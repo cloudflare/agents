@@ -21,6 +21,7 @@ import type { UIMessage } from "ai";
 
 const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
 const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
+const MSG_TOOL_APPROVAL = "cf_agent_tool_approval";
 
 async function connectWS(room: string): Promise<WebSocket> {
   const res = await exports.default.fetch(
@@ -34,9 +35,18 @@ async function connectWS(room: string): Promise<WebSocket> {
   return ws;
 }
 
-/** Drive a single user turn and resolve once the server signals `done`. */
-function runTurn(ws: WebSocket, text: string, timeout = 10_000): Promise<void> {
+/**
+ * Drive a single user turn and resolve once the server signals `done`, with the
+ * UI-message chunks broadcast to the client along the way.
+ */
+function runTurn(
+  ws: WebSocket,
+  text: string,
+  extraBody?: Record<string, unknown>,
+  timeout = 10_000
+): Promise<Array<Record<string, unknown>>> {
   return new Promise((resolve, reject) => {
+    const chunks: Array<Record<string, unknown>> = [];
     const timer = setTimeout(
       () => reject(new Error("Timeout waiting for done")),
       timeout
@@ -45,10 +55,13 @@ function runTurn(ws: WebSocket, text: string, timeout = 10_000): Promise<void> {
       try {
         const msg = JSON.parse(e.data as string) as Record<string, unknown>;
         if (msg.type !== MSG_CHAT_RESPONSE) return;
+        if (typeof msg.body === "string" && msg.body.length > 0) {
+          chunks.push(JSON.parse(msg.body) as Record<string, unknown>);
+        }
         if (msg.done === true) {
           clearTimeout(timer);
           ws.removeEventListener("message", handler);
-          resolve();
+          resolve(chunks);
         }
       } catch {
         // ignore non-JSON frames
@@ -69,7 +82,8 @@ function runTurn(ws: WebSocket, text: string, timeout = 10_000): Promise<void> {
                 role: "user",
                 parts: [{ type: "text", text }]
               }
-            ]
+            ],
+            ...extraBody
           })
         }
       })
@@ -118,6 +132,112 @@ describe("Think — server-authored assistant-message metadata", () => {
       expect(metadata.source).toBe("server");
 
       ws.close(1000);
+    }
+  );
+
+  it(
+    "broadcasts the metadata on the live start/finish chunks so the client sees it while streaming",
+    { timeout: 15_000 },
+    async () => {
+      const room = crypto.randomUUID();
+      const agent = await getAgentByName(env.ThinkClientToolsAgent, room);
+      await agent.setTextOnlyMode(true);
+      await agent.setMessageMetadataMode(true);
+      const ws = await connectWS(room);
+
+      const chunks = await runTurn(ws, "hello");
+
+      const start = chunks.find((c) => c.type === "start");
+      const finish = chunks.find((c) => c.type === "finish");
+      expect(start?.messageMetadata).toEqual({
+        createdAt: 1_700_000_000_000,
+        scope: "turn"
+      });
+      expect(finish?.messageMetadata).toEqual({ source: "server" });
+
+      ws.close(1000);
+    }
+  );
+
+  it(
+    "resolves the writer again for a continuation turn, which persists its own assistant message",
+    { timeout: 20_000 },
+    async () => {
+      const room = crypto.randomUUID();
+      const agent = await getAgentByName(env.ThinkClientToolsAgent, room);
+      await agent.setMessageMetadataMode(true);
+      await agent.setServerApprovalToolMode(true);
+      const ws = await connectWS(room);
+
+      await runTurn(ws, "update my trigger");
+      const first = await waitForAssistant(agent);
+
+      const continuationDone = new Promise<void>((resolve) => {
+        const handler = (e: MessageEvent) => {
+          const msg = JSON.parse(e.data as string) as Record<string, unknown>;
+          if (msg.type === MSG_CHAT_RESPONSE && msg.done === true) {
+            ws.removeEventListener("message", handler);
+            resolve();
+          }
+        };
+        ws.addEventListener("message", handler);
+      });
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_APPROVAL,
+          toolCallId: "tc-server-approval-1",
+          approved: true,
+          autoContinue: true
+        })
+      );
+      await continuationDone;
+
+      await vi.waitFor(
+        async () => {
+          const messages = (await agent.getMessages()) as UIMessage[];
+          const assistants = messages.filter((m) => m.role === "assistant");
+          expect(assistants).toHaveLength(2);
+          expect(assistants[0].id).toBe(first.id);
+          expect(assistants[0].metadata).toEqual({
+            createdAt: 1_700_000_000_000,
+            scope: "turn",
+            source: "server"
+          });
+          expect(assistants[1].metadata).toEqual({
+            continued: true,
+            source: "server"
+          });
+        },
+        { timeout: 8000, interval: 25 }
+      );
+
+      ws.close(1000);
+    }
+  );
+
+  it(
+    "writes metadata on the sub-agent chat() RPC path too",
+    { timeout: 15_000 },
+    async () => {
+      const agent = await getAgentByName(
+        env.ThinkClientToolsAgent,
+        crypto.randomUUID()
+      );
+      await agent.setTextOnlyMode(true);
+      await agent.setMessageMetadataMode(true);
+
+      const { startMetadataJson, metadataJson } =
+        await agent.runChatForMetadata("hello");
+
+      expect(JSON.parse(startMetadataJson ?? "null")).toEqual({
+        createdAt: 1_700_000_000_000,
+        scope: "turn"
+      });
+      expect(JSON.parse(metadataJson ?? "null")).toEqual({
+        createdAt: 1_700_000_000_000,
+        scope: "turn",
+        source: "server"
+      });
     }
   );
 

@@ -302,16 +302,24 @@ beforeTurn(ctx: TurnContext) {
 }
 ```
 
-Stamp a `createdAt` timestamp on the assistant message this turn persists. Stamp it on the `start` part so it survives even if the turn stalls or errors before it finishes. For turn-independent metadata like this, set the instance-level `messageMetadata` property instead of returning it from every `beforeTurn`:
+Stamp server-authored metadata on the assistant message this turn persists. The callback runs for every stream part and each non-`undefined` return is shallow-merged into the message's metadata, then broadcast to clients and persisted. An auto-continuation (for example, after a tool approval or client tool result) is its own turn: `beforeTurn` runs again with `ctx.continuation: true` and the continuation persists as a separate assistant message with its own metadata.
 
 ```typescript
 beforeTurn(ctx: TurnContext) {
   return {
-    messageMetadata: ({ part }) =>
-      part.type === "start" ? { createdAt: Date.now() } : undefined
+    messageMetadata: ({ part }) => {
+      if (part.type === "start") {
+        return { createdAt: Date.now(), continuation: ctx.continuation };
+      }
+      if (part.type === "finish") {
+        return { finishReason: part.finishReason };
+      }
+    }
   };
 }
 ```
+
+For metadata that applies to every turn, set the instance-level `messageMetadata` property on your `Think` subclass instead of returning it from `beforeTurn`. A `TurnConfig.messageMetadata` overrides it for one turn.
 
 Disable retries and apply a streaming timeout for a recovery turn:
 

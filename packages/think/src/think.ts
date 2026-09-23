@@ -1228,11 +1228,11 @@ export interface StreamCallback {
 /**
  * Produces server-authored assistant-message metadata from AI SDK stream parts.
  * Forwarded to the AI SDK `toUIMessageStream` so a Think turn can stamp
- * structured metadata onto the assistant message it persists. Use `part.type`
- * to choose when to return metadata — `start` and `finish` are the conventional
- * points, with `start` the safer place for a value that must survive a turn that
- * stalls or errors before it finishes. The return value is serialized into the
- * UI-message stream, broadcast to clients, and persisted, so it must be
+ * structured metadata onto the assistant message it persists. Called for every
+ * stream part; use `part.type` to choose when to return metadata (`start` and
+ * `finish` are the conventional points). Each non-`undefined` return is
+ * shallow-merged into the message's metadata. The return value is broadcast to
+ * clients and persisted, so it must be
  * JSON-serializable and must not carry server-only secrets.
  *
  * The `Metadata` parameter defaults to the opaque `Record<string, unknown>` used
@@ -1251,7 +1251,6 @@ export interface StreamableResult {
   toUIMessageStream(options?: {
     sendReasoning?: boolean;
     onError?: (error: unknown) => string;
-    messageMetadata?: MessageMetadataCallback;
   }): AsyncIterable<unknown>;
   output?: PromiseLike<unknown>;
 }
@@ -6812,13 +6811,6 @@ export class Think<
         toUIMessageStream: (options) => {
           const sendReasoning = options?.sendReasoning ?? finalSendReasoning;
           const onError = options?.onError ?? streamErrorToString;
-          // Forward the per-turn `messageMetadata` callback so a Think turn can
-          // stamp assistant-message metadata. A caller-supplied option wins over
-          // the turn-config value (matches `sendReasoning` above). The downstream
-          // consumers (`_streamResult` / `_streamResultToRpcCallback`) call this
-          // without options, so the turn-config value is what actually runs.
-          const messageMetadata =
-            options?.messageMetadata ?? finalMessageMetadata;
           // Use the result's own `toUIMessageStream()` method rather than the
           // standalone `toUIMessageStream({ stream })` helper: the method exists
           // in both AI SDK v6 and v7 (deprecated in v7 but functional), whereas
@@ -6832,7 +6824,11 @@ export class Think<
                 messageMetadata?: MessageMetadataCallback;
               }) => ReadableStream;
             }
-          ).toUIMessageStream({ sendReasoning, onError, messageMetadata });
+          ).toUIMessageStream({
+            sendReasoning,
+            onError,
+            messageMetadata: finalMessageMetadata
+          });
           return readableStreamToAsyncIterable(uiStream);
         },
         output: outputPromise
