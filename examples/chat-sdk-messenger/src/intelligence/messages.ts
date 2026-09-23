@@ -39,6 +39,37 @@ export function shouldRouteToAi(input: AiRoutingInput): boolean {
   return input.isMention === true || isAskCommand(input.text);
 }
 
+export interface BurstPlan {
+  menu: boolean;
+  /** Messages for the model, oldest first. */
+  messages: Message[];
+  reset: boolean;
+}
+
+/**
+ * Splits a burst into its control commands and model input. A `/reset` runs
+ * first and drops everything sent before it, so only later lines reach the
+ * fresh conversation. `/menu` lines are never model input.
+ */
+export function planBurst(
+  message: Message,
+  skipped: readonly Message[] = []
+): BurstPlan {
+  const burst = [...skipped, message];
+  let start = 0;
+  burst.forEach((entry, index) => {
+    if (isResetCommand(entry.text)) {
+      start = index + 1;
+    }
+  });
+  const rest = burst.slice(start);
+  return {
+    menu: rest.some((entry) => isMenuCommand(entry.text)),
+    messages: rest.filter((entry) => !isMenuCommand(entry.text)),
+    reset: start > 0
+  };
+}
+
 /**
  * `skipped` holds the earlier messages Chat SDK's `burst` strategy folded into
  * this turn (`context.skipped`). They are rendered oldest first, and a speaker
@@ -49,7 +80,7 @@ export function toThinkUserMessage(
   skipped: readonly Message[] = []
 ): UIMessage {
   const lines: string[] = [];
-  let previousAuthor: string | undefined;
+  let previousAuthorId: string | undefined;
   for (const entry of [...skipped, message]) {
     const text = stripAskCommand(entry.text).trim() || entry.text.trim();
     if (!text && entry !== message) {
@@ -58,11 +89,11 @@ export function toThinkUserMessage(
     const authorName =
       entry.author.fullName || entry.author.userName || entry.author.userId;
     lines.push(
-      authorName && authorName !== previousAuthor
+      authorName && entry.author.userId !== previousAuthorId
         ? `${authorName}: ${text}`
         : text
     );
-    previousAuthor = authorName;
+    previousAuthorId = entry.author.userId;
   }
 
   return {

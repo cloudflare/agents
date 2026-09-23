@@ -417,14 +417,17 @@ export class ThinkMessengerRuntime {
     chat.onSubscribedMessage(async (thread, message, context) => {
       const definition = this.definitionForThread(thread);
       if (!definition) return;
+      const mentioned =
+        message.isMention ||
+        (context?.skipped.some((skipped) => skipped.isMention) ?? false);
       if (
         definition.respondTo.includes("subscribed-thread") ||
-        (message.isMention && definition.respondTo.includes("mention"))
+        (mentioned && definition.respondTo.includes("mention"))
       ) {
         await this.enqueueReply(
           definition,
           await this.toEvent(definition, {
-            eventKind: message.isMention ? "mention" : "subscribed-message",
+            eventKind: mentioned ? "mention" : "subscribed-message",
             message,
             skipped: context?.skipped,
             thread

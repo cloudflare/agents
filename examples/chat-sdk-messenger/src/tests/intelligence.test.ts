@@ -17,6 +17,7 @@ import {
   isAskCommand,
   isMenuCommand,
   isResetCommand,
+  planBurst,
   shouldRouteToAi,
   toThinkUserMessage
 } from "../intelligence/messages";
@@ -201,6 +202,53 @@ describe("Telegram intelligence helpers", () => {
         text: "Bob Babbage: is the deploy done?\nAda Lovelace: what changed?"
       }
     ]);
+  });
+
+  it("labels different senders who share a display name separately", () => {
+    const otherAda = { ...BOB, fullName: "Ada Lovelace", userId: "other" };
+    const skipped = [createMessage("deploy failed", { id: "m1" })];
+    const message = createMessage("I will investigate", {
+      author: otherAda,
+      id: "m2"
+    });
+
+    expect(toThinkUserMessage(message, skipped).parts).toEqual([
+      {
+        type: "text",
+        text: "Ada Lovelace: deploy failed\nAda Lovelace: I will investigate"
+      }
+    ]);
+  });
+
+  it("runs burst commands before the lines sent after them", () => {
+    const ids = (plan: ReturnType<typeof planBurst>) =>
+      plan.messages.map((entry) => entry.id);
+
+    const afterReset = planBurst(
+      createMessage("what did we discuss?", { id: "m3" }),
+      [
+        createMessage("old question", { id: "m1" }),
+        createMessage("/reset", { id: "m2" })
+      ]
+    );
+    expect(afterReset.reset).toBe(true);
+    expect(ids(afterReset)).toEqual(["m3"]);
+
+    const withMenu = planBurst(createMessage("hello", { id: "m2" }), [
+      createMessage("/menu", { id: "m1" })
+    ]);
+    expect(withMenu).toMatchObject({ menu: true, reset: false });
+    expect(ids(withMenu)).toEqual(["m2"]);
+
+    const onlyReset = planBurst(createMessage("/reset", { id: "m2" }), [
+      createMessage("old question", { id: "m1" })
+    ]);
+    expect(onlyReset).toMatchObject({ menu: false, reset: true });
+    expect(onlyReset.messages).toEqual([]);
+
+    const plain = planBurst(createMessage("hi", { id: "m1" }));
+    expect(plain).toMatchObject({ menu: false, reset: false });
+    expect(ids(plain)).toEqual(["m1"]);
   });
 
   it("keeps burst messages in the recovery snapshot", () => {

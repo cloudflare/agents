@@ -1214,6 +1214,36 @@ describe("think messengers core", () => {
         "Bob: @fake_bot is the deploy done?\nAda: @fake_bot what changed?"
       ]);
     });
+
+    it("answers a subscribed-thread burst whose mention is not the newest message", async () => {
+      const threadId = "fake:group-subscribed";
+      const agent = await sendBurst("burst-subscribed", [
+        { id: "s0", isMention: true, text: "@fake_bot hi", threadId }
+      ]);
+      const res = await agent.fetch(
+        "https://example.com/messengers/fake/webhook",
+        {
+          body: JSON.stringify({
+            burst: [
+              {
+                id: "s1",
+                isMention: true,
+                text: "@fake_bot deploy status?",
+                threadId
+              },
+              { id: "s2", text: "please keep it short", threadId }
+            ]
+          }),
+          method: "POST"
+        }
+      );
+      await res.text();
+
+      expect(await agent.getRecorded("prompt")).toEqual([
+        "Ada: @fake_bot hi",
+        "Ada: @fake_bot deploy status?\nplease keep it short"
+      ]);
+    });
   });
 
   it("separates text segments across tool-call boundaries (#1841)", async () => {

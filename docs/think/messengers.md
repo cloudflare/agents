@@ -154,7 +154,13 @@ The turn is keyed to the newest message, so its id, idempotency key, and
 `getMessengerContext()?.message` all refer to that message. The earlier messages
 are available as `getMessengerContext()?.skipped`. A custom `toEvent` receives
 them as `input.skipped`, and the default event copies them onto
-`event.skipped`.
+`event.skipped`. A custom `toEvent` that builds its own event must copy them
+too, or start from `defaultChatSdkEvent(definition, input)`, otherwise the
+model sees only the newest message.
+
+In a subscribed thread, a burst counts as a mention when any of its messages
+mentions the bot. With the default `respondTo`, a mention followed by an
+ordinary line is still answered.
 
 ## Conversation Targets
 

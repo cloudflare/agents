@@ -40,8 +40,7 @@ import {
 } from "./intelligence/delivery";
 import {
   conversationNameForThread,
-  isMenuCommand,
-  isResetCommand,
+  planBurst,
   shouldRouteToAi,
   toThinkUserMessage
 } from "./intelligence/messages";
@@ -140,42 +139,17 @@ export class ChatIngressAgent extends Agent {
 
     bot.onNewMention(async (thread, message, context) => {
       await thread.subscribe();
-      if (isMenuCommand(message.text)) {
-        await postMainMenu(thread);
-        return;
-      }
-
-      await this.enqueueConversationReply(thread, message, context?.skipped);
+      await this.handleBurst(thread, message, context?.skipped, () => true);
     });
 
     bot.onDirectMessage(async (thread, message, _channel, context) => {
-      if (isMenuCommand(message.text)) {
-        await postMainMenu(thread);
-        return;
-      }
-
-      if (isResetCommand(message.text)) {
-        await this.resetConversation(thread);
-        return;
-      }
-
-      await this.enqueueConversationReply(thread, message, context?.skipped);
+      await this.handleBurst(thread, message, context?.skipped, () => true);
     });
 
     bot.onSubscribedMessage(async (thread, message, context) => {
-      if (isMenuCommand(message.text)) {
-        await postMainMenu(thread);
-        return;
-      }
-
-      if (isResetCommand(message.text)) {
-        await this.resetConversation(thread);
-        return;
-      }
-
-      if (this.shouldUseAi(message, thread)) {
-        await this.enqueueConversationReply(thread, message, context?.skipped);
-      }
+      await this.handleBurst(thread, message, context?.skipped, (entry) =>
+        this.shouldUseAi(entry, thread)
+      );
     });
 
     bot.onAction(async (event) => {
@@ -541,6 +515,29 @@ export class ChatIngressAgent extends Agent {
     if (snapshot) {
       await this.recoverAiReply(snapshot);
       await this.resolveFiber(result.fiberId, { status: "completed" });
+    }
+  }
+
+  private async handleBurst(
+    thread: Thread,
+    message: Message,
+    skipped: readonly Message[] | undefined,
+    routesToAi: (message: Message) => boolean
+  ): Promise<void> {
+    const plan = planBurst(message, skipped);
+    if (plan.reset) {
+      await this.resetConversation(thread);
+    }
+    if (plan.menu) {
+      await postMainMenu(thread);
+    }
+    const latest = plan.messages.at(-1);
+    if (latest && plan.messages.some(routesToAi)) {
+      await this.enqueueConversationReply(
+        thread,
+        latest,
+        plan.messages.slice(0, -1)
+      );
     }
   }
 
