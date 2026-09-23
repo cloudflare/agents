@@ -1,0 +1,29 @@
+.changeset/think-assistant-message-metadata.md
+  s_f436787c21c461::t_c7561471ab1436 5,7
+docs/think/lifecycle-hooks.md
+  s_f436787c21c461::t_d76c0a8bae9c38 305,310-317,322-323
+packages/think/README.md
+  s_f436787c21c461::t_0a3fd6558586d2 605
+packages/think/src/tests/agents/client-tools.ts
+  s_f436787c21c461::t_5e06f06400d710 16-17,734,738-741,744-748,1363-1394
+packages/think/src/tests/assistant-message-metadata.test.ts
+  s_f436787c21c461::t_112c441aeb02ef 24,38-47,49,58-60,64,85-86,138-243
+packages/think/src/think.ts
+  s_f436787c21c461::t_4e7d4d7b7d628e 1231-1235,6827-6831
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3472376cab4cb39ef9831dbf759be8d292f8580b",
+  "prompts": {},
+  "sessions": {
+    "s_f436787c21c461": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "0fa960d0-3db7-4194-b67a-9fb4258f92f0",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
