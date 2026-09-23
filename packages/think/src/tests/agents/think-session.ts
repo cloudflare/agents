@@ -4316,10 +4316,21 @@ export class ThinkToolsTestAgent extends Think {
     };
   }
 
+  /** Skip the next transcript tool update, as a restart right before it would. */
+  async skipNextToolUpdateForTest(): Promise<void> {
+    const self = this as unknown as {
+      _applyToolUpdateToMessages(update: unknown): Promise<void>;
+    };
+    const original = self._applyToolUpdateToMessages;
+    self._applyToolUpdateToMessages = async () => {
+      self._applyToolUpdateToMessages = original;
+    };
+  }
+
   /** Drop in-memory deferred-pause state, as an eviction would. */
   async forgetDeferredResolvedPausesForTest(): Promise<void> {
     const state = this as unknown as {
-      _deferredResolvedPauses: Set<string>;
+      _deferredResolvedPauses: Map<string, unknown>;
       _deferredResolvedPausesLoaded: boolean;
     };
     state._deferredResolvedPauses.clear();

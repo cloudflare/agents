@@ -301,6 +301,8 @@ const MAX_REPLY_ATTACHMENTS_PER_TURN = 32;
 const ACTION_LEDGER_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_LEDGER_LAST_SWEPT_KEY = "cf_think_action_ledger:last_swept_at";
 const DEFERRED_RESOLVED_PAUSES_KEY = "cf_think_deferred_resolved_pauses";
+
+type ResolvedPauseOutcome = { executionId: string; output: unknown };
 const ACTION_PENDING_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_PENDING_LAST_SWEPT_KEY =
   "cf_think_action_pending_approvals:last_swept_at";
@@ -4225,11 +4227,12 @@ export class Think<
   // persist. Null when no stream is active. Mirrors `@cloudflare/ai-chat`'s
   // `_streamingMessage` handling.
   private _streamingAssistant: StreamAccumulator | null = null;
-  // Tool calls whose resolved pause still needs its generation dropped: the
-  // outcome is being written, or its own turn was still streaming. See
-  // `_dropGenerationAfterResolvedPause`. Mirrored in storage so the drop
-  // survives a restart before the next turn; loaded once per isolate.
-  private _deferredResolvedPauses = new Set<string>();
+  // Resolved pauses, by tool call id, whose outcome write or generation drop
+  // may not have landed: the outcome is being written, or its own turn was
+  // still streaming. See `_dropGenerationAfterResolvedPause`. Mirrored in
+  // storage with the outcome so both survive a restart before the next turn;
+  // loaded once per isolate.
+  private _deferredResolvedPauses = new Map<string, ResolvedPauseOutcome>();
   private _deferredResolvedPausesLoaded = false;
   private _submitConcurrency = new SubmitConcurrencyController({
     defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS
@@ -14746,9 +14749,9 @@ export class Think<
       } as UIMessage);
     } else {
       await this._enqueueInteractionApply(async () => {
-        // Recorded before the outcome is written, so a restart between the
-        // two writes still drops the generation before the next inference.
-        await this._rememberResolvedPause(toolCallId);
+        // Recorded before the outcome is written, so a restart before either
+        // write lands still applies both before the next inference.
+        await this._rememberResolvedPause(toolCallId, { executionId, output });
         await this._applyToolUpdateToMessages(
           pausedExecutionUpdate(toolCallId, executionId, output)
         );
@@ -14843,8 +14846,8 @@ export class Think<
    * removed underneath it. The drop is deferred to the next inference, which
    * is queued behind that turn and runs after it persists.
    *
-   * The pending drop stays recorded (see `_rememberResolvedPause`) until it
-   * has been applied.
+   * The resolved pause stays recorded (see `_rememberResolvedPause`) until
+   * the drop has been applied.
    */
   private async _dropGenerationAfterResolvedPause(
     toolCallId: string
@@ -14855,7 +14858,6 @@ export class Think<
         (part) => "toolCallId" in part && part.toolCallId === toolCallId
       )
     ) {
-      await this._rememberResolvedPause(toolCallId);
       return;
     }
     const owner = await this._resolveToolCallOwner(toolCallId, undefined);
@@ -14873,18 +14875,20 @@ export class Think<
   private async _loadResolvedPauses(): Promise<void> {
     if (this._deferredResolvedPausesLoaded) return;
     this._deferredResolvedPausesLoaded = true;
-    const stored = await this.ctx.storage.get<string[]>(
-      DEFERRED_RESOLVED_PAUSES_KEY
-    );
-    for (const toolCallId of stored ?? []) {
-      this._deferredResolvedPauses.add(toolCallId);
+    const stored = await this.ctx.storage.get<
+      Array<[string, ResolvedPauseOutcome]>
+    >(DEFERRED_RESOLVED_PAUSES_KEY);
+    for (const [toolCallId, outcome] of stored ?? []) {
+      this._deferredResolvedPauses.set(toolCallId, outcome);
     }
   }
 
-  private async _rememberResolvedPause(toolCallId: string): Promise<void> {
+  private async _rememberResolvedPause(
+    toolCallId: string,
+    outcome: ResolvedPauseOutcome
+  ): Promise<void> {
     await this._loadResolvedPauses();
-    if (this._deferredResolvedPauses.has(toolCallId)) return;
-    this._deferredResolvedPauses.add(toolCallId);
+    this._deferredResolvedPauses.set(toolCallId, outcome);
     await this.ctx.storage.put(DEFERRED_RESOLVED_PAUSES_KEY, [
       ...this._deferredResolvedPauses
     ]);
@@ -14904,10 +14908,14 @@ export class Think<
 
   private async _flushDeferredResolvedPauses(): Promise<void> {
     await this._loadResolvedPauses();
-    for (const toolCallId of [...this._deferredResolvedPauses]) {
-      // Still paused: the restart landed before the outcome was written, so
-      // the pause is unresolved and its approval will run the drop.
-      if (this._findToolCallStillPaused(toolCallId)) continue;
+    for (const [toolCallId, outcome] of [...this._deferredResolvedPauses]) {
+      // Still paused: a restart landed before the outcome was written, and the
+      // execution it resolved is already consumed, so write it now.
+      if (this._findToolCallStillPaused(toolCallId)) {
+        await this._applyToolUpdateToMessages(
+          pausedExecutionUpdate(toolCallId, outcome.executionId, outcome.output)
+        );
+      }
       await this._dropGenerationAfterResolvedPause(toolCallId);
     }
   }
