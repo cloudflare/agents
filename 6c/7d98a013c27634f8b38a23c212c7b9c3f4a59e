@@ -1,0 +1,21 @@
+packages/think/src/tests/run-turn-recovery.test.ts
+  s_368991bdec7f77::t_0faba35aa61ca2 192-266
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_a50a14bdcbae90 7399-7410
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6c7d98a013c27634f8b38a23c212c7b9c3f4a59e",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
