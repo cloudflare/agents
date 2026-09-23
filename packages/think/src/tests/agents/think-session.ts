@@ -1037,6 +1037,36 @@ export class ThinkTestAgent extends Think {
     this._turnConfigOverride = { output: Output.text(), activeTools: [] };
   }
 
+  /** Like `setTurnConfigOutputText`, with an `Output.object` spec. */
+  async setTurnConfigOutputObject(): Promise<void> {
+    this._turnConfigOverride = {
+      output: Output.object({
+        schema: z.object({ answer: z.string() }),
+        name: "Answer"
+      }),
+      activeTools: []
+    };
+  }
+
+  /** Run a wait-mode turn and return its result fields. */
+  async runTurnWaitForTest(input: string): Promise<{
+    status: string;
+    error?: string;
+    outputJson?: string;
+    messageText?: string;
+  }> {
+    const result = await this.runTurn({ input });
+    const text = result.message?.parts
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("");
+    return {
+      status: result.status,
+      ...(result.error !== undefined && { error: result.error }),
+      ...("output" in result && { outputJson: JSON.stringify(result.output) }),
+      ...(text !== undefined && { messageText: text })
+    };
+  }
+
   /**
    * Sets a per-turn `experimental_transform` that upper-cases every `text-delta`
    * part flowing through the stream. The transform is constructed inside the DO

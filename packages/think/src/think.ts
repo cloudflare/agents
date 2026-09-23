@@ -1472,6 +1472,12 @@ export type RunTurnOptions = RunTurnWait | RunTurnSubmit | RunTurnStream;
 /** Result of {@link Think.runTurn} in `mode: "wait"`. */
 export type TurnResult = SaveMessagesResult & {
   message?: SessionMessage;
+  /**
+   * Parsed structured output when the turn's `TurnConfig.output` produced
+   * one. A structured output that fails to parse ends the turn with
+   * `status: "error"`.
+   */
+  output?: unknown;
   continuation: boolean;
 };
 
@@ -2295,6 +2301,8 @@ export type ThinkSubmissionInspection = {
   createdAt: number;
   startedAt?: number;
   completedAt?: number;
+  /** Id of the assistant message this submission's turn persisted. */
+  messageId?: string;
 };
 
 export type SubmitMessagesResult = ThinkSubmissionInspection & {
@@ -2332,6 +2340,7 @@ type ThinkSubmissionRow = {
   completed_at: number | null;
   result_status: SubmissionTurnResult["status"] | null;
   output_json: string | null;
+  message_id: string | null;
 };
 
 /** Payload of one queued workflow notification. */
@@ -7065,8 +7074,9 @@ export class Think<
             }
             return last.input;
           })
-        : finalOutput && result.output
-          ? Promise.resolve(result.output)
+        : finalOutput
+          ? // `result.output` is a getter that builds a new promise per read.
+            Promise.resolve(result.output)
           : undefined;
       if (outputPromise) {
         // Attach a rejection observer immediately. `_streamResult()` will still
@@ -8648,7 +8658,7 @@ export class Think<
   }
 
   private async _enrichTurnResult(
-    result: SaveMessagesResult,
+    result: ProgrammaticMessagesResult,
     continuation: boolean
   ): Promise<TurnResult> {
     let message: SessionMessage | undefined;
@@ -8681,7 +8691,11 @@ export class Think<
       const result = await this._runProgrammaticMessagesTurn(
         crypto.randomUUID(),
         input,
-        { signal: options.signal, channel: options.channel }
+        {
+          signal: options.signal,
+          channel: options.channel,
+          captureOutput: true
+        }
       );
       return this._enrichTurnResult(result, false);
     }
@@ -8694,7 +8708,7 @@ export class Think<
     const result = await this._runProgrammaticMessagesTurn(
       crypto.randomUUID(),
       messages,
-      { signal: options.signal, channel: options.channel }
+      { signal: options.signal, channel: options.channel, captureOutput: true }
     );
     return this._enrichTurnResult(result, false);
   }
@@ -10577,14 +10591,16 @@ export class Think<
         -- Closed vocabulary: 'completed' | 'aborted' | 'retry'. NULL is legacy
         -- or an unsettled attempt; 'retry' is NOT terminal completion evidence.
         result_status TEXT,
-        output_json TEXT
+        output_json TEXT,
+        message_id TEXT
       )
     `;
     // This table is unversioned. Add nullable columns for existing objects,
     // preserving unstamped rows for the legacy stream-evidence fallback.
     for (const statement of [
       "ALTER TABLE cf_think_submissions ADD COLUMN result_status TEXT",
-      "ALTER TABLE cf_think_submissions ADD COLUMN output_json TEXT"
+      "ALTER TABLE cf_think_submissions ADD COLUMN output_json TEXT",
+      "ALTER TABLE cf_think_submissions ADD COLUMN message_id TEXT"
     ]) {
       try {
         this.ctx.storage.sql.exec(statement);
@@ -10613,7 +10629,8 @@ export class Think<
     const rows = this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       WHERE submission_id = ${submissionId}
       LIMIT 1
@@ -10628,7 +10645,8 @@ export class Think<
     const rows = this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       WHERE idempotency_key = ${idempotencyKey}
       LIMIT 1
@@ -10663,7 +10681,8 @@ export class Think<
     const rows = this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       ORDER BY created_at DESC, submission_id DESC
       LIMIT ${limit}
@@ -10678,7 +10697,8 @@ export class Think<
     return this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       WHERE status = ${status}
       ORDER BY created_at DESC, submission_id DESC
@@ -10699,7 +10719,8 @@ export class Think<
       metadata: metadata ?? undefined,
       createdAt: row.created_at,
       startedAt: row.started_at ?? undefined,
-      completedAt: row.completed_at ?? undefined
+      completedAt: row.completed_at ?? undefined,
+      ...(row.message_id !== null && { messageId: row.message_id })
     };
   }
 
@@ -11075,7 +11096,8 @@ export class Think<
       return this.sql<ThinkSubmissionRow>`
         SELECT submission_id, idempotency_key, request_id, stream_id, status,
                messages_json, metadata_json, error_message, created_at,
-               messages_applied_at, started_at, completed_at, result_status, output_json
+               messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
         FROM cf_think_submissions
         WHERE status = ${status}
         ORDER BY completed_at ASC, created_at ASC
@@ -11086,7 +11108,8 @@ export class Think<
     return this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       WHERE status = ${status}
         AND completed_at IS NOT NULL
@@ -11422,7 +11445,8 @@ export class Think<
     const pending = this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       WHERE status = 'pending'
     `;
@@ -11463,7 +11487,8 @@ export class Think<
     const running = this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       WHERE status = 'running'
     `;
@@ -14062,6 +14087,9 @@ export class Think<
     if (this._resumableStream.pendingCutoverId !== streamId) {
       // The stream was settled by another path (a stall, an error): plain persist.
       await this._upsertMessageInHistory(toPersist, parentId);
+      if (submission) {
+        this._recordSubmissionMessage(submission.requestId, toPersist.id);
+      }
       return;
     }
     const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
@@ -14077,7 +14105,8 @@ export class Think<
           if (submission) {
             this._recordSubmissionTurnResult(
               submission.requestId,
-              submission.result
+              submission.result,
+              toPersist.id
             );
           }
         },
@@ -14107,14 +14136,26 @@ export class Think<
   /** Write only inside the transaction that settles this exact request's stream. */
   private _recordSubmissionTurnResult(
     requestId: string,
-    result: SubmissionTurnResult
+    result: SubmissionTurnResult,
+    messageId?: string
   ): void {
     const row = this._readRunningSubmissionForRecovery(requestId);
     if (!row || row.request_id !== requestId) return;
     this.sql`
       UPDATE cf_think_submissions
       SET result_status = ${result.status},
-          output_json = ${result.status === "completed" && result.output !== undefined ? JSON.stringify(result.output) : null}
+          output_json = ${result.status === "completed" && result.output !== undefined ? JSON.stringify(result.output) : null},
+          message_id = COALESCE(${messageId ?? null}, message_id)
+      WHERE submission_id = ${row.submission_id} AND status = 'running'
+    `;
+  }
+
+  private _recordSubmissionMessage(requestId: string, messageId: string): void {
+    const row = this._readRunningSubmissionForRecovery(requestId);
+    if (!row || row.request_id !== requestId) return;
+    this.sql`
+      UPDATE cf_think_submissions
+      SET message_id = ${messageId}
       WHERE submission_id = ${row.submission_id} AND status = 'running'
     `;
   }
@@ -16687,7 +16728,8 @@ export class Think<
     const rows = this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       WHERE submission_id = ${recoveredRequestId}
          OR (request_id = ${recoveredRequestId} AND status = 'running')

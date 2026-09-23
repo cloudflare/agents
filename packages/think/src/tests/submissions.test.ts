@@ -332,7 +332,10 @@ describe("Think durable submissions", () => {
     expect(completed.requestId).toBe("sub-basic");
     expect(completed.startedAt).toBeDefined();
     expect(completed.completedAt).toBeDefined();
-    expect(await agent.getStoredMessages()).toHaveLength(2);
+    const stored = await agent.getStoredMessages();
+    expect(stored).toHaveLength(2);
+    expect(stored[1].role).toBe("assistant");
+    expect(completed.messageId).toBe(stored[1].id);
 
     const responses = await agent.getResponseLog();
     expect(responses).toHaveLength(1);

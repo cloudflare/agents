@@ -1875,6 +1875,39 @@ describe("Think — beforeTurn config overrides", () => {
     expect(result.done).toBe(true);
   });
 
+  it("returns the parsed structured output on a wait-mode TurnResult (#2263)", async () => {
+    const agent = await freshAgent(`bt-output-wait-${crypto.randomUUID()}`);
+    await agent.setResponse(JSON.stringify({ answer: "42" }));
+    await agent.setTurnConfigOutputObject();
+
+    const result = await agent.runTurnWaitForTest("What is the answer?");
+
+    expect(result.status).toBe("completed");
+    expect(JSON.parse(result.outputJson ?? "null")).toEqual({ answer: "42" });
+  });
+
+  it("errors a wait-mode turn whose structured output does not parse (#2263)", async () => {
+    const agent = await freshAgent(`bt-output-bad-${crypto.randomUUID()}`);
+    await agent.setResponse("not json");
+    await agent.setTurnConfigOutputObject();
+
+    const result = await agent.runTurnWaitForTest("What is the answer?");
+
+    expect(result.status).toBe("error");
+    expect(result.outputJson).toBeUndefined();
+  });
+
+  it("omits output from a wait-mode turn without a structured output spec", async () => {
+    const agent = await freshAgent(`bt-output-none-${crypto.randomUUID()}`);
+    await agent.setResponse("plain answer");
+
+    const result = await agent.runTurnWaitForTest("hello");
+
+    expect(result.status).toBe("completed");
+    expect(result.outputJson).toBeUndefined();
+    expect(result.messageText).toBe("plain answer");
+  });
+
   it("experimental_transform override is forwarded to streamText and applied", async () => {
     // #1714 — TurnConfig.experimental_transform should reach streamText so
     // callers can inspect/rewrite the stream. The transform here upper-cases
