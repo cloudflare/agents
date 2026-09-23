@@ -124,6 +124,10 @@
         "name": "ThinkExtensionHookAgent"
       },
       {
+        "class_name": "ThinkMessengerDeliveryTestAgent",
+        "name": "ThinkMessengerDeliveryTestAgent"
+      },
+      {
         "class_name": "ThinkMessengerRouteTestAgent",
         "name": "ThinkMessengerRouteTestAgent"
       },
@@ -181,6 +185,10 @@
       {
         "class_name": "CodemodeRuntime",
         "name": "CodemodeRuntime"
+      },
+      {
+        "class_name": "ThinkMessengerStateAgent",
+        "name": "ThinkMessengerStateAgent"
       }
     ]
   },
@@ -217,6 +225,7 @@
         "ThinkNestedMiddleAgent",
         "StuckThinkAgentToolChild",
         "ThinkExtensionHookAgent",
+        "ThinkMessengerDeliveryTestAgent",
         "ThinkMessengerRouteTestAgent",
         "ThinkMcpToolMaterializationAgent",
         "ThinkExecuteToolAgent",

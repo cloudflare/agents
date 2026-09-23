@@ -10,6 +10,8 @@ export {
 
 // Facet class behind tools built on createCodemodeRuntime (execute tool).
 export { CodemodeRuntime } from "@cloudflare/codemode";
+// Facet class behind the messenger runtime's Chat SDK state.
+export { ThinkMessengerStateAgent } from "../messengers";
 
 export {
   TestAssistantToolsAgent,
@@ -41,6 +43,7 @@ export {
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
   ThinkFetchToolsTestAgent,
+  ThinkMessengerDeliveryTestAgent,
   ThinkMessengerRouteTestAgent,
   ThinkMcpToolMaterializationAgent,
   ThinkOnStartReconcileFailureAgent,
@@ -82,6 +85,7 @@ import type {
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
   ThinkFetchToolsTestAgent,
+  ThinkMessengerDeliveryTestAgent,
   ThinkMessengerRouteTestAgent,
   ThinkMcpToolMaterializationAgent,
   ThinkOnStartReconcileFailureAgent,
@@ -224,6 +228,7 @@ export type Env = {
   ThinkNestedMiddleAgent: DurableObjectNamespace<ThinkNestedMiddleAgent>;
   StuckThinkAgentToolChild: DurableObjectNamespace<StuckThinkAgentToolChild>;
   ThinkExtensionHookAgent: DurableObjectNamespace<ThinkExtensionHookAgent>;
+  ThinkMessengerDeliveryTestAgent: DurableObjectNamespace<ThinkMessengerDeliveryTestAgent>;
   ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;
   ThinkMcpToolMaterializationAgent: DurableObjectNamespace<ThinkMcpToolMaterializationAgent>;
   ThinkExecuteToolAgent: DurableObjectNamespace<ThinkExecuteToolAgent>;

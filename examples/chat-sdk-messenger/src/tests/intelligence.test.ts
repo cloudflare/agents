@@ -1,10 +1,11 @@
-import { Message } from "chat";
-import type { Thread } from "chat";
+import { Chat, Message } from "chat";
+import type { Adapter, StateAdapter, Thread } from "chat";
 import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
 import {
   aiReplyFailureMode,
   aiReplyRecoveryMode,
+  reviveReplyThread,
   type AiReplySnapshot
 } from "../intelligence/delivery";
 import {
@@ -50,6 +51,59 @@ function createMessage(
     isMention: options.isMention
   });
 }
+
+describe("recovered reply threads", () => {
+  function recordingBot() {
+    const sent: Array<{ kind: "post" | "edit"; text: string }> = [];
+    const text = (message: unknown) =>
+      typeof message === "string"
+        ? message
+        : String((message as { markdown?: string }).markdown);
+    const adapter = {
+      name: "fake",
+      userName: "bot",
+      editMessage: (threadId: string, id: string, message: unknown) => {
+        sent.push({ kind: "edit", text: text(message) });
+        return Promise.resolve({ id, raw: {}, threadId });
+      },
+      postMessage: (threadId: string, message: unknown) => {
+        sent.push({ kind: "post", text: text(message) });
+        return Promise.resolve({ id: "reply", raw: {}, threadId });
+      },
+      startTyping: () => Promise.resolve()
+    } as unknown as Adapter;
+    const bot = new Chat({
+      adapters: { fake: adapter },
+      fallbackStreamingPlaceholderText: null,
+      state: {} as StateAdapter,
+      userName: "bot"
+    });
+    return { bot, sent };
+  }
+
+  async function* reply() {
+    yield "Hello";
+    yield " there";
+  }
+
+  it("posts the reply text first instead of a `...` placeholder", async () => {
+    const { bot, sent } = recordingBot();
+    bot.reviver();
+    const thread = reviveReplyThread({
+      _type: "chat:Thread",
+      adapterName: "fake",
+      channelId: "fake:dm",
+      id: "fake:dm",
+      isDM: true
+    });
+
+    await thread.post(reply());
+
+    expect(sent[0]).toMatchObject({ kind: "post" });
+    expect(sent[0].text).toContain("Hello");
+    expect(sent.map((entry) => entry.text)).not.toContain("...");
+  });
+});
 
 describe("Telegram intelligence helpers", () => {
   it("detects control commands", () => {
