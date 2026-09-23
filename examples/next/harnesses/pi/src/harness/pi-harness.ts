@@ -1,6 +1,5 @@
 import {
   AgentHarness as createAgentHarness,
-  awaitWithContext,
   BACKGROUND_CONTEXT,
   StorageBackedSession,
   uuidv7,
@@ -11,14 +10,11 @@ import {
   type Context as UpstreamContext,
   type Entry,
   type HarnessEvent,
-  type LaneSnapshot,
   type OpenOperation,
-  type OperationRequest as UpstreamOperationRequest,
   type OperationResultRecord,
-  type Resources as UpstreamResources,
-  type Skill as UpstreamSkill
+  type Resources as UpstreamResources
 } from "@earendil-works/pi-agent-core";
-import type { Api, ImageContent, Model, Models } from "@earendil-works/pi-ai";
+import type { Api, Model, Models } from "@earendil-works/pi-ai";
 import { SqliteStorage } from "@earendil-works/pi-session-backend-sqlite-node";
 import {
   LifecycleCapability,
@@ -35,13 +31,20 @@ import {
   projectHarnessEvent,
   SUBSCRIBED_EVENT_TYPES
 } from "./events";
-import { PiSubmissions, type QueuedSubmission } from "./intake";
 import {
-  projectMessages,
-  projectQueue,
-  projectAgentMessage,
-  projectToolResult
-} from "./messages";
+  asUpstreamContext,
+  asUpstreamRequest,
+  asUpstreamResources,
+  asUpstreamTools,
+  messageInput,
+  operationStatus,
+  projectResult,
+  projectRunResult,
+  requestKind
+} from "./adapters";
+import { PiSubmissions, type QueuedSubmission } from "./intake";
+import { SettlementWaiters } from "./settlement";
+import { projectMessages, projectQueue } from "./messages";
 import { resolveModel } from "../providers/models";
 import { resolveSkillSources, type ResolvedSkills } from "./skills";
 import { PiTransport, type PiTransportHost } from "./transport";
@@ -66,7 +69,6 @@ import type {
   PiEventListener,
   PiHarnessConfig,
   PiHookRegistry,
-  PiJson,
   PiLaneOptions,
   PiLaneSnapshot,
   PiMessage,
@@ -74,12 +76,10 @@ import type {
   PiOperationKind,
   PiOperationRequest,
   PiOperationResult,
-  PiOperationStatus,
   PiOperationStream,
   PiPendingSubmission,
   PiPromptResponse,
   PiQueueReceipt,
-  PiResources,
   PiSubmissionReceipt,
   PiSubmitOptions,
   PiTool,
@@ -113,159 +113,6 @@ export class PiOperationRejectedError extends Error {
     this.operationId = operationId;
     this.code = code;
   }
-}
-
-function asUpstreamContext(context: PiContext | undefined): UpstreamContext {
-  // SAFETY: PiContext is the public structural projection of Chord Context.
-  return (context ?? BACKGROUND_CONTEXT) as UpstreamContext;
-}
-
-function asUpstreamRequest(
-  request: PiOperationRequest,
-  operationId: string
-): UpstreamOperationRequest {
-  switch (request.kind) {
-    case "prompt":
-      return {
-        kind: "prompt",
-        operationId,
-        prompt: request.prompt,
-        images: request.images?.map(
-          (image): ImageContent => ({ type: "image", ...image })
-        )
-      };
-    case "skill":
-      return {
-        kind: "skill",
-        operationId,
-        name: request.name,
-        additionalInstructions: request.additionalInstructions
-      };
-    case "prompt_template":
-      return {
-        kind: "prompt_template",
-        operationId,
-        name: request.name,
-        args: request.args ? [...request.args] : undefined
-      };
-    case "compaction":
-      return {
-        kind: "compaction",
-        operationId,
-        customInstructions: request.customInstructions
-      };
-    case "navigation":
-      return {
-        kind: "navigation",
-        operationId,
-        targetId: request.targetId,
-        options: {
-          summarize: request.summarize,
-          label: request.label,
-          customInstructions: request.customInstructions
-        }
-      };
-  }
-}
-
-function requestKind(request: PiOperationRequest): PiOperationKind {
-  switch (request.kind) {
-    case "compaction":
-      return "compaction";
-    case "navigation":
-      return "navigation";
-    default:
-      return "run";
-  }
-}
-
-function messageInput(input: PiMessageInput): {
-  text: string;
-  images: ImageContent[] | undefined;
-} {
-  if (typeof input === "string") return { text: input, images: undefined };
-  return {
-    text: input.text,
-    images: input.images?.map((image) => ({ type: "image", ...image }))
-  };
-}
-
-function asUpstreamTools<ToolContext extends object | undefined>(
-  tools: readonly PiTool<ToolContext>[]
-): UpstreamAgentHarnessTool<ToolContext>[] {
-  // SAFETY: PiTool is the public structural projection of AgentHarnessTool.
-  return tools as unknown as UpstreamAgentHarnessTool<ToolContext>[];
-}
-
-function asUpstreamResources(resources: PiResources): UpstreamResources {
-  // SAFETY: PiSkill and PiPromptTemplate mirror pi's Skill and PromptTemplate.
-  return {
-    skills: resources.skills as UpstreamSkill[] | undefined,
-    promptTemplates: resources.promptTemplates
-      ? [...resources.promptTemplates]
-      : undefined
-  };
-}
-
-function projectResult(record: OperationResultRecord): PiOperationResult {
-  return {
-    operationId: record.operationId,
-    kind: record.kind,
-    status: record.status,
-    error: record.error && {
-      code: record.error.code,
-      message: record.error.message
-    },
-    fromTipId: record.fromTipId,
-    tipId: record.tipId,
-    startedAt: record.startedAt,
-    endedAt: record.endedAt
-  };
-}
-
-/**
- * Project pi's terminal record into the machine's bounded result.
- *
- * The checkpoint keeps only the disposition; the full record and the
- * transcript stay in pi's own tables.
- */
-function projectRunResult(record: OperationResultRecord): PiRunResult {
-  return {
-    operationId: record.operationId,
-    status: record.status,
-    error: record.error && {
-      code: record.error.code,
-      message: record.error.message
-    }
-  };
-}
-
-function operationStatus(
-  operation: NonNullable<LaneSnapshot["operation"]>
-): PiOperationStatus {
-  const streaming = operation.streamingMessage
-    ? projectAgentMessage(operation.streamingMessage, `pending:${operation.id}`)
-    : undefined;
-  return {
-    operationId: operation.id,
-    kind: operation.kind,
-    status: operation.status === "aborting" ? "aborting" : "running",
-    startedAt: operation.startedAt,
-    streaming,
-    // Pi reports both still-running and already-settled calls for the live
-    // operation; only the running ones belong in its running-tool view.
-    runningTools: operation.runningTools
-      .filter((tool) => tool.status === "running")
-      .map((tool) => ({
-        toolCallId: tool.toolCallId,
-        toolName: tool.toolName,
-        // SAFETY: pi validated these arguments against the tool schema.
-        arguments: tool.args as PiJson,
-        partial: tool.result && projectToolResult(tool.result)
-      })),
-    retry: operation.retry,
-    deferred: operation.deferred?.handle
-  };
 }
 
 /**
@@ -309,7 +156,7 @@ export class PiHarness<
   readonly #listeners = new Set<PiEventListener>();
   readonly #writers = new Map<string, OperationStreamWriter>();
   readonly #laneWriters = new Map<string, OperationStreamWriter>();
-  readonly #settlementWaiters = new Map<string, Set<() => void>>();
+  readonly #settlement = new SettlementWaiters(RESULT_POLL_MS);
   readonly #rejections = new Map<string, PiOperationRejectedError>();
   readonly #lanesOf = new Map<string, string>();
 
@@ -478,7 +325,7 @@ export class PiHarness<
         this.#rejections.delete(operationId);
         throw rejection;
       }
-      await this.#awaitSettlement(operationId, context);
+      await this.#settlement.wait(operationId, context);
     }
   }
 
@@ -1096,7 +943,7 @@ export class PiHarness<
       operationId: record.operationId,
       status: record.status
     });
-    this.#notifySettled(record.operationId);
+    this.#settlement.notify(record.operationId);
   }
 
   #reject(
@@ -1126,7 +973,7 @@ export class PiHarness<
       code: error.code,
       message: error.message
     });
-    this.#notifySettled(operationId);
+    this.#settlement.notify(operationId);
   }
 
   // ── Streams ──────────────────────────────────────────────────────────────
@@ -1239,36 +1086,6 @@ export class PiHarness<
   }
 
   // ── Waiters ──────────────────────────────────────────────────────────────
-
-  #notifySettled(operationId: string): void {
-    const waiters = this.#settlementWaiters.get(operationId);
-    this.#settlementWaiters.delete(operationId);
-    if (waiters) for (const wake of waiters) wake();
-  }
-
-  #awaitSettlement(
-    operationId: string,
-    context: UpstreamContext
-  ): Promise<void> {
-    return awaitWithContext(
-      new Promise<void>((resolve) => {
-        let waiters = this.#settlementWaiters.get(operationId);
-        if (!waiters) {
-          waiters = new Set();
-          this.#settlementWaiters.set(operationId, waiters);
-        }
-        const wake = () => {
-          clearTimeout(timer);
-          waiters?.delete(wake);
-          resolve();
-        };
-        // The poll is insurance: settlement normally wakes waiters directly.
-        const timer = setTimeout(wake, RESULT_POLL_MS);
-        waiters.add(wake);
-      }),
-      context
-    );
-  }
 
   #transportHost(): PiTransportHost {
     return {
