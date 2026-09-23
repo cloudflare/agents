@@ -108,7 +108,9 @@ new user message, so continuations after tool results and recovered turns keep
 it. Clients cannot choose or forge a channel. Regenerating a message another
 channel sent runs on `web` and leaves that message's channel unchanged; a
 continuation after a tool result keeps `web`, but one that runs after the agent
-was evicted takes the stored message's channel.
+was evicted takes the stored message's channel. More generally, a continuation
+without a `channel` extends the channel of the turn before it, including a
+channel passed explicitly to `runTurn({ continuation: true, channel })`.
 
 A `runTurn()` or `chat()` call with no `channel` runs without a channel context
 and applies no channel policy. Pass `channel: "web"` to apply the `web` policy to

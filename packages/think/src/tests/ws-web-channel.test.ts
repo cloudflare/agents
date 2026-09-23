@@ -170,6 +170,20 @@ describe("Think — WebSocket chat runs on the web channel (#2255)", () => {
     );
     // A tool-result continuation extends the web turn, not the voice one.
     expect(await agent.getAutoContinuationChannelForTest()).toBe("web");
+
+    await agent.resetCapturedTurnChannelsForTest();
+    await agent.runChannelTurnForTest({ continuation: true });
+    expect(await agent.getCapturedTurnChannelsForTest()).toEqual(["web"]);
+    ws.close();
+  });
+
+  it("extends the channel an explicit-channel continuation ran on", async () => {
+    const { agent, ws } = await freshAgent();
+    await sendChat(ws, [userMessage("hello")]);
+
+    await agent.runChannelTurnForTest({ continuation: true, channel: "voice" });
+
+    expect(await agent.getAutoContinuationChannelForTest()).toBe("voice");
     ws.close();
   });
 

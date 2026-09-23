@@ -3119,10 +3119,11 @@ export class Think<
   private _activeChannelContext?: ChannelContext;
 
   /**
-   * Channel of the latest admitted non-continuation turn, which an
-   * auto-continuation extends. Differs from the latest user message's channel
-   * when a WebSocket regeneration reuses a message another channel stored.
-   * In memory only: after an eviction, continuations fall back to history.
+   * Channel of the latest admitted queue turn, which a continuation without
+   * an explicit channel extends. Differs from the latest user message's
+   * channel when a WebSocket regeneration reuses a message another channel
+   * stored, or a continuation ran on an explicit channel. In memory only:
+   * after an eviction, continuations fall back to history.
    */
   private _lastTurnChannel?: { channel: string | undefined };
 
@@ -8142,9 +8143,7 @@ export class Think<
 
                 this._activeTurnReplyAttachments = [];
                 this._activeTurnReplyAttachmentsRequestId = spec.requestId;
-                if (!spec.continuation) {
-                  this._lastTurnChannel = { channel: spec.channel };
-                }
+                this._lastTurnChannel = { channel: spec.channel };
 
                 try {
                   const value = await this._withChannelContext(
@@ -11924,9 +11923,9 @@ export class Think<
     const clientTools = this._lastClientTools;
     const resolvedBody = body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
-    // Re-resolve the channel from durable history so a continued/recovered turn
-    // re-applies per-channel policy.
-    const channel = options?.channel ?? this._channelFromLatestUserMessage();
+    // Re-resolve the channel so a continued/recovered turn re-applies
+    // per-channel policy.
+    const channel = options?.channel ?? this._channelForAutoContinuation();
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
     let wasAborted = false;
