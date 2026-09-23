@@ -610,6 +610,9 @@ export class ThinkTestAgent extends Think {
   // continuation streams normally). `null` = every inference stalls (the
   // original terminal-watchdog behavior).
   private _stallAttemptsRemaining: number | null = null;
+  // The stalling attempt streams only an internal final-answer tool call, which
+  // persistence strips, before it hangs.
+  private _stallWithFinalAnswerOnlyForTest = false;
   private _streamChunkDelayMs: number | null = null;
   private _agentToolOutputForTest = new Map<string, unknown>();
   private _responseLog: ChatResponseResult[] = [];
@@ -1168,6 +1171,17 @@ export class ThinkTestAgent extends Think {
       }
     }
     const stallAfter = willStall ? this._stallAfterChunks : null;
+    const stallPrefix: unknown[] =
+      willStall && this._stallWithFinalAnswerOnlyForTest
+        ? [
+            { type: "start" },
+            {
+              type: "tool-input-start",
+              toolCallId: "final-answer-1",
+              toolName: "think_final_answer"
+            }
+          ]
+        : [];
     const chunkDelayMs = this._streamChunkDelayMs;
 
     return {
@@ -1185,6 +1199,10 @@ export class ThinkTestAgent extends Think {
           [Symbol.asyncIterator]() {
             return {
               async next() {
+                const prefix = stallPrefix.shift();
+                if (prefix !== undefined) {
+                  return { done: false as const, value: prefix };
+                }
                 // Simulate a parked/hung provider: emit `stallAfter` chunks,
                 // then never resolve. The stall watchdog must abort the turn.
                 if (stallAfter != null && chunkCount >= stallAfter) {
@@ -1607,6 +1625,7 @@ export class ThinkTestAgent extends Think {
     timeoutMs: number;
     recovery?: ChatRecoveryOptions | "throw";
     stash?: string;
+    finalAnswerOnly?: boolean;
   }): Promise<{
     first: TestChatResult;
     scheduledContinues: number;
@@ -1622,6 +1641,7 @@ export class ThinkTestAgent extends Think {
     this._recoveryHookForTest = options.recovery ?? null;
     this._recoveryCallsForTest = [];
     this._stashInBeforeTurnForTest = options.stash;
+    this._stallWithFinalAnswerOnlyForTest = options.finalAnswerOnly ?? false;
     try {
       const first = await this.testChat("stall recovery");
       const rolesAfterStall = (await this.getMessages()).map((m) => m.role);
@@ -1661,6 +1681,7 @@ export class ThinkTestAgent extends Think {
       this.chatStreamStallTimeoutMs = 0;
       this._recoveryHookForTest = null;
       this._stashInBeforeTurnForTest = undefined;
+      this._stallWithFinalAnswerOnlyForTest = false;
     }
   }
 

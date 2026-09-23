@@ -13176,8 +13176,11 @@ export class Think<
           persistPartial: async () => {
             if (assistantMsg) return assistantMsg.id;
             if (accumulator.parts.length === 0) return undefined;
-            assistantMsg = accumulator.toMessage();
-            await this._persistAssistantMessage(assistantMsg);
+            const partial = accumulator.toMessage();
+            if (!(await this._persistAssistantMessage(partial))) {
+              return undefined;
+            }
+            assistantMsg = partial;
             this._broadcastMessages();
             return assistantMsg.id;
           }
@@ -13623,7 +13626,9 @@ export class Think<
             ) {
               return undefined;
             }
-            await this._persistAssistantMessage(partialMsg, parentId);
+            if (!(await this._persistAssistantMessage(partialMsg, parentId))) {
+              return undefined;
+            }
             this._broadcastMessages();
             return partialMsg.id;
           }
@@ -13810,13 +13815,15 @@ export class Think<
     return hasMeaningfulParts ? stripped : null;
   }
 
+  /** Resolves to `false` when stripping left nothing to persist. */
   private async _persistAssistantMessage(
     msg: UIMessage,
     parentId?: string
-  ): Promise<void> {
+  ): Promise<boolean> {
     const toPersist = this._strippedForPersist(msg);
-    if (toPersist === null) return;
+    if (toPersist === null) return false;
     await this._upsertMessageInHistory(toPersist, parentId);
+    return true;
   }
 
   /**

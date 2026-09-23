@@ -735,6 +735,24 @@ describe("Think — error handling", () => {
     expect(result.finalRoles).toEqual(["user", "assistant"]);
   });
 
+  it("retries the user turn when the stalled partial holds only internal final-answer parts", async () => {
+    const agent = await freshAgent(
+      `stall-final-answer-only-${crypto.randomUUID()}`
+    );
+    const result = await agent.testStallRecoveryForTest({
+      afterChunks: 0,
+      timeoutMs: 50,
+      finalAnswerOnly: true
+    });
+
+    expect(result.first.error).toBeUndefined();
+    // Persistence strips the internal parts, so nothing was saved to continue.
+    expect(result.rolesAfterStall).toEqual(["user"]);
+    expect(result.scheduledRetries).toBe(1);
+    expect(result.scheduledContinues).toBe(0);
+    expect(result.finalRoles).toEqual(["user", "assistant"]);
+  });
+
   it("surfaces the stall as a terminal error when onChatRecovery throws", async () => {
     const agent = await freshAgent(`stall-hook-throws-${crypto.randomUUID()}`);
     const result = await agent.testStallRecoveryForTest({
