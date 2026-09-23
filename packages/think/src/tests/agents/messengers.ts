@@ -246,8 +246,17 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
   }
 
   /** A pending reply whose incident settled while nothing was delivering it. */
-  async replayOrphanedMessengerDeliveryForTest(): Promise<boolean> {
-    const key = `cf_think_messenger_recovery:${crypto.randomUUID()}`;
+  async replayOrphanedMessengerDeliveryForTest(options?: {
+    activeIncident?: boolean;
+  }): Promise<boolean> {
+    const incidentId = `${crypto.randomUUID()}:user-1`;
+    if (options?.activeIncident) {
+      await this.ctx.storage.put(
+        `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`,
+        { incidentId, status: "scheduled" }
+      );
+    }
+    const key = `cf_think_messenger_recovery:${incidentId}`;
     await this.ctx.storage.put(key, {
       messengerId: "fake",
       threadId: "fake:dm-orphan",

@@ -1234,6 +1234,20 @@ describe("think messengers core", () => {
       );
     });
 
+    it("keeps a pending reply on start while its incident is still recovering", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `orphan-active-${crypto.randomUUID()}`
+      );
+
+      expect(
+        await agent.replayOrphanedMessengerDeliveryForTest({
+          activeIncident: true
+        })
+      ).toBe(false);
+      expect(await agent.getAdapterCalls()).toEqual([]);
+    });
+
     it("apologizes on start for a pending reply whose incident is gone", async () => {
       const agent = await getAgentByName(
         env.ThinkMessengerDeliveryTestAgent,

@@ -17942,7 +17942,7 @@ export class Think<
         // gone or gave up, and no event will settle this record again.
         const incident = await this.ctx.storage.get<ChatRecoveryIncident>(
           CHAT_RECOVERY_INCIDENT_KEY_PREFIX +
-            key.slice(MESSENGER_RECOVERY_PREFIX.length)
+            encodeURIComponent(key.slice(MESSENGER_RECOVERY_PREFIX.length))
         );
         if (
           incident &&
