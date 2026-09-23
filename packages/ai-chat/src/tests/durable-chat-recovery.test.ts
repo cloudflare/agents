@@ -494,7 +494,7 @@ describe("onChatRecovery", () => {
   it("a progressing turn survives past the old wall-clock ceiling (rfc-chat-recovery-work-budget)", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
-    // Default config: maxRecoveryWork is a generous finite backstop (1000) and
+    // Default config: maxRecoveryWork is a generous finite backstop (10000) and
     // this turn produces ~1 work unit, so duration is never a bound here.
     await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 6 });
 

@@ -139,7 +139,7 @@ export const CHAT_LAST_TERMINAL_KEY = "cf:chat:last-terminal";
 export const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 10;
 /**
  * Runaway-loop guard default — the framework-imposed backstop on cumulative
- * recovery WORK (produced content/tool units) since an incident opened.
+ * recovery WORK (durable stream segments, see below) since an incident opened.
  *
  * Originally `Infinity` (rfc-chat-recovery-work-budget): the SDK shipped the
  * *mechanism* but no default cap, so a progressing turn was never terminated on

@@ -210,10 +210,11 @@ export type ChatRecoveryProgressContext = {
   maxAttempts: number;
   recoveryKind: "retry" | "continue";
   /**
-   * Recovery work units produced since this incident began — a durable,
-   * monotonic, reconnect-immune count of produced content/tool segments (not
-   * tokens). The signal that distinguishes a healthy long turn from a runaway
-   * loop.
+   * Recovery work produced since this incident began — a durable, monotonic,
+   * reconnect-immune count of flushed stream segments (roughly ten packed
+   * streaming chunks, one settled tool result, or one forwarded sub-agent
+   * credit each; not tokens). The signal that distinguishes a healthy long turn
+   * from a runaway loop, in the same unit as `maxRecoveryWork`.
    */
   work: number;
   /** Wall-clock ms since the incident's first interruption. */
@@ -251,9 +252,9 @@ export type ChatRecoveryConfig =
        */
       noProgressTimeoutMs?: number;
       /**
-       * Runaway-loop guard. Maximum recovery WORK — produced content/tool units
-       * since the incident began — before a still-progressing turn is sealed
-       * with `reason="work_budget_exceeded"`. Defaults to `1000`: a generous
+       * Runaway-loop guard. Maximum recovery WORK since the incident began
+       * before a still-progressing turn is sealed with
+       * `reason="work_budget_exceeded"`. Defaults to `10000`: a generous
        * backstop that bounds wasted re-run cost when a turn keeps emitting a
        * little content but never converges (e.g. an isolate that OOMs mid-stream
        * on every recovery — #1825 — which otherwise resets the attempt cap and
@@ -263,6 +264,14 @@ export type ChatRecoveryConfig =
        * that legitimately needs more can raise this (or set `Infinity` to
        * disable the framework cap and bound the runaway via `shouldKeepRecovering`
        * instead).
+       *
+       * The unit is one durably flushed stream segment: roughly ten packed
+       * streaming chunks, one settled tool result (flushed on its own), or one
+       * explicit credit for forwarded sub-agent output. It is not tokens,
+       * messages, or chunks. The unit changed from "credited chunk" in #2223
+       * (and the default moved from `1000` to `10000`); an explicit value
+       * carried over from an earlier release is not recalibrated, so measure
+       * `ctx.work` for a healthy interrupted turn before choosing a cap.
        */
       maxRecoveryWork?: number;
       /**

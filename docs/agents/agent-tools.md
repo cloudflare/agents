@@ -543,10 +543,10 @@ finalized in the parent without re-running already-finished work.
 The re-attach wait is **progress-keyed**, not a fixed wall clock. Two static
 `options` tune it:
 
-| Option                                 | Default          | Behavior                                                                                                                                                                                                        |
-| -------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `agentToolReattachNoProgressTimeoutMs` | `120000` (2 min) | How long the parent waits with **no** forward progress before giving up. Resets on every forwarded chunk, so a streaming child is followed through to terminal.                                                 |
-| `agentToolReattachMaxWindowMs`         | `Infinity`       | Optional hard wall-clock ceiling on a single re-attach. Uncapped by default (mirrors chat recovery's `maxRecoveryWork`), so a healthy, long-running child is never cut off. Set a finite value to impose a cap. |
+| Option                                 | Default          | Behavior                                                                                                                                                                                                                          |
+| -------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agentToolReattachNoProgressTimeoutMs` | `120000` (2 min) | How long the parent waits with **no** forward progress before giving up. Resets on every forwarded chunk, so a streaming child is followed through to terminal.                                                                   |
+| `agentToolReattachMaxWindowMs`         | `Infinity`       | Optional hard wall-clock ceiling on a single re-attach. Uncapped by default, so a healthy, long-running child is never cut off; a runaway child is bounded by its own `chatRecovery` budgets. Set a finite value to impose a cap. |
 
 Give-up outcomes map to the `AgentToolFailure` fields:
 

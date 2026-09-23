@@ -3089,7 +3089,7 @@ describe("Think — onChatRecovery", () => {
 
   it("a progressing turn survives past the old wall-clock ceiling (rfc-chat-recovery-work-budget)", async () => {
     const agent = await freshRecoveryAgent("recovery-window-survives");
-    // Default config: maxRecoveryWork is a generous finite backstop (1000) and
+    // Default config: maxRecoveryWork is a generous finite backstop (10000) and
     // this turn produces ~1 work unit, so duration is never a bound here.
     await agent.setChatRecoveryConfigForTest({ maxAttempts: 6 });
 
