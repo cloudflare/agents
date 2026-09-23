@@ -210,7 +210,7 @@ type MachineDecision<State, Result> =
     };
 ```
 
-Every phase must return one decision. A decision and its pending events, gates, effects, children, and commit participants are stored in one transaction.
+Each phase returns a decision and its pending events, gates, effects, children, and commit participants are stored in one transaction.
 
 ## Events and waits
 
