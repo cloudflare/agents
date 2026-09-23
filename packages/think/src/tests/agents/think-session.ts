@@ -1634,6 +1634,7 @@ export class ThinkTestAgent extends Think {
     rolesAfterStall: string[];
     finalRoles: string[];
     finalAssistantText: string;
+    finalStreamingParts: number;
   }> {
     this._stallAfterChunks = options.afterChunks;
     this._stallAttemptsRemaining = 1;
@@ -1673,7 +1674,10 @@ export class ThinkTestAgent extends Think {
         finalRoles: messages.map((m) => m.role),
         finalAssistantText: (finalAssistant?.parts ?? [])
           .map((p) => (p.type === "text" ? p.text : ""))
-          .join("")
+          .join(""),
+        finalStreamingParts: (finalAssistant?.parts ?? []).filter(
+          (p) => "state" in p && p.state === "streaming"
+        ).length
       };
     } finally {
       this._stallAfterChunks = null;

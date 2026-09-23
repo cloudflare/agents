@@ -181,5 +181,10 @@ describe("recovery × runTurn", () => {
         .map((part) => part.text)
         .join("")
     ).toContain("Continued response.");
+    expect(
+      assistants[0]?.parts.filter(
+        (part) => "state" in part && part.state === "streaming"
+      )
+    ).toEqual([]);
   });
 });

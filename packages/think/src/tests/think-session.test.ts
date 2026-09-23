@@ -686,8 +686,9 @@ describe("Think — error handling", () => {
   it("calls onChatRecovery with the live turn's stash when a stall schedules a continuation (#2042)", async () => {
     const agent = await freshAgent(`stall-hook-${crypto.randomUUID()}`);
     const before = Date.now();
+    // Four chunks stop the stream inside its text part, before `text-end`.
     const result = await agent.testStallRecoveryForTest({
-      afterChunks: 5,
+      afterChunks: 4,
       timeoutMs: 50,
       stash: "provider-response-id"
     });
@@ -710,6 +711,8 @@ describe("Think — error handling", () => {
     expect(result.finalAssistantText.length).toBeGreaterThan(
       call.partialText.length
     );
+    // The part the stall interrupted is closed, not left streaming.
+    expect(result.finalStreamingParts).toBe(0);
   });
 
   it("stops stall recovery when onChatRecovery declines to continue", async () => {

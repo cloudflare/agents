@@ -493,6 +493,18 @@ function streamErrorToString(error: unknown): string {
 }
 
 /**
+ * A recovery continuation opens its own text and reasoning parts, and an end
+ * chunk only closes the newest part of its type, so a part the interruption
+ * left streaming would never be closed.
+ */
+function settleInterruptedPart(part: UIMessage["parts"][number]) {
+  return (part.type === "text" || part.type === "reasoning") &&
+    part.state === "streaming"
+    ? { ...part, state: "done" as const }
+    : part;
+}
+
+/**
  * Normalizes the AI SDK tool-execution-finished event across major versions.
  *
  * Think registers a single `experimental_onToolCallFinish` callback, which is
@@ -13421,7 +13433,7 @@ export class Think<
     const accumulator = new StreamAccumulator({
       messageId: continuationAssistant?.id ?? crypto.randomUUID(),
       continuation: continuationAssistant !== undefined,
-      existingParts: continuationAssistant?.parts,
+      existingParts: continuationAssistant?.parts.map(settleInterruptedPart),
       existingMetadata:
         leafMetadata !== null && typeof leafMetadata === "object"
           ? (leafMetadata as Record<string, unknown>)
