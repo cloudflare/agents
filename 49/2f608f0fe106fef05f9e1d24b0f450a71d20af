@@ -1,0 +1,30 @@
+packages/think/src/think.ts
+  s_368991bdec7f77::t_6d9efd67ffbf31 14858-14866,14871-14873,14878,14881-14898,14906-14910,14915-14926
+  s_368991bdec7f77::t_ad8ee7ad675e55 4228-4229,14867-14870,14874-14877,14879
+  s_368991bdec7f77::t_ea722ff8dc0967 4230-4231,14749-14751,14845-14847,14927-14934
+docs/think/actions.md
+  s_368991bdec7f77::t_432fa6c99a6ec2 192-193
+  s_368991bdec7f77::t_805f65f1401cf0 191
+.changeset/think-drop-pending-pause-text.md
+  s_368991bdec7f77::t_20bafbeaa26699 7
+packages/think/src/tests/actions-durable-pause.test.ts
+  s_368991bdec7f77::t_aa4464363a6d9f 593-616
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_830188acbee4cf 4308-4318
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "492f608f0fe106fef05f9e1d24b0f450a71d20af",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
