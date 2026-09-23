@@ -181,7 +181,22 @@ describe("PiHarness durability", () => {
     const settled = await waitForStatus(stub, operationId, "cancelled");
     expect(settled.status).toBe("cancelled");
     await stub.releaseGate();
-    expect(await stub.piResult(operationId)).not.toBe("completed");
+
+    // Pi must reach a terminal state of its own. A machine that settles
+    // while pi still believes the operation is live would leak the
+    // execution, so assert pi actually stopped rather than merely that it
+    // did not succeed.
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const piStatus = await stub.piResult(operationId);
+      if (piStatus !== null) {
+        expect(piStatus).not.toBe("completed");
+        break;
+      }
+      if (Date.now() > deadline) throw new Error("pi never settled the abort");
+      await runDurableObjectAlarm(stub);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   });
 
   it("survives eviction while cancellation is pending", async () => {
@@ -319,6 +334,28 @@ describe("PiHarness multi-pass parking", () => {
     expect(await stub.piResult(done.operationId)).toBe("completed");
   });
 
+  it("gives each pass its own effect identity", async () => {
+    const stub = fresh();
+    // Park at pass 3 so the next pass must be 4, not a repeat of 3. Reusing
+    // an effect id would collide with the settled row from the earlier
+    // pass, and the run would read that stale outcome instead of driving pi.
+    const done = await stub.runMultiply(5, 1);
+    const operationId = done.operationId;
+    await stub.seedWaitingRun({ operationId, pass: 3 });
+    await stub.resumeRun(operationId);
+
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const ids = await stub.effectExternalIds(operationId);
+      if (ids.includes(`${operationId}:4`)) break;
+      if (Date.now() > deadline) {
+        throw new Error(`pass 4 never planned: ${JSON.stringify(ids)}`);
+      }
+      await runDurableObjectAlarm(stub);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  });
+
   it("survives eviction while parked between passes", async () => {
     const stub = fresh();
     const done = await stub.runMultiply(3, 3);
@@ -422,5 +459,86 @@ describe("PiHarness effect planning", () => {
     });
 
     await stub.releaseGate();
+  });
+});
+
+/**
+ * Failure and startup repair.
+ *
+ * These cover the two paths a run takes when something goes wrong rather
+ * than merely slowly: a drive pass that cannot settle, and a submission
+ * whose machine run was never created because the object died between
+ * `submit()`'s two durable writes.
+ */
+describe("PiHarness failure and repair", () => {
+  async function settle(
+    stub: DurableObjectStub<PiHarnessTestObject>,
+    operationId: string,
+    timeoutMs = 10_000
+  ): Promise<MachineView> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const snapshot = (await stub.machine(operationId)) as MachineView | null;
+      if (
+        snapshot &&
+        snapshot.status !== "running" &&
+        snapshot.status !== "waiting" &&
+        snapshot.status !== "paused"
+      ) {
+        return snapshot;
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`run stayed ${JSON.stringify(snapshot)}`);
+      }
+      await runDurableObjectAlarm(stub);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  it("settles the run when a drive pass cannot complete", async () => {
+    const stub = fresh();
+    const operationId = await stub.submitFailing();
+
+    // The run must reach a terminal state rather than parking forever, and
+    // the failure has to be visible on the machine, not just inside pi.
+    const settled = await settle(stub, operationId);
+    expect(["completed", "failed"]).toContain(settled.status);
+    if (settled.status === "completed") {
+      // Pi settled it as a failed operation; the machine reports that.
+      expect(settled.result).toMatchObject({ status: "failed" });
+    }
+  });
+
+  it("settles as failed when a drive pass could not run", async () => {
+    const stub = fresh();
+    const operationId = await stub.seedFailedPass();
+    await stub.resumeRun(operationId);
+
+    // The machine must turn the failed effect into a terminal operation
+    // carrying pi's failure, not park waiting for a pass that will never
+    // report.
+    const settled = await settle(stub, operationId);
+    expect(settled.status).toBe("completed");
+    expect(settled.result).toMatchObject({
+      operationId,
+      status: "failed",
+      error: { code: "drive_failed" }
+    });
+  });
+
+  it("admits a submission whose machine run was never created", async () => {
+    const stub = fresh();
+    const operationId = await stub.seedOrphanedSubmission(6);
+    // The intake row exists but no machine run does.
+    expect(await stub.machine(operationId)).toBeNull();
+    expect(await stub.pendingCount()).toBeGreaterThan(0);
+
+    // Startup reconciliation must notice the orphan and admit it.
+    await evictDurableObject(stub);
+    await stub.messages();
+
+    const settled = await settle(stub, operationId);
+    expect(settled.status).toBe("completed");
+    expect(await stub.piResult(operationId)).toBe("completed");
   });
 });

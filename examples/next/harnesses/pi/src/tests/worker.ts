@@ -385,6 +385,179 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   }
 
   /**
+   * Every external id this operation's effects were planned with.
+   *
+   * Read from the durable table rather than the snapshot, because the
+   * snapshot stops exposing effects once the run is terminal.
+   */
+  async effectExternalIds(operationId: string): Promise<string[]> {
+    await this.harness.inspect("schema-touch");
+    return this.ctx.storage.sql
+      .exec<{ external_id: string | null }>(
+        `SELECT external_id FROM cf_agents_state_machine_effects
+         WHERE run_id = ? ORDER BY created_at ASC`,
+        this.harness.runIdFor(operationId)
+      )
+      .toArray()
+      .map((row) => row.external_id ?? "");
+  }
+
+  /**
+   * Write only the intake row, as a crash between `submit()`'s two writes
+   * would leave behind.
+   *
+   * `submit()` makes the submission durable before it starts the machine
+   * run precisely so this state is recoverable; startup must notice the
+   * orphaned row and admit it. Writing the row directly reproduces the
+   * crash without having to time one.
+   */
+  async seedOrphanedSubmission(value: number): Promise<string> {
+    const operationId = `orphan-${crypto.randomUUID()}`;
+    this.#useTranscriptResponses();
+    // The intake table is created when the capability starts, so make sure
+    // startup has run before writing to it directly.
+    await this.harness.pending();
+    this.ctx.storage.sql.exec(
+      `INSERT INTO cf_agents_pi_submissions
+        (lane, operation_id, request, submitted_at)
+       VALUES ('main', ?, ?, ?)`,
+      operationId,
+      JSON.stringify({ kind: "prompt", prompt: `multiply ${value}` }),
+      Date.now()
+    );
+    return operationId;
+  }
+
+  /**
+   * Submit an operation pi settles as failed.
+   *
+   * The provider errors, so pi records a terminal failure and the pass
+   * reports it as settled. This is the ordinary "the model call failed"
+   * route, distinct from the pass itself throwing.
+   */
+  async submitFailing(): Promise<string> {
+    this.#faux.setResponses([]);
+    const receipt = await this.harness.submit({
+      kind: "prompt",
+      prompt: "this will fail"
+    });
+    return receipt.operationId;
+  }
+
+  /**
+   * Seed a run whose drive pass already failed.
+   *
+   * A pass raises rather than settling when the attachment itself is
+   * broken — a faulted pi harness, a lost session. StateMachine records
+   * the effect as `failed`; the machine's next turn must read that and
+   * settle the operation as failed rather than parking forever. Seeding
+   * the settled-failure row reproduces the crash position between the
+   * effect failing and the checkpoint recording it.
+   */
+  async seedFailedPass(): Promise<string> {
+    await this.harness.inspect("schema-touch");
+    const operationId = `failed-${crypto.randomUUID()}`;
+    const runId = this.harness.runIdFor(operationId);
+    const effectId = "effect_failed";
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        `INSERT OR REPLACE INTO cf_agents_state_machine_runs
+          (run_id, definition, definition_version, status, phase,
+           checkpoint_json, revision, control_json, job_id, wait_kind,
+           wait_type, wait_key, next_at, event_sequence, cancel_requested,
+           cancel_reason, result_json, error_name, error_message, persist,
+           idempotency_key, created_at, updated_at, settled_at)
+         VALUES (?, ?, 1, 'paused', 'drive', ?, 1, '{"status":"running"}',
+                 ?, NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, NULL, NULL,
+                 1, NULL, ?, ?, NULL)`,
+        runId,
+        PI_OPERATION_DEFINITION,
+        JSON.stringify({
+          phase: "drive",
+          lane: "main",
+          operationId,
+          streamId: this.harness.streamId(operationId),
+          effect: {
+            id: effectId,
+            kind: PI_DRIVE_EFFECT,
+            recovery: "reconcile"
+          },
+          pass: 0
+        }),
+        `state-machine:${runId}`,
+        now,
+        now
+      );
+      this.ctx.storage.sql.exec(
+        `INSERT OR REPLACE INTO cf_agents_state_machine_effects
+          (run_id, effect_id, revision, kind, recovery, status, input_json,
+           external_id, result_json, error_name, error_message, created_at,
+           settled_at)
+         VALUES (?, ?, 1, ?, 'reconcile', 'failed', '{}', NULL, NULL,
+                 'Error', 'pi attachment was lost', ?, ?)`,
+        runId,
+        effectId,
+        PI_DRIVE_EFFECT,
+        now,
+        now
+      );
+    });
+    return operationId;
+  }
+
+  /** Seed a run whose drive pass throws outright (no registered runtime). */
+  async seedThrowingPass(): Promise<string> {
+    await this.harness.inspect("schema-touch");
+    const operationId = `throwing-${crypto.randomUUID()}`;
+    const runId = this.harness.runIdFor(operationId);
+    const effectId = "effect_throwing";
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        `INSERT OR REPLACE INTO cf_agents_state_machine_runs
+          (run_id, definition, definition_version, status, phase,
+           checkpoint_json, revision, control_json, job_id, wait_kind,
+           wait_type, wait_key, next_at, event_sequence, cancel_requested,
+           cancel_reason, result_json, error_name, error_message, persist,
+           idempotency_key, created_at, updated_at, settled_at)
+         VALUES (?, ?, 1, 'paused', 'drive', ?, 1, '{"status":"running"}',
+                 ?, NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, NULL, NULL,
+                 1, NULL, ?, ?, NULL)`,
+        runId,
+        PI_OPERATION_DEFINITION,
+        JSON.stringify({
+          phase: "drive",
+          lane: "main",
+          operationId,
+          streamId: this.harness.streamId(operationId),
+          effect: {
+            id: effectId,
+            kind: "pi-drive-unregistered",
+            recovery: "reconcile"
+          },
+          pass: 0
+        }),
+        `state-machine:${runId}`,
+        now,
+        now
+      );
+      this.ctx.storage.sql.exec(
+        `INSERT OR REPLACE INTO cf_agents_state_machine_effects
+          (run_id, effect_id, revision, kind, recovery, status, input_json,
+           external_id, result_json, error_name, error_message, created_at,
+           settled_at)
+         VALUES (?, ?, 1, 'pi-drive-unregistered', 'reconcile', 'pending',
+                 '{}', NULL, NULL, NULL, NULL, ?, NULL)`,
+        runId,
+        effectId,
+        now
+      );
+    });
+    return operationId;
+  }
+
+  /**
    * Seed a run parked in the `waiting` phase, as pi's retry backoff and
    * deferred polling produce.
    *
