@@ -689,7 +689,10 @@ describe("Think durable submissions", () => {
 
   it("links the partial persisted after cancellation to the aborted submission", async () => {
     const agent = await freshAgent();
-    await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+    await agent.setDelayedChunkResponse(
+      Array.from({ length: 40 }, (_, i) => `w${i} `),
+      50
+    );
 
     const accepted = await agent.testSubmitMessages("cancel me", {
       submissionId: "sub-cancel-partial"
@@ -719,7 +722,10 @@ describe("Think durable submissions", () => {
 
   it("does not link a cancelled turn's partial to a reused submission id", async () => {
     const agent = await freshAgent();
-    await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+    await agent.setDelayedChunkResponse(
+      Array.from({ length: 40 }, (_, i) => `w${i} `),
+      50
+    );
 
     const first = await agent.testSubmitMessages("cancel me", {
       submissionId: "sub-reused"
