@@ -128,6 +128,34 @@ they get a speaker prefix in channels so the model can attribute interactive
 clicks, and no prefix in DMs. Returning `null` or an empty string from
 `channelSpeakerLabel` suppresses the channel label as well.
 
+## Message Bursts
+
+People often send one thought as several quick messages. Think's messenger
+runtime waits about 600 ms after a message for more to arrive, then answers the
+whole burst once instead of starting a reply per message. Every message in the
+burst reaches the model, oldest first, in a single user turn:
+
+```text
+summarize the thread
+for me
+and keep it short
+```
+
+In channels, speaker labels follow the same rules as above. Consecutive messages
+from one person share a single label, and a new label starts whenever the
+speaker changes:
+
+```text
+Bob: @support_bot is the deploy done?
+Ada: @support_bot what changed?
+```
+
+The turn is keyed to the newest message, so its id, idempotency key, and
+`getMessengerContext()?.message` all refer to that message. The earlier messages
+are available as `getMessengerContext()?.skipped`. A custom `toEvent` receives
+them as `input.skipped`, and the default event copies them onto
+`event.skipped`.
+
 ## Conversation Targets
 
 The default conversation mode is one Think sub-agent per Chat SDK thread. This
@@ -197,7 +225,9 @@ exception details are not posted into external chats. Override
 
 During a messenger turn, `getMessengerContext()` returns provider, thread,
 author, message, capabilities, and attachment metadata for the initiating event.
-Use it from prompts, tools, or hooks that need channel-specific behavior.
+When the turn answers a [burst](#message-bursts), `skipped` lists the earlier
+messages in that burst, oldest first. Use it from prompts, tools, or hooks that
+need channel-specific behavior.
 
 ```typescript
 const messenger = this.getMessengerContext();

@@ -138,17 +138,17 @@ export class ChatIngressAgent extends Agent {
       fallbackStreamingPlaceholderText: FALLBACK_STREAMING_PLACEHOLDER_TEXT
     });
 
-    bot.onNewMention(async (thread, message) => {
+    bot.onNewMention(async (thread, message, context) => {
       await thread.subscribe();
       if (isMenuCommand(message.text)) {
         await postMainMenu(thread);
         return;
       }
 
-      await this.enqueueConversationReply(thread, message);
+      await this.enqueueConversationReply(thread, message, context?.skipped);
     });
 
-    bot.onDirectMessage(async (thread, message) => {
+    bot.onDirectMessage(async (thread, message, _channel, context) => {
       if (isMenuCommand(message.text)) {
         await postMainMenu(thread);
         return;
@@ -159,10 +159,10 @@ export class ChatIngressAgent extends Agent {
         return;
       }
 
-      await this.enqueueConversationReply(thread, message);
+      await this.enqueueConversationReply(thread, message, context?.skipped);
     });
 
-    bot.onSubscribedMessage(async (thread, message) => {
+    bot.onSubscribedMessage(async (thread, message, context) => {
       if (isMenuCommand(message.text)) {
         await postMainMenu(thread);
         return;
@@ -174,7 +174,7 @@ export class ChatIngressAgent extends Agent {
       }
 
       if (this.shouldUseAi(message, thread)) {
-        await this.enqueueConversationReply(thread, message);
+        await this.enqueueConversationReply(thread, message, context?.skipped);
       }
     });
 
@@ -332,11 +332,16 @@ export class ChatIngressAgent extends Agent {
 
     const restored = JSON.parse(JSON.stringify(snapshot), bot.reviver()) as {
       message: Message;
+      skipped?: Message[];
     };
     const thread = reviveReplyThread(bot, snapshot.thread);
     const mode = aiReplyRecoveryMode(snapshot);
     if (mode === "answer") {
-      await this.answerWithConversationAgent(thread, restored.message);
+      await this.answerWithConversationAgent(
+        thread,
+        restored.message,
+        restored.skipped
+      );
       return;
     }
 
@@ -440,6 +445,7 @@ export class ChatIngressAgent extends Agent {
   private async answerWithConversationAgent(
     thread: Thread,
     message: Message,
+    skipped: readonly Message[] = [],
     fiber?: FiberContext
   ): Promise<void> {
     const callback = new TextStreamCallback({
@@ -448,7 +454,7 @@ export class ChatIngressAgent extends Agent {
     });
     let agent: SubAgentStub<ConversationAgent> | undefined;
     let completedModelTurn = false;
-    fiber?.stash(aiReplySnapshot("streaming", thread, message));
+    fiber?.stash(aiReplySnapshot("streaming", thread, message, skipped));
     const post = thread
       .post(callback.stream())
       .catch(async (error: unknown) => {
@@ -469,14 +475,14 @@ export class ChatIngressAgent extends Agent {
     try {
       await thread.startTyping("Thinking...");
       agent = await this.getConversationAgent(thread);
-      await agent.chat(toThinkUserMessage(message), callback);
+      await agent.chat(toThinkUserMessage(message, skipped), callback);
       completedModelTurn = true;
       callback.complete();
       await post;
       for (const chunk of splitTelegramMessageText(callback.remainingText())) {
         await thread.post(chunk);
       }
-      fiber?.stash(aiReplySnapshot("completed", thread, message));
+      fiber?.stash(aiReplySnapshot("completed", thread, message, skipped));
     } catch (error) {
       callback.fail(error);
       await post.catch(() => undefined);
@@ -486,13 +492,13 @@ export class ChatIngressAgent extends Agent {
         isExpectedFinalEditNoop(error, callback)
       );
       if (failureMode === null) {
-        fiber?.stash(aiReplySnapshot("completed", thread, message));
+        fiber?.stash(aiReplySnapshot("completed", thread, message, skipped));
         return;
       }
 
       if (failureMode === "apologize") {
         await thread.post(INTERRUPTED_AI_RESPONSE).catch(() => undefined);
-        fiber?.stash(aiReplySnapshot("completed", thread, message));
+        fiber?.stash(aiReplySnapshot("completed", thread, message, skipped));
         return;
       }
 
@@ -500,20 +506,21 @@ export class ChatIngressAgent extends Agent {
       await thread.post({
         markdown: `Sorry, I couldn't answer that right now.\n\n${errorMessage}`
       });
-      fiber?.stash(aiReplySnapshot("completed", thread, message));
+      fiber?.stash(aiReplySnapshot("completed", thread, message, skipped));
     }
   }
 
   private async enqueueConversationReply(
     thread: Thread,
-    message: Message
+    message: Message,
+    skipped: readonly Message[] = []
   ): Promise<void> {
     await this.recordConversation(thread, message);
     const result = await this.startFiber(
       AI_REPLY_FIBER_NAME,
       async (fiber: FiberContext) => {
-        fiber.stash(aiReplySnapshot("accepted", thread, message));
-        await this.answerWithConversationAgent(thread, message, fiber);
+        fiber.stash(aiReplySnapshot("accepted", thread, message, skipped));
+        await this.answerWithConversationAgent(thread, message, skipped, fiber);
       },
       {
         idempotencyKey: `ai-reply:${thread.id}:${message.id}`,

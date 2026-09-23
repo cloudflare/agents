@@ -58,6 +58,15 @@ export interface FakeMessengerWebhook {
   threadId: string;
 }
 
+/**
+ * Several messages delivered as one burst: the first takes the thread lock,
+ * the rest are processed in-process while it waits out the burst window, so
+ * outer request latency cannot push them past the window.
+ */
+export interface FakeMessengerBurstWebhook {
+  burst: FakeMessengerWebhook[];
+}
+
 function lastUserText(prompt: unknown): string {
   const messages = Array.isArray(prompt) ? [...prompt].reverse() : [];
   const user = messages.find(
@@ -162,6 +171,27 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     `;
   }
 
+  private _toMessage(webhook: FakeMessengerWebhook): Message {
+    const author = webhook.author ?? { fullName: "Ada", userId: "user-ada" };
+    return new Message({
+      attachments: [],
+      author: {
+        fullName: author.fullName,
+        isBot: false,
+        isMe: false,
+        userId: author.userId,
+        userName: author.fullName.toLowerCase()
+      },
+      formatted: parseMarkdown(webhook.text),
+      id: webhook.id,
+      isMention: webhook.isMention,
+      metadata: { dateSent: new Date(), edited: false },
+      raw: {},
+      text: webhook.text,
+      threadId: webhook.threadId
+    });
+  }
+
   private _recordingAdapter(): Adapter {
     const text = (message: unknown) =>
       typeof message === "string"
@@ -175,29 +205,26 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         return Promise.resolve({ id: "reply", raw: {}, threadId });
       },
       handleWebhook: async (request: Request) => {
-        const body = (await request.json()) as FakeMessengerWebhook;
-        const author = body.author ?? { fullName: "Ada", userId: "user-ada" };
-        await this._chat?.processMessage(
-          adapter,
-          body.threadId,
-          new Message({
-            attachments: [],
-            author: {
-              fullName: author.fullName,
-              isBot: false,
-              isMe: false,
-              userId: author.userId,
-              userName: author.fullName.toLowerCase()
-            },
-            formatted: parseMarkdown(body.text),
-            id: body.id,
-            isMention: body.isMention,
-            metadata: { dateSent: new Date(), edited: false },
-            raw: {},
-            text: body.text,
-            threadId: body.threadId
-          })
-        );
+        const body = (await request.json()) as
+          | FakeMessengerWebhook
+          | FakeMessengerBurstWebhook;
+        const deliver = (webhook: FakeMessengerWebhook) =>
+          this._chat?.processMessage(
+            adapter,
+            webhook.threadId,
+            this._toMessage(webhook)
+          );
+        if (!("burst" in body)) {
+          await deliver(body);
+          return new Response("ok");
+        }
+        const [first, ...rest] = body.burst;
+        const leader = deliver(first);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        for (const webhook of rest) {
+          await deliver(webhook);
+        }
+        await leader;
         return new Response("ok");
       },
       initialize: (chat: ChatInstance) => {

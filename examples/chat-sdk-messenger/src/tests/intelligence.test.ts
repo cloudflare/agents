@@ -5,7 +5,9 @@ import type { UIMessage } from "ai";
 import {
   aiReplyFailureMode,
   aiReplyRecoveryMode,
+  aiReplySnapshot,
   EMPTY_AI_RESPONSE,
+  parseAiReplySnapshot,
   reviveReplyThread,
   type AiReplySnapshot
 } from "../intelligence/delivery";
@@ -25,9 +27,21 @@ import {
   splitTelegramMessageText
 } from "@cloudflare/think/messengers/telegram";
 
+const BOB = {
+  userId: "telegram:bob",
+  userName: "bob",
+  fullName: "Bob Babbage",
+  isBot: false,
+  isMe: false
+} as const;
+
 function createMessage(
   text: string,
-  options: { id?: string; isMention?: boolean } = {}
+  options: {
+    author?: Message["author"];
+    id?: string;
+    isMention?: boolean;
+  } = {}
 ): Message {
   return new Message({
     id: options.id ?? "message-1",
@@ -40,7 +54,7 @@ function createMessage(
       ]
     },
     raw: {},
-    author: {
+    author: options.author ?? {
       userId: "telegram:user",
       userName: "ada",
       fullName: "Ada Lovelace",
@@ -153,6 +167,70 @@ describe("Telegram intelligence helpers", () => {
         }
       ]
     });
+  });
+
+  it("folds a burst from one sender into a single labelled turn", () => {
+    const skipped = [
+      createMessage("summarize the thread", { id: "m1" }),
+      createMessage("for me", { id: "m2" })
+    ];
+    const message = createMessage("and keep it short", { id: "m3" });
+
+    expect(toThinkUserMessage(message, skipped)).toEqual({
+      id: "telegram:m3",
+      role: "user",
+      parts: [
+        {
+          type: "text",
+          text: "Ada Lovelace: summarize the thread\nfor me\nand keep it short"
+        }
+      ]
+    });
+  });
+
+  it("keeps each sender's label when a burst mixes senders", () => {
+    const skipped = [
+      createMessage("/ask is the deploy done?", { author: BOB, id: "m1" }),
+      createMessage("", { author: BOB, id: "m2" })
+    ];
+    const message = createMessage("what changed?", { id: "m3" });
+
+    expect(toThinkUserMessage(message, skipped).parts).toEqual([
+      {
+        type: "text",
+        text: "Bob Babbage: is the deploy done?\nAda Lovelace: what changed?"
+      }
+    ]);
+  });
+
+  it("keeps burst messages in the recovery snapshot", () => {
+    const thread = { toJSON: () => ({ id: "telegram:chat:thread" }) };
+    const message = createMessage("and keep it short", { id: "m2" });
+    const skipped = [createMessage("summarize the thread", { id: "m1" })];
+
+    const snapshot = parseAiReplySnapshot(
+      JSON.parse(
+        JSON.stringify(
+          aiReplySnapshot(
+            "accepted",
+            thread as unknown as Thread,
+            message,
+            skipped
+          )
+        )
+      )
+    );
+    expect(snapshot?.skipped).toEqual([
+      expect.objectContaining({ id: "m1", text: "summarize the thread" })
+    ]);
+
+    const solo = aiReplySnapshot(
+      "accepted",
+      thread as unknown as Thread,
+      message
+    );
+    expect(solo).not.toHaveProperty("skipped");
+    expect(parseAiReplySnapshot(solo)).not.toHaveProperty("skipped");
   });
 
   it("extracts the latest non-empty assistant text response", () => {

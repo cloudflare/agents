@@ -39,16 +39,36 @@ export function shouldRouteToAi(input: AiRoutingInput): boolean {
   return input.isMention === true || isAskCommand(input.text);
 }
 
-export function toThinkUserMessage(message: Message): UIMessage {
-  const text = stripAskCommand(message.text).trim() || message.text.trim();
-  const authorName =
-    message.author.fullName || message.author.userName || message.author.userId;
-  const content = authorName ? `${authorName}: ${text}` : text;
+/**
+ * `skipped` holds the earlier messages Chat SDK's `burst` strategy folded into
+ * this turn (`context.skipped`). They are rendered oldest first, and a speaker
+ * label is only repeated when the author changes.
+ */
+export function toThinkUserMessage(
+  message: Message,
+  skipped: readonly Message[] = []
+): UIMessage {
+  const lines: string[] = [];
+  let previousAuthor: string | undefined;
+  for (const entry of [...skipped, message]) {
+    const text = stripAskCommand(entry.text).trim() || entry.text.trim();
+    if (!text && entry !== message) {
+      continue;
+    }
+    const authorName =
+      entry.author.fullName || entry.author.userName || entry.author.userId;
+    lines.push(
+      authorName && authorName !== previousAuthor
+        ? `${authorName}: ${text}`
+        : text
+    );
+    previousAuthor = authorName;
+  }
 
   return {
     id: `telegram:${message.id}`,
     role: "user",
-    parts: [{ type: "text", text: content }]
+    parts: [{ type: "text", text: lines.join("\n") }]
   };
 }
 
