@@ -1,0 +1,74 @@
+packages/agents/src/chat/truncate-older-messages.ts
+  s_368991bdec7f77::t_b56a3bdef3afa6 201,203-206
+packages/agents/src/tests/chat/truncate-older-messages.test.ts
+  s_368991bdec7f77::t_e1a8cb9a434c02 276-318
+docs/think/lifecycle-hooks.md
+  s_368991bdec7f77::t_8bb8daaf9289fa 744,751-758
+  s_368991bdec7f77::t_5597626deab2bb 743
+packages/think/src/messengers/delivery.ts
+  s_368991bdec7f77::t_c725dd9ee9b8ac 471-472,481-483,516-518
+packages/think/src/tests/run-turn-recovery.test.ts
+  s_368991bdec7f77::t_7e9c2b3f7d9fbb 191,267-299,339-371
+  s_368991bdec7f77::t_c7ae99b0db09e1 300-338
+  s_368991bdec7f77::t_0faba35aa61ca2 192-266
+.changeset/response-hook-after-reset.md
+  s_368991bdec7f77::t_d67c28ea7c1e22 1-6
+packages/agents/src/chat/lifecycle.ts
+  s_368991bdec7f77::t_069ff98eb8c550 44-48
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_9cb89dc032786e 7509-7568,7575-7593,7594-7595,7606-7613,7608-7613
+  s_368991bdec7f77::t_4ba3364935ebfa 7569-7574
+  s_368991bdec7f77::t_7b445dd085d103 1045-1056,1061-1065,1069-1079
+  s_368991bdec7f77::t_7585883aa05f53 1057-1060,1066-1068,6635-6658
+  s_368991bdec7f77::t_a50a14bdcbae90 7596-7607
+  s_368991bdec7f77::t_362d0b4bdcca52 1842-1844,1847-1855,1858-1861,1875-1878,1886-1891,1894-1897
+  s_368991bdec7f77::t_99418a3a6375c8 1846,1857,1879-1885,1893
+packages/think/src/tests/messengers.test.ts
+  s_368991bdec7f77::t_212bad862f1a18 1464-1518
+packages/think/src/think.ts
+  s_368991bdec7f77::t_23b5df241b46b4 305,320-327,3609,14140-14150,14153,14168-14169,14171,16106-16141,17651-17716,17725-17739
+  s_368991bdec7f77::t_16f2332804c51a 13494-13500,13502,13531-13532,13534,17717-17724
+  s_368991bdec7f77::t_d10f3bae75628b 1509-1514,2338-2339,2377,7166-7168,8750,8813-8817,8830,10713-10714,10721-10722,10751-10752,10767-10768,10803-10804,10819-10820,10841-10842,11218-11219,11230-11231,11567-11568,11609-11610,14256-14258,14274-14275,14305-14306,14316-14323,14328-14330,16976-16977
+  s_368991bdec7f77::t_f0bc2523982ee7 12208,12210,12213-12223,12241,12290-12291,12296,12318-12323,18060,18064-18068,18071-18077
+  s_368991bdec7f77::t_67ba1b1329aa1d 16031-16037
+  s_368991bdec7f77::t_2680248b19b51b 16038,16080-16089,16900,16913-16919,17196,17208-17214
+.changeset/turn-result-output.md
+  s_368991bdec7f77::t_ce70a1a7f33b22 1-5
+docs/think/index.md
+  s_368991bdec7f77::t_7892036567017d 264-266
+docs/think/programmatic-submissions.md
+  s_368991bdec7f77::t_092dfb11511700 103-107
+packages/think/src/tests/hooks.test.ts
+  s_368991bdec7f77::t_c20b1499f7b21e 1878-1899,1946-1956
+  s_368991bdec7f77::t_68f8b4b134f0ee 1900-1925
+packages/think/src/tests/submissions.test.ts
+  s_368991bdec7f77::t_e0abc4524a4dd7 339-342
+  s_368991bdec7f77::t_dcece7f12ab1c2 128-131,1515-1532
+packages/agents/src/chat/__tests__/recovery-incident.test.ts
+  s_368991bdec7f77::t_4a9f384d9ca478 831-859
+packages/agents/src/chat/recovery-engine.ts
+  s_368991bdec7f77::t_58cc04bf7d9123 689-704
+packages/agents/src/chat/recovery-incident.ts
+  s_368991bdec7f77::t_30cc1b470f9275 102-109,738-743,767,794,813
+packages/think/src/tests/think-session.test.ts
+  s_368991bdec7f77::t_2bc0160236db5c 731-737
+  s_368991bdec7f77::t_4f23e5298c1f71 738-742,746-748
+.changeset/transient-stream-recovery.md
+  s_368991bdec7f77::t_3b24f1dc05ea3f 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f45aed49a5cd5f9c1014c1e9df7afb7762a641dd",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
