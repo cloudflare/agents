@@ -1,0 +1,133 @@
+packages/think/src/tests/agents/messengers.ts
+  s_368991bdec7f77::t_ba458cf6ba468c 1-3,52-60,70-173,195-207,228-244
+.changeset/messenger-no-placeholder-post.md
+  s_368991bdec7f77::t_8f2262fc47aad6 1-4
+packages/think/src/tests/worker.ts
+  s_368991bdec7f77::t_7d3b60942f9745 13-14,53,102,252
+  s_368991bdec7f77::t_97a4e6bedd911a 30-36,79-85,232-238
+packages/think/src/tests/messengers.test.ts
+  s_368991bdec7f77::t_dfb6e760c57e1d 997,1002-1009,1011-1082,1103-1145
+  s_368991bdec7f77::t_e1d472d7c976b4 32,294-489,1146-1153,1159-1200
+  s_368991bdec7f77::t_da09ae514c18ce 826-877
+packages/think/src/messengers/chat-sdk.ts
+  s_368991bdec7f77::t_6434ffc0108c10 9,12,54-60,318,370,668-673,682-693
+  s_368991bdec7f77::t_52210b8c94bd73 134-141,380,389,397,409,417,429,789-790,796-800,805,809
+  s_368991bdec7f77::t_9769b35b476d1c 897,910-924
+packages/think/src/tests/agents/index.ts
+  s_368991bdec7f77::t_20f50720683b48 48-51
+  s_368991bdec7f77::t_c078f396e66623 15-21
+packages/think/src/tests/wrangler.jsonc
+  s_368991bdec7f77::t_1404707ed96915 154-157,216-219,263
+  s_368991bdec7f77::t_71879dc2b47bbd 74-101,243-249
+docs/think/messengers.md
+  s_368991bdec7f77::t_daf413cebe8ee2 208-214
+  s_368991bdec7f77::t_d16c1f7965bb40 131-158,228-230
+examples/chat-sdk-messenger/src/index.ts
+  s_368991bdec7f77::t_1105e846b1f03b 137,137-138
+  s_368991bdec7f77::t_f8cb818fd98fed 141,148,151,162,165,177,335,340,342-344,448,457,478,485,495,501,509,515-516,522-523
+  s_368991bdec7f77::t_b39566f60e200b 32,38,337,349
+examples/chat-sdk-messenger/src/tests/intelligence.test.ts
+  s_368991bdec7f77::t_fe1f731fe55306 8,10,30-37,40-44,57,173-227,233-236
+  s_368991bdec7f77::t_a2ef6737b3c1da 1-2,11,70-122
+  s_368991bdec7f77::t_e141f53778b1c6 228-232
+packages/think/src/messengers/events.ts
+  s_368991bdec7f77::t_abc8cfa134ccb3 83-90,109,132-158,231-249,251,263-276
+.changeset/messenger-burst-skipped.md
+  s_368991bdec7f77::t_a7daa449bdcc44 1-5
+examples/chat-sdk-messenger/src/intelligence/delivery.ts
+  s_368991bdec7f77::t_c87895067dd784 21,75-76,83-84,90-93
+  s_368991bdec7f77::t_a8da0056fff6b4 1-2,10-13,96-116
+examples/chat-sdk-messenger/src/intelligence/messages.ts
+  s_368991bdec7f77::t_444d00038fc5d2 42-66,71
+docs/agents/agent-tools.md
+  s_368991bdec7f77::t_08fdb9dc98177e 546-549
+docs/agents/chat-agents.md
+  s_368991bdec7f77::t_308b6e98a42b61 666-669,696,703-712,723-735
+docs/think/sub-agents.md
+  s_368991bdec7f77::t_43d4c2636b7502 453,470-479
+  s_368991bdec7f77::t_1d054497383769 30,34-42,367
+  s_368991bdec7f77::t_38ff2bfb0dda2b 333-334
+packages/agents/src/index.ts
+  s_368991bdec7f77::t_727f080334371e 687-689,865-867,956-958,7355-7357
+packages/ai-chat/src/tests/durable-chat-recovery.test.ts
+  s_368991bdec7f77::t_1b268e512acf75 497
+packages/think/src/tests/think-session.test.ts
+  s_368991bdec7f77::t_d56cd26fa12e49 3385
+  s_368991bdec7f77::t_1e14649593df76 11-17,1205-1242,1256-1305,1315-1375
+  s_368991bdec7f77::t_02967b3812d753 625-705,713-759
+  s_368991bdec7f77::t_c810ad99d989b6 619-620,622,706-712
+.changeset/recovery-work-unit-docs.md
+  s_368991bdec7f77::t_4856c57761b29a 1-5
+packages/agents/src/chat/lifecycle.ts
+  s_368991bdec7f77::t_bac5a29b2b490d 213-217,255-257,267-274
+packages/agents/src/chat/recovery-incident.ts
+  s_368991bdec7f77::t_70d52a76a1c21e 142
+packages/agents/src/tests-d/agent-tool-interrupted.test-d.ts
+  s_368991bdec7f77::t_c25f9f4fd8f666 122
+.changeset/messenger-attachment-arraybuffer.md
+  s_368991bdec7f77::t_2ae8c29da8b102 1-5
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_13a8074d2dc212 3651-3717
+  s_368991bdec7f77::t_d823000e384a6a 616-641,908-910,1604-1707,7791,7797-7798
+  s_368991bdec7f77::t_226bc349c9a8b7 847-851
+  s_368991bdec7f77::t_2e7b625bd5465f 4024-4029,4042-4043,4049-4052,4104-4113,4118-4120,4225-4247,4262-4266,4611,4863-4873
+packages/think/src/think.ts
+  s_368991bdec7f77::t_1034b75f12e5c5 2876-2910,3212,5590,6025
+  s_368991bdec7f77::t_1f4175e9752c3d 13177-13185,13281-13299,13481-13483,13668,13674,13745,13752,13759,13765,13769-13790,13794-13814,13816-13840,13843-13845
+  s_368991bdec7f77::t_8166c2534c5007 4954-4963,5176-5198,5200-5205,13226-13233,13257,13259-13262,13688-13698,13725,13727-13730,15407-15421,15424,15429-15436,15442-15443,15448-15452,15458,15460-15466,15472,15482-15523,15528-15579,15585,15596-15600
+  s_368991bdec7f77::t_414958b417b6ee 11895-11896,11972-11973,13439-13445,13460-13465,13467-13473
+  s_368991bdec7f77::t_9a6dce71ccda93 1316-1318,2034-2053,12431-12432,12455,14038-14039,14081-14082,14126-14129,14134-14135,14140,14143,14147-14166,16881,16966
+  s_368991bdec7f77::t_c600287989b7f3 2054-2072,4200-4202,6475-6477,14702-14703,14705-14707,14786-14825
+.changeset/calm-tools-think.md
+  s_368991bdec7f77::t_47c761fbbb7857 1-5
+docs/think/index.md
+  s_368991bdec7f77::t_91795a9fccd8b3 525-534
+  s_368991bdec7f77::t_e79a6c43b79d2a 579-581
+  s_368991bdec7f77::t_9ab470e75337ce 577
+docs/think/lifecycle-hooks.md
+  s_368991bdec7f77::t_07a8508a465e44 850-851
+design/think.md
+  s_368991bdec7f77::t_03cac898c26fd1 221-222
+packages/think/src/tests/assistant-agent.test.ts
+  s_368991bdec7f77::t_a8fb62edf289cb 204-205,208,234-235,238,295-296,299
+packages/think/src/tests/terminal-frame-order.test.ts
+  s_368991bdec7f77::t_117c97b4c31477 1-151
+.changeset/think-persist-before-done.md
+  s_368991bdec7f77::t_7a58fcccb881aa 1-5
+.changeset/think-stall-recovery-retry.md
+  s_368991bdec7f77::t_00783f3403b6ab 1-10
+packages/think/src/tests/run-turn-recovery.test.ts
+  s_368991bdec7f77::t_b741512bda0c53 113-184
+.changeset/think-continuation-accumulator.md
+  s_368991bdec7f77::t_5ac59ba3fb886f 1-5
+.changeset/think-ws-web-channel.md
+  s_368991bdec7f77::t_95660a11bcfa97 1-11
+docs/think/channels.md
+  s_368991bdec7f77::t_f91204692258ed 103-112
+packages/think/src/tests/ws-web-channel.test.ts
+  s_368991bdec7f77::t_35ed2ce37ae33a 1-157
+docs/think/actions.md
+  s_368991bdec7f77::t_474f766faa57e1 183-190
+docs/think/tools.md
+  s_368991bdec7f77::t_b4c456a3acc9f8 320-322
+packages/think/src/tests/actions-durable-pause.test.ts
+  s_368991bdec7f77::t_c60182b021d901 290,294-295,311,370-559
+.changeset/think-drop-pending-pause-text.md
+  s_368991bdec7f77::t_06566657b90d8a 1-7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "354b5a16462f134fa017cb10374422a5172695c6",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
