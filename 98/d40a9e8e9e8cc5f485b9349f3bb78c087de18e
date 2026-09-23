@@ -1,0 +1,29 @@
+.changeset/transient-stream-recovery.md
+  s_368991bdec7f77::t_d28e2e32bce837 8
+packages/agents/src/chat/recovery-engine.ts
+  s_368991bdec7f77::t_895ee95308fe54 52-55,57-60
+packages/agents/src/chat/recovery-task.ts
+  s_368991bdec7f77::t_78252d536e2625 33
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_b9738d7f8255c7 1845,1856,1862-1874,1892
+packages/think/src/tests/think-session.test.ts
+  s_368991bdec7f77::t_fb1f05cc0de64b 743-745
+packages/think/src/think.ts
+  s_368991bdec7f77::t_5de70d6c015854 15970-15973,15978,15996
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "98d40a9e8e9e8cc5f485b9349f3bb78c087de18e",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
