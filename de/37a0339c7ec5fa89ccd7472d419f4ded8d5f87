@@ -1,0 +1,35 @@
+examples/chat-sdk-messenger/src/index.ts
+  s_368991bdec7f77::t_f8cb818fd98fed 138,145,148,159,162,174,333,337-341,445,453,474,484,494,500,508,514-515,521-522
+examples/chat-sdk-messenger/src/tests/intelligence.test.ts
+  s_368991bdec7f77::t_fe1f731fe55306 8-9,28-35,38-42,55,118-177
+packages/think/src/messengers/chat-sdk.ts
+  s_368991bdec7f77::t_52210b8c94bd73 134-141,380,389,397,409,417,429,787-788,794-798,803,807
+packages/think/src/messengers/events.ts
+  s_368991bdec7f77::t_abc8cfa134ccb3 83-90,109,132-158,231-249,251,263-276
+.changeset/messenger-burst-skipped.md
+  s_368991bdec7f77::t_a7daa449bdcc44 1-5
+docs/think/messengers.md
+  s_368991bdec7f77::t_d16c1f7965bb40 131-158,228-230
+examples/chat-sdk-messenger/src/intelligence/delivery.ts
+  s_368991bdec7f77::t_c87895067dd784 16,70-71,78-79,85-88
+examples/chat-sdk-messenger/src/intelligence/messages.ts
+  s_368991bdec7f77::t_444d00038fc5d2 42-66,71
+packages/think/src/tests/messengers.test.ts
+  s_368991bdec7f77::t_e1d472d7c976b4 32,294-489,1123-1186
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "de37a0339c7ec5fa89ccd7472d419f4ded8d5f87",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
