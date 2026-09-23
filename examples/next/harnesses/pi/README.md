@@ -117,7 +117,7 @@ drive it. The browser connects with `useAgent` from `agents/react`;
 
 ### Admission and cancellation
 
-`submit()` writes a row to a small intake table *before* it starts the machine
+`submit()` writes a row to a small intake table _before_ it starts the machine
 run, so a crash between the two is repaired on the next wake: startup re-runs
 `StateMachine.run()` for every queued submission, and `run()` is idempotent on
 the operation id. Cancellation is durable on both sides — pi records its own
