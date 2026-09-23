@@ -1,7 +1,8 @@
 import {
   defineMachine,
   type MachineDefinition,
-  type MachineEffectRecovery
+  type MachineContext,
+  type MachineEffectRef
 } from "agents/state-machine";
 import type { PiOperationRequest, PiOperationResult } from "./types";
 
@@ -11,13 +12,6 @@ export type PiRunInput = {
   readonly operationId: string;
   readonly request: PiOperationRequest;
   readonly streamId: string;
-};
-
-/** The durable effect handle the machine stores in its checkpoint. */
-export type PiEffectRef = {
-  readonly id: string;
-  readonly kind: string;
-  readonly recovery: MachineEffectRecovery;
 };
 
 /**
@@ -41,7 +35,7 @@ export type PiRunState =
       lane: string;
       operationId: string;
       streamId: string;
-      effect: PiEffectRef;
+      effect: MachineEffectRef<PiDriveOutput>;
       pass: number;
     }
   | {
@@ -111,17 +105,6 @@ function parkUntil(notBefore: number): number {
   return Math.min(Math.max(notBefore, now), now + MAX_PARK_MS);
 }
 
-/** The effect-planning slice of a machine context, narrowed for one pass. */
-type PassPlanner = {
-  readonly effects: {
-    plan: (
-      kind: string,
-      input: PiDriveInput,
-      options: { recovery: MachineEffectRecovery; externalId: string }
-    ) => PiEffectRef;
-  };
-};
-
 /**
  * Plan the effect for one drive pass.
  *
@@ -130,7 +113,7 @@ type PassPlanner = {
  * request. Pi itself deduplicates admission by operation id.
  */
 function planPass(
-  context: PassPlanner,
+  context: MachineContext<PiRunState, PiRunResult, PiRunEvent>,
   state: {
     readonly lane: string;
     readonly operationId: string;
@@ -138,7 +121,7 @@ function planPass(
   },
   pass: number,
   request: PiOperationRequest | null
-): PiEffectRef {
+): MachineEffectRef<PiDriveOutput> {
   return context.effects.plan(
     PI_DRIVE_EFFECT,
     {
@@ -193,9 +176,7 @@ export const piRunMachine: MachineDefinition<
 
     /** Run one bounded pi drive pass and commit whatever it settled. */
     drive: async (state, context) => {
-      const outcome = await context.effects.execute<PiDriveOutput>(
-        state.effect
-      );
+      const outcome = await context.effects.execute(state.effect);
 
       if (outcome.status === "completed") {
         const output = outcome.output;

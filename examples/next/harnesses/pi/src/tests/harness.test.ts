@@ -542,3 +542,104 @@ describe("PiHarness failure and repair", () => {
     expect(await stub.piResult(operationId)).toBe("completed");
   });
 });
+
+/**
+ * Lane fidelity across recovery.
+ *
+ * Every other test in this suite runs on the default lane, where a lookup
+ * that loses track of the lane still resolves to the right one by accident.
+ * These use a second lane so that a lane lost across an eviction is visible
+ * as a wrong answer rather than a coincidentally correct one.
+ */
+describe("PiHarness multi-lane recovery", () => {
+  async function waitForPhase(
+    stub: DurableObjectStub<PiHarnessTestObject>,
+    operationId: string,
+    phase: string,
+    timeoutMs = 10_000
+  ): Promise<MachineView> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const snapshot = (await stub.machine(operationId)) as MachineView | null;
+      if (snapshot?.phase === phase) return snapshot;
+      if (Date.now() > deadline) {
+        throw new Error(
+          `run ${operationId} stayed ${JSON.stringify(snapshot)}`
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  async function waitForStatus(
+    stub: DurableObjectStub<PiHarnessTestObject>,
+    operationId: string,
+    status: string,
+    timeoutMs = 10_000
+  ): Promise<MachineView> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const snapshot = (await stub.machine(operationId)) as MachineView | null;
+      if (snapshot?.status === status) return snapshot;
+      if (Date.now() > deadline) {
+        throw new Error(
+          `run ${operationId} stayed ${JSON.stringify(snapshot)}`
+        );
+      }
+      await runDurableObjectAlarm(stub);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  it("reconciles an operation on a non-default lane after eviction", async () => {
+    const stub = fresh();
+    const { operationId } = await stub.submitGatedOnLane("research", 11);
+    await waitForPhase(stub, operationId, "drive");
+
+    // The lane lives in the durable checkpoint, which is what recovery
+    // consults. Read it while the run is in flight: the checkpoint is
+    // cleared once the run settles.
+    expect(await stub.laneOf(operationId)).toBe("research");
+
+    // Drop the object so recovery has to reconcile the in-flight effect
+    // from durable state alone, with no process-local lane table.
+    await evictDurableObject(stub);
+    await stub.releaseGate();
+
+    const settled = await waitForStatus(stub, operationId, "completed");
+    expect(settled.status).toBe("completed");
+
+    // Pi keys results by operation id session-wide, so the assertion that
+    // matters is not which lane can read the record but that the operation
+    // actually ran to completion on "research" rather than being lost or
+    // reconciled against the wrong lane's live execution.
+    expect(await stub.piResultOnLane("research", operationId)).toBe(
+      "completed"
+    );
+  });
+
+  it("cancels an operation on a non-default lane", async () => {
+    const stub = fresh();
+    const { operationId } = await stub.submitGatedOnLane("research", 12);
+    await waitForPhase(stub, operationId, "drive");
+
+    expect(await stub.abortOnLane("research", operationId)).toBe(true);
+    const settled = await waitForStatus(stub, operationId, "cancelled");
+    expect(settled.status).toBe("cancelled");
+    await stub.releaseGate();
+
+    // The abort has to reach pi on "research"; a cancel sent to the wrong
+    // lane would leave this operation running there.
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const piStatus = await stub.piResultOnLane("research", operationId);
+      if (piStatus !== null) {
+        expect(piStatus).not.toBe("completed");
+        break;
+      }
+      if (Date.now() > deadline) throw new Error("pi never settled the abort");
+      await runDurableObjectAlarm(stub);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  });
+});

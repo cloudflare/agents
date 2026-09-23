@@ -158,7 +158,6 @@ export class PiHarness<
   readonly #laneWriters = new Map<string, OperationStreamWriter>();
   readonly #settlement = new SettlementWaiters(RESULT_POLL_MS);
   readonly #rejections = new Map<string, PiOperationRejectedError>();
-  readonly #lanesOf = new Map<string, string>();
 
   constructor(config: PiHarnessConfig<ToolContext>) {
     super("pi-harness");
@@ -200,9 +199,6 @@ export class PiHarness<
     this.#submissions = new PiSubmissions(this.lifecycle.storage);
     this.#submissions.ensureTable();
     const attached = await this.#attached();
-    for (const operation of attached.open) {
-      this.#lanesOf.set(operation.operationId, operation.lane);
-    }
     const pending = this.#submissions.list();
     if (pending.length === 0 && attached.open.length === 0) return;
     // Admission runs after startup completes so StateMachine is ready no
@@ -705,8 +701,8 @@ export class PiHarness<
   #driveHost(): PiDriveHost {
     return {
       drive: (input, signal) => this.#drivePass(input, signal),
-      lookup: (operationId) => this.#lookupOperation(operationId),
-      requestAbort: (operationId) => this.#requestAbort(operationId)
+      lookup: (lane, operationId) => this.#lookupOperation(lane, operationId),
+      requestAbort: (lane, operationId) => this.#requestAbort(lane, operationId)
     };
   }
 
@@ -716,7 +712,6 @@ export class PiHarness<
     operationId: string,
     request: PiOperationRequest
   ): Promise<void> {
-    this.#lanesOf.set(operationId, lane);
     await this.#machines.run(
       PI_RUN_DEFINITION,
       {
@@ -747,7 +742,6 @@ export class PiHarness<
   ): Promise<PiDriveOutput> {
     const { lane, operationId } = input;
     const context = BACKGROUND_CONTEXT;
-    this.#lanesOf.set(operationId, lane);
     try {
       const { harness } = await this.#attached();
       const upstream = await harness.lane(lane, context);
@@ -883,8 +877,10 @@ export class PiHarness<
    * This is the recovery authority: after eviction the machine asks pi what
    * happened rather than repeating a model request.
    */
-  async #lookupOperation(operationId: string): Promise<PiOperationLookup> {
-    const lane = this.#lanesOf.get(operationId) ?? this.#defaultLane;
+  async #lookupOperation(
+    lane: string,
+    operationId: string
+  ): Promise<PiOperationLookup> {
     const context = BACKGROUND_CONTEXT;
     try {
       const upstream = await this.#upstreamLane(lane, context);
@@ -905,8 +901,7 @@ export class PiHarness<
   }
 
   /** Durably ask pi to stop one operation, whichever lane owns it. */
-  async #requestAbort(operationId: string): Promise<void> {
-    const lane = this.#lanesOf.get(operationId) ?? this.#defaultLane;
+  async #requestAbort(lane: string, operationId: string): Promise<void> {
     try {
       const upstream = await this.#upstreamLane(lane, BACKGROUND_CONTEXT);
       await upstream.requestAbort(operationId, BACKGROUND_CONTEXT);

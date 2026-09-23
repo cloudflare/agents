@@ -271,6 +271,54 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     return { operationId: receipt.operationId, accepted: receipt.accepted };
   }
 
+  /**
+   * Submit a gated operation onto a named lane.
+   *
+   * Recovery has to find the lane an operation belongs to. Everything else
+   * in this suite uses the default lane, where an incorrect lane lookup
+   * still happens to resolve, so a second lane is the only way to observe
+   * whether the lane really survives an eviction.
+   */
+  async submitGatedOnLane(
+    lane: string,
+    value: number
+  ): Promise<{ operationId: string; accepted: boolean }> {
+    await this.ctx.storage.put(TOOL_GATE_KEY, "held");
+    this.#useGatedResponses();
+    const receipt = await this.harness.submit(
+      { kind: "prompt", prompt: `slow ${value}` },
+      { lane }
+    );
+    return { operationId: receipt.operationId, accepted: receipt.accepted };
+  }
+
+  /**
+   * The lane recorded in the operation's durable machine checkpoint.
+   *
+   * This is the value recovery reads. Asserting on it proves the lane
+   * survived eviction in durable state rather than in a process-local map.
+   */
+  async laneOf(operationId: string): Promise<string | null> {
+    const row = this.ctx.storage.sql
+      .exec<{ checkpoint_json: string }>(
+        `SELECT checkpoint_json FROM cf_agents_state_machine_runs
+         WHERE run_id = ?`,
+        this.harness.runIdFor(operationId)
+      )
+      .toArray()[0];
+    if (!row) return null;
+    return (JSON.parse(row.checkpoint_json) as { lane?: string }).lane ?? null;
+  }
+
+  /** Pi's own record for one operation, read on an explicit lane. */
+  async piResultOnLane(
+    lane: string,
+    operationId: string
+  ): Promise<string | null> {
+    const result = await this.harness.getResult(operationId, { lane });
+    return result?.status ?? null;
+  }
+
   /** Let a gated tool call finish. */
   async releaseGate(): Promise<void> {
     await this.ctx.storage.put(TOOL_GATE_KEY, "released");
@@ -284,6 +332,12 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   /** Durably abort one operation, as a client would. */
   async abort(operationId: string): Promise<boolean> {
     const result = await this.harness.abort({ operationId });
+    return result !== null;
+  }
+
+  /** Abort an operation owned by a named lane. */
+  async abortOnLane(lane: string, operationId: string): Promise<boolean> {
+    const result = await this.harness.abort({ lane, operationId });
     return result !== null;
   }
 

@@ -20,16 +20,10 @@ export type PiOperationLookup =
 export interface PiDriveHost {
   /** Admit the operation when needed, then run one bounded drive pass. */
   drive: PiDrivePass;
-  /** Read pi's own durable record for one operation. */
-  lookup(operationId: string): Promise<PiOperationLookup>;
-  /** Durably ask pi to stop the operation, whichever lane owns it. */
-  requestAbort(operationId: string): Promise<void>;
-}
-
-/** Recover the operation id from a `operationId:pass` external id. */
-function operationIdOf(externalId: string): string {
-  const separator = externalId.lastIndexOf(":");
-  return separator === -1 ? externalId : externalId.slice(0, separator);
+  /** Read pi's own durable record for one operation on a known lane. */
+  lookup(lane: string, operationId: string): Promise<PiOperationLookup>;
+  /** Durably ask pi to stop one operation on a known lane. */
+  requestAbort(lane: string, operationId: string): Promise<void>;
 }
 
 /**
@@ -52,9 +46,13 @@ export function createPiDriveRuntime(
       invocation: MachineEffectInvocation
     ): Promise<PiDriveOutput> => host.drive(input, invocation.signal),
 
-    reconcile: async (externalId: string) => {
-      const operationId = operationIdOf(externalId);
-      const looked = await host.lookup(operationId);
+    // Recovery reads the lane and operation from the effect's own durable
+    // input. Deriving them from `externalId`, or from an in-memory table,
+    // would be wrong here: this runs after an eviction, which is exactly
+    // when process-local state is gone.
+    reconcile: async (_externalId, invocation) => {
+      const { lane, operationId } = invocation.input;
+      const looked = await host.lookup(lane, operationId);
       if (looked.status === "running") return { status: "running" };
       if (looked.status === "not-found") return { status: "not-found" };
       return {
@@ -63,8 +61,11 @@ export function createPiDriveRuntime(
       };
     },
 
-    cancel: async (externalId: string) => {
-      await host.requestAbort(operationIdOf(externalId));
+    cancel: async (_externalId, invocation) => {
+      await host.requestAbort(
+        invocation.input.lane,
+        invocation.input.operationId
+      );
     }
   };
 }
