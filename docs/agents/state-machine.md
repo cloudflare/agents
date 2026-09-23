@@ -9,7 +9,7 @@ versioned checkpoint. Lifecycle jobs wake runs after events and deadlines, so a
 parked machine holds no JavaScript invocation in memory.
 
 Use StateMachine for long-lived coordination such as agent loops, permission
-flows, external jobs, and parent-child work. Use [Tasks](./tasks.md) when a
+flows, and external jobs. Use [Tasks](./tasks.md) when a
 shorter replay-from-the-top function with journaled steps is a better fit.
 
 ## Define and install a machine
@@ -168,24 +168,6 @@ const machines = new StateMachine({
 Plan an effect in one phase, commit its reference in state, then execute it from
 the next phase. This makes a crash before intent distinct from an uncertain
 external outcome.
-
-## Child machines
-
-`context.children.spawn()` creates a local child run in the same transaction as
-the parent checkpoint. The parent can continue and later consume the child's
-durable completion:
-
-```ts
-const child = context.children.spawn<string>(
-  "research",
-  { topic: state.topic },
-  { mode: "attached" }
-);
-```
-
-Attached children receive parent cancellation. Background children continue
-unless cancelled directly. Cross-Durable-Object and detached children are not
-part of this experimental version.
 
 ## Cancellation and pause
 

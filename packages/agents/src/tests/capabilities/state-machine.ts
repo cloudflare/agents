@@ -69,12 +69,6 @@ type HarnessSnapshot =
         expiresAt: number;
       }>;
       effects?: Array<{ effectId: string; kind: string; status: string }>;
-      children?: Array<{
-        runId: string;
-        definition: string;
-        mode: string;
-        status: string;
-      }>;
       result?: never;
       error?: never;
     }
@@ -87,7 +81,6 @@ type HarnessSnapshot =
       wait?: never;
       gates?: never;
       effects?: never;
-      children?: never;
     }
   | {
       status: "failed" | "cancelled";
@@ -98,18 +91,6 @@ type HarnessSnapshot =
       wait?: never;
       gates?: never;
       effects?: never;
-      children?: never;
-    };
-
-type ParentState =
-  | { phase: "spawn"; value: string; mode: "attached" | "background" }
-  | {
-      phase: "join";
-      child: {
-        runId: string;
-        definition: string;
-        mode: "attached" | "background";
-      };
     };
 
 class SyncJobProbe extends LifecycleCapability {
@@ -323,56 +304,6 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
             type: "effect-ready",
             key: state.effect.id,
             timeoutAt: Date.now() + 1_000
-          });
-        }
-      }
-    }),
-    child: defineMachine<
-      { phase: "complete"; value: string },
-      string,
-      { value: string }
-    >({
-      version: 1,
-      initial: (input) => ({ phase: "complete", value: input.value }),
-      phases: {
-        complete: async (state, context) => {
-          if (state.value === "slow") {
-            await new Promise((resolve) => setTimeout(resolve, 250));
-          }
-          return context.complete(`child:${state.value}`);
-        }
-      }
-    }),
-    parent: defineMachine<
-      ParentState,
-      string,
-      { value: string; mode: "attached" | "background" }
-    >({
-      version: 1,
-      initial: (input) => ({
-        phase: "spawn",
-        value: input.value,
-        mode: input.mode
-      }),
-      phases: {
-        spawn: (state, context) => {
-          const child = context.children.spawn<string>(
-            "child",
-            { value: state.value },
-            { mode: state.mode }
-          );
-          return context.transition({ phase: "join", child });
-        },
-        join: (state, context) => {
-          const result = context.children.take<string>(state.child);
-          if (result) {
-            return result.ok
-              ? context.complete(result.output)
-              : context.fail(new Error(result.error.message));
-          }
-          return context.wait(state, {
-            type: "state-machine:child-completed",
-            key: state.child.runId
           });
         }
       }
@@ -640,10 +571,6 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
     });
     await this.#stateMachine.resume(runId);
     return runId;
-  }
-
-  startParent(value: string, mode: "attached" | "background" = "attached") {
-    return this.#stateMachine.run("parent", { value, mode });
   }
 
   cancelRun(runId: string, reason?: string) {

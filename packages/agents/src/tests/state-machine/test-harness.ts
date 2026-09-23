@@ -20,12 +20,6 @@ export type HarnessSnapshot = {
     recovery?: string;
     status: string;
   }>;
-  children?: Array<{
-    runId: string;
-    definition: string;
-    mode: string;
-    status: string;
-  }>;
 };
 
 export type HarnessStub = DurableObjectStub & {
@@ -69,10 +63,6 @@ export type HarnessStub = DurableObjectStub & {
     recovery: "safe" | "never" | "reconcile",
     externalId?: string
   ): Promise<string>;
-  startParent(
-    value: string,
-    mode?: "attached" | "background"
-  ): Promise<{ runId: string }>;
   cancelRun(runId: string, reason?: string): Promise<{ status: string }>;
   pauseRun(runId: string): Promise<boolean>;
   resumeRun(runId: string): Promise<boolean>;

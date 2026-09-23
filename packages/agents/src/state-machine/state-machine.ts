@@ -4,7 +4,6 @@ import type {
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
 import { isPlatformFailure } from "../retries";
-import { MachineChildManager } from "./children";
 import { applyMachineCommitParticipant } from "./commit";
 import { createMachineContext, type PendingChanges } from "./context";
 import { MachineEffectManager } from "./effects";
@@ -96,7 +95,6 @@ export class StateMachine<
   #eventManager: MachineEventManager | undefined;
   #gateManager: MachineGateManager | undefined;
   #effectManager: MachineEffectManager | undefined;
-  #childManager: MachineChildManager | undefined;
   readonly gates: StateMachineGateNotifications;
 
   constructor(options: StateMachineOptions<Definitions>) {
@@ -152,20 +150,6 @@ export class StateMachine<
       emit: (type, payload) => this.lifecycle.events.emit(type, payload)
     });
     return this.#effectManager;
-  }
-
-  get #children(): MachineChildManager {
-    this.#childManager ??= new MachineChildManager({
-      store: this.#store,
-      events: this.#events,
-      definition: (name) => this.#definition(name),
-      assertState: (name, definition, state) =>
-        this.#assertState(name, definition as RuntimeDefinition, state),
-      insertRun: (input) => this.#insertRun(input),
-      pushJob: (runId, revision, time) => this.#pushJob(runId, revision, time),
-      emit: (type, payload) => this.lifecycle.events.emit(type, payload)
-    });
-    return this.#childManager;
   }
 
   async onStart(): Promise<void> {
@@ -306,7 +290,6 @@ export class StateMachine<
              updated_at = ? WHERE run_id = ?`,
         [reason ?? null, now, runId]
       );
-      this.#children.cascadeAttachedCancellation(runId, reason, now);
       this.#pushJob(runId, row.revision, now);
       wake = true;
       receipt = { status: "requested" };
@@ -340,11 +323,6 @@ export class StateMachine<
       if (!row || !TERMINAL_STATUSES.has(row.status)) return;
       this.lifecycle.jobs.cancelSync(this.#jobId(runId));
       this.#store.deleteOwnedRows(runId);
-      this.#store.write(
-        `DELETE FROM cf_agents_state_machine_children
-         WHERE child_run_id = ?`,
-        [runId]
-      );
       deleted =
         this.#store.write(
           "DELETE FROM cf_agents_state_machine_runs WHERE run_id = ?",
@@ -443,7 +421,6 @@ export class StateMachine<
       events: this.#events,
       gates: this.#gates,
       effects: this.#effects,
-      children: this.#children,
       errorSummary: (error) => this.#errorSummary(error)
     });
     if (row.cancel_requested === 1 && !definition.onCancel) {
@@ -530,7 +507,6 @@ export class StateMachine<
           pending.effects,
           now
         );
-        this.#children.applyPending(row.run_id, pending.children, now);
         this.#events.consume(
           row.run_id,
           pending.claimedEventIds,
@@ -650,7 +626,6 @@ export class StateMachine<
              WHERE run_id = ? AND state = 'open'`,
             [now, now, row.run_id]
           );
-          this.#children.settleParentRelations(row, decision, now);
           if (row.retain === 0) {
             this.#store.deleteOwnedRows(row.run_id);
             this.#store.write(
@@ -673,7 +648,6 @@ export class StateMachine<
     }
     this.#gates.publishPending(row.run_id, pending.gates);
     this.#effects.publishPending(row.run_id, pending.effects);
-    this.#children.publishPending(row.run_id, pending.children);
     await this.lifecycle.jobs.rearm();
     this.lifecycle.events.emit(`state-machine:${decision.kind}`, {
       runId: row.run_id,
@@ -690,7 +664,7 @@ export class StateMachine<
       row,
       this.#definition(row.definition),
       { kind: "fail", error, commit: [] },
-      { claimedEventIds: [], gates: [], effects: [], children: [] }
+      { claimedEventIds: [], gates: [], effects: [] }
     );
   }
 
@@ -714,7 +688,6 @@ export class StateMachine<
          SET state = 'cancelled', settled_at = ? WHERE run_id = ? AND state = 'open'`,
         [now, row.run_id]
       );
-      this.#children.settleCancelledRelations(row, reason, now);
     });
     await this.lifecycle.jobs.rearm();
   }

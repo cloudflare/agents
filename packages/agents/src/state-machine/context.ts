@@ -1,11 +1,8 @@
-import type { MachineChildManager, PendingChild } from "./children";
 import type { MachineEffectManager, PendingEffect } from "./effects";
 import type { MachineEventManager } from "./events";
 import type { MachineGateManager, PendingGate } from "./gates";
 import type {
   GateKind,
-  MachineChildRef,
-  MachineChildResult,
   MachineCommitParticipant,
   MachineContext,
   MachineEffectPlanOptions,
@@ -17,7 +14,6 @@ import type {
   MachinePhased,
   MachineQueuedEvent,
   MachineRunRow,
-  MachineSpawnOptions,
   MachineTransitionOptions,
   MachineValue,
   MachineWaitOptions,
@@ -28,7 +24,6 @@ export type PendingChanges = {
   claimedEventIds: string[];
   gates: PendingGate[];
   effects: PendingEffect[];
-  children: PendingChild[];
 };
 
 export function createMachineContext(options: {
@@ -37,18 +32,16 @@ export function createMachineContext(options: {
   events: MachineEventManager;
   gates: MachineGateManager;
   effects: MachineEffectManager;
-  children: MachineChildManager;
   errorSummary: (error: unknown) => { name: string; message: string };
 }): {
   context: MachineContext<MachinePhased, MachineValue>;
   pending: PendingChanges;
 } {
-  const { row, wake, events, gates, effects, children, errorSummary } = options;
+  const { row, wake, events, gates, effects, errorSummary } = options;
   const pending: PendingChanges = {
     claimedEventIds: [],
     gates: [],
-    effects: [],
-    children: []
+    effects: []
   };
   const takeEvent = (filter: MachineEventFilter): MachineQueuedEvent | null =>
     events.take(row, pending.claimedEventIds, filter);
@@ -85,24 +78,6 @@ export function createMachineContext(options: {
       execute: <Output extends MachineValue>(
         effect: MachineEffectRef<Output>
       ) => effects.execute(row.run_id, effect)
-    }),
-    children: Object.freeze({
-      spawn: <Output extends MachineValue = MachineValue>(
-        definitionName: string,
-        input: MachineValue,
-        spawnOptions: MachineSpawnOptions = {}
-      ): MachineChildRef<Output> =>
-        children.spawn(
-          row,
-          pending.children,
-          definitionName,
-          input,
-          spawnOptions
-        ),
-      take: <Output extends MachineValue>(child: MachineChildRef<Output>) =>
-        children.take<Output>(child, (type, key) =>
-          takeEvent({ type, key })
-        ) as MachineChildResult<Output> | null
     }),
     transition: (
       state: MachinePhased,
