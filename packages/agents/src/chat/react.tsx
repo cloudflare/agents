@@ -2225,6 +2225,10 @@ export function useAgentChat<
             break;
           }
 
+          const appliedReplay = customTransport.appliedChunks.isAppliedReplay(
+            data.id,
+            data
+          );
           // Error bodies are human-readable diagnostics, not UI message
           // chunks. The transport-owned path short-circuits them before JSON
           // parsing; observers must do the same.
@@ -2258,6 +2262,7 @@ export function useAgentChat<
                 (
                   (chunkData as Record<string, unknown>).type as string
                 ).startsWith("data-") &&
+                !appliedReplay &&
                 onDataRef.current
               ) {
                 onDataRef.current(
@@ -2291,7 +2296,7 @@ export function useAgentChat<
           // The replayed `start` still re-seeds the continuation accumulator
           // from the current message, which already holds the applied chunks.
           const alreadyApplied =
-            customTransport.appliedChunks.isAppliedReplay(data.id, data) &&
+            appliedReplay &&
             (chunkData as { type?: string } | undefined)?.type !== "start";
           if (data.done) {
             customTransport.appliedChunks.forget(data.id);

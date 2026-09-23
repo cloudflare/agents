@@ -6210,10 +6210,12 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
       url: "ws://localhost:3000/agents/chat/observer-replay-seq?_pk=abc"
     });
 
+    const dataParts: unknown[] = [];
     const TestComponent = () => {
       const chat = useAgentChat({
         agent,
         getInitialMessages: null,
+        onData: (part) => dataParts.push(part),
         messages: [
           { id: "u1", role: "user", parts: [{ type: "text", text: "Hi" }] },
           {
@@ -6248,6 +6250,7 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
       '{"type":"start","messageId":"a1"}',
       '{"type":"text-start","id":"t2"}',
       '{"type":"text-delta","id":"t2","delta":"already"}',
+      '{"type":"data-audit","data":{"n":1},"transient":true}',
       '{"type":"text-delta","id":"t2","delta":" more"}'
     ];
     const frame = (seq: number, replay: boolean) => ({
@@ -6261,7 +6264,7 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
     });
 
     await act(async () => {
-      for (const seq of [0, 1, 2]) dispatch(target, frame(seq, false));
+      for (const seq of [0, 1, 2, 3]) dispatch(target, frame(seq, false));
       await sleep(10);
     });
     await expect
@@ -6270,8 +6273,8 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
 
     // A reconnect replays the stored chunks before the stream continues.
     await act(async () => {
-      for (const seq of [0, 1, 2]) dispatch(target, frame(seq, true));
-      dispatch(target, frame(3, false));
+      for (const seq of [0, 1, 2, 3]) dispatch(target, frame(seq, true));
+      dispatch(target, frame(4, false));
       await sleep(10);
     });
 
@@ -6281,6 +6284,7 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
     expect(screen.getByTestId("assistant-text").element().textContent).toBe(
       "Before. already more"
     );
+    expect(dataParts).toHaveLength(1);
   });
 
   it("clears protection when CF_AGENT_CHAT_CLEAR arrives mid-stream", async () => {

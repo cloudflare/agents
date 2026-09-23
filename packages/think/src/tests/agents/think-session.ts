@@ -7015,6 +7015,20 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.continueLastTurn();
   }
 
+  private _streamStartContinuations: boolean[] = [];
+
+  protected override _startResumableStream(
+    requestId: string,
+    options?: { messageId?: string; continuation?: boolean }
+  ): string {
+    this._streamStartContinuations.push(options?.continuation ?? false);
+    return super._startResumableStream(requestId, options);
+  }
+
+  async getStreamStartContinuationsForTest(): Promise<boolean[]> {
+    return this._streamStartContinuations;
+  }
+
   async testContinueLastTurnWithBody(
     body: Record<string, unknown>
   ): Promise<SaveMessagesResult> {

@@ -2559,6 +2559,20 @@ describe("Think — continueLastTurn", () => {
     );
   });
 
+  it("stores the continuation flag on the resumable stream it replays from (#1951)", async () => {
+    const agent = await freshProgrammaticAgent(
+      `continue-stream-flag-${crypto.randomUUID()}`
+    );
+
+    await agent.testSaveMessagesWithFn("Start");
+    await agent.testContinueLastTurn();
+
+    expect(await agent.getStreamStartContinuationsForTest()).toEqual([
+      false,
+      true
+    ]);
+  });
+
   it("should set continuation: true on continueLastTurn", async () => {
     const agent = await freshProgrammaticAgent("continue-flag");
 

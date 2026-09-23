@@ -13810,8 +13810,8 @@ export class Think<
     }
   ): Promise<StreamResultStatus> {
     const clearGen = this._turnQueue.generation;
-    const streamId = this._startResumableStream(requestId);
     const continuation = options?.continuation ?? false;
+    const streamId = this._startResumableStream(requestId, { continuation });
     const parentId = options?.parentId;
 
     if (this._continuation.pending?.requestId === requestId) {
@@ -18127,7 +18127,7 @@ export class Think<
    */
   protected _startResumableStream(
     requestId: string,
-    options?: { messageId?: string }
+    options?: { messageId?: string; continuation?: boolean }
   ): string {
     const streamId = this._resumableStream.start(requestId, options);
     // Flush connections parked during this turn's pre-stream window (#1784)
