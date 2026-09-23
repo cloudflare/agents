@@ -1,0 +1,25 @@
+docs/think/channels.md
+  s_368991bdec7f77::t_c5e20fce6bb45d 111-113
+packages/think/src/tests/ws-web-channel.test.ts
+  s_368991bdec7f77::t_886c65436c6467 173-186
+.changeset/think-ws-web-channel.md
+  s_368991bdec7f77::t_42541bba4f6ab0 9
+packages/think/src/think.ts
+  s_368991bdec7f77::t_021fb70a41be01 3122-3126,8146,11926-11928
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "04e277d546febbaa05d1530aabbd5b8f6fa63037",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}

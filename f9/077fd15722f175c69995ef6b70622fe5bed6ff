@@ -1,0 +1,27 @@
+packages/think/src/tests/run-turn-recovery.test.ts
+  s_368991bdec7f77::t_66eb87d40b20ad 184-188
+packages/think/src/think.ts
+  s_368991bdec7f77::t_351617bf172860 495-506,13436
+.changeset/think-continuation-accumulator.md
+  s_368991bdec7f77::t_b46c3e3368c001 5
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_9495ee867a0222 1637,1677-1680
+packages/think/src/tests/think-session.test.ts
+  s_368991bdec7f77::t_36751b28320bc3 689,691,714-715
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f9077fd15722f175c69995ef6b70622fe5bed6ff",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
