@@ -191,7 +191,9 @@ is still streaming, the removal waits until that turn is saved and runs before
 the next model call, whether that is the continuation or a new user turn. The
 outcome is saved in Durable Object storage before the transcript is updated, so
 if the agent restarts before either write lands, both the outcome and the
-removal are applied before the next model call.
+removal are applied before the next model call. A client that resubmits an
+older copy of the message, still showing the paused output, does not restore
+the paused output or the removed text.
 
 Both approval-gated and durable-pause parts carry a stable
 `ActionApprovalDescriptor` (`{ requestId, toolCallId, action, summary, input,

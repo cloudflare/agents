@@ -642,6 +642,52 @@ describe("resolving a durable pause drops pending-state generation (#2054)", () 
     expect(generatedAfter(resolved, "dp1")).toEqual([]);
   });
 
+  it("keeps the outcome when a stale client resubmits the paused message", async () => {
+    const { agent, executionId } = await parkInTurn("dp-stale-client");
+    await agent.holdConnectionlessContinuationForTest();
+    const stale = (await agent.getStoredMessages()) as UIMessage[];
+    await agent.approveExecutionForTest(executionId);
+
+    await agent.persistClientMessagesForTest([
+      ...stale,
+      {
+        id: "u-stale-client",
+        role: "user",
+        parts: [{ type: "text", text: "is it done?" }]
+      }
+    ]);
+
+    const resolved = ownerOf(await agent.getDurableMessagesForTest(), "dp1");
+    expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+    expect(generatedAfter(resolved, "dp1")).toEqual([]);
+  });
+
+  it("resolves a paused part outside the hydrated window in place", async () => {
+    const { agent, executionId } = await parkInTurn("dp-stale-window-approve");
+    await agent.holdConnectionlessContinuationForTest();
+    await agent.appendMessagesForTest([
+      {
+        id: "u-later",
+        role: "user",
+        parts: [{ type: "text", text: "anything else?" }]
+      },
+      {
+        id: "a-later",
+        role: "assistant",
+        parts: [{ type: "text", text: "Not yet." }]
+      }
+    ]);
+    await agent.windowCachedMessagesForTest(1);
+
+    await agent.approveExecutionForTest(executionId);
+
+    const durable = (await agent.getDurableMessagesForTest()) as UIMessage[];
+    const resolved = ownerOf(durable, "dp1");
+    expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+    expect(generatedAfter(resolved, "dp1")).toEqual([]);
+    expect(durable.filter((message) => message.role === "system")).toEqual([]);
+  });
+
   it("writes the outcome after a restart when the paused part is outside the hydrated window", async () => {
     const { agent, executionId } = await parkInTurn("dp-stale-windowed");
     await agent.holdConnectionlessContinuationForTest();

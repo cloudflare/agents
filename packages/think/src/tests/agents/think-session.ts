@@ -4337,6 +4337,26 @@ export class ThinkToolsTestAgent extends Think {
     self._cacheCoversActivePath = false;
   }
 
+  /** Reconcile and persist a client transcript, as a chat request does. */
+  async persistClientMessagesForTest(messages: UIMessage[]): Promise<void> {
+    await (
+      this as unknown as {
+        _reconcileAndPersistIncoming(
+          messages: UIMessage[],
+          options: {
+            requestId: string;
+            isRegeneration: boolean;
+            isCurrent: () => boolean;
+          }
+        ): Promise<unknown>;
+      }
+    )._reconcileAndPersistIncoming(messages, {
+      requestId: crypto.randomUUID(),
+      isRegeneration: false,
+      isCurrent: () => true
+    });
+  }
+
   async getDurableMessagesForTest(): Promise<UIMessage[]> {
     return (await this.session.getHistory()) as UIMessage[];
   }

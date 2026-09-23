@@ -304,19 +304,102 @@ const DEFERRED_RESOLVED_PAUSES_KEY = "cf_think_deferred_resolved_pauses";
 
 type ResolvedPauseOutcome = { executionId: string; output: unknown };
 
+function isPausedToolPart(part: Record<string, unknown>): boolean {
+  const output = part.output as { status?: unknown } | null | undefined;
+  return (
+    part.state === "output-available" &&
+    output != null &&
+    typeof output === "object" &&
+    output.status === "paused"
+  );
+}
+
 function ownsPausedToolCall(message: UIMessage, toolCallId: string): boolean {
   return (message.parts as unknown as Array<Record<string, unknown>>).some(
-    (part) => {
-      if (part.toolCallId !== toolCallId) return false;
-      const output = part.output as { status?: unknown } | null | undefined;
-      return (
-        part.state === "output-available" &&
-        output != null &&
-        typeof output === "object" &&
-        output.status === "paused"
+    (part) => part.toolCallId === toolCallId && isPausedToolPart(part)
+  );
+}
+
+/** The tool call id of a part whose output carries `executionId`, if any. */
+function executionToolCallIn(
+  message: UIMessage,
+  executionId: string,
+  pausedOnly: boolean
+): string | null {
+  if (message.role !== "assistant") return null;
+  for (const part of message.parts as unknown as Array<
+    Record<string, unknown>
+  >) {
+    if (part.state !== "output-available") continue;
+    if (typeof part.toolCallId !== "string") continue;
+    const output = part.output as
+      | { status?: unknown; executionId?: unknown }
+      | null
+      | undefined;
+    if (
+      output != null &&
+      typeof output === "object" &&
+      (!pausedOnly || output.status === "paused") &&
+      output.executionId === executionId
+    ) {
+      return part.toolCallId;
+    }
+  }
+  return null;
+}
+
+/**
+ * A client that missed a pause's resolution resubmits its part still paused,
+ * and reconciliation protects server results only from pre-output client
+ * states. Keep the server's resolved part, and drop the pending-state text
+ * after it as the resolution did.
+ */
+function keepResolvedPauses(
+  incoming: UIMessage[],
+  serverMessages: readonly UIMessage[]
+): UIMessage[] {
+  const resolved = new Map<string, UIMessage["parts"][number]>();
+  for (const message of serverMessages) {
+    if (message.role !== "assistant") continue;
+    for (const part of message.parts) {
+      const record = part as Record<string, unknown>;
+      if (
+        typeof record.toolCallId === "string" &&
+        (record.state === "output-available" ||
+          record.state === "output-error" ||
+          record.state === "output-denied") &&
+        !isPausedToolPart(record)
+      ) {
+        resolved.set(record.toolCallId, part);
+      }
+    }
+  }
+  if (resolved.size === 0) return incoming;
+
+  return incoming.map((message) => {
+    if (message.role !== "assistant") return message;
+    const stale = message.parts.flatMap((part) => {
+      const record = part as Record<string, unknown>;
+      return typeof record.toolCallId === "string" &&
+        isPausedToolPart(record) &&
+        resolved.has(record.toolCallId)
+        ? [record.toolCallId]
+        : [];
+    });
+    if (stale.length === 0) return message;
+    let parts = message.parts;
+    for (const toolCallId of stale) {
+      parts = dropGenerationAfterToolCall(
+        parts.map((part) =>
+          "toolCallId" in part && part.toolCallId === toolCallId
+            ? resolved.get(toolCallId)!
+            : part
+        ),
+        toolCallId
       );
     }
-  );
+    return { ...message, parts };
+  });
 }
 const ACTION_PENDING_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_PENDING_LAST_SWEPT_KEY =
@@ -14118,10 +14201,9 @@ export class Think<
     const serverMessagesById = new Map(
       serverMessages.map((message) => [message.id, message])
     );
-    const reconciled = reconcileMessages(
-      incomingMessages,
-      serverMessages,
-      sanitizeMessage
+    const reconciled = keepResolvedPauses(
+      reconcileMessages(incomingMessages, serverMessages, sanitizeMessage),
+      serverMessages
     );
 
     let branchParentId: string | undefined;
@@ -14735,11 +14817,16 @@ export class Think<
     executionId: string,
     output: unknown
   ): Promise<boolean> {
-    const toolCallId = this._findPausedExecutionToolCall(executionId);
+    const toolCallId = await this._findExecutionToolCallDurably(
+      executionId,
+      true
+    );
     if (!toolCallId) {
       // Already resolved in place (e.g. approved from another tab)? Then the
       // transcript has the outcome and nothing more is needed.
-      if (this._findExecutionToolCall(executionId) != null) return false;
+      if ((await this._findExecutionToolCallDurably(executionId)) != null) {
+        return false;
+      }
       let summary: string;
       try {
         summary = JSON.stringify(output)?.slice(0, 4_000) ?? String(output);
@@ -14795,16 +14882,9 @@ export class Think<
   }
 
   /**
-   * Find the tool part holding the paused output of `executionId` — in the
-   * in-flight streaming accumulator first (an approval can land while a new
-   * turn streams), then the persisted transcript, newest message first.
-   */
-  private _findPausedExecutionToolCall(executionId: string): string | null {
-    return this._findExecutionToolCall(executionId, true);
-  }
-
-  /**
-   * Find the tool part carrying `executionId` in its output. With
+   * Find the tool part carrying `executionId` in its output — in the in-flight
+   * streaming accumulator first (an approval can land while a new turn
+   * streams), then the in-memory transcript, newest message first. With
    * `pausedOnly`, only a still-paused output matches — used to locate the
    * part an approval outcome should replace. Without it, any settled output
    * matches — used to distinguish "already resolved elsewhere" from "the
@@ -14814,38 +14894,45 @@ export class Think<
     executionId: string,
     pausedOnly = false
   ): string | null {
-    const matches = (part: Record<string, unknown>): boolean => {
-      if (part.state !== "output-available") return false;
-      if (typeof part.toolCallId !== "string") return false;
-      const output = part.output as
-        | { status?: unknown; executionId?: unknown }
-        | null
-        | undefined;
-      return (
-        output != null &&
-        typeof output === "object" &&
-        (!pausedOnly || output.status === "paused") &&
-        output.executionId === executionId
-      );
-    };
-
     const streaming = this._streamingAssistant;
     if (streaming) {
-      for (const part of streaming.parts as unknown as Array<
-        Record<string, unknown>
-      >) {
-        if (matches(part)) return part.toolCallId as string;
-      }
+      const found = executionToolCallIn(
+        { role: "assistant", parts: streaming.parts } as unknown as UIMessage,
+        executionId,
+        pausedOnly
+      );
+      if (found) return found;
     }
 
     for (let i = this.messages.length - 1; i >= 0; i--) {
-      const message = this.messages[i];
-      if (message.role !== "assistant") continue;
-      for (const part of message.parts as unknown as Array<
-        Record<string, unknown>
-      >) {
-        if (matches(part)) return part.toolCallId as string;
-      }
+      const found = executionToolCallIn(
+        this.messages[i],
+        executionId,
+        pausedOnly
+      );
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /**
+   * {@link _findExecutionToolCall}, falling back to storage when the hydrated
+   * window does not cover the whole transcript, so a long-lived pause is
+   * still resolved in place.
+   */
+  private async _findExecutionToolCallDurably(
+    executionId: string,
+    pausedOnly = false
+  ): Promise<string | null> {
+    const found = this._findExecutionToolCall(executionId, pausedOnly);
+    if (found || this._cacheCoversActivePath) return found;
+    for await (const message of this.session.history({ newestFirst: true })) {
+      const stored = executionToolCallIn(
+        message as UIMessage,
+        executionId,
+        pausedOnly
+      );
+      if (stored) return stored;
     }
     return null;
   }
