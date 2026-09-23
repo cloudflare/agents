@@ -29,11 +29,13 @@ import { ConversationAgent } from "./intelligence/conversation-agent";
 import {
   AI_REPLY_FIBER_NAME,
   EMPTY_AI_RESPONSE,
+  FALLBACK_STREAMING_PLACEHOLDER_TEXT,
   INTERRUPTED_AI_RESPONSE,
   aiReplyFailureMode,
   aiReplyRecoveryMode,
   aiReplySnapshot,
   parseAiReplySnapshot,
+  reviveReplyThread,
   type AiReplySnapshot
 } from "./intelligence/delivery";
 import {
@@ -132,7 +134,8 @@ export class ChatIngressAgent extends Agent {
         keyShard: (key) => shardTelegramStateKey(key, this.shardThread),
         shardKey: this.shardThread
       }),
-      concurrency: { strategy: "burst", debounceMs: 600 }
+      concurrency: { strategy: "burst", debounceMs: 600 },
+      fallbackStreamingPlaceholderText: FALLBACK_STREAMING_PLACEHOLDER_TEXT
     });
 
     bot.onNewMention(async (thread, message) => {
@@ -328,17 +331,17 @@ export class ChatIngressAgent extends Agent {
     }
 
     const restored = JSON.parse(JSON.stringify(snapshot), bot.reviver()) as {
-      thread: Thread;
       message: Message;
     };
+    const thread = reviveReplyThread(bot, snapshot.thread);
     const mode = aiReplyRecoveryMode(snapshot);
     if (mode === "answer") {
-      await this.answerWithConversationAgent(restored.thread, restored.message);
+      await this.answerWithConversationAgent(thread, restored.message);
       return;
     }
 
     if (mode === "apologize") {
-      await restored.thread.post(INTERRUPTED_AI_RESPONSE);
+      await thread.post(INTERRUPTED_AI_RESPONSE);
     }
   }
 
@@ -440,6 +443,7 @@ export class ChatIngressAgent extends Agent {
     fiber?: FiberContext
   ): Promise<void> {
     const callback = new TextStreamCallback({
+      emptyText: EMPTY_AI_RESPONSE,
       visibleSoftLimit: TELEGRAM_STREAM_SOFT_LIMIT
     });
     let agent: SubAgentStub<ConversationAgent> | undefined;
@@ -467,11 +471,8 @@ export class ChatIngressAgent extends Agent {
       agent = await this.getConversationAgent(thread);
       await agent.chat(toThinkUserMessage(message), callback);
       completedModelTurn = true;
-      callback.close();
+      callback.complete();
       await post;
-      if (!callback.hasText()) {
-        await thread.post(EMPTY_AI_RESPONSE);
-      }
       for (const chunk of splitTelegramMessageText(callback.remainingText())) {
         await thread.post(chunk);
       }

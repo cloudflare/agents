@@ -797,6 +797,173 @@ describe("think messengers core", () => {
     expect(resolved).toEqual([{ status: "completed" }]);
   });
 
+  describe("streamed replies on adapters without native streaming", () => {
+    function recordingRuntime(
+      overrides: Partial<Adapter> = {},
+      deltas = ["Hello", " there"],
+      beforeDelivery?: () => void
+    ) {
+      const calls: Array<{ kind: "post" | "edit"; text: string }> = [];
+      const text = (message: unknown) =>
+        typeof message === "string"
+          ? message
+          : String((message as { markdown?: string }).markdown);
+      const host: MessengerThinkHost = {
+        ...fakeHost([]),
+        chat(_message, callback) {
+          for (const delta of deltas) {
+            callback.onEvent(JSON.stringify({ type: "text-delta", delta }));
+          }
+          return Promise.resolve();
+        }
+      };
+      const runtime = new ThinkMessengerRuntime(
+        {
+          fake: chatSdkMessenger({
+            adapter: fakeAdapter({
+              editMessage(threadId, _messageId, message) {
+                calls.push({ kind: "edit", text: text(message) });
+                return Promise.resolve({ id: "reply", raw: {}, threadId });
+              },
+              postMessage(threadId, message) {
+                calls.push({ kind: "post", text: text(message) });
+                return Promise.resolve({ id: "reply", raw: {}, threadId });
+              },
+              startTyping() {
+                return Promise.resolve();
+              },
+              ...overrides
+            }),
+            conversation: async () => {
+              await Promise.resolve();
+              beforeDelivery?.();
+              return { target: "self" as const };
+            },
+            provider: "fake",
+            userName: "fake_bot",
+            verifyWebhook: false
+          })
+        },
+        host
+      );
+      runtime.initialize();
+      return { calls, runtime };
+    }
+
+    function answerReply(runtime: ThinkMessengerRuntime) {
+      const event: MessengerEvent = {
+        ...baseEvent,
+        messengerId: "fake",
+        provider: "fake",
+        thread: {
+          ...baseEvent.thread,
+          id: "fake:thread",
+          providerThreadId: "fake:thread"
+        }
+      };
+      return runtime.handleFiberRecovery({
+        createdAt: Date.now(),
+        id: "fiber-1",
+        name: MESSENGER_REPLY_FIBER_NAME,
+        recoveryReason: "interrupted",
+        snapshot: messengerReplySnapshot("accepted", event, {
+          _type: "chat:Thread",
+          adapterName: "fake",
+          channelId: "fake:thread",
+          id: "fake:thread",
+          isDM: false
+        })
+      } satisfies FiberRecoveryContext);
+    }
+
+    it("posts real reply text first instead of a `...` placeholder (#2310)", async () => {
+      const { calls, runtime } = recordingRuntime();
+
+      await expect(answerReply(runtime)).resolves.toBe(true);
+
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls[0].kind).toBe("post");
+      expect(calls[0].text).toContain("Hello");
+      expect(calls.map((call) => call.text)).not.toContain("...");
+      expect(calls.at(-1)?.text).toBe("Hello there");
+    });
+
+    it("posts the empty-response text, not a blank message, when a turn produces no text", async () => {
+      const { calls, runtime } = recordingRuntime({}, []);
+
+      await expect(answerReply(runtime)).resolves.toBe(true);
+
+      expect(calls).toEqual([{ kind: "post", text: EMPTY_MESSENGER_RESPONSE }]);
+    });
+
+    it("recovers a reply through its own adapter after another runtime registered its Chat", async () => {
+      const { calls, runtime } = recordingRuntime();
+      const other = recordingRuntime();
+      await expect(answerReply(other.runtime)).resolves.toBe(true);
+      other.calls.length = 0;
+
+      await expect(answerReply(runtime)).resolves.toBe(true);
+
+      expect(calls.at(-1)?.text).toBe("Hello there");
+      expect(other.calls).toEqual([]);
+    });
+
+    it("keeps its own adapter when another runtime registers its Chat mid-recovery", async () => {
+      let other: ReturnType<typeof recordingRuntime> | undefined;
+      const { calls, runtime } = recordingRuntime({}, undefined, () => {
+        other = recordingRuntime();
+      });
+
+      await expect(answerReply(runtime)).resolves.toBe(true);
+
+      expect(other).toBeDefined();
+      expect(calls.at(-1)?.text).toBe("Hello there");
+      expect(other?.calls).toEqual([]);
+    });
+
+    it("posts a live webhook reply's text first instead of a `...` placeholder (#2310)", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        "placeholder-live"
+      );
+
+      const response = await agent.fetch(
+        "https://example.com/messengers/fake/webhook",
+        {
+          body: JSON.stringify({
+            id: "m1",
+            text: "hello",
+            threadId: "fake:dm-1"
+          }),
+          method: "POST"
+        }
+      );
+      await expect(response.text()).resolves.toBe("ok");
+
+      const calls = await agent.getAdapterCalls();
+      expect(calls[0]).toEqual({ kind: "post", content: "Got" });
+      expect(calls.map((call) => call.content)).not.toContain("...");
+      expect(calls.at(-1)?.content).toBe("Got it");
+    });
+
+    it("leaves native streaming untouched", async () => {
+      const streamed: string[] = [];
+      const { calls, runtime } = recordingRuntime({
+        async stream(threadId, textStream) {
+          for await (const chunk of textStream) {
+            streamed.push(typeof chunk === "string" ? chunk : "");
+          }
+          return { id: "native", raw: {}, threadId };
+        }
+      });
+
+      await expect(answerReply(runtime)).resolves.toBe(true);
+
+      expect(streamed.join("")).toBe("Hello there");
+      expect(calls).toEqual([]);
+    });
+  });
+
   it("separates text segments across tool-call boundaries (#1841)", async () => {
     const callback = new TextStreamCallback();
 

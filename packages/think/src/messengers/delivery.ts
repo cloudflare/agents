@@ -18,11 +18,17 @@ export const INTERRUPTED_MESSENGER_RESPONSE =
 type Wake = () => void;
 
 export interface TextStreamCallbackOptions {
+  /**
+   * Streamed as the reply when a turn completes without text, so surfaces that
+   * wait for the first chunk before posting never post an empty message.
+   */
+  emptyText?: string;
   onVisibleStart?: () => Promise<void> | void;
   visibleSoftLimit?: number;
 }
 
 export class TextStreamCallback extends RpcTarget implements StreamCallback {
+  private readonly emptyText?: string;
   private readonly onVisibleStart?: () => Promise<void> | void;
   private readonly textSegmentJoiner = new TextSegmentJoiner();
   private readonly visibleChunks: string[] = [];
@@ -40,6 +46,7 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
 
   constructor(options: TextStreamCallbackOptions = {}) {
     super();
+    this.emptyText = options.emptyText;
     this.onVisibleStart = options.onVisibleStart;
     this.visibleSoftLimit = options.visibleSoftLimit;
   }
@@ -63,7 +70,7 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
   }
 
   onDone(): void {
-    this.close();
+    this.complete();
   }
 
   onError(error: string): void {
@@ -82,6 +89,14 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
 
   wasInterrupted(): boolean {
     return this.interrupted;
+  }
+
+  /** Ends a completed turn, streaming `emptyText` if it produced no text. */
+  complete(): void {
+    if (!this.closed && this.emptyText !== undefined && !this.hasText()) {
+      this.visibleChunks.push(this.emptyText);
+    }
+    this.close();
   }
 
   close(): void {
@@ -385,6 +400,7 @@ export async function deliverMessengerReply(
     });
 
   const callback = new TextStreamCallback({
+    emptyText: emptyResponseText,
     onVisibleStart: async () => {
       await checkpoint(
         messengerReplySnapshot(
@@ -455,11 +471,8 @@ export async function deliverMessengerReply(
       return;
     }
     completedModelTurn = true;
-    callback.close();
+    callback.complete();
     await post;
-    if (!callback.hasText()) {
-      await options.surface.post(emptyResponseText);
-    }
     for (const chunk of options.policy?.splitText?.(callback.remainingText()) ??
       []) {
       await options.surface.post(chunk);

@@ -38,5 +38,8 @@ export { ThinkExecuteHitlAgent } from "./execute-hitl";
 export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";
 export { ThinkExtensionHookAgent } from "./extension-hooks";
-export { ThinkMessengerRouteTestAgent } from "./messengers";
+export {
+  ThinkMessengerDeliveryTestAgent,
+  ThinkMessengerRouteTestAgent
+} from "./messengers";
 export { ThinkMcpToolMaterializationAgent } from "./mcp-tool-materialization";

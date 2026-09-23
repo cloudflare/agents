@@ -177,6 +177,13 @@ idempotent managed fiber, resolves the conversation target, calls
 `target.chat(message, callback)`, and lets the provider delivery policy post or
 edit visible messages.
 
+While the model is working, Think shows the provider's typing indicator. On
+providers with native streaming, the reply streams in place. On providers
+without it, Think posts the reply once the first text arrives and edits that
+message as the rest streams in. It never posts a `...` placeholder first, so
+notification previews (for example, in Slack) show the start of the actual
+reply. Replies delivered by recovery after a restart behave the same way.
+
 Recovery snapshots store only serializable event and Chat SDK thread data. If a
 restart happens before streaming starts, Think can replay the answer. If a
 restart happens after streaming starts, Think posts the configured interruption

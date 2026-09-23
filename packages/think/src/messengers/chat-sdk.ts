@@ -6,9 +6,10 @@ import type {
   Author as ChatAuthor,
   ChatConfig,
   Message as ChatMessage,
+  SerializedThread,
   Thread as ChatThread
 } from "chat";
-import { Chat } from "chat";
+import { Chat, Message, ThreadImpl } from "chat";
 import type {
   Agent,
   FiberContext,
@@ -49,6 +50,13 @@ import {
 } from "./delivery";
 
 export class ThinkMessengerStateAgent extends ChatSdkStateAgent {}
+
+/**
+ * Adapters without native streaming would otherwise post `"..."` and edit it,
+ * and platforms such as Slack keep that first text as the notification
+ * preview. Delivery already shows a typing indicator before the reply starts.
+ */
+const FALLBACK_STREAMING_PLACEHOLDER_TEXT = null;
 
 export type MessengerRespondTo =
   | "action"
@@ -299,7 +307,7 @@ export class ThinkMessengerRuntime {
       );
     }
 
-    const thread = this.reviveChatObject<ChatThread>(snapshot.thread);
+    const thread = this.reviveThread(definition, snapshot.thread);
     const mode = messengerReplyRecoveryMode(snapshot);
 
     if (mode === "answer") {
@@ -351,6 +359,7 @@ export class ThinkMessengerRuntime {
     const chat = new Chat({
       adapters,
       concurrency: { debounceMs: 600, strategy: "burst" },
+      fallbackStreamingPlaceholderText: FALLBACK_STREAMING_PLACEHOLDER_TEXT,
       state: createChatSdkState({
         agent: ThinkMessengerStateAgent,
         keyShard: (key) => this.shardStateKey(key),
@@ -645,15 +654,37 @@ export class ThinkMessengerRuntime {
     return defaultKeyShard(key, (threadId) => this.shardThread(threadId));
   }
 
-  private reviveChatObject<T>(value: unknown): T {
+  /**
+   * `ThreadImpl.fromJSON` (what `chat.reviver()` calls) builds the thread
+   * without the Chat's streaming config, so a recovered reply would fall back to
+   * the `"..."` placeholder. Rebuild it from the same fields with that config.
+   */
+  private reviveThread(
+    definition: NormalizedMessengerDefinition,
+    value: unknown
+  ): ChatThread {
     if (value === undefined) {
       throw new Error(
         "Messenger recovery snapshot is missing chat object data"
       );
     }
-    const chat = this.chat ?? this.createChat();
-    this.chat = chat;
-    return JSON.parse(JSON.stringify(value), chat.reviver()) as T;
+    const chat = (this.chat ??= this.createChat());
+    const json = JSON.parse(JSON.stringify(value)) as SerializedThread;
+    // Bound explicitly: a lazy thread resolves its adapter from the
+    // module-global Chat singleton on first use, which another runtime in
+    // this isolate can replace while recovery awaits.
+    return new ThreadImpl({
+      adapter: definition.adapter,
+      stateAdapter: chat.getState(),
+      channelId: json.channelId,
+      channelVisibility: json.channelVisibility,
+      currentMessage: json.currentMessage
+        ? Message.fromJSON(json.currentMessage)
+        : undefined,
+      fallbackStreamingPlaceholderText: FALLBACK_STREAMING_PLACEHOLDER_TEXT,
+      id: json.id,
+      isDM: json.isDM
+    });
   }
 
   private async toEvent(
