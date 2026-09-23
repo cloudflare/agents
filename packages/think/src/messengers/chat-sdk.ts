@@ -665,7 +665,9 @@ export class ThinkMessengerRuntime {
         "Messenger recovery snapshot is missing chat object data"
       );
     }
-    this.chat ??= this.createChat();
+    // The thread resolves its adapter from the module-global Chat singleton,
+    // which another runtime in this isolate may have registered since.
+    (this.chat ??= this.createChat()).registerSingleton();
     const json = JSON.parse(JSON.stringify(value)) as SerializedThread;
     return new ThreadImpl({
       adapterName: json.adapterName,

@@ -5,6 +5,7 @@ import type { UIMessage } from "ai";
 import {
   aiReplyFailureMode,
   aiReplyRecoveryMode,
+  EMPTY_AI_RESPONSE,
   reviveReplyThread,
   type AiReplySnapshot
 } from "../intelligence/delivery";
@@ -304,6 +305,17 @@ describe("Telegram intelligence helpers", () => {
 
     expect(callback.textSoFar()).toBe("hello world again");
     expect(callback.remainingText()).toBe(" world again");
+  });
+
+  it("streams the empty-response text when a turn completes without text", async () => {
+    const callback = new TextStreamCallback({ emptyText: EMPTY_AI_RESPONSE });
+    const chunks = collectText(callback.stream());
+
+    callback.onDone();
+
+    await expect(chunks).resolves.toBe(EMPTY_AI_RESPONSE);
+    expect(callback.hasText()).toBe(false);
+    expect(callback.remainingText()).toBe("");
   });
 
   it("surfaces callback stream errors to consumers", async () => {

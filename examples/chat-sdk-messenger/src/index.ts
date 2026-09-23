@@ -443,6 +443,7 @@ export class ChatIngressAgent extends Agent {
     fiber?: FiberContext
   ): Promise<void> {
     const callback = new TextStreamCallback({
+      emptyText: EMPTY_AI_RESPONSE,
       visibleSoftLimit: TELEGRAM_STREAM_SOFT_LIMIT
     });
     let agent: SubAgentStub<ConversationAgent> | undefined;
@@ -470,11 +471,8 @@ export class ChatIngressAgent extends Agent {
       agent = await this.getConversationAgent(thread);
       await agent.chat(toThinkUserMessage(message), callback);
       completedModelTurn = true;
-      callback.close();
+      callback.complete();
       await post;
-      if (!callback.hasText()) {
-        await thread.post(EMPTY_AI_RESPONSE);
-      }
       for (const chunk of splitTelegramMessageText(callback.remainingText())) {
         await thread.post(chunk);
       }

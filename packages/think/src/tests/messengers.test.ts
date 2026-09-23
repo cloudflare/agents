@@ -798,7 +798,10 @@ describe("think messengers core", () => {
   });
 
   describe("streamed replies on adapters without native streaming", () => {
-    function recordingRuntime(overrides: Partial<Adapter> = {}) {
+    function recordingRuntime(
+      overrides: Partial<Adapter> = {},
+      deltas = ["Hello", " there"]
+    ) {
       const calls: Array<{ kind: "post" | "edit"; text: string }> = [];
       const text = (message: unknown) =>
         typeof message === "string"
@@ -807,7 +810,7 @@ describe("think messengers core", () => {
       const host: MessengerThinkHost = {
         ...fakeHost([]),
         chat(_message, callback) {
-          for (const delta of ["Hello", " there"]) {
+          for (const delta of deltas) {
             callback.onEvent(JSON.stringify({ type: "text-delta", delta }));
           }
           return Promise.resolve();
@@ -878,6 +881,26 @@ describe("think messengers core", () => {
       expect(calls[0].text).toContain("Hello");
       expect(calls.map((call) => call.text)).not.toContain("...");
       expect(calls.at(-1)?.text).toBe("Hello there");
+    });
+
+    it("posts the empty-response text, not a blank message, when a turn produces no text", async () => {
+      const { calls, runtime } = recordingRuntime({}, []);
+
+      await expect(answerReply(runtime)).resolves.toBe(true);
+
+      expect(calls).toEqual([{ kind: "post", text: EMPTY_MESSENGER_RESPONSE }]);
+    });
+
+    it("recovers a reply through its own adapter after another runtime registered its Chat", async () => {
+      const { calls, runtime } = recordingRuntime();
+      const other = recordingRuntime();
+      await expect(answerReply(other.runtime)).resolves.toBe(true);
+      other.calls.length = 0;
+
+      await expect(answerReply(runtime)).resolves.toBe(true);
+
+      expect(calls.at(-1)?.text).toBe("Hello there");
+      expect(other.calls).toEqual([]);
     });
 
     it("posts a live webhook reply's text first instead of a `...` placeholder (#2310)", async () => {
