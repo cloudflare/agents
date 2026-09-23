@@ -201,10 +201,11 @@ describe("Think — streaming flow", () => {
     await collectMessages(ws, 3);
 
     const responsesPromise = collectMessagesOfType(ws, MSG_CHAT_RESPONSE, true);
+    // The transcript is broadcast before `done` (#2119).
+    const transcriptPromise = waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
     sendChatRequest(ws, [makeUserMessage("hello")]);
     await responsesPromise;
-
-    await waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
+    await transcriptPromise;
 
     const messages = (await agent.getMessages()) as unknown as UIMessage[];
     expect(messages.length).toBe(2);
@@ -230,10 +231,11 @@ describe("Think — clear", () => {
     await collectMessages(ws, 3);
 
     const responsesPromise = collectMessagesOfType(ws, MSG_CHAT_RESPONSE, true);
+    // The transcript is broadcast before `done` (#2119).
+    const transcriptPromise = waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
     sendChatRequest(ws, [makeUserMessage("hello")]);
     await responsesPromise;
-
-    await waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
+    await transcriptPromise;
 
     const messages = (await agent.getMessages()) as unknown as UIMessage[];
     expect(messages.length).toBe(2);
@@ -290,9 +292,11 @@ describe("Think — message persistence", () => {
     await collectMessages(ws, 3);
 
     const responsesPromise = collectMessagesOfType(ws, MSG_CHAT_RESPONSE, true);
+    // The transcript is broadcast before `done` (#2119).
+    const transcriptPromise = waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
     sendChatRequest(ws, [makeUserMessage("hello")]);
     await responsesPromise;
-    await waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
+    await transcriptPromise;
     await closeWS(ws);
 
     const messages1 = (await agent1.getMessages()) as unknown as UIMessage[];
