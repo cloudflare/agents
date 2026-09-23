@@ -15967,10 +15967,15 @@ export class Think<
       delaySeconds = Math.min(2 ** (retries - 1), 30);
     }
     this._rescheduledRecoveryIncidents.add(incident.incidentId);
+    const reason =
+      this._activeChatRecoveryRootRequestId !== undefined
+        ? "chained_retry"
+        : undefined;
     if (unansweredUserId) {
       await this._chatRecoveryEngine().scheduleRecovery({
         incident,
         delaySeconds,
+        reason,
         recoveryKind: "retry",
         callback: "_chatRecoveryRetry",
         data: {
@@ -15988,6 +15993,7 @@ export class Think<
     await this._chatRecoveryEngine().scheduleRecovery({
       incident,
       delaySeconds,
+      reason,
       recoveryKind: "continue",
       callback: "_chatRecoveryContinue",
       data: {

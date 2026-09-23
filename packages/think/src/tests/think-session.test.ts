@@ -740,6 +740,9 @@ describe("Think — error handling", () => {
     const result = await agent.collectTransientBackoffForTest(3);
 
     expect(result.delays).toEqual([1, 2, 4]);
+    // Only the first attempt joins duplicate detections; the attempts it
+    // chains must not join the run that schedules them.
+    expect(result.keyed).toEqual([true, false, false]);
     expect(result.incidentStatuses).not.toContain("failed");
   });
 

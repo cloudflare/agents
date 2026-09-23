@@ -30,6 +30,7 @@ export type ChatRecoveryTaskInput = {
 export type ChatRecoveryTaskReason =
   | "initial"
   | "stable_timeout_retry"
+  | "chained_retry"
   | "redefer";
 
 /** The host's bounded entry point for each continuation callback. */

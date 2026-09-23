@@ -1842,6 +1842,7 @@ export class ThinkTestAgent extends Think {
   /** Fail the turn and `failures - 1` recoveries fast; collect each delay. */
   async collectTransientBackoffForTest(failures: number): Promise<{
     delays: Array<number | null>;
+    keyed: boolean[];
     incidentStatuses: string[];
     finalRoles: string[];
   }> {
@@ -1852,21 +1853,25 @@ export class ThinkTestAgent extends Think {
     this._errorAttemptsRemaining = failures;
     await this.testChat("trigger transient error");
     const delays: Array<number | null> = [];
+    const keyed: boolean[] = [];
     const incidentStatuses: string[] = [];
     for (let i = 0; i <= failures; i++) {
       const continues = recoveryWorkCountForTest(this, "_chatRecoveryContinue");
       const retries = recoveryWorkCountForTest(this, "_chatRecoveryRetry");
       if (continues === 0 && retries === 0) break;
-      delays.push(
-        this.sql<{ delay: number | null }>`
-          SELECT json_extract(input, '$.delaySeconds') AS delay
-          FROM cf_agents_task_runs
-          WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
-            AND state IN ('pending', 'waiting')
-          ORDER BY created_at DESC
-          LIMIT 1
-        `[0]?.delay ?? null
-      );
+      const pending = this.sql<{
+        delay: number | null;
+        idempotency_key: string | null;
+      }>`
+        SELECT json_extract(input, '$.delaySeconds') AS delay, idempotency_key
+        FROM cf_agents_task_runs
+        WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+          AND state IN ('pending', 'waiting')
+        ORDER BY created_at DESC
+        LIMIT 1
+      `[0];
+      delays.push(pending?.delay ?? null);
+      keyed.push(pending?.idempotency_key != null);
       await runRecoveryWorkForTest(
         this,
         continues > 0 ? "_chatRecoveryContinue" : "_chatRecoveryRetry"
@@ -1884,6 +1889,7 @@ export class ThinkTestAgent extends Think {
     Reflect.deleteProperty(this, "classifyChatError");
     return {
       delays,
+      keyed,
       incidentStatuses,
       finalRoles: (await this.getMessages()).map((m) => m.role)
     };

@@ -49,8 +49,15 @@ export type ChatRecoveryScheduleCallback =
  *   settles only AFTER the callback returns, so an idempotent reschedule would
  *   dedup onto the doomed attempt and settle with it — the retry would never
  *   fire. A fresh (non-idempotent) delayed attempt survives.
+ *
+ * - `"chained_retry"` — the next attempt, scheduled from inside an executing
+ *   recovery attempt that was interrupted again. Non-idempotent for the same
+ *   reason as `"stable_timeout_retry"`.
  */
-export type ChatRecoveryScheduleReason = "initial" | "stable_timeout_retry";
+export type ChatRecoveryScheduleReason =
+  | "initial"
+  | "stable_timeout_retry"
+  | "chained_retry";
 
 /**
  * A reconstructed orphaned-stream partial. The engine seam is deliberately
