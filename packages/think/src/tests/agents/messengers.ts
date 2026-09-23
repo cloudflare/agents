@@ -117,6 +117,16 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     super._emit(type, payload);
     if (
       type === "chat:recovery:completed" &&
+      typeof payload?.incidentId === "string"
+    ) {
+      this._stagedAtCompletion = this.ctx.storage
+        .get<{ outcome?: string }>(
+          `cf_think_messenger_recovery:${payload.incidentId}`
+        )
+        .then((delivery) => delivery?.outcome ?? null);
+    }
+    if (
+      type === "chat:recovery:completed" &&
       this._recoveryMode() === "later"
     ) {
       const internal = this as unknown as { _cachedMessages: UIMessage[] };
@@ -226,6 +236,29 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       SELECT content FROM messenger_delivery_log
       WHERE kind = ${kind} ORDER BY seq ASC
     `.map((row) => row.content);
+  }
+
+  private _stagedAtCompletion: Promise<string | null> | undefined;
+
+  /** The messenger reply outcome stored when recovery emitted `completed`. */
+  async getStagedOutcomeAtCompletionForTest(): Promise<string | null> {
+    return (await this._stagedAtCompletion) ?? null;
+  }
+
+  /** A pending reply whose incident settled while nothing was delivering it. */
+  async replayOrphanedMessengerDeliveryForTest(): Promise<boolean> {
+    const key = `cf_think_messenger_recovery:${crypto.randomUUID()}`;
+    await this.ctx.storage.put(key, {
+      messengerId: "fake",
+      threadId: "fake:dm-orphan",
+      partialText: ""
+    });
+    await (
+      this as unknown as {
+        _replayMessengerRecoveryDeliveries(): Promise<void>;
+      }
+    )._replayMessengerRecoveryDeliveries();
+    return (await this.ctx.storage.get(key)) === undefined;
   }
 
   async getAdapterCalls(): Promise<Array<{ kind: string; content: string }>> {

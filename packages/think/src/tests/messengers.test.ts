@@ -1221,6 +1221,31 @@ describe("think messengers core", () => {
       expect(posted).toEqual(["Got", "it"]);
     });
 
+    it("stores the reply outcome before recovery reports completion", async () => {
+      const name = `recover-self-${crypto.randomUUID()}`;
+      await sendAndSettle(name, "it");
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        name
+      );
+
+      expect(await agent.getStagedOutcomeAtCompletionForTest()).toBe(
+        "completed"
+      );
+    });
+
+    it("apologizes on start for a pending reply whose incident is gone", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `orphan-${crypto.randomUUID()}`
+      );
+
+      expect(await agent.replayOrphanedMessengerDeliveryForTest()).toBe(true);
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content)
+      ).toEqual([INTERRUPTED_MESSENGER_RESPONSE]);
+    });
+
     it("posts the empty-response text when recovery completes without text", async () => {
       const posted = await sendAndSettle(
         `recover-empty-${crypto.randomUUID()}`,

@@ -247,6 +247,7 @@ import {
   type DispatchRecoveredTurnInput,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryTaskReason,
+  CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryIncident,
   type ChatRecoveryKind
 } from "agents/chat";
@@ -317,6 +318,29 @@ type MessengerRecoveryDelivery = {
   outcome?: "completed" | "interrupted";
   text?: string;
 };
+
+function messageText(message: UIMessage | undefined): string {
+  return (message?.parts ?? [])
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join("");
+}
+
+function settleMessengerRecoveryDelivery(
+  delivery: MessengerRecoveryDelivery,
+  outcome: "completed" | "interrupted",
+  text?: string
+): MessengerRecoveryDelivery {
+  if (outcome !== "completed") return { ...delivery, outcome };
+  const recovered = text ?? "";
+  return {
+    ...delivery,
+    outcome,
+    text: recovered.startsWith(delivery.partialText)
+      ? recovered.slice(delivery.partialText.length)
+      : recovered
+  };
+}
 
 type PendingResponseHook = {
   requestId: string;
@@ -16114,9 +16138,6 @@ export class Think<
    */
   private _deferringRecoveryIncidents = new Set<string>();
 
-  /** Recovered reply text per incident, pinned when its recovery completes. */
-  private _recoveredReplyText = new Map<string, string>();
-
   /** Incidents whose running recovery attempt scheduled the next attempt. */
   private _rescheduledRecoveryIncidents = new Set<string>();
 
@@ -16957,7 +16978,7 @@ export class Think<
         // Interrupted again: the attempt it scheduled owns the outcome.
         return;
       }
-      this._pinRecoveredReplyText(data, result.status);
+      await this._stageMessengerRecoveryOutcome(data, result.status);
       await this._updateChatRecoveryIncident(
         data?.incidentId,
         result.status === "completed"
@@ -17253,7 +17274,7 @@ export class Think<
         // Interrupted again: the attempt it scheduled owns the outcome.
         return;
       }
-      this._pinRecoveredReplyText(data, result.status);
+      await this._stageMessengerRecoveryOutcome(data, result.status);
       await this._updateChatRecoveryIncident(
         data?.incidentId,
         result.status === "completed"
@@ -17808,14 +17829,34 @@ export class Think<
   }
 
   /**
-   * Pin the recovered reply's text before anything else can append to the
-   * transcript; settlement reads it after awaiting storage.
+   * Durably record a messenger reply's outcome before its recovery incident
+   * settles: once the incident is terminal, nothing re-emits the event that
+   * would settle the reply after a reset. The recovered text is read before
+   * any await, so a later turn cannot replace it.
    */
-  private _pinRecoveredReplyText(
+  private async _stageMessengerRecoveryOutcome(
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
     status: SaveMessagesResult["status"]
-  ): void {
-    if (status !== "completed" || !data?.incidentId) return;
+  ): Promise<void> {
+    if (!data?.incidentId) return;
+    const text =
+      status === "completed" ? this._recoveredReplyText(data) : undefined;
+    const key = MESSENGER_RECOVERY_PREFIX + data.incidentId;
+    const delivery = await this.ctx.storage.get<MessengerRecoveryDelivery>(key);
+    if (!delivery || delivery.outcome) return;
+    await this.ctx.storage.put(
+      key,
+      settleMessengerRecoveryDelivery(
+        delivery,
+        text === undefined ? "interrupted" : "completed",
+        text
+      )
+    );
+  }
+
+  private _recoveredReplyText(
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData
+  ): string {
     const messages = this.messages;
     let reply: UIMessage | undefined;
     if ("targetAssistantId" in data && data.targetAssistantId) {
@@ -17826,48 +17867,43 @@ export class Think<
       if (next?.role === "assistant") reply = next;
     }
     reply ??= messages.filter((m) => m.role === "assistant").at(-1);
-    this._recoveredReplyText.set(
-      data.incidentId,
-      (reply?.parts ?? [])
-        .filter((p): p is { type: "text"; text: string } => p.type === "text")
-        .map((p) => p.text)
-        .join("")
-    );
+    return messageText(reply);
   }
+
+  /** Incidents whose messenger reply is being delivered by this isolate. */
+  private _settlingMessengerRecoveries = new Set<string>();
 
   private _settleMessengerRecovery(
     incidentId: string,
     outcome: "completed" | "interrupted"
   ): void {
-    const pinnedText = this._recoveredReplyText.get(incidentId);
-    this._recoveredReplyText.delete(incidentId);
+    const text =
+      outcome === "completed"
+        ? messageText(
+            this.messages.filter((m) => m.role === "assistant").at(-1)
+          )
+        : undefined;
+    if (this._settlingMessengerRecoveries.has(incidentId)) return;
+    this._settlingMessengerRecoveries.add(incidentId);
     void this.keepAliveWhile(async () => {
       const key = MESSENGER_RECOVERY_PREFIX + incidentId;
-      const delivery =
-        await this.ctx.storage.get<MessengerRecoveryDelivery>(key);
-      if (!delivery || delivery.outcome) return;
-      const settled: MessengerRecoveryDelivery = { ...delivery, outcome };
-      if (outcome === "completed") {
-        const text =
-          pinnedText ??
-          (
-            this.messages.filter((m) => m.role === "assistant").at(-1)?.parts ??
-            []
-          )
-            .filter(
-              (p): p is { type: "text"; text: string } => p.type === "text"
-            )
-            .map((p) => p.text)
-            .join("");
-        settled.text = text.startsWith(delivery.partialText)
-          ? text.slice(delivery.partialText.length)
-          : text;
+      let delivery = await this.ctx.storage.get<MessengerRecoveryDelivery>(key);
+      if (!delivery) return;
+      if (!delivery.outcome) {
+        delivery = settleMessengerRecoveryDelivery(delivery, outcome, text);
+        await this.ctx.storage.put(key, delivery);
       }
-      await this.ctx.storage.put(key, settled);
-      await this._deliverMessengerRecovery(key, settled);
-    }).catch((error: unknown) => {
-      console.error("[Think] recovered messenger reply delivery failed", error);
-    });
+      await this._deliverMessengerRecovery(key, delivery);
+    })
+      .catch((error: unknown) => {
+        console.error(
+          "[Think] recovered messenger reply delivery failed",
+          error
+        );
+      })
+      .finally(() => {
+        this._settlingMessengerRecoveries.delete(incidentId);
+      });
   }
 
   private async _deliverMessengerRecovery(
@@ -17899,8 +17935,25 @@ export class Think<
     const pending = await this.ctx.storage.list<MessengerRecoveryDelivery>({
       prefix: MESSENGER_RECOVERY_PREFIX
     });
-    for (const [key, delivery] of pending) {
-      if (!delivery.outcome) continue;
+    for (const [key, pendingDelivery] of pending) {
+      let delivery = pendingDelivery;
+      if (!delivery.outcome) {
+        // Settled while an earlier isolate was delivering: the incident is
+        // gone or gave up, and no event will settle this record again.
+        const incident = await this.ctx.storage.get<ChatRecoveryIncident>(
+          CHAT_RECOVERY_INCIDENT_KEY_PREFIX +
+            key.slice(MESSENGER_RECOVERY_PREFIX.length)
+        );
+        if (
+          incident &&
+          incident.status !== "skipped" &&
+          incident.status !== "exhausted"
+        ) {
+          continue;
+        }
+        delivery = settleMessengerRecoveryDelivery(delivery, "interrupted");
+        await this.ctx.storage.put(key, delivery);
+      }
       try {
         await this._deliverMessengerRecovery(key, delivery);
       } catch (error) {
