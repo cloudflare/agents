@@ -85,6 +85,8 @@ function lastUserText(prompt: unknown): string {
  * the model was asked and what the adapter sent are recorded in agent SQL.
  * Thread ids starting with `fake:dm` are direct messages.
  */
+type RecoveryMode = "self" | "thread" | "exhaust" | "twice" | "empty";
+
 export class ThinkMessengerDeliveryTestAgent extends Think {
   private _chat: ChatInstance | undefined;
   private _streamCalls = 0;
@@ -93,14 +95,15 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
   /**
    * #2106: an agent named `recover-<mode>-…` fails its first model stream
    * mid-reply with an error classified as transient (`recover-exhaust-…`:
-   * every stream; `recover-twice-…`: the first recovery too), and
+   * every stream; `recover-twice-…`: the first recovery too;
+   * `recover-empty-…`: fails before any text, and recovery has none), and
    * `recover-thread-…` answers in a per-thread sub-agent, which inherits the
    * mode from its parent's name.
    */
-  private _recoveryMode(): "self" | "thread" | "exhaust" | "twice" | undefined {
+  private _recoveryMode(): RecoveryMode | undefined {
     const name = this.parentPath.at(-1)?.name ?? this.name;
-    const mode = /^recover-(self|thread|exhaust|twice)-/.exec(name)?.[1];
-    return mode as "self" | "thread" | "exhaust" | "twice" | undefined;
+    const mode = /^recover-(self|thread|exhaust|twice|empty)-/.exec(name)?.[1];
+    return mode as RecoveryMode | undefined;
   }
 
   override classifyChatError(): "transient" | undefined {
@@ -126,19 +129,28 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
           mode === "exhaust" ||
           (mode !== undefined && call === 1) ||
           (mode === "twice" && call === 2);
-        const failDelta = call === 1 ? "Got " : "it was ";
+        const failDelta =
+          mode === "empty" ? "" : call === 1 ? "Got " : "it was ";
         const deltas =
-          mode === "twice" ? ["successful"] : mode ? ["it"] : ["Got ", "it"];
+          mode === "empty"
+            ? []
+            : mode === "twice"
+              ? ["successful"]
+              : mode
+                ? ["it"]
+                : ["Got ", "it"];
         const stream = new ReadableStream({
           start(controller) {
             controller.enqueue({ type: "stream-start", warnings: [] });
             controller.enqueue({ type: "text-start", id: "t" });
             if (fails) {
-              controller.enqueue({
-                type: "text-delta",
-                id: "t",
-                delta: failDelta
-              });
+              if (failDelta) {
+                controller.enqueue({
+                  type: "text-delta",
+                  id: "t",
+                  delta: failDelta
+                });
+              }
               controller.enqueue({
                 type: "error",
                 error: new Error("upstream connection reset")

@@ -1212,6 +1212,19 @@ describe("think messengers core", () => {
       expect(posted).toEqual(["Got", "it was successful"]);
     }, 20_000);
 
+    it("posts the empty-response text when recovery completes without text", async () => {
+      const posted = await sendAndSettle(
+        `recover-empty-${crypto.randomUUID()}`,
+        EMPTY_MESSENGER_RESPONSE
+      );
+
+      expect(posted.at(-1)).toBe(EMPTY_MESSENGER_RESPONSE);
+      expect(
+        posted.filter((text) => text === EMPTY_MESSENGER_RESPONSE)
+      ).toHaveLength(1);
+      expect(posted).not.toContain(INTERRUPTED_MESSENGER_RESPONSE);
+    });
+
     it("posts the apology once when recovery is exhausted", async () => {
       const posted = await sendAndSettle(
         `recover-exhaust-${crypto.randomUUID()}`,
@@ -1468,6 +1481,40 @@ describe("think messengers core", () => {
 
     expect(posts).toEqual(["partial answer"]);
     expect(stages.at(-1)).toBe("completed");
+  });
+
+  it("reposts the partial when the stream post rejected before the target delivers the rest (#2106)", async () => {
+    const posts: string[] = [];
+
+    await deliverMessengerReply({
+      event: baseEvent,
+      fiber: { stash() {} } as unknown as FiberContext,
+      policy: { splitText: (text) => (text ? [text] : []) },
+      surface: {
+        async post(message) {
+          if (isAsyncIterable(message)) {
+            await collectText(message);
+            throw new Error("provider rejected the stream");
+          }
+          posts.push(typeof message === "string" ? message : message.markdown);
+        }
+      },
+      target: {
+        cancelChat() {
+          return Promise.resolve(false);
+        },
+        chat(_message, callback) {
+          callback.onStart({ requestId: "req-recovering" });
+          callback.onEvent(
+            JSON.stringify({ type: "text-delta", delta: "partial answer" })
+          );
+          callback.onInterrupted?.({ deliversRecoveredReply: true });
+          return Promise.resolve();
+        }
+      }
+    });
+
+    expect(posts).toEqual(["partial answer"]);
   });
 
   it("posts text past the visible limit before the target delivers the rest (#2106)", async () => {

@@ -467,7 +467,10 @@ export async function deliverMessengerReply(
       // if recovery gives up) itself, stay quiet (#2106); otherwise surface
       // the interrupted apology so the user knows to retry.
       callback.close();
-      await post.catch(() => undefined);
+      const streamRejected = await post.then(
+        () => false,
+        () => true
+      );
       // Checkpoint before the post: a reset after it must not let recovery
       // (which apologizes for a `streaming` snapshot) post a second apology.
       await checkpoint(
@@ -479,9 +482,10 @@ export async function deliverMessengerReply(
       );
       if (callback.targetDeliversRecoveredReply()) {
         // The target subtracts every streamed character from the recovered
-        // reply, including any past `visibleSoftLimit` that is still unposted.
+        // reply, including any past `visibleSoftLimit` or in a rejected
+        // stream post, so post that text now.
         for (const chunk of options.policy?.splitText?.(
-          callback.remainingText()
+          streamRejected ? callback.textSoFar() : callback.remainingText()
         ) ?? []) {
           await options.surface.post(chunk).catch(() => undefined);
         }

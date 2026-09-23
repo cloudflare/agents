@@ -5097,6 +5097,7 @@ export class Think<
     threadId: string;
     outcome: "completed" | "interrupted";
     text?: string;
+    partialPosted?: boolean;
   }): Promise<void> {
     if (!this._messengerRuntime) {
       throw new Error(
@@ -17832,7 +17833,8 @@ export class Think<
       messengerId: delivery.messengerId,
       threadId: delivery.threadId,
       outcome: delivery.outcome,
-      ...(delivery.text !== undefined && { text: delivery.text })
+      ...(delivery.text !== undefined && { text: delivery.text }),
+      partialPosted: delivery.partialText.trim().length > 0
     };
     const parent = this.parentPath.at(-1);
     if (parent) {

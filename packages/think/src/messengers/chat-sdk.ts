@@ -40,6 +40,7 @@ import {
 } from "./events";
 import {
   deliverMessengerReply,
+  EMPTY_MESSENGER_RESPONSE,
   INTERRUPTED_MESSENGER_RESPONSE,
   MESSENGER_REPLY_FIBER_NAME,
   messengerReplyRecoveryMode,
@@ -589,6 +590,7 @@ export class ThinkMessengerRuntime {
     threadId: string;
     outcome: "completed" | "interrupted";
     text?: string;
+    partialPosted?: boolean;
   }): Promise<void> {
     const definition = this.definitionsById.get(input.messengerId);
     const surface = await this.resolveDeliverySurface(
@@ -608,7 +610,14 @@ export class ThinkMessengerRuntime {
       return;
     }
     const text = input.text?.trim() ? input.text : "";
-    if (!text) return;
+    if (!text) {
+      if (!input.partialPosted) {
+        await surface.post(
+          definition.delivery?.emptyResponseText ?? EMPTY_MESSENGER_RESPONSE
+        );
+      }
+      return;
+    }
     for (const chunk of definition.delivery?.splitText?.(text) ?? [text]) {
       await surface.post({ markdown: chunk });
     }
