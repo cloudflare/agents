@@ -287,6 +287,64 @@ export class TestChatAgent extends AIChatAgent<Env> {
       return makeSSEChunkResponse(chunks);
     }
 
+    // Reproduce a client-tool result that round-trips while the original
+    // multi-step stream is still active, followed by a final assistant step and
+    // a normal stop. A second auto-continuation would be stale.
+    if (options?.body?.consumeClientToolResultWithinStream === true) {
+      if (options.continuation) {
+        return new Response("Unexpected stale continuation");
+      }
+      return makeDelayedSSEChunkResponse(
+        [
+          { type: "start" },
+          { type: "start-step" },
+          {
+            type: "tool-input-available",
+            toolCallId: "call_consumed_within_stream",
+            toolName: "fastClientTool",
+            input: {}
+          },
+          { type: "finish-step" },
+          { type: "start-step" },
+          { type: "text-start", id: "text_after_client_tool" },
+          {
+            type: "text-delta",
+            id: "text_after_client_tool",
+            delta: "The tool result was handled."
+          },
+          { type: "text-end", id: "text_after_client_tool" },
+          { type: "finish-step" },
+          { type: "finish", finishReason: "stop" }
+        ],
+        75,
+        options.abortSignal
+      );
+    }
+
+    // Companion control: when the stream stops at the tool call, the result has
+    // not yet been consumed and stream finalization must still re-arm it.
+    if (options?.body?.finishWithUnconsumedClientTool === true) {
+      if (options.continuation) {
+        return new Response("Expected tool continuation");
+      }
+      return makeDelayedSSEChunkResponse(
+        [
+          { type: "start" },
+          { type: "start-step" },
+          {
+            type: "tool-input-available",
+            toolCallId: "call_unconsumed_at_stream_end",
+            toolName: "fastClientTool",
+            input: {}
+          },
+          { type: "finish-step" },
+          { type: "finish", finishReason: "tool-calls" }
+        ],
+        75,
+        options.abortSignal
+      );
+    }
+
     // Issue #1404: simulate the OpenAI Responses API "provider replay"
     // pattern. When asked to continue after a tool result, some providers
     // re-emit the prior tool call (start + delta + available) plus the

@@ -241,6 +241,7 @@ type AIChatRecoveryClassification = { shouldRetryPreStream: boolean };
 type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
   error?: string;
+  finishReason?: string;
 };
 
 export type ChatMessage = UIMessage;
@@ -3171,8 +3172,19 @@ export class AIChatAgent<
    * continuation would never fire. A slow batch is re-checked here and simply
    * keeps holding (event-driven) until its remaining siblings answer.
    */
-  private _onStreamingTurnFinalized(): void {
+  private _onStreamingTurnFinalized(finishReason?: string): void {
     this._streamingTurnActive = false;
+
+    // A tool result or approval can leave an auto-continuation pending while the
+    // original AI SDK stream is still active. If that stream then finishes with
+    // a normal assistant response, the continuation is stale: firing it would
+    // replay a transcript ending in assistant text. Modern Anthropic models
+    // reject that request as an unsupported assistant prefill (#1618, #2171).
+    if (finishReason === "stop" && this._continuation.pending) {
+      this._clearPendingAutoContinuation(true);
+      return;
+    }
+
     this._autoContinuation.rearmForBatch();
   }
 
@@ -6421,6 +6433,7 @@ export class AIChatAgent<
     // than creating new blocks. Track whether we've already resumed each type.
     let continuationTextResumed = false;
     let continuationReasoningResumed = false;
+    let finishReason: string | undefined;
 
     // Cancel the reader when the abort signal fires (e.g. client pressed stop).
     // This ensures we stop broadcasting chunks even if the underlying stream
@@ -6502,7 +6515,7 @@ export class AIChatAgent<
           type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
           ...(continuation && { continuation: true })
         });
-        return { status: "completed" };
+        return { status: "completed", finishReason };
       }
 
       const chunk = decoder.decode(value);
@@ -6819,14 +6832,15 @@ export class AIChatAgent<
               }
             }
             if (data.type === "finish" && "finishReason" in data) {
-              const { finishReason, ...rest } = data as {
+              const { finishReason: chunkFinishReason, ...rest } = data as {
                 finishReason: string;
                 [key: string]: unknown;
               };
+              finishReason = chunkFinishReason;
               eventToSend = {
                 ...rest,
                 type: "finish",
-                messageMetadata: { finishReason }
+                messageMetadata: { finishReason: chunkFinishReason }
               };
             }
 
@@ -6862,7 +6876,7 @@ export class AIChatAgent<
       return { status: "aborted" };
     }
 
-    return { status: "completed" };
+    return { status: "completed", finishReason };
   }
 
   // Handle plain text responses (e.g., from generateText)
@@ -7311,7 +7325,7 @@ export class AIChatAgent<
           // TODO(phase-5): the Tier-2 streaming-codec extraction touches this
           // same region — fold this finalize hook into the extracted codec
           // rather than leaving a second seam here.
-          this._onStreamingTurnFinalized();
+          this._onStreamingTurnFinalized(streamResult.finishReason);
         }
       })
     );
