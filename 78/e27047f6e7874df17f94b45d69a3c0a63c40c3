@@ -1,0 +1,62 @@
+docs/think/programmatic-submissions.md
+  s_368991bdec7f77::t_e182d2d57051d2 111-113,119-137,142-146,148-150
+  s_368991bdec7f77::t_191cbe5f3d8726 138-141,147
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_e29c99f9bc5fc4 48-49,6749-6757
+  s_368991bdec7f77::t_e1a971cff8b333 6772-6782
+packages/think/src/tests/submissions.test.ts
+  s_368991bdec7f77::t_675486706bb479 7,107-114,883-927,1078-1093,1095-1141
+  s_368991bdec7f77::t_99156dc8e396aa 117-120,928-963,1050-1077,1094
+packages/think/src/think.ts
+  s_368991bdec7f77::t_61be68ce6cfbf3 2404-2406,2408-2429,2433-2434,2441-2443,11145-11147,11156-11160,11173-11188,11193-11216,11520,11522-11530,11562-11568,11570,11583-11586,11588-11589
+  s_368991bdec7f77::t_7f16f1ef707d2c 2407,2430-2432,2435,2439-2440,11104-11105,11125-11134,11148-11155,11161-11166,11189-11192,11406,11410-11411,11425-11427,11455-11458,11472,11571,11572,11579-11582,11587
+.changeset/think-submission-wait.md
+  s_368991bdec7f77::t_0d66a42b3503bc 1-4,6
+  s_368991bdec7f77::t_88b432ba2d3741 5
+packages/ai-chat/src/tests/client-tools-continuation.test.ts
+  s_368991bdec7f77::t_5dbc5728200787 764-821
+  s_368991bdec7f77::t_84c80808c06a75 149-237,317-400
+  s_52c6a9b0020245::t_a75e22c427f06f 238-316
+packages/think/src/tests/agents/client-tools.ts
+  s_368991bdec7f77::t_eda2f299f8d240 394-480,810,899-900,906-915,917-920,949-952
+packages/think/src/tests/client-tools.test.ts
+  s_368991bdec7f77::t_7da28a3ef9b649 801-843
+.changeset/ai-chat-stale-post-stream-continuation.md
+  s_368991bdec7f77::t_b5d78238ab1c64 1-5
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_0f769334ab82ee 244,3175,3177-3182,3191-3194,6443,6525,6842,6846,6850,6886,7335
+  s_52c6a9b0020245::t_7e14f8e1948fc4 3183-3190
+packages/ai-chat/src/tests/worker.ts
+  s_368991bdec7f77::t_bf7613e81ba7fd 290-323,369-392
+  s_52c6a9b0020245::t_31b7b5edf5b256 324-368
+docs/think/actions.md
+  s_368991bdec7f77::t_01de729b607cd9 178-188,307-316
+docs/think/tools.md
+  s_368991bdec7f77::t_49757b03fe9cd2 319
+packages/think/src/tests/execute-hitl.test.ts
+  s_368991bdec7f77::t_8bb817ef08072e 233
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "78e27047f6e7874df17f94b45d69a3c0a63c40c3",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    },
+    "s_52c6a9b0020245": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "591e6f70-b65e-4ea9-b86e-05744eef5b82",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
