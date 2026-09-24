@@ -1368,6 +1368,61 @@ describe("think messengers core", () => {
     expect(stages).toContain("completed");
   });
 
+  it.each([
+    ["interrupted", INTERRUPTED_MESSENGER_RESPONSE],
+    ["failed after text", INTERRUPTED_MESSENGER_RESPONSE],
+    ["failed before text", ERROR_MESSENGER_RESPONSE]
+  ])(
+    "checkpoints completed before posting the terminal reply when %s (#1842)",
+    async (outcome, reply) => {
+      const log: string[] = [];
+
+      await deliverMessengerReply({
+        event: baseEvent,
+        fiber: {
+          stash(snapshot: unknown) {
+            log.push(
+              `stage:${parseMessengerReplySnapshot(snapshot)?.stage ?? "unknown"}`
+            );
+          }
+        } as unknown as FiberContext,
+        surface: {
+          async post(message) {
+            if (isAsyncIterable(message)) {
+              await collectText(message);
+              return;
+            }
+            log.push(
+              `post:${typeof message === "string" ? message : message.markdown}`
+            );
+          }
+        },
+        target: {
+          cancelChat() {
+            return Promise.resolve(false);
+          },
+          chat(_message, callback) {
+            callback.onStart({ requestId: "req-terminal" });
+            if (outcome !== "failed before text") {
+              callback.onEvent(
+                JSON.stringify({ type: "text-delta", delta: "partial" })
+              );
+            }
+            if (outcome === "interrupted") {
+              callback.onInterrupted?.();
+              return Promise.resolve();
+            }
+            return Promise.reject(new Error("model failed"));
+          }
+        }
+      });
+
+      const completed = log.indexOf("stage:completed");
+      expect(completed).toBeGreaterThanOrEqual(0);
+      expect(log.indexOf(`post:${reply}`)).toBeGreaterThan(completed);
+    }
+  );
+
   it("delivers successful replies with active messenger context and overflow chunks", async () => {
     const posts: string[] = [];
     let seenContext: MessengerEvent | undefined;

@@ -301,6 +301,15 @@ const MAX_REPLY_ATTACHMENTS_PER_TURN = 32;
 const ACTION_LEDGER_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_LEDGER_LAST_SWEPT_KEY = "cf_think_action_ledger:last_swept_at";
 const DEFERRED_RESOLVED_PAUSES_KEY = "cf_think_deferred_resolved_pauses";
+const PENDING_RESPONSE_HOOK_PREFIX = "cf_think_pending_response_hook:";
+
+type PendingResponseHook = {
+  requestId: string;
+  messageId: string;
+  continuation: boolean;
+  status: ChatResponseResult["status"];
+  error?: string;
+};
 
 type ResolvedPauseOutcome = { executionId: string; output: unknown };
 
@@ -3552,6 +3561,7 @@ export class Think<
               await this._sweepActionLedger();
               await this._sweepActionPendingApprovals();
               await this._migrateLegacyWorkflowNotifications();
+              await this._replayPendingResponseHooks();
               await this._recoverSubmissionsOnStart();
             },
             "Pending submissions / workflow notifications were not recovered on " +
@@ -13307,7 +13317,15 @@ export class Think<
       streamFinalized = true;
 
       assistantMsg = accumulator.toMessage();
+      const response: ChatResponseResult = {
+        message: assistantMsg,
+        requestId,
+        continuation: false,
+        status: streamError ? "error" : aborted ? "aborted" : "completed",
+        ...(streamError && { error: streamError })
+      };
       if (accumulator.parts.length > 0) {
+        await this._rememberPendingResponseHook(response);
         await this._persistAssistantMessageWithCutover(
           streamId,
           assistantMsg,
@@ -13332,31 +13350,14 @@ export class Think<
       });
 
       if (streamError) {
-        await this._fireResponseHook({
-          message: assistantMsg,
-          requestId,
-          continuation: false,
-          status: "error",
-          error: streamError
-        });
         pendingRpcError = streamError;
       } else if (!aborted) {
         await callback.onDone();
-        await this._fireResponseHook({
-          message: assistantMsg,
-          requestId,
-          continuation: false,
-          status: "completed"
-        });
-      } else {
-        await this._fireResponseHook({
-          message: assistantMsg,
-          requestId,
-          continuation: false,
-          status: "aborted"
-        });
       }
+      await this._fireResponseHook(response);
+      await this._forgetPendingResponseHook(requestId);
     } catch (error) {
+      await this._forgetPendingResponseHook(requestId).catch(() => {});
       // #1626: a stream-stall watchdog abort is a recoverable interruption, not
       // a terminal error. Persist the settled partial (re-anchor), route into
       // bounded recovery, and suppress the terminal error when a continuation is
@@ -13945,8 +13946,20 @@ export class Think<
       if (this._turnQueue.generation === clearGen) {
         try {
           const assistantMsg = accumulator.toMessage();
+          const response: ChatResponseResult = {
+            message: assistantMsg,
+            requestId,
+            continuation,
+            status: streamError
+              ? "error"
+              : streamAborted
+                ? "aborted"
+                : "completed",
+            error: streamError
+          };
 
           if (accumulator.parts.length > 0) {
+            await this._rememberPendingResponseHook(response);
             await this._persistAssistantMessageWithCutover(
               streamId,
               assistantMsg,
@@ -13961,18 +13974,10 @@ export class Think<
           // output and terminal outcome still commit with stream settlement.
           this._finalizeSubmissionStream(requestId, submissionResult);
 
-          await this._fireResponseHook({
-            message: assistantMsg,
-            requestId,
-            continuation,
-            status: streamError
-              ? "error"
-              : streamAborted
-                ? "aborted"
-                : "completed",
-            error: streamError
-          });
+          await this._fireResponseHook(response);
+          await this._forgetPendingResponseHook(requestId);
         } catch (e) {
+          await this._forgetPendingResponseHook(requestId).catch(() => {});
           console.error("Failed to persist assistant message:", e);
           streamError =
             e instanceof Error
@@ -15820,6 +15825,42 @@ export class Think<
     // durable submission layer + session leaf, so its dispatch owns the
     // terminal-skip / submission-completion / interrupted-broadcast branches the
     // engine frame stays out of. See design/rfc-chat-recovery-foundation.md.
+    const chatFiberPrefix =
+      (this.constructor as typeof Think).CHAT_FIBER_NAME + ":";
+    if (
+      ctx.name.startsWith(chatFiberPrefix) &&
+      (await this._settlePersistedChatTurn(
+        ctx.name.slice(chatFiberPrefix.length)
+      ))
+    ) {
+      return true;
+    }
+    return this._recoverChatFiber(ctx);
+  }
+
+  /**
+   * A turn that owes its response hook and already persisted its message
+   * finished: its stream rows may be gone with the cutover, so recovery would
+   * otherwise re-run it. Fire the owed hook and settle the submission instead.
+   */
+  private async _settlePersistedChatTurn(requestId: string): Promise<boolean> {
+    const hook = await this.ctx.storage.get<PendingResponseHook>(
+      PENDING_RESPONSE_HOOK_PREFIX + requestId
+    );
+    if (!hook || !(await this.session.getMessage(hook.messageId))) {
+      return false;
+    }
+    await this._replayPendingResponseHooks(requestId);
+    await this._completeRecoveredSubmission(
+      requestId,
+      hook.status === "error" ? "error" : "completed",
+      requestId,
+      hook.error ?? null
+    );
+    return true;
+  }
+
+  private _recoverChatFiber(ctx: FiberRecoveryContext): Promise<boolean> {
     return this._chatRecoveryEngine().handleChatFiberRecovery(ctx, {
       chatFiberPrefix: () =>
         (this.constructor as typeof Think).CHAT_FIBER_NAME + ":",
@@ -17309,6 +17350,95 @@ export class Think<
       console.error("[Think] onChatResponse error:", err);
     } finally {
       this._insideResponseHook = false;
+    }
+  }
+
+  /** Request ids whose response hook the live turn still owes. */
+  private _responseHooksInFlight = new Set<string>();
+  private _pendingResponseHookReplay: Promise<void> | undefined;
+
+  /**
+   * Record, before the assistant message is persisted, that this turn owes
+   * `onChatResponse`, so a reset between the persist and the hook replays it.
+   */
+  private async _rememberPendingResponseHook(
+    result: ChatResponseResult
+  ): Promise<void> {
+    this._responseHooksInFlight.add(result.requestId);
+    const pending: PendingResponseHook = {
+      requestId: result.requestId,
+      messageId: result.message.id,
+      continuation: result.continuation,
+      status: result.status,
+      ...(result.error !== undefined && { error: result.error })
+    };
+    await this.ctx.storage.put(
+      PENDING_RESPONSE_HOOK_PREFIX + result.requestId,
+      pending
+    );
+  }
+
+  private async _forgetPendingResponseHook(requestId: string): Promise<void> {
+    await this.ctx.storage.delete(PENDING_RESPONSE_HOOK_PREFIX + requestId);
+    this._responseHooksInFlight.delete(requestId);
+  }
+
+  /**
+   * Fire the response hooks a reset interrupted. A hook whose message never
+   * persisted is dropped: that turn is recovered, and fires, on its own.
+   */
+  private _replayPendingResponseHooks(requestId?: string): Promise<void> {
+    const previous = this._pendingResponseHookReplay ?? Promise.resolve();
+    const replay = previous
+      .catch(() => {})
+      .then(() => this._replayPendingResponseHooksNow(requestId));
+    const tracked = replay.finally(() => {
+      if (this._pendingResponseHookReplay === tracked) {
+        this._pendingResponseHookReplay = undefined;
+      }
+    });
+    this._pendingResponseHookReplay = tracked;
+    return tracked;
+  }
+
+  private async _replayPendingResponseHooksNow(
+    requestId?: string
+  ): Promise<void> {
+    const pending =
+      requestId === undefined
+        ? await this.ctx.storage.list<PendingResponseHook>({
+            prefix: PENDING_RESPONSE_HOOK_PREFIX
+          })
+        : new Map([
+            [
+              PENDING_RESPONSE_HOOK_PREFIX + requestId,
+              await this.ctx.storage.get<PendingResponseHook>(
+                PENDING_RESPONSE_HOOK_PREFIX + requestId
+              )
+            ]
+          ]);
+    for (const [key, hook] of pending) {
+      if (!hook || this._responseHooksInFlight.has(hook.requestId)) continue;
+      // Chat recovery reads this marker to settle the turn instead of
+      // re-running it, so leave it for recovery while the turn is pending.
+      if (
+        requestId === undefined &&
+        this._hasRecoverableChatTurn(hook.requestId)
+      ) {
+        continue;
+      }
+      const message = await this.session.getMessage(hook.messageId);
+      if (message) {
+        await this._fireResponseHook({
+          message: message as UIMessage,
+          requestId: hook.requestId,
+          continuation: hook.continuation,
+          status: hook.status,
+          ...(hook.error !== undefined && { error: hook.error }),
+          recovered: true
+        });
+      }
+      await this.ctx.storage.delete(key);
     }
   }
 

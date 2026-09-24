@@ -188,3 +188,109 @@ describe("recovery × runTurn", () => {
     ).toEqual([]);
   });
 });
+
+describe("recovery × onChatResponse after a reset (#2266)", () => {
+  it("fires the response hook once for a turn persisted before the reset", async () => {
+    const agent = await freshRecoveryAgent(`hook-reset-${crypto.randomUUID()}`);
+    await agent.resetBeforeNextResponseHookForTest();
+
+    const result = await agent.testRunTurnWait("hello");
+    expect(result.status).toBe("completed");
+    expect(await agent.getChatResponsesForTest()).toEqual([]);
+
+    await agent.recoverFromResetForTest();
+    await agent.runScheduledRecoveryContinueForTest();
+    await agent.runScheduledRecoveryRetryForTest();
+    expect(await agent.getTurnCallCount()).toBe(1);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    const responses = await agent.getChatResponsesForTest();
+    expect(responses).toEqual([
+      expect.objectContaining({
+        status: "completed",
+        messageId: messages[1].id,
+        recovered: true
+      })
+    ]);
+    expect(await agent.getActiveFibers()).toHaveLength(0);
+
+    await agent.replayPendingResponseHooksForTest();
+    expect(await agent.getChatResponsesForTest()).toHaveLength(1);
+  });
+
+  it("settles an RPC turn persisted before the reset without re-running it", async () => {
+    const agent = await freshRecoveryAgent(
+      `hook-reset-rpc-${crypto.randomUUID()}`
+    );
+    await agent.resetBeforeNextResponseHookForTest();
+    const result = await agent.testChat("hello");
+    expect(result.done).toBe(true);
+    expect(await agent.getChatResponsesForTest()).toEqual([]);
+
+    await agent.recoverFromResetForTest();
+    await agent.runScheduledRecoveryContinueForTest();
+    await agent.runScheduledRecoveryRetryForTest();
+    expect(await agent.getTurnCallCount()).toBe(1);
+    expect(await agent.getChatResponsesForTest()).toEqual([
+      expect.objectContaining({ status: "completed", recovered: true })
+    ]);
+  });
+
+  it("leaves an owed hook to chat recovery when startup runs first", async () => {
+    const agent = await freshRecoveryAgent(
+      `hook-reset-order-${crypto.randomUUID()}`
+    );
+    await agent.resetBeforeNextResponseHookForTest();
+    await agent.testRunTurnWait("hello");
+    await agent.restoreFiberFromResetForTest();
+
+    await agent.replayPendingResponseHooksForTest();
+    expect(await agent.getChatResponsesForTest()).toEqual([]);
+
+    await agent.triggerFiberRecovery();
+    await agent.runScheduledRecoveryContinueForTest();
+    await agent.runScheduledRecoveryRetryForTest();
+    expect(await agent.getTurnCallCount()).toBe(1);
+    expect(await agent.getChatResponsesForTest()).toEqual([
+      expect.objectContaining({ status: "completed", recovered: true })
+    ]);
+    expect(await agent.getActiveFibers()).toHaveLength(0);
+  });
+
+  it("replays an owed response hook on startup without a chat fiber", async () => {
+    const agent = await freshRecoveryAgent(
+      `hook-reset-start-${crypto.randomUUID()}`
+    );
+    await agent.resetBeforeNextResponseHookForTest();
+    await agent.testRunTurnWait("hello");
+    expect(await agent.getChatResponsesForTest()).toEqual([]);
+
+    await agent.replayPendingResponseHooksForTest();
+    await agent.replayPendingResponseHooksForTest();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(await agent.getChatResponsesForTest()).toEqual([
+      expect.objectContaining({
+        status: "completed",
+        messageId: messages[1].id,
+        recovered: true
+      })
+    ]);
+  });
+
+  it("does not replay the hook of a turn that completed normally", async () => {
+    const agent = await freshRecoveryAgent(
+      `hook-no-reset-${crypto.randomUUID()}`
+    );
+    await agent.testRunTurnWait("hello");
+    await agent.replayPendingResponseHooksForTest();
+
+    expect(await agent.getChatResponsesForTest()).toEqual([
+      expect.not.objectContaining({ recovered: true })
+    ]);
+  });
+});

@@ -7284,6 +7284,99 @@ export class ThinkRecoveryTestAgent extends Think {
   // `metadata.channel` stamp survives.
   private _capturedTurnChannels: string[] = [];
   private _capturedTurnSystems: string[] = [];
+  private _chatResponses: Array<{
+    requestId: string;
+    status: string;
+    messageId: string;
+    recovered?: boolean;
+  }> = [];
+  private _turnAtReset: { requestId: string; userMessageId?: string } | null =
+    null;
+
+  override onChatResponse(result: ChatResponseResult): void {
+    this._chatResponses.push({
+      requestId: result.requestId,
+      status: result.status,
+      messageId: result.message.id,
+      ...(result.recovered !== undefined && { recovered: result.recovered })
+    });
+  }
+
+  async getChatResponsesForTest(): Promise<
+    Array<{
+      requestId: string;
+      status: string;
+      messageId: string;
+      recovered?: boolean;
+    }>
+  > {
+    return this._chatResponses;
+  }
+
+  /**
+   * Skip the next response hook, as a Durable Object reset right after the
+   * assistant message is persisted would.
+   */
+  async resetBeforeNextResponseHookForTest(): Promise<void> {
+    const self = this as unknown as {
+      _fireResponseHook(result: ChatResponseResult): Promise<void>;
+    };
+    const original = self._fireResponseHook;
+    self._fireResponseHook = async (result) => {
+      self._fireResponseHook = original;
+      this._turnAtReset = {
+        requestId: result.requestId,
+        userMessageId: this.messages
+          .filter((message) => message.role === "user")
+          .at(-1)?.id
+      };
+    };
+    const marker = this as unknown as {
+      _forgetPendingResponseHook(requestId: string): Promise<void>;
+      _responseHooksInFlight: Set<string>;
+    };
+    const forget = marker._forgetPendingResponseHook;
+    marker._forgetPendingResponseHook = async () => {
+      marker._forgetPendingResponseHook = forget;
+      marker._responseHooksInFlight.clear();
+    };
+  }
+
+  /** Re-create the chat fiber the reset left behind, then wake recovery. */
+  async recoverFromResetForTest(): Promise<void> {
+    await this.restoreFiberFromResetForTest();
+    await this.triggerFiberRecovery();
+  }
+
+  /** Re-create the chat fiber the reset left behind, without recovering it. */
+  async restoreFiberFromResetForTest(): Promise<void> {
+    const turn = this._turnAtReset;
+    if (!turn) throw new Error("no reset captured");
+    this._turnAtReset = null;
+    await this.insertInterruptedFiber(
+      `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${turn.requestId}`,
+      {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: turn.requestId,
+          continuation: false,
+          latestMessageId: turn.userMessageId,
+          latestMessageRole: "user",
+          latestUserMessageId: turn.userMessageId,
+          startedAt: Date.now()
+        },
+        user: null
+      }
+    );
+  }
+
+  /** Replay owed response hooks, as the startup durable-work step does. */
+  async replayPendingResponseHooksForTest(): Promise<void> {
+    await (
+      this as unknown as { _replayPendingResponseHooks(): Promise<void> }
+    )._replayPendingResponseHooks();
+  }
 
   // A single per-channel policy (voice) so recovery tests can assert that a
   // recovered turn re-resolves the channel from the persisted user message and

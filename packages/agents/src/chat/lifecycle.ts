@@ -42,6 +42,11 @@ export type ChatResponseResult = {
   /** Error message when `status` is `"error"`. */
   error?: string;
   /**
+   * `true` when the hook is delivered by recovery after a restart, because
+   * the turn's message was persisted but the hook had not run yet.
+   */
+  recovered?: boolean;
+  /**
    * Advisory reply attachments recorded during the turn (best-effort,
    * producing-attempt only — not re-applied on a ledger replay).
    */
