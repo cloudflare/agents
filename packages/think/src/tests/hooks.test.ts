@@ -338,8 +338,8 @@ describe("Think — tool-call hooks expose typed input/output", () => {
     expect(identity.afterToolCall.length).toBeGreaterThan(0);
     expect(identity.afterToolCall.every((id) => id === requestId)).toBe(true);
 
-    // A timer the tool scheduled fires after the turn ended.
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    // Work the tool left behind runs after the turn ended.
+    await agent.releaseDetachedToolWorkForTest();
     const later = await agent.getToolCallIdentityForTest();
     expect(later.detached.length).toBeGreaterThan(0);
     expect(later.detached.every((id) => id === null)).toBe(true);

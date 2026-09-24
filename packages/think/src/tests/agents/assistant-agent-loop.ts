@@ -328,11 +328,14 @@ export class LoopToolTestAgent extends Think {
           this._toolCallIdentity.execute.push(
             this.activeTurn?.requestId ?? null
           );
-          setTimeout(() => {
+          const released = new Promise<void>((resolve) => {
+            this._releaseDetached.push(resolve);
+          });
+          void released.then(() => {
             this._toolCallIdentity.detached.push(
               this.activeTurn?.requestId ?? null
             );
-          }, 50);
+          });
           return `pong: ${message}`;
         }
       })
@@ -355,6 +358,14 @@ export class LoopToolTestAgent extends Think {
 
   override onChatResponse(result: ChatResponseResult): void {
     this._toolCallIdentity.onChatResponse.push(result.requestId);
+  }
+
+  private _releaseDetached: Array<() => void> = [];
+
+  /** Run the continuations the tool left behind, after its turn ended. */
+  async releaseDetachedToolWorkForTest(): Promise<void> {
+    for (const release of this._releaseDetached.splice(0)) release();
+    await Promise.resolve();
   }
 
   async getToolCallIdentityForTest(): Promise<{
