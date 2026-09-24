@@ -1,0 +1,21 @@
+packages/think/src/tests/agents/assistant-agent-loop.ts
+  s_368991bdec7f77::t_72dbde4406f7c4 331-334,338,363-370
+packages/think/src/tests/hooks.test.ts
+  s_368991bdec7f77::t_b42cd17d7eb707 341-342
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "937979327cb3a8ec42f6b36e76a50b2309a17861",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
