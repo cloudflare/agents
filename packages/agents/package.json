@@ -145,6 +145,11 @@
       "import": "./dist/tasks/index.js",
       "require": "./dist/tasks/index.js"
     },
+    "./driver": {
+      "types": "./dist/driver/index.d.ts",
+      "import": "./dist/driver/index.js",
+      "require": "./dist/driver/index.js"
+    },
     "./lifecycle": {
       "types": "./dist/lifecycle/index.d.ts",
       "import": "./dist/lifecycle/index.js",

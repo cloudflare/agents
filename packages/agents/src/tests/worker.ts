@@ -9,6 +9,8 @@ import {
 // tests/capabilities/AGENTS.md for the capability testing pattern.
 export { CapabilityHarnessObject } from "./capabilities/harness.ts";
 import type { CapabilityHarnessObject } from "./capabilities/harness.ts";
+export { DriverHarnessObject } from "./capabilities/driver.ts";
+import type { DriverHarnessObject } from "./capabilities/driver.ts";
 export {
   PlainLifecycleObject,
   RetryableStartObject,
@@ -213,6 +215,7 @@ import type {
 export type Env = {
   LOADER: WorkerLoader;
   CapabilityHarnessObject: DurableObjectNamespace<CapabilityHarnessObject>;
+  DriverHarnessObject: DurableObjectNamespace<DriverHarnessObject>;
   PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
   RetryableStartObject: DurableObjectNamespace<RetryableStartObject>;
   StatefulPlainObject: DurableObjectNamespace<StatefulPlainObject>;

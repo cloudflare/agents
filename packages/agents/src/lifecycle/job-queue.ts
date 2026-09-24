@@ -112,8 +112,10 @@ export type LifecycleJobs = {
    * owner's job is impossible; a cross-owner id collision throws instead.
    */
   readonly push: (options: LifecycleJobPushOptions) => Promise<LifecycleJob>;
+  readonly pushSync: (options: LifecycleJobPushOptions) => LifecycleJob;
   /** Cancel one owned job. Returns false when no job matched. */
   readonly cancel: (id: string) => Promise<boolean>;
+  readonly cancelSync: (id: string) => boolean;
   /** Re-time one owned job. Returns false when no job matched. */
   readonly reschedule: (id: string, time: number) => Promise<boolean>;
   /** Read one owned job. */
@@ -195,6 +197,15 @@ export class JobQueue {
     try {
       return [...this.#storage.sql.exec(query, ...params)] as T[];
     } catch (cause) {
+      if (String(cause).includes("no such table: cf_agents_jobs")) {
+        this.#tableEnsured = false;
+        this.#ensureTable();
+        try {
+          return [...this.#storage.sql.exec(query, ...params)] as T[];
+        } catch (retryCause) {
+          throw new SqlError(query, retryCause);
+        }
+      }
       throw new SqlError(query, cause);
     }
   }
