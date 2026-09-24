@@ -686,3 +686,38 @@ describe("PiHarness multi-lane recovery", () => {
     }
   });
 });
+
+/**
+ * Interrupting steer.
+ *
+ * Aborting an operation drains pi's whole lane inbox, so the risk is not the
+ * interrupting message but every other message already queued against that
+ * operation. Each was accepted with a receipt, so losing one is silent data
+ * loss for a caller that was told the message was queued.
+ */
+describe("PiHarness interrupting steer", () => {
+  it("re-queues another caller's messages onto the replacement", async () => {
+    const stub = fresh();
+    const outcome = await stub.interruptWithPendingQueue(3);
+    await stub.releaseGate();
+
+    // A replacement operation, distinct from the one that was cancelled.
+    expect(outcome.resubmittedOperationId).not.toBe(
+      outcome.cancelledOperationId
+    );
+
+    // The abort returned two steers — the other caller's and this call's —
+    // and one follow-up.
+    expect(outcome.requeuedSteer).toBe(2);
+    expect(outcome.requeuedFollowUp).toBe(1);
+
+    // The other caller's messages are back in the inbox, each as its own
+    // entry with its kind preserved. This call's own steer is not among them:
+    // it became the replacement operation's prompt.
+    expect(outcome.queuedKinds).toEqual(["steer", "followUp"]);
+    expect(outcome.queuedTexts).toEqual([
+      "other caller steer",
+      "other caller follow up"
+    ]);
+  });
+});

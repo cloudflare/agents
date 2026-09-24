@@ -677,11 +677,12 @@ export type PiQueueReceipt = {
  * every assistant message. The in-flight request finishes and nothing is
  * discarded.
  *
- * `"interrupt"` additionally aborts the operation so the current request
- * stops immediately. Pi hands the queued steer back from its abort, and the
- * harness resubmits it as a fresh operation, so the message is not lost —
- * but any assistant output still streaming is abandoned, and the aborted
- * operation settles as cancelled.
+ * `"interrupt"` additionally aborts the operation so the current request stops
+ * immediately, and the message becomes the prompt of a replacement operation.
+ * Aborting drains the entire lane inbox, so any steer or follow-up another
+ * caller had queued is re-queued onto the replacement rather than lost. Any
+ * assistant output still streaming is abandoned, and the aborted operation
+ * settles as cancelled.
  */
 export type PiSteerUrgency = "boundary" | "interrupt";
 
@@ -699,6 +700,19 @@ export type PiSteerReceipt = PiQueueReceipt & {
   readonly interrupted?: {
     readonly cancelledOperationId: string;
     readonly resubmittedOperationId: string;
+    /**
+     * What the abort drained and this call put back.
+     *
+     * Aborting an operation empties the whole lane inbox, including messages
+     * other callers queued, so those are re-queued onto the replacement rather
+     * than discarded. `steer` counts every steer the abort returned, including
+     * this call's own, which becomes the replacement's prompt instead of an
+     * inbox entry.
+     */
+    readonly requeued: {
+      readonly steer: number;
+      readonly followUp: number;
+    };
   };
 };
 

@@ -403,15 +403,11 @@ export class PiHarness<
       return receipt;
     }
 
-    // Interrupt. `requestAbort` sets pi's durable cancel marker and drains the
-    // inbox, which discards the steer just queued — so the resubmit below is
-    // what keeps the message alive. It resubmits the caller's own text rather
-    // than the drained handback: the handback is a structured `AgentMessage`
-    // list that may also carry steers queued by someone else, and flattening
-    // those into one prompt would both mangle non-text content and steal
-    // another caller's message into this operation. Losing the isolate between
-    // the abort and the resubmit drops the steer; the cancelled operation is
-    // still correctly cancelled.
+    // Interrupt. `requestAbort` stops the request through pi's durable cancel
+    // marker, and in doing so drains the lane inbox: every queued steer and
+    // follow-up, not only this call's, is removed and handed back. Those
+    // messages were accepted with a receipt, so dropping them would lose data
+    // a caller was told had been queued. Re-queue the handback instead.
     const aborted = await upstream.requestAbort(current.id, context);
     if (!aborted.ok) {
       if (aborted.error._tag === "OperationMismatch") return receipt;
@@ -419,21 +415,80 @@ export class PiHarness<
     }
     await this.#machines.cancel(this.#runIdFor(current.id), "steer-interrupt");
 
+    // Each message goes back as its own inbox entry, structure intact. The
+    // handback is `AgentMessage[]` whose content is a `(TextContent |
+    // ImageContent)[]`, so flattening several into one prompt would corrupt
+    // images and merge separate callers' instructions into a single thought.
+    // Pi's `steer`/`followUp` accept an `AgentMessage` directly, so nothing
+    // has to be stringified.
+    //
+    // This call's own steer becomes the replacement operation's prompt, which
+    // is what puts it first: a prompt is the operation's opening message, and
+    // everything re-queued is claimed after it at the first boundary. That
+    // also avoids duplicating it, since `requestAbort` already drained the
+    // copy queued above.
+    //
+    // `requestAbort` hands steers back in inbox order, so this call's is last.
+    // It may be absent: another interrupt could have drained the inbox between
+    // the enqueue and the abort, in which case there is nothing of ours to
+    // promote and every handback message is someone else's.
+    const carried = aborted.value;
+    const ours = carried.steer.length > 0 ? carried.steer.length - 1 : -1;
+    const others = carried.steer.filter((_, index) => index !== ours);
+
+    // The inbox is lane-scoped rather than operation-scoped, so these can be
+    // queued before the replacement operation is admitted and will be claimed
+    // at its first boundary, in their original relative order. Follow-ups keep
+    // their own kind: pi claims a follow-up only when no steer projects at the
+    // boundary, so turning one into a steer would change when it is read.
+    for (const message of others) {
+      const requeued = await upstream.steer(message, undefined, context);
+      if (!requeued.ok) throw requeued.error;
+    }
+    for (const message of carried.followUp) {
+      const requeued = await upstream.followUp(message, undefined, context);
+      if (!requeued.ok) throw requeued.error;
+    }
+
     const resubmitted = await this.submit(
-      {
-        kind: "prompt",
-        prompt: text,
-        images
-      },
+      { kind: "prompt", prompt: text, images },
       { lane, ...(options.context ? { context: options.context } : {}) }
     );
     return {
       ...receipt,
       interrupted: {
         cancelledOperationId: current.id,
-        resubmittedOperationId: resubmitted.operationId
+        resubmittedOperationId: resubmitted.operationId,
+        requeued: {
+          steer: carried.steer.length,
+          followUp: carried.followUp.length
+        }
       }
     };
+  }
+
+  /**
+   * Queue a message for after the running operation finishes.
+   *
+   * A follow-up is read at a boundary only when no steer is waiting there, so
+   * it appends work rather than redirecting the turn in progress. Use `steer`
+   * to change what the current operation is doing.
+   */
+  async followUp(
+    message: PiMessageInput,
+    options: PiLaneOptions = {}
+  ): Promise<PiQueueReceipt> {
+    const { text, images } = messageInput(message);
+    const context = asUpstreamContext(options.context);
+    const upstream = await this.#upstreamLane(
+      options.lane ?? this.#defaultLane,
+      context
+    );
+    const queued = await upstream.followUp(text, images, context);
+    if (!queued.ok) throw queued.error;
+    // No wake: a follow-up is claimed when the operation reaches a boundary
+    // with no steer pending, so it does not need the run brought forward.
+    return { entryId: queued.value.entryId };
   }
 
   // ── Reads ────────────────────────────────────────────────────────────────

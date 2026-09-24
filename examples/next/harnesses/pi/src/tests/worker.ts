@@ -319,6 +319,61 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   }
 
   /**
+   * Interrupt a gated operation that already has another caller's steer and
+   * follow-up waiting in the lane inbox.
+   *
+   * Aborting drains the whole inbox, so this is the case where a message
+   * someone else was given a receipt for can be silently destroyed. The gate
+   * keeps the first operation genuinely in flight, so the interrupt races a
+   * live turn rather than a settled one.
+   */
+  async interruptWithPendingQueue(value: number): Promise<{
+    cancelledOperationId: string;
+    resubmittedOperationId: string;
+    requeuedSteer: number;
+    requeuedFollowUp: number;
+    queuedKinds: string[];
+    queuedTexts: string[];
+  }> {
+    await this.ctx.storage.put(TOOL_GATE_KEY, "held");
+    this.#useGatedResponses();
+    const first = await this.harness.submit({
+      kind: "prompt",
+      prompt: `slow ${value}`
+    });
+    // Wait until pi is really running it, so the abort hits a live operation.
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const view = await this.harness.snapshot();
+      if (view.operation?.operationId === first.operationId) break;
+      if (Date.now() > deadline) throw new Error("operation never started");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    // Another caller's messages, accepted before the interrupt.
+    await this.harness.steer("other caller steer");
+    await this.harness.followUp("other caller follow up");
+
+    const receipt = await this.harness.steer("stop now", {
+      urgency: "interrupt"
+    });
+    if (!receipt.interrupted) throw new Error("steer did not interrupt");
+    const queue = (await this.harness.snapshot()).queue;
+    return {
+      cancelledOperationId: receipt.interrupted.cancelledOperationId,
+      resubmittedOperationId: receipt.interrupted.resubmittedOperationId,
+      requeuedSteer: receipt.interrupted.requeued.steer,
+      requeuedFollowUp: receipt.interrupted.requeued.followUp,
+      queuedKinds: queue.map((item) => item.kind),
+      queuedTexts: queue.map((item) =>
+        (item.message?.parts ?? [])
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("")
+      )
+    };
+  }
+
+  /**
    * Submit a gated operation onto a named lane.
    *
    * Recovery has to find the lane an operation belongs to. Everything else

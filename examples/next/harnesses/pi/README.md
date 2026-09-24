@@ -140,6 +140,23 @@ run, so a crash between the two is repaired on the next wake: startup re-runs
 the operation id. Cancellation is durable on both sides — pi records its own
 abort marker and the machine run is cancelled, so no further pass is admitted.
 
+### Steering and interrupting
+
+`steer()` queues a message for the running operation, and `followUp()` queues
+one for after it: pi claims a follow-up at a boundary only when no steer is
+waiting there. Neither waits for the end of a turn, because pi reaches a
+boundary after every tool batch as well as after every assistant message.
+
+`steer(message, { urgency: "interrupt" })` is for a correction that must not
+wait at all. It aborts the operation, which stops the current request through
+pi's durable cancel marker, and the message becomes the prompt of a
+replacement operation. Aborting drains the entire lane inbox, including
+messages other callers queued and were given receipts for, so the harness
+re-queues those onto the replacement — each as its own entry, with its kind
+and structure intact — rather than discarding them or flattening them into one
+prompt. What is genuinely lost is the assistant output that was mid-stream,
+and the cancelled operation settles as cancelled.
+
 ## Pi source
 
 The example depends on pi's published packages from npm; nothing is vendored.
