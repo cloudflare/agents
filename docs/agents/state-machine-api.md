@@ -71,11 +71,18 @@ class StateMachine<Definitions extends MachineDefinitions> {
 ```
 
 `StateMachineOptions` registers every definition and external effect runtime.
+`jobHungTimeoutSeconds` is the threshold above which a drive job's dispatch is
+treated as hung. A phase lasts as long as the work it awaits, and a phase that
+drives a wrapped agent runtime routinely outlives the job queue's 30 second
+default, so the capability raises it to ten minutes. Liveness does not depend
+on this value: a dispatch that really is lost is recovered by the effect's own
+`recovery` policy.
 
 ```ts
 interface StateMachineOptions<Definitions extends MachineDefinitions> {
   definitions: Definitions;
   effects?: MachineEffectRuntimes;
+  jobHungTimeoutSeconds?: number; // Default: 600
 }
 
 interface MachineRunOptions {
