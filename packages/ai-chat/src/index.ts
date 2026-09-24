@@ -1872,8 +1872,11 @@ export class AIChatAgent<
    * as forward progress the moment it lands, as it did under the old
    * per-chunk counter. Streaming deltas keep the buffer's own packing.
    */
-  protected async _storeStreamChunk(streamId: string, body: string) {
-    this._resumableStream.storeChunk(streamId, body);
+  protected async _storeStreamChunk(
+    streamId: string,
+    body: string
+  ): Promise<number | undefined> {
+    const seq = this._resumableStream.storeChunk(streamId, body);
     let type: string | undefined;
     try {
       type = (JSON.parse(body) as { type?: string }).type;
@@ -1887,6 +1890,7 @@ export class AIChatAgent<
     ) {
       this._resumableStream.flushBuffer();
     }
+    return seq;
   }
 
   /** @internal Delegate to _resumableStream */
@@ -2225,12 +2229,13 @@ export class AIChatAgent<
     continuation: boolean
   ) {
     const body = JSON.stringify(event);
-    await this._storeStreamChunk(streamId, body);
+    const seq = await this._storeStreamChunk(streamId, body);
     this._broadcastChatMessage({
       body,
       done: false,
       id: event.id,
       type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      ...(seq !== undefined && { seq }),
       ...(continuation && { continuation: true })
     });
   }
@@ -6827,12 +6832,13 @@ export class AIChatAgent<
 
             // Store chunk for replay and broadcast to clients
             const chunkBody = JSON.stringify(eventToSend);
-            await this._storeStreamChunk(streamId, chunkBody);
+            const seq = await this._storeStreamChunk(streamId, chunkBody);
             this._broadcastChatMessage({
               body: chunkBody,
               done: false,
               id,
               type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+              ...(seq !== undefined && { seq }),
               ...(continuation && { continuation: true })
             });
           } catch (_error) {

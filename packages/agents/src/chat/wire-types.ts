@@ -77,6 +77,12 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
       replay?: boolean;
       /** Signals that replay of stored chunks is complete (stream is still active) */
       replayComplete?: boolean;
+      /**
+       * Index of this chunk within its stream. A live chunk carries the index
+       * its replay will carry, so a client can skip replayed chunks it has
+       * already applied.
+       */
+      seq?: number;
     }
   | {
       /** Indicates the server is resuming an active stream */

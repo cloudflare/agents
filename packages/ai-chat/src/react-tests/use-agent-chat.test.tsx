@@ -6204,6 +6204,89 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
     );
   });
 
+  it("does not re-apply replayed continuation chunks an observer already applied (#1951)", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "observer-replay-seq",
+      url: "ws://localhost:3000/agents/chat/observer-replay-seq?_pk=abc"
+    });
+
+    const dataParts: unknown[] = [];
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        onData: (part) => dataParts.push(part),
+        messages: [
+          { id: "u1", role: "user", parts: [{ type: "text", text: "Hi" }] },
+          {
+            id: "a1",
+            role: "assistant",
+            parts: [{ type: "text", text: "Before. " }]
+          }
+        ] as UIMessage[],
+        resume: false
+      });
+      const assistant = chat.messages.find((m) => m.role === "assistant");
+      const text = (assistant?.parts ?? [])
+        .filter((p) => p.type === "text")
+        .map((p) => (p as { text: string }).text)
+        .join("");
+      return <div data-testid="assistant-text">{text}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    const chunks = [
+      '{"type":"start","messageId":"a1"}',
+      '{"type":"text-start","id":"t2"}',
+      '{"type":"text-delta","id":"t2","delta":"already"}',
+      '{"type":"data-audit","data":{"n":1},"transient":true}',
+      '{"type":"text-delta","id":"t2","delta":" more"}'
+    ];
+    const frame = (seq: number, replay: boolean) => ({
+      type: "cf_agent_use_chat_response",
+      id: "req-cont",
+      body: chunks[seq],
+      done: false,
+      continuation: true,
+      seq,
+      ...(replay && { replay: true })
+    });
+
+    await act(async () => {
+      for (const seq of [0, 1, 2, 3]) dispatch(target, frame(seq, false));
+      await sleep(10);
+    });
+    await expect
+      .element(screen.getByTestId("assistant-text"))
+      .toHaveTextContent("Before. already");
+
+    // A reconnect replays the stored chunks before the stream continues.
+    await act(async () => {
+      for (const seq of [0, 1, 2, 3]) dispatch(target, frame(seq, true));
+      dispatch(target, frame(4, false));
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-text"))
+      .toHaveTextContent("Before. already more");
+    expect(screen.getByTestId("assistant-text").element().textContent).toBe(
+      "Before. already more"
+    );
+    expect(dataParts).toHaveLength(1);
+  });
+
   it("clears protection when CF_AGENT_CHAT_CLEAR arrives mid-stream", async () => {
     const { agent, target, sentMessages } = createAgentWithTarget({
       name: "clear-mid-stream",

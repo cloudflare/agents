@@ -781,8 +781,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this._startStream(requestId, options);
   }
 
-  async testStoreStreamChunk(streamId: string, body: string): Promise<void> {
-    await this._storeStreamChunk(streamId, body);
+  async testStoreStreamChunk(
+    streamId: string,
+    body: string
+  ): Promise<number | undefined> {
+    return this._storeStreamChunk(streamId, body);
   }
 
   async testBroadcastLiveChunk(
