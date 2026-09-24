@@ -146,6 +146,258 @@ describe("Client tools continuation", () => {
     ws.close(1000);
   });
 
+  it("does not fire a stale continuation when the active stream completes with stop", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const messages = collectMessages(ws);
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    let resultSent = false;
+
+    try {
+      ws.addEventListener("message", (event: MessageEvent) => {
+        const envelope = JSON.parse(event.data as string) as {
+          type?: string;
+          body?: string;
+        };
+        if (
+          envelope.type !== MessageType.CF_AGENT_USE_CHAT_RESPONSE ||
+          typeof envelope.body !== "string" ||
+          envelope.body.length === 0
+        ) {
+          return;
+        }
+        const chunk = JSON.parse(envelope.body) as {
+          type?: string;
+          toolCallId?: string;
+          toolName?: string;
+        };
+        if (
+          chunk.type !== "tool-input-available" ||
+          chunk.toolCallId !== "call_consumed_within_stream" ||
+          resultSent
+        ) {
+          return;
+        }
+        resultSent = true;
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_TOOL_RESULT,
+            toolCallId: chunk.toolCallId,
+            toolName: chunk.toolName,
+            output: { ok: true },
+            autoContinue: true
+          })
+        );
+      });
+
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+          id: "req-consumed-within-stream",
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: "user-consumed-within-stream",
+                  role: "user",
+                  parts: [{ type: "text", text: "Run the fast tool" }]
+                }
+              ],
+              consumeClientToolResultWithinStream: true
+            })
+          }
+        })
+      );
+
+      const done = await waitForMessage(
+        messages,
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.id === "req-consumed-within-stream" &&
+          message.done === true
+      );
+      expect(done).toBeDefined();
+      expect(resultSent).toBe(true);
+
+      // The result arrived while the stream was active, but the stream then
+      // completed with stop. Wait beyond the 50ms re-arm window and verify
+      // onChatMessage was not called for a second turn.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
+      expect(await agentStub.getContinuationStateForTest()).toMatchObject({
+        hasPending: false,
+        hasDeferred: false,
+        activeRequestId: null
+      });
+    } finally {
+      ws.close(1000);
+    }
+  });
+
+  it("keeps the continuation when a stop leaves a sibling tool call pending", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const messages = collectMessages(ws);
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const sendResult = (toolCallId: string, autoContinue: boolean) =>
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_RESULT,
+          toolCallId,
+          toolName: "fastClientTool",
+          output: { ok: true },
+          autoContinue
+        })
+      );
+
+    try {
+      let sentA = false;
+      ws.addEventListener("message", (event: MessageEvent) => {
+        const envelope = JSON.parse(event.data as string) as {
+          type?: string;
+          body?: string;
+        };
+        if (
+          sentA ||
+          envelope.type !== MessageType.CF_AGENT_USE_CHAT_RESPONSE ||
+          typeof envelope.body !== "string" ||
+          !envelope.body.includes('"toolCallId":"call_sibling_a"')
+        ) {
+          return;
+        }
+        sentA = true;
+        sendResult("call_sibling_a", true);
+      });
+
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+          id: "req-stop-pending-sibling",
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: "user-stop-pending-sibling",
+                  role: "user",
+                  parts: [{ type: "text", text: "Run both tools" }]
+                }
+              ],
+              stopWithPendingSibling: true
+            })
+          }
+        })
+      );
+
+      await waitForMessage(
+        messages,
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.id === "req-stop-pending-sibling" &&
+          message.done === true
+      );
+      expect(sentA).toBe(true);
+
+      sendResult("call_sibling_b", false);
+      const continued = await waitForMessage(
+        messages,
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.continuation === true &&
+          message.done === true
+      );
+      expect(continued).toBeDefined();
+      expect(await agentStub.getChatMessageCallCountForTest()).toBe(2);
+    } finally {
+      ws.close(1000);
+    }
+  });
+
+  it("still continues when the active stream stops at the client tool call", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const messages = collectMessages(ws);
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    let resultSent = false;
+
+    try {
+      ws.addEventListener("message", (event: MessageEvent) => {
+        const envelope = JSON.parse(event.data as string) as {
+          type?: string;
+          body?: string;
+        };
+        if (
+          envelope.type !== MessageType.CF_AGENT_USE_CHAT_RESPONSE ||
+          typeof envelope.body !== "string" ||
+          envelope.body.length === 0
+        ) {
+          return;
+        }
+        const chunk = JSON.parse(envelope.body) as {
+          type?: string;
+          toolCallId?: string;
+          toolName?: string;
+        };
+        if (
+          chunk.type !== "tool-input-available" ||
+          chunk.toolCallId !== "call_unconsumed_at_stream_end" ||
+          resultSent
+        ) {
+          return;
+        }
+        resultSent = true;
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_TOOL_RESULT,
+            toolCallId: chunk.toolCallId,
+            toolName: chunk.toolName,
+            output: { ok: true },
+            autoContinue: true
+          })
+        );
+      });
+
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+          id: "req-unconsumed-at-stream-end",
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: "user-unconsumed-at-stream-end",
+                  role: "user",
+                  parts: [{ type: "text", text: "Run the fast tool" }]
+                }
+              ],
+              finishWithUnconsumedClientTool: true
+            })
+          }
+        })
+      );
+
+      const done = await waitForMessage(
+        messages,
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.continuation === true &&
+          message.done === true
+      );
+      expect(done).toBeDefined();
+      expect(resultSent).toBe(true);
+      expect(await agentStub.getChatMessageCallCountForTest()).toBe(2);
+      expect(await agentStub.getContinuationStateForTest()).toMatchObject({
+        hasPending: false,
+        hasDeferred: false,
+        activeRequestId: null
+      });
+    } finally {
+      ws.close(1000);
+    }
+  });
+
   it("should allow resume requests to wait for pending auto-continuations", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
@@ -506,6 +758,64 @@ describe("Client tools continuation", () => {
     } finally {
       wsA.close(1000);
       wsB.close(1000);
+    }
+  });
+
+  it("continues after approving a tool that shares its message with a settled tool (#2185)", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+    try {
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      await agentStub.persistMessages([
+        {
+          id: "msg-sequential-approval",
+          role: "user",
+          parts: [{ type: "text", text: "Hello" }]
+        },
+        {
+          id: "assistant-sequential-approval",
+          role: "assistant",
+          parts: [
+            { type: "step-start" },
+            {
+              type: "tool-lookupColor",
+              toolCallId: "call_sequential_lookup",
+              state: "output-available",
+              input: {},
+              output: { color: "red" }
+            },
+            { type: "step-start" },
+            {
+              type: "tool-changeBackgroundColor",
+              toolCallId: "call_sequential_approval",
+              state: "approval-requested",
+              input: { color: "blue" },
+              approval: { id: "approval_sequential" }
+            }
+          ] as ChatMessage["parts"]
+        }
+      ]);
+
+      const received = collectMessages(ws);
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_APPROVAL,
+          toolCallId: "call_sequential_approval",
+          approved: true,
+          autoContinue: true
+        })
+      );
+
+      const done = await waitForMessage(
+        received,
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.done === true
+      );
+      expect(done).toBeDefined();
+    } finally {
+      ws.close(1000);
     }
   });
 

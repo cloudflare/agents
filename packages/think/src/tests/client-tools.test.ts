@@ -804,6 +804,49 @@ describe("Think — auto-continuation", () => {
     await closeWS(ws);
   });
 
+  it("continues after approving a tool that shares its message with a settled tool (#2185)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setSequentialApprovalToolMode(true);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const initialDone = waitForDone(ws, 15000);
+    sendChatRequest(ws, [makeUserMessage("update my trigger")]);
+    await initialDone;
+
+    const pending = ((await agent.getMessages()) as UIMessage[]).at(-1);
+    expect(
+      pending?.parts
+        .filter((part) => "toolCallId" in part)
+        .map((part) => ("state" in part ? part.state : undefined))
+    ).toEqual(["output-available", "approval-requested"]);
+
+    const continuationDone = waitForDone(ws, 5000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc-seq-approval",
+        approved: true,
+        autoContinue: true
+      })
+    );
+    await continuationDone;
+
+    expect(await agent.getServerApprovalToolExecutions()).toBe(1);
+    const toolPart = ((await agent.getMessages()) as UIMessage[])
+      .flatMap((message) => message.parts)
+      .find(
+        (part) => "toolCallId" in part && part.toolCallId === "tc-seq-approval"
+      );
+    expect(toolPart).toMatchObject({
+      state: "output-available",
+      output: { enabled: true }
+    });
+
+    await closeWS(ws);
+  });
+
   it("treats a pending approved tool as complete — no spurious transcript-repair backstop (#1627)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
