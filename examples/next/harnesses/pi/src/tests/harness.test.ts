@@ -464,11 +464,13 @@ describe("PiHarness effect planning", () => {
     expect(await stub.machineCheckpoint(operationId)).not.toHaveProperty(
       "effect"
     );
+    // No `timeoutMs`: a drive pass is turn-sized, and an effect timeout is
+    // not a detach. It aborts the effect's signal, which `#drivePass` forwards
+    // to pi as a durable `requestAbort`, so a slow-but-healthy turn would be
+    // cancelled rather than resumed. Losing the observer is already the
+    // recovery path, so there is nothing for a timeout to protect here.
     expect(await stub.effectOptions(operationId)).toEqual([
-      {
-        timeoutMs: 120_000,
-        retries: { limit: 3, delay: 250, backoff: "exponential" }
-      }
+      { retries: { limit: 3, delay: 250, backoff: "exponential" } }
     ]);
 
     await stub.releaseGate();

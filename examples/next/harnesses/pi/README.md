@@ -50,9 +50,19 @@ through `getResult()` and `inspectExecution()`, what actually happened:
 
 Pi's provider backoffs and deferred-request polls surface as `waiting`, so a
 run parks on a durable deadline instead of holding a JavaScript invocation
-open. A drive attachment also has a two-minute attempt timeout and three
-durable attempts with exponential backoff. These retries reuse the same effect
-and operation id, so eviction during backoff does not repeat completed work.
+open. A drive attachment also gets three durable attempts with exponential
+backoff. These retries reuse the same effect and operation id, so eviction
+during backoff does not repeat completed work.
+
+The drive effect deliberately sets no `timeoutMs`. A pass is turn-sized, so
+there is no duration that distinguishes a healthy turn from a stuck one, and
+an effect timeout is not a detach: it aborts the effect's signal, which the
+drive pass forwards to pi as a durable `requestAbort`. A slow-but-healthy turn
+would be cancelled rather than resumed. Nothing is lost by omitting it,
+because pi runs `driveOperation` as a floating promise owned by the lane and
+the caller only observes it — an invocation that dies mid-pass leaves the
+drive intact, and the next pass re-attaches by operation id. A whole-isolate
+loss is covered by `recovery: "reconcile"`.
 
 ## Run locally
 

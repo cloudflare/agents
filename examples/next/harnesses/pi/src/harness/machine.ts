@@ -49,8 +49,25 @@ export const PI_RUN_DEFINITION = "pi-operation";
 
 const MAX_PARK_MS = 30_000;
 const RUNNING_POLL_MS = 250;
-/** Bounds faults in the pi attachment rather than pi's own provider policy. */
-export const PI_DRIVE_TIMEOUT_MS = 120_000;
+/**
+ * No `timeoutMs` on the drive effect, deliberately.
+ *
+ * A pass is turn-sized: `driveOperation` returns only on `settled` or
+ * `waiting`, so a healthy turn can outlive any timeout we would pick. An
+ * effect timeout is not a detach — `withTimeout` calls `controller.abort()`,
+ * and `#drivePass` turns that abort into `requestAbort()`, which sets pi's
+ * *durable* `cancel_requested` marker. A slow turn would be cancelled rather
+ * than resumed, and the retry policy would then re-drive an operation pi has
+ * already condemned.
+ *
+ * A timeout is also unnecessary. `driveOperation` runs as a floating promise
+ * owned by the lane's `activeDrive`, and the caller only observes it through
+ * `awaitWithContext`, which rejects the observer without touching the work.
+ * An invocation that dies mid-pass leaves the Drive intact, and the next pass
+ * re-attaches by operation id (`{ kind: "observe", installed: false }`). So
+ * losing the observer is already the recovery path, and `recovery:
+ * "reconcile"` covers the case where the whole isolate went away.
+ */
 export const PI_DRIVE_RETRY_LIMIT = 3;
 export const PI_DRIVE_RETRY_DELAY_MS = 250;
 export const MAX_DRIVE_PASSES = 4_000;
@@ -113,7 +130,6 @@ export const piRunMachine: MachineDefinition<
         {
           recovery: "reconcile",
           externalId: `${state.operationId}:${state.pass}`,
-          timeoutMs: PI_DRIVE_TIMEOUT_MS,
           retries: {
             limit: PI_DRIVE_RETRY_LIMIT,
             delay: PI_DRIVE_RETRY_DELAY_MS,

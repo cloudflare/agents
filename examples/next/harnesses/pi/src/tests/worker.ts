@@ -11,8 +11,7 @@ import { PI_OPERATION_DEFINITION, PiHarness } from "../harness/pi-harness";
 import {
   PI_DRIVE_EFFECT,
   PI_DRIVE_RETRY_DELAY_MS,
-  PI_DRIVE_RETRY_LIMIT,
-  PI_DRIVE_TIMEOUT_MS
+  PI_DRIVE_RETRY_LIMIT
 } from "../harness/machine";
 import type { PiEvent, PiMessage, PiTool } from "../harness/types";
 import { createModels } from "../providers/models";
@@ -33,7 +32,6 @@ const GATE_POLL_MS = 10;
 /** Bounds the gated tool so a stuck gate cannot pin the object forever. */
 const GATE_MAX_POLLS = 300;
 const DRIVE_EFFECT_OPTIONS = JSON.stringify({
-  timeoutMs: PI_DRIVE_TIMEOUT_MS,
   retries: {
     limit: PI_DRIVE_RETRY_LIMIT,
     delay: PI_DRIVE_RETRY_DELAY_MS,
