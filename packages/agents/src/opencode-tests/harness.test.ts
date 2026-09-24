@@ -31,6 +31,7 @@ describe("OpenCodeHarness workerd integration", () => {
       sessionId,
       accepted: false
     });
+    await stub.dispose();
   });
 
   it("creates and restores independent native sessions", async () => {
@@ -52,6 +53,7 @@ describe("OpenCodeHarness workerd integration", () => {
     expect(await restored.snapshot(second)).toMatchObject({
       sessionId: second
     });
+    await restored.dispose();
   });
 
   it("boots over Durable Object SQLite and restores its default session", async () => {
@@ -76,5 +78,6 @@ describe("OpenCodeHarness workerd integration", () => {
       messages: [],
       running: false
     });
+    await restored.dispose();
   });
 });

@@ -1,15 +1,26 @@
 import { DurableObject } from "cloudflare:workers";
-import { HarnessDriver, type HarnessDriverRuntime } from "../driver";
+import {
+  DurableToolRuns,
+  HarnessDriver,
+  type DurableToolRuntime,
+  type HarnessDriverRuntime
+} from "../driver";
 import { Lifecycle, type DurableObjectCapability } from "../lifecycle";
 
 type Input = { text: string };
 type Result = { answer: string };
 
 declare const runtime: HarnessDriverRuntime<Input, Result>;
+declare const toolRuntime: DurableToolRuntime<Input, Result>;
 
 class DriverObject extends DurableObject {
   readonly driver = new HarnessDriver({ id: "test", runtime });
-  readonly lifecycle = Lifecycle.install(this).use(this.driver);
+  readonly tools = new DurableToolRuns({
+    id: "tools",
+    runtime: toolRuntime,
+    wake: (owner) => this.driver.wake(owner.scope)
+  });
+  readonly lifecycle = Lifecycle.install(this).use(this.driver).use(this.tools);
 }
 
 declare const object: DriverObject;

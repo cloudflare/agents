@@ -14,13 +14,14 @@ class OpenCodeObject extends DurableObject {
   readonly streams = new Streams();
   readonly harness = new OpenCodeHarness({ ...config, streams: this.streams });
   readonly lifecycle = Lifecycle.install(this)
+    .use(this.harness)
     .use(this.streams)
-    .use(this.harness.driver)
-    .use(this.harness);
+    .use(this.harness.driver);
 }
 
 declare const object: OpenCodeObject;
 declare const request: OpenCodeRequest;
+object.harness.createSession() satisfies Promise<string>;
 object.harness.submit(request) satisfies Promise<{
   operationId: string;
   sessionId: string;

@@ -48,3 +48,5 @@ readonly lifecycle = Lifecycle.install(this)
 ```
 
 Each Pi lane is a driver scope. Submissions remain ordered within one lane, while model and remote-tool waits on different lanes can overlap. Pi's native durable state remains the execution authority.
+
+For external side effects, install `DurableToolRuns` from `agents/driver` on the same Lifecycle. `createPiDurableTool` re-enters one stable foreground run from Pi's safe replay path, while `createPiBackgroundTool` returns a durable handle immediately. Pass the coordinator as `durableTools` in `PiHarness` so cancellation also reaches parent-attached runs. Detached background runs survive parent cancellation.

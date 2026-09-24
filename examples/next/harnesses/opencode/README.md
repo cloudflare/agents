@@ -32,10 +32,14 @@ readonly harness = new OpenCodeHarness({
 });
 readonly webSockets = new WebSockets(this.harness.webSockets());
 readonly lifecycle = Lifecycle.install(this)
+  .use(this.harness)
   .use(this.streams)
   .use(this.harness.driver)
-  .use(this.webSockets)
-  .use(this.harness);
+  .use(this.webSockets);
 ```
 
+Register the OpenCode harness first so its native SQLite migrations run before other capabilities create their own tables.
+
 The first driver integration supports prompt turns with a stable native message identifier. Commands, skills, and exact resumption of an interrupted foreground tool need native operation correlation or a deferred-tool recovery hook before they can make the same durability guarantee.
+
+`DurableToolRuns` from `agents/driver` provides stable ownership, reconciliation, attached cancellation, and owner-scope wake-up. `startOpenCodeBackgroundTool` starts a detached or parent-attached background run and returns a handle immediately. Foreground continuation remains interrupted until OpenCode provides a recovery hook that re-enters the original tool call.
