@@ -5417,17 +5417,30 @@ export class AIChatAgent<
     streamId: string;
     partialParts: MessagePart[];
     targetAssistantId?: string;
+    continuation: boolean;
   }): Promise<"scheduled" | "exhausted"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
     const latestUserMessageId =
       [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
+    // A new turn that failed before producing any part has nothing to continue:
+    // continuing would clone and merge into the previous assistant (#1691), so
+    // re-run it fresh like `_dispatchRecoveredChatTurn` does after a restart.
+    const leaf = this.messages[this.messages.length - 1];
+    const lostPartialUserId =
+      !input.continuation &&
+      input.partialParts.length === 0 &&
+      leaf?.role === "user" &&
+      leaf.id === latestUserMessageId
+        ? latestUserMessageId
+        : undefined;
+    const recoveryKind = lostPartialUserId ? "retry" : "continue";
     const { incident, config, exhausted } =
       await this._beginChatRecoveryIncident({
         requestId: input.requestId,
         recoveryRootRequestId,
         latestUserMessageId,
-        recoveryKind: "continue"
+        recoveryKind
       });
     if (exhausted) {
       // Budget spent: deliver the SAME terminal UX as deploy-recovery
@@ -5449,6 +5462,21 @@ export class AIChatAgent<
         incident.firstSeenAt
       );
       return "exhausted";
+    }
+    if (lostPartialUserId) {
+      await this._chatRecoveryEngine().scheduleRecovery({
+        incident,
+        recoveryKind,
+        callback: "_chatRecoveryRetry",
+        data: {
+          targetUserId: lostPartialUserId,
+          originalRequestId: recoveryRootRequestId,
+          incidentId: incident.incidentId,
+          lastBody: this._lastBody ?? null,
+          lastClientTools: this._lastClientTools ?? null
+        }
+      });
+      return "scheduled";
     }
     await this._chatRecoveryEngine().scheduleRecovery({
       incident,
@@ -7187,7 +7215,8 @@ export class AIChatAgent<
                 requestId: id,
                 streamId,
                 partialParts: message.parts,
-                targetAssistantId
+                targetAssistantId,
+                continuation
               });
               if (outcome === "scheduled") {
                 // Recovering: close the stream cleanly (no terminal error frame);

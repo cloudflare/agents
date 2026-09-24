@@ -197,7 +197,11 @@ interface ChatRecoveryTestStub {
   }): Promise<"completed" | "error" | "aborted" | "skipped">;
   driveFailingReaderTurnForTest(
     message: string,
-    turns?: number
+    turns?: number,
+    options?: {
+      prelude?: "partial" | "start-only" | "none";
+      priorAssistant?: boolean;
+    }
   ): Promise<"completed" | "error" | "aborted" | "skipped">;
 }
 
@@ -2717,6 +2721,62 @@ describe("platform-transient reader errors (#1964)", () => {
       .toContain("Continued response.");
     expect(await assistantText()).toContain("partial before failure");
   });
+
+  it.each([
+    ["before the first chunk", "none", false],
+    ["before the first chunk", "none", true],
+    ["after a start-only chunk", "start-only", false],
+    ["after a start-only chunk", "start-only", true]
+  ] as const)(
+    "re-runs a new turn that failed %s (prelude %s, prior assistant %s)",
+    async (_when, prelude, priorAssistant) => {
+      const agentStub = await getTestAgent(
+        `transient-empty-${prelude}-${priorAssistant}-${crypto.randomUUID()}`
+      );
+
+      expect(
+        await agentStub.driveFailingReaderTurnForTest(
+          "Network connection lost.",
+          1,
+          { prelude, priorAssistant }
+        )
+      ).toBe("aborted");
+
+      const incidents =
+        (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+          recoveryKind: string;
+        }>;
+      expect(incidents[0]?.recoveryKind).toBe("retry");
+
+      type Stored = Array<{
+        id: string;
+        role: string;
+        parts: Array<{ type: string; text?: string }>;
+      }>;
+      const textOf = (m: Stored[number]) =>
+        m.parts.map((p) => p.text ?? "").join("");
+      await expect
+        .poll(
+          async () => {
+            const stored = (await agentStub.getPersistedMessages()) as Stored;
+            const last = stored[stored.length - 1];
+            return last?.role === "assistant" ? textOf(last) : "";
+          },
+          { timeout: 5000 }
+        )
+        .toBe("Continued response.");
+
+      const stored = (await agentStub.getPersistedMessages()) as Stored;
+      expect(stored.map((m) => m.role)).toEqual(
+        priorAssistant
+          ? ["user", "assistant", "user", "assistant"]
+          : ["user", "assistant"]
+      );
+      if (priorAssistant) {
+        expect(textOf(stored[1])).toBe("Earlier answer.");
+      }
+    }
+  );
 
   it("keeps an application error terminal", async () => {
     const agentStub = await getTestAgent(
