@@ -1072,6 +1072,23 @@ describe("SubAgent", () => {
     await expectRootKeepAliveRefCount(agent, 0);
   });
 
+  it("keeps the root facet-run lease until a finished sub-agent fiber's leftover row is gone (#2305)", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await expect(
+      agent.subAgentRunFiberWithFailingCleanup("cleanup-child", "done")
+    ).resolves.toBe("done");
+    expect(await agent.subAgentRunningFiberCount("cleanup-child")).toBe(1);
+    expect(await agent.facetRunRows()).toHaveLength(1);
+
+    await runDurableObjectAlarm(agent);
+
+    expect(await agent.subAgentRunningFiberCount("cleanup-child")).toBe(0);
+    expect(await agent.facetRunRows()).toEqual([]);
+    expect(await agent.subAgentRecoveredFibers("cleanup-child")).toEqual([]);
+  });
+
   it("holds root keepAlive and facet-run leases for managed sub-agent fibers", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);

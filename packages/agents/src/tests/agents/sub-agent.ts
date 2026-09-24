@@ -403,6 +403,21 @@ export class CounterSubAgent extends Agent {
     return id;
   }
 
+  async runFiberWithFailingCleanup(value: string): Promise<string> {
+    this.sql`
+      CREATE TRIGGER fail_run_fiber_cleanup
+      BEFORE DELETE ON cf_agents_runs
+      BEGIN
+        SELECT RAISE(FAIL, 'simulated fiber cleanup failure');
+      END
+    `;
+    try {
+      return await this.runFiber("cleanup-failure", async () => value);
+    } finally {
+      this.sql`DROP TRIGGER fail_run_fiber_cleanup`;
+    }
+  }
+
   async holdManagedFiber(value: string, key: string): Promise<string> {
     const result = await this.startFiber(
       "managed-held",
@@ -1908,6 +1923,14 @@ export class TestSubAgentParent extends Agent {
   ): Promise<FiberInspection | null> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.inspectManagedFiber(fiberId);
+  }
+
+  async subAgentRunFiberWithFailingCleanup(
+    subAgentName: string,
+    value: string
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.runFiberWithFailingCleanup(value);
   }
 
   async subAgentRunningFiberCount(subAgentName: string): Promise<number> {

@@ -345,6 +345,7 @@ runFiber("work", fn)
   _checkRunFibers():
   ├─ SELECT * FROM cf_agents_runs
   ├─ For each orphaned row:
+  │    ├─ Body already finished (only its cleanup failed) → DELETE, no hook
   │    ├─ Parse snapshot from JSON
   │    ├─ Call onFiberRecovered(ctx)
   │    └─ DELETE the row after successful recovery
@@ -461,6 +462,7 @@ Key points:
 
 - **The original lambda is gone.** On recovery, you only have the `name` and `snapshot`. The lambda cannot be serialized — recovery logic must be in the hook.
 - **The row is deleted after the hook returns successfully.** If you want to continue the work, call `runFiber()` again inside the hook — this creates a new row.
+- **The hook only sees interrupted work.** If the function returned or threw and only the row delete failed, the fiber records that it finished, and the next scan deletes the row without calling the hook.
 - **You control what recovery means.** Retry from the beginning, resume from a checkpoint, skip and notify the user, or do nothing. The framework does not impose a strategy.
 - **If the hook throws, the row is kept (up to a bound).** A later startup or alarm scan will try recovery again, which protects against transient storage or scheduling failures. Catch application-level errors yourself when you want to mark the work terminal instead of retrying. A hook that always throws is retried on a backing-off schedule (the recovery alarm uses an exponential delay capped at 5 minutes, so it is not a busy-loop) until the row exceeds `fiberRecoveryMaxAgeMs` (default 24h), after which it is discarded with a `fiber:recovery:skipped` (`reason: "max_age_exceeded"`) event. Setting `fiberRecoveryMaxAgeMs: 0` retains such rows indefinitely — recovery keeps retrying on the capped backoff, and the Durable Object never idle-evicts while an un-recoverable row exists, so prefer a finite age unless you intend to inspect or clear those rows yourself.
 

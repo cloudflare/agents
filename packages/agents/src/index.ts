@@ -750,7 +750,7 @@ type AgentToolRecoveryInspection =
  * every capability uses for its own schema version) and checks it on wake to
  * skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 11;
+const CURRENT_SCHEMA_VERSION = 12;
 const SCHEMA_VERSION_KEY = "cf_agents:schema_version";
 
 // Before the State capability owned `cf_agents_state`, Agent kept its schema
@@ -1611,7 +1611,8 @@ export class Agent<
           id TEXT PRIMARY KEY NOT NULL,
           name TEXT NOT NULL,
           snapshot TEXT,
-          created_at INTEGER NOT NULL
+          created_at INTEGER NOT NULL,
+          completed_at INTEGER
         )
       `;
 
@@ -1758,6 +1759,11 @@ export class Agent<
       // reconcile can deliver them after eviction, not only the warm tail.
       addColumnIfNotExists(
         "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_milestones TEXT"
+      );
+      // A legacy fiber body that settled whose row delete then failed. Recovery
+      // deletes it without calling `onFiberRecovered()` (#2305).
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_runs ADD COLUMN completed_at INTEGER"
       );
 
       // Mark schema as up-to-date
@@ -4253,6 +4259,7 @@ export class Agent<
 
     let root: RootFacetRpcSurface | undefined;
     let registeredFacetRun = false;
+    let bodySettled = false;
     let dispose: () => void = () => {};
     try {
       if ("initialSnapshot" in (options ?? {})) {
@@ -4271,9 +4278,13 @@ export class Agent<
       };
 
       try {
-        const result = await _fiberALS.run({ id, signal, stash }, () =>
-          fn({ id, signal, stash, snapshot: null })
-        );
+        const result = await _fiberALS
+          .run({ id, signal, stash }, () =>
+            fn({ id, signal, stash, snapshot: null })
+          )
+          .finally(() => {
+            bodySettled = true;
+          });
         options?.beforeRunCleanup?.({ ok: true });
         this._emit("fiber:run:completed", {
           fiberId: id,
@@ -4295,6 +4306,7 @@ export class Agent<
       }
     } finally {
       this._runFiberActiveFibers.delete(id);
+      let rowDeleted = false;
       try {
         this._withAgentSpan(
           "finalize_fiber",
@@ -4304,9 +4316,20 @@ export class Agent<
             "cloudflare.agents.fiber.name": name
           },
           () => {
+            if (bodySettled) {
+              try {
+                this.sql`
+                  UPDATE cf_agents_runs SET completed_at = ${Date.now()}
+                  WHERE id = ${id}
+                `;
+              } catch {
+                // The delete below is still worth attempting.
+              }
+            }
             this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
           }
         );
+        rowDeleted = true;
       } catch (error) {
         console.error(
           `[Agent] Failed to finalize fiber "${name}" (${id}); leaving run row for recovery:`,
@@ -4314,7 +4337,9 @@ export class Agent<
         );
       }
       dispose();
-      if (root && registeredFacetRun) {
+      // The root's registration is what brings recovery back to an idle facet,
+      // so it stays until the leftover row is gone.
+      if (root && registeredFacetRun && rowDeleted) {
         try {
           await root._cf_unregisterFacetRun(this.selfPath, id);
         } catch (e) {
@@ -4408,7 +4433,8 @@ export class Agent<
         name: string;
         snapshot: string | null;
         created_at: number;
-      }>`SELECT id, name, snapshot, created_at FROM cf_agents_runs`;
+        completed_at: number | null;
+      }>`SELECT id, name, snapshot, created_at, completed_at FROM cf_agents_runs`;
 
       for (const row of rows) {
         if (scanDeadlineMs > 0 && Date.now() - scanStartedAt > scanDeadlineMs) {
@@ -4422,6 +4448,14 @@ export class Agent<
         }
         if (this._runFiberActiveFibers.has(row.id)) continue;
 
+        const managedRow = this._readFiber(row.id);
+        if (row.completed_at !== null && !managedRow) {
+          // The body settled and only its cleanup failed: nothing to recover.
+          this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+          madeProgress = true;
+          continue;
+        }
+
         const snapshot = this._parseFiberRecoverySnapshot(row.id, row.snapshot);
         const ctx: FiberRecoveryContext = {
           id: row.id,
@@ -4431,7 +4465,6 @@ export class Agent<
           recoveryReason: "interrupted"
         };
 
-        const managedRow = this._readFiber(row.id);
         this._emit("fiber:recovery:detected", {
           ...this._fiberRecoveryPayload(ctx, managedRow),
           elapsedMs: Date.now() - row.created_at
