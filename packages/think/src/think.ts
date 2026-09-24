@@ -260,7 +260,7 @@ import type {
   ChatFiberSnapshot,
   OrphanPersistStore
 } from "agents/chat";
-import { truncateOlderMessages } from "agents/chat";
+import { truncateOlderMessages, truncateOlderToolResults } from "agents/chat";
 import {
   Sessions,
   isCompactionMessage,
@@ -6335,7 +6335,9 @@ export class Think<
     const providerSafeHistory = history.map(
       toProviderSafeExecutionOutcomeMessage
     );
-    const truncated = truncateOlderMessages(providerSafeHistory) as UIMessage[];
+    const truncated = truncateOlderMessages(providerSafeHistory, {
+      toolOutputs: false
+    }) as UIMessage[];
     // `_repairTranscriptForProvider` above already heals orphan tool calls
     // (flipping them to errored results, preserving the record). This is the
     // last-line backstop: if any incomplete tool call still slips through
@@ -6356,10 +6358,11 @@ export class Think<
         toolCallIds: incompleteAfterRepair
       });
     }
-    return convertToModelMessages(truncated, {
+    const modelMessages = await convertToModelMessages(truncated, {
       tools,
       ignoreIncompleteToolCalls: true
     });
+    return truncateOlderToolResults(modelMessages, truncated);
   }
 
   /**

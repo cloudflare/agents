@@ -242,7 +242,7 @@ await session.addCompaction(summary, fromMessageId, toMessageId);
 
 Sessions stamps each message with a token estimate when the row is written. `compactAfter()` gates on that O(1) aggregate and never reads the transcript to decide whether to compact. Auto-compaction failures are non-fatal: they log, emit `session:error`, and leave the transcript alone.
 
-To trim a transcript before handing it to a model, `truncateOlderMessages` is exported from [`agents/chat`](./chat-agents.md), not from `agents/sessions`.
+To trim a transcript before handing it to a model, `truncateOlderMessages` is exported from [`agents/chat`](./chat-agents.md), not from `agents/sessions`. If your tools define `toModelOutput`, a truncated tool output may no longer match the tool's output schema. In that case, pass `toolOutputs: false` to `truncateOlderMessages` and call `truncateOlderToolResults` on the result of `convertToModelMessages`, which truncates what the model reads after `toModelOutput` has run. Provider-executed tool outputs are never truncated.
 
 ## Large messages
 
