@@ -99,6 +99,14 @@ export type ChatRecoveryIncident = {
    * incident with `reason="out_of_memory"` (#1825). Optional for backward-compat.
    */
   oomAttempts?: number;
+  /**
+   * Recoveries scheduled for this incident after a transient or rate-limited
+   * stream error. Drives the retry backoff and is capped by `maxAttempts`.
+   * Unlike `attempt`, it is not debounced and does not reset on progress: a
+   * provider that fails every retry within seconds must still back off and
+   * run out of attempts. Bumped by `ChatRecoveryEngine.recordTransientRetry`.
+   */
+  transientRetries?: number;
 };
 
 // ── Persisted storage keys (cutover contract) ──────────────────────────────
@@ -727,6 +735,12 @@ export async function evaluateChatRecoveryIncident(
     !awaitingClientInteraction &&
     oomAttempts > config.maxOomRetries;
 
+  const transientRetries = existing?.transientRetries ?? 0;
+  const transientBudgetExceeded =
+    existing != null &&
+    !awaitingClientInteraction &&
+    transientRetries >= config.maxAttempts;
+
   const debounced =
     existing != null &&
     !madeProgress &&
@@ -750,6 +764,7 @@ export async function evaluateChatRecoveryIncident(
     !noProgressExceeded &&
     !workBudgetExceeded &&
     !oomBudgetExceeded &&
+    !transientBudgetExceeded &&
     attempt <= config.maxAttempts
   ) {
     try {
@@ -776,6 +791,7 @@ export async function evaluateChatRecoveryIncident(
       noProgressExceeded ||
       workBudgetExceeded ||
       abortedByCaller ||
+      transientBudgetExceeded ||
       attempt > config.maxAttempts);
 
   const incident: ChatRecoveryIncident = {
@@ -794,6 +810,7 @@ export async function evaluateChatRecoveryIncident(
     // Carry the OOM count forward so a begin-path re-evaluation never loses what
     // `recordOomAndDecide` accrued between begins.
     ...(oomAttempts > 0 ? { oomAttempts } : {}),
+    ...(transientRetries > 0 ? { transientRetries } : {}),
     ...(exhausted
       ? {
           reason: oomBudgetExceeded

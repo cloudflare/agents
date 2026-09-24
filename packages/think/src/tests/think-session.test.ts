@@ -683,6 +683,128 @@ describe("Think — error handling", () => {
     }
   });
 
+  it.each([
+    { classification: "transient" as const, inStream: false },
+    { classification: "transient" as const, inStream: true },
+    { classification: "rate_limit" as const, inStream: false },
+    { classification: "rate_limit" as const, inStream: true }
+  ])(
+    "routes a $classification stream error (inStream: $inStream) into bounded recovery (#2085)",
+    async ({ classification, inStream }) => {
+      const agent = await freshAgent(`transient-${crypto.randomUUID()}`);
+      const result = await agent.testChatWithTransientErrorForTest({
+        classification,
+        inStream
+      });
+
+      expect(result.first.error).toBeUndefined();
+      expect(result.first.interruptedCalls).toBe(1);
+      expect(result.scheduledContinues).toBe(1);
+      expect(result.delaySeconds).toBe(1);
+      expect(result.assistantMessages).toBe(1);
+      expect(result.finalAssistantText.length).toBeGreaterThan(0);
+    }
+  );
+
+  it.each([
+    { classification: "fatal" as const, inStream: false },
+    { classification: "unknown" as const, inStream: true },
+    { classification: undefined, inStream: false },
+    { classification: undefined, inStream: true }
+  ])(
+    "keeps a $classification stream error (inStream: $inStream) terminal (#2085)",
+    async ({ classification, inStream }) => {
+      const agent = await freshAgent(`non-transient-${crypto.randomUUID()}`);
+      const result = await agent.testChatWithTransientErrorForTest({
+        classification,
+        inStream,
+        message: "provider rejected the request"
+      });
+
+      expect(result.first.error).toContain("provider rejected the request");
+      expect(result.first.interruptedCalls).toBe(0);
+      expect(result.scheduledContinues).toBe(0);
+      expect(result.scheduledRetries).toBe(0);
+    }
+  );
+
+  it("backs off and stops retrying a transient error that fails fast", async () => {
+    const agent = await freshAgent(`transient-backoff-${crypto.randomUUID()}`);
+    const result = await agent.collectTransientBackoffForTest(20);
+
+    expect(result.delays).toEqual([1, 2, 4, 8, 16, 30, 30, 30, 30, 30]);
+  });
+
+  it("classifies an in-stream error once when overflow recovery is on", async () => {
+    const agent = await freshAgent(`transient-classify-${crypto.randomUUID()}`);
+    const result = await agent.testSingleStreamErrorClassificationForTest();
+
+    expect(result.classifications).toBe(1);
+    expect(result.error).toBeUndefined();
+    expect(result.scheduledContinues).toBe(1);
+  });
+
+  it("keeps a submission running while transient recovery finishes it", async () => {
+    const agent = await freshAgent(`transient-sub-${crypto.randomUUID()}`);
+    const result = await agent.testTransientSubmissionForTest();
+
+    expect(result.afterFailure).toBe("running");
+    expect(result.final).toBe("completed");
+  });
+
+  it("leaves the incident to the attempt a failed recovery schedules", async () => {
+    const agent = await freshAgent(`transient-chain-${crypto.randomUUID()}`);
+    const result = await agent.collectTransientBackoffForTest(3);
+
+    expect(result.delays).toEqual([1, 2, 4]);
+    // Only the first attempt joins duplicate detections; the attempts it
+    // chains must not join the run that schedules them.
+    expect(result.keyed).toEqual([true, false, false]);
+    expect(result.incidentStatuses).not.toContain("failed");
+  });
+
+  it("routes a transient WebSocket stream error into bounded recovery (#2085)", async () => {
+    const room = `transient-ws-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    await agent.armTransientErrorForTest({
+      classification: "transient",
+      inStream: true
+    });
+    const ws = await connectThinkTestAgentWS(room);
+    try {
+      const done = waitForProtocolMessage(
+        ws,
+        (m) => m.type === "cf_agent_use_chat_response" && m.done === true
+      );
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: crypto.randomUUID(),
+                  role: "user",
+                  parts: [{ type: "text", text: "hello" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+      expect((await done).error).toBeUndefined();
+
+      const recovered = await agent.runScheduledRecoveryForTest();
+      expect(recovered.scheduledContinues).toBe(1);
+      expect(recovered.delaySeconds).toBe(1);
+      expect(recovered.finalRoles).toEqual(["user", "assistant"]);
+    } finally {
+      await closeWS(ws);
+    }
+  });
+
   it("calls onChatRecovery with the live turn's stash when a stall schedules a continuation (#2042)", async () => {
     const agent = await freshAgent(`stall-hook-${crypto.randomUUID()}`);
     const before = Date.now();

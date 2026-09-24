@@ -828,6 +828,35 @@ describe("evaluateChatRecoveryIncident", () => {
     expect(over.incident.reason).toBe("out_of_memory");
   });
 
+  it("carries transientRetries forward and seals once it reaches maxAttempts", async () => {
+    const defaults = resolveChatRecoveryConfig(true);
+    const base = (await evaluate()).incident;
+    const existing = {
+      ...base,
+      attempt: 1,
+      lastProgressAt: T0
+    };
+
+    const within = await evaluate({
+      existing: { ...existing, transientRetries: defaults.maxAttempts - 1 },
+      config: defaults,
+      currentProgress: 5,
+      now: T0 + CHAT_RECOVERY_ALARM_DEBOUNCE_MS - 1
+    });
+    expect(within.exhausted).toBe(false);
+    expect(within.incident.transientRetries).toBe(defaults.maxAttempts - 1);
+
+    const over = await evaluate({
+      existing: { ...existing, transientRetries: defaults.maxAttempts },
+      config: defaults,
+      currentProgress: 6,
+      now: T0 + CHAT_RECOVERY_ALARM_DEBOUNCE_MS - 1
+    });
+    expect(over.incident.attempt).toBe(1);
+    expect(over.exhausted).toBe(true);
+    expect(over.incident.reason).toBe("max_attempts_exceeded");
+  });
+
   it("does not seal on OOM while a client interaction is pending", async () => {
     // A parked HITL turn must never be sealed by the OOM budget either.
     const defaults = resolveChatRecoveryConfig(true);

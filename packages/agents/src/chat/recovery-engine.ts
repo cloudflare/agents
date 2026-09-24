@@ -49,8 +49,15 @@ export type ChatRecoveryScheduleCallback =
  *   settles only AFTER the callback returns, so an idempotent reschedule would
  *   dedup onto the doomed attempt and settle with it — the retry would never
  *   fire. A fresh (non-idempotent) delayed attempt survives.
+ *
+ * - `"chained_retry"` — the next attempt, scheduled from inside an executing
+ *   recovery attempt that was interrupted again. Non-idempotent for the same
+ *   reason as `"stable_timeout_retry"`.
  */
-export type ChatRecoveryScheduleReason = "initial" | "stable_timeout_retry";
+export type ChatRecoveryScheduleReason =
+  | "initial"
+  | "stable_timeout_retry"
+  | "chained_retry";
 
 /**
  * A reconstructed orphaned-stream partial. The engine seam is deliberately
@@ -610,6 +617,7 @@ export class ChatRecoveryEngine {
     callback: ChatRecoveryScheduleCallback;
     data: Record<string, unknown>;
     reason?: ChatRecoveryScheduleReason;
+    delaySeconds?: number;
   }): Promise<void> {
     const { incident } = input;
     await this.updateIncident(incident.incidentId, "scheduled");
@@ -625,7 +633,7 @@ export class ChatRecoveryEngine {
       input.callback,
       input.data,
       input.reason ?? "initial",
-      0
+      input.delaySeconds ?? 0
     );
   }
 
@@ -676,6 +684,22 @@ export class ChatRecoveryEngine {
       CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
     );
     return true;
+  }
+
+  /**
+   * Bump the incident's durable `transientRetries` counter before scheduling a
+   * recovery for a transient or rate-limited stream error, and return the new
+   * count so the caller can derive its backoff. Returns `1` when the incident
+   * record is gone.
+   */
+  async recordTransientRetry(incidentId: string): Promise<number> {
+    const { adapter } = this;
+    const key = chatRecoveryIncidentKey(incidentId);
+    const incident = await adapter.getIncident(key);
+    if (!incident) return 1;
+    const transientRetries = (incident.transientRetries ?? 0) + 1;
+    await adapter.putIncident(key, { ...incident, transientRetries });
+    return transientRetries;
   }
 
   /**

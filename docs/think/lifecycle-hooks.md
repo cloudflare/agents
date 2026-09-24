@@ -848,7 +848,11 @@ Called when an error occurs during a turn, **before** `onChatError`. Maps a raw 
 classifyChatError(error: unknown, ctx?: ChatErrorContext): ChatErrorClassification | void
 ```
 
-`ChatErrorClassification` is `"context_overflow" | "rate_limit" | "transient" | "fatal" | "unknown"`. Today this hook drives **only** context-overflow recovery: Think calls it when a turn errors **and** `contextOverflow.reactive` is enabled (if reactive is off, it is not called). Returning `"context_overflow"` runs the compact-and-retry backstop (see [Context-window overflow recovery](./index.md#context-window-overflow-recovery)); if recovery cannot save the turn, that classification is surfaced on the terminal `onChatError` call via `ChatErrorContext.classification`. The other categories are reserved for future use — returning one today is a no-op (the turn terminalizes as usual) and is not forwarded to `onChatError`. Returning `void` (the default) keeps the existing terminal behavior.
+`ChatErrorClassification` is `"context_overflow" | "rate_limit" | "transient" | "fatal" | "unknown"`. Think calls this hook when a turn's stream errors, and reacts to the result:
+
+- `"context_overflow"` runs the compact-and-retry backstop when `contextOverflow.reactive` is enabled (see [Context-window overflow recovery](./index.md#context-window-overflow-recovery)). If recovery cannot save the turn, that classification is surfaced on the terminal `onChatError` call via `ChatErrorContext.classification`.
+- `"transient"` and `"rate_limit"` route the turn into bounded chat recovery, the same path as a stream stall. Think calls `onChatRecovery`, keeps the partial response (unless the hook returns `persist: false`), and schedules a continuation. The continuation waits 1 second on the first attempt and doubles on each later attempt, up to 30 seconds. Once `chatRecovery.maxAttempts` is spent, the turn ends with the configured terminal message and `onExhausted`, not the raw error.
+- `"fatal"`, `"unknown"`, and `void` (the default) keep the existing terminal behavior.
 
 If `contextOverflow.reactive` is enabled but neither your class nor a parent class overrides `classifyChatError` (as a method or a class field), Think logs a one-time warning and skips overflow recovery, since the default classifier never returns `"context_overflow"`.
 
