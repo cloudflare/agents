@@ -1,0 +1,49 @@
+packages/agents/src/chat/replay-frames.ts
+  s_368991bdec7f77::t_5993c7db822c33 53-58,69-71
+packages/agents/src/tests/streams/resumable-stream-settlement.test.ts
+  s_368991bdec7f77::t_00f9c9f26037d7 4,88-163
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_68b630d5c953ea 97-98,1170-1173,1180,1464,1816-1820,2173-2196,2198,2746-2754,5012-5017,5028
+packages/ai-chat/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_92546b6ee59a60 1-96
+packages/think/src/think.ts
+  s_368991bdec7f77::t_d8d4a7a79e4b5b 239-240,13047-13050,13059,13360,17736-17743,18384-18389,18400,18514-18518,18604-18634
+.changeset/terminal-frame-message-ids.md
+  s_368991bdec7f77::t_f0957039e1a2ea 1-7
+docs/agents/chat-agents.md
+  s_368991bdec7f77::t_af831a55fcb8fe 1688-1709
+packages/agents/src/chat/__tests__/origin-message-ids.test.ts
+  s_368991bdec7f77::t_26daaf0c1c5c13 1-46
+packages/agents/src/chat/__tests__/resume-handshake.test.ts
+  s_368991bdec7f77::t_fbe96865aff89e 56,87,411-462
+packages/agents/src/chat/index.ts
+  s_368991bdec7f77::t_15e4b4a7e53910 27-28
+packages/agents/src/chat/origin-message-ids.ts
+  s_368991bdec7f77::t_e97dafa4822072 1-39
+packages/agents/src/chat/recovery-incident.ts
+  s_368991bdec7f77::t_3eefc5b344af0c 485-490,501-502,504-506
+packages/agents/src/chat/resumable-stream.ts
+  s_368991bdec7f77::t_5526da057387a8 116-120,523-527,549-551,582-590,850-855,910-911
+packages/agents/src/chat/resume-handshake.ts
+  s_368991bdec7f77::t_0a3ee53e0fff11 36,251,259-260,318-320,328-329
+packages/agents/src/chat/wire-types.ts
+  s_368991bdec7f77::t_3f7f5b574eebd8 86-93
+packages/think/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_51b244fc07ec1a 1-112
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "42f1521cfdc61befaa6c93e2eb17427aecb71d19",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
