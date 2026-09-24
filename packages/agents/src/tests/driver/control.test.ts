@@ -30,6 +30,19 @@ class Runtime implements HarnessDriverRuntime<Input, Result> {
 }
 
 describe("HarnessDriver control", () => {
+  it("returns false when waking or deferring an unknown scope", async () => {
+    await withCapabilityHarness(async ({ install }) => {
+      const driver = new HarnessDriver({ id: "test", runtime: new Runtime() });
+      const { lifecycle } = install(driver);
+      await lifecycle.start();
+
+      expect(await driver.wake("missing")).toBe(false);
+      expect(await driver.defer("missing", Date.now())).toBe(false);
+      await expect(driver.defer("missing", Number.NaN)).rejects.toThrow(
+        "Invalid job time"
+      );
+    });
+  });
   it("wakes a future scope job without changing intake order", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const runtime = new Runtime();

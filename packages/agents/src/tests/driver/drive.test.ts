@@ -63,6 +63,26 @@ describe("HarnessDriver drive", () => {
     });
   });
 
+  it("parks at a native inspection deadline without driving", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const runtime = new Runtime();
+      const notBefore = Date.now() + 60_000;
+      runtime.inspection = { status: "waiting", notBefore };
+      const driver = new HarnessDriver({ id: "test", runtime });
+      const { lifecycle } = install(driver);
+      await lifecycle.start();
+      await driver.submit("main", { text: "hello" }, { operationId: "op-1" });
+      await storage.deleteAlarm();
+
+      await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+      await driver.waitForIdle("main");
+
+      expect(runtime.calls).toEqual(["inspect"]);
+      expect(driver.jobs()[0].time).toBe(notBefore);
+      await storage.deleteAlarm();
+    });
+  });
+
   it("reconciles native admission before the driver acknowledgement", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const runtime = new Runtime();
@@ -206,6 +226,41 @@ describe("HarnessDriver drive", () => {
 
       expect(runtime.calls).toEqual(["inspect"]);
       expect(settlements).toBe(2);
+      expect(await driver.pending()).toEqual([]);
+      await storage.deleteAlarm();
+    });
+  });
+
+  it("retries completed result settlement without failing native work", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const runtime = new Runtime();
+      runtime.inspection = { status: "completed", result: { answer: "done" } };
+      let settlements = 0;
+      let failures = 0;
+      const driver = new HarnessDriver({
+        id: "test",
+        runtime,
+        retryBaseMs: 1,
+        settle: () => {
+          settlements += 1;
+          if (settlements === 1) throw new Error("stream unavailable");
+        },
+        fail: () => {
+          failures += 1;
+        }
+      });
+      const { lifecycle } = install(driver);
+      await lifecycle.start();
+      await driver.submit("main", { text: "hello" }, { operationId: "op-1" });
+      await storage.deleteAlarm();
+
+      await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+      await driver.waitForIdle("main");
+      await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+      await driver.waitForIdle("main");
+
+      expect(settlements).toBe(2);
+      expect(failures).toBe(0);
       expect(await driver.pending()).toEqual([]);
       await storage.deleteAlarm();
     });
