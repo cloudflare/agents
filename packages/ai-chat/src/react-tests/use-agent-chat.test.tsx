@@ -1816,6 +1816,98 @@ describe("useAgentChat onToolCall", () => {
       })
     );
   });
+
+  it("does not fire onToolCall for a server tool that is still executing (#2195)", async () => {
+    const target = new EventTarget();
+    const sentMessages: string[] = [];
+    const agent = createAgent({
+      name: "ontoolcall-server-tool",
+      url: "ws://localhost:3000/agents/chat/ontoolcall-server-tool?_pk=abc",
+      send: (data: string) => sentMessages.push(data)
+    });
+    (agent as unknown as Record<string, unknown>).addEventListener =
+      target.addEventListener.bind(target);
+    (agent as unknown as Record<string, unknown>).removeEventListener =
+      target.removeEventListener.bind(target);
+    const frame = (id: string, chunk: Record<string, unknown> | null) =>
+      target.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "cf_agent_use_chat_response",
+            id,
+            body: chunk ? JSON.stringify(chunk) : "",
+            done: chunk === null
+          })
+        })
+      );
+
+    const toolCalls: string[] = [];
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onToolCall: ({ toolCall }) => {
+          toolCalls.push(toolCall.toolCallId);
+        }
+      });
+      chatInstance = chat;
+      return <div data-testid="status">{chat.status}</div>;
+    };
+
+    await act(async () => {
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+    });
+
+    let sendPromise: Promise<void> | undefined;
+    await act(async () => {
+      sendPromise = chatInstance!.sendMessage({ text: "Look it up" });
+      await sleep(10);
+    });
+    const request = sentMessages
+      .map((message) => JSON.parse(message))
+      .find((message) => message.type === "cf_agent_use_chat_request");
+    expect(request).toBeDefined();
+
+    await act(async () => {
+      frame(request.id, {
+        type: "tool-input-available",
+        toolCallId: "tc-server",
+        toolName: "search",
+        input: { q: "weather" }
+      });
+      frame(request.id, {
+        type: "tool-input-available",
+        toolCallId: "tc-client",
+        toolName: "getLocation",
+        input: {}
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual([]);
+
+    await act(async () => {
+      frame(request.id, {
+        type: "tool-output-available",
+        toolCallId: "tc-server",
+        output: { forecast: "sunny" }
+      });
+      frame(request.id, { type: "finish" });
+      frame(request.id, null);
+      await sendPromise;
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual(["tc-client"]);
+  });
 });
 
 describe("useAgentChat re-render stability", () => {
@@ -2309,13 +2401,7 @@ describe("useAgentChat tool continuation status (issue #1157)", () => {
         agent,
         getInitialMessages: null,
         messages: [] as UIMessage[],
-        resume: false,
-        onToolCall: ({ toolCall, addToolOutput }) => {
-          addToolOutput({
-            toolCallId: toolCall.toolCallId,
-            output: { lat: 51.5, lng: -0.1 }
-          });
-        }
+        resume: false
       });
       chatInstance = chat;
       return <div data-testid="status">{chat.status}</div>;
@@ -2353,6 +2439,12 @@ describe("useAgentChat tool continuation status (issue #1157)", () => {
           input: { city: "London" }
         }),
         done: false
+      });
+      await sleep(10);
+      chatInstance!.addToolOutput({
+        toolCallId: "tc-single-flight",
+        toolName: "getLocation",
+        output: { lat: 51.5, lng: -0.1 }
       });
       await sleep(20);
     });
@@ -2413,13 +2505,7 @@ describe("useAgentChat tool continuation status (issue #1157)", () => {
         agent,
         getInitialMessages: null,
         messages: [] as UIMessage[],
-        resume: false,
-        onToolCall: ({ toolCall, addToolOutput }) => {
-          addToolOutput({
-            toolCallId: toolCall.toolCallId,
-            output: { lat: 51.5, lng: -0.1 }
-          });
-        }
+        resume: false
       });
       chatInstance = chat;
       return (
@@ -2465,6 +2551,12 @@ describe("useAgentChat tool continuation status (issue #1157)", () => {
           input: { city: "London" }
         }),
         done: false
+      });
+      await sleep(10);
+      chatInstance!.addToolOutput({
+        toolCallId: "tc-early-resume",
+        toolName: "getLocation",
+        output: { lat: 51.5, lng: -0.1 }
       });
       await sleep(20);
     });

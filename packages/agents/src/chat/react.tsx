@@ -421,6 +421,9 @@ export type UseAgentChatOptions<
   /**
    * Callback for handling client-side tool execution.
    * Called when a tool without server-side `execute` is invoked by the LLM.
+   * It fires once the response stream ends, for each tool call still waiting
+   * for a result, so server tools that resolve in the same stream never
+   * reach it.
    *
    * Use this for:
    * - Tools that need browser APIs (geolocation, camera, etc.)
@@ -1783,11 +1786,20 @@ export function useAgentChat<
     [autoContinueAfterToolResult, startToolContinuation]
   );
 
+  const [isServerStreaming, setIsServerStreaming] = useState(false);
+
   // Effect for new onToolCall callback pattern (v6 style)
   // This fires when there are tool calls that need client-side handling
   useEffect(() => {
     const currentOnToolCall = onToolCallRef.current;
     if (!currentOnToolCall) {
+      return;
+    }
+
+    // A server tool sits in `input-available` while the server executes it,
+    // and its result arrives in the same stream. Once the stream ends, every
+    // part still waiting is one the client has to answer (#2195).
+    if (status === "streaming" || status === "submitted" || isServerStreaming) {
       return;
     }
 
@@ -1858,11 +1870,17 @@ export function useAgentChat<
         });
       }
     }
-  }, [chatMessages, sendToolOutputToServer, addToolResult, finishOnToolCall]);
+  }, [
+    chatMessages,
+    status,
+    isServerStreaming,
+    sendToolOutputToServer,
+    addToolResult,
+    finishOnToolCall
+  ]);
 
   const streamStateRef = useRef<BroadcastStreamState>({ status: "idle" });
 
-  const [isServerStreaming, setIsServerStreaming] = useState(false);
   // #1620: a durable chat turn is being recovered (interrupted by a
   // deploy/eviction or a stream-stall watchdog abort and now resuming). Driven
   // by the server's `CF_AGENT_CHAT_RECOVERING` frames; surfaced as a "working,
