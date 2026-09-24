@@ -65,6 +65,10 @@ import type {
 } from "./capabilities/tasks.ts";
 export { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
 import type { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
+export { BrowserHarnessObject } from "./capabilities/browser.ts";
+import type { BrowserHarnessObject } from "./capabilities/browser.ts";
+export { TestBrowserAgent } from "./agents/browser.ts";
+import type { TestBrowserAgent } from "./agents/browser.ts";
 
 // Re-export all test agents so existing imports (e.g. `import { type Env } from "./worker"`)
 // and wrangler bindings continue to work.
@@ -232,6 +236,8 @@ export type Env = {
   SessionSearchHarnessObject: DurableObjectNamespace<SessionSearchHarnessObject>;
   SessionBenchObject: DurableObjectNamespace<SessionBenchObject>;
   PlainMcpClientObject: DurableObjectNamespace<PlainMcpClientObject>;
+  BrowserHarnessObject: DurableObjectNamespace<BrowserHarnessObject>;
+  TestBrowserAgent: DurableObjectNamespace<TestBrowserAgent>;
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   TestCodemodeMcpAgent: DurableObjectNamespace<TestCodemodeMcpAgent>;
   EmailAgent: DurableObjectNamespace<TestEmailAgent>;
