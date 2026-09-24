@@ -45,10 +45,11 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
     this.#heartbeatMs = options.heartbeatMs ?? 30_000;
   }
 
-  override onStart(_context: CapabilityStartContext): void {
+  override async onStart(_context: CapabilityStartContext): Promise<void> {
     const store = this.#submissionStore();
     this.lifecycle.jobs.list();
     for (const scope of store.scopes()) this.#pushScopeJob(scope, Date.now());
+    await this.lifecycle.jobs.rearm();
   }
 
   async submit(

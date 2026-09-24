@@ -98,6 +98,7 @@ describe("HarnessDriver", () => {
 
       expect(second.jobs()).toHaveLength(1);
       expect(second.jobs()[0].payload).toEqual({ scope: "lane-a" });
+      expect(await storage.getAlarm()).not.toBeNull();
       await storage.deleteAlarm();
     });
   });
