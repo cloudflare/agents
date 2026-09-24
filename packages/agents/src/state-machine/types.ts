@@ -1,10 +1,20 @@
+/**
+ * Any value a machine can persist.
+ *
+ * Arrays and objects are `readonly` so that a caller's own immutable types
+ * satisfy this without copying or casting. A `readonly` array is not
+ * assignable to a mutable one, so requiring mutability here would force
+ * every caller holding `readonly` data through an unchecked cast. Nothing
+ * in the engine mutates a checkpoint in place, so nothing needs the looser
+ * form.
+ */
 export type MachineJson =
   | string
   | number
   | boolean
   | null
-  | MachineJson[]
-  | { [key: string]: MachineJson };
+  | readonly MachineJson[]
+  | { readonly [key: string]: MachineJson };
 
 export type MachineValue = MachineJson | undefined | void;
 export type MachinePhased = { phase: string } & Record<string, MachineJson>;
@@ -129,24 +139,45 @@ export interface MachineGates {
 
 export type MachineEffectRecovery = "safe" | "never" | "reconcile";
 
-export interface MachineEffectRef<Output extends MachineValue = MachineValue> {
+/**
+ * A handle to one planned effect.
+ *
+ * Declared as a type alias rather than an interface so it satisfies
+ * {@link MachineJson}: TypeScript gives an interface no implicit index
+ * signature, which would stop a machine storing its own effect handle in its
+ * own checkpoint. A wrapped runtime that parks between passes has to do
+ * exactly that, so the alias is load-bearing.
+ */
+export type MachineEffectRef<Output extends MachineValue = MachineValue> = {
   readonly id: string;
   readonly kind: string;
   readonly recovery: MachineEffectRecovery;
   /** @internal Type carrier. */
   readonly __output?: Output;
-}
+};
 
 export interface MachineEffectPlanOptions {
   readonly recovery: MachineEffectRecovery;
   readonly externalId?: string;
 }
 
-export interface MachineEffectInvocation {
+export interface MachineEffectInvocation<
+  Input extends MachineJson = MachineJson
+> {
   readonly effectId: string;
   readonly idempotencyKey: string;
   readonly externalId?: string;
   readonly signal: AbortSignal;
+  /**
+   * The input this effect was planned with.
+   *
+   * Available to every hook, including `reconcile` and `cancel`. Those run
+   * after a crash, when the only other thing they are given is `externalId`,
+   * so without this a runtime has to encode what it needs into that string
+   * and parse it back, or keep an in-memory side table that recovery has
+   * already lost.
+   */
+  readonly input: Input;
 }
 
 export interface MachineEffectPending {
@@ -162,11 +193,11 @@ export interface MachineEffectRuntime<
 > {
   execute(
     input: Input,
-    invocation: MachineEffectInvocation
+    invocation: MachineEffectInvocation<Input>
   ): Promise<Output | MachineEffectPending>;
   reconcile?(
     externalId: string,
-    invocation: MachineEffectInvocation
+    invocation: MachineEffectInvocation<Input>
   ): Promise<
     | { status: "running" }
     | { status: "completed"; output: Output }
@@ -175,7 +206,7 @@ export interface MachineEffectRuntime<
   >;
   cancel?(
     externalId: string,
-    invocation: MachineEffectInvocation
+    invocation: MachineEffectInvocation<Input>
   ): Promise<void>;
 }
 

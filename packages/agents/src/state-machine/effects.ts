@@ -150,7 +150,8 @@ export class MachineEffectManager {
         effectId: row.effect_id,
         idempotencyKey: `${runId}:${row.effect_id}`,
         externalId: row.external_id,
-        signal: controller.signal
+        signal: controller.signal,
+        input: JSON.parse(row.input_json)
       });
       if (reconciled.status === "running") return { status: "running" };
       if (reconciled.status === "completed") {
@@ -180,11 +181,13 @@ export class MachineEffectManager {
     const controllerKey = `${runId}:${effect.id}`;
     this.#controllers.set(controllerKey, controller);
     try {
-      const output = await runtime.execute(JSON.parse(row.input_json), {
+      const input = JSON.parse(row.input_json);
+      const output = await runtime.execute(input, {
         effectId: row.effect_id,
         idempotencyKey: `${runId}:${row.effect_id}`,
         ...(row.external_id ? { externalId: row.external_id } : {}),
-        signal: controller.signal
+        signal: controller.signal,
+        input
       });
       if (isMachineEffectPending(output)) {
         this.#store.write(
@@ -223,7 +226,8 @@ export class MachineEffectManager {
         effectId: effect.effect_id,
         idempotencyKey: `${row.run_id}:${effect.effect_id}`,
         externalId: effect.external_id,
-        signal: AbortSignal.abort(row.cancel_reason ?? "cancelled")
+        signal: AbortSignal.abort(row.cancel_reason ?? "cancelled"),
+        input: JSON.parse(effect.input_json)
       });
       this.#markInterrupted(row.run_id, effect.effect_id);
     }
