@@ -3216,7 +3216,8 @@ export class ThinkAgentToolParent extends Agent {
     progressBody: string,
     milestoneBody: string,
     chunkDelayMs: number,
-    runId = crypto.randomUUID()
+    runId = crypto.randomUUID(),
+    eventDelivery?: "full" | "terminal"
   ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }> {
     this.events = [];
     this.finishes = [];
@@ -3227,9 +3228,40 @@ export class ThinkAgentToolParent extends Agent {
       runId,
       parentToolCallId: "think-tool-call",
       input,
-      inputPreview: input
+      inputPreview: input,
+      ...(eventDelivery ? { eventDelivery } : {})
     });
     return { result, events: this.events };
+  }
+
+  /** Replay this parent's agent-tool events to a fresh connection. */
+  async replayAgentToolEventsForTest(): Promise<AgentToolEventMessage[]> {
+    const sent: AgentToolEventMessage[] = [];
+    const connection = {
+      id: "replay-probe",
+      send(body: string) {
+        sent.push(JSON.parse(body) as AgentToolEventMessage);
+      }
+    };
+    await (
+      this as unknown as {
+        _replayAgentToolRuns(connection: unknown): Promise<void>;
+      }
+    )._replayAgentToolRuns(connection);
+    return sent;
+  }
+
+  async runThinkChildDetachedTerminalForTest(): Promise<string | null> {
+    try {
+      await this.runAgentTool(ThinkTestAgent, {
+        input: "detached terminal",
+        detached: true,
+        eventDelivery: "terminal"
+      });
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   /**

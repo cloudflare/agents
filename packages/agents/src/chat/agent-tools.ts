@@ -465,11 +465,14 @@ export interface AgentToolBroadcastHooks {
  * error capture never depends on tailer timing. A frame belongs to a run iff it
  * carries that run's turn request id, so concurrent runs can't cross-contaminate
  * each other's progress or error state.
+ *
+ * Returns the run id when the frame is one of that run's content chunks, so a
+ * host can skip broadcasting chunks no client is watching.
  */
 export function interceptAgentToolBroadcast(
   msg: string | ArrayBuffer | ArrayBufferView,
   hooks: AgentToolBroadcastHooks
-): void {
+): string | null {
   if (
     (hooks.forwarders.size > 0 || hooks.liveSequences.size > 0) &&
     typeof msg === "string"
@@ -499,6 +502,7 @@ export function interceptAgentToolBroadcast(
             if (forwarders) {
               for (const forward of forwarders) forward(chunk);
             }
+            return runId;
           }
         }
       }
@@ -506,4 +510,5 @@ export function interceptAgentToolBroadcast(
       // Non-chat frames pass through unchanged.
     }
   }
+  return null;
 }

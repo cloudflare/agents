@@ -13,6 +13,7 @@ import {
   isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
   __DO_NOT_USE_WILL_BREAK__withInvocationScope as withInvocationScope,
+  type AgentToolEventDelivery,
   type AgentToolLifecycleResult,
   type AgentToolMilestone,
   type AgentToolProgress,
@@ -581,6 +582,8 @@ export class AIChatAgent<
   private _agentToolLastErrors = new Map<string, string>();
   private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
   private _agentToolLiveSequences = new Map<string, number>();
+  /** Runs started with `eventDelivery: "terminal"`: their chunks are not broadcast. */
+  private _agentToolTerminalOnlyRuns = new Set<string>();
   /**
    * Request id → run id for in-flight agent-tool turns (null = resolved as
    * not an agent-tool turn, cached so unrelated turns don't re-query SQLite
@@ -920,13 +923,19 @@ export class AIChatAgent<
       this._agentToolForwarders.size > 0 ||
       this._agentToolLiveSequences.size > 0
     ) {
-      interceptAgentToolBroadcast(msg, {
+      const chunkRunId = interceptAgentToolBroadcast(msg, {
         forwarders: this._agentToolForwarders,
         liveSequences: this._agentToolLiveSequences,
         lastErrors: this._agentToolLastErrors,
         responseType: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
         runForRequest: (requestId) => this._agentToolRunForRequest(requestId)
       });
+      if (
+        chunkRunId !== null &&
+        this._agentToolTerminalOnlyRuns.has(chunkRunId)
+      ) {
+        return;
+      }
     }
     super.broadcast(msg, without);
   }
@@ -3902,7 +3911,11 @@ export class AIChatAgent<
 
   async startAgentToolRun(
     input: unknown,
-    options: { runId: string; signal?: AbortSignal }
+    options: {
+      runId: string;
+      signal?: AbortSignal;
+      eventDelivery?: AgentToolEventDelivery;
+    }
   ): Promise<AgentToolRunInspection> {
     const existing = await this.inspectAgentToolRun(options.runId);
     if (existing) return existing;
@@ -3926,6 +3939,9 @@ export class AIChatAgent<
       assistantIdsBeforeStart
     );
     this._agentToolLiveSequences.set(options.runId, 0);
+    if (options.eventDelivery === "terminal") {
+      this._agentToolTerminalOnlyRuns.add(options.runId);
+    }
 
     const abortFromParent = () => controller.abort(options.signal?.reason);
     if (options.signal?.aborted) {
@@ -4034,6 +4050,7 @@ export class AIChatAgent<
         options.signal?.removeEventListener("abort", abortFromParent);
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
+        this._agentToolTerminalOnlyRuns.delete(options.runId);
         // Drop the progress emitter's per-run coalescing state.
         this._agentToolProgressEmitterInstance?.forget(options.runId);
         // Drop this run's request-id mappings. When no runs remain in flight

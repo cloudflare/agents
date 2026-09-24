@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import {
   AGENT_TOOL_MILESTONE_PART,
   AGENT_TOOL_PROGRESS_PART,
@@ -29,7 +29,7 @@ type ThinkAgentToolTestStub = {
   resetTurnStateForTest(): Promise<void>;
   startAgentToolRun(
     input: unknown,
-    options: { runId: string }
+    options: { runId: string; eventDelivery?: "full" | "terminal" }
   ): ReturnType<ThinkTestAgent["startAgentToolRun"]>;
   cancelAgentToolRun(
     runId: string,
@@ -81,8 +81,11 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     progressBody: string,
     milestoneBody: string,
     chunkDelayMs: number,
-    runId?: string
+    runId?: string,
+    eventDelivery?: "full" | "terminal"
   ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }>;
+  replayAgentToolEventsForTest(): Promise<AgentToolEventMessage[]>;
+  runThinkChildDetachedTerminalForTest(): Promise<string | null>;
   startThinkChildWithoutTailForTest(
     input: string,
     errorText: string,
@@ -439,6 +442,119 @@ describe("Think agent tools", () => {
       .map((event) => (event.event as { kind: "chunk"; body: string }).body);
     expect(chunkBodies).toContain(progressBody);
     expect(chunkBodies).toContain(milestoneBody);
+  });
+
+  describe('eventDelivery: "terminal" (#2298)', () => {
+    const progressBody = JSON.stringify({
+      type: AGENT_TOOL_PROGRESS_PART,
+      transient: true,
+      data: { message: "halfway", fraction: 0.5 }
+    });
+    const milestoneBody = JSON.stringify({
+      type: AGENT_TOOL_MILESTONE_PART,
+      data: { name: "phase-1", sequence: 0, at: 1, data: { sources: 2 } }
+    });
+
+    it("forwards only lifecycle events to the parent's clients, live and on replay", async () => {
+      const parent = await freshParent();
+      const runId = crypto.randomUUID();
+
+      const { result, events } =
+        await parent.runThinkChildWithProgressInjectionForTest(
+          "headless parent",
+          progressBody,
+          milestoneBody,
+          10,
+          runId,
+          "terminal"
+        );
+
+      expect(result).toMatchObject({
+        status: "completed",
+        summary: "Hello from the assistant!"
+      });
+      const kinds = events.map((event) => event.event.kind);
+      expect(kinds[0]).toBe("started");
+      expect(kinds.at(-1)).toBe("finished");
+      const chunkBodies = events
+        .filter((event) => event.event.kind === "chunk")
+        .map((event) => (event.event as { body: string }).body);
+      expect(chunkBodies.sort()).toEqual([milestoneBody, progressBody].sort());
+
+      const replayed = await parent.replayAgentToolEventsForTest();
+      expect(
+        replayed
+          .filter((event) => event.event.kind === "chunk")
+          .every((event) => {
+            const body = (event.event as { body: string }).body;
+            return body === progressBody || body === milestoneBody;
+          })
+      ).toBe(true);
+      expect(replayed.at(-1)?.event.kind).toBe("finished");
+    });
+
+    it("still forwards every chunk by default", async () => {
+      const parent = await freshParent();
+      const { events } = await parent.runThinkChildWithProgressInjectionForTest(
+        "watched parent",
+        progressBody,
+        milestoneBody,
+        10
+      );
+      const chunkBodies = events
+        .filter((event) => event.event.kind === "chunk")
+        .map((event) => (event.event as { body: string }).body);
+      expect(
+        chunkBodies.some(
+          (body) => body !== progressBody && body !== milestoneBody
+        )
+      ).toBe(true);
+    });
+
+    it("rejects terminal delivery for a detached run", async () => {
+      const parent = await freshParent();
+      await expect(
+        parent.runThinkChildDetachedTerminalForTest()
+      ).resolves.toMatch(/not supported for detached runs/);
+    });
+
+    it("stops the child broadcasting its own chunks", async () => {
+      async function chatChunksBroadcast(
+        eventDelivery: "full" | "terminal"
+      ): Promise<number> {
+        const room = crypto.randomUUID();
+        const res = await exports.default.fetch(
+          `http://example.com/agents/think-test-agent/${room}`,
+          { headers: { Upgrade: "websocket" } }
+        );
+        const ws = res.webSocket as WebSocket;
+        ws.accept();
+        let chunks = 0;
+        ws.addEventListener("message", (e: MessageEvent) => {
+          try {
+            const frame = JSON.parse(e.data as string) as {
+              type?: string;
+              body?: string;
+            };
+            if (frame.type === "cf_agent_use_chat_response" && frame.body) {
+              chunks++;
+            }
+          } catch {
+            // Non-JSON frames are not chat chunks.
+          }
+        });
+        const agent = await freshAgent(room);
+        const runId = crypto.randomUUID();
+        await agent.startAgentToolRun("child probe", { runId, eventDelivery });
+        await waitForAgentToolRun(agent, runId);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        ws.close();
+        return chunks;
+      }
+
+      expect(await chatChunksBroadcast("full")).toBeGreaterThan(0);
+      expect(await chatChunksBroadcast("terminal")).toBe(0);
+    });
   });
 
   it("does not contaminate a run's terminal status with an unrelated turn's error frame (#1575)", async () => {
