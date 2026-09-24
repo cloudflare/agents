@@ -27,7 +27,7 @@ import {
   type BrowserBinding
 } from "./browser-run";
 import {
-  mintLiveView,
+  createLiveView,
   type BrowserLiveView,
   type LiveViewMode
 } from "./live-view";
@@ -181,7 +181,7 @@ export class BrowserSessions extends LifecycleCapability {
           error
         );
       }
-      return mintLiveView(entry.sessionId, targets, options?.mode);
+      return createLiveView(entry.sessionId, targets, options?.mode);
     } catch (error) {
       if (isMissingBrowserSession(error)) return undefined;
       throw error;

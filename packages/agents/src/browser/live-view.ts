@@ -77,7 +77,7 @@ export function applyLiveViewMode(rawUrl: string, mode?: LiveViewMode): string {
  * Project a fresh target listing into Live View links — one per tab that has
  * a `devtoolsFrontendUrl`. Pure; the caller supplies just-listed targets.
  */
-export function mintLiveView(
+export function createLiveView(
   sessionId: string,
   targets: BrowserTargetInfo[],
   mode?: LiveViewMode

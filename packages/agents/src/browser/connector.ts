@@ -22,7 +22,7 @@ import {
 import {
   applyLiveViewMode,
   LIVE_VIEW_URL_TTL_MS,
-  mintLiveView,
+  createLiveView,
   type BrowserLiveView,
   type BrowserLiveViewUrl,
   type LiveViewMode
@@ -717,7 +717,7 @@ export class BrowserConnector extends CodemodeConnector {
   }): Promise<BrowserLiveView | undefined> {
     const info = await this.sessionInfo();
     if (!info) return undefined;
-    return mintLiveView(info.sessionId, info.targets ?? [], options?.mode);
+    return createLiveView(info.sessionId, info.targets ?? [], options?.mode);
   }
 
   /** Close the shared (reuse/promoted) session, if one exists. */
