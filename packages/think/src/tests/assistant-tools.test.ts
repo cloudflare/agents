@@ -526,6 +526,286 @@ exit 9`)) as {
     expect(read.content).toContain("keep me");
   });
 
+  it("leaves workspace content under sandbox roots alone", async () => {
+    const agent = await freshAgent("bash-sandbox-root-content");
+    await agent.seed([
+      { path: "/tmp/cache/data.txt", content: "cached\n" },
+      { path: "/usr/notes.txt", content: "notes\n" }
+    ]);
+
+    // A script that never touches /tmp or /usr must not disturb them: the
+    // sync used to treat every pre-existing directory under a sandbox root
+    // as deleted and rm -rf it after writing its files back.
+    await agent.toolBash("echo hi > /hi.txt");
+
+    const cached = (await agent.toolRead("/tmp/cache/data.txt")) as {
+      content: string;
+    };
+    expect(cached.content).toContain("cached");
+    const notes = (await agent.toolRead("/usr/notes.txt")) as {
+      content: string;
+    };
+    expect(notes.content).toContain("notes");
+
+    // A script that does delete such a directory is still honoured.
+    const result = (await agent.toolBash("rm -rf /tmp/cache")) as {
+      changedFiles: { deleted: string[]; directoriesDeleted: string[] };
+    };
+    expect(result.changedFiles.deleted).toContain("/tmp/cache/data.txt");
+    expect(result.changedFiles.directoriesDeleted).toContain("/tmp/cache");
+    const removed = (await agent.toolRead("/tmp/cache/data.txt")) as {
+      error: string;
+    };
+    expect(removed.error).toContain("File not found");
+  });
+
+  it("persists writes inside workspace directories under sandbox roots", async () => {
+    const agent = await freshAgent("bash-sandbox-root-writes");
+    await agent.seed([
+      { path: "/tmp/cache/data.txt", content: "cached\n" },
+      { path: "/usr/project/notes.txt", content: "notes\n" }
+    ]);
+
+    // A workspace directory that happens to live under a sandbox root owns
+    // everything the script writes inside it: creates, subdirectories and
+    // renames all have to survive the sync.
+    const result = (await agent.toolBash(`echo fresh > /tmp/cache/new.txt
+mkdir -p /tmp/cache/sub
+echo deep > /tmp/cache/sub/deep.txt
+mv /tmp/cache/data.txt /tmp/cache/renamed.txt
+echo scratch > /tmp/loose.txt
+echo more > /usr/project/more.txt
+mv /usr/project/notes.txt /usr/project/renamed.txt`)) as {
+      exitCode: number;
+      changedFiles: {
+        created: string[];
+        deleted: string[];
+        directoriesCreated: string[];
+      };
+    };
+
+    expect(result.exitCode).toBe(0);
+    expect(result.changedFiles.created).toContain("/tmp/cache/new.txt");
+    expect(result.changedFiles.created).toContain("/tmp/cache/sub/deep.txt");
+    expect(result.changedFiles.created).toContain("/tmp/cache/renamed.txt");
+    expect(result.changedFiles.created).toContain("/usr/project/more.txt");
+    expect(result.changedFiles.created).toContain("/usr/project/renamed.txt");
+    expect(result.changedFiles.directoriesCreated).toContain("/tmp/cache/sub");
+    expect(result.changedFiles.deleted).toContain("/tmp/cache/data.txt");
+    expect(result.changedFiles.deleted).toContain("/usr/project/notes.txt");
+    // Scratch written directly under a sandbox root is still the shell's own.
+    expect(result.changedFiles.created).not.toContain("/tmp/loose.txt");
+
+    const renamed = (await agent.toolRead("/tmp/cache/renamed.txt")) as {
+      content: string;
+    };
+    expect(renamed.content).toContain("cached");
+    const created = (await agent.toolRead("/tmp/cache/new.txt")) as {
+      content: string;
+    };
+    expect(created.content).toContain("fresh");
+    const deep = (await agent.toolRead("/tmp/cache/sub/deep.txt")) as {
+      content: string;
+    };
+    expect(deep.content).toContain("deep");
+    const usrRenamed = (await agent.toolRead("/usr/project/renamed.txt")) as {
+      content: string;
+    };
+    expect(usrRenamed.content).toContain("notes");
+    const usrCreated = (await agent.toolRead("/usr/project/more.txt")) as {
+      content: string;
+    };
+    expect(usrCreated.content).toContain("more");
+
+    const scratch = (await agent.toolRead("/tmp/loose.txt")) as {
+      error: string;
+    };
+    expect(scratch.error).toContain("File not found");
+    const gone = (await agent.toolRead("/tmp/cache/data.txt")) as {
+      error: string;
+    };
+    expect(gone.error).toContain("File not found");
+  });
+
+  it("never persists the shell's synthetic builtins", async () => {
+    const agent = await freshAgent("bash-builtin-leak");
+    await agent.seed([{ path: "/usr/bin/custom-tool", content: "tool\n" }]);
+
+    // The shell writes a file per builtin into /bin and /usr/bin. A workspace
+    // holding /usr/bin must not therefore own all of them.
+    const result = (await agent.toolBash("echo ok")) as {
+      exitCode: number;
+      changedFiles: {
+        created: string[];
+        updated: string[];
+        directoriesCreated: string[];
+      };
+    };
+
+    expect(result.exitCode).toBe(0);
+    const touched = [
+      ...result.changedFiles.created,
+      ...result.changedFiles.updated,
+      ...result.changedFiles.directoriesCreated
+    ];
+    expect(touched.filter((path) => path.startsWith("/usr/bin/"))).toEqual([]);
+    expect(touched.filter((path) => path.startsWith("/bin/"))).toEqual([]);
+
+    const listed = (await agent.toolList("/usr/bin")) as { entries: string[] };
+    expect(listed.entries).toHaveLength(1);
+    expect(listed.entries[0]).toContain("custom-tool");
+
+    const tool = (await agent.toolRead("/usr/bin/custom-tool")) as {
+      content: string;
+    };
+    expect(tool.content).toContain("tool");
+  });
+
+  it("keeps content moved onto a sandbox root", async () => {
+    const agent = await freshAgent("bash-sandbox-root-rename");
+    await agent.seed([
+      { path: "/tmp/cache/data.txt", content: "cached\n" },
+      { path: "/tmp/cache/sub/deep.txt", content: "deep\n" },
+      { path: "/tmp/notes/note.txt", content: "note\n" }
+    ]);
+
+    // Renaming a workspace directory onto a sandbox root leaves the
+    // destination without an initial ancestor; provenance comes from the
+    // vanished source's contents instead.
+    const result = (await agent.toolBash(`mv /tmp/cache /tmp/archive
+mv /tmp/notes/note.txt /tmp/note.txt
+echo scratch > /tmp/loose.txt`)) as {
+      exitCode: number;
+      changedFiles: { created: string[]; deleted: string[] };
+    };
+
+    expect(result.exitCode).toBe(0);
+    expect(result.changedFiles.created).toContain("/tmp/archive/data.txt");
+    expect(result.changedFiles.created).toContain("/tmp/archive/sub/deep.txt");
+    expect(result.changedFiles.created).toContain("/tmp/note.txt");
+    expect(result.changedFiles.deleted).toContain("/tmp/cache/data.txt");
+    // Unrelated scratch under a sandbox root is still discarded.
+    expect(result.changedFiles.created).not.toContain("/tmp/loose.txt");
+
+    const moved = (await agent.toolRead("/tmp/archive/data.txt")) as {
+      content: string;
+    };
+    expect(moved.content).toContain("cached");
+    const deep = (await agent.toolRead("/tmp/archive/sub/deep.txt")) as {
+      content: string;
+    };
+    expect(deep.content).toContain("deep");
+    const note = (await agent.toolRead("/tmp/note.txt")) as { content: string };
+    expect(note.content).toContain("note");
+
+    const gone = (await agent.toolRead("/tmp/cache/data.txt")) as {
+      error: string;
+    };
+    expect(gone.error).toContain("File not found");
+    const scratch = (await agent.toolRead("/tmp/loose.txt")) as {
+      error: string;
+    };
+    expect(scratch.error).toContain("File not found");
+  });
+
+  it("keeps moved content that the script edits afterwards", async () => {
+    const agent = await freshAgent("bash-move-then-edit");
+    await agent.seed([{ path: "/tmp/cache/data.txt", content: "cached\n" }]);
+
+    // Ownership follows the move itself, so it survives later writes that
+    // change the content out from under any before/after comparison.
+    const result = (await agent.toolBash(`mv /tmp/cache /tmp/archive
+echo more >> /tmp/archive/data.txt`)) as {
+      exitCode: number;
+      changedFiles: { created: string[]; deleted: string[] };
+    };
+
+    expect(result.exitCode).toBe(0);
+    expect(result.changedFiles.created).toContain("/tmp/archive/data.txt");
+    expect(result.changedFiles.deleted).toContain("/tmp/cache/data.txt");
+
+    const moved = (await agent.toolRead("/tmp/archive/data.txt")) as {
+      content: string;
+    };
+    expect(moved.content).toContain("cached");
+    expect(moved.content).toContain("more");
+  });
+
+  it("keeps an empty workspace directory moved onto a sandbox root", async () => {
+    const agent = await freshAgent("bash-move-empty-dir");
+    await agent.seedDir("/tmp/empty");
+
+    const result = (await agent.toolBash("mv /tmp/empty /tmp/moved")) as {
+      exitCode: number;
+      changedFiles: {
+        directoriesCreated: string[];
+        directoriesDeleted: string[];
+      };
+    };
+
+    expect(result.exitCode).toBe(0);
+    expect(result.changedFiles.directoriesCreated).toContain("/tmp/moved");
+    expect(result.changedFiles.directoriesDeleted).toContain("/tmp/empty");
+
+    const listed = (await agent.toolList("/tmp")) as { entries: string[] };
+    expect(listed.entries).toContain("moved/");
+    expect(listed.entries).not.toContain("empty/");
+  });
+
+  it("keeps content moved across sandbox roots and through a chain of moves", async () => {
+    const agent = await freshAgent("bash-move-chain");
+    await agent.seed([
+      { path: "/tmp/cache/data.txt", content: "cached\n" },
+      { path: "/tmp/chain/link.txt", content: "chained\n" },
+      { path: "/usr/project/keep.txt", content: "keep\n" }
+    ]);
+
+    const result =
+      (await agent.toolBash(`mv /tmp/cache/data.txt /usr/project/data.txt
+mv /tmp/chain /tmp/first
+mv /tmp/first /usr/second`)) as {
+        exitCode: number;
+        changedFiles: { created: string[]; deleted: string[] };
+      };
+
+    expect(result.exitCode).toBe(0);
+    expect(result.changedFiles.created).toContain("/usr/project/data.txt");
+    expect(result.changedFiles.created).toContain("/usr/second/link.txt");
+    expect(result.changedFiles.deleted).toContain("/tmp/cache/data.txt");
+    expect(result.changedFiles.deleted).toContain("/tmp/chain/link.txt");
+
+    const crossRoot = (await agent.toolRead("/usr/project/data.txt")) as {
+      content: string;
+    };
+    expect(crossRoot.content).toContain("cached");
+    const chained = (await agent.toolRead("/usr/second/link.txt")) as {
+      content: string;
+    };
+    expect(chained.content).toContain("chained");
+  });
+
+  it("does not adopt scratch that matches deleted workspace content", async () => {
+    const agent = await freshAgent("bash-scratch-lookalike");
+    await agent.seed([{ path: "/tmp/cache/data.txt", content: "cached\n" }]);
+
+    // No move happened, so byte-identical scratch under a sandbox root stays
+    // the shell's own however closely it resembles the deleted file.
+    const result = (await agent.toolBash(`rm /tmp/cache/data.txt
+printf 'cached\\n' > /tmp/data.txt`)) as {
+      exitCode: number;
+      changedFiles: { created: string[]; deleted: string[] };
+    };
+
+    expect(result.exitCode).toBe(0);
+    expect(result.changedFiles.created).not.toContain("/tmp/data.txt");
+    expect(result.changedFiles.deleted).toContain("/tmp/cache/data.txt");
+
+    const scratch = (await agent.toolRead("/tmp/data.txt")) as {
+      error: string;
+    };
+    expect(scratch.error).toContain("File not found");
+  });
+
   it("persists empty directory creates and deletes", async () => {
     const agent = await freshAgent("bash-empty-dirs");
     await agent.seedDir("/remove-empty");
