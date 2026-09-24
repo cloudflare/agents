@@ -1,0 +1,29 @@
+.changeset/think-structured-turn-recovery.md
+  s_368991bdec7f77::t_12d9070d4a8d88 1-5
+docs/think/workflows.md
+  s_368991bdec7f77::t_c79b934936339f 144-148
+packages/think/src/tests/submissions.test.ts
+  s_368991bdec7f77::t_1496f819b9ef7c 161-169,1366-1488
+packages/think/src/think.ts
+  s_368991bdec7f77::t_593f20b89e7462 1830,12622-12624,12666,12679,12737,12774,12783-12784,16822-16823,16829-16834,17230-17248
+packages/think/src/e2e-tests/workflow-recovery.test.ts
+  s_368991bdec7f77::t_16673504551259 11-12,238,257-259,270-271
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_c08321b8ba42df 7050-7110
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "372a83ae4b489d4c40ce05399933d1fda4ec1b32",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
