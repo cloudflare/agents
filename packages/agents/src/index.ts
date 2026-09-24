@@ -4278,13 +4278,14 @@ export class Agent<
       };
 
       try {
-        const result = await _fiberALS
-          .run({ id, signal, stash }, () =>
+        let result: T;
+        try {
+          result = await _fiberALS.run({ id, signal, stash }, () =>
             fn({ id, signal, stash, snapshot: null })
-          )
-          .finally(() => {
-            bodySettled = true;
-          });
+          );
+        } finally {
+          bodySettled = true;
+        }
         options?.beforeRunCleanup?.({ ok: true });
         this._emit("fiber:run:completed", {
           fiberId: id,

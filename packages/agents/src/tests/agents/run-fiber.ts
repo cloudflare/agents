@@ -75,7 +75,9 @@ export class TestRunFiberAgent extends Agent {
   }
 
   /** Returns the body's error message, caught here so it does not cross RPC. */
-  async runFailingWithFailingCleanup(): Promise<string | null> {
+  async runFailingWithFailingCleanup(
+    syncThrow = false
+  ): Promise<string | null> {
     this.sql`
       CREATE TRIGGER fail_run_fiber_cleanup
       BEFORE DELETE ON cf_agents_runs
@@ -86,9 +88,16 @@ export class TestRunFiberAgent extends Agent {
     `;
 
     try {
-      await this.runFiber("cleanup-failure-after-error", async () => {
-        throw new Error("body failed");
-      });
+      await this.runFiber(
+        "cleanup-failure-after-error",
+        syncThrow
+          ? (): Promise<void> => {
+              throw new Error("body failed synchronously");
+            }
+          : async () => {
+              throw new Error("body failed");
+            }
+      );
       return null;
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
