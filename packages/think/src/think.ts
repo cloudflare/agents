@@ -2395,7 +2395,7 @@ export type SubmitMessagesResult = ThinkSubmissionInspection & {
 export type WaitForSubmissionOptions = {
   /**
    * Stop waiting after this many milliseconds and return the submission as it
-   * is then, still `pending` or `running`.
+   * is then, still `pending` or `running`, or `null` if it was deleted.
    */
   timeoutMs?: number;
 };
@@ -2418,11 +2418,17 @@ export type CancelSubmissionResult =
       outcome: "cancelled";
       submissionId: string;
       /**
-       * `"pending"`: removed before its turn started, so its messages were
-       * never applied. `"running"`: its turn had started and was signalled to
-       * abort; side effects already under way may still finish.
+       * `"pending"`: removed before its turn started. `"running"`: its turn
+       * had been claimed and was signalled to abort; side effects already
+       * under way may still finish.
        */
       previousStatus: "pending" | "running";
+      /**
+       * Whether the submission's messages were written to the conversation
+       * before it was cancelled. A claimed submission can still be `false`
+       * when it is cancelled before its turn applies them.
+       */
+      messagesApplied: boolean;
       submission: ThinkSubmissionInspection;
     };
 
@@ -11085,6 +11091,8 @@ export class Think<
 
   private async _emitSubmissionStatus(row: ThinkSubmissionRow): Promise<void> {
     const inspection = this._inspectionFromSubmissionRow(row);
+    const terminal = this._isTerminalSubmissionStatus(inspection.status);
+    if (terminal) this._terminalStatusEmits.add(inspection.submissionId);
     this._emit("submission:status", {
       submissionId: inspection.submissionId,
       requestId: inspection.requestId,
@@ -11104,24 +11112,40 @@ export class Think<
         error: inspection.error
       });
     }
-    await this.keepAliveWhile(async () => {
-      try {
-        await this.onSubmissionStatus(inspection);
-      } catch (error) {
-        console.error("[Think] onSubmissionStatus failed", error);
+    try {
+      await this.keepAliveWhile(async () => {
+        try {
+          await this.onSubmissionStatus(inspection);
+        } catch (error) {
+          console.error("[Think] onSubmissionStatus failed", error);
+        }
+      });
+    } finally {
+      if (terminal) {
+        this._terminalStatusEmits.delete(inspection.submissionId);
+        this._resolveSubmissionWaiters(inspection);
       }
-    });
-    if (this._isTerminalSubmissionStatus(inspection.status)) {
-      const waiters = this._submissionWaiters.get(inspection.submissionId);
-      this._submissionWaiters.delete(inspection.submissionId);
-      for (const waiter of waiters ?? []) waiter(inspection);
     }
+  }
+
+  private _resolveSubmissionWaiters(
+    submission: ThinkSubmissionInspection
+  ): void {
+    const waiters = this._submissionWaiters.get(submission.submissionId);
+    this._submissionWaiters.delete(submission.submissionId);
+    for (const waiter of waiters ?? []) waiter(submission);
   }
 
   private _submissionWaiters = new Map<
     string,
     Set<(submission: ThinkSubmissionInspection) => void>
   >();
+
+  /**
+   * Submissions whose row is terminal but whose `onSubmissionStatus` has not
+   * finished. `waitForSubmission` keeps waiting for these.
+   */
+  private _terminalStatusEmits = new Set<string>();
 
   /**
    * Resolve once the submission reaches a terminal status (`completed`,
@@ -11139,7 +11163,10 @@ export class Think<
   ): Promise<ThinkSubmissionInspection | null> {
     const row = this._readSubmission(submissionId);
     if (!row) return null;
-    if (this._isTerminalSubmissionStatus(row.status)) {
+    if (
+      this._isTerminalSubmissionStatus(row.status) &&
+      !this._terminalStatusEmits.has(submissionId)
+    ) {
       return this._inspectionFromSubmissionRow(row);
     }
     return new Promise((resolve) => {
@@ -11353,7 +11380,15 @@ export class Think<
       WHERE submission_id = ${submissionId}
         AND status IN ('completed', 'aborted', 'skipped', 'error')
     `;
+    this._releaseDeletedSubmissionWaiters([row]);
     return true;
+  }
+
+  private _releaseDeletedSubmissionWaiters(rows: ThinkSubmissionRow[]): void {
+    for (const row of rows) {
+      if (this._terminalStatusEmits.has(row.submission_id)) continue;
+      this._resolveSubmissionWaiters(this._inspectionFromSubmissionRow(row));
+    }
   }
 
   async deleteSubmissions(options?: DeleteSubmissionsOptions): Promise<number> {
@@ -11383,9 +11418,10 @@ export class Think<
       )
       .slice(0, limit);
 
-    const idsToDelete = rows
-      .filter((row) => this._isTerminalSubmissionStatus(row.status))
-      .map((row) => row.submission_id);
+    const rowsToDelete = rows.filter((row) =>
+      this._isTerminalSubmissionStatus(row.status)
+    );
+    const idsToDelete = rowsToDelete.map((row) => row.submission_id);
 
     // Batch deletes into `IN (...)` queries within the SQLite 100
     // bound-parameter limit to minimize round-trips during cleanup.
@@ -11399,6 +11435,7 @@ export class Think<
       this.sql(strings, ...batch);
       deleted += batch.length;
     }
+    this._releaseDeletedSubmissionWaiters(rowsToDelete);
     return deleted;
   }
 
@@ -11457,6 +11494,7 @@ export class Think<
       };
     }
     const previousStatus = row.status as "pending" | "running";
+    const messagesApplied = row.messages_applied_at !== null;
 
     const completedAt = Date.now();
     const errorMessage =
@@ -11491,12 +11529,17 @@ export class Think<
       };
     }
     this._enqueueTerminalWorkflowNotification(updated);
-    await this.dequeue(submissionRunItemId(submissionId));
-    await this._emitSubmissionStatus(updated);
+    this._terminalStatusEmits.add(submissionId);
+    try {
+      await this.dequeue(submissionRunItemId(submissionId));
+    } finally {
+      await this._emitSubmissionStatus(updated);
+    }
     return {
       outcome: "cancelled",
       submissionId,
       previousStatus,
+      messagesApplied,
       submission: this._inspectionFromSubmissionRow(updated)
     };
   }

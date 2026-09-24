@@ -113,6 +113,10 @@ type ThinkSubmissionTestStub = {
     options?: { timeoutMs?: number }
   ): Promise<ThinkSubmissionInspection | null>;
   deleteSubmissionForTest(submissionId: string): Promise<boolean>;
+  setSubmissionRowStatusForTest(
+    submissionId: string,
+    status: ThinkSubmissionStatus
+  ): Promise<void>;
   deleteSubmissionsForTest(options?: {
     status?: ThinkSubmissionStatus | ThinkSubmissionStatus[];
     completedBefore?: Date;
@@ -920,6 +924,70 @@ describe("Think durable submissions", () => {
     ).resolves.toMatchObject({ status: "pending" });
   });
 
+  it("waitForSubmission waits for onSubmissionStatus after the terminal write", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({ submissionId: "sub-wait-hook" });
+    await agent.setSubmissionStatusDelayForTest(150);
+
+    const cancel = agent.cancelSubmissionForTest("sub-wait-hook", "stop");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await expect(
+      agent.waitForSubmissionForTest("sub-wait-hook")
+    ).resolves.toMatchObject({ status: "aborted" });
+    const hookRan = (await agent.getSubmissionLog()).some(
+      (entry) =>
+        entry.submissionId === "sub-wait-hook" && entry.status === "aborted"
+    );
+    await cancel;
+    expect(hookRan).toBe(true);
+  });
+
+  it("waitForSubmission resolves when a terminal submission is deleted before its status is emitted", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({ submissionId: "sub-wait-deleted" });
+
+    const waiting = agent.waitForSubmissionForTest("sub-wait-deleted");
+    await agent.setSubmissionRowStatusForTest("sub-wait-deleted", "completed");
+    await expect(
+      agent.deleteSubmissionForTest("sub-wait-deleted")
+    ).resolves.toBe(true);
+    const settled = await Promise.race([
+      waiting,
+      new Promise<"stranded">((resolve) =>
+        setTimeout(() => resolve("stranded"), 1000)
+      )
+    ]);
+    expect(settled).toMatchObject({ status: "completed" });
+  });
+
+  it("reports whether a cancelled submission's messages were applied", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-claimed",
+      status: "running"
+    });
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-applied",
+      status: "running",
+      messagesAppliedAt: Date.now()
+    });
+
+    await expect(
+      agent.cancelSubmissionForTest("sub-claimed")
+    ).resolves.toMatchObject({
+      outcome: "cancelled",
+      previousStatus: "running",
+      messagesApplied: false
+    });
+    await expect(
+      agent.cancelSubmissionForTest("sub-applied")
+    ).resolves.toMatchObject({
+      outcome: "cancelled",
+      previousStatus: "running",
+      messagesApplied: true
+    });
+  });
+
   it("reports what cancelSubmission did", async () => {
     const agent = await freshAgent();
     await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
@@ -936,6 +1004,7 @@ describe("Think durable submissions", () => {
     ).resolves.toMatchObject({
       outcome: "cancelled",
       previousStatus: "pending",
+      messagesApplied: false,
       submission: { status: "aborted", error: "not needed" }
     });
     await expect(

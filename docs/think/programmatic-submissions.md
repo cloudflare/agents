@@ -111,11 +111,11 @@ Worker and Durable Object RPC boundaries, unlike `AbortSignal`.
 `cancelSubmission()` reports what it did, so a caller does not need a separate,
 race-prone inspection to find out:
 
-| `outcome`          | Meaning                                                                                                                                                                                                          |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cancelled`        | The submission is now `aborted`. `previousStatus` is `pending` when it was removed before its turn started, or `running` when its turn had started and was signalled to abort. `submission` holds the new state. |
-| `already_terminal` | The submission had already finished. `submission` holds its final state, which is unchanged.                                                                                                                     |
-| `not_found`        | No submission has this id.                                                                                                                                                                                       |
+| `outcome`          | Meaning                                                                                                                                                                                                                                                                                     |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cancelled`        | The submission is now `aborted`. `previousStatus` is `pending` when it was removed before its turn started, or `running` when its turn had been claimed and was signalled to abort. `messagesApplied` says whether its messages reached the conversation. `submission` holds the new state. |
+| `already_terminal` | The submission had already finished. `submission` holds its final state, which is unchanged.                                                                                                                                                                                                |
+| `not_found`        | No submission has this id.                                                                                                                                                                                                                                                                  |
 
 A `running` cancellation stops the turn, but work a tool had already started,
 such as an external request, may still finish.
@@ -135,13 +135,16 @@ const { submissionId } = await agent.submitMessages([message], {
 const settled = await agent.waitForSubmission(submissionId, {
   timeoutMs: 60_000
 });
-if (settled?.status === "pending" || settled?.status === "running") {
+if (!settled) {
+  throw new Error("Submission not found");
+}
+if (settled.status === "pending" || settled.status === "running") {
   throw new Error("Still running; retry this step");
 }
 ```
 
 With `timeoutMs`, the call returns the submission as it is when the time runs
-out, still `pending` or `running`. The wait is held in the agent's memory, so it
+out, still `pending` or `running`, or `null` if it was deleted. The wait is held in the agent's memory, so it
 rejects if the agent restarts. The submission itself is durable, so call
 `waitForSubmission()` again to keep waiting.
 

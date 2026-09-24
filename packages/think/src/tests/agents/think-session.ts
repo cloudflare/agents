@@ -6752,6 +6752,17 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.deleteSubmission(submissionId);
   }
 
+  async setSubmissionRowStatusForTest(
+    submissionId: string,
+    status: ThinkSubmissionStatus
+  ): Promise<void> {
+    this.sql`
+      UPDATE cf_think_submissions
+      SET status = ${status}, completed_at = ${Date.now()}
+      WHERE submission_id = ${submissionId}
+    `;
+  }
+
   async deleteSubmissionsForTest(options?: {
     status?: ThinkSubmissionStatus | ThinkSubmissionStatus[];
     completedBefore?: Date;
