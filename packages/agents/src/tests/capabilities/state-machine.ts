@@ -813,6 +813,66 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
     return this.#stateMachine.run("pipeline", { label }, { runId });
   }
 
+  /**
+   * Drive a run whose stored `definition_version` no longer matches the
+   * registered definition.
+   *
+   * Rewriting the column is the only way to reach this from a test: the
+   * engine writes the registered version on insert, so a mismatch means the
+   * code changed under a run that was already durable. The run must survive
+   * as `paused` with its checkpoint intact, and `resume()` must pick it up
+   * once the versions agree again.
+   */
+  async bumpStoredDefinitionVersion(
+    runId: string,
+    delta: number
+  ): Promise<void> {
+    await this.#stateMachine.run("pipeline", { label: "mismatch" }, { runId });
+    this.ctx.storage.sql.exec(
+      `UPDATE cf_agents_state_machine_runs
+       SET definition_version = definition_version + ? WHERE run_id = ?`,
+      delta,
+      runId
+    );
+  }
+
+  async readVersionMismatch(runId: string): Promise<{
+    status: string;
+    checkpoint: unknown;
+    error: { name: string; message: string } | null;
+  }> {
+    const row = this.ctx.storage.sql
+      .exec<{
+        status: string;
+        checkpoint_json: string | null;
+        error_name: string | null;
+        error_message: string | null;
+      }>(
+        `SELECT status, checkpoint_json, error_name, error_message
+         FROM cf_agents_state_machine_runs WHERE run_id = ?`,
+        runId
+      )
+      .one();
+    return {
+      status: row.status,
+      checkpoint: JSON.parse(row.checkpoint_json ?? "null"),
+      error:
+        row.error_name === null
+          ? null
+          : { name: row.error_name, message: row.error_message ?? "" }
+    };
+  }
+
+  /** Restore agreement, as a corrective redeploy would, then resume. */
+  async healVersionMismatch(runId: string): Promise<boolean> {
+    this.ctx.storage.sql.exec(
+      `UPDATE cf_agents_state_machine_runs
+       SET definition_version = definition_version - 1 WHERE run_id = ?`,
+      runId
+    );
+    return this.#stateMachine.resume(runId);
+  }
+
   async stageProbeJob(value: string, rollback = false) {
     try {
       await this.#jobProbe.stage(value, rollback);
@@ -1385,6 +1445,98 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
       supportsRetrying = false;
     }
     return { columns, attempt, supportsRetrying };
+  }
+
+  /**
+   * Seed a v4 effects table holding two rows that claim one external id, then
+   * migrate. The unique index cannot be built over the duplicate, so the
+   * migration has to resolve it; the newest claimant keeps the id.
+   */
+  async migrateDuplicateExternalIds(): Promise<{
+    indexed: boolean;
+    kept: string[];
+    cleared: string[];
+    rejectsDuplicates: boolean;
+  }> {
+    await this.#stateMachine.get("initialize-schema-v4");
+    await this.ctx.storage.put("cf_agents_state_machine_schema_version", 4);
+    // Rebuild the effect table as version four had it: same columns, but no
+    // unique index over `external_id`. Dropping the index alone is not enough,
+    // because `ensureCoordinationTables()` recreates it from the current DDL
+    // on the way through the migration.
+    this.ctx.storage.sql.exec(
+      "DROP TABLE IF EXISTS cf_agents_state_machine_effects"
+    );
+    this.ctx.storage.sql.exec(`CREATE TABLE cf_agents_state_machine_effects (
+      run_id TEXT NOT NULL,
+      effect_id TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      recovery TEXT NOT NULL CHECK (recovery IN ('safe', 'never', 'reconcile')),
+      status TEXT NOT NULL CHECK (status IN (
+        'pending', 'running', 'retrying', 'completed', 'failed', 'interrupted'
+      )),
+      input_json TEXT NOT NULL,
+      external_id TEXT,
+      result_json TEXT,
+      error_name TEXT,
+      error_message TEXT,
+      attempt INTEGER NOT NULL DEFAULT 1,
+      retry_at INTEGER,
+      options_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      settled_at INTEGER,
+      PRIMARY KEY (run_id, effect_id)
+    ) WITHOUT ROWID`);
+    const now = Date.now();
+    for (const [effectId, createdAt] of [
+      ["effect_old", now - 1000],
+      ["effect_new", now]
+    ] as const) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO cf_agents_state_machine_effects
+         (run_id, effect_id, revision, kind, recovery, status, input_json,
+          external_id, attempt, options_json, created_at)
+         VALUES ('dup-run', ?, 1, 'echo', 'reconcile', 'completed', '{}',
+                 'shared-external-id', 1, '{}', ?)`,
+        effectId,
+        createdAt
+      );
+    }
+    await this.#stateMachine.onStart();
+
+    const indexed =
+      this.ctx.storage.sql
+        .exec<{ name: string }>(
+          `SELECT name FROM sqlite_master WHERE type = 'index'
+           AND name = 'cf_agents_state_machine_effect_external_id'`
+        )
+        .toArray().length === 1;
+    const rows = this.ctx.storage.sql
+      .exec<{ effect_id: string; external_id: string | null }>(
+        `SELECT effect_id, external_id FROM cf_agents_state_machine_effects
+         WHERE run_id = 'dup-run' ORDER BY effect_id`
+      )
+      .toArray();
+    let rejectsDuplicates = false;
+    try {
+      this.ctx.storage.sql.exec(
+        `UPDATE cf_agents_state_machine_effects SET external_id = 'shared-external-id'
+         WHERE run_id = 'dup-run' AND effect_id = 'effect_old'`
+      );
+    } catch {
+      rejectsDuplicates = true;
+    }
+    return {
+      indexed,
+      kept: rows
+        .filter((row) => row.external_id !== null)
+        .map((row) => row.effect_id),
+      cleared: rows
+        .filter((row) => row.external_id === null)
+        .map((row) => row.effect_id),
+      rejectsDuplicates
+    };
   }
 
   async remigrateChildren(): Promise<{ rowCount: number; version?: number }> {

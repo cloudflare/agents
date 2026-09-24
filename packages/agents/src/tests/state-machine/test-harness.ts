@@ -150,6 +150,19 @@ export type HarnessStub = DurableObjectStub & {
     supportsRetrying: boolean;
   }>;
   remigrateChildren(): Promise<{ rowCount: number; version?: number }>;
+  migrateDuplicateExternalIds(): Promise<{
+    indexed: boolean;
+    kept: string[];
+    cleared: string[];
+    rejectsDuplicates: boolean;
+  }>;
+  bumpStoredDefinitionVersion(runId: string, delta: number): Promise<void>;
+  readVersionMismatch(runId: string): Promise<{
+    status: string;
+    checkpoint: unknown;
+    error: { name: string; message: string } | null;
+  }>;
+  healVersionMismatch(runId: string): Promise<boolean>;
   runSnapshot(runId: string): Promise<HarnessSnapshot | null>;
 };
 

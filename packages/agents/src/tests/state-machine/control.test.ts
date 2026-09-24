@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { runDurableObjectAlarm } from "cloudflare:test";
 import { createHarnessStub, waitFor } from "./test-harness";
 
 describe("StateMachine control", () => {
@@ -98,4 +99,27 @@ describe("StateMachine list", () => {
       );
     }
   );
+
+  it("pauses rather than fails a run whose definition version moved", async () => {
+    const stub = createHarnessStub();
+    await stub.bumpStoredDefinitionVersion("version-mismatch", 1);
+    await runDurableObjectAlarm(stub);
+
+    const parked = await stub.readVersionMismatch("version-mismatch");
+    expect(parked.status).toBe("paused");
+    // Pausing must not record a fault, and must not discard the checkpoint —
+    // both are what make the run recoverable by a corrective deploy.
+    expect(parked.error).toBeNull();
+    expect(parked.checkpoint).toMatchObject({ phase: "first" });
+
+    // With the versions in agreement again the run continues from that
+    // checkpoint instead of having to be restarted.
+    expect(await stub.healVersionMismatch("version-mismatch")).toBe(true);
+    const finished = await waitFor(stub, "version-mismatch", [
+      "completed",
+      "running",
+      "waiting"
+    ]);
+    expect(finished.status).not.toBe("failed");
+  });
 });
