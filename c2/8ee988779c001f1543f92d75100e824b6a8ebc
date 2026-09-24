@@ -1,0 +1,59 @@
+docs/think/programmatic-submissions.md
+  s_368991bdec7f77::t_e182d2d57051d2 111-147
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_e29c99f9bc5fc4 48-49,6749-6757
+packages/think/src/tests/submissions.test.ts
+  s_368991bdec7f77::t_675486706bb479 7,107-114,878-985
+packages/think/src/think.ts
+  s_368991bdec7f77::t_61be68ce6cfbf3 2408-2441,11139-11191,11474,11476-11484,11510-11516,11518-11526
+  s_368991bdec7f77::t_dda5c028f75607 482-485,488,3290-3300,5309-5310
+.changeset/think-submission-wait.md
+  s_368991bdec7f77::t_0d66a42b3503bc 1-7
+packages/ai-chat/src/tests/client-tools-continuation.test.ts
+  s_368991bdec7f77::t_5dbc5728200787 764-821
+  s_368991bdec7f77::t_84c80808c06a75 149-237,317-400
+packages/think/src/tests/agents/client-tools.ts
+  s_368991bdec7f77::t_eda2f299f8d240 394-480,810,899-900,906-915,917-920,949-952
+packages/think/src/tests/client-tools.test.ts
+  s_368991bdec7f77::t_7da28a3ef9b649 801-843
+.changeset/ai-chat-stale-post-stream-continuation.md
+  s_368991bdec7f77::t_b5d78238ab1c64 1-5
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_0f769334ab82ee 244,3175,3177-3182,3191-3194,6443,6525,6842,6846,6850,6886,7335
+packages/ai-chat/src/tests/worker.ts
+  s_368991bdec7f77::t_bf7613e81ba7fd 290-323,369-392
+docs/think/actions.md
+  s_368991bdec7f77::t_01de729b607cd9 178-188,307-316
+docs/think/tools.md
+  s_368991bdec7f77::t_49757b03fe9cd2 319
+packages/think/src/tests/execute-hitl.test.ts
+  s_368991bdec7f77::t_8bb817ef08072e 233
+packages/think/src/messengers/chat-sdk.ts
+  s_368991bdec7f77::t_a2ed85b75be9c1 8-9,116-123,242-243,246-247,249,385
+packages/think/src/messengers/index.ts
+  s_368991bdec7f77::t_68dcc1a9c8a3ce 3,20
+.changeset/think-messenger-concurrency.md
+  s_368991bdec7f77::t_e4ad04a21b03ab 1-5
+docs/think/messengers.md
+  s_368991bdec7f77::t_3a8f86e8678709 165-186
+packages/think/src/tests/agents/messengers.ts
+  s_368991bdec7f77::t_f9bcadb5260af3 222-223
+packages/think/src/tests/messengers.test.ts
+  s_368991bdec7f77::t_1fb4482483b468 1315-1331
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c28ee988779c001f1543f92d75100e824b6a8ebc",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
