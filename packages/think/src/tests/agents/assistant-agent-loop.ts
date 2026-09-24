@@ -10,6 +10,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import type { Session } from "../../think";
 import type { ObservabilityEvent } from "agents/observability";
+import type { ChatResponseResult } from "agents/chat";
 import { Think } from "../../think";
 import type {
   ChatErrorClassification,
@@ -323,9 +324,58 @@ export class LoopToolTestAgent extends Think {
       echo: tool({
         description: "Echo a message back",
         inputSchema: z.object({ message: z.string() }),
-        execute: async ({ message }: { message: string }) => `pong: ${message}`
+        execute: async ({ message }: { message: string }) => {
+          this._toolCallIdentity.execute.push(
+            this.activeTurn?.requestId ?? null
+          );
+          const released = new Promise<void>((resolve) => {
+            this._releaseDetached.push(resolve);
+          });
+          void released.then(() => {
+            this._toolCallIdentity.detached.push(
+              this.activeTurn?.requestId ?? null
+            );
+          });
+          return `pong: ${message}`;
+        }
       })
     };
+  }
+
+  private _toolCallIdentity: {
+    beforeToolCall: (string | null)[];
+    execute: (string | null)[];
+    afterToolCall: (string | null)[];
+    detached: (string | null)[];
+    onChatResponse: string[];
+  } = {
+    beforeToolCall: [],
+    execute: [],
+    afterToolCall: [],
+    detached: [],
+    onChatResponse: []
+  };
+
+  override onChatResponse(result: ChatResponseResult): void {
+    this._toolCallIdentity.onChatResponse.push(result.requestId);
+  }
+
+  private _releaseDetached: Array<() => void> = [];
+
+  /** Run the continuations the tool left behind, after its turn ended. */
+  async releaseDetachedToolWorkForTest(): Promise<void> {
+    for (const release of this._releaseDetached.splice(0)) release();
+    await Promise.resolve();
+  }
+
+  async getToolCallIdentityForTest(): Promise<{
+    beforeToolCall: (string | null)[];
+    execute: (string | null)[];
+    afterToolCall: (string | null)[];
+    detached: (string | null)[];
+    onChatResponse: string[];
+  }> {
+    return this._toolCallIdentity;
   }
 
   private _stepLog: Array<{
@@ -345,6 +395,7 @@ export class LoopToolTestAgent extends Think {
   }
 
   override beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
+    this._toolCallIdentity.beforeToolCall.push(ctx.requestId ?? null);
     this._beforeToolCallLog.push({
       toolName: ctx.toolName,
       inputJson: JSON.stringify(ctx.input)
@@ -352,6 +403,7 @@ export class LoopToolTestAgent extends Think {
   }
 
   override afterToolCall(ctx: ToolCallResultContext): void {
+    this._toolCallIdentity.afterToolCall.push(ctx.requestId ?? null);
     this._afterToolCallLog.push({
       toolName: ctx.toolName,
       inputJson: JSON.stringify(ctx.input),

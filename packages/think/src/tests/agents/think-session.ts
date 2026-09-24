@@ -44,8 +44,10 @@ import type {
   ActionAuthorizationContext,
   ActionAuthorizationDecision,
   StepContext,
-  ChunkContext
+  ChunkContext,
+  ActiveTurn
 } from "../../think";
+import type { MessengerContext } from "../../messengers";
 import {
   CHAT_MESSAGE_TYPES,
   CHAT_RECOVERY_TASK_NAME,
@@ -597,6 +599,17 @@ class TestCollectingCallback implements StreamCallback {
 // beforeTurn/onStepFinish/onChunk (instrumentation),
 // _transformInferenceResult (error injection).
 
+type TurnIdentityLogEntry = {
+  input: string;
+  requestId: string | null;
+  trigger: string | null;
+  hasAbortSignal: boolean;
+  activeRequestId: string | null;
+  activeTrigger: string | null;
+  messengerThreadId: string | null;
+  getMessengerThreadId: string | null;
+};
+
 export class ThinkTestAgent extends Think {
   private _response = "Hello from the assistant!";
   private _nextSubAgentConnectionSendDelayMs = 0;
@@ -630,6 +643,7 @@ export class ThinkTestAgent extends Think {
     createdAt: number;
   }> = [];
   private _stashInBeforeTurnForTest: string | undefined;
+  private _turnIdentityLog: TurnIdentityLogEntry[] = [];
 
   override async onChatRecovery(
     ctx: ChatRecoveryContext
@@ -903,7 +917,9 @@ export class ThinkTestAgent extends Think {
     return this._agentToolOutputForTest.get(runId);
   }
 
-  override beforeTurn(ctx: TurnContext): TurnConfig | void {
+  override beforeTurn(
+    ctx: TurnContext
+  ): TurnConfig | void | Promise<TurnConfig | void> {
     this._beforeTurnLog.push({
       system: ctx.system,
       toolNames: Object.keys(ctx.tools),
@@ -911,16 +927,101 @@ export class ThinkTestAgent extends Think {
       body: ctx.body as RpcJsonObject | undefined
     });
     this._beforeTurnMessagesJson.push(JSON.stringify(ctx.messages));
+    const lastUser = [...ctx.messages].reverse().find((m) => m.role === "user");
+    this._turnIdentityLog.push({
+      input: JSON.stringify(lastUser?.content ?? null),
+      requestId: ctx.requestId ?? null,
+      trigger: ctx.trigger ?? null,
+      hasAbortSignal: ctx.abortSignal instanceof AbortSignal,
+      activeRequestId: this.activeTurn?.requestId ?? null,
+      activeTrigger: this.activeTurn?.trigger ?? null,
+      messengerThreadId: ctx.messenger?.thread.id ?? null,
+      getMessengerThreadId: this.getMessengerContext()?.thread.id ?? null
+    });
     this._capturedTurnChannels.push(this.activeChannel?.channelId ?? "");
     this._capturedTurnMetadata.push(this.activeTurnMetadata);
     if (this._stashInBeforeTurnForTest !== undefined) {
       this.stash(this._stashInBeforeTurnForTest);
     }
+    const hold = this._messengerTurnHold;
+    if (hold) {
+      this._messengerTurnHold = undefined;
+      return this._holdMessengerTurn(hold);
+    }
     if (this._turnConfigOverride) return this._turnConfigOverride;
+  }
+
+  private _messengerTurnHold:
+    | { entered: () => void; release: Promise<void> }
+    | undefined;
+  private _heldMessengerThreadId: string | null = null;
+
+  private async _holdMessengerTurn(hold: {
+    entered: () => void;
+    release: Promise<void>;
+  }): Promise<TurnConfig | void> {
+    hold.entered();
+    await hold.release;
+    this._heldMessengerThreadId = this.getMessengerContext()?.thread.id ?? null;
+    if (this._turnConfigOverride) return this._turnConfigOverride;
+  }
+
+  async getHeldMessengerThreadIdForTest(): Promise<string | null> {
+    return this._heldMessengerThreadId;
   }
 
   async getCapturedTurnChannelsForTest(): Promise<string[]> {
     return this._capturedTurnChannels;
+  }
+
+  async getTurnIdentityLogForTest(): Promise<TurnIdentityLogEntry[]> {
+    return this._turnIdentityLog;
+  }
+
+  async getResponseRequestIdsForTest(): Promise<string[]> {
+    return this._responseLog.map((response) => response.requestId);
+  }
+
+  async getActiveTurnForTest(): Promise<ActiveTurn | null> {
+    return this.activeTurn ?? null;
+  }
+
+  async runConcurrentMessengerTurnsForTest(): Promise<void> {
+    const context = (threadId: string): MessengerContext => ({
+      capabilities: {},
+      kind: "direct-message",
+      messengerId: "fake",
+      provider: "fake",
+      thread: {
+        id: threadId,
+        isDirectMessage: true,
+        providerThreadId: threadId
+      }
+    });
+    let entered!: () => void;
+    const enteredA = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    this._messengerTurnHold = {
+      entered,
+      release: new Promise<void>((resolve) => {
+        release = resolve;
+      })
+    };
+    const turnA = this.chatWithMessengerContext(
+      "from thread a",
+      new TestCollectingCallback(),
+      context("thread-a")
+    );
+    await enteredA;
+    const turnB = this.chatWithMessengerContext(
+      "from thread b",
+      new TestCollectingCallback(),
+      context("thread-b")
+    );
+    release();
+    await Promise.all([turnA, turnB]);
   }
 
   async getCapturedTurnMetadataForTest(): Promise<

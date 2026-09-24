@@ -142,14 +142,34 @@ beforeTurn(ctx: TurnContext): TurnConfig | void | Promise<TurnConfig | void>
 
 ### TurnContext
 
-| Field          | Type                      | Description                                                              |
-| -------------- | ------------------------- | ------------------------------------------------------------------------ |
-| `system`       | `string`                  | Assembled system prompt (from context blocks or `getSystemPrompt()`)     |
-| `messages`     | `ModelMessage[]`          | Assembled model messages (truncated)                                     |
-| `tools`        | `ToolSet`                 | Merged tool set (workspace + getTools + context + MCP + client + caller) |
-| `model`        | `LanguageModel`           | The resolved model (a string from `getModel()` is already resolved here) |
-| `continuation` | `boolean`                 | Whether this is a continuation turn (auto-continue after tool result)    |
-| `body`         | `Record<string, unknown>` | Custom body fields from the client request                               |
+| Field          | Type                            | Description                                                              |
+| -------------- | ------------------------------- | ------------------------------------------------------------------------ |
+| `system`       | `string`                        | Assembled system prompt (from context blocks or `getSystemPrompt()`)     |
+| `messages`     | `ModelMessage[]`                | Assembled model messages (truncated)                                     |
+| `tools`        | `ToolSet`                       | Merged tool set (workspace + getTools + context + MCP + client + caller) |
+| `model`        | `LanguageModel`                 | The resolved model (a string from `getModel()` is already resolved here) |
+| `continuation` | `boolean`                       | Whether this is a continuation turn (auto-continue after tool result)    |
+| `body`         | `Record<string, unknown>`       | Custom body fields from the client request                               |
+| `requestId`    | `string \| undefined`           | The request this turn runs for. See [Turn identity](#turn-identity)      |
+| `trigger`      | `TurnTrigger \| undefined`      | What admitted the turn: `"ws-chat"`, `"rpc"`, `"submission"`, and so on  |
+| `abortSignal`  | `AbortSignal \| undefined`      | Aborts when the turn is cancelled. Pass it to I/O the hook awaits        |
+| `messenger`    | `MessengerContext \| undefined` | The messenger thread this turn answers, fixed when the turn was admitted |
+
+### Turn identity
+
+Every turn has a request id. `beforePersist`, `beforeTurn`, `beforeToolCall`, `onChatResponse` and `onChatError` all receive the same id for the same turn, so state a subclass keeps for a turn can be keyed by it instead of by a shared field that a later turn could overwrite.
+
+Anywhere else inside a turn, such as a tool's `execute` or a helper called from a hook, read `this.activeTurn`. It returns `{ requestId, trigger, continuation, channel? }` for the running turn, and `undefined` outside a turn, including in work a turn schedules to run later.
+
+```typescript
+override async beforeTurn(ctx: TurnContext) {
+  console.log("turn", ctx.requestId, "admitted by", ctx.trigger);
+  const profile = await loadProfile({ signal: ctx.abortSignal });
+  return { system: `${ctx.system}\n\n${profile}` };
+}
+```
+
+A continuation turn, for example the one that runs after a tool approval, has its own request id rather than the id of the turn that asked for the approval.
 
 ### TurnConfig
 
@@ -491,6 +511,7 @@ beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void | Promise<ToolCall
 | `stepNumber`       | `number \| undefined`         | Index of the current step where this tool call occurs                       |
 | `messages`         | `ReadonlyArray<ModelMessage>` | Conversation messages visible at tool execution time                        |
 | `abortSignal`      | `AbortSignal \| undefined`    | Aborts if the turn is cancelled                                             |
+| `requestId?`       | `string`                      | Request id of the turn making the call. See [Turn identity](#turn-identity) |
 
 Pass an explicit `TOOLS` generic to get full input typing:
 
@@ -577,19 +598,20 @@ afterToolCall(ctx: ToolCallResultContext): void | Promise<void>
 
 `ToolCallResultContext<TOOLS>` is backed by the AI SDK's `OnToolCallFinishEvent<TOOLS>` (the parameter of `experimental_onToolCallFinish`). It spreads the originating `TypedToolCall<TOOLS>` at the top level, plus the per-call event extras and a discriminated outcome:
 
-| Field        | Type                                      | Description                                          |
-| ------------ | ----------------------------------------- | ---------------------------------------------------- |
-| `type`       | `"tool-call"`                             | Discriminator (carried over from the call)           |
-| `toolCallId` | `string`                                  | Unique id matching the originating `ToolCallContext` |
-| `toolName`   | `string`                                  | Name of the tool that was called                     |
-| `input`      | typed when `TOOLS` is passed              | Arguments the tool was called with                   |
-| `dynamic?`   | `boolean`                                 | `true` for runtime-registered tools                  |
-| `stepNumber` | `number \| undefined`                     | Index of the current step                            |
-| `messages`   | `ReadonlyArray<ModelMessage>`             | Conversation messages visible at tool execution time |
-| `durationMs` | `number`                                  | Wall-clock execution time of `execute`               |
-| `success`    | `boolean`                                 | Discriminator: `true` on success, `false` on failure |
-| `output`     | typed per tool (when `success` is `true`) | Whatever the tool's `execute` returned               |
-| `error`      | `unknown` (when `success` is `false`)     | Whatever was thrown from `execute`                   |
+| Field        | Type                                      | Description                                                                    |
+| ------------ | ----------------------------------------- | ------------------------------------------------------------------------------ |
+| `type`       | `"tool-call"`                             | Discriminator (carried over from the call)                                     |
+| `toolCallId` | `string`                                  | Unique id matching the originating `ToolCallContext`                           |
+| `toolName`   | `string`                                  | Name of the tool that was called                                               |
+| `input`      | typed when `TOOLS` is passed              | Arguments the tool was called with                                             |
+| `dynamic?`   | `boolean`                                 | `true` for runtime-registered tools                                            |
+| `stepNumber` | `number \| undefined`                     | Index of the current step                                                      |
+| `messages`   | `ReadonlyArray<ModelMessage>`             | Conversation messages visible at tool execution time                           |
+| `durationMs` | `number`                                  | Wall-clock execution time of `execute`                                         |
+| `requestId?` | `string`                                  | Request id of the turn that made the call. See [Turn identity](#turn-identity) |
+| `success`    | `boolean`                                 | Discriminator: `true` on success, `false` on failure                           |
+| `output`     | typed per tool (when `success` is `true`) | Whatever the tool's `execute` returned                                         |
+| `error`      | `unknown` (when `success` is `false`)     | Whatever was thrown from `execute`                                             |
 
 When you pass an explicit `TOOLS` generic, narrowing on `ctx.toolName` (together with `ctx.success`) narrows `ctx.output` to that tool's inferred output type. Dynamic tools (runtime-registered, MCP) stay `unknown`:
 
@@ -924,13 +946,13 @@ The handler receives `(snapshot, host)` — symmetric with tool `execute`. `host
 
 Snapshots are intentionally narrower than the subclass `Context` types — class instances, `AbortSignal`s, and other non-JSON-clonable values can't cross the Workers RPC boundary.
 
-| Hook             | Snapshot fields                                                                                              |
-| ---------------- | ------------------------------------------------------------------------------------------------------------ |
-| `beforeTurn`     | `{ system, toolNames, messageCount, continuation, body?, modelId }` — see `TurnContextSnapshot`              |
-| `beforeToolCall` | `{ toolName, toolCallId, input, stepNumber, dynamic? }`                                                      |
-| `afterToolCall`  | `{ toolName, toolCallId, input, stepNumber, durationMs, success, output? \| error?, dynamic? }`              |
-| `onStepFinish`   | `{ stepNumber, finishReason, text, reasoningText, toolCallCount, toolResultCount, usage, providerMetadata }` |
-| `onChunk`        | `{ type, text?, toolName?, toolCallId? }` — minimal because this fires per token                             |
+| Hook             | Snapshot fields                                                                                                       |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `beforeTurn`     | `{ system, toolNames, messageCount, continuation, body?, modelId, requestId?, trigger? }` — see `TurnContextSnapshot` |
+| `beforeToolCall` | `{ toolName, toolCallId, input, stepNumber, dynamic? }`                                                               |
+| `afterToolCall`  | `{ toolName, toolCallId, input, stepNumber, durationMs, success, output? \| error?, dynamic? }`                       |
+| `onStepFinish`   | `{ stepNumber, finishReason, text, reasoningText, toolCallCount, toolResultCount, usage, providerMetadata }`          |
+| `onChunk`        | `{ type, text?, toolName?, toolCallId? }` — minimal because this fires per token                                      |
 
 ### Return values
 
