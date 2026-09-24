@@ -38,4 +38,5 @@ minimumReleaseAge: 1440
 minimumReleaseAgeExclude:
   - "@cloudflare/*"
   - "@earendil-works/*"
+  - "@opencode/*"
   - "@typescript/*"
