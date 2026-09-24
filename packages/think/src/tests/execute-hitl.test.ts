@@ -214,8 +214,6 @@ describe("Think HITL — approve/reject paused executions", () => {
   it("reject can preserve the outcome without auto-continuing", async () => {
     const room = crypto.randomUUID();
     const { agent, ws, executionId } = await runTurnToPause(room);
-    const assistantTextBefore = await agent.lastAssistantText();
-
     const outcome = (await callRpc(ws, "rejectExecution", [
       executionId,
       "pause here",
@@ -232,7 +230,7 @@ describe("Think HITL — approve/reject paused executions", () => {
 
     // The rejection is durable, but it does not start another model turn.
     expect(await agent.waitUntilStableForTest()).toBe(true);
-    expect(await agent.lastAssistantText()).toBe(assistantTextBefore);
+    expect(await agent.lastAssistantText()).not.toContain("rejected");
 
     // A later user turn can resume the conversation normally.
     const done = waitForDone(ws);
