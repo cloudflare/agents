@@ -147,6 +147,56 @@ describe("Think — beforeTurn hook", () => {
     expect(log[0].continuation).toBe(false);
   });
 
+  it("carries the turn's request id, trigger and abort signal", async () => {
+    const agent = await freshAgent("hook-bt-identity");
+    await agent.testChat("First");
+    await agent.testChat("Second");
+
+    const log = await agent.getTurnIdentityLogForTest();
+    expect(log).toHaveLength(2);
+    expect(log.map((entry) => entry.requestId)).toEqual(
+      await agent.getResponseRequestIdsForTest()
+    );
+    expect(log[0].requestId).not.toBe(log[1].requestId);
+    for (const entry of log) {
+      expect(entry.trigger).toBe("rpc");
+      expect(entry.hasAbortSignal).toBe(true);
+      expect(entry.activeRequestId).toBe(entry.requestId);
+      expect(entry.activeTrigger).toBe("rpc");
+      expect(entry.messengerThreadId).toBeNull();
+    }
+    expect(await agent.getActiveTurnForTest()).toBeNull();
+  });
+
+  it("gives each concurrent messenger turn its own thread", async () => {
+    const agent = await freshAgent("hook-bt-messenger-race");
+    await agent.runConcurrentMessengerTurnsForTest();
+
+    const log = await agent.getTurnIdentityLogForTest();
+    expect(
+      log
+        .map((entry) => ({
+          input: entry.input,
+          thread: entry.messengerThreadId,
+          getMessengerContext: entry.getMessengerThreadId
+        }))
+        .sort((a, b) => a.input.localeCompare(b.input))
+    ).toEqual([
+      {
+        input: expect.stringContaining("from thread a"),
+        thread: "thread-a",
+        getMessengerContext: "thread-a"
+      },
+      {
+        input: expect.stringContaining("from thread b"),
+        thread: "thread-b",
+        getMessengerContext: "thread-b"
+      }
+    ]);
+    // Turn A read its context again after turn B had been admitted.
+    expect(await agent.getHeldMessengerThreadIdForTest()).toBe("thread-a");
+  });
+
   it("captures continuation flag from programmatic path", async () => {
     const agent = await freshProgrammaticAgent("hook-bt-save");
     await agent.testChat("First message");
@@ -272,6 +322,19 @@ describe("Think — tool-call hooks expose typed input/output", () => {
     expect(log.length).toBeGreaterThan(0);
     expect(log[0].toolName).toBe("echo");
     expect(JSON.parse(log[0].inputJson)).toEqual({ message: "ping" });
+  });
+
+  it("beforeToolCall and tool execute see the turn's request id", async () => {
+    const agent = await freshLoopToolAgent("hook-tc-identity");
+    await agent.testChat("Use echo");
+
+    const identity = await agent.getToolCallIdentityForTest();
+    expect(identity.onChatResponse).toHaveLength(1);
+    const [requestId] = identity.onChatResponse;
+    expect(identity.beforeToolCall.length).toBeGreaterThan(0);
+    expect(identity.beforeToolCall.every((id) => id === requestId)).toBe(true);
+    expect(identity.execute.length).toBeGreaterThan(0);
+    expect(identity.execute.every((id) => id === requestId)).toBe(true);
   });
 
   it("afterToolCall receives typed output (was always undefined before)", async () => {

@@ -10,6 +10,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import type { Session } from "../../think";
 import type { ObservabilityEvent } from "agents/observability";
+import type { ChatResponseResult } from "agents/chat";
 import { Think } from "../../think";
 import type {
   ChatErrorClassification,
@@ -323,9 +324,32 @@ export class LoopToolTestAgent extends Think {
       echo: tool({
         description: "Echo a message back",
         inputSchema: z.object({ message: z.string() }),
-        execute: async ({ message }: { message: string }) => `pong: ${message}`
+        execute: async ({ message }: { message: string }) => {
+          this._toolCallIdentity.execute.push(
+            this.activeTurn?.requestId ?? null
+          );
+          return `pong: ${message}`;
+        }
       })
     };
+  }
+
+  private _toolCallIdentity: {
+    beforeToolCall: (string | null)[];
+    execute: (string | null)[];
+    onChatResponse: string[];
+  } = { beforeToolCall: [], execute: [], onChatResponse: [] };
+
+  override onChatResponse(result: ChatResponseResult): void {
+    this._toolCallIdentity.onChatResponse.push(result.requestId);
+  }
+
+  async getToolCallIdentityForTest(): Promise<{
+    beforeToolCall: (string | null)[];
+    execute: (string | null)[];
+    onChatResponse: string[];
+  }> {
+    return this._toolCallIdentity;
   }
 
   private _stepLog: Array<{
@@ -345,6 +369,7 @@ export class LoopToolTestAgent extends Think {
   }
 
   override beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
+    this._toolCallIdentity.beforeToolCall.push(ctx.requestId ?? null);
     this._beforeToolCallLog.push({
       toolName: ctx.toolName,
       inputJson: JSON.stringify(ctx.input)

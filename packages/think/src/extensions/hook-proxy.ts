@@ -54,6 +54,8 @@ export interface TurnContextSnapshot {
   continuation: boolean;
   body?: Record<string, unknown>;
   modelId: string;
+  requestId?: string;
+  trigger?: string;
 }
 
 /**
@@ -69,7 +71,9 @@ export function createTurnContextSnapshot(
     continuation: ctx.continuation,
     body: ctx.body,
     modelId:
-      ((ctx.model as Record<string, unknown>).modelId as string) ?? "unknown"
+      ((ctx.model as Record<string, unknown>).modelId as string) ?? "unknown",
+    ...(ctx.requestId !== undefined && { requestId: ctx.requestId }),
+    ...(ctx.trigger !== undefined && { trigger: ctx.trigger })
   };
 }
 

@@ -1724,7 +1724,8 @@ type NormalizedActionAuthorization = {
   grantedPermissions?: readonly string[];
 };
 
-type TurnTrigger =
+/** What admitted a turn. Exposed on {@link ActiveTurn} and {@link TurnContext}. */
+export type TurnTrigger =
   | "ws-chat"
   | "rpc"
   | "programmatic"
@@ -1777,6 +1778,14 @@ const admittedTurnContext = new AsyncLocalStorage<{
   channel?: string | undefined;
   continuation?: boolean | undefined;
   generation?: number | undefined;
+}>();
+
+// A messenger turn waits in the turn queue before it runs, and a concurrent
+// messenger turn can be admitted meanwhile, so the context has to travel with
+// the call chain rather than sit on the instance.
+const messengerTurnContext = new AsyncLocalStorage<{
+  agent: unknown;
+  context: MessengerContext;
 }>();
 
 // Recovery acceptance belongs to the successor's async call chain, including
@@ -2496,6 +2505,37 @@ export interface TurnContext {
   continuation: boolean;
   /** Custom body fields from the client request. */
   body?: Record<string, unknown>;
+  /**
+   * The request this turn runs for: the same id `beforePersist`,
+   * `onChatResponse` and `onChatError` see. Undefined for inference that runs
+   * outside an admitted turn.
+   */
+  requestId?: string;
+  /** What admitted this turn. Undefined outside an admitted turn. */
+  trigger?: TurnTrigger;
+  /**
+   * Aborts when the turn is cancelled. Pass it to any I/O `beforeTurn` awaits
+   * so a stopped turn does not wait for it to finish.
+   */
+  abortSignal?: AbortSignal;
+  /**
+   * The messenger thread this turn answers, fixed when the turn was admitted.
+   * Unlike {@link Think.getMessengerContext}, it never falls back to another
+   * turn's message.
+   */
+  messenger?: MessengerContext;
+}
+
+/**
+ * The turn currently running on this agent. See {@link Think.activeTurn}.
+ */
+export interface ActiveTurn {
+  /** Request id shared by every hook, tool call and event of this turn. */
+  requestId: string;
+  trigger: TurnTrigger;
+  continuation: boolean;
+  /** Channel the turn resolved to, when it has one. */
+  channel?: string;
 }
 
 /**
@@ -2862,6 +2902,11 @@ type ToolCallContextExtras = {
   readonly messages: ReadonlyArray<ModelMessage>;
   /** Signal for cancelling the operation. */
   readonly abortSignal: AbortSignal | undefined;
+  /**
+   * Request id of the turn making this call, matching `TurnContext.requestId`
+   * and `onChatResponse`. Undefined outside an admitted turn.
+   */
+  readonly requestId?: string;
 };
 
 /**
@@ -3327,8 +3372,6 @@ export class Think<
   getOnStartDegradations(): ReadonlyArray<OnStartDegradation> {
     return [...this._onStartDegradations];
   }
-
-  private _activeMessengerContext?: MessengerContext;
 
   /**
    * Turn-scoped channel context (superset of `_activeMessengerContext`). Set on
@@ -4841,8 +4884,9 @@ export class Think<
   }
 
   getMessengerContext(): MessengerContext | undefined {
-    if (this._activeMessengerContext) {
-      return this._activeMessengerContext;
+    const active = this._activeMessengerContext();
+    if (active) {
+      return active;
     }
 
     const message = this.messages.at(-1) as
@@ -4851,22 +4895,40 @@ export class Think<
     return message?.metadata?.messenger;
   }
 
+  private _activeMessengerContext(): MessengerContext | undefined {
+    const store = messengerTurnContext.getStore();
+    return store?.agent === this ? store.context : undefined;
+  }
+
   async chatWithMessengerContext(
     userMessage: string | UIMessage,
     callback: StreamCallback,
     context: MessengerContext,
     options?: ChatOptions
   ): Promise<void> {
-    const previous = this._activeMessengerContext;
-    this._activeMessengerContext = context;
-    try {
-      await this.chat(userMessage, callback, {
+    await messengerTurnContext.run({ agent: this, context }, () =>
+      this.chat(userMessage, callback, {
         ...options,
         channel: context.messengerId
-      });
-    } finally {
-      this._activeMessengerContext = previous;
-    }
+      })
+    );
+  }
+
+  /**
+   * The turn currently running on this agent, readable from `beforeTurn`,
+   * `beforeToolCall`, tool `execute`, `onChatResponse` and anything they call.
+   * Undefined outside a turn, including from code a turn scheduled to run
+   * later.
+   */
+  get activeTurn(): ActiveTurn | undefined {
+    const turn = admittedTurnContext.getStore();
+    if (!turn || turn.agent !== this) return undefined;
+    return {
+      requestId: turn.requestId,
+      trigger: turn.trigger,
+      continuation: turn.continuation ?? false,
+      ...(turn.channel !== undefined && { channel: turn.channel })
+    };
   }
 
   /**
@@ -5139,7 +5201,7 @@ export class Think<
   private _activeChannelId(): string | undefined {
     return (
       this._activeChannelContext?.channelId ??
-      this._activeMessengerContext?.messengerId
+      this._activeMessengerContext()?.messengerId
     );
   }
 
@@ -6852,13 +6914,18 @@ export class Think<
     }
 
     const model = this.resolveModel();
+    const turn = this.activeTurn;
+    const messenger = this._activeMessengerContext();
     const ctx: TurnContext = {
       system,
       messages,
       tools,
       model,
       continuation: input.continuation,
-      body: input.body
+      body: input.body,
+      ...(turn && { requestId: turn.requestId, trigger: turn.trigger }),
+      ...(input.signal && { abortSignal: input.signal }),
+      ...(messenger && { messenger })
     };
 
     const subclassConfig = (await this.beforeTurn(ctx)) ?? {};
@@ -8118,11 +8185,13 @@ export class Think<
       ...(isDynamic ? { dynamic: true as const } : {})
     };
 
+    const requestId = this.activeTurn?.requestId;
     const ctx = {
       ...toolCallBase,
       stepNumber: undefined,
       messages: options.messages,
-      abortSignal: options.abortSignal
+      abortSignal: options.abortSignal,
+      ...(requestId !== undefined && { requestId })
     } as ToolCallContext;
 
     // Subclass decision first.
@@ -17817,7 +17886,7 @@ export class Think<
     incidentId: string,
     partialText: string
   ): Promise<void> {
-    const context = this._activeMessengerContext;
+    const context = this._activeMessengerContext();
     if (!context) return;
     const delivery: MessengerRecoveryDelivery = {
       messengerId: context.messengerId,

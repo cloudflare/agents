@@ -251,6 +251,8 @@ if (messenger?.thread.isDirectMessage === false) {
 }
 ```
 
+The context belongs to the turn, so concurrent messenger turns on one agent each see their own thread. In `beforeTurn`, `ctx.messenger` holds the same value. Unlike `getMessengerContext()`, it is `undefined` for a turn that is not a messenger turn, rather than falling back to the metadata on the latest message.
+
 ## Self-Mentions
 
 When a user @-mentions the bot, the triggering message leads with the bot's own
