@@ -1,0 +1,25 @@
+packages/ai-chat/src/react-tests/use-agent-chat.test.tsx
+  s_368991bdec7f77::t_d099c6ba43ad9e 1819-1910,2404,2443-2448,2508,2555-2560
+.changeset/on-tool-call-after-stream.md
+  s_368991bdec7f77::t_e144e81c19a7d4 1-5
+docs/agents/chat-agents.md
+  s_368991bdec7f77::t_f22238b0b8e564 1004-1005
+packages/agents/src/chat/react.tsx
+  s_368991bdec7f77::t_24a648702e82ae 424-426,1789-1790,1799-1805,1873-1880
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3b3e515e71c09540f4363af0a5536f249c46b013",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
