@@ -473,6 +473,7 @@
     "evals": "(cd evals; evalite)",
     "test": "vitest --run",
     "test:node": "vitest --project node",
+    "test:opencode": "vitest --project opencode-workers",
     "test:react": "vitest --project react",
     "test:voice:workers": "vitest --project voice-workers",
     "test:voice:react": "vitest --project voice-react",

@@ -309,6 +309,7 @@ export class OpenCodeHarness extends LifecycleCapability {
 
   async #boot(): Promise<Host> {
     const host = await OpenCodeWorkerd.create({
+      ...this.#config.workerd,
       storage: this.lifecycle.storage,
       config: this.#config.config as never,
       plugins: this.#config.plugins as never

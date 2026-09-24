@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     projects: [
       "src/tests/vitest.config.ts",
+      "src/opencode-tests/vitest.config.ts",
       "src/react-tests/vitest.config.ts",
       "src/voice/tests/vitest.config.ts",
       "src/voice/react-tests/vitest.config.ts",

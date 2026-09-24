@@ -1,3 +1,4 @@
+import type { OpenCodeWorkerd } from "@opencode/sdk/workerd";
 import type { Streams } from "../streams";
 
 export type OpenCodeRequest = {
@@ -135,6 +136,11 @@ export type OCSubmissionReceipt = {
 
 export type OpenCodeHarnessConfig = {
   readonly streams: Streams;
+
+  readonly workerd?: Omit<
+    Parameters<typeof OpenCodeWorkerd.create>[0],
+    "storage" | "config" | "plugins"
+  >;
 
   readonly config?: Record<string, unknown>;
 
