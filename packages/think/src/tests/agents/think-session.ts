@@ -6752,6 +6752,14 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.deleteSubmission(submissionId);
   }
 
+  async markSubmissionRunningHereForTest(submissionId: string): Promise<void> {
+    (
+      this as unknown as {
+        _submissionAbortControllers: Map<string, AbortController>;
+      }
+    )._submissionAbortControllers.set(submissionId, new AbortController());
+  }
+
   async setSubmissionRowStatusForTest(
     submissionId: string,
     status: ThinkSubmissionStatus

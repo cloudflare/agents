@@ -4540,6 +4540,7 @@ export class Think<
   private _actionLedgerTableEnsured = false;
   private _actionPendingTableEnsured = false;
   private _submissionAbortControllers = new Map<string, AbortController>();
+  private _submissionsApplyingMessages = new Set<string>();
   private _programmaticStreamErrors = new Map<string, string>();
   protected static submissionRecoveryStaleMs = 15 * 60 * 1000;
 
@@ -11122,8 +11123,12 @@ export class Think<
       });
     } finally {
       if (terminal) {
-        this._terminalStatusEmits.delete(inspection.submissionId);
-        const current = this._readSubmission(inspection.submissionId);
+        const id = inspection.submissionId;
+        this._terminalStatusEmits.delete(id);
+        const held = this._waitersHeldForDeletedEmit.get(id);
+        this._waitersHeldForDeletedEmit.delete(id);
+        for (const waiter of held ?? []) waiter(inspection);
+        const current = this._readSubmission(id);
         if (current?.created_at === row.created_at) {
           this._resolveSubmissionWaiters(inspection);
         }
@@ -11149,6 +11154,12 @@ export class Think<
    * finished. `waitForSubmission` keeps waiting for these.
    */
   private _terminalStatusEmits = new Set<string>();
+
+  /** Waiters of a submission deleted while its terminal emit was in flight. */
+  private _waitersHeldForDeletedEmit = new Map<
+    string,
+    Set<(submission: ThinkSubmissionInspection) => void>
+  >();
 
   /**
    * Resolve once the submission reaches a terminal status (`completed`,
@@ -11389,7 +11400,19 @@ export class Think<
 
   private _releaseDeletedSubmissionWaiters(rows: ThinkSubmissionRow[]): void {
     for (const row of rows) {
-      this._resolveSubmissionWaiters(this._inspectionFromSubmissionRow(row));
+      const id = row.submission_id;
+      if (!this._terminalStatusEmits.has(id)) {
+        this._resolveSubmissionWaiters(this._inspectionFromSubmissionRow(row));
+        continue;
+      }
+      // The in-flight emit settles these after its hook; a new row that
+      // reuses the id gets a fresh waiter set.
+      const waiters = this._submissionWaiters.get(id);
+      if (!waiters) continue;
+      this._submissionWaiters.delete(id);
+      const held = this._waitersHeldForDeletedEmit.get(id) ?? new Set();
+      for (const waiter of waiters) held.add(waiter);
+      this._waitersHeldForDeletedEmit.set(id, held);
     }
   }
 
@@ -11496,6 +11519,12 @@ export class Think<
       };
     }
     const previousStatus = row.status as "pending" | "running";
+    // Once the append loop starts it finishes even if cancelled, so starting
+    // it is what applies the messages.
+    let messagesApplied =
+      row.messages_applied_at !== null ||
+      this._submissionsApplyingMessages.has(submissionId);
+    const runningHere = this._submissionAbortControllers.has(submissionId);
 
     const completedAt = Date.now();
     const errorMessage =
@@ -11531,11 +11560,10 @@ export class Think<
     }
     this._enqueueTerminalWorkflowNotification(updated);
     this._terminalStatusEmits.add(submissionId);
-    let messagesApplied = row.messages_applied_at !== null;
     try {
-      // The applied marker is stamped after the last append, so a cancel
-      // that lands mid-append has to look for the messages themselves.
-      if (!messagesApplied && previousStatus === "running") {
+      // A submission claimed before a restart has no in-memory record of its
+      // appends, so fall back to the stored-message check recovery uses.
+      if (!messagesApplied && previousStatus === "running" && !runningHere) {
         messagesApplied =
           (await this._getSubmissionMessagesAppliedState(updated)) !== "none";
       }
@@ -11742,6 +11770,9 @@ export class Think<
           workflowPrompt: workflowPrompt ?? undefined,
           shouldApplyMessages: () =>
             this._readSubmission(row.submission_id)?.status === "running",
+          onApplyingMessages: () => {
+            this._submissionsApplyingMessages.add(row.submission_id);
+          },
           onMessagesApplied: () => {
             this.sql`
               UPDATE cf_think_submissions
@@ -11813,6 +11844,7 @@ export class Think<
     } finally {
       this._programmaticStreamErrors.delete(requestId);
       this._submissionAbortControllers.delete(row.submission_id);
+      this._submissionsApplyingMessages.delete(row.submission_id);
       const updated = this._readSubmission(row.submission_id);
       if (updated && this._isTerminalSubmissionStatus(updated.status)) {
         await this._emitSubmissionStatus(updated);
@@ -12258,6 +12290,7 @@ export class Think<
       | UIMessage[]
       | ((currentMessages: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>),
     options?: SaveMessagesOptions & {
+      onApplyingMessages?: () => void;
       onMessagesApplied?: () => void;
       captureProgrammaticStreamError?: boolean;
       captureOutput?: boolean;
@@ -12324,6 +12357,7 @@ export class Think<
           return;
         }
 
+        options?.onApplyingMessages?.();
         for (const msg of this._stampChannel(resolved, channel)) {
           await this._appendMessageToHistory(msg);
         }

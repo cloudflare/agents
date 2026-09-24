@@ -113,6 +113,7 @@ type ThinkSubmissionTestStub = {
     options?: { timeoutMs?: number }
   ): Promise<ThinkSubmissionInspection | null>;
   deleteSubmissionForTest(submissionId: string): Promise<boolean>;
+  markSubmissionRunningHereForTest(submissionId: string): Promise<void>;
   setSubmissionRowStatusForTest(
     submissionId: string,
     status: ThinkSubmissionStatus
@@ -981,7 +982,50 @@ describe("Think durable submissions", () => {
     await expect(waiting).resolves.toMatchObject({ status: "pending" });
   });
 
-  it("reports messages applied when a cancel lands mid-append", async () => {
+  it("holds a wait until the hook finishes when the submission is deleted during it", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({ submissionId: "sub-del-hook" });
+    await agent.setSubmissionStatusDelayForTest(150);
+
+    const waiting = agent.waitForSubmissionForTest("sub-del-hook");
+    const cancel = agent.cancelSubmissionForTest("sub-del-hook", "stop");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await expect(agent.deleteSubmissionForTest("sub-del-hook")).resolves.toBe(
+      true
+    );
+    await expect(waiting).resolves.toMatchObject({ status: "aborted" });
+    const hookRan = (await agent.getSubmissionLog()).some(
+      (entry) =>
+        entry.submissionId === "sub-del-hook" && entry.status === "aborted"
+    );
+    await cancel;
+    expect(hookRan).toBe(true);
+  });
+
+  it("does not count a message id that was already in the conversation", async () => {
+    const agent = await freshAgent();
+    await agent.persistAssistantMessageForTest({
+      id: "sub-existing-a",
+      role: "user",
+      parts: [{ type: "text", text: "earlier" }]
+    });
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-existing",
+      status: "running",
+      messageIds: ["sub-existing-a"]
+    });
+    await agent.markSubmissionRunningHereForTest("sub-existing");
+
+    await expect(
+      agent.cancelSubmissionForTest("sub-existing")
+    ).resolves.toMatchObject({
+      outcome: "cancelled",
+      previousStatus: "running",
+      messagesApplied: false
+    });
+  });
+
+  it("checks stored messages for a submission claimed before a restart", async () => {
     const agent = await freshAgent();
     await agent.insertSubmissionForTest({
       submissionId: "sub-partial",
