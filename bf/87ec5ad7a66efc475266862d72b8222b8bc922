@@ -1,0 +1,39 @@
+packages/agents/src/agent-tool-types.ts
+  s_368991bdec7f77::t_072dffea47ae43 274-282,285-286,359-367
+packages/agents/src/agent-tools.ts
+  s_368991bdec7f77::t_4a295e27d8a9b4 223
+packages/agents/src/chat/agent-tools.ts
+  s_368991bdec7f77::t_5055c9c5ed7961 468-470,475,505,513
+packages/agents/src/index.ts
+  s_368991bdec7f77::t_ca4cc14a9874cf 222,754,797-814,1781-1784,5570-5580,5732,5738-5739,5769-5770,6830,6833-6836,6839,6848-6854,6956,6959-6966
+packages/agents/src/tests/schema-and-state-optimization.test.ts
+  s_368991bdec7f77::t_73bb931fab5008 150
+packages/think/src/think.ts
+  s_368991bdec7f77::t_b28d0bcaad6fc9 4572-4573,4602,4609-4614,9556,9570-9572,9655
+.changeset/agent-tool-terminal-delivery.md
+  s_368991bdec7f77::t_0d310b3c0eca45 1-7
+docs/agents/agent-tools.md
+  s_368991bdec7f77::t_785e403bd2a13c 463-484
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_948fdc8364c598 13,569-570,876,883-888,3864-3868,3892-3894,4003
+packages/think/src/tests/agent-tools.test.ts
+  s_368991bdec7f77::t_b32de3b57a4e5e 1,32,84-85,87-88,447-559
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_4dc5d16240b9d1 3208-3209,3220-3221,3226-3255
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "bf87ec5ad7a66efc475266862d72b8222b8bc922",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
