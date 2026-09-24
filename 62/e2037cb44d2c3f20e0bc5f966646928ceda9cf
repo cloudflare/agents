@@ -1,0 +1,21 @@
+packages/think/src/e2e-tests/worker.ts
+  s_368991bdec7f77::t_654bb68e005eba 2323-2331,2351,2359,2362,2389-2397,2404-2422
+packages/think/src/e2e-tests/workflow-recovery.test.ts
+  s_368991bdec7f77::t_ab2ad027ed004e 246-255,257,277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "62e2037cb44d2c3f20e0bc5f966646928ceda9cf",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
