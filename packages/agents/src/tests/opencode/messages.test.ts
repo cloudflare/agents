@@ -8,6 +8,10 @@ describe("hasOpenCodeOperation", () => {
     expect(hasOpenCodeOperation([message], "op-1")).toBe(true);
     expect(hasOpenCodeOperation({ messages: [message] }, "op-1")).toBe(true);
     expect(hasOpenCodeOperation([message], "op-2")).toBe(false);
+    expect(hasOpenCodeOperation([{ id: "msg_op-1" }], "op-1")).toBe(true);
+    expect(hasOpenCodeOperation({ data: [{ id: "msg_op-1" }] }, "op-1")).toBe(
+      true
+    );
     expect(hasOpenCodeOperation(undefined, "op-1")).toBe(false);
   });
 });

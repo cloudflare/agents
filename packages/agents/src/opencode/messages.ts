@@ -66,10 +66,24 @@ export function hasOpenCodeOperation(
   response: unknown,
   operationId: string
 ): boolean {
-  return rawMessages(response).some(
-    (message) =>
-      message.info.role === "user" && message.info.id === `msg_${operationId}`
-  );
+  const values = Array.isArray(response)
+    ? response
+    : typeof response === "object" && response !== null
+      ? "messages" in response && Array.isArray(response.messages)
+        ? response.messages
+        : "data" in response && Array.isArray(response.data)
+          ? response.data
+          : []
+      : [];
+  const messageId = `msg_${operationId}`;
+  return values.some((value) => {
+    if (typeof value !== "object" || value === null) return false;
+    if ("id" in value && value.id === messageId) return true;
+    if (!("info" in value) || typeof value.info !== "object" || !value.info) {
+      return false;
+    }
+    return "id" in value.info && value.info.id === messageId;
+  });
 }
 
 export function projectMessages(response: unknown): readonly OCMessage[] {

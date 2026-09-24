@@ -15,6 +15,7 @@ type Message = {
 
 class Client implements OpenCodeRuntimeClient {
   messages: Message[] = [];
+  inbox: Array<{ id: string }> = [];
   prompts: unknown[] = [];
   agents: unknown[] = [];
   interrupted: string[] = [];
@@ -23,6 +24,10 @@ class Client implements OpenCodeRuntimeClient {
 
   listMessages() {
     return Promise.resolve(this.messages);
+  }
+
+  listInbox() {
+    return Promise.resolve(this.inbox);
   }
 
   prompt(input: unknown) {
@@ -54,6 +59,12 @@ describe("OpenCodeRuntimeAdapter", () => {
       status: "not-admitted"
     });
 
+    client.inbox = [{ id: "msg_op-1" }];
+    expect(await adapter.inspect("session", "op-1")).toEqual({
+      status: "active"
+    });
+
+    client.inbox = [];
     client.messages = [{ info: { id: "msg_op-1", role: "user" } }];
     expect(await adapter.inspect("session", "op-1")).toEqual({
       status: "active"
@@ -125,7 +136,12 @@ describe("OpenCodeRuntimeAdapter", () => {
 
     expect(client.agents).toEqual([{ sessionID: "session", agent: "build" }]);
     expect(client.prompts).toEqual([
-      { sessionID: "session", id: "msg_op-1", text: "hello" }
+      {
+        sessionID: "session",
+        id: "msg_op-1",
+        text: "hello",
+        resume: true
+      }
     ]);
   });
 

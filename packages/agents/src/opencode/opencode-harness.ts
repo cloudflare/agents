@@ -66,6 +66,7 @@ export class OpenCodeHarness extends LifecycleCapability {
         client: this.#runtimeClient(),
         passBudgetMs: config.passBudgetMs,
         defaultAgent: config.agent,
+        resumePrompts: config.resumePrompts,
         afterAdmit: (sessionId, operationId) =>
           this.#openOperation(sessionId, operationId),
         beforeDrive: async (sessionId, operationId) => {
@@ -107,11 +108,13 @@ export class OpenCodeHarness extends LifecycleCapability {
     await this.#ensureSessionPump(sessionId);
     const operationId = options.operationId ?? crypto.randomUUID();
     const host = await this.#host();
+    const [messages, inbox] = await Promise.all([
+      host.message.list({ sessionID: sessionId }),
+      host.sessions.inbox.list({ sessionID: sessionId })
+    ]);
     if (
-      hasOpenCodeOperation(
-        await host.message.list({ sessionID: sessionId }),
-        operationId
-      )
+      hasOpenCodeOperation(messages, operationId) ||
+      hasOpenCodeOperation(inbox, operationId)
     ) {
       return { operationId, sessionId, accepted: false };
     }
@@ -449,6 +452,10 @@ export class OpenCodeHarness extends LifecycleCapability {
       listMessages: async (sessionId) => {
         const host = await this.#host();
         return host.message.list({ sessionID: sessionId });
+      },
+      listInbox: async (sessionId) => {
+        const host = await this.#host();
+        return host.sessions.inbox.list({ sessionID: sessionId });
       },
       prompt: async (input) => {
         const host = await this.#host();

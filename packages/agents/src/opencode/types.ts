@@ -151,6 +151,8 @@ export type OpenCodeHarnessConfig = {
   readonly permissions?: "ask" | "allow" | "deny";
 
   readonly passBudgetMs?: number;
+
+  readonly resumePrompts?: boolean;
 };
 
 export type OCClientMessage =

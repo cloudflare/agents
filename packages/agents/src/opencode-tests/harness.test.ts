@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { evictDurableObject } from "cloudflare:test";
+import { evictDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { OpenCodeHarnessTestObject } from "./worker";
 
@@ -12,6 +12,27 @@ function namespace() {
 }
 
 describe("OpenCodeHarness workerd integration", () => {
+  it("admits one native prompt for a stable operation identifier", async () => {
+    const stub = namespace().getByName(crypto.randomUUID());
+    const sessionId = await stub.createSession();
+
+    expect(await stub.submitPrompt(sessionId, "op-1", "hello")).toEqual({
+      operationId: "op-1",
+      sessionId,
+      accepted: true
+    });
+    await runDurableObjectAlarm(stub);
+
+    expect(await stub.pending(sessionId)).toMatchObject([
+      { operationId: "op-1", sessionId }
+    ]);
+    expect(await stub.submitPrompt(sessionId, "op-1", "hello again")).toEqual({
+      operationId: "op-1",
+      sessionId,
+      accepted: false
+    });
+  });
+
   it("creates and restores independent native sessions", async () => {
     const name = crypto.randomUUID();
     const stub = namespace().getByName(name);

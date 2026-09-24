@@ -9,7 +9,8 @@ export class OpenCodeHarnessTestObject extends DurableObject<Cloudflare.Env> {
     streams: this.streams,
     workerd: {
       models: { fetch: false }
-    }
+    },
+    resumePrompts: false
   });
   readonly lifecycle = Lifecycle.install(this)
     .use(this.harness)
@@ -22,6 +23,21 @@ export class OpenCodeHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   createSession() {
     return this.harness.createSession();
+  }
+
+  submitPrompt(sessionId: string, operationId: string, text: string) {
+    return this.harness.submit(
+      { kind: "prompt", text },
+      { sessionId, operationId }
+    );
+  }
+
+  messages(sessionId: string) {
+    return this.harness.getMessages({ sessionId });
+  }
+
+  pending(sessionId: string) {
+    return this.harness.pending({ sessionId });
   }
 
   snapshot(sessionId?: string) {

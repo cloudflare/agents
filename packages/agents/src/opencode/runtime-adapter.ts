@@ -17,10 +17,12 @@ type OpenCodeMessage = {
 
 export interface OpenCodeRuntimeClient {
   listMessages(sessionId: string): Promise<unknown>;
+  listInbox(sessionId: string): Promise<unknown>;
   prompt(input: {
     readonly sessionID: string;
     readonly id: string;
     readonly text: string;
+    readonly resume: boolean;
   }): Promise<unknown>;
   switchAgent(input: {
     readonly sessionID: string;
@@ -35,6 +37,7 @@ export type OpenCodeRuntimeAdapterOptions = {
   readonly passBudgetMs?: number;
   readonly heartbeatMs?: number;
   readonly defaultAgent?: string;
+  readonly resumePrompts?: boolean;
   readonly afterAdmit?: (
     scope: string,
     operationId: string
@@ -53,6 +56,7 @@ export class OpenCodeRuntimeAdapter implements HarnessDriverRuntime<
   readonly #passBudgetMs: number;
   readonly #heartbeatMs: number;
   readonly #defaultAgent: string | undefined;
+  readonly #resumePrompts: boolean;
   readonly #afterAdmit: OpenCodeRuntimeAdapterOptions["afterAdmit"];
   readonly #beforeDrive: OpenCodeRuntimeAdapterOptions["beforeDrive"];
 
@@ -61,6 +65,7 @@ export class OpenCodeRuntimeAdapter implements HarnessDriverRuntime<
     this.#passBudgetMs = options.passBudgetMs ?? 20_000;
     this.#heartbeatMs = options.heartbeatMs ?? 30_000;
     this.#defaultAgent = options.defaultAgent;
+    this.#resumePrompts = options.resumePrompts ?? true;
     this.#afterAdmit = options.afterAdmit;
     this.#beforeDrive = options.beforeDrive;
   }
@@ -73,7 +78,12 @@ export class OpenCodeRuntimeAdapter implements HarnessDriverRuntime<
     const index = messages.findIndex(
       (message) => message.info.id === this.#messageId(operationId)
     );
-    if (index < 0) return { status: "not-admitted" };
+    if (index < 0) {
+      const inbox = this.#inbox(await this.#client.listInbox(scope));
+      return inbox.some((item) => item.id === this.#messageId(operationId))
+        ? { status: "active" }
+        : { status: "not-admitted" };
+    }
     const nextUser = messages.findIndex(
       (message, messageIndex) =>
         messageIndex > index && message.info.role === "user"
@@ -118,7 +128,8 @@ export class OpenCodeRuntimeAdapter implements HarnessDriverRuntime<
     await this.#client.prompt({
       sessionID: scope,
       id: this.#messageId(operationId),
-      text: input.text
+      text: input.text,
+      resume: this.#resumePrompts
     });
     await this.#afterAdmit?.(scope, operationId);
   }
@@ -191,6 +202,27 @@ export class OpenCodeRuntimeAdapter implements HarnessDriverRuntime<
 
   #messageId(operationId: string): string {
     return `msg_${operationId}`;
+  }
+
+  #inbox(value: unknown): ReadonlyArray<{ readonly id: string }> {
+    if (Array.isArray(value)) {
+      return value.filter(
+        (item): item is { readonly id: string } =>
+          typeof item === "object" &&
+          item !== null &&
+          "id" in item &&
+          typeof item.id === "string"
+      );
+    }
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      "data" in value &&
+      Array.isArray(value.data)
+    ) {
+      return this.#inbox(value.data);
+    }
+    return [];
   }
 
   #messages(value: unknown): readonly OpenCodeMessage[] {
