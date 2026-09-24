@@ -1,14 +1,14 @@
 import {
   createProvider,
   type ApiStreamOptions,
-  type Context,
+  type TranscriptContext,
   type Model,
   type ProviderStreams,
   type SimpleStreamOptions
 } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { cloudflareWorkersAIProvider } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai";
-import type { PiProvider } from "./models";
+import type { PiProvider } from "agents/pi";
 
 /** Provider id shared with pi-ai's REST-based Workers AI provider. */
 export const WORKERS_AI_PROVIDER = "cloudflare-workers-ai";
@@ -125,7 +125,7 @@ export function workersAI(
       } as ApiStreamOptions<string>),
     streamSimple: (
       model: Model<string>,
-      context: Context,
+      context: TranscriptContext,
       streamOptions?: SimpleStreamOptions
     ) => api.streamSimple(model, context, { ...streamOptions, fetch })
   };

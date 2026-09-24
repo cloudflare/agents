@@ -7,4 +7,4 @@ export type {
   PiMessagePart as TranscriptPart,
   PiServerMessage as ServerMessage,
   PiToolInfo as ToolInfo
-} from "./harness/types";
+} from "agents/pi";

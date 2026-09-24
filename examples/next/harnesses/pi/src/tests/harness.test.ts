@@ -1,39 +1,51 @@
 import { env } from "cloudflare:workers";
-import { evictDurableObject } from "cloudflare:test";
+import { evictDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { PiHarnessTestObject } from "./worker";
 
-function fresh(): DurableObjectStub<PiHarnessTestObject> {
-  return env.PI_HARNESS_TEST.getByName(crypto.randomUUID());
+async function settle(
+  stub: DurableObjectStub<PiHarnessTestObject>,
+  lane: string,
+  operationId: string
+) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await runDurableObjectAlarm(stub);
+    const result = await stub.result(lane, operationId);
+    if (result) return result;
+  }
+  return stub.result(lane, operationId);
 }
 
-describe("example-local PiHarness", () => {
-  it("uses a pi-ai provider and restores its transcript after eviction", async () => {
-    const stub = fresh();
-    const first = await stub.runMultiply(4, 3);
-    expect(first).toMatchObject({
-      status: "completed",
-      result: 12,
-      messages: ["multiply 4", "", "", "tool complete"]
-    });
-
-    const eventTypes = await stub.eventTypes(first.operationId);
-    for (const expected of [
-      "operation_start",
-      "turn_start",
-      "tool_start",
-      "tool_end",
-      "turn_end",
-      "operation_end"
-    ]) {
-      expect(eventTypes.includes(expected)).toBe(true);
-    }
+describe("Pi harness example", () => {
+  it("recovers a turn after eviction", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.PI_HARNESS_TEST.getByName(name);
+    await stub.submit("main", "op-1", 4);
 
     await evictDurableObject(stub);
-    expect(await stub.messages()).toEqual(first.messages);
+    const fresh = env.PI_HARNESS_TEST.getByName(name);
 
-    const second = await stub.runMultiply(2, 5);
-    expect(second).toMatchObject({ status: "completed", result: 10 });
-    expect((await stub.messages()).at(-1)).toBe("tool complete");
+    expect(await settle(fresh, "main", "op-1")).toMatchObject({
+      status: "completed"
+    });
+    expect(await fresh.messages("main")).toEqual([
+      "multiply 4",
+      "",
+      "",
+      "complete"
+    ]);
+  });
+
+  it("drives multiple lanes", async () => {
+    const stub = env.PI_HARNESS_TEST.getByName(crypto.randomUUID());
+    await stub.submit("main", "op-1", 2);
+    await stub.submit("research", "op-2", 3);
+
+    expect(await settle(stub, "main", "op-1")).toMatchObject({
+      status: "completed"
+    });
+    expect(await settle(stub, "research", "op-2")).toMatchObject({
+      status: "completed"
+    });
   });
 });

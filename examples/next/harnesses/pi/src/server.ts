@@ -1,14 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
 import { Type } from "typebox";
-import { PiHarness } from "./harness/pi-harness";
-import type { PiEvent, PiTool } from "./harness/types";
+import { PiHarness, createModels, type PiEvent, type PiTool } from "agents/pi";
 import { Lifecycle } from "agents/lifecycle";
-import { createModels } from "./providers/models";
 import { workersAI } from "./providers/workers-ai";
 import { fromManifest } from "agents/skills";
 import { Streams } from "agents/streams";
-import { Tasks } from "agents/tasks";
 import { WebSockets } from "agents/websockets";
 
 const MEMORY_PREFIX = "pi-playground:memory:";
@@ -245,12 +242,10 @@ function memoryKeyOf(call: ToolCallEvent): string {
 
 /** Playable pi session backed by one Durable Object. */
 export class PiAgent extends DurableObject<Env> {
-  readonly tasks = new Tasks();
   readonly streams = new Streams();
   readonly harness = new PiHarness<ToolContext>({
     models: createModels({ providers: [workersAI(this.env.AI)] }),
     model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
-    tasks: this.tasks,
     streams: this.streams,
     thinkingLevel: "low",
     toolContext: { storage: this.ctx.storage, now: () => new Date() },
@@ -282,8 +277,8 @@ export class PiAgent extends DurableObject<Env> {
   readonly webSockets = new WebSockets(this.harness.webSockets());
 
   readonly lifecycle = Lifecycle.install(this)
-    .use(this.tasks)
     .use(this.streams)
+    .use(this.harness.driver)
     .use(this.webSockets)
     .use(this.harness);
 

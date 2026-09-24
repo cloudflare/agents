@@ -5,121 +5,116 @@ import {
 } from "@earendil-works/pi-ai";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
+import {
+  PiHarness,
+  createModels,
+  type PiMessage,
+  type PiTool
+} from "agents/pi";
 import { Streams } from "agents/streams";
-import { Tasks } from "agents/tasks";
 import { Type } from "typebox";
-import { PiHarness } from "../harness/pi-harness";
-import type { PiEvent, PiMessage, PiTool } from "../harness/types";
-import { createModels } from "../providers/models";
 
-const multiplyParameters = Type.Object({ value: Type.Number() });
-const TOOL_REVISION_KEY = "test:pi:revision";
+const parameters = Type.Object({ value: Type.Number() });
 
-type ToolContext = {
-  readonly revision: number;
+type Env = {
+  PI_HARNESS_TEST: DurableObjectNamespace<PiHarnessTestObject>;
 };
 
-function messageText(message: PiMessage): string {
+type ToolContext = { multiplier: number };
+
+function text(message: PiMessage): string {
   return message.parts
     .filter((part) => part.type === "text")
     .map((part) => (part.type === "text" ? part.text : ""))
     .join("");
 }
 
-/** Real Durable Object fixture using pi-ai's faux provider. */
+function response(context: {
+  readonly messages: readonly { role: string; content: unknown }[];
+}) {
+  let lastUser = -1;
+  for (let index = 0; index < context.messages.length; index++) {
+    if (context.messages[index].role === "user") lastUser = index;
+  }
+  if (
+    context.messages
+      .slice(lastUser + 1)
+      .some((message) => message.role === "toolResult")
+  ) {
+    return fauxAssistantMessage("complete");
+  }
+  const prompt = context.messages
+    .slice(lastUser)
+    .filter((message) => message.role === "user")
+    .map((message) => JSON.stringify(message.content))
+    .join(" ");
+  const value = Number(/multiply (-?\d+(?:\.\d+)?)/.exec(prompt)?.[1] ?? 0);
+  return fauxAssistantMessage(fauxToolCall("multiply", { value }), {
+    stopReason: "toolUse"
+  });
+}
+
 export class PiHarnessTestObject extends DurableObject<Env> {
   readonly #faux = fauxProvider();
-  readonly tasks = new Tasks();
   readonly streams = new Streams();
   readonly harness = new PiHarness<ToolContext>({
     models: createModels({ providers: [this.#faux.provider] }),
     model: this.#faux.getModel(),
-    tasks: this.tasks,
     streams: this.streams,
     thinkingLevel: "off",
     retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
     compaction: { enabled: false, reserveTokens: 0, keepRecentTokens: 0 },
-    toolContext: async () => ({
-      revision: (await this.ctx.storage.get<number>(TOOL_REVISION_KEY)) ?? 1
-    }),
-    tools: () => [this.#multiplyTool()],
-    systemPrompt: "Use the supplied test tool."
+    toolContext: { multiplier: 3 },
+    tools: [this.#tool()],
+    systemPrompt: "Use the supplied tool."
   });
   readonly lifecycle = Lifecycle.install(this)
-    .use(this.tasks)
     .use(this.streams)
+    .use(this.harness.driver)
     .use(this.harness);
 
-  /** Run one pi-ai faux-provider turn containing a tool call. */
-  async runMultiply(
-    value: number,
-    revision: number
-  ): Promise<{
-    readonly operationId: string;
-    readonly status: string;
-    readonly messages: readonly string[];
-    readonly result: number | null;
-  }> {
-    await this.ctx.storage.put(TOOL_REVISION_KEY, revision);
-    this.#faux.setResponses([
-      fauxAssistantMessage(fauxToolCall("multiply", { value }), {
-        stopReason: "toolUse"
-      }),
-      fauxAssistantMessage("tool complete")
-    ]);
-    const response = await this.harness.prompt(`multiply ${value}`);
-    const resultPart = response.messages
-      .flatMap((message) => message.parts)
-      .filter((part) => part.type === "tool-result")
-      .at(-1);
-    const result =
-      resultPart?.type === "tool-result" &&
-      typeof resultPart.details === "object" &&
-      resultPart.details !== null &&
-      "result" in resultPart.details &&
-      typeof resultPart.details.result === "number"
-        ? resultPart.details.result
-        : null;
-    return {
-      operationId: response.operationId,
-      status: response.status,
-      messages: response.messages.map(messageText),
-      result
-    };
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.#faux.setResponses(
+      Array.from(
+        { length: 16 },
+        () => (context: unknown) =>
+          response(
+            context as {
+              messages: readonly { role: string; content: unknown }[];
+            }
+          )
+      )
+    );
   }
 
-  /** Read the durable transcript without starting another model turn. */
-  async messages(): Promise<readonly string[]> {
-    return (await this.harness.getMessages()).map(messageText);
+  submit(lane: string, operationId: string, value: number) {
+    return this.harness.submit(
+      { kind: "prompt", prompt: `multiply ${value}` },
+      { lane, operationId }
+    );
   }
 
-  /** Read projected event type names from one operation's durable stream. */
-  async eventTypes(operationId: string): Promise<readonly string[]> {
-    const events: PiEvent[] = [];
-    for await (const chunk of this.streams.read(
-      this.harness.streamId(operationId)
-    )) {
-      events.push(...(chunk.chunk as unknown as PiEvent[]));
-    }
-    return events.map((event) => event.type);
+  result(lane: string, operationId: string) {
+    return this.harness.getResult(operationId, { lane });
   }
 
-  #multiplyTool(): PiTool<
-    ToolContext,
-    typeof multiplyParameters,
-    { readonly result: number; readonly revision: number }
-  > {
+  async messages(lane: string) {
+    return (await this.harness.getMessages({ lane })).map(text);
+  }
+
+  #tool(): PiTool<ToolContext, typeof parameters, { result: number }> {
     return {
       name: "multiply",
       label: "Multiply",
-      description: "Multiply by the current tool revision.",
-      parameters: multiplyParameters,
+      description: "Multiply the input.",
+      parameters,
       replay: "safe",
       async execute(_id, input, _onUpdate, context) {
-        const result = input.value * context.revision;
+        const result = input.value * context.multiplier;
         return {
           content: [{ type: "text", text: String(result) }],
-          details: { result, revision: context.revision }
+          details: { result }
         };
       }
     };
