@@ -335,6 +335,14 @@ describe("Think — tool-call hooks expose typed input/output", () => {
     expect(identity.beforeToolCall.every((id) => id === requestId)).toBe(true);
     expect(identity.execute.length).toBeGreaterThan(0);
     expect(identity.execute.every((id) => id === requestId)).toBe(true);
+    expect(identity.afterToolCall.length).toBeGreaterThan(0);
+    expect(identity.afterToolCall.every((id) => id === requestId)).toBe(true);
+
+    // A timer the tool scheduled fires after the turn ended.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const later = await agent.getToolCallIdentityForTest();
+    expect(later.detached.length).toBeGreaterThan(0);
+    expect(later.detached.every((id) => id === null)).toBe(true);
   });
 
   it("afterToolCall receives typed output (was always undefined before)", async () => {

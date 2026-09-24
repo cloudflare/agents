@@ -598,19 +598,20 @@ afterToolCall(ctx: ToolCallResultContext): void | Promise<void>
 
 `ToolCallResultContext<TOOLS>` is backed by the AI SDK's `OnToolCallFinishEvent<TOOLS>` (the parameter of `experimental_onToolCallFinish`). It spreads the originating `TypedToolCall<TOOLS>` at the top level, plus the per-call event extras and a discriminated outcome:
 
-| Field        | Type                                      | Description                                          |
-| ------------ | ----------------------------------------- | ---------------------------------------------------- |
-| `type`       | `"tool-call"`                             | Discriminator (carried over from the call)           |
-| `toolCallId` | `string`                                  | Unique id matching the originating `ToolCallContext` |
-| `toolName`   | `string`                                  | Name of the tool that was called                     |
-| `input`      | typed when `TOOLS` is passed              | Arguments the tool was called with                   |
-| `dynamic?`   | `boolean`                                 | `true` for runtime-registered tools                  |
-| `stepNumber` | `number \| undefined`                     | Index of the current step                            |
-| `messages`   | `ReadonlyArray<ModelMessage>`             | Conversation messages visible at tool execution time |
-| `durationMs` | `number`                                  | Wall-clock execution time of `execute`               |
-| `success`    | `boolean`                                 | Discriminator: `true` on success, `false` on failure |
-| `output`     | typed per tool (when `success` is `true`) | Whatever the tool's `execute` returned               |
-| `error`      | `unknown` (when `success` is `false`)     | Whatever was thrown from `execute`                   |
+| Field        | Type                                      | Description                                                                    |
+| ------------ | ----------------------------------------- | ------------------------------------------------------------------------------ |
+| `type`       | `"tool-call"`                             | Discriminator (carried over from the call)                                     |
+| `toolCallId` | `string`                                  | Unique id matching the originating `ToolCallContext`                           |
+| `toolName`   | `string`                                  | Name of the tool that was called                                               |
+| `input`      | typed when `TOOLS` is passed              | Arguments the tool was called with                                             |
+| `dynamic?`   | `boolean`                                 | `true` for runtime-registered tools                                            |
+| `stepNumber` | `number \| undefined`                     | Index of the current step                                                      |
+| `messages`   | `ReadonlyArray<ModelMessage>`             | Conversation messages visible at tool execution time                           |
+| `durationMs` | `number`                                  | Wall-clock execution time of `execute`                                         |
+| `requestId?` | `string`                                  | Request id of the turn that made the call. See [Turn identity](#turn-identity) |
+| `success`    | `boolean`                                 | Discriminator: `true` on success, `false` on failure                           |
+| `output`     | typed per tool (when `success` is `true`) | Whatever the tool's `execute` returned                                         |
+| `error`      | `unknown` (when `success` is `false`)     | Whatever was thrown from `execute`                                             |
 
 When you pass an explicit `TOOLS` generic, narrowing on `ctx.toolName` (together with `ctx.success`) narrows `ctx.output` to that tool's inferred output type. Dynamic tools (runtime-registered, MCP) stay `unknown`:
 

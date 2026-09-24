@@ -328,6 +328,11 @@ export class LoopToolTestAgent extends Think {
           this._toolCallIdentity.execute.push(
             this.activeTurn?.requestId ?? null
           );
+          setTimeout(() => {
+            this._toolCallIdentity.detached.push(
+              this.activeTurn?.requestId ?? null
+            );
+          }, 50);
           return `pong: ${message}`;
         }
       })
@@ -337,8 +342,16 @@ export class LoopToolTestAgent extends Think {
   private _toolCallIdentity: {
     beforeToolCall: (string | null)[];
     execute: (string | null)[];
+    afterToolCall: (string | null)[];
+    detached: (string | null)[];
     onChatResponse: string[];
-  } = { beforeToolCall: [], execute: [], onChatResponse: [] };
+  } = {
+    beforeToolCall: [],
+    execute: [],
+    afterToolCall: [],
+    detached: [],
+    onChatResponse: []
+  };
 
   override onChatResponse(result: ChatResponseResult): void {
     this._toolCallIdentity.onChatResponse.push(result.requestId);
@@ -347,6 +360,8 @@ export class LoopToolTestAgent extends Think {
   async getToolCallIdentityForTest(): Promise<{
     beforeToolCall: (string | null)[];
     execute: (string | null)[];
+    afterToolCall: (string | null)[];
+    detached: (string | null)[];
     onChatResponse: string[];
   }> {
     return this._toolCallIdentity;
@@ -377,6 +392,7 @@ export class LoopToolTestAgent extends Think {
   }
 
   override afterToolCall(ctx: ToolCallResultContext): void {
+    this._toolCallIdentity.afterToolCall.push(ctx.requestId ?? null);
     this._afterToolCallLog.push({
       toolName: ctx.toolName,
       inputJson: JSON.stringify(ctx.input),

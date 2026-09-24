@@ -1786,6 +1786,7 @@ const admittedTurnContext = new AsyncLocalStorage<{
 const messengerTurnContext = new AsyncLocalStorage<{
   agent: unknown;
   context: MessengerContext;
+  ended: boolean;
 }>();
 
 // Recovery acceptance belongs to the successor's async call chain, including
@@ -3003,6 +3004,8 @@ type ToolCallResultBase = {
   readonly toolExecutionMs: number;
   /** @deprecated Prefer `toolExecutionMs`. */
   readonly durationMs: number;
+  /** Request id of the turn that made this call; see `ToolCallContext`. */
+  readonly requestId?: string;
 };
 
 /**
@@ -4897,7 +4900,7 @@ export class Think<
 
   private _activeMessengerContext(): MessengerContext | undefined {
     const store = messengerTurnContext.getStore();
-    return store?.agent === this ? store.context : undefined;
+    return store?.agent === this && !store.ended ? store.context : undefined;
   }
 
   async chatWithMessengerContext(
@@ -4906,12 +4909,19 @@ export class Think<
     context: MessengerContext,
     options?: ChatOptions
   ): Promise<void> {
-    await messengerTurnContext.run({ agent: this, context }, () =>
-      this.chat(userMessage, callback, {
-        ...options,
-        channel: context.messengerId
-      })
-    );
+    // Async work the turn leaves behind keeps this store, so it is marked
+    // ended rather than trusted to go out of scope.
+    const store = { agent: this, context, ended: false };
+    try {
+      await messengerTurnContext.run(store, () =>
+        this.chat(userMessage, callback, {
+          ...options,
+          channel: context.messengerId
+        })
+      );
+    } finally {
+      store.ended = true;
+    }
   }
 
   /**
@@ -4923,6 +4933,8 @@ export class Think<
   get activeTurn(): ActiveTurn | undefined {
     const turn = admittedTurnContext.getStore();
     if (!turn || turn.agent !== this) return undefined;
+    // The store outlives the turn in any async work the turn scheduled.
+    if (this._turnQueue.activeRequestId !== turn.requestId) return undefined;
     return {
       requestId: turn.requestId,
       trigger: turn.trigger,
@@ -7194,12 +7206,14 @@ export class Think<
         const e = normalizeToolFinishEvent(event);
         if (e.toolCall.toolName === finalAnswerToolName) return;
         const { success, output, error } = e;
+        const requestId = this.activeTurn?.requestId;
         const base = {
           ...e.toolCall,
           stepNumber: e.stepNumber,
           messages: e.messages,
           toolExecutionMs: e.toolExecutionMs,
-          durationMs: e.toolExecutionMs
+          durationMs: e.toolExecutionMs,
+          ...(requestId !== undefined && { requestId })
         };
         const ctx = (success
           ? {
