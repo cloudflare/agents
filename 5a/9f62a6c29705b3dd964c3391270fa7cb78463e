@@ -1,0 +1,21 @@
+docs/think/index.md
+  s_368991bdec7f77::t_1858bd72e1763f 406
+docs/think/messengers.md
+  s_368991bdec7f77::t_861306a145a418 184-187
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5a9f62a6c29705b3dd964c3391270fa7cb78463e",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
