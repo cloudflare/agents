@@ -19,6 +19,9 @@ type AgentToolInspection = Awaited<
 
 type ThinkAgentToolTestStub = {
   inspectAgentToolRun(runId: string): Promise<AgentToolInspection>;
+  broadcastRecoveredAgentToolChunkForTest(
+    eventDelivery: "full" | "terminal"
+  ): Promise<void>;
   seedAgentToolLastErrorForTest(runId: string, error: string): Promise<void>;
   setAgentToolOutputForTest(runId: string, output: unknown): Promise<void>;
   clearAgentToolOutputForTest(runId: string): Promise<void>;
