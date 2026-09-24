@@ -188,12 +188,10 @@ export class NamedBrowserSessions {
       const existing = await this.#readStored(key);
 
       if (existing === undefined) {
-        // No browser on record. A retired marker — left by close() or a
-        // dead-session recovery — is evidence a prior browser existed:
-        // that's a restart. Only first-ever use of the name is not.
-        const restarted = await this.#wasRetired(name);
-        const { stored, winner } = await this.#createAndCommit(key);
-        return { name, restarted, ...(winner ?? stored) };
+        // No browser on record: create one. The commit reports whether the
+        // name was ever used before (see #createAndCommit).
+        const { session, restarted } = await this.#createAndCommit(name);
+        return { name, restarted, ...session };
       }
 
       // Live entry on record — probe it outside any lock.
@@ -339,17 +337,21 @@ export class NamedBrowserSessions {
   }
 
   /**
-   * Create a Browser Run session (outside any lock) and commit it under
-   * `key`, reapplying the durable creation options. If a concurrent caller
+   * Create a Browser Run session (outside any lock) and commit it under the
+   * name, reapplying the durable creation options. If a concurrent caller
    * committed an entry first, theirs wins and the redundant session is
    * deleted best-effort.
+   *
+   * `restarted` is read under the commit lock: a retired marker — left by
+   * close() or a dead-session recovery — is evidence a prior browser
+   * existed, and only first-ever use of the name is not a restart. Markers
+   * are permanent, so reading at commit time also catches a browser that
+   * was created and closed while this create was in flight.
    */
   async #createAndCommit(
-    key: string
-  ): Promise<
-    | { stored: StoredBrowserSession; winner?: undefined }
-    | { stored?: undefined; winner: StoredBrowserSession }
-  > {
+    name: string
+  ): Promise<{ session: StoredBrowserSession; restarted: boolean }> {
+    const key = namedBrowserSessionKey(name);
     const info = await createBrowserSession(this.#browser, {
       keepAliveMs: this.keepAliveMs,
       recording: this.#create.recording,
@@ -363,8 +365,11 @@ export class NamedBrowserSessions {
     };
 
     let winner: StoredBrowserSession | undefined;
+    let restarted: boolean;
     const lock = await this.#store.acquireLock(key);
     try {
+      restarted =
+        (await this.#store.get(retiredBrowserSessionKey(name))) !== undefined;
       const current = await this.#store.get(key);
       if (current === undefined) {
         await this.#store.set(key, stored);
@@ -384,9 +389,9 @@ export class NamedBrowserSessions {
           error
         );
       }
-      return { winner };
+      return { session: winner, restarted };
     }
-    return { stored };
+    return { session: stored, restarted };
   }
 
   async #isAlive(stored: StoredBrowserSession): Promise<boolean> {
@@ -397,12 +402,6 @@ export class NamedBrowserSessions {
       if (isMissingBrowserSession(error)) return false;
       throw error;
     }
-  }
-
-  async #wasRetired(name: string): Promise<boolean> {
-    return (
-      (await this.#store.get(retiredBrowserSessionKey(name))) !== undefined
-    );
   }
 
   async #readStored(key: string): Promise<StoredBrowserSession | undefined> {

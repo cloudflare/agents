@@ -315,6 +315,37 @@ describe("NamedBrowserSessions.resolve", () => {
     expect(first.restarted).toBe(true);
     expect(second.restarted).toBe(true);
   });
+
+  it("reports restarted: true when the name is used and closed during its create", async () => {
+    let releaseFirstCreate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseFirstCreate = resolve;
+    });
+    let createCalls = 0;
+    const { browser } = createFakeBrowser({
+      // Hold A's create open; later creates respond immediately.
+      onCreate: () => {
+        createCalls++;
+        return createCalls === 1 ? gate : undefined;
+      }
+    });
+    const store = new MemorySessionStore();
+    const sessions = new NamedBrowserSessions({ browser, store });
+
+    // A finds the name unused and starts creating…
+    const a = sessions.resolve("checkout");
+    await waitUntil(() => createCalls === 1);
+    // …while B uses the name and closes it, emptying the key again.
+    const b = await sessions.resolve("checkout");
+    expect(b.restarted).toBe(false);
+    expect(await sessions.close("checkout")).toBe(true);
+    releaseFirstCreate();
+
+    // The name already lost B's browser, so A's commit is a restart.
+    const resolved = await a;
+    expect(resolved.sessionId).not.toBe(b.sessionId);
+    expect(resolved.restarted).toBe(true);
+  });
 });
 
 describe("NamedBrowserSessions.close", () => {
