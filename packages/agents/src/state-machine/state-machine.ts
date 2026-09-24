@@ -39,9 +39,11 @@ import type {
   MachineOutput,
   MachinePhased,
   MachineReceipt,
+  MachineListOptions,
   MachineRunOptions,
   MachineRunRow,
   MachineRunSnapshot,
+  MachineRunStatus,
   MachineNotifyOptions,
   MachineNotifyReceipt,
   MachineState,
@@ -243,6 +245,48 @@ export class StateMachine<
     };
   }
 
+  async list<Name extends keyof Definitions & string>(
+    options: MachineListOptions & { readonly definition?: Name } = {}
+  ): Promise<
+    MachineRunSnapshot<
+      MachineState<Definitions[Name]>,
+      MachineOutput<Definitions[Name]>
+    >[]
+  > {
+    await this.lifecycle.ready();
+    if (
+      options.limit !== undefined &&
+      (!Number.isSafeInteger(options.limit) ||
+        options.limit < 1 ||
+        options.limit > 1_000)
+    ) {
+      throw new Error(
+        "Machine list limit must be an integer between 1 and 1000"
+      );
+    }
+    const status =
+      options.status === undefined
+        ? undefined
+        : Array.isArray(options.status)
+          ? options.status
+          : [options.status as MachineRunStatus];
+    return this.#store
+      .listRuns({
+        ...(options.definition === undefined
+          ? {}
+          : { definition: options.definition }),
+        ...(status === undefined ? {} : { status }),
+        limit: options.limit ?? 100
+      })
+      .map(
+        (row) =>
+          this.#store.toSnapshot(row) as MachineRunSnapshot<
+            MachineState<Definitions[Name]>,
+            MachineOutput<Definitions[Name]>
+          >
+      );
+  }
+
   async get<Name extends keyof Definitions & string>(
     runId: string,
     definition?: Name
@@ -425,7 +469,8 @@ export class StateMachine<
       events: this.#events,
       gates: this.#gates,
       effects: this.#effects,
-      errorSummary: (error) => this.#errorSummary(error)
+      errorSummary: (error) => this.#errorSummary(error),
+      flushPending: (pending) => this.#flushPending(row, pending)
     });
     if (row.cancel_requested === 1 && !definition.onCancel) {
       await this.#commitCancelled(row, row.cancel_reason ?? undefined);
@@ -464,7 +509,16 @@ export class StateMachine<
         row.cancel_requested === 1
       );
     } catch (error) {
-      if (error instanceof MachineTransitionConflictError) return;
+      if (error instanceof MachineTransitionConflictError) {
+        // A mid-phase effect may already be settled. Requeue the latest
+        // checkpoint so deterministic builder IDs recover that outcome.
+        const latest = this.#store.getRun(row.run_id);
+        if (latest && !TERMINAL_STATUSES.has(latest.status)) {
+          this.#pushJob(latest.run_id, latest.revision, Date.now());
+          await this.lifecycle.jobs.rearm();
+        }
+        return;
+      }
       if (isPlatformFailure(error)) throw error;
       await this.#commitFailure(row, this.#errorSummary(error));
     }
@@ -529,6 +583,7 @@ export class StateMachine<
           written = this.#store.write(
             `UPDATE cf_agents_state_machine_runs
              SET status = 'running', phase = ?, checkpoint_json = ?, revision = ?,
+                 builder_revision = builder_revision + 1,
                  wait_kind = NULL, wait_type = NULL, wait_key = NULL,
                  next_at = NULL, cancel_requested = ?, cancel_reason = NULL,
                  updated_at = ?
@@ -660,6 +715,20 @@ export class StateMachine<
     });
   }
 
+  /** Persist mid-phase intent without recording a state transition. */
+  #flushPending(row: MachineRunRow, pending: PendingChanges): void {
+    if (pending.gates.length === 0 && pending.effects.length === 0) return;
+    const gates = pending.gates.splice(0);
+    const effects = pending.effects.splice(0);
+    const now = Date.now();
+    this.#store.transaction(() => {
+      this.#gates.applyPending(row.run_id, gates, now);
+      this.#effects.applyPending(row.run_id, row.revision, effects, now);
+    });
+    this.#gates.publishPending(row.run_id, gates);
+    this.#effects.publishPending(row.run_id, effects);
+  }
+
   async #commitFailure(
     row: MachineRunRow,
     error: { name: string; message: string }
@@ -714,6 +783,7 @@ export class StateMachine<
       phase: input.phase,
       checkpoint_json: input.checkpoint,
       revision: 0,
+      builder_revision: 0,
       control_json: '{"status":"running"}',
       job_id: this.#jobId(input.runId),
       wait_kind: null,

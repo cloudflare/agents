@@ -33,16 +33,20 @@ export function createMachineContext(options: {
   gates: MachineGateManager;
   effects: MachineEffectManager;
   errorSummary: (error: unknown) => { name: string; message: string };
+  flushPending: (pending: PendingChanges) => void;
 }): {
   context: MachineContext<MachinePhased, MachineValue>;
   pending: PendingChanges;
 } {
-  const { row, wake, events, gates, effects, errorSummary } = options;
+  const { row, wake, events, gates, effects, errorSummary, flushPending } =
+    options;
   const pending: PendingChanges = {
     claimedEventIds: [],
     gates: [],
     effects: []
   };
+  let gateOrdinal = 0;
+  let effectOrdinal = 0;
   const takeEvent = (filter: MachineEventFilter): MachineQueuedEvent | null =>
     events.take(row, pending.claimedEventIds, filter);
   const commit = (transition?: MachineTransitionOptions) =>
@@ -64,7 +68,14 @@ export function createMachineContext(options: {
         request: Payload,
         gateOptions: MachineGateOptions
       ): MachineGateRef<Answer> =>
-        gates.create(row, pending.gates, kind, request, gateOptions),
+        gates.create(
+          row,
+          pending.gates,
+          gateOrdinal++,
+          kind,
+          request,
+          gateOptions
+        ),
       take: <Answer extends MachineJson>(gate: MachineGateRef<Answer>) =>
         gates.take(gate, (type, key) => takeEvent({ type, key }))
     }),
@@ -74,10 +85,33 @@ export function createMachineContext(options: {
         input: Input,
         effectOptions: MachineEffectPlanOptions
       ): MachineEffectRef<Output> =>
-        effects.plan(row, pending.effects, kind, input, effectOptions),
+        effects.plan(
+          row,
+          pending.effects,
+          effectOrdinal++,
+          kind,
+          input,
+          effectOptions
+        ),
       execute: <Output extends MachineValue>(
         effect: MachineEffectRef<Output>
-      ) => effects.execute(row.run_id, effect)
+      ) => effects.execute(row.run_id, effect, pending.effects),
+      run: async <Input extends MachineJson, Output extends MachineValue>(
+        kind: string,
+        input: Input,
+        effectOptions: MachineEffectPlanOptions
+      ) => {
+        const effect = effects.plan<Input, Output>(
+          row,
+          pending.effects,
+          effectOrdinal++,
+          kind,
+          input,
+          effectOptions
+        );
+        flushPending(pending);
+        return effects.execute(row.run_id, effect);
+      }
     }),
     transition: (
       state: MachinePhased,

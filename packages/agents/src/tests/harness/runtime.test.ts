@@ -29,6 +29,7 @@ class FakeRuntime implements HarnessRuntime<Input, Result> {
 const invocation = {
   effectId: "effect-1",
   idempotencyKey: "run:effect-1",
+  attempt: 1,
   signal: new AbortController().signal
 };
 

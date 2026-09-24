@@ -1,6 +1,6 @@
 import type { StateMachineStore } from "./store";
 
-export const STATE_MACHINE_SCHEMA_VERSION = 2;
+export const STATE_MACHINE_SCHEMA_VERSION = 4;
 export const STATE_MACHINE_SCHEMA_VERSION_KEY =
   "cf_agents_state_machine_schema_version";
 
@@ -26,13 +26,13 @@ export function migrateStateMachineSchema(
         store.createRunTable();
         store.sql(`INSERT INTO cf_agents_state_machine_runs
           (run_id, definition, definition_version, status, phase,
-           checkpoint_json, revision, control_json, job_id, wait_kind,
+           checkpoint_json, revision, builder_revision, control_json, job_id, wait_kind,
            wait_type, wait_key, next_at, event_sequence, cancel_requested,
            cancel_reason, result_json, error_name, error_message, persist,
            idempotency_key,
            created_at, updated_at, settled_at)
           SELECT run_id, definition, definition_version, status, phase,
-                 checkpoint_json, revision, control_json, job_id, NULL,
+                 checkpoint_json, revision, 0, control_json, job_id, NULL,
                  NULL, NULL, NULL, 0, 0, NULL, result_json, error_name,
                  error_message, persist, idempotency_key, created_at,
                  updated_at, settled_at
@@ -41,5 +41,43 @@ export function migrateStateMachineSchema(
       });
     }
     store.ensureCoordinationTables();
+  }
+
+  if (fromVersion < 3) {
+    store.ensureCoordinationTables();
+    const columns = store.sql<{ name: string }>(
+      "PRAGMA table_info(cf_agents_state_machine_effects)"
+    );
+    if (!columns.some((column) => column.name === "attempt")) {
+      store.sql(
+        "ALTER TABLE cf_agents_state_machine_effects ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1"
+      );
+    }
+  }
+
+  if (fromVersion < 4) {
+    const runColumns = store.sql<{ name: string }>(
+      "PRAGMA table_info(cf_agents_state_machine_runs)"
+    );
+    if (!runColumns.some((column) => column.name === "builder_revision")) {
+      store.sql(
+        "ALTER TABLE cf_agents_state_machine_runs ADD COLUMN builder_revision INTEGER NOT NULL DEFAULT 0"
+      );
+    }
+    store.transaction(() => {
+      store.sql(
+        "ALTER TABLE cf_agents_state_machine_effects RENAME TO cf_agents_state_machine_effects_v3"
+      );
+      store.createEffectTable();
+      store.sql(`INSERT INTO cf_agents_state_machine_effects
+        (run_id, effect_id, revision, kind, recovery, status, input_json,
+         external_id, result_json, error_name, error_message, attempt,
+         retry_at, options_json, created_at, settled_at)
+        SELECT run_id, effect_id, revision, kind, recovery, status, input_json,
+               external_id, result_json, error_name, error_message, attempt,
+               NULL, '{}', created_at, settled_at
+        FROM cf_agents_state_machine_effects_v3`);
+      store.sql("DROP TABLE cf_agents_state_machine_effects_v3");
+    });
   }
 }

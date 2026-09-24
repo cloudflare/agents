@@ -1,5 +1,5 @@
 import type { LifecycleJobs } from "../lifecycle/job-queue";
-import { randomAlphanumeric } from "./ids";
+import { machineBuilderId } from "./ids";
 import { serializeMachineValue } from "./serialization";
 import type { StateMachineStore } from "./store";
 import { TERMINAL_STATUSES, type MachineEventManager } from "./events";
@@ -48,23 +48,51 @@ export class MachineGateManager {
   create<Payload extends MachineJson, Answer extends MachineJson>(
     row: MachineRunRow,
     pending: PendingGate[],
+    ordinal: number,
     kind: GateKind<Payload, Answer>,
     request: Payload,
     options: MachineGateOptions
   ): MachineGateRef<Answer> {
+    const id = machineBuilderId(
+      row.run_id,
+      row.builder_revision,
+      "gate",
+      ordinal
+    );
+    const expiresAt = requiredTime(options.expiresAt);
+    const requestJson =
+      serializeMachineValue(request, `request for gate "${id}"`) ?? "null";
+    const metadataJson = serializeMachineValue(
+      options.metadata,
+      `metadata for gate "${id}"`
+    );
+    const existing = this.#store.getGate(id);
+    if (existing) {
+      if (
+        existing.run_id !== row.run_id ||
+        existing.kind !== kind.name ||
+        existing.request_json !== requestJson ||
+        existing.metadata_json !== metadataJson ||
+        existing.expires_at !== expiresAt
+      ) {
+        throw new Error(
+          `Machine gate "${id}" was replayed with a different definition`
+        );
+      }
+      return { id, kind: kind.name };
+    }
     const openGates = this.#store
       .gatesForRun(row.run_id)
       .filter((gate) => gate.state === "open").length;
     if (openGates + pending.length >= MAX_OPEN_GATES) {
       throw new Error(`Machine run "${row.run_id}" has too many open gates`);
     }
-    const id = `${row.run_id}#gate_${randomAlphanumeric()}`;
     pending.push({
       id,
       kind: kind.name,
       request,
       metadata: options.metadata,
-      expiresAt: requiredTime(options.expiresAt)
+      expiresAt
     });
     return { id, kind: kind.name };
   }
