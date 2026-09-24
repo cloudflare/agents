@@ -277,8 +277,8 @@ import {
 } from "agents/context";
 
 /**
- * The recent-message span the model sees at FULL fidelity each turn —
- * `truncateOlderMessages`' default `keepRecent` (see `_assembleModelMessages`).
+ * The shortest recent-message span the model sees at FULL fidelity each turn
+ * (see `_assembleModelMessages` and {@link MODEL_TRUNCATION_STEP}).
  *
  * Both memory bounds are anchored to this window (#1710):
  * - budgeted hydration (`hydrationByteBudget`) is a hard byte ceiling, so a
@@ -289,6 +289,24 @@ import {
  *   fidelity are never stripped.
  */
 const MODEL_RECENT_WINDOW = 4;
+
+/**
+ * Read-time truncation cuts the history at a multiple of this many messages,
+ * so the full-fidelity span grows from `MODEL_RECENT_WINDOW` to
+ * `MODEL_RECENT_WINDOW + MODEL_TRUNCATION_STEP - 1` messages between cuts.
+ * Providers cache on a byte-identical prompt prefix, and a cutoff that moved
+ * every turn rewrote a message near the end of that prefix on every turn
+ * (#2200). Stepping it rewrites the prefix once per step instead.
+ */
+const MODEL_TRUNCATION_STEP = 8;
+
+function truncationKeepRecent(messageCount: number): number {
+  if (messageCount <= MODEL_RECENT_WINDOW) return MODEL_RECENT_WINDOW;
+  return (
+    MODEL_RECENT_WINDOW +
+    ((messageCount - MODEL_RECENT_WINDOW) % MODEL_TRUNCATION_STEP)
+  );
+}
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 
 /** Whether a workspace can receive raw bytes, which skills projection needs. */
@@ -6638,7 +6656,9 @@ export class Think<
     const providerSafeHistory = history.map(
       toProviderSafeExecutionOutcomeMessage
     );
+    const keepRecent = truncationKeepRecent(providerSafeHistory.length);
     const truncated = truncateOlderMessages(providerSafeHistory, {
+      keepRecent,
       toolOutputs: false
     }) as UIMessage[];
     // `_repairTranscriptForProvider` above already heals orphan tool calls
@@ -6665,7 +6685,7 @@ export class Think<
       tools,
       ignoreIncompleteToolCalls: true
     });
-    return truncateOlderToolResults(modelMessages, truncated);
+    return truncateOlderToolResults(modelMessages, truncated, { keepRecent });
   }
 
   /**

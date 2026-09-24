@@ -244,6 +244,22 @@ Sessions stamps each message with a token estimate when the row is written. `com
 
 To trim a transcript before handing it to a model, `truncateOlderMessages` is exported from [`agents/chat`](./chat-agents.md), not from `agents/sessions`. If your tools define `toModelOutput`, a truncated tool output may no longer match the tool's output schema. In that case, pass `toolOutputs: false` to `truncateOlderMessages` and call `truncateOlderToolResults` on the result of `convertToModelMessages`, which truncates what the model reads after `toModelOutput` has run. Provider-executed tool outputs are never truncated.
 
+With the default `keepRecent`, the truncation cutoff moves forward by one message whenever a message is added, so every turn rewrites a message near the end of the prompt and invalidates the provider's prompt cache from that point. To keep the prefix stable, move the cutoff in steps and pass the same `keepRecent` to both functions:
+
+```ts
+const step = 8;
+const keepRecent = history.length <= 4 ? 4 : 4 + ((history.length - 4) % step);
+const truncated = truncateOlderMessages(history, {
+  keepRecent,
+  toolOutputs: false
+});
+const modelMessages = truncateOlderToolResults(
+  await convertToModelMessages(truncated, { tools }),
+  truncated,
+  { keepRecent }
+);
+```
+
 ## Large messages
 
 A message is stored as one JSON string. When that string exceeds the row budget it is cut into slices: slice 0 lives in the message row, the rest become numbered continuation rows in `cf_agents_session_message_chunks`. A read concatenates them back, so what you append is exactly what you read.

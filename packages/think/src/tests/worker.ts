@@ -58,6 +58,7 @@ export {
   ThinkOnStartHydrationFailureAgent,
   ThinkWindowedHydrationAgent,
   ThinkMediaEvictionAgent,
+  ThinkPromptCacheTestAgent,
   ThinkMediaEvictionAutoAgent,
   ThinkPointerHydrationAgent,
   ThinkLegacySessionApiAgent
@@ -108,6 +109,7 @@ import type {
   ThinkOnStartHydrationFailureAgent,
   ThinkWindowedHydrationAgent,
   ThinkMediaEvictionAgent,
+  ThinkPromptCacheTestAgent,
   ThinkMediaEvictionAutoAgent,
   ThinkPointerHydrationAgent,
   ThinkLegacySessionApiAgent
@@ -262,6 +264,7 @@ export type Env = {
   ThinkOnStartHydrationFailureAgent: DurableObjectNamespace<ThinkOnStartHydrationFailureAgent>;
   ThinkWindowedHydrationAgent: DurableObjectNamespace<ThinkWindowedHydrationAgent>;
   ThinkMediaEvictionAgent: DurableObjectNamespace<ThinkMediaEvictionAgent>;
+  ThinkPromptCacheTestAgent: DurableObjectNamespace<ThinkPromptCacheTestAgent>;
   ThinkMediaEvictionAutoAgent: DurableObjectNamespace<ThinkMediaEvictionAutoAgent>;
   ThinkPointerHydrationAgent: DurableObjectNamespace<ThinkPointerHydrationAgent>;
   ThinkLegacySessionApiAgent: DurableObjectNamespace<ThinkLegacySessionApiAgent>;
