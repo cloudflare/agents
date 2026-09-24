@@ -31,6 +31,9 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
         result: Result
       ) => void | Promise<void>)
     | undefined;
+  readonly #cancelTools:
+    | ((submission: HarnessDriverSubmission<Input>) => void | Promise<void>)
+    | undefined;
   readonly #fail:
     | ((
         submission: HarnessDriverSubmission<Input>,
@@ -57,6 +60,7 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
     this.#id = options.id;
     this.#runtime = options.runtime;
     this.#settle = options.settle;
+    this.#cancelTools = options.cancelTools;
     this.#fail = options.fail;
     this.#heartbeatMs = options.heartbeatMs ?? 30_000;
     this.#maxAttempts = options.maxAttempts ?? 3;
@@ -144,10 +148,7 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
     const active = this.#inFlight.get(submission.scope);
     if (active?.operationId === operationId) active.controller.abort();
     try {
-      const cancelled = await this.#runtime.cancel(
-        submission.scope,
-        operationId
-      );
+      const cancelled = await this.#cancelSubmission(submission);
       await this.#applyOutcome(
         submission.scope,
         await this.#cancellationOutcome(submission, cancelled)
@@ -202,10 +203,7 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
       return this.#failed(submission, submission.failure);
     }
     if (submission.cancelRequested) {
-      const cancelled = await this.#runtime.cancel(
-        scope,
-        submission.operationId
-      );
+      const cancelled = await this.#cancelSubmission(submission);
       return this.#cancellationOutcome(submission, cancelled);
     }
 
@@ -314,6 +312,17 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
       });
       await this.#scheduleRetry(scope, attempts + 1);
     }
+  }
+
+  async #cancelSubmission(
+    submission: HarnessDriverSubmission<Input>
+  ): Promise<HarnessDriverCancellation<Result>> {
+    const cancellation = await this.#runtime.cancel(
+      submission.scope,
+      submission.operationId
+    );
+    await this.#cancelTools?.(submission);
+    return cancellation;
   }
 
   async #retryCancellation(

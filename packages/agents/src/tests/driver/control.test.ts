@@ -147,6 +147,35 @@ describe("HarnessDriver control", () => {
     });
   });
 
+  it("keeps cancellation intake when attached tool cancellation fails", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const runtime = new Runtime();
+      let calls = 0;
+      const driver = new HarnessDriver({
+        id: "test",
+        runtime,
+        cancelTools: async () => {
+          calls += 1;
+          throw new Error("tool cancellation unavailable");
+        }
+      });
+      const { lifecycle } = install(driver);
+      await lifecycle.start();
+      await driver.submit("main", { text: "first" }, { operationId: "op-1" });
+      await storage.deleteAlarm();
+
+      await expect(driver.cancel("op-1")).rejects.toThrow(
+        "tool cancellation unavailable"
+      );
+
+      expect(calls).toBe(1);
+      expect(await driver.pending()).toMatchObject([
+        { operationId: "op-1", cancelRequested: true }
+      ]);
+      await storage.deleteAlarm();
+    });
+  });
+
   it("keeps cancellation intake when the runtime throws", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const runtime = new Runtime();

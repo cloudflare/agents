@@ -204,6 +204,9 @@ export type PiHarnessConfig<
   readonly model: PiModel | PiModelIdentity;
 
   readonly streams: Streams;
+  readonly durableTools?: {
+    cancelByOperation(operationId: string): Promise<number>;
+  };
   readonly thinkingLevel?: PiThinkingLevel;
   readonly activeToolNames?: readonly string[];
 

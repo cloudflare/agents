@@ -111,7 +111,14 @@ export class PiHarness<
           this.#prepareDrive(lane, operationId)
       }),
       settle: (submission, result) =>
-        this.#settleResult(submission.scope, result)
+        this.#settleResult(submission.scope, result),
+      cancelTools: config.durableTools
+        ? async (submission) => {
+            await config.durableTools?.cancelByOperation(
+              submission.operationId
+            );
+          }
+        : undefined
     });
   }
 

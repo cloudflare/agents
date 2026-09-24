@@ -98,6 +98,7 @@ export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
     models: createModels({ providers: [this.#faux.provider] }),
     model: this.#faux.getModel(),
     streams: this.streams,
+    durableTools: this.durableTools,
     thinkingLevel: "off",
     retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
     compaction: { enabled: false, reserveTokens: 0, keepRecentTokens: 0 },

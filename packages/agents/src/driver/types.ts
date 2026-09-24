@@ -70,6 +70,9 @@ export type HarnessDriverOptions<Input, Result> = {
     submission: HarnessDriverSubmission<Input>,
     result: Result
   ) => void | Promise<void>;
+  readonly cancelTools?: (
+    submission: HarnessDriverSubmission<Input>
+  ) => void | Promise<void>;
   readonly fail?: (
     submission: HarnessDriverSubmission<Input>,
     error: HarnessDriverError

@@ -137,6 +137,10 @@ export type OCSubmissionReceipt = {
 export type OpenCodeHarnessConfig = {
   readonly streams: Streams;
 
+  readonly durableTools?: {
+    cancelByOperation(operationId: string): Promise<number>;
+  };
+
   readonly workerd?: Omit<
     Parameters<typeof OpenCodeWorkerd.create>[0],
     "storage" | "config" | "plugins"

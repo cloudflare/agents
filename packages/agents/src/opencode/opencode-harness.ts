@@ -74,7 +74,14 @@ export class OpenCodeHarness extends LifecycleCapability {
           await this.#writerFor(sessionId, operationId);
         }
       }),
-      settle: (submission, result) => this.#settle(submission.scope, result)
+      settle: (submission, result) => this.#settle(submission.scope, result),
+      cancelTools: config.durableTools
+        ? async (submission) => {
+            await config.durableTools?.cancelByOperation(
+              submission.operationId
+            );
+          }
+        : undefined
     });
   }
 
