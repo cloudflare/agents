@@ -365,6 +365,34 @@ describe("durable-pause actions (turn-driven, connection-less)", () => {
       { timeout: 5000, interval: 50 }
     );
   });
+
+  it("rejects without starting a connection-less continuation when disabled", async () => {
+    const agent = await freshPauseAgent(
+      `dp-reject-pause-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest();
+
+    const first = await agent.testChat("call pauseAction");
+    expect(first.done).toBe(true);
+
+    const pending = await agent.listActionPendingForTest();
+    expect(pending).toHaveLength(1);
+    const modelCallsBefore = await agent.getDurablePauseModelCallCount();
+
+    const rejected = (await agent.rejectExecutionForTest(
+      pending[0].execution_id,
+      "pause here",
+      { autoContinue: false }
+    )) as PausedOutput;
+
+    expect(rejected.status).toBe("rejected");
+    expect(rejected.reason).toBe("pause here");
+    expect(await agent.getDurablePauseExecCount()).toBe(0);
+    expect(await agent.listActionPendingForTest()).toHaveLength(0);
+
+    expect(await agent.waitUntilStableForTest()).toBe(true);
+    expect(await agent.getDurablePauseModelCallCount()).toBe(modelCallsBefore);
+  });
 });
 
 describe("resolving a durable pause drops pending-state generation (#2054)", () => {

@@ -316,7 +316,7 @@ createExecuteTool({
 An AI SDK tool with `needsApproval` doesn't run immediately inside the sandbox — calling it **pauses the run durably**. The pause comes back as a normal tool output (`{ status: "paused", executionId, pending }`), the model tells the user what it needs, and the turn ends. Note this differs from the client-side approval flow for plain `getTools()` tools: inside the sandbox a function-valued `needsApproval` can't be evaluated against the call's arguments ahead of time, so it conservatively **always** requires approval. Think ships built-in callables to resolve it:
 
 - `approveExecution(executionId)` — resumes the run where it stopped (already-done work is replayed, not re-executed); the outcome replaces the paused output in the transcript and the chat auto-continues.
-- `rejectExecution(executionId, reason?)` — ends the run with `{ status: "rejected", reason }` so the model can adapt.
+- `rejectExecution(executionId, reason?, { autoContinue? })` — ends the run with `{ status: "rejected", reason }` so the model can adapt. Pass `{ autoContinue: false }` to record the rejection without starting another model turn.
 
 Either way, the text and reasoning the model wrote after the paused output (its "waiting for approval" reply) are removed from that assistant message, so the continuation does not read a stale pending state next to the real outcome.
 
