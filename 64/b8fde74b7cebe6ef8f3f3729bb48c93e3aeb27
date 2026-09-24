@@ -1,0 +1,33 @@
+docs/think/programmatic-submissions.md
+  s_368991bdec7f77::t_e182d2d57051d2 111-113,119-137,142-146,148-150
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_e29c99f9bc5fc4 48-49,6740-6748
+packages/think/src/tests/submissions.test.ts
+  s_368991bdec7f77::t_675486706bb479 7,107-114,882-926,991-1006,1008-1054
+packages/think/src/think.ts
+  s_368991bdec7f77::t_61be68ce6cfbf3 2395-2397,2399-2420,2424-2425,2432-2434,11128-11130,11139-11143,11150-11165,11170-11193,11486,11488-11496,11523-11529,11531,11538-11541,11543-11544
+.changeset/think-submission-wait.md
+  s_368991bdec7f77::t_0d66a42b3503bc 1-4,6
+packages/ai-chat/src/tests/client-tools-continuation.test.ts
+  s_368991bdec7f77::t_5dbc5728200787 512-569
+packages/think/src/tests/agents/client-tools.ts
+  s_368991bdec7f77::t_eda2f299f8d240 394-480,810,899-900,906-915,917-920,949-952
+packages/think/src/tests/client-tools.test.ts
+  s_368991bdec7f77::t_7da28a3ef9b649 801-843
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "64b8fde74b7cebe6ef8f3f3729bb48c93e3aeb27",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}

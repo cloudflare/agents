@@ -1,0 +1,23 @@
+packages/ai-chat/src/index.ts
+  s_52c6a9b0020245::t_7e14f8e1948fc4 3183-3190
+packages/ai-chat/src/tests/client-tools-continuation.test.ts
+  s_52c6a9b0020245::t_a75e22c427f06f 238-316
+packages/ai-chat/src/tests/worker.ts
+  s_52c6a9b0020245::t_31b7b5edf5b256 324-368
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "16ba35b4a992597a7a857e2a3382cf70f9fb1f87",
+  "prompts": {},
+  "sessions": {
+    "s_52c6a9b0020245": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "591e6f70-b65e-4ea9-b86e-05744eef5b82",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
