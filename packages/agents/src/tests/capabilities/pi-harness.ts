@@ -5,10 +5,13 @@ import {
 } from "@earendil-works/pi-ai";
 import { DurableObject } from "cloudflare:workers";
 import { Type } from "typebox";
+import { DurableToolRuns } from "../../driver";
+import type { DurableToolInspection } from "../../driver";
 import { Lifecycle } from "../../lifecycle";
+import { createPiDurableTool } from "../../pi/durable-tools";
 import { createModels } from "../../pi/models";
 import { PiHarness } from "../../pi/pi-harness";
-import type { PiMessage, PiTool } from "../../pi/types";
+import type { PiMessage, PiTool, PiToolResult } from "../../pi/types";
 import { Streams } from "../../streams";
 
 const parameters = Type.Object({ value: Type.Number() });
@@ -41,7 +44,10 @@ function response(context: {
     .map((message) => JSON.stringify(message.content))
     .join(" ");
   const value = Number(/multiply (-?\d+(?:\.\d+)?)/.exec(prompt)?.[1] ?? 0);
-  return fauxAssistantMessage(fauxToolCall("multiply", { value }), {
+  const toolName = prompt.includes("durable multiply")
+    ? "durable_multiply"
+    : "multiply";
+  return fauxAssistantMessage(fauxToolCall(toolName, { value }), {
     stopReason: "toolUse"
   });
 }
@@ -49,6 +55,45 @@ function response(context: {
 export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly #faux = fauxProvider();
   readonly streams = new Streams();
+  readonly durableTools = new DurableToolRuns<
+    { value: number },
+    PiToolResult<{ result: number }>
+  >({
+    id: "pi-multiply",
+    runtime: {
+      inspect: async (runId) =>
+        (await this.ctx.storage.get<
+          DurableToolInspection<PiToolResult<{ result: number }>>
+        >(`external:${runId}`)) ?? { status: "not-started" },
+      start: async (runId, input) => {
+        const starts =
+          (await this.ctx.storage.get<number>("durable-tool-starts")) ?? 0;
+        await this.ctx.storage.put("durable-tool-starts", starts + 1);
+        await this.ctx.storage.put("durable-tool-last", { runId, input });
+        const hold =
+          (await this.ctx.storage.get<boolean>("durable-tool-hold")) ?? false;
+        await this.ctx.storage.put(
+          `external:${runId}`,
+          hold
+            ? { status: "running" }
+            : {
+                status: "completed",
+                result: {
+                  content: [{ type: "text", text: String(input.value * 3) }],
+                  details: { result: input.value * 3 }
+                }
+              }
+        );
+      },
+      cancel: async (runId) => {
+        await this.ctx.storage.put(`external:${runId}`, {
+          status: "cancelled"
+        });
+      }
+    },
+    wake: (owner) => this.harness.driver.wake(owner.scope),
+    heartbeatMs: 1
+  });
   readonly harness = new PiHarness<ToolContext>({
     models: createModels({ providers: [this.#faux.provider] }),
     model: this.#faux.getModel(),
@@ -57,11 +102,12 @@ export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
     retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
     compaction: { enabled: false, reserveTokens: 0, keepRecentTokens: 0 },
     toolContext: { multiplier: 3 },
-    tools: [this.#tool()],
+    tools: [this.#tool(), this.#durableTool()],
     systemPrompt: "Use the supplied tool."
   });
   readonly lifecycle = Lifecycle.install(this)
     .use(this.streams)
+    .use(this.durableTools)
     .use(this.harness.driver)
     .use(this.harness);
 
@@ -85,6 +131,41 @@ export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
       { kind: "prompt", prompt: `multiply ${value}` },
       { lane, operationId }
     );
+  }
+
+  async submitDurableMultiply(
+    lane: string,
+    operationId: string,
+    value: number
+  ) {
+    return this.harness.submit(
+      { kind: "prompt", prompt: `durable multiply ${value}` },
+      { lane, operationId }
+    );
+  }
+
+  holdDurableTools() {
+    return this.ctx.storage.put("durable-tool-hold", true);
+  }
+
+  async completeDurableTool() {
+    const last = await this.ctx.storage.get<{
+      runId: string;
+      input: { value: number };
+    }>("durable-tool-last");
+    if (!last) return false;
+    await this.ctx.storage.put(`external:${last.runId}`, {
+      status: "completed",
+      result: {
+        content: [{ type: "text", text: String(last.input.value * 3) }],
+        details: { result: last.input.value * 3 }
+      }
+    });
+    return true;
+  }
+
+  durableToolStarts() {
+    return this.ctx.storage.get<number>("durable-tool-starts");
   }
 
   abort(lane: string, operationId: string) {
@@ -115,6 +196,24 @@ export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
 
   streamStatus(lane: string, operationId: string) {
     return this.streams.status(this.harness.streamId(operationId, lane));
+  }
+
+  #durableTool(): PiTool<ToolContext, typeof parameters, { result: number }> {
+    return createPiDurableTool({
+      name: "durable_multiply",
+      label: "Durable multiply",
+      description: "Multiply the input durably.",
+      parameters,
+      runs: this.durableTools,
+      scope: async (_context, invocation) => {
+        const pending = await this.harness.driver.pending();
+        return (
+          pending.find(
+            (submission) => submission.operationId === invocation.operationId
+          )?.scope ?? "main"
+        );
+      }
+    });
   }
 
   #tool(): PiTool<ToolContext, typeof parameters, { result: number }> {

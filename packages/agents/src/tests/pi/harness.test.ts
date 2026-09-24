@@ -49,6 +49,30 @@ describe("PiHarness", () => {
     ]);
   });
 
+  it("rejoins one foreground durable tool run after eviction", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.PiDriverHarnessObject.getByName(name);
+    await stub.holdDurableTools();
+    await stub.submitDurableMultiply("main", "op-durable", 5);
+
+    await runDurableObjectAlarm(stub);
+    await runDurableObjectAlarm(stub);
+    expect(await stub.durableToolStarts()).toBe(1);
+
+    await evictDurableObject(stub);
+    const fresh = env.PiDriverHarnessObject.getByName(name);
+    await fresh.completeDurableTool();
+    for (let index = 0; index < 4; index += 1) {
+      await runDurableObjectAlarm(fresh);
+    }
+
+    expect(await fresh.durableToolStarts()).toBe(1);
+    expect(await fresh.result("main", "op-durable")).toMatchObject({
+      status: "completed"
+    });
+    expect(await fresh.pending("main")).toEqual([]);
+  });
+
   it("recovers a submitted turn after eviction", async () => {
     const name = crypto.randomUUID();
     const stub = env.PiDriverHarnessObject.getByName(name);

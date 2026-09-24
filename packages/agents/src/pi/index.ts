@@ -1,5 +1,7 @@
 export { PiHarness, PiOperationRejectedError } from "./pi-harness";
 export { PiRuntimeAdapter } from "./runtime-adapter";
+export { createPiBackgroundTool, createPiDurableTool } from "./durable-tools";
+export type { PiDurableToolRuns } from "./durable-tools";
 export type { PiDriverLane, PiRuntimeAdapterOptions } from "./runtime-adapter";
 export { createModels, resolveModel } from "./models";
 export type {
