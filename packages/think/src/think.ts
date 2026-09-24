@@ -2392,6 +2392,40 @@ export type SubmitMessagesResult = ThinkSubmissionInspection & {
   accepted: boolean;
 };
 
+export type WaitForSubmissionOptions = {
+  /**
+   * Stop waiting after this many milliseconds and return the submission as it
+   * is then, still `pending` or `running`.
+   */
+  timeoutMs?: number;
+};
+
+/** What {@link Think.cancelSubmission} did. */
+export type CancelSubmissionResult =
+  | {
+      /** No submission has this id. */
+      outcome: "not_found";
+      submissionId: string;
+    }
+  | {
+      /** The submission had already finished; nothing changed. */
+      outcome: "already_terminal";
+      submissionId: string;
+      submission: ThinkSubmissionInspection;
+    }
+  | {
+      /** The submission is now `aborted`. */
+      outcome: "cancelled";
+      submissionId: string;
+      /**
+       * `"pending"`: removed before its turn started, so its messages were
+       * never applied. `"running"`: its turn had started and was signalled to
+       * abort; side effects already under way may still finish.
+       */
+      previousStatus: "pending" | "running";
+      submission: ThinkSubmissionInspection;
+    };
+
 export type ListSubmissionsOptions = {
   status?: ThinkSubmissionStatus | ThinkSubmissionStatus[];
   limit?: number;
@@ -11077,6 +11111,59 @@ export class Think<
         console.error("[Think] onSubmissionStatus failed", error);
       }
     });
+    if (this._isTerminalSubmissionStatus(inspection.status)) {
+      const waiters = this._submissionWaiters.get(inspection.submissionId);
+      this._submissionWaiters.delete(inspection.submissionId);
+      for (const waiter of waiters ?? []) waiter(inspection);
+    }
+  }
+
+  private _submissionWaiters = new Map<
+    string,
+    Set<(submission: ThinkSubmissionInspection) => void>
+  >();
+
+  /**
+   * Resolve once the submission reaches a terminal status (`completed`,
+   * `aborted`, `skipped` or `error`), after `onSubmissionStatus` has run for
+   * it. Resolves immediately for a submission that already finished, and with
+   * `null` for an unknown id. An `error` status resolves rather than rejects;
+   * read `status` and `error` from the result.
+   *
+   * The wait lives in this object's memory, so it rejects if the object
+   * restarts. The submission itself is durable: call again to keep waiting.
+   */
+  async waitForSubmission(
+    submissionId: string,
+    options?: WaitForSubmissionOptions
+  ): Promise<ThinkSubmissionInspection | null> {
+    const row = this._readSubmission(submissionId);
+    if (!row) return null;
+    if (this._isTerminalSubmissionStatus(row.status)) {
+      return this._inspectionFromSubmissionRow(row);
+    }
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const waiter = (submission: ThinkSubmissionInspection) => {
+        clearTimeout(timer);
+        resolve(submission);
+      };
+      let waiters = this._submissionWaiters.get(submissionId);
+      if (!waiters) {
+        waiters = new Set();
+        this._submissionWaiters.set(submissionId, waiters);
+      }
+      waiters.add(waiter);
+      if (options?.timeoutMs !== undefined) {
+        timer = setTimeout(() => {
+          const current = this._submissionWaiters.get(submissionId);
+          current?.delete(waiter);
+          if (current?.size === 0) this._submissionWaiters.delete(submissionId);
+          const latest = this._readSubmission(submissionId);
+          resolve(latest ? this._inspectionFromSubmissionRow(latest) : null);
+        }, options.timeoutMs);
+      }
+    });
   }
 
   protected onSubmissionStatus(
@@ -11359,9 +11446,17 @@ export class Think<
   async cancelSubmission(
     submissionId: string,
     reason?: unknown
-  ): Promise<void> {
+  ): Promise<CancelSubmissionResult> {
     const row = this._readSubmission(submissionId);
-    if (!row || this._isTerminalSubmissionStatus(row.status)) return;
+    if (!row) return { outcome: "not_found", submissionId };
+    if (this._isTerminalSubmissionStatus(row.status)) {
+      return {
+        outcome: "already_terminal",
+        submissionId,
+        submission: this._inspectionFromSubmissionRow(row)
+      };
+    }
+    const previousStatus = row.status as "pending" | "running";
 
     const completedAt = Date.now();
     const errorMessage =
@@ -11387,11 +11482,23 @@ export class Think<
     `;
 
     const updated = this._readSubmission(submissionId);
-    if (updated?.status === "aborted") {
-      this._enqueueTerminalWorkflowNotification(updated);
-      await this.dequeue(submissionRunItemId(submissionId));
-      await this._emitSubmissionStatus(updated);
+    if (!updated) return { outcome: "not_found", submissionId };
+    if (updated.status !== "aborted") {
+      return {
+        outcome: "already_terminal",
+        submissionId,
+        submission: this._inspectionFromSubmissionRow(updated)
+      };
     }
+    this._enqueueTerminalWorkflowNotification(updated);
+    await this.dequeue(submissionRunItemId(submissionId));
+    await this._emitSubmissionStatus(updated);
+    return {
+      outcome: "cancelled",
+      submissionId,
+      previousStatus,
+      submission: this._inspectionFromSubmissionRow(updated)
+    };
   }
 
   async submitMessages(

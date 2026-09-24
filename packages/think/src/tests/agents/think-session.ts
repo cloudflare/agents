@@ -45,7 +45,8 @@ import type {
   ActionAuthorizationDecision,
   StepContext,
   ChunkContext,
-  ActiveTurn
+  ActiveTurn,
+  CancelSubmissionResult
 } from "../../think";
 import type { MessengerContext } from "../../messengers";
 import {
@@ -6736,8 +6737,15 @@ export class ThinkProgrammaticTestAgent extends Think {
   async cancelSubmissionForTest(
     submissionId: string,
     reason?: string
-  ): Promise<void> {
-    await this.cancelSubmission(submissionId, reason);
+  ): Promise<CancelSubmissionResult> {
+    return this.cancelSubmission(submissionId, reason);
+  }
+
+  async waitForSubmissionForTest(
+    submissionId: string,
+    options?: { timeoutMs?: number }
+  ): Promise<ThinkSubmissionInspection | null> {
+    return this.waitForSubmission(submissionId, options);
   }
 
   async deleteSubmissionForTest(submissionId: string): Promise<boolean> {

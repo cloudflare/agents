@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
 import type { ThinkProgrammaticTestAgent } from "./agents/think-session";
 import type {
+  CancelSubmissionResult,
   SubmitMessagesResult,
   ThinkSubmissionInspection,
   ThinkSubmissionStatus
@@ -103,7 +104,14 @@ type ThinkSubmissionTestStub = {
     status?: ThinkSubmissionStatus | ThinkSubmissionStatus[];
     limit?: number;
   }): Promise<ThinkSubmissionInspection[]>;
-  cancelSubmissionForTest(submissionId: string, reason?: string): Promise<void>;
+  cancelSubmissionForTest(
+    submissionId: string,
+    reason?: string
+  ): Promise<CancelSubmissionResult>;
+  waitForSubmissionForTest(
+    submissionId: string,
+    options?: { timeoutMs?: number }
+  ): Promise<ThinkSubmissionInspection | null>;
   deleteSubmissionForTest(submissionId: string): Promise<boolean>;
   deleteSubmissionsForTest(options?: {
     status?: ThinkSubmissionStatus | ThinkSubmissionStatus[];
@@ -865,6 +873,114 @@ describe("Think durable submissions", () => {
         }
       })
     );
+  });
+
+  it("waitForSubmission resolves when a running submission completes", async () => {
+    const agent = await freshAgent();
+    await agent.setDelayedChunkResponse(["slow ", "response"], 50);
+    const accepted = await agent.testSubmitMessages("wait for me", {
+      submissionId: "sub-wait"
+    });
+    expect(accepted.status).not.toBe("completed");
+
+    const settled = await agent.waitForSubmissionForTest(accepted.submissionId);
+
+    expect(settled).toMatchObject({ status: "completed" });
+    expect(settled?.messageId).toBeTruthy();
+    await expect(
+      agent.waitForSubmissionForTest(accepted.submissionId)
+    ).resolves.toEqual(settled);
+    await expect(
+      agent.waitForSubmissionForTest("sub-missing")
+    ).resolves.toBeNull();
+  });
+
+  it("waitForSubmission resolves on cancellation and on reset", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({ submissionId: "sub-wait-cancel" });
+    await agent.insertSubmissionForTest({ submissionId: "sub-wait-reset" });
+
+    const cancelled = agent.waitForSubmissionForTest("sub-wait-cancel");
+    const reset = agent.waitForSubmissionForTest("sub-wait-reset");
+    await agent.cancelSubmissionForTest("sub-wait-cancel", "stop");
+    await expect(cancelled).resolves.toMatchObject({
+      status: "aborted",
+      error: "stop"
+    });
+    await agent.resetTurnStateForTest();
+    await expect(reset).resolves.toMatchObject({ status: "skipped" });
+  });
+
+  it("waitForSubmission returns the current state when it times out", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({ submissionId: "sub-wait-timeout" });
+
+    await expect(
+      agent.waitForSubmissionForTest("sub-wait-timeout", { timeoutMs: 50 })
+    ).resolves.toMatchObject({ status: "pending" });
+  });
+
+  it("reports what cancelSubmission did", async () => {
+    const agent = await freshAgent();
+    await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+
+    await expect(agent.cancelSubmissionForTest("sub-missing")).resolves.toEqual(
+      { outcome: "not_found", submissionId: "sub-missing" }
+    );
+
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-outcome-pending"
+    });
+    await expect(
+      agent.cancelSubmissionForTest("sub-outcome-pending", "not needed")
+    ).resolves.toMatchObject({
+      outcome: "cancelled",
+      previousStatus: "pending",
+      submission: { status: "aborted", error: "not needed" }
+    });
+    await expect(
+      agent.cancelSubmissionForTest("sub-outcome-pending")
+    ).resolves.toMatchObject({
+      outcome: "already_terminal",
+      submission: { status: "aborted", error: "not needed" }
+    });
+
+    const running = await agent.testSubmitMessages("cancel me", {
+      submissionId: "sub-outcome-running"
+    });
+    await waitForSubmission(
+      agent,
+      running.submissionId,
+      (submission) => submission.status === "running"
+    );
+    const cancelled = await agent.cancelSubmissionForTest(
+      running.submissionId,
+      "stop"
+    );
+    expect(cancelled).toMatchObject({
+      outcome: "cancelled",
+      previousStatus: "running",
+      submission: { status: "aborted", error: "stop" }
+    });
+    expect(
+      cancelled.outcome === "cancelled" && cancelled.submission.startedAt
+    ).toBeTruthy();
+
+    const other = await freshAgent();
+    const completed = await other.testSubmitMessages("finish", {
+      submissionId: "sub-outcome-completed"
+    });
+    await waitForSubmission(
+      other,
+      completed.submissionId,
+      (submission) => submission.status === "completed"
+    );
+    await expect(
+      other.cancelSubmissionForTest(completed.submissionId)
+    ).resolves.toMatchObject({
+      outcome: "already_terminal",
+      submission: { status: "completed" }
+    });
   });
 
   it("aborts a pending submission without running it", async () => {
