@@ -17,11 +17,7 @@ export interface PiDurableToolRuns<Input, Result> {
   wait(runId: string, signal?: AbortSignal): Promise<Result>;
 }
 
-type PiDurableToolOptions<
-  ToolContext extends object | undefined,
-  Parameters extends TSchema,
-  Details
-> = {
+type PiDurableToolOptions<Parameters extends TSchema, Details> = {
   readonly name: string;
   readonly label: string;
   readonly description: string;
@@ -35,11 +31,7 @@ type PiDurableToolOptions<
   readonly cancellation?: "with-parent" | "detached";
 };
 
-type PiBackgroundToolOptions<
-  ToolContext extends object | undefined,
-  Parameters extends TSchema,
-  RunResult
-> = {
+type PiBackgroundToolOptions<Parameters extends TSchema, RunResult> = {
   readonly name: string;
   readonly label: string;
   readonly description: string;
@@ -83,7 +75,7 @@ export function createPiDurableTool<
   Parameters extends TSchema = TSchema,
   Details = unknown
 >(
-  options: PiDurableToolOptions<ToolContext, Parameters, Details>
+  options: PiDurableToolOptions<Parameters, Details>
 ): PiTool<ToolContext, Parameters, Details> {
   return {
     name: options.name,
@@ -119,7 +111,7 @@ export function createPiBackgroundTool<
   Parameters extends TSchema = TSchema,
   RunResult = unknown
 >(
-  options: PiBackgroundToolOptions<ToolContext, Parameters, RunResult>
+  options: PiBackgroundToolOptions<Parameters, RunResult>
 ): PiTool<ToolContext, Parameters, { readonly runId: string }> {
   return {
     name: options.name,
