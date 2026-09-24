@@ -2392,6 +2392,46 @@ export type SubmitMessagesResult = ThinkSubmissionInspection & {
   accepted: boolean;
 };
 
+export type WaitForSubmissionOptions = {
+  /**
+   * Stop waiting after this many milliseconds and return the submission as it
+   * is then, still `pending` or `running`, or `null` if it was deleted.
+   */
+  timeoutMs?: number;
+};
+
+/** What {@link Think.cancelSubmission} did. */
+export type CancelSubmissionResult =
+  | {
+      /** No submission has this id. */
+      outcome: "not_found";
+      submissionId: string;
+    }
+  | {
+      /** The submission had already finished; nothing changed. */
+      outcome: "already_terminal";
+      submissionId: string;
+      submission: ThinkSubmissionInspection;
+    }
+  | {
+      /** The submission is now `aborted`. */
+      outcome: "cancelled";
+      submissionId: string;
+      /**
+       * `"pending"`: removed before its turn started. `"running"`: its turn
+       * had been claimed and was signalled to abort; side effects already
+       * under way may still finish.
+       */
+      previousStatus: "pending" | "running";
+      /**
+       * Whether any of the submission's messages were written to the
+       * conversation when it was cancelled. A claimed submission can still be
+       * `false` when it is cancelled before its turn applies them.
+       */
+      messagesApplied: boolean;
+      submission: ThinkSubmissionInspection;
+    };
+
 export type ListSubmissionsOptions = {
   status?: ThinkSubmissionStatus | ThinkSubmissionStatus[];
   limit?: number;
@@ -4500,6 +4540,7 @@ export class Think<
   private _actionLedgerTableEnsured = false;
   private _actionPendingTableEnsured = false;
   private _submissionAbortControllers = new Map<string, AbortController>();
+  private _submissionsApplyingMessages = new Set<string>();
   private _programmaticStreamErrors = new Map<string, string>();
   protected static submissionRecoveryStaleMs = 15 * 60 * 1000;
 
@@ -11051,6 +11092,8 @@ export class Think<
 
   private async _emitSubmissionStatus(row: ThinkSubmissionRow): Promise<void> {
     const inspection = this._inspectionFromSubmissionRow(row);
+    const terminal = this._isTerminalSubmissionStatus(inspection.status);
+    if (terminal) this._terminalStatusEmits.add(inspection.submissionId);
     this._emit("submission:status", {
       submissionId: inspection.submissionId,
       requestId: inspection.requestId,
@@ -11070,11 +11113,96 @@ export class Think<
         error: inspection.error
       });
     }
-    await this.keepAliveWhile(async () => {
-      try {
-        await this.onSubmissionStatus(inspection);
-      } catch (error) {
-        console.error("[Think] onSubmissionStatus failed", error);
+    try {
+      await this.keepAliveWhile(async () => {
+        try {
+          await this.onSubmissionStatus(inspection);
+        } catch (error) {
+          console.error("[Think] onSubmissionStatus failed", error);
+        }
+      });
+    } finally {
+      if (terminal) {
+        const id = inspection.submissionId;
+        this._terminalStatusEmits.delete(id);
+        const held = this._waitersHeldForDeletedEmit.get(id);
+        this._waitersHeldForDeletedEmit.delete(id);
+        for (const waiter of held ?? []) waiter(inspection);
+        const current = this._readSubmission(id);
+        if (current?.created_at === row.created_at) {
+          this._resolveSubmissionWaiters(inspection);
+        }
+      }
+    }
+  }
+
+  private _resolveSubmissionWaiters(
+    submission: ThinkSubmissionInspection
+  ): void {
+    const waiters = this._submissionWaiters.get(submission.submissionId);
+    this._submissionWaiters.delete(submission.submissionId);
+    for (const waiter of waiters ?? []) waiter(submission);
+  }
+
+  private _submissionWaiters = new Map<
+    string,
+    Set<(submission: ThinkSubmissionInspection) => void>
+  >();
+
+  /**
+   * Submissions whose row is terminal but whose `onSubmissionStatus` has not
+   * finished. `waitForSubmission` keeps waiting for these.
+   */
+  private _terminalStatusEmits = new Set<string>();
+
+  /** Waiters of a submission deleted while its terminal emit was in flight. */
+  private _waitersHeldForDeletedEmit = new Map<
+    string,
+    Set<(submission: ThinkSubmissionInspection) => void>
+  >();
+
+  /**
+   * Resolve once the submission reaches a terminal status (`completed`,
+   * `aborted`, `skipped` or `error`), after `onSubmissionStatus` has run for
+   * it. Resolves immediately for a submission that already finished, and with
+   * `null` for an unknown id. An `error` status resolves rather than rejects;
+   * read `status` and `error` from the result.
+   *
+   * The wait lives in this object's memory, so it rejects if the object
+   * restarts. The submission itself is durable: call again to keep waiting.
+   */
+  async waitForSubmission(
+    submissionId: string,
+    options?: WaitForSubmissionOptions
+  ): Promise<ThinkSubmissionInspection | null> {
+    const row = this._readSubmission(submissionId);
+    if (!row) return null;
+    if (
+      this._isTerminalSubmissionStatus(row.status) &&
+      !this._terminalStatusEmits.has(submissionId)
+    ) {
+      return this._inspectionFromSubmissionRow(row);
+    }
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const waiter = (submission: ThinkSubmissionInspection) => {
+        clearTimeout(timer);
+        resolve(submission);
+      };
+      let waiters = this._submissionWaiters.get(submissionId);
+      if (!waiters) {
+        waiters = new Set();
+        this._submissionWaiters.set(submissionId, waiters);
+      }
+      waiters.add(waiter);
+      if (options?.timeoutMs !== undefined) {
+        timer = setTimeout(() => {
+          const current = this._submissionWaiters.get(submissionId);
+          current?.delete(waiter);
+          if (current?.size === 0) this._submissionWaiters.delete(submissionId);
+          const latest = this._readSubmission(submissionId);
+          resolve(latest ? this._inspectionFromSubmissionRow(latest) : null);
+        }, options.timeoutMs);
       }
     });
   }
@@ -11266,7 +11394,26 @@ export class Think<
       WHERE submission_id = ${submissionId}
         AND status IN ('completed', 'aborted', 'skipped', 'error')
     `;
+    this._releaseDeletedSubmissionWaiters([row]);
     return true;
+  }
+
+  private _releaseDeletedSubmissionWaiters(rows: ThinkSubmissionRow[]): void {
+    for (const row of rows) {
+      const id = row.submission_id;
+      if (!this._terminalStatusEmits.has(id)) {
+        this._resolveSubmissionWaiters(this._inspectionFromSubmissionRow(row));
+        continue;
+      }
+      // The in-flight emit settles these after its hook; a new row that
+      // reuses the id gets a fresh waiter set.
+      const waiters = this._submissionWaiters.get(id);
+      if (!waiters) continue;
+      this._submissionWaiters.delete(id);
+      const held = this._waitersHeldForDeletedEmit.get(id) ?? new Set();
+      for (const waiter of waiters) held.add(waiter);
+      this._waitersHeldForDeletedEmit.set(id, held);
+    }
   }
 
   async deleteSubmissions(options?: DeleteSubmissionsOptions): Promise<number> {
@@ -11296,9 +11443,10 @@ export class Think<
       )
       .slice(0, limit);
 
-    const idsToDelete = rows
-      .filter((row) => this._isTerminalSubmissionStatus(row.status))
-      .map((row) => row.submission_id);
+    const rowsToDelete = rows.filter((row) =>
+      this._isTerminalSubmissionStatus(row.status)
+    );
+    const idsToDelete = rowsToDelete.map((row) => row.submission_id);
 
     // Batch deletes into `IN (...)` queries within the SQLite 100
     // bound-parameter limit to minimize round-trips during cleanup.
@@ -11312,6 +11460,7 @@ export class Think<
       this.sql(strings, ...batch);
       deleted += batch.length;
     }
+    this._releaseDeletedSubmissionWaiters(rowsToDelete);
     return deleted;
   }
 
@@ -11359,9 +11508,23 @@ export class Think<
   async cancelSubmission(
     submissionId: string,
     reason?: unknown
-  ): Promise<void> {
+  ): Promise<CancelSubmissionResult> {
     const row = this._readSubmission(submissionId);
-    if (!row || this._isTerminalSubmissionStatus(row.status)) return;
+    if (!row) return { outcome: "not_found", submissionId };
+    if (this._isTerminalSubmissionStatus(row.status)) {
+      return {
+        outcome: "already_terminal",
+        submissionId,
+        submission: this._inspectionFromSubmissionRow(row)
+      };
+    }
+    const previousStatus = row.status as "pending" | "running";
+    // Once the append loop starts it finishes even if cancelled, so starting
+    // it is what applies the messages.
+    let messagesApplied =
+      row.messages_applied_at !== null ||
+      this._submissionsApplyingMessages.has(submissionId);
+    const runningHere = this._submissionAbortControllers.has(submissionId);
 
     const completedAt = Date.now();
     const errorMessage =
@@ -11387,11 +11550,34 @@ export class Think<
     `;
 
     const updated = this._readSubmission(submissionId);
-    if (updated?.status === "aborted") {
-      this._enqueueTerminalWorkflowNotification(updated);
+    if (!updated) return { outcome: "not_found", submissionId };
+    if (updated.status !== "aborted") {
+      return {
+        outcome: "already_terminal",
+        submissionId,
+        submission: this._inspectionFromSubmissionRow(updated)
+      };
+    }
+    this._enqueueTerminalWorkflowNotification(updated);
+    this._terminalStatusEmits.add(submissionId);
+    try {
+      // A submission claimed before a restart has no in-memory record of its
+      // appends, so fall back to the stored-message check recovery uses.
+      if (!messagesApplied && previousStatus === "running" && !runningHere) {
+        messagesApplied =
+          (await this._getSubmissionMessagesAppliedState(updated)) !== "none";
+      }
       await this.dequeue(submissionRunItemId(submissionId));
+    } finally {
       await this._emitSubmissionStatus(updated);
     }
+    return {
+      outcome: "cancelled",
+      submissionId,
+      previousStatus,
+      messagesApplied,
+      submission: this._inspectionFromSubmissionRow(updated)
+    };
   }
 
   async submitMessages(
@@ -11584,6 +11770,9 @@ export class Think<
           workflowPrompt: workflowPrompt ?? undefined,
           shouldApplyMessages: () =>
             this._readSubmission(row.submission_id)?.status === "running",
+          onApplyingMessages: () => {
+            this._submissionsApplyingMessages.add(row.submission_id);
+          },
           onMessagesApplied: () => {
             this.sql`
               UPDATE cf_think_submissions
@@ -11655,6 +11844,7 @@ export class Think<
     } finally {
       this._programmaticStreamErrors.delete(requestId);
       this._submissionAbortControllers.delete(row.submission_id);
+      this._submissionsApplyingMessages.delete(row.submission_id);
       const updated = this._readSubmission(row.submission_id);
       if (updated && this._isTerminalSubmissionStatus(updated.status)) {
         await this._emitSubmissionStatus(updated);
@@ -12100,6 +12290,7 @@ export class Think<
       | UIMessage[]
       | ((currentMessages: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>),
     options?: SaveMessagesOptions & {
+      onApplyingMessages?: () => void;
       onMessagesApplied?: () => void;
       captureProgrammaticStreamError?: boolean;
       captureOutput?: boolean;
@@ -12166,6 +12357,7 @@ export class Think<
           return;
         }
 
+        options?.onApplyingMessages?.();
         for (const msg of this._stampChannel(resolved, channel)) {
           await this._appendMessageToHistory(msg);
         }
