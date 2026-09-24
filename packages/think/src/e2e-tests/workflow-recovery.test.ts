@@ -243,13 +243,18 @@ describe("Think workflow-turn recovery e2e", () => {
 
     const id = (await callAgent(agent, "startGreetingWorkflow")) as string;
 
-    // Wait until the workflow-turn submission is mid-stream (chat fiber row).
-    await pollUntil(
-      "workflow turn in-flight",
-      () => callAgent(agent, "hasFiberRows") as Promise<boolean>,
-      (has) => has === true,
-      { attempts: 30, delayMs: 250 }
+    type Progress = { streams: number; emitted: number; total: number };
+    const progress = () =>
+      callAgent(agent, "getFinalAnswerProgress") as Promise<Progress>;
+
+    // Wait until the final-answer tool input is part-way through streaming.
+    const beforeKill = await pollUntil(
+      "final-answer input mid-stream",
+      progress,
+      (p) => p.emitted >= 1,
+      { attempts: 200, delayMs: 100 }
     );
+    expect(beforeKill.emitted).toBeLessThan(beforeKill.total);
 
     // Kill mid-stream and restart with the same persist dir.
     wrangler = await restartWrangler(wrangler);
@@ -269,6 +274,7 @@ describe("Think workflow-turn recovery e2e", () => {
     );
     expect(view.status).toBe("complete");
     expect(view.output).toMatchObject({ greeting: GREETING });
+    expect((await progress()).streams).toBeGreaterThanOrEqual(2);
 
     // The submission's terminal status was delivered through the
     // workflow-notification drain (replay after restart).

@@ -2320,7 +2320,15 @@ export class ThinkMessengerRecoveryE2EAgent extends Think<Env> {
 
 const WORKFLOW_GREETING = "hello from a recovered workflow turn";
 
-function createStructuredGreetingModel(chunkDelayMs: number): LanguageModel {
+type StructuredGreetingProgress = {
+  onStreamStart(): Promise<void>;
+  onDelta(emitted: number, total: number): Promise<void>;
+};
+
+function createStructuredGreetingModel(
+  chunkDelayMs: number,
+  progress?: StructuredGreetingProgress
+): LanguageModel {
   const input = JSON.stringify({ greeting: WORKFLOW_GREETING });
   // Split the JSON into a handful of pieces so the tool-input streams over a
   // window (keeps the stream active + gives a mid-turn kill window).
@@ -2340,6 +2348,7 @@ function createStructuredGreetingModel(chunkDelayMs: number): LanguageModel {
     doStream() {
       const stream = new ReadableStream({
         async start(controller) {
+          await progress?.onStreamStart();
           controller.enqueue({ type: "stream-start", warnings: [] });
           const id = "fa";
           controller.enqueue({
@@ -2347,9 +2356,10 @@ function createStructuredGreetingModel(chunkDelayMs: number): LanguageModel {
             id,
             toolName: "think_final_answer"
           });
-          for (const piece of pieces) {
+          for (const [index, piece] of pieces.entries()) {
             await new Promise((r) => setTimeout(r, chunkDelayMs));
             controller.enqueue({ type: "tool-input-delta", id, delta: piece });
+            await progress?.onDelta(index + 1, pieces.length);
           }
           controller.enqueue({ type: "tool-input-end", id });
           controller.enqueue({
@@ -2376,11 +2386,38 @@ export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
   override maxSteps = 4;
 
   override getModel(): LanguageModel {
-    return createStructuredGreetingModel(500);
+    return createStructuredGreetingModel(500, {
+      onStreamStart: async () => {
+        const streams =
+          (await this.ctx.storage.get<number>("e2e:final_answer_streams")) ?? 0;
+        await this.ctx.storage.put("e2e:final_answer_streams", streams + 1);
+      },
+      onDelta: (emitted, total) =>
+        this.ctx.storage.put("e2e:final_answer_progress", { emitted, total })
+    });
   }
 
   override getSystemPrompt(): string {
     return "Workflow-turn recovery e2e agent.";
+  }
+
+  /** How far the final-answer tool input has streamed, and how many streams ran. */
+  @callable()
+  async getFinalAnswerProgress(): Promise<{
+    streams: number;
+    emitted: number;
+    total: number;
+  }> {
+    const progress = await this.ctx.storage.get<{
+      emitted: number;
+      total: number;
+    }>("e2e:final_answer_progress");
+    return {
+      streams:
+        (await this.ctx.storage.get<number>("e2e:final_answer_streams")) ?? 0,
+      emitted: progress?.emitted ?? 0,
+      total: progress?.total ?? 0
+    };
   }
 
   override async onChatRecovery(): Promise<ChatRecoveryOptions> {
