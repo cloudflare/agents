@@ -1,0 +1,27 @@
+.changeset/ai-chat-transient-reader-recovery.md
+  s_368991bdec7f77::t_9d0694e94e7f83 5
+docs/agents/chat-agents.md
+  s_368991bdec7f77::t_489d6649532ac7 590
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_9a348900613d89 5413-5415,5423-5425,5449-5455,5470-5517,5521,5536,7273-7274
+packages/ai-chat/src/tests/durable-chat-recovery.test.ts
+  s_368991bdec7f77::t_c448e771329264 206,2782-2828
+packages/ai-chat/src/tests/worker.ts
+  s_368991bdec7f77::t_d99f1813d2a4d2 2016,2834-2838
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "beb510c776c15a1a0f5d421e31a923de080e4128",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
