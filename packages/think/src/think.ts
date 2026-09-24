@@ -479,9 +479,13 @@ import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
 import { truncatePausedExecutionOutput } from "./tools/execute";
 import { ExtensionManager, sanitizeName } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
-import { MESSENGER_REPLY_FIBER_NAME } from "./messengers";
+import {
+  DEFAULT_MESSENGER_CONCURRENCY,
+  MESSENGER_REPLY_FIBER_NAME
+} from "./messengers";
 import type {
   DeliveryKind,
+  MessengerConcurrency,
   MessengerContext,
   MessengerDeliverySurface,
   ThinkMessengers,
@@ -3290,6 +3294,17 @@ export class Think<
   messageConcurrency: MessageConcurrency = "queue";
 
   /**
+   * How the Chat SDK handles messages that arrive in a messenger thread while
+   * the agent is still answering, or before it starts. Accepts any Chat SDK
+   * `concurrency` value: `"queue"`, `"debounce"`, `"burst"`, `"concurrent"`,
+   * `"drop"`, or a `ConcurrencyConfig`. One setting covers every messenger on
+   * the agent. Set it as a class field: it is read before `onStart` runs.
+   *
+   * @default { strategy: "burst", debounceMs: 600 }
+   */
+  messengerConcurrency: MessengerConcurrency = DEFAULT_MESSENGER_CONCURRENCY;
+
+  /**
    * Byte budget for hydrating the persisted transcript into the in-memory
    * message cache (`this.messages`).
    *
@@ -5298,7 +5313,8 @@ export class Think<
 
     this._messengerRuntime = new ThinkMessengerRuntime(
       messengerDefs,
-      this as unknown as MessengerThinkHost
+      this as unknown as MessengerThinkHost,
+      { concurrency: this.messengerConcurrency }
     );
     this._messengerRuntime.initialize();
   }

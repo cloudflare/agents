@@ -5,6 +5,8 @@ import type {
   Attachment as ChatAttachment,
   Author as ChatAuthor,
   ChatConfig,
+  ConcurrencyConfig,
+  ConcurrencyStrategy,
   Message as ChatMessage,
   SerializedThread,
   Thread as ChatThread
@@ -110,6 +112,14 @@ export interface MessengerDefinition {
 }
 
 export type ThinkMessengers = Record<string, MessengerDefinition>;
+
+/** The Chat SDK `concurrency` setting for a Think agent's messengers. */
+export type MessengerConcurrency = ConcurrencyStrategy | ConcurrencyConfig;
+
+export const DEFAULT_MESSENGER_CONCURRENCY: MessengerConcurrency = {
+  debounceMs: 600,
+  strategy: "burst"
+};
 
 export interface NormalizedMessengerDefinition extends MessengerDefinition {
   id: string;
@@ -229,10 +239,14 @@ export class ThinkMessengerRuntime {
   >();
   private readonly definitions: NormalizedMessengerDefinition[];
 
+  private readonly concurrency: MessengerConcurrency;
+
   constructor(
     definitions: ThinkMessengers,
-    private readonly host: MessengerThinkHost
+    private readonly host: MessengerThinkHost,
+    options?: { concurrency?: MessengerConcurrency }
   ) {
+    this.concurrency = options?.concurrency ?? DEFAULT_MESSENGER_CONCURRENCY;
     this.definitions = normalizeMessengers(definitions);
     for (const definition of this.definitions) {
       this.definitionsByAdapterName.set(definition.adapterName, definition);
@@ -368,7 +382,7 @@ export class ThinkMessengerRuntime {
     ) as Record<string, Adapter>;
     const chat = new Chat({
       adapters,
-      concurrency: { debounceMs: 600, strategy: "burst" },
+      concurrency: this.concurrency,
       fallbackStreamingPlaceholderText: FALLBACK_STREAMING_PLACEHOLDER_TEXT,
       state: createChatSdkState({
         agent: ThinkMessengerStateAgent,

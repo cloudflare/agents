@@ -219,6 +219,8 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
   }
 
   override getMessengers(): ThinkMessengers {
+    // #2313: an agent named `queue-…` answers each message as it arrives.
+    if (this.name.startsWith("queue-")) this.messengerConcurrency = "queue";
     return {
       fake: chatSdkMessenger({
         adapter: this._recordingAdapter(),

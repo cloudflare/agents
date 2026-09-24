@@ -1,5 +1,6 @@
 export {
   chatSdkMessenger,
+  DEFAULT_MESSENGER_CONCURRENCY,
   defaultChatSdkEvent,
   defaultConversationName,
   idempotencyKeyForEvent,
@@ -16,6 +17,7 @@ export {
 export type {
   ChatSdkMessengerEventInput,
   ChatSdkMessengerOptions,
+  MessengerConcurrency,
   MessengerConversationMode,
   MessengerConversationResolver,
   MessengerConversationTarget,
