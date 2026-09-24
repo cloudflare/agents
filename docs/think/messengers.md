@@ -181,8 +181,10 @@ export class SupportAgent extends Think<Env> {
 ```
 
 Use `{ strategy: "burst", debounceMs: 1500 }` to wait longer for a burst. The
-`"drop"` strategy discards a message that arrives while a reply is running, and
-`"concurrent"` answers every message in parallel without a thread lock.
+`"drop"` strategy discards a message that arrives while a reply is running.
+`"concurrent"` hands every message to Think without a thread lock, so none are
+batched or dropped. Think still runs the turns of one conversation one at a
+time, so the replies arrive in order rather than in parallel.
 
 ## Conversation Targets
 
