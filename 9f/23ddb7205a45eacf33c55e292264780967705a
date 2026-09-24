@@ -1,0 +1,23 @@
+docs/think/actions.md
+  s_368991bdec7f77::t_01de729b607cd9 178-188,307-316
+docs/think/tools.md
+  s_368991bdec7f77::t_49757b03fe9cd2 319
+packages/think/src/tests/execute-hitl.test.ts
+  s_368991bdec7f77::t_8bb817ef08072e 233
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9f23ddb7205a45eacf33c55e292264780967705a",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
