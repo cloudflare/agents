@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { evictDurableObject, runDurableObjectAlarm } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 describe("PiHarness", () => {
   it("drives a Pi tool turn through the shared driver", async () => {
@@ -105,6 +105,32 @@ describe("PiHarness", () => {
     expect(
       events.filter((event) => event.type === "operation_end")
     ).toHaveLength(1);
+  });
+
+  it("overlaps real provider waits across two lanes", async () => {
+    const stub = env.PiDriverHarnessObject.getByName(crypto.randomUUID());
+    await stub.holdProviders();
+    await stub.submitMultiply("main", "op-main", 2);
+    await stub.submitMultiply("research", "op-research", 3);
+
+    const alarm = runDurableObjectAlarm(stub);
+    await vi.waitFor(async () => {
+      expect((await stub.providerStats()).active).toBe(2);
+    });
+
+    expect((await stub.providerStats()).maxActive).toBe(2);
+    await stub.releaseProviders();
+    await alarm;
+    for (let index = 0; index < 3; index += 1) {
+      await runDurableObjectAlarm(stub);
+    }
+
+    expect(await stub.result("main", "op-main")).toMatchObject({
+      status: "completed"
+    });
+    expect(await stub.result("research", "op-research")).toMatchObject({
+      status: "completed"
+    });
   });
 
   it("drives multiple lanes independently and preserves FIFO within a lane", async () => {

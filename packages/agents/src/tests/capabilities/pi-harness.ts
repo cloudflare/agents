@@ -54,6 +54,10 @@ function response(context: {
 
 export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly #faux = fauxProvider();
+  #providerGate: Promise<void> | undefined;
+  #releaseProviders: (() => void) | undefined;
+  #providerActive = 0;
+  #providerMaxActive = 0;
   readonly streams = new Streams();
   readonly durableTools = new DurableToolRuns<
     { value: number },
@@ -115,16 +119,43 @@ export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.#faux.setResponses(
-      Array.from(
-        { length: 16 },
-        () => (context: unknown) =>
-          response(
+      Array.from({ length: 16 }, () => async (context: unknown) => {
+        this.#providerActive += 1;
+        this.#providerMaxActive = Math.max(
+          this.#providerMaxActive,
+          this.#providerActive
+        );
+        try {
+          if (this.#providerGate) await this.#providerGate;
+          return response(
             context as {
               messages: readonly { role: string; content: unknown }[];
             }
-          )
-      )
+          );
+        } finally {
+          this.#providerActive -= 1;
+        }
+      })
     );
+  }
+
+  holdProviders() {
+    this.#providerGate = new Promise<void>((resolve) => {
+      this.#releaseProviders = resolve;
+    });
+  }
+
+  providerStats() {
+    return {
+      active: this.#providerActive,
+      maxActive: this.#providerMaxActive
+    };
+  }
+
+  releaseProviders() {
+    this.#releaseProviders?.();
+    this.#providerGate = undefined;
+    this.#releaseProviders = undefined;
   }
 
   async submitMultiply(lane: string, operationId: string, value: number) {
