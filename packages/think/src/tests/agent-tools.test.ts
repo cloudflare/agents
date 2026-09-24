@@ -482,14 +482,15 @@ describe("Think agent tools", () => {
       expect(chunkBodies.sort()).toEqual([milestoneBody, progressBody].sort());
 
       const replayed = await parent.replayAgentToolEventsForTest();
+      const replayedBodies = replayed
+        .filter((event) => event.event.kind === "chunk")
+        .map((event) => (event.event as { body: string }).body);
+      expect(replayed[0]?.event.kind).toBe("started");
       expect(
-        replayed
-          .filter((event) => event.event.kind === "chunk")
-          .every((event) => {
-            const body = (event.event as { body: string }).body;
-            return body === progressBody || body === milestoneBody;
-          })
-      ).toBe(true);
+        replayedBodies.filter(
+          (body) => body !== progressBody && body !== milestoneBody
+        )
+      ).toEqual([]);
       expect(replayed.at(-1)?.event.kind).toBe("finished");
     });
 
@@ -508,6 +509,15 @@ describe("Think agent tools", () => {
         chunkBodies.some(
           (body) => body !== progressBody && body !== milestoneBody
         )
+      ).toBe(true);
+
+      const replayed = await parent.replayAgentToolEventsForTest();
+      expect(
+        replayed.some((event) => {
+          if (event.event.kind !== "chunk") return false;
+          const body = (event.event as { body: string }).body;
+          return body !== progressBody && body !== milestoneBody;
+        })
       ).toBe(true);
     });
 
@@ -554,6 +564,33 @@ describe("Think agent tools", () => {
 
       expect(await chatChunksBroadcast("full")).toBeGreaterThan(0);
       expect(await chatChunksBroadcast("terminal")).toBe(0);
+    });
+
+    it("keeps suppressing a recovered child's chunks after a restart", async () => {
+      async function recoveredChunksBroadcast(
+        eventDelivery: "full" | "terminal"
+      ): Promise<number> {
+        const room = crypto.randomUUID();
+        const res = await exports.default.fetch(
+          `http://example.com/agents/think-test-agent/${room}`,
+          { headers: { Upgrade: "websocket" } }
+        );
+        const ws = res.webSocket as WebSocket;
+        ws.accept();
+        let chunks = 0;
+        ws.addEventListener("message", (e: MessageEvent) => {
+          const frame = JSON.parse(e.data as string) as { id?: string };
+          if (frame.id === "recovered-request") chunks++;
+        });
+        const agent = await freshAgent(room);
+        await agent.broadcastRecoveredAgentToolChunkForTest(eventDelivery);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        ws.close();
+        return chunks;
+      }
+
+      expect(await recoveredChunksBroadcast("full")).toBe(1);
+      expect(await recoveredChunksBroadcast("terminal")).toBe(0);
     });
   });
 

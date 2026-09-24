@@ -15,6 +15,7 @@ import {
 } from "agents";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
+import { connectChatWS } from "./test-utils";
 
 type ParentStub = DurableObjectStub & {
   runChild(
@@ -1177,5 +1178,34 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(result.abortedBefore).toBe(false);
     expect(result.abortedAfter).toBe(true);
     expect(result.childStatus).toBe("aborted");
+  });
+
+  it("keeps suppressing a recovered terminal-only child's chunks after a restart (#2298)", async () => {
+    async function recoveredChunksBroadcast(
+      eventDelivery: "full" | "terminal"
+    ): Promise<number> {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      let chunks = 0;
+      ws.addEventListener("message", (e: MessageEvent) => {
+        const frame = JSON.parse(e.data as string) as { id?: string };
+        if (frame.id === "recovered-request") chunks++;
+      });
+      const child = (await getAgentByName(
+        env.TestChatAgent,
+        room
+      )) as unknown as {
+        broadcastRecoveredAgentToolChunkForTest(
+          eventDelivery: "full" | "terminal"
+        ): Promise<void>;
+      };
+      await child.broadcastRecoveredAgentToolChunkForTest(eventDelivery);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      ws.close(1000);
+      return chunks;
+    }
+
+    expect(await recoveredChunksBroadcast("full")).toBe(1);
+    expect(await recoveredChunksBroadcast("terminal")).toBe(0);
   });
 });

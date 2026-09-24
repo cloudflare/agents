@@ -451,6 +451,12 @@ export interface AgentToolBroadcastHooks {
   responseType: string;
   /** Resolve the agent-tool run that owns a turn request id, or null. */
   runForRequest: (requestId: string) => string | null;
+  /**
+   * Runs whose chunks the host suppresses (`eventDelivery: "terminal"`). Keeps
+   * inspection on after a restart empties the other maps, so a recovered
+   * turn's chunks are still attributed and suppressed.
+   */
+  terminalOnlyRuns?: ReadonlySet<string>;
 }
 
 /**
@@ -474,7 +480,9 @@ export function interceptAgentToolBroadcast(
   hooks: AgentToolBroadcastHooks
 ): string | null {
   if (
-    (hooks.forwarders.size > 0 || hooks.liveSequences.size > 0) &&
+    (hooks.forwarders.size > 0 ||
+      hooks.liveSequences.size > 0 ||
+      (hooks.terminalOnlyRuns?.size ?? 0) > 0) &&
     typeof msg === "string"
   ) {
     try {

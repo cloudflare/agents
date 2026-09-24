@@ -1594,6 +1594,36 @@ export class ThinkTestAgent extends Think {
     )._recordTerminalChatStatus("interrupted", requestId, body);
   }
 
+  /**
+   * Stand in for a child restarted mid-run (#2298): a persisted in-flight
+   * agent-tool run with empty in-memory state, rebound to a recovery turn's
+   * request id, whose chunk is then broadcast.
+   */
+  async broadcastRecoveredAgentToolChunkForTest(
+    eventDelivery: "full" | "terminal"
+  ): Promise<void> {
+    const internals = this as unknown as {
+      _ensureAgentToolChildRunTable(): void;
+      _rebindAgentToolChildRunRequestId(requestId: string): void;
+    };
+    internals._ensureAgentToolChildRunTable();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, status, started_at, event_delivery)
+      VALUES (${crypto.randomUUID()}, 'pre-restart', 'running', ${Date.now()},
+        ${eventDelivery === "terminal" ? "terminal" : null})
+    `;
+    internals._rebindAgentToolChildRunRequestId("recovered-request");
+    this.broadcast(
+      JSON.stringify({
+        type: "cf_agent_use_chat_response",
+        id: "recovered-request",
+        body: JSON.stringify({ type: "text-delta", id: "t", delta: "hi" }),
+        done: false
+      })
+    );
+  }
+
   /** Read the durable terminal record (#1645) so a test can assert it is
    *  cleared when the conversation is cleared. */
   async getPendingChatTerminalForTest(): Promise<{
