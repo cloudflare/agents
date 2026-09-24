@@ -1,0 +1,33 @@
+.changeset/think-turn-identity.md
+  s_368991bdec7f77::t_2569373b7bcdc5 1-7
+docs/think/lifecycle-hooks.md
+  s_368991bdec7f77::t_563db2db847e44 145-172,514,948-954
+packages/think/src/extensions/hook-proxy.ts
+  s_368991bdec7f77::t_d2e406bd901e73 57-58,74-76
+packages/think/src/tests/agents/assistant-agent-loop.ts
+  s_368991bdec7f77::t_88eed4a783ae45 13,327-332,337-354,372
+packages/think/src/think.ts
+  s_368991bdec7f77::t_59f115f715203c 1727-1728,1783-1790,2508-2538,2905-2909,4887-4889,4898-4902,4909-4910,4913-4931,5204,6917-6918,6925-6928,8188,8193-8194,17889
+docs/think/messengers.md
+  s_368991bdec7f77::t_f51e67d6bda173 254-255
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_373133f9ccd858 47-48,50,602-612,646,920-922,930-940,946-950,954-972,977-1026
+packages/think/src/tests/hooks.test.ts
+  s_368991bdec7f77::t_ace98a51e9decc 150-199,327-339
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d91a647b94c28e8f87623d5d46469a3d1c289734",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
