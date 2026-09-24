@@ -669,6 +669,39 @@ export type PiQueueReceipt = {
   readonly entryId: string;
 };
 
+/**
+ * How urgently a steer should reach the model.
+ *
+ * `"boundary"` queues the message and lets the run claim it at its next
+ * phase boundary, which pi reaches after every tool batch as well as after
+ * every assistant message. The in-flight request finishes and nothing is
+ * discarded.
+ *
+ * `"interrupt"` additionally aborts the operation so the current request
+ * stops immediately. Pi hands the queued steer back from its abort, and the
+ * harness resubmits it as a fresh operation, so the message is not lost —
+ * but any assistant output still streaming is abandoned, and the aborted
+ * operation settles as cancelled.
+ */
+export type PiSteerUrgency = "boundary" | "interrupt";
+
+/** Options for steering a running operation. */
+export type PiSteerOptions = PiLaneOptions & {
+  readonly urgency?: PiSteerUrgency;
+};
+
+/** Receipt for a steer that interrupted the running operation. */
+export type PiSteerReceipt = PiQueueReceipt & {
+  /**
+   * Set when `urgency: "interrupt"` aborted an operation. Names the cancelled
+   * operation and the replacement carrying the steer forward.
+   */
+  readonly interrupted?: {
+    readonly cancelledOperationId: string;
+    readonly resubmittedOperationId: string;
+  };
+};
+
 /** Outcome of a durable abort request. */
 export type PiAbortResult = {
   readonly operationId: string;

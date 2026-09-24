@@ -80,6 +80,8 @@ import type {
   PiPendingSubmission,
   PiPromptResponse,
   PiQueueReceipt,
+  PiSteerOptions,
+  PiSteerReceipt,
   PiSubmissionReceipt,
   PiSubmitOptions,
   PiTool,
@@ -367,30 +369,71 @@ export class PiHarness<
     return { operationId, newlyRequested: requested.value.newlyRequested };
   }
 
-  /** Queue a message the running operation reads at its next turn boundary. */
+  /**
+   * Queue a message for the running operation.
+   *
+   * By default the run claims it at its next phase boundary. Pi reaches one
+   * after every tool batch, not only at the end of a turn, so a boundary
+   * steer is usually read well inside a turn. Pass `urgency: "interrupt"`
+   * when the message must stop the current request instead of following it.
+   */
   async steer(
     message: PiMessageInput,
-    options: PiLaneOptions = {}
-  ): Promise<PiQueueReceipt> {
+    options: PiSteerOptions = {}
+  ): Promise<PiSteerReceipt> {
     const { text, images } = messageInput(message);
+    const lane = options.lane ?? this.#defaultLane;
     const context = asUpstreamContext(options.context);
-    const upstream = await this.#upstreamLane(
-      options.lane ?? this.#defaultLane,
-      context
-    );
+    const upstream = await this.#upstreamLane(lane, context);
     const queued = await upstream.steer(text, images, context);
     if (!queued.ok) throw queued.error;
-    // Wake a parked run so the steer is read at the next turn boundary
-    // instead of waiting out the park deadline.
+    const receipt: PiQueueReceipt = { entryId: queued.value.entryId };
+
     const current = (await upstream.inspectExecution(context)).current;
-    if (current) {
+    if (!current) return receipt;
+
+    if ((options.urgency ?? "boundary") === "boundary") {
+      // Wake a parked run so the steer is read at the next phase boundary
+      // instead of waiting out the park deadline.
       await this.#machines.notify(
         this.#runIdFor(current.id),
         { type: "pi:steered", key: current.id },
         { eventId: `steer:${queued.value.entryId}` }
       );
+      return receipt;
     }
-    return { entryId: queued.value.entryId };
+
+    // Interrupt. `requestAbort` sets pi's durable cancel marker and drains the
+    // inbox, which discards the steer just queued — so the resubmit below is
+    // what keeps the message alive. It resubmits the caller's own text rather
+    // than the drained handback: the handback is a structured `AgentMessage`
+    // list that may also carry steers queued by someone else, and flattening
+    // those into one prompt would both mangle non-text content and steal
+    // another caller's message into this operation. Losing the isolate between
+    // the abort and the resubmit drops the steer; the cancelled operation is
+    // still correctly cancelled.
+    const aborted = await upstream.requestAbort(current.id, context);
+    if (!aborted.ok) {
+      if (aborted.error._tag === "OperationMismatch") return receipt;
+      throw aborted.error;
+    }
+    await this.#machines.cancel(this.#runIdFor(current.id), "steer-interrupt");
+
+    const resubmitted = await this.submit(
+      {
+        kind: "prompt",
+        prompt: text,
+        images
+      },
+      { lane, ...(options.context ? { context: options.context } : {}) }
+    );
+    return {
+      ...receipt,
+      interrupted: {
+        cancelledOperationId: current.id,
+        resubmittedOperationId: resubmitted.operationId
+      }
+    };
   }
 
   // ── Reads ────────────────────────────────────────────────────────────────
