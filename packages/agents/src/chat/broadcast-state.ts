@@ -58,6 +58,31 @@ export interface TransitionResult {
   isStreaming: boolean;
 }
 
+// ── Snapshot reconciliation ────────────────────────────────────────
+
+function textOf(parts: UIMessage["parts"]): string {
+  let text = "";
+  for (const part of parts) {
+    if (part.type === "text") text += part.text;
+  }
+  return text;
+}
+
+/**
+ * Whether `messages` already holds a copy of the observed message whose text
+ * the accumulator does not extend. A healthy live accumulator is always the
+ * stored copy plus more; one that diverges holds interleaved or duplicated
+ * chunks (#2166), so the stored copy must win or the corruption never heals.
+ */
+export function observedDivergesFrom(
+  accumulator: StreamAccumulator,
+  messages: UIMessage[]
+): boolean {
+  const existing = messages.find((m) => m.id === accumulator.messageId);
+  if (!existing) return false;
+  return !textOf(accumulator.parts).startsWith(textOf(existing.parts));
+}
+
 // ── Transition ─────────────────────────────────────────────────────
 
 export function transition(
@@ -118,7 +143,10 @@ export function transition(
       let messagesUpdate: ((prev: UIMessage[]) => UIMessage[]) | undefined;
 
       if (event.done) {
-        messagesUpdate = (prev) => accumulator.mergeInto(prev);
+        messagesUpdate = (prev) =>
+          observedDivergesFrom(accumulator, prev)
+            ? prev
+            : accumulator.mergeInto(prev);
         return {
           state: { status: "idle" },
           messagesUpdate,

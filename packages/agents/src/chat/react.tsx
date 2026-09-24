@@ -14,6 +14,7 @@ import type { OutgoingMessage } from "./wire-types";
 import { STREAM_RESUME_NONE_REASONS } from "./protocol";
 import { MessageType } from "./wire-types";
 import {
+  observedDivergesFrom,
   transition as broadcastTransition,
   type BroadcastStreamState
 } from "./broadcast-state";
@@ -1925,13 +1926,17 @@ export function useAgentChat<
               // briefly trail a fully-persisted snapshot; merging then would drop
               // parts until replay catches up. In steady-state live observing the
               // accumulator is always at or ahead of the snapshot, so this still
-              // fixes the disappear/reappear flicker.
+              // fixes the disappear/reappear flicker. An accumulator whose text
+              // no longer extends the snapshot's is corrupt, not ahead (#2166).
               const snapshotIdx = next.findIndex(
                 (m) => m.id === observed.accumulator.messageId
               );
               const snapshotParts =
                 snapshotIdx >= 0 ? next[snapshotIdx].parts.length : 0;
-              if (observed.accumulator.parts.length >= snapshotParts) {
+              if (
+                observed.accumulator.parts.length >= snapshotParts &&
+                !observedDivergesFrom(observed.accumulator, next)
+              ) {
                 next = observed.accumulator.mergeInto(next) as ChatMessage[];
               }
             }

@@ -6117,6 +6117,93 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
       .toHaveTextContent("One two");
   });
 
+  it("lets the server snapshot replace an OBSERVED assistant whose text diverged from it (#2166)", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "observer-heal",
+      url: "ws://localhost:3000/agents/chat/observer-heal?_pk=abc"
+    });
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false
+      });
+      const assistant = chat.messages.find((m) => m.role === "assistant");
+      const text = (assistant?.parts ?? [])
+        .filter((p) => p.type === "text")
+        .map((p) => (p as { text: string }).text)
+        .join("");
+      return <div data-testid="assistant-text">{text}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    // Two copies of the reply interleave into the observed text part.
+    const chunks = [
+      '{"type":"start","messageId":"obs-assistant"}',
+      '{"type":"text-start","id":"t1"}',
+      ...["You", " can", "You", " see", " can", " see"].map(
+        (delta) => `{"type":"text-delta","id":"t1","delta":"${delta}"}`
+      )
+    ];
+    await act(async () => {
+      for (const body of chunks) {
+        dispatch(target, {
+          type: "cf_agent_use_chat_response",
+          id: "req-scrambled",
+          body,
+          done: false
+        });
+      }
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-text"))
+      .toHaveTextContent("You canYou see can see");
+
+    // The server persists the clean reply and broadcasts it before `done`.
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_chat_messages",
+        messages: [
+          { id: "u1", role: "user", parts: [{ type: "text", text: "Hi" }] },
+          {
+            id: "obs-assistant",
+            role: "assistant",
+            parts: [{ type: "text", text: "You can see" }]
+          }
+        ]
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-scrambled",
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-text"))
+      .toHaveTextContent("You can see");
+    expect(screen.getByTestId("assistant-text").element().textContent).toBe(
+      "You can see"
+    );
+  });
+
   it("clears protection when CF_AGENT_CHAT_CLEAR arrives mid-stream", async () => {
     const { agent, target, sentMessages } = createAgentWithTarget({
       name: "clear-mid-stream",
