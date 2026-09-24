@@ -11,6 +11,8 @@ export { CapabilityHarnessObject } from "./capabilities/harness.ts";
 import type { CapabilityHarnessObject } from "./capabilities/harness.ts";
 export { DriverHarnessObject } from "./capabilities/driver.ts";
 import type { DriverHarnessObject } from "./capabilities/driver.ts";
+export { PiDriverHarnessObject } from "./capabilities/pi-harness.ts";
+import type { PiDriverHarnessObject } from "./capabilities/pi-harness.ts";
 export {
   PlainLifecycleObject,
   RetryableStartObject,
@@ -216,6 +218,7 @@ export type Env = {
   LOADER: WorkerLoader;
   CapabilityHarnessObject: DurableObjectNamespace<CapabilityHarnessObject>;
   DriverHarnessObject: DurableObjectNamespace<DriverHarnessObject>;
+  PiDriverHarnessObject: DurableObjectNamespace<PiDriverHarnessObject>;
   PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
   RetryableStartObject: DurableObjectNamespace<RetryableStartObject>;
   StatefulPlainObject: DurableObjectNamespace<StatefulPlainObject>;

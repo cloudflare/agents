@@ -21,6 +21,10 @@
         "name": "DriverHarnessObject"
       },
       {
+        "class_name": "PiDriverHarnessObject",
+        "name": "PiDriverHarnessObject"
+      },
+      {
         "class_name": "PlainLifecycleObject",
         "name": "PlainLifecycleObject"
       },
@@ -417,6 +421,7 @@
       "new_sqlite_classes": [
         "CapabilityHarnessObject",
         "DriverHarnessObject",
+        "PiDriverHarnessObject",
         "PlainLifecycleObject",
         "StatefulPlainObject",
         "RetryableStartObject",
