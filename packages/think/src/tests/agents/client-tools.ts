@@ -391,6 +391,93 @@ function createServerApprovalToolMockModel(): LanguageModel {
   } as LanguageModel;
 }
 
+/**
+ * #2185: one assistant turn that first calls a server tool that runs, then, in
+ * a later step of the same turn, calls the approval tool, so both parts land in
+ * one assistant message.
+ */
+function createSequentialApprovalMockModel(): LanguageModel {
+  const usage = {
+    inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 5, text: 5, reasoning: 0 }
+  };
+  const toolResultNames = (prompt: unknown[]): string[] =>
+    prompt.flatMap((message) => {
+      const record = message as { role?: string; content?: unknown };
+      if (record.role !== "tool" || !Array.isArray(record.content)) return [];
+      return record.content.map(
+        (part) => (part as { toolName?: string }).toolName ?? ""
+      );
+    });
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-sequential-approval-model",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream(options: Record<string, unknown>) {
+      const results = toolResultNames(
+        (options as { prompt?: unknown[] }).prompt ?? []
+      );
+      const call = (toolCallId: string, toolName: string, input: unknown) => [
+        { type: "tool-input-start", id: toolCallId, toolName },
+        {
+          type: "tool-input-delta",
+          id: toolCallId,
+          delta: JSON.stringify(input)
+        },
+        { type: "tool-input-end", id: toolCallId },
+        {
+          type: "tool-call",
+          toolCallId,
+          toolName,
+          input: JSON.stringify(input)
+        }
+      ];
+      const chunks: Array<Record<string, unknown>> = results.includes(
+        "updateTrigger"
+      )
+        ? [
+            { type: "text-start", id: "t-done" },
+            { type: "text-delta", id: "t-done", delta: "Trigger updated" },
+            { type: "text-end", id: "t-done" },
+            {
+              type: "finish",
+              finishReason: { unified: "stop", raw: undefined },
+              usage
+            }
+          ]
+        : results.includes("lookupTrigger")
+          ? [
+              ...call("tc-seq-approval", "updateTrigger", { enabled: true }),
+              {
+                type: "finish",
+                finishReason: { unified: "tool-calls", raw: undefined },
+                usage
+              }
+            ]
+          : [
+              ...call("tc-seq-lookup", "lookupTrigger", {}),
+              {
+                type: "finish",
+                finishReason: { unified: "tool-calls", raw: undefined },
+                usage
+              }
+            ];
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          for (const chunk of chunks) controller.enqueue(chunk);
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 function createSlowMockModel(
   delayMs: number,
   chunkCount: number
@@ -720,6 +807,7 @@ export class ThinkClientToolsAgent extends Think {
   private _midStreamParallelGapsBeforeSlow = 20;
   private _midStreamParallelGapsAfterSlow = 10;
   private _useServerApprovalTool = false;
+  private _useSequentialApprovalTool = false;
   private _serverApprovalToolExecutions = 0;
   private _serverApprovalToolFails = false;
   private _useExecutableClientTool = false;
@@ -808,12 +896,28 @@ export class ThinkClientToolsAgent extends Think {
         this._midStreamParallelGapsAfterSlow
       );
     if (this._useTextOnly) return createTextOnlyMockModel();
+    if (this._useSequentialApprovalTool)
+      return createSequentialApprovalMockModel();
     if (this._useServerApprovalTool) return createServerApprovalToolMockModel();
     return createClientToolMockModel();
   }
 
   override getTools(): ToolSet {
+    if (this._useSequentialApprovalTool) {
+      return {
+        lookupTrigger: tool({
+          description: "Read the trigger",
+          inputSchema: z.object({}),
+          execute: async () => ({ enabled: false })
+        }),
+        ...this._serverApprovalTools()
+      };
+    }
     if (!this._useServerApprovalTool) return {};
+    return this._serverApprovalTools();
+  }
+
+  private _serverApprovalTools(): ToolSet {
     return {
       updateTrigger: tool({
         description: "Enable or disable a trigger",
@@ -840,6 +944,10 @@ export class ThinkClientToolsAgent extends Think {
 
   async setServerApprovalToolMode(value: boolean): Promise<void> {
     this._useServerApprovalTool = value;
+  }
+
+  async setSequentialApprovalToolMode(value: boolean): Promise<void> {
+    this._useSequentialApprovalTool = value;
   }
 
   async getServerApprovalToolExecutions(): Promise<number> {

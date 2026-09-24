@@ -509,6 +509,64 @@ describe("Client tools continuation", () => {
     }
   });
 
+  it("continues after approving a tool that shares its message with a settled tool (#2185)", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+    try {
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      await agentStub.persistMessages([
+        {
+          id: "msg-sequential-approval",
+          role: "user",
+          parts: [{ type: "text", text: "Hello" }]
+        },
+        {
+          id: "assistant-sequential-approval",
+          role: "assistant",
+          parts: [
+            { type: "step-start" },
+            {
+              type: "tool-lookupColor",
+              toolCallId: "call_sequential_lookup",
+              state: "output-available",
+              input: {},
+              output: { color: "red" }
+            },
+            { type: "step-start" },
+            {
+              type: "tool-changeBackgroundColor",
+              toolCallId: "call_sequential_approval",
+              state: "approval-requested",
+              input: { color: "blue" },
+              approval: { id: "approval_sequential" }
+            }
+          ] as ChatMessage["parts"]
+        }
+      ]);
+
+      const received = collectMessages(ws);
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_APPROVAL,
+          toolCallId: "call_sequential_approval",
+          approved: true,
+          autoContinue: true
+        })
+      );
+
+      const done = await waitForMessage(
+        received,
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.done === true
+      );
+      expect(done).toBeDefined();
+    } finally {
+      ws.close(1000);
+    }
+  });
+
   it("preserves reasoning-start before reasoning-delta during approval continuation (#1480)", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
