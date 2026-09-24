@@ -21,6 +21,8 @@ export type PromptCacheScenario = {
   mediaEviction?: MediaEvictionConfig;
   /** Compact every older message into one summary past this token estimate. */
   compactAfterTokens?: number;
+  /** Override `truncationStep`. */
+  truncationStep?: number;
 };
 
 export type PromptCacheTurn = {
@@ -111,6 +113,9 @@ export class ThinkPromptCacheTestAgent extends Think {
   ): Promise<PromptCacheTurn[]> {
     this._toolOutputChars = scenario.toolOutputChars ?? 0;
     if (scenario.mediaEviction) this.mediaEviction = scenario.mediaEviction;
+    if (scenario.truncationStep !== undefined) {
+      this.truncationStep = scenario.truncationStep;
+    }
     if (scenario.compactAfterTokens !== undefined) {
       this.session
         .onCompaction(async (messages) => {

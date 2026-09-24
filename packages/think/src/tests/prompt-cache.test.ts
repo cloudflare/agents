@@ -39,6 +39,23 @@ describe("prompt-cache prefix stability (#2200)", () => {
     expect(prefixBreaks(report)).toEqual([6, 10, 14]);
   });
 
+  it("cuts every turn when truncationStep is 1", async () => {
+    const report = await measure("prefix-step-one", {
+      turns: 8,
+      toolOutputChars: 4000,
+      truncationStep: 1
+    });
+    expect(prefixBreaks(report)).toEqual([3, 4, 5, 6, 7]);
+    expect(report.at(-1)!.requestChars).toBeLessThan(
+      (
+        await measure("prefix-step-default", {
+          turns: 8,
+          toolOutputChars: 4000
+        })
+      ).at(-1)!.requestChars
+    );
+  });
+
   it("rewrites truncated long text once per step, not every turn", async () => {
     const report = await measure("prefix-long-text", {
       turns: 16,

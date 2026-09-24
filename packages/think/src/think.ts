@@ -291,7 +291,8 @@ import {
 const MODEL_RECENT_WINDOW = 4;
 
 /**
- * Read-time truncation cuts the history at a multiple of this many messages,
+ * Default `truncationStep`. Read-time truncation cuts the history at a
+ * multiple of this many messages,
  * so the full-fidelity span grows from `MODEL_RECENT_WINDOW` to
  * `MODEL_RECENT_WINDOW + MODEL_TRUNCATION_STEP - 1` messages between cuts.
  * Providers cache on a byte-identical prompt prefix, and a cutoff that moved
@@ -300,11 +301,11 @@ const MODEL_RECENT_WINDOW = 4;
  */
 const MODEL_TRUNCATION_STEP = 8;
 
-function truncationKeepRecent(messageCount: number): number {
+function truncationKeepRecent(messageCount: number, step: number): number {
+  const safeStep = Number.isFinite(step) ? Math.max(1, Math.floor(step)) : 1;
   if (messageCount <= MODEL_RECENT_WINDOW) return MODEL_RECENT_WINDOW;
   return (
-    MODEL_RECENT_WINDOW +
-    ((messageCount - MODEL_RECENT_WINDOW) % MODEL_TRUNCATION_STEP)
+    MODEL_RECENT_WINDOW + ((messageCount - MODEL_RECENT_WINDOW) % safeStep)
   );
 }
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
@@ -5774,6 +5775,17 @@ export class Think<
   maxSteps = 10;
 
   /**
+   * Read-time truncation moves its cutoff once every this many messages, so
+   * the provider's cached prompt prefix survives the turns in between. Up to
+   * `truncationStep + 3` recent messages stay at full fidelity. Set it to `1`
+   * to cut every turn, which keeps the fewest full-fidelity messages for
+   * models with a small context window.
+   *
+   * @default 8
+   */
+  truncationStep = MODEL_TRUNCATION_STEP;
+
+  /**
    * Retention window for settled action ledger rows. Deleting a row ends the
    * idempotency guarantee for that key, so increase these windows for side
    * effects whose downstream idempotency horizon is longer. Set a status to
@@ -6656,7 +6668,10 @@ export class Think<
     const providerSafeHistory = history.map(
       toProviderSafeExecutionOutcomeMessage
     );
-    const keepRecent = truncationKeepRecent(providerSafeHistory.length);
+    const keepRecent = truncationKeepRecent(
+      providerSafeHistory.length,
+      this.truncationStep
+    );
     const truncated = truncateOlderMessages(providerSafeHistory, {
       keepRecent,
       toolOutputs: false
