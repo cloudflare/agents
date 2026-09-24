@@ -213,6 +213,14 @@ export class OpenCodeHarness extends LifecycleCapability {
     await this.driver.wake(sessionId);
   }
 
+  async createSession(): Promise<string> {
+    await this.lifecycle.ready();
+    const host = await this.#host();
+    const created = await host.sessions.create({});
+    await this.#ensureSessionPump(created.id);
+    return created.id;
+  }
+
   async sessionId(): Promise<string> {
     if (this.#defaultSession) return this.#defaultSession;
     const stored = await this.lifecycle.storage.get<string>("oc:session-id");

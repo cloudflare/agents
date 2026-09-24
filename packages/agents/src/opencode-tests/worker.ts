@@ -12,16 +12,20 @@ export class OpenCodeHarnessTestObject extends DurableObject<Cloudflare.Env> {
     }
   });
   readonly lifecycle = Lifecycle.install(this)
+    .use(this.harness)
     .use(this.streams)
-    .use(this.harness.driver)
-    .use(this.harness);
+    .use(this.harness.driver);
 
   sessionId() {
     return this.harness.sessionId();
   }
 
-  snapshot() {
-    return this.harness.snapshot();
+  createSession() {
+    return this.harness.createSession();
+  }
+
+  snapshot(sessionId?: string) {
+    return this.harness.snapshot({ sessionId });
   }
 
   dispose() {

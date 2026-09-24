@@ -21,10 +21,10 @@ export class OpenCodeAgent extends DurableObject<Env> {
   readonly webSockets = new WebSockets(this.harness.webSockets());
 
   readonly lifecycle = Lifecycle.install(this)
+    .use(this.harness)
     .use(this.streams)
     .use(this.harness.driver)
-    .use(this.webSockets)
-    .use(this.harness);
+    .use(this.webSockets);
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
