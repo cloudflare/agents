@@ -7471,6 +7471,18 @@ export class ThinkRecoveryTestAgent extends Think {
     );
   }
 
+  /** Fail the next final assistant-message persist, as a storage error would. */
+  async failNextAssistantPersistForTest(): Promise<void> {
+    const self = this as unknown as {
+      _persistAssistantMessageWithCutover(...args: unknown[]): Promise<void>;
+    };
+    const original = self._persistAssistantMessageWithCutover;
+    self._persistAssistantMessageWithCutover = async () => {
+      self._persistAssistantMessageWithCutover = original;
+      throw new Error("simulated persist failure");
+    };
+  }
+
   /** Replay owed response hooks, as the startup durable-work step does. */
   async replayPendingResponseHooksForTest(): Promise<void> {
     await (
