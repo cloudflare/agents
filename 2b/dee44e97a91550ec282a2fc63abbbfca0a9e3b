@@ -1,0 +1,27 @@
+docs/think/index.md
+  s_368991bdec7f77::t_041ef9e10180fa 408,974-983,986
+packages/think/src/tests/prompt-cache.test.ts
+  s_368991bdec7f77::t_d06828c5e7c5d9 42-58
+.changeset/think-stable-truncation-prefix.md
+  s_368991bdec7f77::t_ccc3a14fadbd3c 5
+packages/think/src/tests/agents/prompt-cache.ts
+  s_368991bdec7f77::t_a1ef34dbb5e0eb 24-25,116-118
+packages/think/src/think.ts
+  s_368991bdec7f77::t_1f000a27b6d952 294-295,304-305,308,5776-5786,6670-6673
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2bdee44e97a91550ec282a2fc63abbbfca0a9e3b",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
