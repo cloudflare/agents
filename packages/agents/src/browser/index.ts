@@ -2,7 +2,8 @@ export {
   CdpSession,
   connectUrl,
   type CdpSendOptions,
-  type CdpAttachOptions
+  type CdpAttachOptions,
+  type CdpSessionOptions
 } from "./cdp-session";
 
 export {
@@ -15,9 +16,13 @@ export {
   BrowserRenderingError,
   type BrowserBinding,
   type BrowserRecording,
+  type BrowserSessionGuardrails,
   type BrowserSessionInfo,
   type BrowserTargetInfo,
-  type ConnectBrowserOptions
+  type ConnectBrowserOptions,
+  type ConnectBrowserSessionOptions,
+  type ConnectChromiumBrowserOptions,
+  type ConnectKitesurfBrowserOptions
 } from "./browser-run";
 
 export {

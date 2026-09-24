@@ -2,6 +2,8 @@
 
 **Status:** experimental (`agents/browser`)
 
+> A named browser session layer (reattach-or-create sessions, restart signaling, a `BrowserSessions` lifecycle capability) is being built beneath this connector — see [browser-sessions.md](./browser-sessions.md). It is internal and not yet exported. Everything below is the shipping surface.
+
 ## Problem
 
 Agents need full Chrome DevTools Protocol access — navigation, DOM reads, screenshots, network inspection — without shipping a generated protocol bundle, without handing LLM-generated code a raw network capability, and with browser sessions that survive the pauses a durable agent naturally takes (approvals, hibernation, long waits).
