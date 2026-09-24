@@ -1828,6 +1828,7 @@ const messengerTurnContext = new AsyncLocalStorage<{
 const recoveredTurnAcceptanceContext = new AsyncLocalStorage<{
   agent: unknown;
   onAccepted: (successorRequestId: string) => void;
+  workflowPrompt?: ThinkWorkflowPromptContext;
 }>();
 
 // A `runTurn` continuation dispatched through an overridden `continueLastTurn`:
@@ -12643,6 +12644,9 @@ export class Think<
     this._rebindAgentToolChildRunRequestId(requestId);
     const clientTools = this._lastClientTools;
     const resolvedBody = body ?? this._lastBody;
+    const workflowPrompt = this._recoveredWorkflowPrompt();
+    const captureOutput =
+      options?.captureOutput || Boolean(workflowPrompt?.output);
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
@@ -12684,6 +12688,7 @@ export class Think<
                   signal: abortSignal,
                   clientTools,
                   body: resolvedBody,
+                  workflowPrompt,
                   continuation: true
                 })
             );
@@ -12696,7 +12701,7 @@ export class Think<
                 {
                   continuation: true,
                   extendLeafAssistant: trigger === "recovery-continue",
-                  captureOutput: options?.captureOutput
+                  captureOutput
                 }
               );
               status = streamResult.status;
@@ -12754,6 +12759,7 @@ export class Think<
     // `metadata.channel` stamp survives the interruption; without this the
     // retried turn would silently fall back to the default policy.
     const channel = options?.channel ?? this._channelFromLatestUserMessage();
+    const workflowPrompt = this._recoveredWorkflowPrompt();
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
     let wasAborted = false;
@@ -12790,6 +12796,7 @@ export class Think<
                   signal: abortSignal,
                   clientTools,
                   body,
+                  workflowPrompt,
                   continuation: false
                 })
             );
@@ -12798,7 +12805,8 @@ export class Think<
               const streamResult = await this._streamResult(
                 requestId,
                 result,
-                abortSignal
+                abortSignal,
+                { captureOutput: Boolean(workflowPrompt?.output) }
               );
               status = streamResult.status;
               error = streamResult.error;
@@ -16848,12 +16856,19 @@ export class Think<
     snapshot: ChatFiberSnapshot | null,
     partial: { text: string; parts: unknown[] }
   ): Promise<string | null> {
+    // A partial holding only the internal final-answer tool persists nothing,
+    // so the user message stays the leaf and there is nothing to continue.
     if (
       !snapshot ||
       snapshot.continuation ||
       !snapshot.latestUserMessageId ||
       partial.text ||
-      partial.parts.length > 0
+      (partial.parts.length > 0 &&
+        this._strippedForPersist({
+          id: "",
+          role: "assistant",
+          parts: partial.parts as UIMessage["parts"]
+        }) !== null)
     ) {
       return null;
     }
@@ -17249,7 +17264,25 @@ export class Think<
       }
       onTurnStarted?.();
     };
-    return recoveredTurnAcceptanceContext.run({ agent: this, onAccepted }, run);
+    const workflowPrompt = recoveredSubmission
+      ? this._readWorkflowPromptContext(
+          this._parseJsonObject(recoveredSubmission.metadata_json)
+        )
+      : null;
+    return recoveredTurnAcceptanceContext.run(
+      { agent: this, onAccepted, workflowPrompt: workflowPrompt ?? undefined },
+      run
+    );
+  }
+
+  /**
+   * The workflow prompt of the submission a recovery turn is completing. A
+   * structured prompt must re-arm its final-answer tool on the recovered turn,
+   * or the turn can never produce the output the workflow waits for.
+   */
+  private _recoveredWorkflowPrompt(): ThinkWorkflowPromptContext | undefined {
+    const acceptance = recoveredTurnAcceptanceContext.getStore();
+    return acceptance?.agent === this ? acceptance.workflowPrompt : undefined;
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {

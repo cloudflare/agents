@@ -141,6 +141,11 @@ Object RPC open.
 5. `step.waitForEvent("<name>:wait", ...)` resumes the Workflow.
 6. `step.prompt()` validates the structured output or throws a typed error.
 
+If a deploy or eviction interrupts the turn mid-stream, chat recovery retries or
+continues it with the structured output tool still available. The recovered turn
+produces the output, and `step.prompt()` resolves as it would have without the
+interruption.
+
 The machine-readable output is carried in the pending notification and Workflow
 event payload. Think does not store a separate `output_json` column on the
 submission ledger, and clears the notification payload after delivery. After
