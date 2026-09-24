@@ -1,3 +1,4 @@
+import { redactBase64Replacer } from "../../core/base64-redaction";
 import { TraceAttribute } from "../genai/attributes";
 import type { TraceAttributes } from "../tracing/tracer";
 
@@ -63,7 +64,7 @@ export function toolInputAttributes(
   enabled: boolean
 ): TraceAttributes {
   return enabled
-    ? { [TraceAttribute.GenAI.ToolCallArguments]: serialize(value) }
+    ? { [TraceAttribute.GenAI.ToolCallArguments]: serializeToolPayload(value) }
     : {};
 }
 
@@ -72,7 +73,7 @@ export function toolOutputAttributes(
   enabled: boolean
 ): TraceAttributes {
   return enabled
-    ? { [TraceAttribute.GenAI.ToolCallResult]: serialize(value) }
+    ? { [TraceAttribute.GenAI.ToolCallResult]: serializeToolPayload(value) }
     : {};
 }
 
@@ -332,17 +333,38 @@ function serializeMessages(
   }
 }
 
-function serialize(value: unknown): string | undefined {
+/**
+ * Payloads that fit are recorded exactly as `JSON.stringify` emits them.
+ * Oversized payloads (typically screenshots or other images) are re-serialized
+ * with base64 data replaced by a size summary, so the surrounding result is
+ * still reviewable. If that still doesn't fit, a small marker records that a
+ * payload existed rather than leaving the attribute indistinguishable from
+ * `storeTools: false`. Values JSON cannot serialize record nothing, as before.
+ */
+function serializeToolPayload(value: unknown): string | undefined {
   const json = stringify(value);
-  return json !== undefined && byteLength(json) <= MAX_ATTRIBUTE_BYTES
-    ? json
-    : undefined;
+  if (json === undefined || byteLength(json) <= MAX_ATTRIBUTE_BYTES) {
+    return json;
+  }
+
+  const redacted = stringify(value, redactBase64Replacer);
+  if (redacted === undefined) return undefined;
+  const bytes = byteLength(redacted);
+  return bytes <= MAX_ATTRIBUTE_BYTES
+    ? redacted
+    : JSON.stringify({
+        omitted: "tool payload exceeds trace attribute limit",
+        bytes
+      });
 }
 
-function stringify(value: unknown): string | undefined {
+function stringify(
+  value: unknown,
+  replacer?: (this: unknown, key: string, value: unknown) => unknown
+): string | undefined {
   if (value === undefined) return undefined;
   try {
-    return JSON.stringify(value);
+    return JSON.stringify(value, replacer);
   } catch {
     return undefined;
   }
