@@ -432,12 +432,13 @@ interface MachineEffectRuntime<
   ): Promise<void>;
 }
 
-interface MachineEffectInvocation {
+interface MachineEffectInvocation<Input extends MachineJson = MachineJson> {
   effectId: string;
   idempotencyKey: string;
   externalId?: string;
   attempt: number;
   signal: AbortSignal;
+  input: Input;
 }
 ```
 

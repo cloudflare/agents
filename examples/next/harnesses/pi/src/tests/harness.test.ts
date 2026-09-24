@@ -433,6 +433,47 @@ describe("PiHarness reconcile of a live operation", () => {
  * by downstream behaviour.
  */
 describe("PiHarness effect planning", () => {
+  it("retries a transient drive attachment failure", async () => {
+    const stub = fresh();
+
+    const result = await stub.runWithTransientDriveFailure();
+
+    expect(result.status).toBe("completed");
+    expect(await stub.effectAttempts(result.operationId)).toContain(2);
+  });
+
+  it("runs a pass without storing an effect baton in the checkpoint", async () => {
+    const stub = fresh();
+    const { operationId } = await stub.submitGated(12);
+
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const options = await stub.effectOptions(operationId);
+      if (options.length > 0) break;
+      if (Date.now() > deadline)
+        throw new Error("no drive effect was committed");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(await stub.machineCheckpoint(operationId)).toMatchObject({
+      phase: "drive",
+      operationId,
+      pass: 0,
+      request: expect.any(Object)
+    });
+    expect(await stub.machineCheckpoint(operationId)).not.toHaveProperty(
+      "effect"
+    );
+    expect(await stub.effectOptions(operationId)).toEqual([
+      {
+        timeoutMs: 120_000,
+        retries: { limit: 3, delay: 250, backoff: "exponential" }
+      }
+    ]);
+
+    await stub.releaseGate();
+  });
+
   it("plans each drive pass as a reconcilable effect keyed by pi's id", async () => {
     const stub = fresh();
     const { operationId } = await stub.submitGated(11);

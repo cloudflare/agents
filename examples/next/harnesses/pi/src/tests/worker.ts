@@ -8,13 +8,19 @@ import { Lifecycle } from "agents/lifecycle";
 import { Streams } from "agents/streams";
 import { Type } from "typebox";
 import { PI_OPERATION_DEFINITION, PiHarness } from "../harness/pi-harness";
-import { PI_DRIVE_EFFECT } from "../harness/machine";
+import {
+  PI_DRIVE_EFFECT,
+  PI_DRIVE_RETRY_DELAY_MS,
+  PI_DRIVE_RETRY_LIMIT,
+  PI_DRIVE_TIMEOUT_MS
+} from "../harness/machine";
 import type { PiEvent, PiMessage, PiTool } from "../harness/types";
 import { createModels } from "../providers/models";
 
 const multiplyParameters = Type.Object({ value: Type.Number() });
 const noParameters = Type.Object({});
 const TOOL_REVISION_KEY = "test:pi:revision";
+const DRIVE_FAILURES_KEY = "test:pi:drive-failures";
 /**
  * Durable gate for the slow tool.
  *
@@ -26,6 +32,18 @@ const TOOL_GATE_KEY = "test:pi:gate";
 const GATE_POLL_MS = 10;
 /** Bounds the gated tool so a stuck gate cannot pin the object forever. */
 const GATE_MAX_POLLS = 300;
+const DRIVE_EFFECT_OPTIONS = JSON.stringify({
+  timeoutMs: PI_DRIVE_TIMEOUT_MS,
+  retries: {
+    limit: PI_DRIVE_RETRY_LIMIT,
+    delay: PI_DRIVE_RETRY_DELAY_MS,
+    backoff: "exponential"
+  }
+});
+
+function driveEffectId(runId: string, builderRevision: number): string {
+  return `${runId}#effect_${builderRevision}_0`;
+}
 
 type ToolContext = {
   readonly revision: number;
@@ -98,6 +116,15 @@ export class PiHarnessTestObject extends DurableObject<Env> {
       revision: (await this.ctx.storage.get<number>(TOOL_REVISION_KEY)) ?? 1
     }),
     tools: () => [this.#multiplyTool(), this.#slowTool()],
+    configure: (hooks) => {
+      hooks.on("before_drive", async () => {
+        const failures =
+          (await this.ctx.storage.get<number>(DRIVE_FAILURES_KEY)) ?? 0;
+        if (failures === 0) return;
+        await this.ctx.storage.put(DRIVE_FAILURES_KEY, failures - 1);
+        throw new Error("transient drive failure");
+      });
+    },
     systemPrompt: "Use the supplied test tool."
   });
   readonly lifecycle = Lifecycle.install(this)
@@ -111,6 +138,28 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     // Re-seeding on every wake makes the fixture behave like a real provider,
     // so an eviction test measures the harness's durability, not the script's.
     this.#useTranscriptResponses();
+  }
+
+  async runWithTransientDriveFailure(): Promise<{
+    operationId: string;
+    status: string;
+  }> {
+    await this.ctx.storage.put(DRIVE_FAILURES_KEY, 1);
+    this.#faux.setResponses([fauxAssistantMessage("recovered")]);
+    const response = await this.harness.prompt("recover this drive");
+    return { operationId: response.operationId, status: response.status };
+  }
+
+  async effectAttempts(operationId: string): Promise<number[]> {
+    await this.harness.inspect("schema-touch");
+    return this.ctx.storage.sql
+      .exec<{ attempt: number }>(
+        `SELECT attempt FROM cf_agents_state_machine_effects
+         WHERE run_id = ? ORDER BY created_at ASC`,
+        this.harness.runIdFor(operationId)
+      )
+      .toArray()
+      .map((row) => row.attempt);
   }
 
   /** Run one pi-ai faux-provider turn containing a tool call. */
@@ -375,35 +424,36 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     const { operationId } = options;
     const pass = options.pass ?? 0;
     const runId = this.harness.runIdFor(operationId);
-    const effectId = `effect_seeded_${pass}`;
+    const revision = 10_000 + pass;
+    const builderRevision = revision;
+    const effectId = driveEffectId(runId, builderRevision);
     const streamId = this.harness.streamId(operationId);
     const now = Date.now();
     const checkpoint = JSON.stringify({
       phase: "drive",
       lane: "main",
       operationId,
+      request: null,
       streamId,
-      effect: {
-        id: effectId,
-        kind: PI_DRIVE_EFFECT,
-        recovery: "reconcile"
-      },
       pass
     });
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         `INSERT OR REPLACE INTO cf_agents_state_machine_runs
           (run_id, definition, definition_version, status, phase,
-           checkpoint_json, revision, control_json, job_id, wait_kind,
-           wait_type, wait_key, next_at, event_sequence, cancel_requested,
-           cancel_reason, result_json, error_name, error_message, persist,
-           idempotency_key, created_at, updated_at, settled_at)
-         VALUES (?, ?, 1, 'paused', 'drive', ?, 1, '{"status":"running"}',
+           checkpoint_json, revision, builder_revision, control_json, job_id,
+           wait_kind, wait_type, wait_key, next_at, event_sequence,
+           cancel_requested, cancel_reason, result_json, error_name,
+           error_message, persist, idempotency_key, created_at, updated_at,
+           settled_at)
+         VALUES (?, ?, 2, 'paused', 'drive', ?, ?, ?, '{"status":"running"}',
                  ?, NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, NULL, NULL,
                  1, NULL, ?, ?, NULL)`,
         runId,
         PI_OPERATION_DEFINITION,
         checkpoint,
+        revision,
+        builderRevision,
         `state-machine:${runId}`,
         now,
         now
@@ -411,12 +461,13 @@ export class PiHarnessTestObject extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         `INSERT OR REPLACE INTO cf_agents_state_machine_effects
           (run_id, effect_id, revision, kind, recovery, status, input_json,
-           external_id, result_json, error_name, error_message, created_at,
-           settled_at)
-         VALUES (?, ?, 1, ?, 'reconcile', 'running', ?, ?, NULL, NULL, NULL,
-                 ?, NULL)`,
+           external_id, result_json, error_name, error_message, attempt,
+           retry_at, options_json, created_at, settled_at)
+         VALUES (?, ?, ?, ?, 'reconcile', 'running', ?, ?, NULL, NULL, NULL,
+                 1, NULL, ?, ?, NULL)`,
         runId,
         effectId,
+        revision,
         PI_DRIVE_EFFECT,
         JSON.stringify({
           lane: "main",
@@ -427,6 +478,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
         }),
         // The external id the runtime reconciles against.
         `${operationId}:${pass}`,
+        DRIVE_EFFECT_OPTIONS,
         now
       );
     });
@@ -438,12 +490,44 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     return this.harness.resume(operationId);
   }
 
-  /**
-   * Every external id this operation's effects were planned with.
-   *
-   * Read from the durable table rather than the snapshot, because the
-   * snapshot stops exposing effects once the run is terminal.
-   */
+  /** Read the raw checkpoint to prove `effects.run()` needs no user-state ref. */
+  async machineCheckpoint(
+    operationId: string
+  ): Promise<Record<string, unknown>> {
+    await this.harness.inspect("schema-touch");
+    const row = this.ctx.storage.sql
+      .exec<{ checkpoint_json: string | null }>(
+        `SELECT checkpoint_json FROM cf_agents_state_machine_runs
+         WHERE run_id = ?`,
+        this.harness.runIdFor(operationId)
+      )
+      .one();
+    return JSON.parse(row.checkpoint_json ?? "null") as Record<string, unknown>;
+  }
+
+  /** Read the engine policy stored with each drive pass. */
+  async effectOptions(operationId: string): Promise<
+    Array<{
+      timeoutMs?: number;
+      retries?: {
+        limit?: number;
+        delay?: number;
+        backoff?: string;
+      };
+    }>
+  > {
+    await this.harness.inspect("schema-touch");
+    return this.ctx.storage.sql
+      .exec<{ options_json: string }>(
+        `SELECT options_json FROM cf_agents_state_machine_effects
+         WHERE run_id = ? ORDER BY created_at ASC`,
+        this.harness.runIdFor(operationId)
+      )
+      .toArray()
+      .map((row) => JSON.parse(row.options_json));
+  }
+
+  /** Read effect identities after terminal snapshots stop exposing them. */
   async effectExternalIds(operationId: string): Promise<string[]> {
     await this.harness.inspect("schema-touch");
     return this.ctx.storage.sql
@@ -512,17 +596,20 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     await this.harness.inspect("schema-touch");
     const operationId = `failed-${crypto.randomUUID()}`;
     const runId = this.harness.runIdFor(operationId);
-    const effectId = "effect_failed";
+    const builderRevision = 1;
+    const effectId = driveEffectId(runId, builderRevision);
+    const streamId = this.harness.streamId(operationId);
     const now = Date.now();
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         `INSERT OR REPLACE INTO cf_agents_state_machine_runs
           (run_id, definition, definition_version, status, phase,
-           checkpoint_json, revision, control_json, job_id, wait_kind,
-           wait_type, wait_key, next_at, event_sequence, cancel_requested,
-           cancel_reason, result_json, error_name, error_message, persist,
-           idempotency_key, created_at, updated_at, settled_at)
-         VALUES (?, ?, 1, 'paused', 'drive', ?, 1, '{"status":"running"}',
+           checkpoint_json, revision, builder_revision, control_json, job_id,
+           wait_kind, wait_type, wait_key, next_at, event_sequence,
+           cancel_requested, cancel_reason, result_json, error_name,
+           error_message, persist, idempotency_key, created_at, updated_at,
+           settled_at)
+         VALUES (?, ?, 2, 'paused', 'drive', ?, 1, ?, '{"status":"running"}',
                  ?, NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, NULL, NULL,
                  1, NULL, ?, ?, NULL)`,
         runId,
@@ -531,14 +618,11 @@ export class PiHarnessTestObject extends DurableObject<Env> {
           phase: "drive",
           lane: "main",
           operationId,
-          streamId: this.harness.streamId(operationId),
-          effect: {
-            id: effectId,
-            kind: PI_DRIVE_EFFECT,
-            recovery: "reconcile"
-          },
+          request: null,
+          streamId,
           pass: 0
         }),
+        builderRevision,
         `state-machine:${runId}`,
         now,
         now
@@ -546,65 +630,23 @@ export class PiHarnessTestObject extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         `INSERT OR REPLACE INTO cf_agents_state_machine_effects
           (run_id, effect_id, revision, kind, recovery, status, input_json,
-           external_id, result_json, error_name, error_message, created_at,
-           settled_at)
-         VALUES (?, ?, 1, ?, 'reconcile', 'failed', '{}', NULL, NULL,
-                 'Error', 'pi attachment was lost', ?, ?)`,
+           external_id, result_json, error_name, error_message, attempt,
+           retry_at, options_json, created_at, settled_at)
+         VALUES (?, ?, 1, ?, 'reconcile', 'failed', ?, ?, NULL,
+                 'Error', 'pi attachment was lost', 1, NULL, ?, ?, ?)`,
         runId,
         effectId,
         PI_DRIVE_EFFECT,
-        now,
-        now
-      );
-    });
-    return operationId;
-  }
-
-  /** Seed a run whose drive pass throws outright (no registered runtime). */
-  async seedThrowingPass(): Promise<string> {
-    await this.harness.inspect("schema-touch");
-    const operationId = `throwing-${crypto.randomUUID()}`;
-    const runId = this.harness.runIdFor(operationId);
-    const effectId = "effect_throwing";
-    const now = Date.now();
-    this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec(
-        `INSERT OR REPLACE INTO cf_agents_state_machine_runs
-          (run_id, definition, definition_version, status, phase,
-           checkpoint_json, revision, control_json, job_id, wait_kind,
-           wait_type, wait_key, next_at, event_sequence, cancel_requested,
-           cancel_reason, result_json, error_name, error_message, persist,
-           idempotency_key, created_at, updated_at, settled_at)
-         VALUES (?, ?, 1, 'paused', 'drive', ?, 1, '{"status":"running"}',
-                 ?, NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, NULL, NULL,
-                 1, NULL, ?, ?, NULL)`,
-        runId,
-        PI_OPERATION_DEFINITION,
         JSON.stringify({
-          phase: "drive",
           lane: "main",
           operationId,
-          streamId: this.harness.streamId(operationId),
-          effect: {
-            id: effectId,
-            kind: "pi-drive-unregistered",
-            recovery: "reconcile"
-          },
+          request: null,
+          streamId,
           pass: 0
         }),
-        `state-machine:${runId}`,
+        `${operationId}:0`,
+        DRIVE_EFFECT_OPTIONS,
         now,
-        now
-      );
-      this.ctx.storage.sql.exec(
-        `INSERT OR REPLACE INTO cf_agents_state_machine_effects
-          (run_id, effect_id, revision, kind, recovery, status, input_json,
-           external_id, result_json, error_name, error_message, created_at,
-           settled_at)
-         VALUES (?, ?, 1, 'pi-drive-unregistered', 'reconcile', 'pending',
-                 '{}', NULL, NULL, NULL, NULL, ?, NULL)`,
-        runId,
-        effectId,
         now
       );
     });
@@ -628,6 +670,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     const { operationId } = options;
     const pass = options.pass ?? 0;
     const runId = this.harness.runIdFor(operationId);
+    const builderRevision = 1_000 + pass;
     const now = Date.now();
     const checkpoint = JSON.stringify({
       phase: "waiting",
@@ -640,16 +683,18 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     this.ctx.storage.sql.exec(
       `INSERT OR REPLACE INTO cf_agents_state_machine_runs
         (run_id, definition, definition_version, status, phase,
-         checkpoint_json, revision, control_json, job_id, wait_kind,
-         wait_type, wait_key, next_at, event_sequence, cancel_requested,
-         cancel_reason, result_json, error_name, error_message, persist,
-         idempotency_key, created_at, updated_at, settled_at)
-       VALUES (?, ?, 1, 'paused', 'waiting', ?, 1, '{"status":"running"}',
+         checkpoint_json, revision, builder_revision, control_json, job_id,
+         wait_kind, wait_type, wait_key, next_at, event_sequence,
+         cancel_requested, cancel_reason, result_json, error_name,
+         error_message, persist, idempotency_key, created_at, updated_at,
+         settled_at)
+       VALUES (?, ?, 2, 'paused', 'waiting', ?, 1, ?, '{"status":"running"}',
                ?, NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, NULL, NULL,
                1, NULL, ?, ?, NULL)`,
       runId,
       PI_OPERATION_DEFINITION,
       checkpoint,
+      builderRevision,
       `state-machine:${runId}`,
       now,
       now

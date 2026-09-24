@@ -15,8 +15,9 @@ The example composes:
 - `agents/skills` for a bundled `trip-planning` skill;
 - pi-ai's Workers AI provider, transported over the `AI` binding.
 
-Pi owns the transcript, tool intents and results, retries, and recovery. The
-SDK supplies durable wakes, the output log, and the client transport.
+Pi owns the transcript, tool intents and results, provider retries, and
+recovery. The SDK supplies durable wakes, bounded retries for attaching a drive
+pass, the output log, and the client transport.
 
 ## Why a wrapped runtime, not a native machine
 
@@ -25,14 +26,17 @@ as `StateMachine` phases would create two authorities for the same effects, so
 this example uses the second integration shape from the state-machine design:
 a **durable runtime wrapper**.
 
-Each operation becomes one machine run whose checkpoint holds only admission
-data and a handle to the current drive pass. The pass itself is an effect with
-`recovery: "reconcile"`, keyed by pi's own operation id:
+Each operation becomes one machine run whose checkpoint holds only the input
+for the current drive pass. The phase uses `effects.run()` to commit and execute
+the pass without storing an effect handle in user state. The effect uses
+`recovery: "reconcile"` and is keyed by pi's own operation id:
 
 ```text
-admit ──▶ drive ──▶ (settled) ──▶ complete
-             │
-             └────▶ (waiting) ──▶ waiting ──▶ drive …
+drive ──▶ (settled) ──▶ complete
+  │
+  ├────▶ (attachment retry) ──▶ drive
+  │
+  └────▶ (pi waiting) ──▶ waiting ──▶ drive …
 ```
 
 After an eviction the machine does not replay the model request. It asks pi,
@@ -44,8 +48,11 @@ through `getResult()` and `inspectExecution()`, what actually happened:
 | operation still live   | `running`     | parks and re-checks    |
 | nothing recorded       | `not-found`   | reports it interrupted |
 
-Pi's retry backoffs and deferred-request polls surface as `waiting`, so a run
-parks on a durable deadline instead of holding a JavaScript invocation open.
+Pi's provider backoffs and deferred-request polls surface as `waiting`, so a
+run parks on a durable deadline instead of holding a JavaScript invocation
+open. A drive attachment also has a two-minute attempt timeout and three
+durable attempts with exponential backoff. These retries reuse the same effect
+and operation id, so eviction during backoff does not repeat completed work.
 
 ## Run locally
 

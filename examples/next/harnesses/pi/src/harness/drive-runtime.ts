@@ -43,7 +43,7 @@ export function createPiDriveRuntime(
   return {
     execute: async (
       input: PiDriveInput,
-      invocation: MachineEffectInvocation
+      invocation: MachineEffectInvocation<PiDriveInput>
     ): Promise<PiDriveOutput> => host.drive(input, invocation.signal),
 
     // Recovery reads the lane and operation from the effect's own durable
