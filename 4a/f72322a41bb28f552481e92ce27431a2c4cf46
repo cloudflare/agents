@@ -1,0 +1,27 @@
+packages/agents/src/index.ts
+  s_368991bdec7f77::t_19581c374b980e 4281-4283,4285-4288
+packages/agents/src/tests/sub-agent.test.ts
+  s_368991bdec7f77::t_643bf35ae43793 1075-1082,1084-1100
+packages/agents/src/tests/agents/run-fiber.ts
+  s_368991bdec7f77::t_c554ed18d0832b 78-80,91-100
+packages/agents/src/tests/agents/sub-agent.ts
+  s_368991bdec7f77::t_388be25bd72824 406-409,418-423,1938-1939,1942
+packages/agents/src/tests/run-fiber.test.ts
+  s_368991bdec7f77::t_5c678d022f1aed 83-98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4af72322a41bb28f552481e92ce27431a2c4cf46",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
