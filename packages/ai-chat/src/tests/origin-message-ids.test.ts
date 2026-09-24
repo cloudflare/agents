@@ -116,6 +116,56 @@ describe("originating message ids on terminal frames (#2280)", () => {
     ws.close(1000);
   });
 
+  it("carries the ids onto a turn recovered before its stream started", async () => {
+    const room = crypto.randomUUID();
+    const agent = (await getAgentByName(
+      env.ChatRecoveryTestAgent,
+      room
+    )) as unknown as {
+      persistMessages(messages: unknown[]): Promise<void>;
+      insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
+      triggerFiberRecovery(): Promise<void>;
+      runScheduledRecoveryRetryForTest(): Promise<void>;
+    };
+    await agent.persistMessages([user("msg-p")]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-pre", {
+      __cfAIChatFiberSnapshot: {
+        kind: "ai-chat-turn",
+        version: 1,
+        requestId: "req-pre",
+        continuation: false,
+        latestMessageId: "msg-p",
+        latestMessageRole: "user",
+        latestUserMessageId: "msg-p",
+        startedAt: Date.now(),
+        originMessageIds: ["msg-p"]
+      },
+      user: null
+    });
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const terminals: ResponseFrame[] = [];
+    ws.addEventListener("message", (e: MessageEvent) => {
+      const frame = JSON.parse(e.data as string) as ResponseFrame;
+      if (frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE && frame.done) {
+        terminals.push(frame);
+      }
+    });
+
+    await agent.triggerFiberRecovery();
+    await agent.runScheduledRecoveryRetryForTest();
+    for (let i = 0; i < 60 && terminals.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(terminals.length).toBeGreaterThan(0);
+    for (const frame of terminals) {
+      expect(frame.messageIds).toEqual(["msg-p"]);
+    }
+
+    ws.close(1000);
+  });
+
   it("omits messageIds when the request carries no trailing user message", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

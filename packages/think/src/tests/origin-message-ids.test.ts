@@ -7,7 +7,10 @@ import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
-import type { ThinkTestAgent } from "./agents/think-session";
+import type {
+  ThinkRecoveryTestAgent,
+  ThinkTestAgent
+} from "./agents/think-session";
 
 const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
 const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
@@ -138,6 +141,58 @@ describe("Think terminal frames carry originating message ids (#2280)", () => {
       requestId: "req-3",
       messageIds: ["msg-e"]
     });
+    ws.close();
+  });
+
+  it("carries the ids onto a turn recovered before its stream started", async () => {
+    const room = crypto.randomUUID();
+    const agent = (await getAgentByName(
+      env.ThinkRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkRecoveryTestAgent>,
+      room
+    )) as unknown as {
+      persistTestMessage(msg: UIMessage): Promise<void>;
+      insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
+      triggerFiberRecovery(): Promise<unknown>;
+      runScheduledRecoveryRetryForTest(): Promise<void>;
+    };
+    await agent.persistTestMessage(user("msg-p"));
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-pre", {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "req-pre",
+        continuation: false,
+        latestMessageId: "msg-p",
+        latestMessageRole: "user",
+        latestUserMessageId: "msg-p",
+        startedAt: Date.now(),
+        originMessageIds: ["msg-p"]
+      },
+      user: null
+    });
+    const res = await exports.default.fetch(
+      `http://example.com/agents/think-recovery-test-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    const terminals: TerminalFrame[] = [];
+    ws.addEventListener("message", (e: MessageEvent) => {
+      const msg = JSON.parse(e.data as string) as TerminalFrame & {
+        type?: string;
+      };
+      if (msg.type === MSG_CHAT_RESPONSE && msg.done) terminals.push(msg);
+    });
+
+    await agent.triggerFiberRecovery();
+    await agent.runScheduledRecoveryRetryForTest();
+    for (let i = 0; i < 60 && terminals.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(terminals.length).toBeGreaterThan(0);
+    for (const frame of terminals) {
+      expect(frame.messageIds).toEqual(["msg-p"]);
+    }
     ws.close();
   });
 });
