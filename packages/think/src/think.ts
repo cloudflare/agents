@@ -236,6 +236,8 @@ import {
   recordChatTerminal,
   clearChatTerminal,
   pendingChatTerminal,
+  originMessageIds,
+  withOriginMessageIds,
   buildChatRecoveringFrame,
   setChatRecovering,
   AgentToolStreamProgressThrottle,
@@ -13075,6 +13077,10 @@ export class Think<
     const requestId = event.id;
     let messagesPersisted = false;
     let failureStage: ChatErrorContext["stage"] = "persist";
+    const requestOriginIds = originMessageIds(incomingMessages);
+    if (requestOriginIds) {
+      this._requestOriginMessageIds.set(requestId, requestOriginIds);
+    }
 
     // ── Concurrency decision (before persisting anything) ────────
     const concurrencyDecision =
@@ -13083,6 +13089,7 @@ export class Think<
     if (concurrencyDecision.action === "drop") {
       this._rollbackDroppedSubmit(connection);
       this._completeSkippedRequest(connection, requestId);
+      this._requestOriginMessageIds.delete(requestId);
       return;
     }
 
@@ -13383,6 +13390,7 @@ export class Think<
     } finally {
       releaseIfPending();
       this._aborts.remove(requestId);
+      this._requestOriginMessageIds.delete(requestId);
       // Release any pre-stream parked connections (#1784). No-op when the turn
       // streamed (flushed on _startResumableStream); covers the no-response /
       // pre-stream-failure paths.
@@ -17795,12 +17803,14 @@ export class Think<
     requestId: string
   ): void {
     connection.send(
-      JSON.stringify({
-        type: MSG_CHAT_RESPONSE,
-        id: requestId,
-        body: "",
-        done: true
-      })
+      JSON.stringify(
+        this._withOriginMessageIds({
+          type: MSG_CHAT_RESPONSE,
+          id: requestId,
+          body: "",
+          done: true
+        })
+      )
     );
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
@@ -18441,7 +18451,12 @@ export class Think<
     requestId: string,
     body: string
   ): Promise<void> {
-    await recordChatTerminal(this.ctx.storage, requestId, body);
+    await recordChatTerminal(
+      this.ctx.storage,
+      requestId,
+      body,
+      this._originMessageIdsFor(requestId)
+    );
   }
 
   /** Clear the durable terminal record once a later turn supersedes it (#1645). */
@@ -18452,6 +18467,7 @@ export class Think<
   private async _pendingChatTerminal(): Promise<{
     requestId: string;
     body: string;
+    messageIds?: string[];
   } | null> {
     return pendingChatTerminal(this.ctx.storage);
   }
@@ -18565,7 +18581,11 @@ export class Think<
     requestId: string,
     options?: { messageId?: string; continuation?: boolean }
   ): string {
-    const streamId = this._resumableStream.start(requestId, options);
+    const originIds = this._requestOriginMessageIds.get(requestId);
+    const streamId = this._resumableStream.start(requestId, {
+      ...options,
+      ...(originIds && { originMessageIds: originIds })
+    });
     // Flush connections parked during this turn's pre-stream window (#1784)
     // into STREAM_RESUMING now that a stream exists. No-op unless a client
     // reconnected before the first chunk. (Continuation-turn parks live in
@@ -18651,7 +18671,37 @@ export class Think<
       ...(exclude || []),
       ...this._pendingResumeConnections
     ];
-    this.broadcast(JSON.stringify(message), allExclusions);
+    this.broadcast(
+      JSON.stringify(this._withOriginMessageIds(message)),
+      allExclusions
+    );
+  }
+
+  /**
+   * User message ids a WebSocket chat request originated from (#2280), keyed
+   * by request id while the request is handled. After that (or after a
+   * restart) the request's stream metadata is the fallback.
+   */
+  private _requestOriginMessageIds = new Map<string, string[]>();
+
+  private _originMessageIdsFor(requestId: string): string[] | undefined {
+    return (
+      this._requestOriginMessageIds.get(requestId) ??
+      this._resumableStream.getOriginMessageIds(requestId)
+    );
+  }
+
+  private _withOriginMessageIds(
+    message: Record<string, unknown>
+  ): Record<string, unknown> {
+    if (
+      message.type !== MSG_CHAT_RESPONSE ||
+      typeof message.id !== "string" ||
+      !(message.done || message.error)
+    ) {
+      return message;
+    }
+    return withOriginMessageIds(message, this._originMessageIdsFor(message.id));
   }
 
   private _broadcast(message: Record<string, unknown>, exclude?: string[]) {

@@ -24,6 +24,8 @@ export {
 
 export { TurnQueue, type TurnResult, type EnqueueOptions } from "./turn-queue";
 
+export { originMessageIds, withOriginMessageIds } from "./origin-message-ids";
+
 /**
  * @internal Shared text-segment separator for sibling streaming packages.
  */

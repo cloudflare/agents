@@ -33,6 +33,7 @@ import type { ResumableStream } from "./resumable-stream";
 export interface PendingChatTerminal {
   requestId: string;
   body: string;
+  messageIds?: string[];
 }
 
 /**
@@ -247,6 +248,7 @@ export class ResumeHandshake {
     } else if (
       !resumableStream.replayCompletedChunksByRequestId(connection, requestId)
     ) {
+      const messageIds = resumableStream.getOriginMessageIds(requestId);
       sendIfOpen(
         connection,
         JSON.stringify({
@@ -254,7 +256,8 @@ export class ResumeHandshake {
           done: true,
           id: requestId,
           type: responseMessageType,
-          replay: true
+          replay: true,
+          ...(messageIds && { messageIds })
         })
       );
     }
@@ -312,6 +315,9 @@ export class ResumeHandshake {
     ) {
       return true;
     }
+    const messageIds =
+      pending.messageIds ??
+      resumableStream.getOriginMessageIds(pending.requestId);
     sendIfOpen(
       connection,
       JSON.stringify({
@@ -319,7 +325,8 @@ export class ResumeHandshake {
         done: true,
         error: true,
         id: pending.requestId,
-        type: responseMessageType
+        type: responseMessageType,
+        ...(messageIds && { messageIds })
       })
     );
     return true;

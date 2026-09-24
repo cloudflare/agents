@@ -1689,6 +1689,28 @@ The chat protocol uses typed JSON messages over WebSocket:
 | `CF_AGENT_STREAM_RESUMING`       | Server → Client | Notify of stream resumption |
 | `CF_AGENT_STREAM_RESUME_REQUEST` | Client → Server | Request stream resume check |
 
+#### Correlate terminal frames with sent messages
+
+A `CF_AGENT_USE_CHAT_RESPONSE` frame names its request by `id`. Terminal frames
+(`done: true` or `error: true`) also carry `messageIds`: the ids of the user
+messages at the end of the request's `messages`. One send carries one id, and
+queued sends that arrive together carry several. This applies to completion,
+errors before or during the stream, skipped and cancelled requests, and
+terminals replayed on reconnect, so an application that renders optimistic
+sends can settle exactly the ones a terminal belongs to:
+
+```ts
+agent.addEventListener("message", (event) => {
+  const frame = JSON.parse(event.data);
+  if (frame.type === "cf_agent_use_chat_response" && frame.messageIds) {
+    settlePendingSends(frame.messageIds, frame.error ? "failed" : "done");
+  }
+});
+```
+
+`messageIds` is absent when the request did not end with a user message, or
+when the server no longer has a record of the request.
+
 ## Examples
 
 - [AI Chat Example](https://github.com/cloudflare/agents/tree/main/examples/ai-chat) — Modern example with server tools, client tools, and approval

@@ -482,7 +482,12 @@ export class StreamProgressCreditThrottle {
 // wrapper, which are passed in. Shared by `AIChatAgent` and `Think`.
 
 /** Durable record of the last turn that ended in a terminal error (#1645). */
-export type ChatTerminalRecord = { requestId: string; body: string };
+export type ChatTerminalRecord = {
+  requestId: string;
+  body: string;
+  /** The request's originating user message ids (#2280). */
+  messageIds?: string[];
+};
 
 /**
  * Persist a durable record of the last terminal turn so a client that
@@ -493,9 +498,12 @@ export type ChatTerminalRecord = { requestId: string; body: string };
 export async function recordChatTerminal(
   storage: Pick<DurableObjectStorage, "put">,
   requestId: string,
-  body: string
+  body: string,
+  messageIds?: string[]
 ): Promise<void> {
-  await storage.put(CHAT_LAST_TERMINAL_KEY, { requestId, body });
+  const record: ChatTerminalRecord = { requestId, body };
+  if (messageIds?.length) record.messageIds = messageIds;
+  await storage.put(CHAT_LAST_TERMINAL_KEY, record);
 }
 
 /** Clear the durable terminal record once a later turn supersedes it (#1645). */

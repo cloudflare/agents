@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import type { Connection } from "../../index";
 import { ResumableStream } from "../../chat/resumable-stream";
 import type { StreamBenchObject } from "../capabilities/streams-bench";
 
@@ -81,6 +82,82 @@ describe("ResumableStream settlement", () => {
       expect(stream.getStreamMetadata(child)?.status).toBe("completed");
       expect(stream.reclaim()).toBe(1);
       expect(stream.getStreamMetadata(child)).toBeNull();
+    });
+  });
+});
+
+describe("ResumableStream originating message ids (#2280)", () => {
+  function collectingConnection(frames: Record<string, unknown>[]) {
+    return {
+      id: "c1",
+      send: (message: string) => {
+        frames.push(JSON.parse(message) as Record<string, unknown>);
+      }
+    } as unknown as Connection;
+  }
+
+  it("echoes them on the replayed terminal of a completed stream", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
+      const stream = createAdapter(instance, ctx.storage.sql);
+      const id = stream.start("req-done", { originMessageIds: ["m1", "m2"] });
+      stream.storeChunk(
+        id,
+        JSON.stringify({ type: "text-delta", delta: "hi" })
+      );
+      stream.complete(id);
+      expect(stream.getOriginMessageIds("req-done")).toEqual(["m1", "m2"]);
+
+      const frames: Record<string, unknown>[] = [];
+      expect(
+        stream.replayCompletedChunksByRequestId(
+          collectingConnection(frames),
+          "req-done"
+        )
+      ).toBe(true);
+      expect(frames.at(0)?.messageIds).toBeUndefined();
+      expect(frames.at(-1)).toMatchObject({
+        done: true,
+        replay: true,
+        messageIds: ["m1", "m2"]
+      });
+    });
+  });
+
+  it("echoes them on the terminal of an orphaned stream", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
+      const first = createAdapter(instance, ctx.storage.sql);
+      const id = first.start("req-orphan", { originMessageIds: ["m3"] });
+      first.storeChunk(id, JSON.stringify({ type: "text-delta", delta: "x" }));
+      first.flushBuffer();
+
+      const restored = createAdapter(instance, ctx.storage.sql);
+      restored.restore();
+      const frames: Record<string, unknown>[] = [];
+      expect(
+        restored.replayChunks(collectingConnection(frames), "req-orphan")
+      ).toBe(id);
+      expect(frames.at(-1)).toMatchObject({
+        done: true,
+        messageIds: ["m3"]
+      });
+    });
+  });
+
+  it("omits them for a stream started without ids", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
+      const stream = createAdapter(instance, ctx.storage.sql);
+      const id = stream.start("req-plain");
+      stream.complete(id);
+      expect(stream.getOriginMessageIds("req-plain")).toBeUndefined();
+      const frames: Record<string, unknown>[] = [];
+      stream.replayCompletedChunksByRequestId(
+        collectingConnection(frames),
+        "req-plain"
+      );
+      expect(frames.at(-1)).not.toHaveProperty("messageIds");
     });
   });
 });

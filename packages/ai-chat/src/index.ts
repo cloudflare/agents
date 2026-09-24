@@ -97,6 +97,8 @@ import {
   recordChatTerminal,
   clearChatTerminal,
   pendingChatTerminal,
+  originMessageIds,
+  withOriginMessageIds,
   buildChatRecoveringFrame,
   setChatRecovering,
   AgentToolStreamProgressThrottle,
@@ -1215,12 +1217,17 @@ export class AIChatAgent<
           const requestBody =
             Object.keys(customBody).length > 0 ? customBody : undefined;
           const epoch = this._turnQueue.generation;
+          const requestOriginIds = originMessageIds(messages);
+          if (requestOriginIds) {
+            this._requestOriginMessageIds.set(chatMessageId, requestOriginIds);
+          }
           const concurrencyDecision =
             this._getSubmitConcurrencyDecision(requestTrigger);
 
           if (concurrencyDecision.action === "drop") {
             this._rollbackDroppedSubmit(connection);
             this._completeSkippedRequest(connection, chatMessageId);
+            this._requestOriginMessageIds.delete(chatMessageId);
             return;
           }
 
@@ -1504,6 +1511,7 @@ export class AIChatAgent<
             // covers a throw in a pre-turn-body step before chatTurnBody's
             // finally could run.
             this._settlePreStreamTurn(chatMessageId);
+            this._requestOriginMessageIds.delete(chatMessageId);
           }
           return;
         }
@@ -1855,7 +1863,11 @@ export class AIChatAgent<
     requestId: string,
     options: { messageId?: string; continuation?: boolean } = {}
   ): string {
-    const streamId = this._resumableStream.start(requestId, options);
+    const originIds = this._requestOriginMessageIds.get(requestId);
+    const streamId = this._resumableStream.start(requestId, {
+      ...options,
+      ...(originIds && { originMessageIds: originIds })
+    });
     // Flush connections parked during this turn's pre-stream window (#1784)
     // into the normal STREAM_RESUMING path now that a stream exists. Safe for
     // every turn — the awaiting set is empty unless a client reconnected before
@@ -2208,7 +2220,32 @@ export class AIChatAgent<
     }
   }
 
+  /**
+   * User message ids a WebSocket chat request originated from (#2280), keyed
+   * by request id while the request is handled. After that (or after a
+   * restart) the request's stream metadata is the fallback.
+   */
+  private _requestOriginMessageIds = new Map<string, string[]>();
+
+  private _originMessageIdsFor(requestId: string): string[] | undefined {
+    return (
+      this._requestOriginMessageIds.get(requestId) ??
+      this._resumableStream.getOriginMessageIds(requestId)
+    );
+  }
+
+  private _withOriginMessageIds(message: OutgoingMessage): OutgoingMessage {
+    if (
+      message.type !== MessageType.CF_AGENT_USE_CHAT_RESPONSE ||
+      !(message.done || message.error)
+    ) {
+      return message;
+    }
+    return withOriginMessageIds(message, this._originMessageIdsFor(message.id));
+  }
+
   private _broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
+    message = this._withOriginMessageIds(message);
     if (
       message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
       (message.done || message.error)
@@ -2756,12 +2793,15 @@ export class AIChatAgent<
   }
 
   private _completeSkippedRequest(connection: Connection, requestId: string) {
-    this._sendDirectMessage(connection, {
-      body: "",
-      done: true,
-      id: requestId,
-      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-    });
+    this._sendDirectMessage(
+      connection,
+      this._withOriginMessageIds({
+        body: "",
+        done: true,
+        id: requestId,
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+      })
+    );
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
     // admitted (latest/merge supersede) or the queue generation advanced. The
@@ -5019,7 +5059,12 @@ export class AIChatAgent<
     requestId: string,
     body: string
   ): Promise<void> {
-    await recordChatTerminal(this.ctx.storage, requestId, body);
+    await recordChatTerminal(
+      this.ctx.storage,
+      requestId,
+      body,
+      this._originMessageIdsFor(requestId)
+    );
   }
 
   /** Clear the durable terminal record once a later turn supersedes it (#1645). */
@@ -5030,6 +5075,7 @@ export class AIChatAgent<
   private async _pendingChatTerminal(): Promise<{
     requestId: string;
     body: string;
+    messageIds?: string[];
   } | null> {
     return pendingChatTerminal(this.ctx.storage);
   }

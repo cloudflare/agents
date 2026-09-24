@@ -53,6 +53,7 @@ interface FakeStreamState {
   orphanedStreamId: string;
   replayCompletedReturn: boolean;
   replayErroredReturn: boolean;
+  originMessageIds?: string[];
   calls: { replayChunks: string[]; replayErrored: string[] };
 }
 
@@ -83,6 +84,7 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
       return state.orphanedStreamId;
     },
     replayCompletedChunksByRequestId: () => state.replayCompletedReturn,
+    getOriginMessageIds: () => state.originMessageIds,
     replayErroredChunksByRequestId: (_c: Connection, requestId: string) => {
       state.calls.replayErrored.push(requestId);
       return state.replayErroredReturn;
@@ -403,6 +405,58 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     expect(state.calls.replayErrored).toEqual(["req-term"]);
     expect(frames).toEqual([
       terminalErrorFrame("req-term", "boom", RESPONSE_TYPE)
+    ]);
+  });
+
+  it("ACK with a pending terminal echoes its originating message ids (#2280)", async () => {
+    const frames: SentFrame[] = [];
+    const { resumableStream } = makeStream({
+      active: false,
+      originMessageIds: ["stream-msg"]
+    });
+    const handshake = new ResumeHandshake(
+      makeHost({
+        resumableStream,
+        pendingTerminal: {
+          requestId: "req-term",
+          body: "boom",
+          messageIds: ["msg-1", "msg-2"]
+        }
+      })
+    );
+
+    await handshake.handleResumeAck(makeConnection("c1", frames), "req-term");
+
+    expect(frames).toEqual([
+      {
+        ...terminalErrorFrame("req-term", "boom", RESPONSE_TYPE),
+        messageIds: ["msg-1", "msg-2"]
+      }
+    ]);
+  });
+
+  it("ACK falls back to the stream's originating message ids (#2280)", async () => {
+    const frames: SentFrame[] = [];
+    const { resumableStream } = makeStream({
+      active: false,
+      originMessageIds: ["msg-s"]
+    });
+    const handshake = new ResumeHandshake(
+      makeHost({
+        resumableStream,
+        pendingTerminal: { requestId: "req-term", body: "boom" }
+      })
+    );
+
+    await handshake.handleResumeAck(makeConnection("c1", frames), "req-term");
+    await handshake.handleResumeAck(makeConnection("c2", frames), "req-none");
+
+    expect(frames).toEqual([
+      {
+        ...terminalErrorFrame("req-term", "boom", RESPONSE_TYPE),
+        messageIds: ["msg-s"]
+      },
+      { ...replayDoneFrame("req-none", RESPONSE_TYPE), messageIds: ["msg-s"] }
     ]);
   });
 

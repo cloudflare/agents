@@ -50,7 +50,12 @@ export function sendReplayBodies(
 export function sendReplayControl(
   connection: Connection,
   requestId: string,
-  options: { done: boolean; replayComplete?: boolean; continuation: boolean }
+  options: {
+    done: boolean;
+    replayComplete?: boolean;
+    continuation: boolean;
+    messageIds?: string[];
+  }
 ): boolean {
   return sendIfOpen(
     connection,
@@ -61,7 +66,9 @@ export function sendReplayControl(
       type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
       replay: true,
       ...(options.replayComplete && { replayComplete: true }),
-      ...(options.continuation && { continuation: true })
+      ...(options.continuation && { continuation: true }),
+      ...(options.done &&
+        options.messageIds && { messageIds: options.messageIds })
     })
   );
 }

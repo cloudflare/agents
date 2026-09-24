@@ -1,0 +1,112 @@
+/**
+ * #2280: terminal chat frames echo the user message ids the request carried,
+ * so a client can settle exactly the sends a completion or error belongs to.
+ */
+
+import { env, exports } from "cloudflare:workers";
+import { describe, expect, it } from "vitest";
+import { getAgentByName } from "agents";
+import type { UIMessage } from "ai";
+import type { ThinkTestAgent } from "./agents/think-session";
+
+const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
+const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
+
+type TerminalFrame = {
+  id: string;
+  done?: boolean;
+  error?: boolean;
+  messageIds?: string[];
+};
+
+async function freshAgent() {
+  const room = crypto.randomUUID();
+  const agent = await getAgentByName(
+    env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+    room
+  );
+  const res = await exports.default.fetch(
+    `http://example.com/agents/think-test-agent/${room}`,
+    { headers: { Upgrade: "websocket" } }
+  );
+  expect(res.status).toBe(101);
+  const ws = res.webSocket as WebSocket;
+  ws.accept();
+  return { agent, ws };
+}
+
+function user(id: string): UIMessage {
+  return { id, role: "user", parts: [{ type: "text", text: id }] };
+}
+
+function sendAndWaitForDone(
+  ws: WebSocket,
+  requestId: string,
+  messages: UIMessage[]
+): Promise<TerminalFrame[]> {
+  return new Promise((resolve, reject) => {
+    const terminals: TerminalFrame[] = [];
+    const timer = setTimeout(
+      () => reject(new Error("Timeout waiting for done")),
+      10_000
+    );
+    const handler = (e: MessageEvent) => {
+      const msg = JSON.parse(e.data as string) as TerminalFrame & {
+        type?: string;
+      };
+      if (msg.type !== MSG_CHAT_RESPONSE || msg.id !== requestId) return;
+      if (msg.done || msg.error) terminals.push(msg);
+      if (msg.done) {
+        clearTimeout(timer);
+        ws.removeEventListener("message", handler);
+        resolve(terminals);
+      }
+    };
+    ws.addEventListener("message", handler);
+    ws.send(
+      JSON.stringify({
+        type: MSG_CHAT_REQUEST,
+        id: requestId,
+        init: { method: "POST", body: JSON.stringify({ messages }) }
+      })
+    );
+  });
+}
+
+describe("Think terminal frames carry originating message ids (#2280)", () => {
+  it("echoes the request's user message id on the done frame", async () => {
+    const { ws } = await freshAgent();
+    const terminals = await sendAndWaitForDone(ws, "req-1", [user("msg-1")]);
+    expect(terminals.at(-1)?.messageIds).toEqual(["msg-1"]);
+    ws.close();
+  });
+
+  it("echoes every trailing user message of the request", async () => {
+    const { ws } = await freshAgent();
+    const terminals = await sendAndWaitForDone(ws, "req-2", [
+      user("msg-a"),
+      user("msg-b")
+    ]);
+    expect(terminals.at(-1)?.messageIds).toEqual(["msg-a", "msg-b"]);
+    ws.close();
+  });
+
+  it("echoes the ids on the error terminal and in the durable terminal record", async () => {
+    const { agent, ws } = await freshAgent();
+    await agent.setInBandErrorResponse("provider exploded");
+    const terminals = await sendAndWaitForDone(ws, "req-3", [user("msg-e")]);
+    expect(terminals.some((frame) => frame.error)).toBe(true);
+    for (const frame of terminals) {
+      expect(frame.messageIds).toEqual(["msg-e"]);
+    }
+    const pending = (await agent.getPendingChatTerminalForTest()) as {
+      requestId: string;
+      messageIds?: string[];
+    } | null;
+    expect(pending).toMatchObject({
+      requestId: "req-3",
+      messageIds: ["msg-e"]
+    });
+    ws.close();
+  });
+});
