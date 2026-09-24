@@ -1,3 +1,5 @@
+import { env } from "cloudflare:workers";
+import { getAgentByName } from "agents";
 import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { MessageType } from "../types";
@@ -72,6 +74,44 @@ describe("originating message ids on terminal frames (#2280)", () => {
     const done = waitForTerminal(ws, "req-b");
     sendChat(ws, "req-b", [user("msg-1"), user("msg-2")]);
     expect((await done).messageIds).toEqual(["msg-1", "msg-2"]);
+
+    ws.close(1000);
+  });
+
+  it("carries the ids onto a recovered turn's successor request", async () => {
+    const room = crypto.randomUUID();
+    const agent = await getAgentByName(env.ChatRecoveryTestAgent, room);
+    await (
+      agent as unknown as {
+        armStallingTurnsForTest(timeoutMs: number, hangTurns: number): void;
+      }
+    ).armStallingTurnsForTest(150, 1);
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const successorTerminals: ResponseFrame[] = [];
+    ws.addEventListener("message", (e: MessageEvent) => {
+      const frame = JSON.parse(e.data as string) as ResponseFrame;
+      if (
+        frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+        frame.id !== "req-stall" &&
+        frame.done
+      ) {
+        successorTerminals.push(frame);
+      }
+    });
+
+    const first = waitForTerminal(ws, "req-stall");
+    sendChat(ws, "req-stall", [user("msg-s")]);
+    expect((await first).messageIds).toEqual(["msg-s"]);
+
+    for (let i = 0; i < 60 && successorTerminals.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(successorTerminals.length).toBeGreaterThan(0);
+    for (const frame of successorTerminals) {
+      expect(frame.messageIds).toEqual(["msg-s"]);
+    }
 
     ws.close(1000);
   });

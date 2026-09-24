@@ -2803,6 +2803,12 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.chatStreamStallTimeoutMs = ms;
   }
 
+  /** Make the next `hangTurns` model streams hang, for a WebSocket-driven turn. */
+  armStallingTurnsForTest(timeoutMs: number, hangTurns: number): void {
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    this._hangTurnsRemaining = hangTurns;
+  }
+
   /**
    * Drive a turn whose model stream hangs after a partial, with a short stall
    * timeout configured, so the inactivity watchdog fires and routes the turn

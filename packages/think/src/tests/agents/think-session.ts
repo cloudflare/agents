@@ -1838,6 +1838,30 @@ export class ThinkTestAgent extends Think {
    * scheduled-continue count, and the recovered transcript so a test can assert
    * the turn recovered. chatRecovery stays at its default (`true`).
    */
+  async armStallOnceForTest(
+    afterChunks: number,
+    timeoutMs: number
+  ): Promise<void> {
+    this._stallAfterChunks = afterChunks;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+  }
+
+  /** Run the queued stall continuation, then disarm the stall. */
+  async runStallContinuationForTest(): Promise<number> {
+    try {
+      const scheduled = recoveryWorkCountForTest(this, "_chatRecoveryContinue");
+      if (scheduled > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      }
+      return scheduled;
+    } finally {
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
   async testChatWithStallThenRecover(
     afterChunks: number,
     timeoutMs: number

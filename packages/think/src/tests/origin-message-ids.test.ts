@@ -91,6 +91,37 @@ describe("Think terminal frames carry originating message ids (#2280)", () => {
     ws.close();
   });
 
+  it("carries the ids onto a recovered turn's successor request", async () => {
+    const { agent, ws } = await freshAgent();
+    const successorTerminals: TerminalFrame[] = [];
+    ws.addEventListener("message", (e: MessageEvent) => {
+      const msg = JSON.parse(e.data as string) as TerminalFrame & {
+        type?: string;
+      };
+      if (
+        msg.type === MSG_CHAT_RESPONSE &&
+        msg.id !== "req-stall" &&
+        msg.done
+      ) {
+        successorTerminals.push(msg);
+      }
+    });
+
+    await agent.armStallOnceForTest(1, 50);
+    const first = await sendAndWaitForDone(ws, "req-stall", [user("msg-s")]);
+    expect(first.at(-1)?.messageIds).toEqual(["msg-s"]);
+
+    for (let i = 0; i < 50 && successorTerminals.length === 0; i++) {
+      await agent.runStallContinuationForTest();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(successorTerminals.length).toBeGreaterThan(0);
+    for (const frame of successorTerminals) {
+      expect(frame.messageIds).toEqual(["msg-s"]);
+    }
+    ws.close();
+  });
+
   it("echoes the ids on the error terminal and in the durable terminal record", async () => {
     const { agent, ws } = await freshAgent();
     await agent.setInBandErrorResponse("provider exploded");

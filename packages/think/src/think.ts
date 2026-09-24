@@ -1258,6 +1258,7 @@ type ChatRecoveryRetryData = {
   targetUserId?: string;
   originalRequestId?: string;
   incidentId?: string;
+  originMessageIds?: string[];
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
   recoveredRequestId?: string;
@@ -1267,6 +1268,7 @@ type ChatRecoveryContinueData = {
   targetAssistantId?: string;
   originalRequestId?: string;
   incidentId?: string;
+  originMessageIds?: string[];
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
   recoveredRequestId?: string;
@@ -3268,6 +3270,12 @@ export class Think<
   // prior value once a continuation settles. If turns ever run concurrently,
   // this must move to per-incident storage.
   private _activeChatRecoveryRootRequestId: string | undefined;
+  /**
+   * The originating user message ids of the active recovery chain (#2280),
+   * carried in the recovery payload because the successor turn runs under a
+   * fresh request id. Scoped and restored like the root request id above.
+   */
+  private _activeChatRecoveryOriginIds: string[] | undefined;
 
   private static readonly CONFIG_KEYS = [
     "_think_config",
@@ -16365,6 +16373,7 @@ export class Think<
   }): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
+    const originIds = this._originMessageIdsFor(input.requestId);
     const latestUserMessageId =
       [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
     const retryTargetUserId =
@@ -16512,6 +16521,7 @@ export class Think<
           incidentId: incident.incidentId,
           lastBody: this._lastBody ?? null,
           lastClientTools: this._lastClientTools ?? null,
+          ...(originIds ? { originMessageIds: originIds } : {}),
           ...(recoveredRequestId ? { recoveredRequestId } : {})
         }
       });
@@ -16531,6 +16541,7 @@ export class Think<
         incidentId: incident.incidentId,
         lastBody: this._lastBody ?? null,
         lastClientTools: this._lastClientTools ?? null,
+        ...(originIds ? { originMessageIds: originIds } : {}),
         ...(recoveredRequestId ? { recoveredRequestId } : {})
       }
     });
@@ -16753,6 +16764,7 @@ export class Think<
       streamStatus
     } = input;
     const { retryTargetUserId } = input.detail;
+    const originIds = this._originMessageIdsFor(requestId);
     const streamIsTerminal =
       streamStatus === "completed" || streamStatus === "error";
 
@@ -16801,6 +16813,7 @@ export class Think<
           incidentId: incident.incidentId,
           lastBody: snapshot?.lastBody ?? null,
           lastClientTools: snapshot?.lastClientTools ?? null,
+          ...(originIds ? { originMessageIds: originIds } : {}),
           ...(recoveredRequestId ? { recoveredRequestId } : {})
         }
       });
@@ -16819,6 +16832,7 @@ export class Think<
                 lastClientTools: snapshot.lastClientTools ?? null
               }
             : {}),
+          ...(originIds ? { originMessageIds: originIds } : {}),
           ...(recoveredRequestId ? { recoveredRequestId } : {})
         }
       });
@@ -17318,6 +17332,8 @@ export class Think<
     }
 
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
+    const previousOriginIds = this._activeChatRecoveryOriginIds;
+    this._activeChatRecoveryOriginIds = data?.originMessageIds;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
     const controller = recoveredSubmission ? new AbortController() : null;
@@ -17453,6 +17469,7 @@ export class Think<
       );
     } finally {
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
+      this._activeChatRecoveryOriginIds = previousOriginIds;
       if (recoveredSubmission) {
         this._submissionAbortControllers.delete(
           recoveredSubmission.submission_id
@@ -17617,6 +17634,8 @@ export class Think<
     }
 
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
+    const previousOriginIds = this._activeChatRecoveryOriginIds;
+    this._activeChatRecoveryOriginIds = data?.originMessageIds;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
     const controller = recoveredSubmission ? new AbortController() : null;
@@ -17749,6 +17768,7 @@ export class Think<
       );
     } finally {
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
+      this._activeChatRecoveryOriginIds = previousOriginIds;
       if (recoveredSubmission) {
         this._submissionAbortControllers.delete(
           recoveredSubmission.submission_id
@@ -18581,7 +18601,9 @@ export class Think<
     requestId: string,
     options?: { messageId?: string; continuation?: boolean }
   ): string {
-    const originIds = this._requestOriginMessageIds.get(requestId);
+    const originIds =
+      this._requestOriginMessageIds.get(requestId) ??
+      this._activeChatRecoveryOriginIds;
     const streamId = this._resumableStream.start(requestId, {
       ...options,
       ...(originIds && { originMessageIds: originIds })
@@ -18687,7 +18709,8 @@ export class Think<
   private _originMessageIdsFor(requestId: string): string[] | undefined {
     return (
       this._requestOriginMessageIds.get(requestId) ??
-      this._resumableStream.getOriginMessageIds(requestId)
+      this._resumableStream.getOriginMessageIds(requestId) ??
+      this._activeChatRecoveryOriginIds
     );
   }
 

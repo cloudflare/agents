@@ -186,6 +186,7 @@ function withAgentSpan<T>(
 type ChatRecoveryRetryData = {
   targetUserId?: string;
   originalRequestId?: string;
+  originMessageIds?: string[];
   incidentId?: string;
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
@@ -194,6 +195,7 @@ type ChatRecoveryRetryData = {
 type ChatRecoveryContinueData = {
   targetAssistantId?: string;
   originalRequestId?: string;
+  originMessageIds?: string[];
   incidentId?: string;
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
@@ -406,6 +408,12 @@ export class AIChatAgent<
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State, Props> {
   private _activeChatRecoveryRootRequestId: string | undefined;
+  /**
+   * The originating user message ids of the active recovery chain (#2280),
+   * carried in the recovery payload because the successor turn runs under a
+   * fresh request id. Scoped and restored like the root request id above.
+   */
+  private _activeChatRecoveryOriginIds: string[] | undefined;
 
   /**
    * Registry of per-request AbortControllers.
@@ -1863,7 +1871,9 @@ export class AIChatAgent<
     requestId: string,
     options: { messageId?: string; continuation?: boolean } = {}
   ): string {
-    const originIds = this._requestOriginMessageIds.get(requestId);
+    const originIds =
+      this._requestOriginMessageIds.get(requestId) ??
+      this._activeChatRecoveryOriginIds;
     const streamId = this._resumableStream.start(requestId, {
       ...options,
       ...(originIds && { originMessageIds: originIds })
@@ -2230,7 +2240,8 @@ export class AIChatAgent<
   private _originMessageIdsFor(requestId: string): string[] | undefined {
     return (
       this._requestOriginMessageIds.get(requestId) ??
-      this._resumableStream.getOriginMessageIds(requestId)
+      this._resumableStream.getOriginMessageIds(requestId) ??
+      this._activeChatRecoveryOriginIds
     );
   }
 
@@ -5253,6 +5264,7 @@ export class AIChatAgent<
     input: DispatchRecoveredTurnInput<AIChatRecoveryClassification>
   ): Promise<void> {
     const { incident, options, snapshot, recoveryRootRequestId } = input;
+    const originIds = this._originMessageIdsFor(input.requestId);
     const leaf =
       this.messages.length > 0
         ? this.messages[this.messages.length - 1]
@@ -5280,7 +5292,8 @@ export class AIChatAgent<
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: snapshot?.lastBody ?? null,
-          lastClientTools: snapshot?.lastClientTools ?? null
+          lastClientTools: snapshot?.lastClientTools ?? null,
+          ...(originIds ? { originMessageIds: originIds } : {})
         }
       });
     } else if (lostPartialUserId !== undefined && options.continue !== false) {
@@ -5296,7 +5309,8 @@ export class AIChatAgent<
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: snapshot?.lastBody ?? null,
-          lastClientTools: snapshot?.lastClientTools ?? null
+          lastClientTools: snapshot?.lastClientTools ?? null,
+          ...(originIds ? { originMessageIds: originIds } : {})
         }
       });
     } else if (options.continue !== false) {
@@ -5313,7 +5327,8 @@ export class AIChatAgent<
                 lastBody: snapshot.lastBody ?? null,
                 lastClientTools: snapshot.lastClientTools ?? null
               }
-            : {})
+            : {}),
+          ...(originIds ? { originMessageIds: originIds } : {})
         }
       });
     } else {
@@ -5359,6 +5374,8 @@ export class AIChatAgent<
     onTurnStarted?: () => void
   ): Promise<void> {
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
+    const previousOriginIds = this._activeChatRecoveryOriginIds;
+    this._activeChatRecoveryOriginIds = data?.originMessageIds;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
     try {
@@ -5456,6 +5473,7 @@ export class AIChatAgent<
       throw error;
     } finally {
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
+      this._activeChatRecoveryOriginIds = previousOriginIds;
       // If this facet is an agent-tool child, its recovered turn just settled
       // outside `startAgentToolRun`'s finalizer — eagerly close the run so a
       // re-attached parent collects the terminal immediately rather than
@@ -5505,6 +5523,7 @@ export class AIChatAgent<
   }): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
+    const originIds = this._originMessageIdsFor(input.requestId);
     const latestUserMessageId =
       [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
     // A new turn that failed before producing any part has nothing to continue:
@@ -5624,7 +5643,8 @@ export class AIChatAgent<
         originalRequestId: recoveryRootRequestId,
         incidentId: incident.incidentId,
         lastBody: this._lastBody ?? null,
-        lastClientTools: this._lastClientTools ?? null
+        lastClientTools: this._lastClientTools ?? null,
+        ...(originIds ? { originMessageIds: originIds } : {})
       }
     });
     return "scheduled";
@@ -5870,6 +5890,8 @@ export class AIChatAgent<
     onTurnStarted?: () => void
   ): Promise<void> {
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
+    const previousOriginIds = this._activeChatRecoveryOriginIds;
+    this._activeChatRecoveryOriginIds = data?.originMessageIds;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
     try {
@@ -5962,6 +5984,7 @@ export class AIChatAgent<
       throw error;
     } finally {
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
+      this._activeChatRecoveryOriginIds = previousOriginIds;
       // If this facet is an agent-tool child, its recovered turn just settled
       // outside `startAgentToolRun`'s finalizer — eagerly close the run so a
       // re-attached parent collects the terminal immediately rather than

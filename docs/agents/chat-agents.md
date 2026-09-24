@@ -1702,7 +1702,11 @@ sends can settle exactly the ones a terminal belongs to:
 ```ts
 agent.addEventListener("message", (event) => {
   const frame = JSON.parse(event.data);
-  if (frame.type === "cf_agent_use_chat_response" && frame.messageIds) {
+  if (
+    frame.type === "cf_agent_use_chat_response" &&
+    (frame.done || frame.error) &&
+    frame.messageIds
+  ) {
     settlePendingSends(frame.messageIds, frame.error ? "failed" : "done");
   }
 });
