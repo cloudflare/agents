@@ -2424,9 +2424,9 @@ export type CancelSubmissionResult =
        */
       previousStatus: "pending" | "running";
       /**
-       * Whether the submission's messages were written to the conversation
-       * before it was cancelled. A claimed submission can still be `false`
-       * when it is cancelled before its turn applies them.
+       * Whether any of the submission's messages were written to the
+       * conversation when it was cancelled. A claimed submission can still be
+       * `false` when it is cancelled before its turn applies them.
        */
       messagesApplied: boolean;
       submission: ThinkSubmissionInspection;
@@ -11123,7 +11123,10 @@ export class Think<
     } finally {
       if (terminal) {
         this._terminalStatusEmits.delete(inspection.submissionId);
-        this._resolveSubmissionWaiters(inspection);
+        const current = this._readSubmission(inspection.submissionId);
+        if (current?.created_at === row.created_at) {
+          this._resolveSubmissionWaiters(inspection);
+        }
       }
     }
   }
@@ -11386,7 +11389,6 @@ export class Think<
 
   private _releaseDeletedSubmissionWaiters(rows: ThinkSubmissionRow[]): void {
     for (const row of rows) {
-      if (this._terminalStatusEmits.has(row.submission_id)) continue;
       this._resolveSubmissionWaiters(this._inspectionFromSubmissionRow(row));
     }
   }
@@ -11494,7 +11496,6 @@ export class Think<
       };
     }
     const previousStatus = row.status as "pending" | "running";
-    const messagesApplied = row.messages_applied_at !== null;
 
     const completedAt = Date.now();
     const errorMessage =
@@ -11530,7 +11531,14 @@ export class Think<
     }
     this._enqueueTerminalWorkflowNotification(updated);
     this._terminalStatusEmits.add(submissionId);
+    let messagesApplied = row.messages_applied_at !== null;
     try {
+      // The applied marker is stamped after the last append, so a cancel
+      // that lands mid-append has to look for the messages themselves.
+      if (!messagesApplied && previousStatus === "running") {
+        messagesApplied =
+          (await this._getSubmissionMessagesAppliedState(updated)) !== "none";
+      }
       await this.dequeue(submissionRunItemId(submissionId));
     } finally {
       await this._emitSubmissionStatus(updated);

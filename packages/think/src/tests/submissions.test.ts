@@ -960,6 +960,49 @@ describe("Think durable submissions", () => {
     expect(settled).toMatchObject({ status: "completed" });
   });
 
+  it("does not settle a reused submission id with the deleted submission's result", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({ submissionId: "sub-reuse" });
+    await agent.setSubmissionStatusDelayForTest(150);
+
+    const cancel = agent.cancelSubmissionForTest("sub-reuse", "stop");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await expect(agent.deleteSubmissionForTest("sub-reuse")).resolves.toBe(
+      true
+    );
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-reuse",
+      createdAt: Date.now() + 1000
+    });
+    const waiting = agent.waitForSubmissionForTest("sub-reuse", {
+      timeoutMs: 400
+    });
+    await cancel;
+    await expect(waiting).resolves.toMatchObject({ status: "pending" });
+  });
+
+  it("reports messages applied when a cancel lands mid-append", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-partial",
+      status: "running",
+      messageIds: ["sub-partial-a", "sub-partial-b"]
+    });
+    await agent.persistAssistantMessageForTest({
+      id: "sub-partial-a",
+      role: "user",
+      parts: [{ type: "text", text: "first" }]
+    });
+
+    await expect(
+      agent.cancelSubmissionForTest("sub-partial")
+    ).resolves.toMatchObject({
+      outcome: "cancelled",
+      previousStatus: "running",
+      messagesApplied: true
+    });
+  });
+
   it("reports whether a cancelled submission's messages were applied", async () => {
     const agent = await freshAgent();
     await agent.insertSubmissionForTest({
