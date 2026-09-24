@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createBrowserRuntime } from "../browser/ai";
 import { BrowserConnector } from "../browser/connector";
+import { CdpSession } from "../browser/cdp-session";
 import { connectBrowser, getBrowserRecording } from "../browser/browser-run";
+import type { ConnectBrowserOptions } from "../browser/browser-run";
 import type {
   BrowserSessionLock,
   BrowserSessionStore,
@@ -338,6 +340,55 @@ describe("browser_execute model output", () => {
   });
 });
 
+describe("CdpSession construction", () => {
+  /** A socket that never answers, so commands can only time out. */
+  function silentSocket(): WebSocket {
+    const listeners = new Map<string, Array<(event: unknown) => void>>();
+    return {
+      addEventListener(type: string, fn: (event: unknown) => void) {
+        listeners.set(type, [...(listeners.get(type) ?? []), fn]);
+      },
+      send() {},
+      close() {
+        for (const fn of listeners.get("close") ?? []) fn({});
+      }
+    } as unknown as WebSocket;
+  }
+
+  it("still honors the deprecated positional arguments", async () => {
+    let closed = 0;
+    const session = new CdpSession(
+      silentSocket(),
+      25,
+      () => closed++,
+      "session-1"
+    );
+
+    expect(session.sessionId).toBe("session-1");
+    await expect(session.send("Page.enable")).rejects.toThrow(
+      "CDP command timed out after 25ms: Page.enable"
+    );
+    session.close();
+    expect(closed).toBe(1);
+  });
+
+  it("accepts the options object", async () => {
+    let closed = 0;
+    const session = new CdpSession(silentSocket(), {
+      timeoutMs: 25,
+      onClose: () => closed++,
+      sessionId: "session-1"
+    });
+
+    expect(session.sessionId).toBe("session-1");
+    await expect(session.send("Page.enable")).rejects.toThrow(
+      "CDP command timed out after 25ms: Page.enable"
+    );
+    session.close();
+    expect(closed).toBe(1);
+  });
+});
+
 describe("Kitesurf Browser Run connections", () => {
   it("acquires Kitesurf directly over WebSocket without session endpoints", async () => {
     const { browser, requests } = createFakeBrowser();
@@ -362,7 +413,12 @@ describe("Kitesurf Browser Run connections", () => {
     const { browser, requests } = createFakeBrowser();
 
     await expect(
-      connectBrowser(browser, { browser: "kitesurf", ...option })
+      // The options union forbids this at the type level — the cast simulates
+      // a plain-JS caller smuggling a Chromium-only option past the compiler.
+      connectBrowser(browser, {
+        browser: "kitesurf",
+        ...option
+      } as ConnectBrowserOptions)
     ).rejects.toThrow("does not support");
     expect(requests).toHaveLength(0);
   });
@@ -370,12 +426,14 @@ describe("Kitesurf Browser Run connections", () => {
   it("allows explicitly disabled Chromium-only options", async () => {
     const { browser, requests } = createFakeBrowser();
 
+    // Type-invalid but runtime-tolerated: explicitly disabled values from
+    // plain-JS callers are accepted and never sent on the wire.
     const session = await connectBrowser(browser, {
       browser: "kitesurf",
       keepAliveMs: 0,
       includeTargets: false,
       recording: false
-    });
+    } as ConnectBrowserOptions);
     session.disconnect();
 
     expect(requests[0]?.url).toBe(
