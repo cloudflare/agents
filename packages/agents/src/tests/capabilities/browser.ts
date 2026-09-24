@@ -95,27 +95,16 @@ export function createFakeBrowserBinding(): FakeBrowserBinding {
 }
 
 /**
- * Idle window (and sweep cadence) the harness object's capability uses.
- * Deliberately far-future: imminent alarms auto-fire in workerd, so tests
- * backdate stored timestamps and the sweep job instead of sleeping, then
- * fire the alarm deterministically with `runDurableObjectAlarm`.
- */
-export const BROWSER_HARNESS_SWEEP_IDLE_MS = 5 * 60 * 1000;
-
-/**
  * Minimal real host for capability-level browser-session tests: a Durable
  * Object whose only capability is `BrowserSessions`, with runtime handlers
  * installed so tests can drive real Lifecycle startup, real storage, and the
- * real alarm-scheduled sweep. The binding is the in-memory fake above; its
+ * real job queue and alarm. The binding is the in-memory fake above; its
  * requests are exposed for platform-call assertions.
  */
 export class BrowserHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly #binding = createFakeBrowserBinding();
   readonly browserRequests = this.#binding.requests;
   readonly killBrowserSession = this.#binding.kill;
-  readonly browser = new BrowserSessions({
-    browser: this.#binding.browser,
-    sweepIdleMs: BROWSER_HARNESS_SWEEP_IDLE_MS
-  });
+  readonly browser = new BrowserSessions({ browser: this.#binding.browser });
   readonly lifecycle = Lifecycle.install(this).use(this.browser);
 }
