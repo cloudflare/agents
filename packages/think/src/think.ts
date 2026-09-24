@@ -1552,6 +1552,7 @@ export type RunTurnOptions = RunTurnWait | RunTurnSubmit | RunTurnStream;
 
 /** Result of {@link Think.runTurn} in `mode: "wait"`. */
 export type TurnResult = SaveMessagesResult & {
+  /** Persisted assistant produced by this completed turn; absent otherwise. */
   message?: SessionMessage;
   /**
    * Parsed structured output when the turn's `TurnConfig.output` produced
@@ -1842,6 +1843,16 @@ const continuationOutputContext = new AsyncLocalStorage<{
   agent: unknown;
   taken: boolean;
   result?: ProgrammaticMessagesResult;
+}>();
+
+// A `runTurn({ mode: "wait" })` call records the assistant message each turn
+// persists, keyed by that turn's request ID. The context travels through the
+// turn queue and inherited async work, so keying (not a single slot) keeps a
+// later turn in the same context — e.g. an overridden `continueLastTurn` that
+// runs another `saveMessages` — from replacing this turn's answer.
+const waitTurnResultContext = new AsyncLocalStorage<{
+  agent: unknown;
+  messageIds: Map<string, string>;
 }>();
 
 // Drains the underlying model stream when a drain loop exits early (in-stream
@@ -8989,57 +9000,83 @@ export class Think<
     result: ProgrammaticMessagesResult,
     continuation: boolean
   ): Promise<TurnResult> {
-    let message: SessionMessage | undefined;
-    if (result.status === "completed") {
-      const leaf = await this.session.getLatestLeaf();
-      if (leaf?.role === "assistant") {
-        message = leaf;
-      }
-    }
-    return { ...result, continuation, message };
+    const capture = waitTurnResultContext.getStore();
+    const messageId =
+      result.status === "completed" && capture?.agent === this
+        ? capture.messageIds.get(result.requestId)
+        : undefined;
+    const message =
+      messageId !== undefined ? await this.session.getMessage(messageId) : null;
+    return {
+      ...result,
+      continuation,
+      ...(message !== null && { message })
+    };
   }
 
   private async _runTurnWait(options: RunTurnWait): Promise<TurnResult> {
     this._validateRunTurnAdmission(options, "wait");
 
-    if (options.continuation === true) {
-      const continueOptions = {
-        signal: options.signal,
-        channel: options.channel
-      };
-      if (!isMethodOverridden(this, "continueLastTurn")) {
-        const result = await this._continueLastTurn(options.body, {
-          ...continueOptions,
-          captureOutput: true
-        });
-        return this._enrichTurnResult(result, true);
+    const capture = { agent: this, messageIds: new Map<string, string>() };
+    return waitTurnResultContext.run(capture, async () => {
+      if (options.continuation === true) {
+        const continueOptions = {
+          signal: options.signal,
+          channel: options.channel
+        };
+        if (!isMethodOverridden(this, "continueLastTurn")) {
+          const result = await this._continueLastTurn(options.body, {
+            ...continueOptions,
+            captureOutput: true
+          });
+          return this._enrichTurnResult(result, true);
+        }
+        const outputCapture: {
+          agent: unknown;
+          taken: boolean;
+          result?: ProgrammaticMessagesResult;
+        } = { agent: this, taken: false };
+        const returned = await continuationOutputContext.run(
+          outputCapture,
+          () => this.continueLastTurn(options.body, continueOptions)
+        );
+        const captured = outputCapture.result;
+        return this._enrichTurnResult(
+          captured?.requestId === returned.requestId && "output" in captured
+            ? { ...returned, output: captured.output }
+            : returned,
+          true
+        );
       }
-      const capture: {
-        agent: unknown;
-        taken: boolean;
-        result?: ProgrammaticMessagesResult;
-      } = { agent: this, taken: false };
-      const returned = await continuationOutputContext.run(capture, () =>
-        this.continueLastTurn(options.body, continueOptions)
-      );
-      const captured = capture.result;
-      return this._enrichTurnResult(
-        captured?.requestId === returned.requestId && "output" in captured
-          ? { ...returned, output: captured.output }
-          : returned,
-        true
-      );
-    }
 
-    const input = options.input;
-    if (input === undefined) {
-      throw new TypeError("runTurn: supply either input or continuation: true");
-    }
+      const input = options.input;
+      if (input === undefined) {
+        throw new TypeError(
+          "runTurn: supply either input or continuation: true"
+        );
+      }
 
-    if (typeof input === "function") {
+      if (typeof input === "function") {
+        const result = await this._runProgrammaticMessagesTurn(
+          crypto.randomUUID(),
+          input,
+          {
+            signal: options.signal,
+            channel: options.channel,
+            captureOutput: true
+          }
+        );
+        return this._enrichTurnResult(result, false);
+      }
+
+      const messages = this._normalizeRunTurnMessages(input);
+      if (messages.length === 0) {
+        return { requestId: "", status: "skipped", continuation: false };
+      }
+
       const result = await this._runProgrammaticMessagesTurn(
         crypto.randomUUID(),
-        input,
+        messages,
         {
           signal: options.signal,
           channel: options.channel,
@@ -9047,19 +9084,7 @@ export class Think<
         }
       );
       return this._enrichTurnResult(result, false);
-    }
-
-    const messages = this._normalizeRunTurnMessages(input);
-    if (messages.length === 0) {
-      return { requestId: "", status: "skipped", continuation: false };
-    }
-
-    const result = await this._runProgrammaticMessagesTurn(
-      crypto.randomUUID(),
-      messages,
-      { signal: options.signal, channel: options.channel, captureOutput: true }
-    );
-    return this._enrichTurnResult(result, false);
+    });
   }
 
   private async _runTurnSubmit(
@@ -14545,13 +14570,24 @@ export class Think<
 
           if (accumulator.parts.length > 0) {
             await this._rememberPendingResponseHook(response);
-            await this._persistAssistantMessageWithCutover(
-              streamId,
-              assistantMsg,
-              parentId,
-              this._streamCutoverOptions(requestId),
-              { requestId, result: submissionResult }
-            );
+            const persistedMessageId =
+              await this._persistAssistantMessageWithCutover(
+                streamId,
+                assistantMsg,
+                parentId,
+                this._streamCutoverOptions(requestId),
+                { requestId, result: submissionResult }
+              );
+            if (
+              !streamError &&
+              !streamAborted &&
+              persistedMessageId !== undefined
+            ) {
+              const capture = waitTurnResultContext.getStore();
+              if (capture?.agent === this) {
+                capture.messageIds.set(requestId, persistedMessageId);
+              }
+            }
             this._broadcastMessages();
           }
           sendTerminalFrame();
@@ -14641,16 +14677,16 @@ export class Think<
     parentId?: string,
     options: { discard?: boolean } = {},
     submission?: { requestId: string; result: SubmissionTurnResult }
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const toPersist = this._strippedForPersist(msg);
-    if (toPersist === null) return;
+    if (toPersist === null) return undefined;
     if (this._resumableStream.pendingCutoverId !== streamId) {
       // The stream was settled by another path (a stall, an error): plain persist.
       await this._upsertMessageInHistory(toPersist, parentId);
       if (submission) {
         this._recordSubmissionMessage(submission.requestId, toPersist.id);
       }
-      return;
+      return toPersist.id;
     }
     const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
     let after: (() => Promise<void>) | undefined;
@@ -14679,6 +14715,7 @@ export class Think<
       throw error;
     }
     await after?.();
+    return toPersist.id;
   }
 
   /**
