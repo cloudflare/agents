@@ -1,0 +1,25 @@
+.changeset/ai-chat-stale-post-stream-continuation.md
+  s_368991bdec7f77::t_b5d78238ab1c64 1-5
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_0f769334ab82ee 244,3175,3177-3187,6436,6518,6835,6839,6843,6879,7328
+packages/ai-chat/src/tests/client-tools-continuation.test.ts
+  s_368991bdec7f77::t_84c80808c06a75 149-321
+packages/ai-chat/src/tests/worker.ts
+  s_368991bdec7f77::t_bf7613e81ba7fd 290-347
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a577abadfe196c69e47443db51939858423c9cec",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}

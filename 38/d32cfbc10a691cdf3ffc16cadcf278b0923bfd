@@ -1,0 +1,38 @@
+docs/think/programmatic-submissions.md
+  s_368991bdec7f77::t_e182d2d57051d2 111-113,119-137,142-146,148-150
+  s_368991bdec7f77::t_191cbe5f3d8726 138-141,147
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_e29c99f9bc5fc4 48-49,6740-6748
+  s_368991bdec7f77::t_e1a971cff8b333 6755-6765
+packages/think/src/tests/submissions.test.ts
+  s_368991bdec7f77::t_675486706bb479 7,107-114,882-926,1034-1049,1051-1097
+  s_368991bdec7f77::t_99156dc8e396aa 116-119,927-962,1006-1033,1050
+packages/think/src/think.ts
+  s_368991bdec7f77::t_61be68ce6cfbf3 2395-2397,2399-2420,2424-2425,2432-2434,11131-11133,11142-11146,11153-11168,11173-11196,11488,11490-11498,11524-11530,11532,11546-11549,11551-11552
+  s_368991bdec7f77::t_7f16f1ef707d2c 2398,2421-2423,2426,2430-2431,11094-11095,11115-11125,11134-11141,11147-11152,11169-11172,11386,11390-11391,11392-11395,11423-11426,11440,11533,11535,11542-11545,11550
+.changeset/think-submission-wait.md
+  s_368991bdec7f77::t_0d66a42b3503bc 1-4,6
+  s_368991bdec7f77::t_88b432ba2d3741 5
+packages/ai-chat/src/tests/client-tools-continuation.test.ts
+  s_368991bdec7f77::t_5dbc5728200787 512-569
+packages/think/src/tests/agents/client-tools.ts
+  s_368991bdec7f77::t_eda2f299f8d240 394-480,810,899-900,906-915,917-920,949-952
+packages/think/src/tests/client-tools.test.ts
+  s_368991bdec7f77::t_7da28a3ef9b649 801-843
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "38d32cfbc10a691cdf3ffc16cadcf278b0923bfd",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
