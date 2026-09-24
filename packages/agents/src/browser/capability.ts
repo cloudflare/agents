@@ -100,14 +100,14 @@ export class BrowserSessions extends LifecycleCapability {
   resolve(
     name = DEFAULT_BROWSER_SESSION_NAME
   ): Promise<ResolvedBrowserSession> {
-    return this.#core_().resolve(name);
+    return this.#namedSessions.resolve(name);
   }
 
   /** Resolve the named session and attach a CDP socket to it. */
   connect(
     name = DEFAULT_BROWSER_SESSION_NAME
   ): Promise<ConnectedBrowserSession> {
-    return this.#core_().connect(name);
+    return this.#namedSessions.connect(name);
   }
 
   /**
@@ -115,7 +115,7 @@ export class BrowserSessions extends LifecycleCapability {
    * reports `restarted: true`.
    */
   close(name = DEFAULT_BROWSER_SESSION_NAME): Promise<boolean> {
-    return this.#core_().close(name);
+    return this.#namedSessions.close(name);
   }
 
   // ── Host observability ───────────────────────────────────────────────────
@@ -129,7 +129,7 @@ export class BrowserSessions extends LifecycleCapability {
     const entries = await this.#sessionStore.list?.(prefix);
     if (!entries) return [];
     const now = Date.now();
-    const keepAliveMs = this.#core_().keepAliveMs;
+    const keepAliveMs = this.#namedSessions.keepAliveMs;
     return [...entries]
       .map(([key, entry]) => ({
         name: key.slice(prefix.length),
@@ -170,7 +170,10 @@ export class BrowserSessions extends LifecycleCapability {
       // than minting doomed links. Touch *errors* stay best effort — a
       // store blip must not break minting.
       try {
-        const refreshed = await this.#core_().touch(name, entry.sessionId);
+        const refreshed = await this.#namedSessions.touch(
+          name,
+          entry.sessionId
+        );
         if (!refreshed) return undefined;
       } catch (error) {
         console.warn(
@@ -195,7 +198,8 @@ export class BrowserSessions extends LifecycleCapability {
     return this.#store;
   }
 
-  #core_(): NamedBrowserSessions {
+  /** Lazy: built on first use, over the lazily supplied store. */
+  get #namedSessions(): NamedBrowserSessions {
     this.#core ??= new NamedBrowserSessions({
       browser: this.#options.browser,
       store: this.#sessionStore,
