@@ -1041,10 +1041,10 @@ export class ThinkTestAgent extends Think {
     this._gatewayForTest = gateway ?? undefined;
     this._gatewayModels = [];
     const resolved = this.resolveModel(model) as unknown as {
-      doGenerate(options: { prompt: unknown[] }): Promise<unknown>;
+      doStream(options: { prompt: unknown[] }): Promise<unknown>;
     };
     await resolved
-      .doGenerate({
+      .doStream({
         prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }]
       })
       .catch(() => {});
