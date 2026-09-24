@@ -1,5 +1,74 @@
 import { describe, expect, it } from "vitest";
-import { projectEvent } from "../../opencode/events";
+import { OperationStreamWriter, projectEvent } from "../../opencode/events";
+import type { StreamWriter } from "../../streams";
+
+describe("OperationStreamWriter", () => {
+  it("propagates durable append failures so projection can retry", () => {
+    const appended: unknown[] = [];
+    let failing = true;
+    const durable = {
+      append(value: unknown) {
+        if (failing) throw new Error("append failed");
+        appended.push(value);
+        return 1;
+      },
+      close() {}
+    } as unknown as StreamWriter;
+    const writer = new OperationStreamWriter({
+      streamId: "stream",
+      operationId: "operation",
+      writer: durable
+    });
+    writer.push({
+      type: "text_delta",
+      messageId: "message",
+      partId: "part",
+      delta: "hello"
+    });
+
+    expect(() => writer.flush()).toThrow("append failed");
+    failing = false;
+    writer.push({
+      type: "text_delta",
+      messageId: "message",
+      partId: "part",
+      delta: "hello"
+    });
+    writer.flush();
+
+    expect(appended).toEqual([
+      [
+        {
+          type: "text_delta",
+          messageId: "message",
+          partId: "part",
+          delta: "hello"
+        }
+      ]
+    ]);
+  });
+
+  it("reports whether durable projection is available", () => {
+    const missing = new OperationStreamWriter({
+      streamId: "stream",
+      operationId: "operation",
+      writer: undefined
+    });
+    const durable = new OperationStreamWriter({
+      streamId: "stream",
+      operationId: "operation",
+      writer: {
+        append: () => 1,
+        close() {}
+      } as unknown as StreamWriter
+    });
+
+    expect(missing.writable).toBe(false);
+    expect(durable.writable).toBe(true);
+    durable.close();
+    expect(durable.writable).toBe(false);
+  });
+});
 
 describe("OpenCode event projection", () => {
   it("projects current text and reasoning delta identifiers", () => {

@@ -8,8 +8,8 @@ import {
   OpenCodeRuntimeAdapter,
   type OpenCodeRuntimeClient
 } from "./runtime-adapter";
-import { replayOpenCodeLog } from "./log";
-import { projectMessages } from "./messages";
+import { OpenCodeLogPumps, replayOpenCodeLog } from "./log";
+import { hasOpenCodeOperation, projectMessages } from "./messages";
 import { SettlementWaiters } from "./settlement";
 import { OpenCodeTransport, type OpenCodeTransportHost } from "./transport";
 import type {
@@ -46,7 +46,7 @@ export class OpenCodeHarness extends LifecycleCapability {
   readonly driver: HarnessDriver<OpenCodeRequest, OpenCodeResult>;
   #booting: Promise<Host> | undefined;
   #eventPump: AbortController | undefined;
-  readonly #sessionPumps = new Map<string, AbortController>();
+  readonly #sessionPumps = new OpenCodeLogPumps();
   #transport: OpenCodeTransport | undefined;
   #defaultSession: string | undefined;
   readonly #writers = new Map<string, OperationStreamWriter>();
@@ -69,6 +69,7 @@ export class OpenCodeHarness extends LifecycleCapability {
         afterAdmit: (sessionId, operationId) =>
           this.#openOperation(sessionId, operationId),
         beforeDrive: async (sessionId, operationId) => {
+          await this.#ensureSessionPump(sessionId);
           await this.#writerFor(sessionId, operationId);
         }
       }),
@@ -87,8 +88,7 @@ export class OpenCodeHarness extends LifecycleCapability {
   async dispose(): Promise<void> {
     this.#eventPump?.abort();
     this.#eventPump = undefined;
-    for (const controller of this.#sessionPumps.values()) controller.abort();
-    this.#sessionPumps.clear();
+    this.#sessionPumps.stopAll();
     const booting = this.#booting;
     this.#booting = undefined;
     for (const writer of this.#writers.values()) writer.flush();
@@ -106,6 +106,15 @@ export class OpenCodeHarness extends LifecycleCapability {
     const sessionId = options.sessionId ?? (await this.sessionId());
     await this.#ensureSessionPump(sessionId);
     const operationId = options.operationId ?? crypto.randomUUID();
+    const host = await this.#host();
+    if (
+      hasOpenCodeOperation(
+        await host.message.list({ sessionID: sessionId }),
+        operationId
+      )
+    ) {
+      return { operationId, sessionId, accepted: false };
+    }
     const receipt = await this.driver.submit(sessionId, request, {
       operationId,
       streamId: this.streamId(operationId, sessionId)
@@ -163,7 +172,7 @@ export class OpenCodeHarness extends LifecycleCapability {
 
     const cancelled = await this.driver.cancel(operationId);
     if (!cancelled) return null;
-    this.#reject(
+    await this.#reject(
       sessionId,
       operationId,
       new OpenCodeRejectedError(operationId, "aborted", "Turn aborted")
@@ -328,41 +337,61 @@ export class OpenCodeHarness extends LifecycleCapability {
   }
 
   async #ensureSessionPump(sessionId: string): Promise<void> {
-    if (this.#sessionPumps.has(sessionId)) return;
-    const controller = new AbortController();
-    this.#sessionPumps.set(sessionId, controller);
-    const host = await this.#host();
-    const key = `oc:log-cursor:${sessionId}`;
-    const after = (await this.lifecycle.storage.get<number>(key)) ?? -1;
-    const source = host.sessions.log(
-      {
-        sessionID: sessionId,
-        after: after >= 0 ? after : undefined,
-        follow: true
+    await this.#sessionPumps.start(
+      sessionId,
+      async (signal) => {
+        const host = await this.#host();
+        const key = `oc:log-cursor:${sessionId}`;
+        const after = (await this.lifecycle.storage.get<number>(key)) ?? -1;
+        const source = host.sessions.log(
+          {
+            sessionID: sessionId,
+            after: after >= 0 ? after : undefined,
+            follow: true
+          },
+          { signal }
+        );
+        return () =>
+          replayOpenCodeLog({
+            after,
+            source,
+            project: (event) => this.#projectDurableEvent(sessionId, event),
+            save: (seq) => this.lifecycle.storage.put(key, seq)
+          });
       },
-      { signal: controller.signal }
-    );
-    const work = replayOpenCodeLog({
-      after,
-      source,
-      project: async (event) => {
-        this.#onOpenCodeEvent(event);
-        this.#bySession.get(sessionId)?.flush();
-      },
-      save: (seq) => this.lifecycle.storage.put(key, seq)
-    }).catch((error: unknown) => {
-      if (!controller.signal.aborted) {
+      (error) => {
         this.lifecycle.events.emit("opencode:log_error", {
           sessionId,
           error: error instanceof Error ? error.message : String(error)
         });
       }
-    });
-    void work.finally(() => {
-      if (this.#sessionPumps.get(sessionId) === controller) {
-        this.#sessionPumps.delete(sessionId);
-      }
-    });
+    );
+  }
+
+  async #projectDurableEvent(
+    sessionId: string,
+    event: {
+      type: string;
+      data?: Record<string, unknown>;
+      created?: number;
+    }
+  ): Promise<void> {
+    const projected = projectEvent(event);
+    if (projected && !this.#bySession.get(sessionId)?.writable) {
+      const submissions = await this.driver.pending(sessionId);
+      const owner =
+        submissions.find((submission) => submission.status === "admitted") ??
+        submissions[0];
+      if (owner) await this.#writerFor(sessionId, owner.operationId);
+    }
+    const writer = this.#bySession.get(sessionId);
+    if (projected && writer && !writer.writable) {
+      throw new Error(
+        `OpenCode stream ${writer.streamId} is unavailable for durable projection`
+      );
+    }
+    this.#onOpenCodeEvent(event);
+    writer?.flush();
   }
 
   #onOpenCodeEvent(raw: {
@@ -505,12 +534,13 @@ export class OpenCodeHarness extends LifecycleCapability {
     this.#settlement.notify(result.operationId);
   }
 
-  #reject(
+  async #reject(
     sessionId: string,
     operationId: string,
     error: OpenCodeRejectedError
-  ): void {
+  ): Promise<void> {
     this.#rejections.set(operationId, error);
+    const writer = await this.#writerFor(sessionId, operationId);
     this.#emit(sessionId, {
       type: "operation_end",
       operationId,
@@ -518,6 +548,11 @@ export class OpenCodeHarness extends LifecycleCapability {
       error: { code: error.code, message: error.message },
       endedAt: Date.now()
     });
+    writer.close();
+    this.#writers.delete(operationId);
+    if (this.#bySession.get(sessionId) === writer) {
+      this.#bySession.delete(sessionId);
+    }
     this.#settlement.notify(operationId);
   }
 

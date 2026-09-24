@@ -27,6 +27,28 @@ describe("PiHarness", () => {
     expect(await stub.pending("main")).toEqual([]);
   });
 
+  it("closes the durable stream when queued work is cancelled", async () => {
+    const stub = env.PiDriverHarnessObject.getByName(crypto.randomUUID());
+    await stub.submitMultiply("main", "op-cancelled", 5);
+
+    expect(await stub.abort("main", "op-cancelled")).toEqual({
+      operationId: "op-cancelled",
+      newlyRequested: true
+    });
+
+    expect(await stub.pending("main")).toEqual([]);
+    expect(await stub.streamStatus("main", "op-cancelled")).toMatchObject({
+      state: "completed"
+    });
+    expect(await stub.streamEvents("main", "op-cancelled")).toMatchObject([
+      {
+        type: "operation_end",
+        operationId: "op-cancelled",
+        status: "declined"
+      }
+    ]);
+  });
+
   it("recovers a submitted turn after eviction", async () => {
     const name = crypto.randomUUID();
     const stub = env.PiDriverHarnessObject.getByName(name);

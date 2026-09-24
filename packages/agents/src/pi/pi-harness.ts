@@ -212,7 +212,7 @@ export class PiHarness<
     if (operationId === undefined) return null;
     const cancelled = await this.driver.cancel(operationId);
     if (!cancelled) return null;
-    this.#reject(
+    await this.#reject(
       lane,
       operationId,
       current?.kind ?? "run",
@@ -504,12 +504,12 @@ export class PiHarness<
     this.#settlement.notify(result.operationId);
   }
 
-  #reject(
+  async #reject(
     lane: string,
     operationId: string,
     kind: PiOperationKind,
     error: PiOperationRejectedError
-  ): void {
+  ): Promise<void> {
     this.#rejections.set(operationId, error);
     const now = Date.now();
     const event: PiEvent = {
@@ -523,7 +523,11 @@ export class PiHarness<
       startedAt: now,
       endedAt: now
     };
-    this.#emitLaneEvent(lane, event, operationId);
+    const writer = await this.#writerFor(lane, operationId, kind);
+    this.#emitLaneEvent(lane, event, operationId, writer);
+    writer.close();
+    this.#writers.delete(operationId);
+    if (this.#laneWriters.get(lane) === writer) this.#laneWriters.delete(lane);
     this.lifecycle.events.emit("operation:rejected", {
       lane,
       operationId,

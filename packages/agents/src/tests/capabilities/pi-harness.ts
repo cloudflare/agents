@@ -87,6 +87,10 @@ export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
     );
   }
 
+  abort(lane: string, operationId: string) {
+    return this.harness.abort({ lane, operationId });
+  }
+
   result(lane: string, operationId: string) {
     return this.harness.getResult(operationId, { lane });
   }

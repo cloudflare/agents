@@ -49,10 +49,31 @@ function projectPart(part: Record<string, unknown>): OCPart | undefined {
   }
 }
 
+function rawMessages(response: unknown): readonly RawMessage[] {
+  if (Array.isArray(response)) return response as RawMessage[];
+  if (
+    typeof response === "object" &&
+    response !== null &&
+    "messages" in response &&
+    Array.isArray(response.messages)
+  ) {
+    return response.messages as RawMessage[];
+  }
+  return [];
+}
+
+export function hasOpenCodeOperation(
+  response: unknown,
+  operationId: string
+): boolean {
+  return rawMessages(response).some(
+    (message) =>
+      message.info.role === "user" && message.info.id === `msg_${operationId}`
+  );
+}
+
 export function projectMessages(response: unknown): readonly OCMessage[] {
-  const messages = Array.isArray(response)
-    ? (response as RawMessage[])
-    : ((response as { messages?: RawMessage[] })?.messages ?? []);
+  const messages = rawMessages(response);
   return messages
     .filter(
       (message) =>

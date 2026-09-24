@@ -157,6 +157,10 @@ export class OperationStreamWriter {
     return this.#closed;
   }
 
+  get writable(): boolean {
+    return !this.#closed && this.#writer !== undefined;
+  }
+
   push(event: OCEvent): void {
     if (this.#closed || !this.#writer) return;
     const bytes = JSON.stringify(event).length;
@@ -185,27 +189,16 @@ export class OperationStreamWriter {
     const events = this.#buffer;
     this.#buffer = [];
     this.#bufferedBytes = 0;
-    try {
-      const seq = this.#writer.append(
-        events as unknown as Parameters<StreamWriter["append"]>[0]
-      );
-      this.#onChunk?.({ seq, events });
-    } catch (error) {
-      console.warn(
-        `OpenCodeHarness dropped ${events.length} event(s) for ${this.streamId}`,
-        error
-      );
-    }
+    const seq = this.#writer.append(
+      events as unknown as Parameters<StreamWriter["append"]>[0]
+    );
+    this.#onChunk?.({ seq, events });
   }
 
   close(): void {
     if (this.#closed) return;
     this.flush();
+    this.#writer?.close();
     this.#closed = true;
-    try {
-      this.#writer?.close();
-    } catch (error) {
-      console.warn(`OpenCodeHarness failed to close ${this.streamId}`, error);
-    }
   }
 }
