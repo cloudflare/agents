@@ -43,6 +43,11 @@ export class StateMachineStore {
   ensureTables(): void {
     this.createRunTable();
     this.ensureCoordinationTables();
+    // Indexed separately from `createEffectTable()` so a migration can create
+    // the table, clean up rows that predate the constraint, and only then add
+    // the index. Creating it with the table would make the migration fail on
+    // exactly the data it exists to repair.
+    this.createEffectExternalIdIndex();
   }
 
   createRunTable(): void {
@@ -142,6 +147,22 @@ export class StateMachineStore {
     ) WITHOUT ROWID`);
 
     this.createChildTable();
+  }
+
+  /**
+   * One external id per run.
+   *
+   * `externalId` names the thing an effect created in the outside world, and
+   * `recovery: "reconcile"` looks an interrupted effect up by it. Two effects
+   * in one run claiming the same external id would make that lookup
+   * ambiguous, so reject it at the schema. Partial, because `external_id` is
+   * null until an effect reports one and nulls are not in conflict.
+   */
+  createEffectExternalIdIndex(): void {
+    this.sql(`CREATE UNIQUE INDEX IF NOT EXISTS
+      cf_agents_state_machine_effect_external_id
+      ON cf_agents_state_machine_effects (run_id, external_id)
+      WHERE external_id IS NOT NULL`);
   }
 
   createChildTable(): void {

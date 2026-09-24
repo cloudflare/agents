@@ -1,6 +1,6 @@
 import type { StateMachineStore } from "./store";
 
-export const STATE_MACHINE_SCHEMA_VERSION = 4;
+export const STATE_MACHINE_SCHEMA_VERSION = 5;
 export const STATE_MACHINE_SCHEMA_VERSION_KEY =
   "cf_agents_state_machine_schema_version";
 
@@ -78,6 +78,45 @@ export function migrateStateMachineSchema(
                NULL, '{}', created_at, settled_at
         FROM cf_agents_state_machine_effects_v3`);
       store.sql("DROP TABLE cf_agents_state_machine_effects_v3");
+    });
+  }
+
+  if (fromVersion < 5) {
+    // Make sure the effect table exists before rewriting it: a database that
+    // skipped the v4 step reaches here with no coordination tables at all.
+    store.ensureCoordinationTables();
+    // An existing database may already hold duplicate external ids, which a
+    // unique index would refuse to build. Those rows predate the constraint,
+    // so keep the newest claimant per (run_id, external_id) and null the
+    // earlier ones: nulls are exempt from the index, and an effect whose
+    // external id is cleared simply loses reconcile lookup rather than
+    // blocking the migration. Settled rows are never reconciled against, so
+    // in practice this only rewrites history that is already inert.
+    //
+    // Drop the index first. `ensureCoordinationTables()` creates it as part of
+    // the current effect-table DDL, so an earlier step in this same migration
+    // may already have built it over rows this step still has to clean up —
+    // and on that path the duplicates would have failed the index build. The
+    // deduplicating UPDATE has to run against an unindexed table.
+    store.transaction(() => {
+      store.sql(
+        "DROP INDEX IF EXISTS cf_agents_state_machine_effect_external_id"
+      );
+      store.sql(`UPDATE cf_agents_state_machine_effects
+        SET external_id = NULL
+        WHERE external_id IS NOT NULL
+          AND (run_id, effect_id) NOT IN (
+            SELECT run_id, effect_id FROM (
+              SELECT run_id, effect_id,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY run_id, external_id
+                       ORDER BY created_at DESC, effect_id DESC
+                     ) AS rn
+              FROM cf_agents_state_machine_effects
+              WHERE external_id IS NOT NULL
+            ) WHERE rn = 1
+          )`);
+      store.createEffectExternalIdIndex();
     });
   }
 }
