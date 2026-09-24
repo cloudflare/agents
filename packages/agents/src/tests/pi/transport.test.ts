@@ -33,10 +33,10 @@ describe("PiTransport", () => {
         metadata: { lane: "main", operationId: "op-1" }
       });
       writer.append([
-        { type: "message_end", messageId: "first" } satisfies PiEvent
+        { type: "message_end", entryId: "first" } satisfies PiEvent
       ]);
       writer.append([
-        { type: "message_end", messageId: "second" } satisfies PiEvent
+        { type: "message_end", entryId: "second" } satisfies PiEvent
       ]);
       writer.close();
       const host = {
@@ -78,7 +78,7 @@ describe("PiTransport", () => {
         seq: 1,
         lastSeq: 1,
         operationId: "op-1",
-        events: [{ type: "message_end", messageId: "second" }]
+        events: [{ type: "message_end", entryId: "second" }]
       });
     });
   });

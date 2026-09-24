@@ -28,9 +28,13 @@ function text(message: PiMessage): string {
 function response(context: {
   readonly messages: readonly { role: string; content: unknown }[];
 }) {
-  const lastUser = context.messages.findLastIndex(
-    (message) => message.role === "user"
-  );
+  let lastUser = -1;
+  for (let index = context.messages.length - 1; index >= 0; index -= 1) {
+    if (context.messages[index]?.role === "user") {
+      lastUser = index;
+      break;
+    }
+  }
   if (
     context.messages
       .slice(lastUser + 1)
@@ -59,10 +63,10 @@ export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
   #providerActive = 0;
   #providerMaxActive = 0;
   readonly streams = new Streams();
-  readonly durableTools = new DurableToolRuns<
+  readonly #durableTools: DurableToolRuns<
     { value: number },
     PiToolResult<{ result: number }>
-  >({
+  > = new DurableToolRuns({
     id: "pi-multiply",
     runtime: {
       inspect: async (runId) =>
@@ -95,14 +99,16 @@ export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
         });
       }
     },
-    wake: (owner) => this.harness.driver.wake(owner.scope),
+    wake: async (owner): Promise<void> => {
+      await this.#harness.driver.wake(owner.scope);
+    },
     heartbeatMs: 1
   });
-  readonly harness = new PiHarness<ToolContext>({
+  readonly #harness: PiHarness<ToolContext> = new PiHarness<ToolContext>({
     models: createModels({ providers: [this.#faux.provider] }),
     model: this.#faux.getModel(),
     streams: this.streams,
-    durableTools: this.durableTools,
+    durableTools: this.#durableTools,
     thinkingLevel: "off",
     retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
     compaction: { enabled: false, reserveTokens: 0, keepRecentTokens: 0 },
@@ -112,9 +118,9 @@ export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
   });
   readonly lifecycle = Lifecycle.install(this)
     .use(this.streams)
-    .use(this.durableTools)
-    .use(this.harness.driver)
-    .use(this.harness);
+    .use(this.#durableTools)
+    .use(this.#harness.driver)
+    .use(this.#harness);
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -159,7 +165,7 @@ export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
   }
 
   async submitMultiply(lane: string, operationId: string, value: number) {
-    return this.harness.submit(
+    return this.#harness.submit(
       { kind: "prompt", prompt: `multiply ${value}` },
       { lane, operationId }
     );
@@ -170,7 +176,7 @@ export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
     operationId: string,
     value: number
   ) {
-    return this.harness.submit(
+    return this.#harness.submit(
       { kind: "prompt", prompt: `durable multiply ${value}` },
       { lane, operationId }
     );
@@ -201,33 +207,39 @@ export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
   }
 
   abort(lane: string, operationId: string) {
-    return this.harness.abort({ lane, operationId });
+    return this.#harness.abort({ lane, operationId });
   }
 
   result(lane: string, operationId: string) {
-    return this.harness.getResult(operationId, { lane });
+    return this.#harness.getResult(operationId, { lane });
   }
 
   async messages(lane: string) {
-    return (await this.harness.getMessages({ lane })).map(text);
+    return (await this.#harness.getMessages({ lane })).map(text);
   }
 
-  pending(lane: string) {
-    return this.harness.pending({ lane });
+  pending(lane: string): Promise<readonly { operationId: string }[]> {
+    return this.#harness.pending({ lane });
   }
 
   async streamEvents(lane: string, operationId: string) {
     const events: unknown[] = [];
     for await (const chunk of this.streams.read(
-      this.harness.streamId(operationId, lane)
+      this.#harness.streamId(operationId, lane)
     )) {
       if (Array.isArray(chunk.chunk)) events.push(...chunk.chunk);
     }
     return events;
   }
 
-  streamStatus(lane: string, operationId: string) {
-    return this.streams.status(this.harness.streamId(operationId, lane));
+  async streamStatus(
+    lane: string,
+    operationId: string
+  ): Promise<{ state: string } | null> {
+    const status = await this.streams.status(
+      this.#harness.streamId(operationId, lane)
+    );
+    return status ? { state: status.state } : null;
   }
 
   #durableTool(): PiTool<ToolContext, typeof parameters, { result: number }> {
@@ -236,9 +248,9 @@ export class PiDriverHarnessObject extends DurableObject<Cloudflare.Env> {
       label: "Durable multiply",
       description: "Multiply the input durably.",
       parameters,
-      runs: this.durableTools,
+      runs: this.#durableTools,
       scope: async (_context, invocation) => {
-        const pending = await this.harness.driver.pending();
+        const pending = await this.#harness.driver.pending();
         return (
           pending.find(
             (submission) => submission.operationId === invocation.operationId

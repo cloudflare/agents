@@ -18,7 +18,9 @@ class DriverObject extends DurableObject {
   readonly tools = new DurableToolRuns({
     id: "tools",
     runtime: toolRuntime,
-    wake: (owner) => this.driver.wake(owner.scope)
+    wake: async (owner) => {
+      await this.driver.wake(owner.scope);
+    }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.driver).use(this.tools);
 }
