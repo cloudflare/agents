@@ -1472,6 +1472,12 @@ export type RunTurnOptions = RunTurnWait | RunTurnSubmit | RunTurnStream;
 /** Result of {@link Think.runTurn} in `mode: "wait"`. */
 export type TurnResult = SaveMessagesResult & {
   message?: SessionMessage;
+  /**
+   * Parsed structured output when the turn's `TurnConfig.output` produced
+   * one. A structured output that fails to parse ends the turn with
+   * `status: "error"`.
+   */
+  output?: unknown;
   continuation: boolean;
 };
 
@@ -1721,6 +1727,15 @@ const admittedTurnContext = new AsyncLocalStorage<{
 const recoveredTurnAcceptanceContext = new AsyncLocalStorage<{
   agent: unknown;
   onAccepted: (successorRequestId: string) => void;
+}>();
+
+// A `runTurn` continuation dispatched through an overridden `continueLastTurn`:
+// the base method, when the override delegates to it, records the full result
+// (with structured output) for that `runTurn` call alone.
+const continuationOutputContext = new AsyncLocalStorage<{
+  agent: unknown;
+  taken: boolean;
+  result?: ProgrammaticMessagesResult;
 }>();
 
 // Drains the underlying model stream when a drain loop exits early (in-stream
@@ -2295,6 +2310,8 @@ export type ThinkSubmissionInspection = {
   createdAt: number;
   startedAt?: number;
   completedAt?: number;
+  /** Id of the assistant message this submission's turn persisted. */
+  messageId?: string;
 };
 
 export type SubmitMessagesResult = ThinkSubmissionInspection & {
@@ -2332,6 +2349,7 @@ type ThinkSubmissionRow = {
   completed_at: number | null;
   result_status: SubmissionTurnResult["status"] | null;
   output_json: string | null;
+  message_id: string | null;
 };
 
 /** Payload of one queued workflow notification. */
@@ -7065,8 +7083,9 @@ export class Think<
             }
             return last.input;
           })
-        : finalOutput && result.output
-          ? Promise.resolve(result.output)
+        : finalOutput
+          ? // `result.output` is a getter that builds a new promise per read.
+            Promise.resolve(result.output)
           : undefined;
       if (outputPromise) {
         // Attach a rejection observer immediately. `_streamResult()` will still
@@ -8648,7 +8667,7 @@ export class Think<
   }
 
   private async _enrichTurnResult(
-    result: SaveMessagesResult,
+    result: ProgrammaticMessagesResult,
     continuation: boolean
   ): Promise<TurnResult> {
     let message: SessionMessage | undefined;
@@ -8665,11 +8684,32 @@ export class Think<
     this._validateRunTurnAdmission(options, "wait");
 
     if (options.continuation === true) {
-      const result = await this.continueLastTurn(options.body, {
+      const continueOptions = {
         signal: options.signal,
         channel: options.channel
-      });
-      return this._enrichTurnResult(result, true);
+      };
+      if (!isMethodOverridden(this, "continueLastTurn")) {
+        const result = await this._continueLastTurn(options.body, {
+          ...continueOptions,
+          captureOutput: true
+        });
+        return this._enrichTurnResult(result, true);
+      }
+      const capture: {
+        agent: unknown;
+        taken: boolean;
+        result?: ProgrammaticMessagesResult;
+      } = { agent: this, taken: false };
+      const returned = await continuationOutputContext.run(capture, () =>
+        this.continueLastTurn(options.body, continueOptions)
+      );
+      const captured = capture.result;
+      return this._enrichTurnResult(
+        captured?.requestId === returned.requestId && "output" in captured
+          ? { ...returned, output: captured.output }
+          : returned,
+        true
+      );
     }
 
     const input = options.input;
@@ -8681,7 +8721,11 @@ export class Think<
       const result = await this._runProgrammaticMessagesTurn(
         crypto.randomUUID(),
         input,
-        { signal: options.signal, channel: options.channel }
+        {
+          signal: options.signal,
+          channel: options.channel,
+          captureOutput: true
+        }
       );
       return this._enrichTurnResult(result, false);
     }
@@ -8694,7 +8738,7 @@ export class Think<
     const result = await this._runProgrammaticMessagesTurn(
       crypto.randomUUID(),
       messages,
-      { signal: options.signal, channel: options.channel }
+      { signal: options.signal, channel: options.channel, captureOutput: true }
     );
     return this._enrichTurnResult(result, false);
   }
@@ -10577,14 +10621,16 @@ export class Think<
         -- Closed vocabulary: 'completed' | 'aborted' | 'retry'. NULL is legacy
         -- or an unsettled attempt; 'retry' is NOT terminal completion evidence.
         result_status TEXT,
-        output_json TEXT
+        output_json TEXT,
+        message_id TEXT
       )
     `;
     // This table is unversioned. Add nullable columns for existing objects,
     // preserving unstamped rows for the legacy stream-evidence fallback.
     for (const statement of [
       "ALTER TABLE cf_think_submissions ADD COLUMN result_status TEXT",
-      "ALTER TABLE cf_think_submissions ADD COLUMN output_json TEXT"
+      "ALTER TABLE cf_think_submissions ADD COLUMN output_json TEXT",
+      "ALTER TABLE cf_think_submissions ADD COLUMN message_id TEXT"
     ]) {
       try {
         this.ctx.storage.sql.exec(statement);
@@ -10613,7 +10659,8 @@ export class Think<
     const rows = this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       WHERE submission_id = ${submissionId}
       LIMIT 1
@@ -10628,7 +10675,8 @@ export class Think<
     const rows = this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       WHERE idempotency_key = ${idempotencyKey}
       LIMIT 1
@@ -10663,7 +10711,8 @@ export class Think<
     const rows = this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       ORDER BY created_at DESC, submission_id DESC
       LIMIT ${limit}
@@ -10678,7 +10727,8 @@ export class Think<
     return this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       WHERE status = ${status}
       ORDER BY created_at DESC, submission_id DESC
@@ -10699,7 +10749,8 @@ export class Think<
       metadata: metadata ?? undefined,
       createdAt: row.created_at,
       startedAt: row.started_at ?? undefined,
-      completedAt: row.completed_at ?? undefined
+      completedAt: row.completed_at ?? undefined,
+      ...(row.message_id !== null && { messageId: row.message_id })
     };
   }
 
@@ -11075,7 +11126,8 @@ export class Think<
       return this.sql<ThinkSubmissionRow>`
         SELECT submission_id, idempotency_key, request_id, stream_id, status,
                messages_json, metadata_json, error_message, created_at,
-               messages_applied_at, started_at, completed_at, result_status, output_json
+               messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
         FROM cf_think_submissions
         WHERE status = ${status}
         ORDER BY completed_at ASC, created_at ASC
@@ -11086,7 +11138,8 @@ export class Think<
     return this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       WHERE status = ${status}
         AND completed_at IS NOT NULL
@@ -11422,7 +11475,8 @@ export class Think<
     const pending = this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       WHERE status = 'pending'
     `;
@@ -11463,7 +11517,8 @@ export class Think<
     const running = this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       WHERE status = 'running'
     `;
@@ -12058,6 +12113,26 @@ export class Think<
     body?: Record<string, unknown>,
     options?: SaveMessagesOptions & { trigger?: TurnTrigger; channel?: string }
   ): Promise<SaveMessagesResult> {
+    const store = continuationOutputContext.getStore();
+    const capture = store?.agent === this && !store.taken ? store : undefined;
+    if (capture) capture.taken = true;
+    const full = await this._continueLastTurn(
+      body,
+      capture ? { ...options, captureOutput: true } : options
+    );
+    if (capture) capture.result = full;
+    const { output: _output, ...result } = full;
+    return result;
+  }
+
+  private async _continueLastTurn(
+    body?: Record<string, unknown>,
+    options?: SaveMessagesOptions & {
+      trigger?: TurnTrigger;
+      channel?: string;
+      captureOutput?: boolean;
+    }
+  ): Promise<ProgrammaticMessagesResult> {
     const trigger = options?.trigger ?? "programmatic";
     this._assertNotInsideAdmittedTurn(trigger);
     const lastLeaf = await this.session.getLatestLeaf();
@@ -12075,6 +12150,7 @@ export class Think<
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
+    let output: unknown;
     let wasAborted = false;
 
     await this._admitTurn({
@@ -12123,11 +12199,13 @@ export class Think<
                 abortSignal,
                 {
                   continuation: true,
-                  extendLeafAssistant: trigger === "recovery-continue"
+                  extendLeafAssistant: trigger === "recovery-continue",
+                  captureOutput: options?.captureOutput
                 }
               );
               status = streamResult.status;
               error = streamResult.error;
+              output = streamResult.output;
             }
           };
 
@@ -12149,7 +12227,12 @@ export class Think<
       status = "aborted";
     }
 
-    return { requestId, status, ...(error !== undefined && { error }) };
+    return {
+      requestId,
+      status,
+      ...(error !== undefined && { error }),
+      ...(output !== undefined && { output })
+    };
   }
 
   private async _retryLastUserTurn(
@@ -14062,6 +14145,9 @@ export class Think<
     if (this._resumableStream.pendingCutoverId !== streamId) {
       // The stream was settled by another path (a stall, an error): plain persist.
       await this._upsertMessageInHistory(toPersist, parentId);
+      if (submission) {
+        this._recordSubmissionMessage(submission.requestId, toPersist.id);
+      }
       return;
     }
     const sync = this.sessions.session().__DO_NOT_USE_WILL_BREAK__sync();
@@ -14077,7 +14163,8 @@ export class Think<
           if (submission) {
             this._recordSubmissionTurnResult(
               submission.requestId,
-              submission.result
+              submission.result,
+              toPersist.id
             );
           }
         },
@@ -14107,15 +14194,53 @@ export class Think<
   /** Write only inside the transaction that settles this exact request's stream. */
   private _recordSubmissionTurnResult(
     requestId: string,
-    result: SubmissionTurnResult
+    result: SubmissionTurnResult,
+    messageId?: string
   ): void {
     const row = this._readRunningSubmissionForRecovery(requestId);
-    if (!row || row.request_id !== requestId) return;
+    if (!row || row.request_id !== requestId) {
+      if (messageId) this._recordAbortedSubmissionMessage(requestId, messageId);
+      return;
+    }
     this.sql`
       UPDATE cf_think_submissions
       SET result_status = ${result.status},
-          output_json = ${result.status === "completed" && result.output !== undefined ? JSON.stringify(result.output) : null}
+          output_json = ${result.status === "completed" && result.output !== undefined ? JSON.stringify(result.output) : null},
+          message_id = COALESCE(${messageId ?? null}, message_id)
       WHERE submission_id = ${row.submission_id} AND status = 'running'
+    `;
+  }
+
+  private _recordSubmissionMessage(requestId: string, messageId: string): void {
+    const row = this._readRunningSubmissionForRecovery(requestId);
+    if (!row || row.request_id !== requestId) {
+      this._recordAbortedSubmissionMessage(requestId, messageId);
+      return;
+    }
+    this.sql`
+      UPDATE cf_think_submissions
+      SET message_id = ${messageId}
+      WHERE submission_id = ${row.submission_id} AND status = 'running'
+    `;
+  }
+
+  /**
+   * Cancellation settles a submission as `aborted` before the stream persists
+   * its partial; link that message without touching the terminal status. A
+   * row that never started (a reused submission id cancelled while queued)
+   * cannot own the partial.
+   */
+  private _recordAbortedSubmissionMessage(
+    requestId: string,
+    messageId: string
+  ): void {
+    this.sql`
+      UPDATE cf_think_submissions
+      SET message_id = ${messageId}
+      WHERE request_id = ${requestId}
+        AND status = 'aborted'
+        AND started_at IS NOT NULL
+        AND message_id IS NULL
     `;
   }
 
@@ -16687,7 +16812,8 @@ export class Think<
     const rows = this.sql<ThinkSubmissionRow>`
       SELECT submission_id, idempotency_key, request_id, stream_id, status,
              messages_json, metadata_json, error_message, created_at,
-             messages_applied_at, started_at, completed_at, result_status, output_json
+             messages_applied_at, started_at, completed_at, result_status, output_json,
+             message_id
       FROM cf_think_submissions
       WHERE submission_id = ${recoveredRequestId}
          OR (request_id = ${recoveredRequestId} AND status = 'running')
@@ -17664,13 +17790,24 @@ export class Think<
     // NOTE: progress is bumped at production/flush time in `_storeChunkDurably`
     // (#1637), NOT here — persisting on recovery or a client reconnect must not
     // be miscounted as new forward progress.
+    let persistedId: string | undefined;
     const wrote = await persistReconstructedOrphan(chunks, {
       store: this._orphanStore(),
       fallbackId: crypto.randomUUID(),
-      prepare: (message) => this._strippedForPersist(message),
+      prepare: (message) => {
+        const prepared = this._strippedForPersist(message);
+        persistedId = prepared?.id;
+        return prepared;
+      },
       merge: (_existing, incoming) => incoming
     });
-    if (wrote) this._broadcastMessages();
+    if (!wrote) return;
+    const requestId =
+      this._resumableStream.getStreamMetadata(streamId)?.request_id;
+    if (requestId && persistedId) {
+      this._recordSubmissionMessage(requestId, persistedId);
+    }
+    this._broadcastMessages();
   }
 
   private _broadcastChat(message: Record<string, unknown>, exclude?: string[]) {

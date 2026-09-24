@@ -261,7 +261,9 @@ admission. (`submit` does not accept function input.)
 // wait — block for the result
 const result = await this.runTurn({ input: "Summarize the latest thread" });
 if (result.status === "completed") {
-  // result.message is the assistant SessionMessage; result.continuation is false
+  // result.message is the assistant SessionMessage; result.continuation is false.
+  // When beforeTurn returns a structured `output` spec, result.output holds
+  // the parsed value; an answer that does not parse ends the turn with "error".
 }
 
 // submit — durable acceptance, check status later

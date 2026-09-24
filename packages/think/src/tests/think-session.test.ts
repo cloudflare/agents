@@ -2425,6 +2425,18 @@ describe("Think — continueLastTurn", () => {
     expect(result.requestId).toBe("");
   });
 
+  it("routes runTurn continuations through an overridden continueLastTurn", async () => {
+    const agent = await freshProgrammaticAgent(
+      `continue-override-${crypto.randomUUID()}`
+    );
+    await agent.testSaveMessagesWithFn("Start");
+    await agent.failNextRecoveredContinueForTest("override ran");
+
+    expect(await agent.testRunTurnWaitError({ continuation: true })).toContain(
+      "override ran"
+    );
+  });
+
   it("should set continuation: true on continueLastTurn", async () => {
     const agent = await freshProgrammaticAgent("continue-flag");
 

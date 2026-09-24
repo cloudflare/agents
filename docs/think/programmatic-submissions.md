@@ -100,6 +100,11 @@ const active = await this.listSubmissions({
 await this.cancelSubmission(submission.submissionId, "No longer needed");
 ```
 
+Once the turn persists its assistant message, the inspection carries that
+message's id as `messageId`, so a caller that admitted the turn by submission
+id can find the exact message it wrote, even if later turns have added messages
+since.
+
 Use `cancelSubmission(submissionId)` for durable cancellation. This works across
 Worker and Durable Object RPC boundaries, unlike `AbortSignal`.
 

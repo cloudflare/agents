@@ -125,6 +125,10 @@ type ThinkSubmissionTestStub = {
   ): Promise<void>;
   resetTurnStateForTest(): Promise<void>;
   recoverChatFiberForTest(requestId: string): Promise<void>;
+  persistOrphanedStreamForTest(
+    requestId: string,
+    messageId: string
+  ): Promise<void>;
   continueRecoveredChatForTest(requestId: string): Promise<void>;
   continueRecoveredChatCatchingForTest(
     requestId: string
@@ -332,7 +336,10 @@ describe("Think durable submissions", () => {
     expect(completed.requestId).toBe("sub-basic");
     expect(completed.startedAt).toBeDefined();
     expect(completed.completedAt).toBeDefined();
-    expect(await agent.getStoredMessages()).toHaveLength(2);
+    const stored = await agent.getStoredMessages();
+    expect(stored).toHaveLength(2);
+    expect(stored[1].role).toBe("assistant");
+    expect(completed.messageId).toBe(stored[1].id);
 
     const responses = await agent.getResponseLog();
     expect(responses).toHaveLength(1);
@@ -678,6 +685,68 @@ describe("Think durable submissions", () => {
 
     expect(completed.status).toBe("completed");
     await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([]);
+  });
+
+  it("links the partial persisted after cancellation to the aborted submission", async () => {
+    const agent = await freshAgent();
+    await agent.setDelayedChunkResponse(
+      Array.from({ length: 40 }, (_, i) => `w${i} `),
+      50
+    );
+
+    const accepted = await agent.testSubmitMessages("cancel me", {
+      submissionId: "sub-cancel-partial"
+    });
+    await waitForSubmission(
+      agent,
+      accepted.submissionId,
+      (submission) => submission.status === "running"
+    );
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await agent.cancelSubmissionForTest(accepted.submissionId, "stop");
+    await waitForSubmission(
+      agent,
+      accepted.submissionId,
+      (submission) => submission.status === "aborted"
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const assistant = (await agent.getStoredMessages()).find(
+      (message) => message.role === "assistant"
+    );
+    expect(assistant).toBeDefined();
+    await expect(
+      agent.inspectSubmissionForTest(accepted.submissionId)
+    ).resolves.toMatchObject({ status: "aborted", messageId: assistant?.id });
+  });
+
+  it("does not link a cancelled turn's partial to a reused submission id", async () => {
+    const agent = await freshAgent();
+    await agent.setDelayedChunkResponse(
+      Array.from({ length: 40 }, (_, i) => `w${i} `),
+      50
+    );
+
+    const first = await agent.testSubmitMessages("cancel me", {
+      submissionId: "sub-reused"
+    });
+    await waitForSubmission(
+      agent,
+      first.submissionId,
+      (submission) => submission.status === "running"
+    );
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await agent.cancelSubmissionForTest(first.submissionId, "stop");
+    await agent.deleteSubmissionForTest(first.submissionId);
+    const second = await agent.testSubmitMessages("again", {
+      submissionId: "sub-reused"
+    });
+    await agent.cancelSubmissionForTest(second.submissionId, "stop");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const submission = await agent.inspectSubmissionForTest("sub-reused");
+    expect(submission?.status).toBe("aborted");
+    expect(submission?.messageId).toBeUndefined();
   });
 
   it("aborts a running submission without letting late completion overwrite it", async () => {
@@ -1447,6 +1516,24 @@ describe("Think durable submissions", () => {
     } finally {
       await agent.setSubmissionRecoveryStaleMsForTest(15 * 60 * 1000);
     }
+  });
+
+  it("records the message id of an assistant persisted from orphaned chunks", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-orphan",
+      requestId: "sub-orphan",
+      status: "running",
+      messagesAppliedAt: Date.now()
+    });
+
+    await agent.persistOrphanedStreamForTest("sub-orphan", "a-orphan");
+
+    const stored = await agent.getStoredMessages();
+    expect(stored.map((message) => message.id)).toContain("a-orphan");
+    expect(await agent.inspectSubmissionForTest("sub-orphan")).toMatchObject({
+      messageId: "a-orphan"
+    });
   });
 
   it("completes recovered chat fiber submissions through scheduled continuation", async () => {

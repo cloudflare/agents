@@ -1037,6 +1037,41 @@ export class ThinkTestAgent extends Think {
     this._turnConfigOverride = { output: Output.text(), activeTools: [] };
   }
 
+  /** Like `setTurnConfigOutputText`, with an `Output.object` spec. */
+  async setTurnConfigOutputObject(): Promise<void> {
+    this._turnConfigOverride = {
+      output: Output.object({
+        schema: z.object({ answer: z.string() }),
+        name: "Answer"
+      }),
+      activeTools: []
+    };
+  }
+
+  /** Run a wait-mode turn and return its result fields. */
+  async runTurnWaitForTest(
+    input: string,
+    options?: { continuation?: boolean }
+  ): Promise<{
+    status: string;
+    error?: string;
+    outputJson?: string;
+    messageText?: string;
+  }> {
+    const result = await this.runTurn(
+      options?.continuation ? { continuation: true } : { input }
+    );
+    const text = result.message?.parts
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("");
+    return {
+      status: result.status,
+      ...(result.error !== undefined && { error: result.error }),
+      ...("output" in result && { outputJson: JSON.stringify(result.output) }),
+      ...(text !== undefined && { messageText: text })
+    };
+  }
+
   /**
    * Sets a per-turn `experimental_transform` that upper-cases every `text-delta`
    * part flowing through the stream. The transform is constructed inside the DO
@@ -5469,6 +5504,38 @@ export class ThinkToolsTestAgent extends Think {
 // ── ThinkProgrammaticTestAgent ──────────────────────────────
 // Tests saveMessages, continueLastTurn, and body persistence.
 
+/**
+ * A `continueLastTurn` override that delegates to `super`, optionally after a
+ * delay or replacing the status it returns.
+ */
+export class ThinkContinueOverrideTestAgent extends ThinkTestAgent {
+  private _delayBeforeSuperMs = 0;
+  private _forcedStatus: SaveMessagesResult["status"] | null = null;
+
+  async configureContinueOverrideForTest(options: {
+    delayBeforeSuperMs?: number;
+    forcedStatus?: SaveMessagesResult["status"];
+  }): Promise<void> {
+    this._delayBeforeSuperMs = options.delayBeforeSuperMs ?? 0;
+    this._forcedStatus = options.forcedStatus ?? null;
+  }
+
+  protected override async continueLastTurn(
+    body?: Record<string, unknown>,
+    options?: SaveMessagesOptions
+  ): Promise<SaveMessagesResult> {
+    if (this._delayBeforeSuperMs > 0) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, this._delayBeforeSuperMs)
+      );
+    }
+    const result = await super.continueLastTurn(body, options);
+    return this._forcedStatus
+      ? { ...result, status: this._forcedStatus }
+      : result;
+  }
+}
+
 export class ThinkProgrammaticTestAgent extends Think {
   protected static override submissionRecoveryStaleMs = 15 * 60 * 1000;
 
@@ -5991,6 +6058,15 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.runTurn(options);
   }
 
+  async testRunTurnWaitError(options: RunTurnWait): Promise<string | null> {
+    try {
+      await this.runTurn(options);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   async testRunTurnWaitString(text: string): Promise<TurnResult> {
     return this.runTurn({ mode: "wait", input: text });
   }
@@ -6432,6 +6508,30 @@ export class ThinkProgrammaticTestAgent extends Think {
       createdAt: Date.now(),
       recoveryReason: "interrupted"
     });
+  }
+
+  /** Leave stored chunks for `requestId`, then persist them as recovery does. */
+  async persistOrphanedStreamForTest(
+    requestId: string,
+    messageId: string
+  ): Promise<void> {
+    const internals = this as unknown as {
+      _resumableStream: {
+        start(requestId: string): string;
+        storeChunk(streamId: string, body: string): unknown;
+      };
+      _persistOrphanedStream(streamId: string): Promise<void>;
+    };
+    const streamId = internals._resumableStream.start(requestId);
+    for (const chunk of [
+      { type: "start", messageId },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "recovered" },
+      { type: "text-end", id: "t1" }
+    ]) {
+      internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+    }
+    await internals._persistOrphanedStream(streamId);
   }
 
   async continueRecoveredChatForTest(requestId: string): Promise<void> {
