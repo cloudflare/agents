@@ -173,7 +173,13 @@ describe("Think — beforeTurn hook", () => {
     );
 
     expect(models).toEqual(["openai/gpt-5-mini"]);
-    expect(calls.map((call) => call.gateway?.id)).toEqual(["clutch"]);
+    expect(calls).toEqual([
+      {
+        kind: "run",
+        model: "openai/gpt-5-mini",
+        gateway: { id: "clutch", metadata: { role: "support" } }
+      }
+    ]);
   });
 
   it("keeps the default gateway when getGateway returns undefined", async () => {

@@ -427,8 +427,9 @@ path.
 
 When `getModel()` returns a string, override `getGateway(model)` to choose the
 AI Gateway and attach metadata to the request log. Think calls it each time it
-resolves the model, so it runs once per turn and can read `this.activeTurn`,
-`this.getMessengerContext()`, or agent state:
+resolves a string model: once per turn, plus once for each string `model`
+override returned from `beforeTurn` or `beforeStep`. It can read
+`this.activeTurn`, `this.getMessengerContext()`, or agent state:
 
 ```ts
 import { Think } from "@cloudflare/think";

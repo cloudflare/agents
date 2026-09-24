@@ -4887,14 +4887,15 @@ export class Think<
 
   /**
    * Return AI Gateway options for a string model resolved by the default
-   * provider. Called on every {@link resolveModel} call, so it runs once per
-   * turn and can read {@link activeTurn}, the messenger context, or agent
-   * state. Use it to pick a gateway `id` and to attach `metadata`, which AI
+   * provider. Called on every {@link resolveModel} call: once per turn, plus
+   * once for each string `model` override returned from `beforeTurn` or
+   * `beforeStep`. It can read {@link activeTurn}, the messenger context, or
+   * agent state. Use it to pick a gateway `id` and to attach `metadata`, which AI
    * Gateway records on the request log as `cf-aig-metadata`.
    *
    * Defaults to `undefined`: catalog slugs use the account's `default`
    * gateway, and `@cf/...` ids call Workers AI without a gateway. Not called
-   * when {@link getModel} returns a `LanguageModel`.
+   * for a model that is already a `LanguageModel`.
    */
   getGateway(_model: string): GatewayOptions | undefined {
     return undefined;
