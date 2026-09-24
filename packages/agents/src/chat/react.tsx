@@ -1787,9 +1787,19 @@ export function useAgentChat<
   );
 
   const [isServerStreaming, setIsServerStreaming] = useState(false);
-  // A stream observed from another tab whose terminal frame was missed when
-  // the socket closed: its tool parts may still belong to a live server turn.
-  const [observedTurnUnresolved, setObservedTurnUnresolved] = useState(false);
+  // The request of a stream observed from another tab whose terminal frame was
+  // missed when the socket closed: its tool parts may still belong to a live
+  // server turn until that request's terminal frame or an idle probe settles it.
+  const [unresolvedObservedRequestId, setUnresolvedObservedRequestId] =
+    useState<string | null>(null);
+
+  // Server turns are serialized, so a request this client submits runs after
+  // the observed turn ends; its own lifecycle gates tool calls from here on.
+  useEffect(() => {
+    if (status === "submitted") {
+      setUnresolvedObservedRequestId(null);
+    }
+  }, [status]);
 
   // Effect for new onToolCall callback pattern (v6 style)
   // This fires when there are tool calls that need client-side handling
@@ -1806,7 +1816,7 @@ export function useAgentChat<
       status === "streaming" ||
       status === "submitted" ||
       isServerStreaming ||
-      observedTurnUnresolved
+      unresolvedObservedRequestId !== null
     ) {
       return;
     }
@@ -1882,7 +1892,7 @@ export function useAgentChat<
     chatMessages,
     status,
     isServerStreaming,
-    observedTurnUnresolved,
+    unresolvedObservedRequestId,
     sendToolOutputToServer,
     addToolResult,
     finishOnToolCall
@@ -1920,7 +1930,7 @@ export function useAgentChat<
             type: "clear"
           }).state;
           setIsServerStreaming(false);
-          setObservedTurnUnresolved(false);
+          setUnresolvedObservedRequestId(null);
           setIsRecovering(false);
           // Shared local-state reset — see `resetLocalChatState`.
           resetLocalChatState();
@@ -2052,6 +2062,7 @@ export function useAgentChat<
             });
             streamStateRef.current = result.state;
             setIsServerStreaming(result.isStreaming);
+            setUnresolvedObservedRequestId(null);
             if (observedToolContinuationRequestIdRef.current !== null) {
               resetToolContinuation();
             }
@@ -2135,7 +2146,9 @@ export function useAgentChat<
 
         case MessageType.CF_AGENT_USE_CHAT_RESPONSE: {
           if (data.done || data.error) {
-            setObservedTurnUnresolved(false);
+            setUnresolvedObservedRequestId((current) =>
+              current === data.id ? null : current
+            );
           }
           if (localRequestIdsRef.current.has(data.id)) {
             if (data.body?.trim()) {
@@ -2373,7 +2386,7 @@ export function useAgentChat<
 
     const clearFallbackObserver = () => {
       if (streamStateRef.current.status === "observing") {
-        setObservedTurnUnresolved(true);
+        setUnresolvedObservedRequestId(streamStateRef.current.streamId);
       }
       const result = broadcastTransition(streamStateRef.current, {
         type: "clear"
@@ -2459,7 +2472,7 @@ export function useAgentChat<
       fallbackAckedResumeRequestIds.clear();
       streamStateRef.current = { status: "idle" };
       setIsServerStreaming(false);
-      setObservedTurnUnresolved(false);
+      setUnresolvedObservedRequestId(null);
       setIsRecovering(false);
       protectedStreamingAssistantRef.current = null;
       localResponseIds.clear();
