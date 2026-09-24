@@ -2013,6 +2013,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     }
 
     if (this._failingTurn) {
+      this._failingReaderCalls++;
       const { message, remaining, prelude } = this._failingTurn;
       this._failingTurn =
         remaining > 1 ? { message, remaining: remaining - 1, prelude } : null;
@@ -2830,6 +2831,11 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     remaining: number;
     prelude: FailingReaderPrelude;
   } | null = null;
+  private _failingReaderCalls = 0;
+
+  getFailingReaderCallsForTest(): number {
+    return this._failingReaderCalls;
+  }
 
   /**
    * Drive a turn whose response reader throws `message` after `prelude`.

@@ -5410,7 +5410,9 @@ export class AIChatAgent<
    * schedule payload carries no `recoveredRequestId`.
    *
    * Returns `"exhausted"` when the budget was spent (terminal UX already
-   * delivered), or `"scheduled"` when a continuation was queued.
+   * delivered), `"scheduled"` when a continuation was queued, or `"declined"`
+   * / `"failed"` when `onChatRecovery` opted out or threw — the caller then
+   * delivers the ordinary terminal error.
    */
   private async _routeStallToBoundedRecovery(input: {
     requestId: string;
@@ -5418,7 +5420,9 @@ export class AIChatAgent<
     partialParts: MessagePart[];
     targetAssistantId?: string;
     continuation: boolean;
-  }): Promise<"scheduled" | "exhausted"> {
+    /** Delay the recovery with exponential backoff (transient errors). */
+    backoff?: boolean;
+  }): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
     const latestUserMessageId =
@@ -5442,18 +5446,18 @@ export class AIChatAgent<
         latestUserMessageId,
         recoveryKind
       });
+    const partialText = input.partialParts
+      .filter(
+        (p): p is { type: "text"; text: string } =>
+          (p as { type?: string }).type === "text"
+      )
+      .map((p) => p.text)
+      .join("");
     if (exhausted) {
       // Budget spent: deliver the SAME terminal UX as deploy-recovery
       // exhaustion (terminalMessage + onExhausted + chat:recovery:exhausted)
       // instead of letting the raw stall error leak out. `firstSeenAt` is the
       // closest available turn-start proxy here.
-      const partialText = input.partialParts
-        .filter(
-          (p): p is { type: "text"; text: string } =>
-            (p as { type?: string }).type === "text"
-        )
-        .map((p) => p.text)
-        .join("");
       await this._exhaustChatRecovery(
         incident,
         config,
@@ -5463,9 +5467,58 @@ export class AIChatAgent<
       );
       return "exhausted";
     }
+
+    let options: ChatRecoveryOptions;
+    try {
+      options =
+        (await this.onChatRecovery({
+          incidentId: incident.incidentId,
+          recoveryRootRequestId,
+          attempt: incident.attempt,
+          maxAttempts: incident.maxAttempts,
+          recoveryKind,
+          streamId: input.streamId,
+          requestId: input.requestId,
+          partialText,
+          partialParts: input.partialParts,
+          recoveryData: null,
+          messages: [...this.messages],
+          lastBody: this._lastBody,
+          lastClientTools: this._lastClientTools,
+          createdAt: incident.firstSeenAt
+        })) ?? {};
+    } catch (error) {
+      console.error(
+        "[AIChatAgent] onChatRecovery threw during stream recovery:",
+        error
+      );
+      await this._updateChatRecoveryIncident(
+        incident.incidentId,
+        "failed",
+        error instanceof Error ? error.message : String(error)
+      );
+      return "failed";
+    }
+    if (options.continue === false) {
+      await this._updateChatRecoveryIncident(
+        incident.incidentId,
+        "skipped",
+        "continue_disabled"
+      );
+      return "declined";
+    }
+
+    let delaySeconds: number | undefined;
+    if (input.backoff) {
+      const retries = await this._chatRecoveryEngine().recordTransientRetry(
+        incident.incidentId
+      );
+      delaySeconds = Math.min(2 ** (retries - 1), 30);
+    }
     if (lostPartialUserId) {
       await this._chatRecoveryEngine().scheduleRecovery({
         incident,
+        delaySeconds,
         recoveryKind,
         callback: "_chatRecoveryRetry",
         data: {
@@ -5480,6 +5533,7 @@ export class AIChatAgent<
     }
     await this._chatRecoveryEngine().scheduleRecovery({
       incident,
+      delaySeconds,
       recoveryKind: "continue",
       callback: "_chatRecoveryContinue",
       data: {
@@ -7216,7 +7270,8 @@ export class AIChatAgent<
                 streamId,
                 partialParts: message.parts,
                 targetAssistantId,
-                continuation
+                continuation,
+                backoff: !(error instanceof ChatStreamStalledError)
               });
               if (outcome === "scheduled") {
                 // Recovering: close the stream cleanly (no terminal error frame);

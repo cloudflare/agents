@@ -203,6 +203,7 @@ interface ChatRecoveryTestStub {
       priorAssistant?: boolean;
     }
   ): Promise<"completed" | "error" | "aborted" | "skipped">;
+  getFailingReaderCallsForTest(): Promise<number>;
 }
 
 async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
@@ -2777,6 +2778,53 @@ describe("platform-transient reader errors (#1964)", () => {
       }
     }
   );
+
+  it("honours onChatRecovery declining the continuation", async () => {
+    const agentStub = await getTestAgent(
+      `transient-declined-${crypto.randomUUID()}`
+    );
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    expect(
+      await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
+    ).toBe("error");
+
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        status: string;
+      }>;
+    expect(incidents.map((i) => i.status)).toEqual(["skipped"]);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(await agentStub.getFailingReaderCallsForTest()).toBe(1);
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
+  });
+
+  it("exhausts repeated disconnects on the transient retry budget", async () => {
+    const agentStub = await getTestAgent(
+      `transient-budget-${crypto.randomUUID()}`
+    );
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
+
+    expect(
+      await agentStub.driveFailingReaderTurnForTest(
+        "Network connection lost.",
+        10
+      )
+    ).toBe("aborted");
+
+    await expect
+      .poll(
+        async () =>
+          (
+            (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+              reason?: string;
+            }>
+          )[0]?.reason,
+        { timeout: 15_000, interval: 200 }
+      )
+      .toBe("max_attempts_exceeded");
+    expect(await agentStub.getFailingReaderCallsForTest()).toBe(3);
+  }, 20_000);
 
   it("keeps an application error terminal", async () => {
     const agentStub = await getTestAgent(
