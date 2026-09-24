@@ -4,6 +4,7 @@ import { Lifecycle } from "agents/lifecycle";
 import { Streams } from "agents/streams";
 import { WebSockets } from "agents/websockets";
 import { OpenCodeHarness, type OCEvent } from "agents/opencode";
+import { createSessionName } from "./session";
 
 export class OpenCodeAgent extends DurableObject<Env> {
   readonly streams = new Streams();
@@ -34,7 +35,7 @@ export class OpenCodeAgent extends DurableObject<Env> {
     });
   }
 
-  async ask(text: string) {
+  async prompt(text: string) {
     const { result, messages } = await this.harness.prompt(text);
     return { result, messages };
   }
@@ -43,7 +44,7 @@ export class OpenCodeAgent extends DurableObject<Env> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (new URL(request.url).pathname === "/api/session") {
-      return Response.json({ session: crypto.randomUUID() });
+      return Response.json({ session: createSessionName() });
     }
     try {
       return (

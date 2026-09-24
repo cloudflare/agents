@@ -1,14 +1,14 @@
 import { useAgent } from "agents/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
-  ClientMessage,
-  MessageDelta,
-  ServerMessage,
-  TranscriptEvent,
-  TranscriptMessage,
-  TranscriptPart,
-  ToolInfo
-} from "./protocol";
+  PiClientMessage as ClientMessage,
+  PiEvent as TranscriptEvent,
+  PiMessage as TranscriptMessage,
+  PiMessageDelta as MessageDelta,
+  PiMessagePart as TranscriptPart,
+  PiServerMessage as ServerMessage,
+  PiToolInfo as ToolInfo
+} from "agents/pi";
 
 export type ConnectionStatus = "connecting" | "open" | "closed";
 

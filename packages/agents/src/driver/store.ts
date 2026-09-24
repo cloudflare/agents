@@ -75,8 +75,8 @@ export class HarnessDriverStore {
     if (operationId.trim() === "") {
       throw new Error("operationId must not be empty");
     }
-    const inputJson = JSON.stringify(input);
-    if (inputJson === undefined)
+    const inputJSON = JSON.stringify(input);
+    if (inputJSON === undefined)
       throw new Error("input must be JSON-serializable");
     const cursor = this.#storage.sql.exec(
       `INSERT INTO cf_agents_harness_submissions
@@ -87,7 +87,7 @@ export class HarnessDriverStore {
       this.#driverId,
       scope,
       operationId,
-      inputJson,
+      inputJSON,
       streamId,
       Date.now()
     );

@@ -8,7 +8,8 @@
     "start": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "types": "wrangler types env.d.ts --include-runtime false"
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "test": "vitest run src/session.test.ts"
   },
   "dependencies": {
     "@opencode/plugin": "^2.0.15",

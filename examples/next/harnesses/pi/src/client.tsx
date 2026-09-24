@@ -28,7 +28,11 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Streamdown } from "streamdown";
-import type { ToolInfo, TranscriptMessage, TranscriptPart } from "./protocol";
+import type {
+  PiMessage as TranscriptMessage,
+  PiMessagePart as TranscriptPart,
+  PiToolInfo as ToolInfo
+} from "agents/pi";
 import { usePiSession } from "./use-pi-session";
 import "./styles.css";
 
