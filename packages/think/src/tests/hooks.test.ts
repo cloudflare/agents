@@ -147,6 +147,57 @@ describe("Think — beforeTurn hook", () => {
     expect(log[0].continuation).toBe(false);
   });
 
+  it("routes a Workers AI model through the gateway from getGateway (#2262)", async () => {
+    const agent = await freshAgent("gateway-cf");
+    const gateway = { id: "clutch", metadata: { role: "support", siteId: 7 } };
+    const { models, calls } = await agent.resolveModelGatewayForTest(
+      "@cf/meta/llama-3.1-8b-instruct",
+      gateway
+    );
+
+    expect(models).toEqual(["@cf/meta/llama-3.1-8b-instruct"]);
+    expect(calls).toEqual([
+      {
+        kind: "run",
+        model: "@cf/meta/llama-3.1-8b-instruct",
+        gateway
+      }
+    ]);
+  });
+
+  it("routes a catalog model through the gateway from getGateway (#2262)", async () => {
+    const agent = await freshAgent("gateway-catalog");
+    const { models, calls } = await agent.resolveModelGatewayForTest(
+      "openai/gpt-5-mini",
+      { id: "clutch", metadata: { role: "support" } }
+    );
+
+    expect(models).toEqual(["openai/gpt-5-mini"]);
+    expect(calls).toEqual([
+      {
+        kind: "run",
+        model: "openai/gpt-5-mini",
+        gateway: { id: "clutch", metadata: { role: "support" } }
+      }
+    ]);
+  });
+
+  it("keeps the default gateway when getGateway returns undefined", async () => {
+    const agent = await freshAgent("gateway-default");
+    const cf = await agent.resolveModelGatewayForTest(
+      "@cf/meta/llama-3.1-8b-instruct",
+      null
+    );
+    expect(cf.calls).toEqual([
+      { kind: "run", model: "@cf/meta/llama-3.1-8b-instruct", gateway: null }
+    ]);
+
+    const catalog = await (
+      await freshAgent("gateway-default-catalog")
+    ).resolveModelGatewayForTest("openai/gpt-5-mini", null);
+    expect(catalog.calls.map((call) => call.gateway?.id)).toEqual(["default"]);
+  });
+
   it("carries the turn's request id, trigger and abort signal", async () => {
     const agent = await freshAgent("hook-bt-identity");
     await agent.testChat("First");
