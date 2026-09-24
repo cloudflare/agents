@@ -600,6 +600,12 @@ class TestCollectingCallback implements StreamCallback {
 // beforeTurn/onStepFinish/onChunk (instrumentation),
 // _transformInferenceResult (error injection).
 
+type GatewayCallForTest = {
+  kind: "run" | "gateway";
+  model: string | null;
+  gateway: GatewayOptions | null;
+};
+
 type TurnIdentityLogEntry = {
   input: string;
   requestId: string | null;
@@ -985,6 +991,64 @@ export class ThinkTestAgent extends Think {
 
   async getActiveTurnForTest(): Promise<ActiveTurn | null> {
     return this.activeTurn ?? null;
+  }
+
+  private _gatewayForTest: GatewayOptions | undefined;
+  private _fakeAIBinding: Ai | undefined;
+  private _gatewayModels: string[] = [];
+
+  override getGateway(model: string): GatewayOptions | undefined {
+    this._gatewayModels.push(model);
+    return this._gatewayForTest;
+  }
+
+  override getAIBinding(): Ai {
+    return this._fakeAIBinding ?? super.getAIBinding();
+  }
+
+  /**
+   * Resolve a string model against a fake AI binding and report what reached
+   * the binding: `run` options on the Workers AI path, or the gateway id on
+   * the catalog gateway path. The fake throws, so no response is parsed.
+   */
+  async resolveModelGatewayForTest(
+    model: string,
+    gateway: GatewayOptions | null
+  ): Promise<{ models: string[]; calls: GatewayCallForTest[] }> {
+    const calls: GatewayCallForTest[] = [];
+    this._fakeAIBinding = {
+      run: async (
+        runModel: string,
+        _inputs: unknown,
+        options?: { gateway?: GatewayOptions }
+      ) => {
+        calls.push({
+          kind: "run",
+          model: runModel,
+          gateway: options?.gateway ?? null
+        });
+        throw new Error("fake AI binding");
+      },
+      gateway: (id: string) => {
+        calls.push({ kind: "gateway", model: null, gateway: { id } });
+        return {
+          run: async () => {
+            throw new Error("fake AI gateway");
+          }
+        };
+      }
+    } as unknown as Ai;
+    this._gatewayForTest = gateway ?? undefined;
+    this._gatewayModels = [];
+    const resolved = this.resolveModel(model) as unknown as {
+      doGenerate(options: { prompt: unknown[] }): Promise<unknown>;
+    };
+    await resolved
+      .doGenerate({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }]
+      })
+      .catch(() => {});
+    return { models: this._gatewayModels, calls };
   }
 
   async runConcurrentMessengerTurnsForTest(): Promise<void> {

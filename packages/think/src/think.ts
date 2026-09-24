@@ -4886,6 +4886,21 @@ export class Think<
   private _defaultProvider?: ReturnType<typeof createWorkersAI>;
 
   /**
+   * Return AI Gateway options for a string model resolved by the default
+   * provider. Called on every {@link resolveModel} call, so it runs once per
+   * turn and can read {@link activeTurn}, the messenger context, or agent
+   * state. Use it to pick a gateway `id` and to attach `metadata`, which AI
+   * Gateway records on the request log as `cf-aig-metadata`.
+   *
+   * Defaults to `undefined`: catalog slugs use the account's `default`
+   * gateway, and `@cf/...` ids call Workers AI without a gateway. Not called
+   * when {@link getModel} returns a `LanguageModel`.
+   */
+  getGateway(_model: string): GatewayOptions | undefined {
+    return undefined;
+  }
+
+  /**
    * Resolve a model value into a concrete AI SDK `LanguageModel`.
    *
    * Defaults to resolving {@link getModel}. A `LanguageModel` is returned as-is;
@@ -4902,11 +4917,15 @@ export class Think<
     });
     // `@cf/...` ids take Workers AI chat settings (sessionAffinity improves
     // prefix-cache hits). Any other slug is a catalog model routed through AI
-    // Gateway; we pass no per-call settings, which avoids forcing options a
-    // given provider/transport would reject.
+    // Gateway; we pass no other per-call settings, which avoids forcing
+    // options a given provider/transport would reject.
+    const gateway = this.getGateway(model);
     return model.startsWith("@cf/")
-      ? this._defaultProvider(model, { sessionAffinity: this.sessionAffinity })
-      : this._defaultProvider(model);
+      ? this._defaultProvider(model, {
+          sessionAffinity: this.sessionAffinity,
+          ...(gateway && { gateway })
+        })
+      : this._defaultProvider(model, gateway && { gateway });
   }
 
   /**
