@@ -1,10 +1,20 @@
+/**
+ * Any value a machine can persist.
+ *
+ * Arrays and objects are `readonly` so that a caller's own immutable types
+ * satisfy this without copying or casting. A `readonly` array is not
+ * assignable to a mutable one, so requiring mutability here would force
+ * every caller holding `readonly` data through an unchecked cast. Nothing
+ * in the engine mutates a checkpoint in place, so nothing needs the looser
+ * form.
+ */
 export type MachineJson =
   | string
   | number
   | boolean
   | null
-  | MachineJson[]
-  | { [key: string]: MachineJson };
+  | readonly MachineJson[]
+  | { readonly [key: string]: MachineJson };
 
 export type MachineValue = MachineJson | undefined | void;
 export type MachinePhased = { phase: string } & Record<string, MachineJson>;
@@ -129,7 +139,16 @@ export interface MachineGates {
 
 export type MachineEffectRecovery = "safe" | "never" | "reconcile";
 
-export interface MachineEffectRef<Output extends MachineValue = MachineValue> {
+/**
+ * A handle to one planned effect.
+ *
+ * Declared as a type alias rather than an interface so it satisfies
+ * {@link MachineJson}: TypeScript gives an interface no implicit index
+ * signature, which would stop a machine storing its own effect handle in its
+ * own checkpoint. A wrapped runtime that parks between passes has to do
+ * exactly that, so the alias is load-bearing.
+ */
+export type MachineEffectRef<Output extends MachineValue = MachineValue> = {
   readonly id: string;
   readonly kind: string;
   readonly recovery: MachineEffectRecovery;
@@ -139,7 +158,7 @@ export interface MachineEffectRef<Output extends MachineValue = MachineValue> {
   readonly retries?: MachineEffectRetryPolicy;
   /** @internal Type carrier. */
   readonly __output?: Output;
-}
+};
 
 export interface MachineEffectPlanOptions {
   readonly recovery: MachineEffectRecovery;
@@ -152,18 +171,30 @@ export interface MachineEffectPlanOptions {
 
 export type MachineEffectBackoff = "constant" | "linear" | "exponential";
 
-export interface MachineEffectRetryPolicy {
+export type MachineEffectRetryPolicy = {
   readonly limit?: number;
   readonly delay?: number;
   readonly backoff?: MachineEffectBackoff;
-}
+};
 
-export interface MachineEffectInvocation {
+export interface MachineEffectInvocation<
+  Input extends MachineJson = MachineJson
+> {
   readonly effectId: string;
   readonly idempotencyKey: string;
   readonly externalId?: string;
   readonly attempt: number;
   readonly signal: AbortSignal;
+  /**
+   * The input this effect was planned with.
+   *
+   * Available to every hook, including `reconcile` and `cancel`. Those run
+   * after a crash, when the only other thing they are given is `externalId`,
+   * so without this a runtime has to encode what it needs into that string
+   * and parse it back, or keep an in-memory side table that recovery has
+   * already lost.
+   */
+  readonly input: Input;
 }
 
 export interface MachineEffectPending {
@@ -179,11 +210,11 @@ export interface MachineEffectRuntime<
 > {
   execute(
     input: Input,
-    invocation: MachineEffectInvocation
+    invocation: MachineEffectInvocation<Input>
   ): Promise<Output | MachineEffectPending>;
   reconcile?(
     externalId: string,
-    invocation: MachineEffectInvocation
+    invocation: MachineEffectInvocation<Input>
   ): Promise<
     | { status: "running" }
     | { status: "completed"; output: Output }
@@ -192,7 +223,7 @@ export interface MachineEffectRuntime<
   >;
   cancel?(
     externalId: string,
-    invocation: MachineEffectInvocation
+    invocation: MachineEffectInvocation<Input>
   ): Promise<void>;
 }
 
@@ -234,10 +265,46 @@ export interface MachineEffects {
   ): Promise<MachineEffectOutcome<Output>>;
 }
 
+/**
+ * - `attached`: parent cancellation requests child cancellation.
+ * - `background`: outlives the parent turn; excluded from the default join.
+ */
+export type MachineChildMode = "attached" | "background";
+
+export interface MachineChildRef<Output extends MachineValue = MachineValue> {
+  readonly runId: string;
+  readonly definition: string;
+  readonly mode: MachineChildMode;
+  readonly effect: MachineEffectRef<MachineJson>;
+  /** @internal Type carrier. */
+  readonly __output?: Output;
+}
+
+export type MachineChildResult<Output extends MachineValue> =
+  | { readonly ok: true; readonly output: Output }
+  | { readonly ok: false; readonly error: { name: string; message: string } };
+
+export interface MachineSpawnOptions {
+  readonly runId?: string;
+  readonly mode?: MachineChildMode;
+}
+
+export interface MachineChildren<Definitions extends MachineDefinitions> {
+  spawn<Output extends MachineValue = MachineValue>(
+    definition: keyof Definitions & string,
+    input: MachineValue,
+    options?: MachineSpawnOptions
+  ): MachineChildRef<Output>;
+  join<Output extends MachineValue>(
+    child: MachineChildRef<Output>
+  ): Promise<MachineChildResult<Output> | null>;
+}
+
 export interface MachineContext<
   State extends MachinePhased,
   Result extends MachineValue,
-  Event extends MachineEvent = MachineEvent
+  Event extends MachineEvent = MachineEvent,
+  Definitions extends MachineDefinitions = MachineDefinitions
 > {
   readonly runId: string;
   readonly revision: number;
@@ -245,6 +312,7 @@ export interface MachineContext<
   readonly events: MachineEvents<Event>;
   readonly gates: MachineGates;
   readonly effects: MachineEffects;
+  readonly children: MachineChildren<Definitions>;
 
   transition(
     state: State,
@@ -406,6 +474,7 @@ export type MachineRunSnapshot<
       };
       readonly gates?: readonly MachineGateView[];
       readonly effects?: readonly MachineEffectView[];
+      readonly children?: readonly MachineChildView[];
     }
   | {
       readonly runId: string;
@@ -446,6 +515,13 @@ export interface MachineEffectView {
   readonly externalId?: string;
   readonly attempt: number;
   readonly retryAt?: number;
+}
+
+export interface MachineChildView {
+  readonly runId: string;
+  readonly definition: string;
+  readonly mode: MachineChildMode;
+  readonly status: string;
 }
 
 /** @internal Raw StateMachine run row. */
@@ -534,6 +610,18 @@ export interface MachineEffectRow {
   attempt: number;
   retry_at: number | null;
   options_json: string;
+  created_at: number;
+  settled_at: number | null;
+}
+
+/** @internal */
+export interface MachineChildRow {
+  parent_run_id: string;
+  child_run_id: string;
+  child_definition: string;
+  mode: MachineChildMode;
+  status: "running" | "completed" | "failed" | "cancelled";
+  completion_event_id: string;
   created_at: number;
   settled_at: number | null;
 }

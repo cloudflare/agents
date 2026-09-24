@@ -1,7 +1,7 @@
 import {
   createProvider,
   type ApiStreamOptions,
-  type Context,
+  type TranscriptContext,
   type Model,
   type ProviderStreams,
   type SimpleStreamOptions
@@ -125,7 +125,7 @@ export function workersAI(
       } as ApiStreamOptions<string>),
     streamSimple: (
       model: Model<string>,
-      context: Context,
+      context: TranscriptContext,
       streamOptions?: SimpleStreamOptions
     ) => api.streamSimple(model, context, { ...streamOptions, fetch })
   };

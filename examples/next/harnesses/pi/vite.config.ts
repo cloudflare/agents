@@ -12,9 +12,8 @@ export default defineConfig({
     tailwindcss()
   ],
   resolve: {
-    // The commit-pinned pi artifacts intentionally omit sibling package
-    // dependencies. Resolve every internal pi import from this example's
-    // node_modules so one revision supplies all provider and harness types.
+    // Resolve every internal pi import from this example's node_modules so
+    // one release supplies all provider and harness types.
     dedupe: [
       "react",
       "react-dom",

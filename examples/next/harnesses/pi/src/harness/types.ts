@@ -1,7 +1,6 @@
 import type { Static, TSchema } from "typebox";
 import type { SkillSource } from "agents/skills";
 import type { Streams } from "agents/streams";
-import type { Tasks } from "agents/tasks";
 
 /** Invocation-scoped cancellation and application values used by pi callbacks. */
 export interface PiContext {
@@ -49,15 +48,20 @@ export type PiThinkingLevel =
   | "xhigh"
   | "max";
 
-/** JSON value carried by projected messages, events, and tool results. */
+/**
+ * JSON value carried by projected messages, events, and tool results.
+ *
+ * Arrays and objects are `readonly` to match pi's own `JsonValue`, so values
+ * projected straight out of pi assign without a cast.
+ */
 export type PiJson =
   | string
   | number
   | boolean
   | null
   | undefined
-  | PiJson[]
-  | { [key: string]: PiJson };
+  | readonly PiJson[]
+  | { readonly [key: string]: PiJson };
 
 /** Base64 image content accepted in prompts and returned by tools. */
 export type PiImage = {
@@ -93,7 +97,6 @@ export type PiToolResult<Details = PiJson> = {
   readonly content: readonly PiToolContent[];
   readonly details: Details;
   readonly usage?: PiUsage;
-  readonly addedToolNames?: readonly string[];
   readonly terminate?: boolean;
 };
 
@@ -247,11 +250,6 @@ export type PiHarnessConfig<
    * provider and model id resolved against `models` when the harness attaches.
    */
   readonly model: PiModel | PiModelIdentity;
-  /**
-   * Durable execution for operations. Each lane's work runs as one Task run
-   * that replays after eviction; pi's session is the recovery evidence.
-   */
-  readonly tasks: Tasks;
   /** Durable output. Every operation's live events land in one stream. */
   readonly streams: Streams;
   readonly thinkingLevel?: PiThinkingLevel;
@@ -669,6 +667,53 @@ export type PiSubmissionReceipt = {
 /** Receipt for a message queued into a lane's inbox. */
 export type PiQueueReceipt = {
   readonly entryId: string;
+};
+
+/**
+ * How urgently a steer should reach the model.
+ *
+ * `"boundary"` queues the message and lets the run claim it at its next
+ * phase boundary, which pi reaches after every tool batch as well as after
+ * every assistant message. The in-flight request finishes and nothing is
+ * discarded.
+ *
+ * `"interrupt"` additionally aborts the operation so the current request stops
+ * immediately, and the message becomes the prompt of a replacement operation.
+ * Aborting drains the entire lane inbox, so any steer or follow-up another
+ * caller had queued is re-queued onto the replacement rather than lost. Any
+ * assistant output still streaming is abandoned, and the aborted operation
+ * settles as cancelled.
+ */
+export type PiSteerUrgency = "boundary" | "interrupt";
+
+/** Options for steering a running operation. */
+export type PiSteerOptions = PiLaneOptions & {
+  readonly urgency?: PiSteerUrgency;
+};
+
+/** Receipt for a steer that interrupted the running operation. */
+export type PiSteerReceipt = PiQueueReceipt & {
+  /**
+   * Set when `urgency: "interrupt"` aborted an operation. Names the cancelled
+   * operation and the replacement carrying the steer forward.
+   */
+  readonly interrupted?: {
+    readonly cancelledOperationId: string;
+    readonly resubmittedOperationId: string;
+    /**
+     * What the abort drained and this call put back.
+     *
+     * Aborting an operation empties the whole lane inbox, including messages
+     * other callers queued, so those are re-queued onto the replacement rather
+     * than discarded. `steer` counts every steer the abort returned, including
+     * this call's own, which becomes the replacement's prompt instead of an
+     * inbox entry.
+     */
+    readonly requeued: {
+      readonly steer: number;
+      readonly followUp: number;
+    };
+  };
 };
 
 /** Outcome of a durable abort request. */

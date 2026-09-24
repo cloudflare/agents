@@ -4,6 +4,11 @@ import type {
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
 import { isPlatformFailure } from "../retries";
+import {
+  ATTACHED_CHILD_EFFECT,
+  BACKGROUND_CHILD_EFFECT,
+  MachineChildManager
+} from "./children";
 import { applyMachineCommitParticipant } from "./commit";
 import { createMachineContext, type PendingChanges } from "./context";
 import { MachineEffectManager } from "./effects";
@@ -75,7 +80,28 @@ type DrivePayload = { runId: string; revision: number };
 export interface StateMachineOptions<Definitions extends MachineDefinitions> {
   readonly definitions: Definitions;
   readonly effects?: MachineEffectRuntimes;
+  /**
+   * Hung-dispatch threshold for this capability's own drive jobs, in seconds.
+   *
+   * A phase is as long as the work it awaits, and a phase that drives a
+   * wrapped agent runtime is routinely longer than the queue's 30 second
+   * default. That default is tuned for short jobs: exceeding it logs a
+   * `job:slow_dispatch` warning on every dispatch and marks the row hung, at
+   * which point a same-id redispatch may reset a perfectly healthy in-flight
+   * phase. Raise this above the longest phase you expect. Liveness does not
+   * depend on it — a dispatch that really is lost is recovered by the
+   * effect's own `recovery` policy, not by the hung timeout.
+   */
+  readonly jobHungTimeoutSeconds?: number;
 }
+
+/**
+ * Default hung-dispatch threshold for drive jobs.
+ *
+ * Ten minutes: long enough that no realistic phase trips it, short enough to
+ * stay well inside a Durable Object alarm's reach.
+ */
+const DEFAULT_JOB_HUNG_TIMEOUT_SECONDS = 600;
 
 export interface StateMachineGateNotifications {
   notify<Payload extends MachineJson, Answer extends MachineJson>(
@@ -93,16 +119,29 @@ export class StateMachine<
 > extends LifecycleCapability {
   readonly #definitions: Definitions;
   readonly #effectRuntimes: MachineEffectRuntimes;
+  readonly #jobHungTimeoutSeconds: number;
   #storeInstance: StateMachineStore | undefined;
   #eventManager: MachineEventManager | undefined;
   #gateManager: MachineGateManager | undefined;
   #effectManager: MachineEffectManager | undefined;
+  #childManager: MachineChildManager | undefined;
   readonly gates: StateMachineGateNotifications;
 
   constructor(options: StateMachineOptions<Definitions>) {
     super("state-machine");
     this.#definitions = options.definitions;
     this.#effectRuntimes = options.effects ?? {};
+    this.#jobHungTimeoutSeconds =
+      options.jobHungTimeoutSeconds ?? DEFAULT_JOB_HUNG_TIMEOUT_SECONDS;
+    if (this.#jobHungTimeoutSeconds <= 0) {
+      throw new Error("StateMachine jobHungTimeoutSeconds must be positive");
+    }
+    if (
+      ATTACHED_CHILD_EFFECT in this.#effectRuntimes ||
+      BACKGROUND_CHILD_EFFECT in this.#effectRuntimes
+    ) {
+      throw new Error("StateMachine child effect kinds are reserved");
+    }
     this.gates = Object.freeze({
       notify: async <Payload extends MachineJson, Answer extends MachineJson>(
         gateId: string,
@@ -148,10 +187,24 @@ export class StateMachine<
   get #effects(): MachineEffectManager {
     this.#effectManager ??= new MachineEffectManager({
       store: this.#store,
-      runtimes: this.#effectRuntimes,
+      runtimes: { ...this.#effectRuntimes, ...this.#children.runtimes },
       emit: (type, payload) => this.lifecycle.events.emit(type, payload)
     });
     return this.#effectManager;
+  }
+
+  get #children(): MachineChildManager {
+    this.#childManager ??= new MachineChildManager({
+      store: this.#store,
+      events: this.#events,
+      definition: (name) => this.#definition(name),
+      assertState: (name, definition, state) =>
+        this.#assertState(name, definition as RuntimeDefinition, state),
+      insertRun: (input) => this.#insertRun(input),
+      pushJob: (runId, revision, time) => this.#pushJob(runId, revision, time),
+      emit: (type, payload) => this.lifecycle.events.emit(type, payload)
+    });
+    return this.#childManager;
   }
 
   async onStart(): Promise<void> {
@@ -368,6 +421,11 @@ export class StateMachine<
       if (!row || !TERMINAL_STATUSES.has(row.status)) return;
       this.lifecycle.jobs.cancelSync(this.#jobId(runId));
       this.#store.deleteOwnedRows(runId);
+      this.#store.write(
+        `DELETE FROM cf_agents_state_machine_children
+         WHERE child_run_id = ?`,
+        [runId]
+      );
       deleted =
         this.#store.write(
           "DELETE FROM cf_agents_state_machine_runs WHERE run_id = ?",
@@ -448,13 +506,13 @@ export class StateMachine<
     }
     const definition = this.#definition(row.definition);
     if (definition.version !== row.definition_version) {
-      await this.#commitFailure(row, {
-        name: "MachineDefinitionVersionError",
-        message:
-          `Machine definition "${row.definition}" is version ` +
-          `${definition.version}, but run "${row.run_id}" requires ` +
-          `${row.definition_version}`
-      });
+      // Pause rather than fail. A version mismatch is a deploy-time mistake,
+      // not a fault in the run: the checkpoint is intact and the phase graph
+      // that wrote it may be restored by redeploying the previous definition,
+      // or migrated by a later upgrade hook. Failing is irreversible and
+      // strands whatever the run owned, so leave the run recoverable and make
+      // the operator's next deploy the fix. `resume()` picks it up unchanged.
+      await this.#pauseForVersionMismatch(row, definition.version);
       return;
     }
     if (row.cancel_requested === 1) {
@@ -469,6 +527,7 @@ export class StateMachine<
       events: this.#events,
       gates: this.#gates,
       effects: this.#effects,
+      children: this.#children,
       errorSummary: (error) => this.#errorSummary(error),
       flushPending: (pending) => this.#flushPending(row, pending)
     });
@@ -685,6 +744,7 @@ export class StateMachine<
              WHERE run_id = ? AND state = 'open'`,
             [now, now, row.run_id]
           );
+          this.#children.settleParentRelations(row, decision, now);
           if (row.persist === 0) {
             this.#store.deleteOwnedRows(row.run_id);
             this.#store.write(
@@ -741,6 +801,43 @@ export class StateMachine<
     );
   }
 
+  /**
+   * Park a run whose definition version moved out from under it.
+   *
+   * Unlike `pause()` this is not an operator action, so it must not race the
+   * dispatch that observed the mismatch: the update is guarded on the revision
+   * the caller read, and a lost race simply means another dispatch already
+   * parked the run. The checkpoint, gates and effect rows are left untouched
+   * so a redeploy of the matching definition can `resume()` the run as it
+   * stood. The pending wake is cancelled, because nothing should re-enter the
+   * phase graph until the definition agrees.
+   */
+  async #pauseForVersionMismatch(
+    row: MachineRunRow,
+    actualVersion: number
+  ): Promise<void> {
+    let paused = false;
+    this.#store.transaction(() => {
+      paused =
+        this.#store.write(
+          `UPDATE cf_agents_state_machine_runs
+           SET status = 'paused', updated_at = ?
+           WHERE run_id = ? AND revision = ? AND status IN ('running', 'waiting')`,
+          [Date.now(), row.run_id, row.revision]
+        ) === 1;
+      if (paused) this.lifecycle.jobs.cancelSync(this.#jobId(row.run_id));
+    });
+    if (!paused) return;
+    await this.lifecycle.jobs.rearm();
+    this.lifecycle.events.emit("state-machine:paused", {
+      runId: row.run_id,
+      definition: row.definition,
+      reason: "definition-version-mismatch",
+      requiredVersion: row.definition_version,
+      actualVersion
+    });
+  }
+
   async #commitCancelled(row: MachineRunRow, reason?: string): Promise<void> {
     const now = Date.now();
     this.#store.transaction(() => {
@@ -761,6 +858,7 @@ export class StateMachine<
          SET state = 'cancelled', settled_at = ? WHERE run_id = ? AND state = 'open'`,
         [now, row.run_id]
       );
+      this.#children.settleCancelledRelations(row, reason, now);
     });
     await this.lifecycle.jobs.rearm();
   }
@@ -838,7 +936,8 @@ export class StateMachine<
       fn: "drive",
       time,
       payload: { runId, revision } satisfies DrivePayload,
-      singleflight: true
+      singleflight: true,
+      hungTimeoutSeconds: this.#jobHungTimeoutSeconds
     });
   }
 

@@ -113,10 +113,10 @@ export function projectHarnessEvent(
       );
       if (!message) return undefined;
       return {
-        ...(event.runId === undefined ? {} : { operationId: event.runId }),
+        operationId: event.runId,
         event: {
           type: "message_start",
-          ...(event.runId === undefined ? {} : { operationId: event.runId }),
+          operationId: event.runId,
           message
         }
       };
@@ -132,11 +132,11 @@ export function projectHarnessEvent(
     }
     case "message_end":
       return {
-        ...(event.runId === undefined ? {} : { operationId: event.runId }),
+        operationId: event.runId,
         event: {
           type: "message_end",
-          ...(event.runId === undefined ? {} : { operationId: event.runId }),
-          ...(event.entryId === undefined ? {} : { entryId: event.entryId })
+          operationId: event.runId,
+          entryId: event.entryId
         }
       };
     case "tool_start":

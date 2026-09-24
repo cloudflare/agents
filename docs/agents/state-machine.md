@@ -1,18 +1,12 @@
-# State machines
+# State machine examples
 
-> **Experimental.** Everything exported from `agents/state-machine` may change
-> between releases while the durable coordination surface stabilizes.
+> **Experimental.** Exports from `agents/state-machine` may change between releases.
 
-`agents/state-machine` adds durable, checkpointed state machines to a
-[Lifecycle Object](./lifecycle.md). Each transition replaces one complete,
-versioned checkpoint. Lifecycle jobs wake runs after events and deadlines, so a
-parked machine holds no JavaScript invocation in memory.
+See the [State machine API reference](./state-machine-api.md) for signatures and return types.
 
-Use StateMachine for long-lived coordination such as agent loops, permission
-flows, and external jobs. Use [Tasks](./tasks.md) when a
-shorter replay-from-the-top function with journaled steps is a better fit.
+## Define and install
 
-## Define and install a machine
+A definition maps each stored `phase` to a handler. Install the definition map on a Lifecycle Object so runs can resume after eviction.
 
 ```ts
 import { DurableObject } from "cloudflare:workers";
@@ -23,212 +17,412 @@ import {
   type MachineDefinition
 } from "agents/state-machine";
 
-type RunState =
-  | { phase: "waiting"; key: string }
-  | { phase: "processing"; value: string };
-
-type RunEvent = {
-  type: "input";
+type OrderEvent = {
+  type: "payment.received";
   key: string;
-  value: string;
+  transactionId: string;
 };
 
-const run = defineMachine<RunState, string, { key: string }, RunEvent>({
+type OrderState =
+  | { phase: "waiting"; orderId: string }
+  | { phase: "paid"; orderId: string; transactionId: string };
+
+const order = defineMachine<
+  OrderState,
+  { orderId: string; transactionId: string },
+  { orderId: string },
+  OrderEvent
+>({
   version: 1,
-  initial: (input) => ({ phase: "waiting", key: input.key }),
+  initial: ({ orderId }) => ({ phase: "waiting", orderId }),
   phases: {
     waiting: (state, context) => {
-      const input = context.events.take({ type: "input", key: state.key });
-      if (input) {
-        return context.transition({
-          phase: "processing",
-          value: input.event.value
+      if (context.wake.kind === "timeout") {
+        return context.fail(new Error("Payment expired"));
+      }
+
+      const payment = context.events.take({
+        type: "payment.received",
+        key: state.orderId
+      });
+
+      if (!payment) {
+        return context.wait(state, {
+          type: "payment.received",
+          key: state.orderId,
+          timeoutAt: Date.now() + 24 * 60 * 60 * 1000
         });
       }
-      return context.wait(state, { type: "input", key: state.key });
-    },
-    processing: (state, context) => context.complete(state.value)
-  }
-} satisfies MachineDefinition<RunState, string, { key: string }, RunEvent>);
 
-export class RunObject extends DurableObject<Env> {
-  readonly machines = new StateMachine({ definitions: { run } });
+      return context.transition({
+        phase: "paid",
+        orderId: state.orderId,
+        transactionId: payment.event.transactionId
+      });
+    },
+    paid: (state, context) =>
+      context.complete({
+        orderId: state.orderId,
+        transactionId: state.transactionId
+      })
+  }
+} satisfies MachineDefinition<
+  OrderState,
+  { orderId: string; transactionId: string },
+  { orderId: string },
+  OrderEvent
+>);
+
+const definitions = { order };
+
+export class OrderObject extends DurableObject<Env> {
+  readonly machines = new StateMachine({ definitions });
   readonly lifecycle = Lifecycle.install(this).use(this.machines);
 }
 ```
 
-The definition map is rebuilt on every Durable Object wake. Keep a definition's
-name and version available while retained runs use them.
+## Start, notify, and inspect
 
-## Start and inspect a run
+`run()` durably accepts work, `notify()` adds an idempotent event, and `get()` returns the current checkpoint or terminal result.
 
 ```ts
 const receipt = await machines.run(
-  "run",
-  { key: "request-1" },
-  {
-    idempotencyKey: "request-1"
-  }
+  "order",
+  { orderId: "order-123" },
+  { idempotencyKey: "order-123" }
 );
 
-const snapshot = await machines.get(receipt.runId, "run");
+await machines.notify(
+  receipt.runId,
+  {
+    type: "payment.received",
+    key: "order-123",
+    transactionId: "txn-456"
+  },
+  { eventId: "payment-webhook-txn-456" }
+);
 
-const liveRuns = await machines.list({
-  definition: "run",
+const snapshot = await machines.get(receipt.runId, "order");
+
+const liveOrders = await machines.list({
+  definition: "order",
   status: ["running", "waiting"],
   limit: 20
 });
+
+if (snapshot?.status === "completed") {
+  console.log(snapshot.result.transactionId);
+}
 ```
 
-A caller-selected `runId` or `idempotencyKey` joins an existing run instead of
-creating another one. `list()` returns newest runs first. Its default limit is
-100 and its maximum limit is 1,000. An empty status list returns no runs.
+## Handle cancellation
 
-## Notify a machine
-
-Every delivery requires an idempotent `eventId`:
+Add `onCancel` for a final transition. Without it, cancellation settles the run as cancelled.
 
 ```ts
-await machines.notify(
-  receipt.runId,
-  { type: "input", key: "request-1", value: "hello" },
-  { eventId: "input-request-1" }
+const cancellableOrder = defineMachine<
+  OrderState,
+  { orderId: string; transactionId: string },
+  { orderId: string },
+  OrderEvent
+>({
+  ...order,
+  onCancel: (_state, context) =>
+    context.fail(new Error(context.wake.reason ?? "Order cancelled"))
+});
+
+await machines.cancel(runId, "customer requested");
+```
+
+## Ask for approval
+
+A gate stores a typed request and waits for one external answer. Save the gate reference in the next checkpoint.
+
+```ts
+import {
+  defineGate,
+  defineMachine,
+  type MachineGateRef
+} from "agents/state-machine";
+
+const Approval = defineGate<{ command: string }, { approved: boolean }>(
+  "approval"
 );
-```
 
-Events may arrive before a machine starts waiting. StateMachine queues them and
-consumes a matching event atomically with the next checkpoint. A repeated
-`eventId` cannot feed a later wait.
+type ApprovalState =
+  | { phase: "request"; command: string }
+  | {
+      phase: "wait";
+      command: string;
+      gate: MachineGateRef<{ approved: boolean }>;
+    };
 
-Add `timeoutAt` to a wait to schedule a durable deadline:
+const approval = defineMachine<ApprovalState, boolean, { command: string }>({
+  version: 1,
+  initial: ({ command }) => ({ phase: "request", command }),
+  phases: {
+    request: (state, context) => {
+      const gate = context.gates.create(
+        Approval,
+        { command: state.command },
+        {
+          metadata: { source: "tool" },
+          expiresAt: Date.now() + 10 * 60 * 1000
+        }
+      );
 
-```ts
-return context.wait(state, {
-  type: "input",
-  key: state.key,
-  timeoutAt: Date.now() + 60_000
+      return context.transition({
+        phase: "wait",
+        command: state.command,
+        gate
+      });
+    },
+    wait: (state, context) => {
+      if (context.wake.kind === "timeout") {
+        return context.complete(false);
+      }
+
+      const decision = context.gates.take(state.gate);
+      if (!decision) {
+        return context.wait(state, {
+          type: "state-machine:gate-answer",
+          key: state.gate.id,
+          timeoutAt: Date.now() + 10 * 60 * 1000
+        });
+      }
+
+      return context.complete(
+        decision.status === "answered" && decision.answer.approved
+      );
+    }
+  }
 });
 ```
-
-On re-entry, `context.wake.kind` distinguishes an event wake from a timeout.
-
-## Permission gates
-
-A gate is a typed, correlated question built on the event queue:
-
-```ts
-import { defineGate } from "agents/state-machine";
-
-const Permission = defineGate<
-  { tool: string; command: string },
-  { approved: boolean }
->("permission");
-
-const gate = context.gates.create(
-  Permission,
-  { tool: "exec", command: "pnpm test" },
-  {
-    metadata: { tool: "exec" },
-    expiresAt: Date.now() + 10 * 60_000
-  }
-);
-```
-
-Store `gate.id` in the next checkpoint. An external request answers it by ID:
 
 ```ts
 await machines.gates.notify(
   gateId,
-  Permission,
+  Approval,
   { approved: true },
-  { eventId: `decision:${gateId}` }
+  { eventId: `approval:${gateId}:yes` }
 );
+
+await machines.gates.withdraw(gateId);
 ```
 
-Authentication and authorization remain the host application's responsibility.
+## Run an external effect
 
-## External effects
-
-External effects separate durable intent from invocation. Register runtimes on
-the capability and choose a recovery policy when planning an effect:
-
-- `safe`: invoke again with the same idempotency key;
-- `never`: do not repeat an uncertain invocation;
-- `reconcile`: inspect work through its persisted external ID.
+Plan external work in one phase and execute it in the next. The recovery policy controls what happens when execution is interrupted.
 
 ```ts
-const machines = new StateMachine({
-  definitions,
-  effects: {
-    command: {
-      execute: (input, invocation) =>
-        sandbox.exec(input.command, {
-          id: invocation.externalId,
-          signal: invocation.signal
-        }),
-      reconcile: (externalId) => sandbox.inspect(externalId)
+import {
+  StateMachine,
+  defineMachine,
+  effectPending,
+  type MachineEffectRef,
+  type MachineEffectRuntime
+} from "agents/state-machine";
+
+const commandEffect: MachineEffectRuntime<
+  { command: string },
+  { stdout: string }
+> = {
+  async execute(input, invocation) {
+    const job = await sandbox.start(input.command, {
+      idempotencyKey: invocation.idempotencyKey,
+      signal: invocation.signal
+    });
+
+    return effectPending(job.id);
+  },
+
+  async reconcile(externalId) {
+    const job = await sandbox.get(externalId);
+
+    if (!job) return { status: "not-found" };
+    if (job.status === "running") return { status: "running" };
+    if (job.status === "failed") {
+      return {
+        status: "failed",
+        error: { name: "CommandError", message: job.error }
+      };
+    }
+
+    return {
+      status: "completed",
+      output: { stdout: job.stdout }
+    };
+  },
+
+  async cancel(externalId) {
+    await sandbox.cancel(externalId);
+  }
+};
+
+type CommandState =
+  | { phase: "plan"; command: string }
+  | {
+      phase: "execute";
+      effect: MachineEffectRef<{ stdout: string }>;
+    };
+
+const command = defineMachine<
+  CommandState,
+  { stdout: string },
+  { command: string }
+>({
+  version: 1,
+  initial: ({ command }) => ({ phase: "plan", command }),
+  phases: {
+    plan: (state, context) => {
+      const effect = context.effects.plan<
+        { command: string },
+        { stdout: string }
+      >("command", { command: state.command }, { recovery: "reconcile" });
+
+      return context.transition({ phase: "execute", effect });
+    },
+    execute: async (state, context) => {
+      const outcome = await context.effects.execute(state.effect);
+
+      if (outcome.status === "completed") {
+        return context.complete(outcome.output);
+      }
+      if (outcome.status === "failed") {
+        return context.fail(new Error(outcome.error.message));
+      }
+      if (outcome.status === "retrying") {
+        return context.wait(state, {
+          type: "effect.retry",
+          key: state.effect.id,
+          timeoutAt: outcome.retryAt
+        });
+      }
+      if (outcome.status === "interrupted") {
+        return context.fail(new Error("Command interrupted"));
+      }
+
+      return context.wait(state, {
+        type: "effect.poll",
+        timeoutAt: Date.now() + 5_000
+      });
     }
   }
 });
+
+const machines = new StateMachine({
+  definitions: { command },
+  effects: { command: commandEffect }
+});
 ```
 
-Plan an effect in one phase, commit its reference in state, then execute it from
-the next phase. This makes a crash before intent distinct from an uncertain
-external outcome.
-
-Use `effects.run()` when one phase should commit the effect row and execute it
-without an intermediate state transition:
+Use `context.effects.run()` to commit and execute an effect without an
+intermediate transition. It accepts `timeoutMs` and a durable retry policy:
 
 ```ts
 const outcome = await context.effects.run(
   "command",
-  { command: "pnpm test" },
+  { command: state.command },
   {
     recovery: "safe",
     timeoutMs: 30_000,
-    retries: {
-      limit: 3,
-      delay: 1_000,
-      backoff: "exponential"
-    }
+    retries: { limit: 3, delay: 1_000, backoff: "exponential" }
   }
 );
 
 if (outcome.status === "retrying") {
   return context.wait(state, {
-    type: "effect-retry",
+    type: "effect.retry",
     key: context.runId,
     timeoutAt: outcome.retryAt
   });
 }
 ```
 
-`limit` counts the first attempt. Retry delays are durable: the run enters the
-`waiting` state and the Durable Object can leave memory until `retryAt`.
-Constant, linear, and exponential backoff are available.
-
-Calls to `effects.run()`, `effects.plan()`, and `gates.create()` have a stable
-identity while the same phase visit re-enters. Keep builder call order and
-arguments stable until the phase transitions. A later transition back to the
-phase creates new operations.
-
-The engine applies `timeoutMs` to execution and reconciliation. It fails the
-attempt at the deadline even when a runtime does not handle its abort signal.
-A runtime can still use the signal to stop its own work promptly.
+Retry `limit` includes the first attempt. A retrying run waits durably until
+`retryAt`, so it does not keep the Durable Object in memory. Keep calls and
+arguments to `effects.run()`, `effects.plan()`, `gates.create()`, and
+`children.spawn()` in a stable order while the same phase visit re-enters. A
+later transition back to the phase creates new operations.
 
 After an effect with `recovery: "never"` starts, the engine does not invoke it
-again. This includes runtime errors, timeouts, process failures, and a conflict
-while committing the phase decision.
+again after an error, timeout, process failure, or transition conflict.
 
-## Cancellation and pause
+## Join a child
+
+A child is a built-in reconcile effect. `spawn()` commits its intent, `join()` starts or inspects it, and a durable completion event wakes the parent. Attached children follow parent cancellation.
 
 ```ts
-await machines.cancel(runId, "user requested");
-await machines.pause(runId);
-await machines.resume(runId);
-await machines.terminate(runId, "administrative stop");
+type ParentState =
+  | { phase: "spawn"; topic: string }
+  | {
+      phase: "join";
+      child: {
+        runId: string;
+        definition: string;
+        mode: "attached" | "background";
+        effect: {
+          id: string;
+          kind: string;
+          recovery: "reconcile";
+        };
+      };
+    };
+
+const parent = defineMachine<ParentState, string, { topic: string }>({
+  version: 1,
+  initial: ({ topic }) => ({ phase: "spawn", topic }),
+  phases: {
+    spawn: (state, context) => {
+      const child = context.children.spawn<string>(
+        "research",
+        { topic: state.topic },
+        { mode: "attached" }
+      );
+
+      return context.transition({ phase: "join", child });
+    },
+    join: async (state, context) => {
+      const result = await context.children.join(state.child);
+
+      if (!result) {
+        return context.wait(state, {
+          type: "state-machine:child-completed",
+          key: state.child.runId,
+          timeoutAt: Date.now() + 30_000
+        });
+      }
+
+      return result.ok
+        ? context.complete(result.output)
+        : context.fail(new Error(result.error.message));
+    }
+  }
+});
 ```
 
-A definition may provide `onCancel` to return a final or stable next state. A
-definition without `onCancel` settles as cancelled. Pause removes the run's job
-without changing its checkpoint.
+Use `mode: "background"` to exclude the child from parent cancellation. The completion event is the normal wake path; the timeout reconciles the child if event delivery is delayed.
+
+## Pause, resume, terminate, and delete
+
+Pause keeps the checkpoint. Terminate settles immediately. Delete removes a terminal run.
+
+```ts
+await machines.pause(runId);
+await machines.resume(runId);
+
+await machines.terminate(runId, "operator stopped run");
+await machines.delete(runId); // Terminal runs only
+```
+
+## Settle a stream with a decision
+
+A commit participant updates another Lifecycle capability in the same transaction as the machine decision.
+
+```ts
+import { settleStreamOnMachineCommit } from "agents/state-machine";
+
+return context.complete(result, {
+  commit: [settleStreamOnMachineCommit(streams, streamId)]
+});
+```

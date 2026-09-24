@@ -12,7 +12,8 @@ describe("StateMachine effects", () => {
     ).resolves.toMatchObject({ result: "effect:fresh" });
     expect(await stub.effectActivity()).toEqual({
       runs: ["fresh"],
-      reconciles: []
+      reconciles: [],
+      reconcileInputs: []
     });
   });
 
@@ -25,7 +26,8 @@ describe("StateMachine effects", () => {
     });
     expect(await stub.effectActivity()).toEqual({
       runs: ["safe"],
-      reconciles: []
+      reconciles: [],
+      reconcileInputs: []
     });
   });
 
@@ -36,7 +38,11 @@ describe("StateMachine effects", () => {
     await expect(waitFor(stub, runId, ["completed"])).resolves.toMatchObject({
       result: "interrupted"
     });
-    expect(await stub.effectActivity()).toEqual({ runs: [], reconciles: [] });
+    expect(await stub.effectActivity()).toEqual({
+      runs: [],
+      reconciles: [],
+      reconcileInputs: []
+    });
   });
 
   it("aborts an admitted effect when durable cancellation wins", async () => {
@@ -72,7 +78,9 @@ describe("StateMachine effects", () => {
     });
     expect(await stub.effectActivity()).toEqual({
       runs: [],
-      reconciles: ["done:remote"]
+      reconciles: ["done:remote"],
+      // Recovery sees the planned input, not only the external id.
+      reconcileInputs: ["ignored"]
     });
   });
 });
@@ -153,7 +161,11 @@ describe("StateMachine effects.run() recovery", () => {
       result: "effect:completed-safe|attempt=1"
     });
     expect(await stub.effectRowsFor(runId)).toHaveLength(1);
-    expect(await stub.effectActivity()).toEqual({ runs: [], reconciles: [] });
+    expect(await stub.effectActivity()).toEqual({
+      runs: [],
+      reconciles: [],
+      reconcileInputs: []
+    });
   });
 
   it("does not re-execute a never effect that was running at recovery", async () => {
@@ -166,7 +178,11 @@ describe("StateMachine effects.run() recovery", () => {
     expect(await stub.effectRowsFor(runId)).toMatchObject([
       { status: "interrupted", attempt: 1 }
     ]);
-    expect(await stub.effectActivity()).toEqual({ runs: [], reconciles: [] });
+    expect(await stub.effectActivity()).toEqual({
+      runs: [],
+      reconciles: [],
+      reconcileInputs: []
+    });
   });
 
   it("reuses the completed effect after a phase decision conflict", async () => {

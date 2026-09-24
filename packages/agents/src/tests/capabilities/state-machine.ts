@@ -7,6 +7,7 @@ import {
   defineGate,
   defineMachine,
   settleStreamOnMachineCommit,
+  type MachineChildMode,
   type MachineDefinition,
   type MachineJson
 } from "../../state-machine";
@@ -48,7 +49,11 @@ type HarnessDefinitionName =
   | "participant"
   | "streamSettlement"
   | "streamSettlementFailure"
-  | "participantFailure";
+  | "participantFailure"
+  | "child"
+  | "otherChild"
+  | "parent"
+  | "fanout";
 
 const Permission = defineGate<{ tool: string }, { approved: boolean }>(
   "permission"
@@ -86,6 +91,12 @@ type HarnessSnapshot =
         expiresAt: number;
       }>;
       effects?: Array<{ effectId: string; kind: string; status: string }>;
+      children?: Array<{
+        runId: string;
+        definition: string;
+        mode: string;
+        status: string;
+      }>;
       result?: never;
       error?: never;
     }
@@ -98,6 +109,7 @@ type HarnessSnapshot =
       wait?: never;
       gates?: never;
       effects?: never;
+      children?: never;
     }
   | {
       status: "failed" | "cancelled";
@@ -108,6 +120,29 @@ type HarnessSnapshot =
       wait?: never;
       gates?: never;
       effects?: never;
+      children?: never;
+    };
+
+type ParentState =
+  | {
+      phase: "spawn";
+      value: string;
+      mode: MachineChildMode;
+      childRunId?: string;
+      childDefinition: "child" | "otherChild";
+    }
+  | {
+      phase: "join";
+      child: {
+        runId: string;
+        definition: string;
+        mode: MachineChildMode;
+        effect: {
+          id: string;
+          kind: string;
+          recovery: "safe" | "never" | "reconcile";
+        };
+      };
     };
 
 class SyncJobProbe extends LifecycleCapability {
@@ -157,6 +192,7 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly #streams = new Streams();
   readonly #effectRuns: string[] = [];
   readonly #effectReconciles: string[] = [];
+  readonly #reconcileInputs: (string | null)[] = [];
   readonly #effectRuntimes = {
     conflict: {
       execute: async (
@@ -224,8 +260,16 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
         this.#effectRuns.push(value);
         return `effect:${value}`;
       },
-      reconcile: async (externalId: string) => {
+      reconcile: async (
+        externalId: string,
+        invocation: import("../../state-machine").MachineEffectInvocation
+      ) => {
         this.#effectReconciles.push(externalId);
+        // Recovery must see the input the effect was planned with, not just
+        // the external id it was keyed by.
+        this.#reconcileInputs.push(
+          (invocation.input as { value?: string }).value ?? null
+        );
         return externalId.startsWith("done:")
           ? ({
               status: "completed" as const,
@@ -560,6 +604,104 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
         }
       }
     }),
+    child: defineMachine<
+      { phase: "complete"; value: string },
+      string,
+      { value: string }
+    >({
+      version: 1,
+      initial: (input) => ({ phase: "complete", value: input.value }),
+      phases: {
+        complete: async (state, context) => {
+          if (state.value === "fail") {
+            return context.fail(new Error("child failed"));
+          }
+          if (state.value === "wait") {
+            return context.wait(state, { type: "release" });
+          }
+          if (state.value === "slow") {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+          return context.complete(`child:${state.value}`);
+        }
+      }
+    }),
+    otherChild: defineMachine<
+      { phase: "complete"; value: string },
+      string,
+      { value: string }
+    >({
+      version: 1,
+      initial: (input) => ({ phase: "complete", value: input.value }),
+      phases: {
+        complete: (state, context) => context.complete(`other:${state.value}`)
+      }
+    }),
+    parent: defineMachine<
+      ParentState,
+      string,
+      {
+        value: string;
+        mode: "attached" | "background";
+        childRunId?: string;
+        childDefinition: "child" | "otherChild";
+      }
+    >({
+      version: 1,
+      initial: (input) => ({
+        phase: "spawn",
+        value: input.value,
+        mode: input.mode,
+        childRunId: input.childRunId,
+        childDefinition: input.childDefinition
+      }),
+      phases: {
+        spawn: (state, context) => {
+          const child = context.children.spawn<string>(
+            state.childDefinition,
+            { value: state.value },
+            {
+              mode: state.mode,
+              ...(state.childRunId ? { runId: state.childRunId } : {})
+            }
+          );
+          return context.transition({ phase: "join", child });
+        },
+        join: async (state, context) => {
+          const result = await context.children.join<string>(state.child);
+          if (result) {
+            return result.ok
+              ? context.complete(result.output)
+              : context.fail(new Error(result.error.message));
+          }
+          return context.wait(state, {
+            type: "state-machine:child-completed",
+            key: state.child.runId,
+            timeoutAt: Date.now() + 50
+          });
+        }
+      }
+    }),
+    fanout: defineMachine<
+      { phase: "spawn"; count: number },
+      number,
+      { count: number }
+    >({
+      version: 1,
+      initial: ({ count }) => ({ phase: "spawn", count }),
+      phases: {
+        spawn: (state, context) => {
+          for (let index = 0; index < state.count; index++) {
+            context.children.spawn(
+              "child",
+              { value: `child-${index}` },
+              { runId: `${context.runId}:child-${index}` }
+            );
+          }
+          return context.complete(state.count);
+        }
+      }
+    }),
     participant: defineMachine<CommitState, string, { value: string }>({
       version: 1,
       initial: (input) => ({ phase: "write", value: input.value }),
@@ -669,6 +811,66 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
 
   start(label: string, runId?: string) {
     return this.#stateMachine.run("pipeline", { label }, { runId });
+  }
+
+  /**
+   * Drive a run whose stored `definition_version` no longer matches the
+   * registered definition.
+   *
+   * Rewriting the column is the only way to reach this from a test: the
+   * engine writes the registered version on insert, so a mismatch means the
+   * code changed under a run that was already durable. The run must survive
+   * as `paused` with its checkpoint intact, and `resume()` must pick it up
+   * once the versions agree again.
+   */
+  async bumpStoredDefinitionVersion(
+    runId: string,
+    delta: number
+  ): Promise<void> {
+    await this.#stateMachine.run("pipeline", { label: "mismatch" }, { runId });
+    this.ctx.storage.sql.exec(
+      `UPDATE cf_agents_state_machine_runs
+       SET definition_version = definition_version + ? WHERE run_id = ?`,
+      delta,
+      runId
+    );
+  }
+
+  async readVersionMismatch(runId: string): Promise<{
+    status: string;
+    checkpoint: unknown;
+    error: { name: string; message: string } | null;
+  }> {
+    const row = this.ctx.storage.sql
+      .exec<{
+        status: string;
+        checkpoint_json: string | null;
+        error_name: string | null;
+        error_message: string | null;
+      }>(
+        `SELECT status, checkpoint_json, error_name, error_message
+         FROM cf_agents_state_machine_runs WHERE run_id = ?`,
+        runId
+      )
+      .one();
+    return {
+      status: row.status,
+      checkpoint: JSON.parse(row.checkpoint_json ?? "null"),
+      error:
+        row.error_name === null
+          ? null
+          : { name: row.error_name, message: row.error_message ?? "" }
+    };
+  }
+
+  /** Restore agreement, as a corrective redeploy would, then resume. */
+  async healVersionMismatch(runId: string): Promise<boolean> {
+    this.ctx.storage.sql.exec(
+      `UPDATE cf_agents_state_machine_runs
+       SET definition_version = definition_version - 1 WHERE run_id = ?`,
+      runId
+    );
+    return this.#stateMachine.resume(runId);
   }
 
   async stageProbeJob(value: string, rollback = false) {
@@ -1005,7 +1207,8 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
   effectActivity() {
     return {
       runs: [...this.#effectRuns],
-      reconciles: [...this.#effectReconciles]
+      reconciles: [...this.#effectReconciles],
+      reconcileInputs: [...this.#reconcileInputs]
     };
   }
 
@@ -1056,8 +1259,76 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
     return runId;
   }
 
+  startParent(
+    value: string,
+    mode: "attached" | "background" = "attached",
+    childRunId?: string,
+    childDefinition: "child" | "otherChild" = "child"
+  ) {
+    return this.#stateMachine.run("parent", {
+      value,
+      mode,
+      childDefinition,
+      ...(childRunId ? { childRunId } : {})
+    });
+  }
+
+  cancelChild(runId: string) {
+    return this.#stateMachine.cancel(runId, "test cancelled child");
+  }
+
+  startFanout(count: number) {
+    return this.#stateMachine.run("fanout", { count });
+  }
+
+  suppressChildCompletion(parentRunId: string, childRunId: string): void {
+    this.ctx.storage.sql.exec(
+      `DELETE FROM cf_agents_state_machine_children
+       WHERE parent_run_id = ? AND child_run_id = ?`,
+      parentRunId,
+      childRunId
+    );
+  }
+
   cancelRun(runId: string, reason?: string) {
     return this.#stateMachine.cancel(runId, reason);
+  }
+
+  dispatchStale(runId: string) {
+    return this.#stateMachine.onJob({
+      attempt: 1,
+      job: {
+        id: `state-machine:${runId}`,
+        capability: "state-machine",
+        fn: "drive",
+        time: Date.now(),
+        payload: { runId, revision: 0 },
+        retry: undefined,
+        singleflight: true,
+        exclusive: false,
+        recoveryLoop: false,
+        createdAt: Date.now()
+      }
+    });
+  }
+
+  async snapshot(runId: string): Promise<HarnessSnapshot | null> {
+    return (await this.#stateMachine.get(
+      runId,
+      "pipeline"
+    )) as unknown as HarnessSnapshot | null;
+  }
+
+  pauseRun(runId: string) {
+    return this.#stateMachine.pause(runId);
+  }
+
+  resumeRun(runId: string) {
+    return this.#stateMachine.resume(runId);
+  }
+
+  deleteRun(runId: string) {
+    return this.#stateMachine.delete(runId);
   }
 
   async migrateVersionOneRun(): Promise<{
@@ -1176,41 +1447,120 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
     return { columns, attempt, supportsRetrying };
   }
 
-  dispatchStale(runId: string) {
-    return this.#stateMachine.onJob({
-      attempt: 1,
-      job: {
-        id: `state-machine:${runId}`,
-        capability: "state-machine",
-        fn: "drive",
-        time: Date.now(),
-        payload: { runId, revision: 0 },
-        retry: undefined,
-        singleflight: true,
-        exclusive: false,
-        recoveryLoop: false,
-        createdAt: Date.now()
-      }
-    });
+  /**
+   * Seed a v4 effects table holding two rows that claim one external id, then
+   * migrate. The unique index cannot be built over the duplicate, so the
+   * migration has to resolve it; the newest claimant keeps the id.
+   */
+  async migrateDuplicateExternalIds(): Promise<{
+    indexed: boolean;
+    kept: string[];
+    cleared: string[];
+    rejectsDuplicates: boolean;
+  }> {
+    await this.#stateMachine.get("initialize-schema-v4");
+    await this.ctx.storage.put("cf_agents_state_machine_schema_version", 4);
+    // Rebuild the effect table as version four had it: same columns, but no
+    // unique index over `external_id`. Dropping the index alone is not enough,
+    // because `ensureCoordinationTables()` recreates it from the current DDL
+    // on the way through the migration.
+    this.ctx.storage.sql.exec(
+      "DROP TABLE IF EXISTS cf_agents_state_machine_effects"
+    );
+    this.ctx.storage.sql.exec(`CREATE TABLE cf_agents_state_machine_effects (
+      run_id TEXT NOT NULL,
+      effect_id TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      recovery TEXT NOT NULL CHECK (recovery IN ('safe', 'never', 'reconcile')),
+      status TEXT NOT NULL CHECK (status IN (
+        'pending', 'running', 'retrying', 'completed', 'failed', 'interrupted'
+      )),
+      input_json TEXT NOT NULL,
+      external_id TEXT,
+      result_json TEXT,
+      error_name TEXT,
+      error_message TEXT,
+      attempt INTEGER NOT NULL DEFAULT 1,
+      retry_at INTEGER,
+      options_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      settled_at INTEGER,
+      PRIMARY KEY (run_id, effect_id)
+    ) WITHOUT ROWID`);
+    const now = Date.now();
+    for (const [effectId, createdAt] of [
+      ["effect_old", now - 1000],
+      ["effect_new", now]
+    ] as const) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO cf_agents_state_machine_effects
+         (run_id, effect_id, revision, kind, recovery, status, input_json,
+          external_id, attempt, options_json, created_at)
+         VALUES ('dup-run', ?, 1, 'echo', 'reconcile', 'completed', '{}',
+                 'shared-external-id', 1, '{}', ?)`,
+        effectId,
+        createdAt
+      );
+    }
+    await this.#stateMachine.onStart();
+
+    const indexed =
+      this.ctx.storage.sql
+        .exec<{ name: string }>(
+          `SELECT name FROM sqlite_master WHERE type = 'index'
+           AND name = 'cf_agents_state_machine_effect_external_id'`
+        )
+        .toArray().length === 1;
+    const rows = this.ctx.storage.sql
+      .exec<{ effect_id: string; external_id: string | null }>(
+        `SELECT effect_id, external_id FROM cf_agents_state_machine_effects
+         WHERE run_id = 'dup-run' ORDER BY effect_id`
+      )
+      .toArray();
+    let rejectsDuplicates = false;
+    try {
+      this.ctx.storage.sql.exec(
+        `UPDATE cf_agents_state_machine_effects SET external_id = 'shared-external-id'
+         WHERE run_id = 'dup-run' AND effect_id = 'effect_old'`
+      );
+    } catch {
+      rejectsDuplicates = true;
+    }
+    return {
+      indexed,
+      kept: rows
+        .filter((row) => row.external_id !== null)
+        .map((row) => row.effect_id),
+      cleared: rows
+        .filter((row) => row.external_id === null)
+        .map((row) => row.effect_id),
+      rejectsDuplicates
+    };
   }
 
-  pauseRun(runId: string) {
-    return this.#stateMachine.pause(runId);
-  }
-
-  resumeRun(runId: string) {
-    return this.#stateMachine.resume(runId);
-  }
-
-  deleteRun(runId: string) {
-    return this.#stateMachine.delete(runId);
-  }
-
-  async snapshot(runId: string): Promise<HarnessSnapshot | null> {
-    return (await this.#stateMachine.get(
-      runId,
-      "pipeline"
-    )) as unknown as HarnessSnapshot | null;
+  async remigrateChildren(): Promise<{ rowCount: number; version?: number }> {
+    await this.#stateMachine.get("initialize-schema");
+    const now = Date.now();
+    this.ctx.storage.sql.exec(
+      `INSERT INTO cf_agents_state_machine_children
+        (parent_run_id, child_run_id, child_definition, mode, status,
+         completion_event_id, created_at, settled_at)
+       VALUES ('parent_b', 'child_keep', 'child', 'attached', 'running',
+               'child_child_keep', ?, NULL)`,
+      now
+    );
+    await this.#stateMachine.onStart();
+    await this.#stateMachine.onStart();
+    const rowCount = this.ctx.storage.sql
+      .exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM cf_agents_state_machine_children"
+      )
+      .one().count;
+    const version = await this.ctx.storage.get<number>(
+      "cf_agents_state_machine_schema_version"
+    );
+    return { rowCount, version };
   }
 
   async runSnapshot(runId: string): Promise<HarnessSnapshot | null> {
