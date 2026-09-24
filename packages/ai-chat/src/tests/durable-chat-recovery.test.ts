@@ -195,6 +195,10 @@ interface ChatRecoveryTestStub {
     timeoutMs?: number;
     hangTurns?: number;
   }): Promise<"completed" | "error" | "aborted" | "skipped">;
+  driveFailingReaderTurnForTest(
+    message: string,
+    turns?: number
+  ): Promise<"completed" | "error" | "aborted" | "skipped">;
 }
 
 async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
@@ -2678,5 +2682,59 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
     expect(
       await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
     ).toBe(0);
+  });
+});
+
+describe("platform-transient reader errors (#1964)", () => {
+  it("routes a dropped connection mid-stream into bounded recovery", async () => {
+    const agentStub = await getTestAgent(
+      `transient-reader-${crypto.randomUUID()}`
+    );
+
+    expect(
+      await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
+    ).toBe("aborted");
+
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        recoveryKind: string;
+      }>;
+    expect(incidents.length).toBeGreaterThanOrEqual(1);
+    expect(incidents[0].recoveryKind).toBe("continue");
+
+    type Stored = Array<{
+      role: string;
+      parts: Array<{ type: string; text?: string }>;
+    }>;
+    const assistantText = async () =>
+      ((await agentStub.getPersistedMessages()) as Stored)
+        .filter((m) => m.role === "assistant")
+        .flatMap((m) => m.parts)
+        .map((p) => p.text ?? "")
+        .join("");
+    await expect
+      .poll(assistantText, { timeout: 5000 })
+      .toContain("Continued response.");
+    expect(await assistantText()).toContain("partial before failure");
+  });
+
+  it("keeps an application error terminal", async () => {
+    const agentStub = await getTestAgent(
+      `app-reader-error-${crypto.randomUUID()}`
+    );
+    expect(await agentStub.driveFailingReaderTurnForTest("boom")).toBe("error");
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toHaveLength(0);
+  });
+
+  it("leaves a deploy reset to the restart's recovery", async () => {
+    const agentStub = await getTestAgent(
+      `deploy-reader-error-${crypto.randomUUID()}`
+    );
+    expect(
+      await agentStub.driveFailingReaderTurnForTest(
+        "Durable Object reset because its code was updated."
+      )
+    ).toBe("error");
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toHaveLength(0);
   });
 });

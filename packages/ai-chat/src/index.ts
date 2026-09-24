@@ -7,7 +7,10 @@ import type {
 } from "ai";
 import {
   Agent,
+  isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
+  isDurableObjectStorageReset,
+  isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
   __DO_NOT_USE_WILL_BREAK__withInvocationScope as withInvocationScope,
   type AgentToolLifecycleResult,
@@ -258,6 +261,19 @@ const PROVIDER_TOOL_OPAQUE_STRING_KEY_PREFIX = "encrypted";
  * limit are truncated with a marker so persisted messages stay small.
  */
 const PROVIDER_TOOL_MAX_STRING_LENGTH = 500;
+
+/**
+ * Whether a response-reader error is a platform transient that bounded chat
+ * recovery can retry. A deploy or storage reset is excluded: the isolate is
+ * going away, and the restart's own recovery owns the turn.
+ */
+function isRecoverableStreamReadError(error: unknown): boolean {
+  return (
+    isPlatformTransientError(error) &&
+    !isDurableObjectCodeUpdateReset(error) &&
+    !isDurableObjectStorageReset(error)
+  );
+}
 
 /**
  * Validates that a parsed message has the minimum required structure.
@@ -7149,13 +7165,15 @@ export class AIChatAgent<
               );
             }
           } catch (error) {
-            // A stall watchdog abort (#1626) is a recoverable interruption, not a
+            // A stall watchdog abort (#1626) or a platform transient such as a
+            // dropped connection (#1964) is a recoverable interruption, not a
             // terminal error. Persist the settled partial (so the continuation
             // re-anchors without re-running completed tool calls, and the user
             // keeps generated content), then route into bounded recovery.
             if (
-              error instanceof ChatStreamStalledError &&
-              !streamCompleted.value
+              !streamCompleted.value &&
+              (error instanceof ChatStreamStalledError ||
+                (!abortSignal?.aborted && isRecoverableStreamReadError(error)))
             ) {
               // The partial generated so far lives on the in-memory `message`; the
               // unconditional post-stream persistence block below writes it under

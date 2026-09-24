@@ -118,6 +118,32 @@ function makeHangingSSEResponse() {
   });
 }
 
+/**
+ * An SSE response whose reader throws `errorMessage` after a partial, the way
+ * a dropped platform connection surfaces mid-stream (#1964).
+ */
+function makeFailingSSEResponse(errorMessage: string) {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async pull(controller) {
+      for (const chunk of [
+        { type: "start" },
+        { type: "text-start" },
+        { type: "text-delta", delta: "partial before failure" }
+      ]) {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      controller.error(new Error(errorMessage));
+    }
+  });
+  return new Response(stream, {
+    headers: { "Content-Type": "text/event-stream" }
+  });
+}
+
 export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
   CustomSanitizeAgent: DurableObjectNamespace<CustomSanitizeAgent>;
@@ -1976,6 +2002,13 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       return makeHangingSSEResponse();
     }
 
+    if (this._failingTurn) {
+      const { message, remaining } = this._failingTurn;
+      this._failingTurn =
+        remaining > 1 ? { message, remaining: remaining - 1 } : null;
+      return makeFailingSSEResponse(message);
+    }
+
     if (this._stashData !== null) {
       try {
         this.stash(this._stashData);
@@ -2772,6 +2805,27 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }): Promise<SaveMessagesResult["status"]> {
     this.chatStreamStallTimeoutMs = options?.timeoutMs ?? 50;
     this._hangTurnsRemaining = options?.hangTurns ?? 1;
+    const result = await this.saveMessages([
+      {
+        id: `u-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text: "tell me a long story" }]
+      }
+    ]);
+    return result.status;
+  }
+
+  private _failingTurn: { message: string; remaining: number } | null = null;
+
+  /**
+   * Drive a turn whose response reader throws `message` after a partial.
+   * `turns` controls how many attempts fail before the normal response.
+   */
+  async driveFailingReaderTurnForTest(
+    message: string,
+    turns = 1
+  ): Promise<SaveMessagesResult["status"]> {
+    this._failingTurn = { message, remaining: turns };
     const result = await this.saveMessages([
       {
         id: `u-${crypto.randomUUID()}`,
