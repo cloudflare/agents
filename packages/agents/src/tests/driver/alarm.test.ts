@@ -1,7 +1,6 @@
 import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { DriverHarnessObject } from "../capabilities/driver";
 
 describe("HarnessDriver alarm", () => {
   it("drives a submitted operation to native settlement", async () => {
