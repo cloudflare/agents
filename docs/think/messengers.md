@@ -223,6 +223,15 @@ restart happens before streaming starts, Think can replay the answer. If a
 restart happens after streaming starts, Think posts the configured interruption
 message instead of risking a duplicate partial answer.
 
+A reply can also be interrupted without a restart, for example by the stream
+stall watchdog or by a model error that `classifyChatError` marks as
+`"transient"` or `"rate_limit"`. Think then continues the turn through chat
+recovery and posts the rest of the answer to the thread as a new message once
+the continuation finishes. This works whether the conversation target is the
+root agent or a per-thread sub-agent. If recovery gives up, Think posts the
+configured interruption message instead. A reset after recovery finishes but
+before the post lands can post the recovered text twice.
+
 Delivery errors use a generic user-facing message by default so internal
 exception details are not posted into external chats. Override
 `delivery.errorResponseText` when you want a custom safe message.

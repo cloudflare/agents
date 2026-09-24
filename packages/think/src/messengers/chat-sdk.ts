@@ -40,6 +40,8 @@ import {
 } from "./events";
 import {
   deliverMessengerReply,
+  EMPTY_MESSENGER_RESPONSE,
+  INTERRUPTED_MESSENGER_RESPONSE,
   MESSENGER_REPLY_FIBER_NAME,
   messengerReplyRecoveryMode,
   messengerReplySnapshot,
@@ -343,7 +345,7 @@ export class ThinkMessengerRuntime {
     if (mode === "apologize") {
       await thread.post(
         definition.delivery?.interruptedResponseText ??
-          "Sorry, my reply was interrupted. Please send your message again if you'd like me to retry."
+          INTERRUPTED_MESSENGER_RESPONSE
       );
       if (!options?.persistRecoverySnapshot) {
         await this.host.resolveFiber(ctx.id, { status: "completed" });
@@ -578,6 +580,49 @@ export class ThinkMessengerRuntime {
     return chat.thread(threadId) satisfies MessengerDeliverySurface;
   }
 
+  /**
+   * Post what chat recovery produced for an interrupted messenger turn: the
+   * text the thread has not seen yet, or the interrupted apology when
+   * recovery gave up.
+   */
+  async deliverRecoveredReply(input: {
+    messengerId: string;
+    threadId: string;
+    outcome: "completed" | "interrupted";
+    text?: string;
+    partialPosted?: boolean;
+  }): Promise<void> {
+    const definition = this.definitionsById.get(input.messengerId);
+    const surface = await this.resolveDeliverySurface(
+      input.messengerId,
+      input.threadId
+    );
+    if (!definition || !surface) {
+      throw new Error(
+        `No messenger delivery surface for ${input.messengerId} thread ${input.threadId}`
+      );
+    }
+    if (input.outcome === "interrupted") {
+      await surface.post(
+        definition.delivery?.interruptedResponseText ??
+          INTERRUPTED_MESSENGER_RESPONSE
+      );
+      return;
+    }
+    const text = input.text?.trim() ? input.text : "";
+    if (!text) {
+      if (!input.partialPosted) {
+        await surface.post(
+          definition.delivery?.emptyResponseText ?? EMPTY_MESSENGER_RESPONSE
+        );
+      }
+      return;
+    }
+    for (const chunk of definition.delivery?.splitText?.(text) ?? [text]) {
+      await surface.post({ markdown: chunk });
+    }
+  }
+
   private async resolveTarget(
     definition: NormalizedMessengerDefinition,
     event: MessengerEvent
@@ -602,10 +647,18 @@ export class ThinkMessengerRuntime {
       (this.host.constructor as unknown as SubAgentClass<
         Agent & MessengerThinkTarget
       >);
-    return (await this.host.subAgent(
+    const stub = (await this.host.subAgent(
       agentClass,
       target.name
-    )) as unknown as MessengerDeliveryTarget;
+    )) as unknown as Required<MessengerThinkTarget>;
+    // A live thread cannot cross the sub-agent RPC boundary, so the stub's
+    // `bindActiveDeliverySurface` must not be offered to delivery.
+    return {
+      cancelChat: (requestId, reason) => stub.cancelChat(requestId, reason),
+      chat: (userMessage, callback) => stub.chat(userMessage, callback),
+      chatWithMessengerContext: (userMessage, callback, context) =>
+        stub.chatWithMessengerContext(userMessage, callback, context)
+    };
   }
 
   private definitionForThread(

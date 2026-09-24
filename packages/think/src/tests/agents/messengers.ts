@@ -1,4 +1,4 @@
-import type { LanguageModel } from "ai";
+import type { LanguageModel, UIMessage } from "ai";
 import type { Adapter, ChatInstance } from "chat";
 import { Message, parseMarkdown } from "chat";
 import { Think } from "../../think";
@@ -85,11 +85,70 @@ function lastUserText(prompt: unknown): string {
  * the model was asked and what the adapter sent are recorded in agent SQL.
  * Thread ids starting with `fake:dm` are direct messages.
  */
+type RecoveryMode = "self" | "thread" | "exhaust" | "twice" | "empty" | "later";
+
 export class ThinkMessengerDeliveryTestAgent extends Think {
   private _chat: ChatInstance | undefined;
+  private _streamCalls = 0;
+  override chatRecovery = { maxAttempts: 2 };
+
+  /**
+   * #2106: an agent named `recover-<mode>-…` fails its first model stream
+   * mid-reply with an error classified as transient (`recover-exhaust-…`:
+   * every stream; `recover-twice-…`: the first recovery too;
+   * `recover-empty-…`: fails before any text, and recovery has none;
+   * `recover-later-…`: a newer assistant message lands as recovery
+   * completes), and
+   * `recover-thread-…` answers in a per-thread sub-agent, which inherits the
+   * mode from its parent's name.
+   */
+  private _recoveryMode(): RecoveryMode | undefined {
+    const name = this.parentPath.at(-1)?.name ?? this.name;
+    const mode = /^recover-(self|thread|exhaust|twice|empty|later)-/.exec(
+      name
+    )?.[1];
+    return mode as RecoveryMode | undefined;
+  }
+
+  protected override _emit(
+    type: Parameters<Think["_emit"]>[0],
+    payload?: Record<string, unknown>
+  ): void {
+    super._emit(type, payload);
+    if (
+      type === "chat:recovery:completed" &&
+      typeof payload?.incidentId === "string"
+    ) {
+      this._stagedAtCompletion = this.ctx.storage
+        .get<{ outcome?: string }>(
+          `cf_think_messenger_recovery:${payload.incidentId}`
+        )
+        .then((delivery) => delivery?.outcome ?? null);
+    }
+    if (
+      type === "chat:recovery:completed" &&
+      this._recoveryMode() === "later"
+    ) {
+      const internal = this as unknown as { _cachedMessages: UIMessage[] };
+      internal._cachedMessages = [
+        ...internal._cachedMessages,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          parts: [{ type: "text", text: "a later reply" }]
+        }
+      ];
+    }
+  }
+
+  override classifyChatError(): "transient" | undefined {
+    return this._recoveryMode() ? "transient" : undefined;
+  }
 
   override getModel(): LanguageModel {
     const record = (text: string) => this._record("prompt", text);
+    const mode = this._recoveryMode();
+    const nextCall = () => ++this._streamCalls;
     return {
       specificationVersion: "v3",
       provider: "test",
@@ -100,11 +159,41 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       },
       doStream(options: { prompt: unknown }) {
         record(lastUserText(options.prompt));
+        const call = nextCall();
+        const fails =
+          mode === "exhaust" ||
+          (mode !== undefined && call === 1) ||
+          (mode === "twice" && call === 2);
+        const failDelta =
+          mode === "empty" ? "" : call === 1 ? "Got " : "it was ";
+        const deltas =
+          mode === "empty"
+            ? []
+            : mode === "twice"
+              ? ["successful"]
+              : mode
+                ? ["it"]
+                : ["Got ", "it"];
         const stream = new ReadableStream({
           start(controller) {
             controller.enqueue({ type: "stream-start", warnings: [] });
             controller.enqueue({ type: "text-start", id: "t" });
-            for (const delta of ["Got ", "it"]) {
+            if (fails) {
+              if (failDelta) {
+                controller.enqueue({
+                  type: "text-delta",
+                  id: "t",
+                  delta: failDelta
+                });
+              }
+              controller.enqueue({
+                type: "error",
+                error: new Error("upstream connection reset")
+              });
+              controller.close();
+              return;
+            }
+            for (const delta of deltas) {
               controller.enqueue({ type: "text-delta", id: "t", delta });
             }
             controller.enqueue({ type: "text-end", id: "t" });
@@ -133,7 +222,7 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     return {
       fake: chatSdkMessenger({
         adapter: this._recordingAdapter(),
-        conversation: "self",
+        conversation: this._recoveryMode() === "thread" ? "thread" : "self",
         provider: "fake",
         userName: "fake_bot",
         verifyWebhook: false
@@ -147,6 +236,38 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       SELECT content FROM messenger_delivery_log
       WHERE kind = ${kind} ORDER BY seq ASC
     `.map((row) => row.content);
+  }
+
+  private _stagedAtCompletion: Promise<string | null> | undefined;
+
+  /** The messenger reply outcome stored when recovery emitted `completed`. */
+  async getStagedOutcomeAtCompletionForTest(): Promise<string | null> {
+    return (await this._stagedAtCompletion) ?? null;
+  }
+
+  /** A pending reply whose incident settled while nothing was delivering it. */
+  async replayOrphanedMessengerDeliveryForTest(options?: {
+    activeIncident?: boolean;
+  }): Promise<boolean> {
+    const incidentId = `${crypto.randomUUID()}:user-1`;
+    if (options?.activeIncident) {
+      await this.ctx.storage.put(
+        `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`,
+        { incidentId, status: "scheduled" }
+      );
+    }
+    const key = `cf_think_messenger_recovery:${incidentId}`;
+    await this.ctx.storage.put(key, {
+      messengerId: "fake",
+      threadId: "fake:dm-orphan",
+      partialText: ""
+    });
+    await (
+      this as unknown as {
+        _replayMessengerRecoveryDeliveries(): Promise<void>;
+      }
+    )._replayMessengerRecoveryDeliveries();
+    return (await this.ctx.storage.get(key)) === undefined;
   }
 
   async getAdapterCalls(): Promise<Array<{ kind: string; content: string }>> {

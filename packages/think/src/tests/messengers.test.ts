@@ -1161,6 +1161,128 @@ describe("think messengers core", () => {
     });
   });
 
+  describe("recovered replies reach the thread (#2106)", () => {
+    async function sendAndSettle(name: string, expectedLast: string) {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        name
+      );
+      const response = await agent.fetch(
+        "https://example.com/messengers/fake/webhook",
+        {
+          body: JSON.stringify({
+            id: "m1",
+            text: "hello",
+            threadId: "fake:dm-recover"
+          }),
+          method: "POST"
+        }
+      );
+      await expect(response.text()).resolves.toBe("ok");
+      const deadline = Date.now() + 10_000;
+      let posted: string[] = [];
+      while (Date.now() < deadline) {
+        posted = (await agent.getAdapterCalls()).map((call) => call.content);
+        if (posted.at(-1) === expectedLast) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return (await agent.getAdapterCalls()).map((call) => call.content);
+    }
+
+    it.each(["self", "thread"])(
+      "posts the recovered answer instead of the apology (conversation: %s)",
+      async (mode) => {
+        const posted = await sendAndSettle(
+          `recover-${mode}-${crypto.randomUUID()}`,
+          "it"
+        );
+
+        expect(posted).toEqual(["Got", "it"]);
+        expect(posted).not.toContain(INTERRUPTED_MESSENGER_RESPONSE);
+      }
+    );
+
+    it("posts every recovered attempt's text after a second interruption", async () => {
+      const posted = await sendAndSettle(
+        `recover-twice-${crypto.randomUUID()}`,
+        "it was successful"
+      );
+
+      expect(posted).toEqual(["Got", "it was successful"]);
+    }, 20_000);
+
+    it("posts the recovered reply, not a newer message, to the thread", async () => {
+      const posted = await sendAndSettle(
+        `recover-later-${crypto.randomUUID()}`,
+        "it"
+      );
+
+      expect(posted).toEqual(["Got", "it"]);
+    });
+
+    it("stores the reply outcome before recovery reports completion", async () => {
+      const name = `recover-self-${crypto.randomUUID()}`;
+      await sendAndSettle(name, "it");
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        name
+      );
+
+      expect(await agent.getStagedOutcomeAtCompletionForTest()).toBe(
+        "completed"
+      );
+    });
+
+    it("keeps a pending reply on start while its incident is still recovering", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `orphan-active-${crypto.randomUUID()}`
+      );
+
+      expect(
+        await agent.replayOrphanedMessengerDeliveryForTest({
+          activeIncident: true
+        })
+      ).toBe(false);
+      expect(await agent.getAdapterCalls()).toEqual([]);
+    });
+
+    it("apologizes on start for a pending reply whose incident is gone", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `orphan-${crypto.randomUUID()}`
+      );
+
+      expect(await agent.replayOrphanedMessengerDeliveryForTest()).toBe(true);
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content)
+      ).toEqual([INTERRUPTED_MESSENGER_RESPONSE]);
+    });
+
+    it("posts the empty-response text when recovery completes without text", async () => {
+      const posted = await sendAndSettle(
+        `recover-empty-${crypto.randomUUID()}`,
+        EMPTY_MESSENGER_RESPONSE
+      );
+
+      expect(posted.at(-1)).toBe(EMPTY_MESSENGER_RESPONSE);
+      expect(
+        posted.filter((text) => text === EMPTY_MESSENGER_RESPONSE)
+      ).toHaveLength(1);
+      expect(posted).not.toContain(INTERRUPTED_MESSENGER_RESPONSE);
+    });
+
+    it("posts the apology once when recovery is exhausted", async () => {
+      const posted = await sendAndSettle(
+        `recover-exhaust-${crypto.randomUUID()}`,
+        INTERRUPTED_MESSENGER_RESPONSE
+      );
+
+      expect(posted).toEqual(["Got", INTERRUPTED_MESSENGER_RESPONSE]);
+    });
+  });
+
   describe("burst replies end to end (#2312)", () => {
     type Webhook = import("./agents/messengers").FakeMessengerWebhook;
 
@@ -1366,6 +1488,119 @@ describe("think messengers core", () => {
     // The one-shot delivery is checkpointed completed (recovery owns the WS
     // answer; this surface won't receive it).
     expect(stages).toContain("completed");
+  });
+
+  it("skips the apology when the target delivers the recovered reply itself (#2106)", async () => {
+    const posts: string[] = [];
+    const stages: string[] = [];
+
+    await deliverMessengerReply({
+      event: baseEvent,
+      fiber: {
+        stash(snapshot: unknown) {
+          stages.push(
+            parseMessengerReplySnapshot(snapshot)?.stage ?? "unknown"
+          );
+        }
+      } as unknown as FiberContext,
+      surface: {
+        async post(message) {
+          if (isAsyncIterable(message)) {
+            posts.push(...(await collectText(message)));
+            return;
+          }
+          posts.push(typeof message === "string" ? message : message.markdown);
+        }
+      },
+      target: {
+        cancelChat() {
+          return Promise.resolve(false);
+        },
+        chat(_message, callback) {
+          callback.onStart({ requestId: "req-recovering" });
+          callback.onEvent(
+            JSON.stringify({ type: "text-delta", delta: "partial answer" })
+          );
+          callback.onInterrupted?.({ deliversRecoveredReply: true });
+          return Promise.resolve();
+        }
+      }
+    });
+
+    expect(posts).toEqual(["partial answer"]);
+    expect(stages.at(-1)).toBe("completed");
+  });
+
+  it("reposts the partial when the stream post rejected before the target delivers the rest (#2106)", async () => {
+    const posts: string[] = [];
+
+    await deliverMessengerReply({
+      event: baseEvent,
+      fiber: { stash() {} } as unknown as FiberContext,
+      policy: { splitText: (text) => (text ? [text] : []) },
+      surface: {
+        async post(message) {
+          if (isAsyncIterable(message)) {
+            await collectText(message);
+            throw new Error("provider rejected the stream");
+          }
+          posts.push(typeof message === "string" ? message : message.markdown);
+        }
+      },
+      target: {
+        cancelChat() {
+          return Promise.resolve(false);
+        },
+        chat(_message, callback) {
+          callback.onStart({ requestId: "req-recovering" });
+          callback.onEvent(
+            JSON.stringify({ type: "text-delta", delta: "partial answer" })
+          );
+          callback.onInterrupted?.({ deliversRecoveredReply: true });
+          return Promise.resolve();
+        }
+      }
+    });
+
+    expect(posts).toEqual(["partial answer"]);
+  });
+
+  it("posts text past the visible limit before the target delivers the rest (#2106)", async () => {
+    const posts: string[] = [];
+
+    await deliverMessengerReply({
+      event: baseEvent,
+      fiber: { stash() {} } as unknown as FiberContext,
+      policy: {
+        visibleSoftLimit: 7,
+        splitText: (text) => (text ? [text] : [])
+      },
+      surface: {
+        async post(message) {
+          if (isAsyncIterable(message)) {
+            posts.push((await collectText(message)).join(""));
+            return;
+          }
+          posts.push(typeof message === "string" ? message : message.markdown);
+        }
+      },
+      target: {
+        cancelChat() {
+          return Promise.resolve(false);
+        },
+        chat(_message, callback) {
+          callback.onStart({ requestId: "req-recovering" });
+          callback.onEvent(
+            JSON.stringify({ type: "text-delta", delta: "partial answer" })
+          );
+          callback.onInterrupted?.({ deliversRecoveredReply: true });
+          return Promise.resolve();
+        }
+      }
+    });
+
+    expect(posts.join("")).toBe("partial answer");
+    expect(posts).toHaveLength(2);
   });
 
   it.each([

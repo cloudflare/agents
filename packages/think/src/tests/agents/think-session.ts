@@ -8461,6 +8461,7 @@ export class ThinkRecoveryTestAgent extends Think {
     seedRunningSubmission?: boolean;
     maxAttempts?: number;
     terminalMessage?: string;
+    seedMessengerDelivery?: boolean;
   }): Promise<{
     threw: boolean;
     exhaustedContexts: number;
@@ -8468,6 +8469,7 @@ export class ThinkRecoveryTestAgent extends Think {
     terminalBroadcast: string | undefined;
     incidentStatus: string | undefined;
     submissionStatus: string | null;
+    messengerOutcome?: string | null;
   }> {
     const maxAttempts = input.maxAttempts ?? 5;
     const terminalMessage =
@@ -8505,6 +8507,15 @@ export class ThinkRecoveryTestAgent extends Think {
           ${JSON.stringify([])}, NULL, NULL, ${now}, ${now}, ${now}, NULL
         )
       `;
+    }
+
+    const messengerKey = `cf_think_messenger_recovery:${begun.incidentId}`;
+    if (input.seedMessengerDelivery) {
+      await this.ctx.storage.put(messengerKey, {
+        messengerId: "fake",
+        threadId: "fake:thread",
+        partialText: ""
+      });
     }
 
     let terminalBroadcast: string | undefined;
@@ -8585,7 +8596,16 @@ export class ThinkRecoveryTestAgent extends Think {
       exhaustedReason: captured[0]?.reason,
       terminalBroadcast,
       incidentStatus: [...incidents.values()][0]?.status,
-      submissionStatus: submissionRows[0]?.status ?? null
+      submissionStatus: submissionRows[0]?.status ?? null,
+      ...(input.seedMessengerDelivery && {
+        messengerOutcome: await new Promise((resolve) =>
+          setTimeout(resolve, 50)
+        ).then(
+          async () =>
+            (await this.ctx.storage.get<{ outcome?: string }>(messengerKey))
+              ?.outcome ?? null
+        )
+      })
     };
   }
 

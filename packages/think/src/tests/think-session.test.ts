@@ -5618,6 +5618,21 @@ describe("Think — onChatRecovery", () => {
     expect(result.incidentStatus).toBe("failed");
   });
 
+  it("keeps a messenger reply pending while the platform re-runs recovery", async () => {
+    const agent = await freshRecoveryAgent(
+      `recovery-throw-messenger-${crypto.randomUUID()}`
+    );
+
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "Durable Object reset because its code was updated.",
+      seedMessengerDelivery: true
+    });
+
+    expect(result.threw).toBe(true);
+    expect(result.incidentStatus).toBe("failed");
+    expect(result.messengerOutcome).toBeNull();
+  });
+
   it('re-throws a "This script has been upgraded" supersede (defer + re-run) and does NOT terminalize', async () => {
     const agent = await freshRecoveryAgent("recovery-throw-script-upgraded");
 
