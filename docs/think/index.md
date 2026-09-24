@@ -405,6 +405,7 @@ path.
 | `getActions()`             | `{}`                             | Server actions (idempotency, approvals, authorization) compiled into tools — see [Actions](./actions.md)                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `configureChannels()`      | `{}`                             | Per-channel policy and surfaces beyond the implicit `web` channel — see [Channels](./channels.md)                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `messengerConcurrency`     | Burst, 600 ms                    | Chat SDK concurrency strategy for every messenger on the agent. Set it as a class field — see [Messengers](./messengers.md#change-the-concurrency-strategy)                                                                                                                                                                                                                                                                                                                                                                 |
+| `truncationStep`           | `8`                              | Move the read-time truncation cutoff once every this many messages. `1` cuts every turn — see [Prompt caching](#prompt-caching)                                                                                                                                                                                                                                                                                                                                                                                             |
 | `maxSteps`                 | `10`                             | Max tool-call rounds per turn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `sendReasoning`            | `true`                           | Send reasoning chunks to chat clients                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `configureSession()`       | identity                         | Configure the default session handle: compaction and search — see [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md)                                                                                                                                                                                                                                                                                                                                                                        |
@@ -957,6 +958,32 @@ Passes are bounded (`maxRowsPerPass`, 64 by default) and run in the background a
 `mediaEviction: false` keeps aged media in the conversation, so the model keeps seeing it. It does not change where Sessions keeps the bytes — a large payload may still be stored as a pointer, which is unobservable.
 
 Startup hydration reads a recent window bounded by `hydrationByteBudget` (32 MiB by default). The budget charges each row its stored bytes plus the attachment bytes it re-inflates, so it bounds isolate memory rather than the on-disk footprint.
+
+### Prompt caching
+
+Providers cache on a byte-identical prompt prefix, so a request only reads the cache up to the first byte that differs from an earlier request. Think keeps that prefix stable: the frozen system prompt is persisted, and each turn's first model request extends the previous request unless one of the context-reduction mechanisms rewrote history. Each mechanism rewrites the prefix on a bounded schedule:
+
+| Mechanism            | What it rewrites                                                                   | How often the prefix changes                |
+| -------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------- |
+| Read-time truncation | Tool outputs over 500 characters and text over 10,000 characters in older messages | Once every 8 messages (about every 4 turns) |
+| Media eviction       | An aged file part becomes a marker                                                 | Once per evicted message                    |
+| Compaction           | A span of older turns becomes one summary                                          | Once per compaction                         |
+
+Read-time truncation keeps at least the 4 most recent messages at full fidelity and cuts the rest at a multiple of 8 messages, so between cuts up to 11 recent messages stay whole. A cutoff that moved every turn would rewrite a message near the end of the prefix on every turn. In a 16-turn run with a 4,000-character tool output per turn, and cached input billed at a tenth of fresh input, that cost about twice as much as sending the untruncated history. Cutting every 8 messages brings it close to the untruncated cost while still bounding the context.
+
+The extra full-fidelity messages cost context. For a model with a small context window, set `truncationStep` to cut more often, or to `1` to cut every turn and keep only the 4 most recent messages whole:
+
+```ts
+import { Think } from "@cloudflare/think";
+
+export class SmallModelAgent extends Think<Env> {
+  truncationStep = 1;
+}
+```
+
+A compaction threshold that the compacted history still exceeds compacts on every append, which rewrites the summary every turn. Set `compactAfter()` well above the size of a summary plus the recent messages it keeps.
+
+`hydrationByteBudget` does not affect caching while the transcript fits in it. Its 32 MiB default is larger than any model's context window, so this holds unless large attachments fill the budget. Once the transcript exceeds the budget, the hydrated window starts later as messages are added, which rewrites the start of the prompt. Media eviction keeps a transcript with large attachments under the budget.
 
 ## Package Exports
 
