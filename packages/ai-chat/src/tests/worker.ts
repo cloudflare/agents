@@ -321,6 +321,51 @@ export class TestChatAgent extends AIChatAgent<Env> {
       );
     }
 
+    // A stop with a sibling tool call still unanswered: the continuation opted
+    // into by the first result must survive until the sibling answers.
+    if (options?.body?.stopWithPendingSibling === true) {
+      if (options.continuation) {
+        return makeSSEChunkResponse([
+          { type: "start" },
+          { type: "start-step" },
+          { type: "text-start", id: "text_after_batch" },
+          { type: "text-delta", id: "text_after_batch", delta: "Both done." },
+          { type: "text-end", id: "text_after_batch" },
+          { type: "finish-step" },
+          { type: "finish", finishReason: "stop" }
+        ]);
+      }
+      return makeDelayedSSEChunkResponse(
+        [
+          { type: "start" },
+          { type: "start-step" },
+          {
+            type: "tool-input-available",
+            toolCallId: "call_sibling_a",
+            toolName: "fastClientTool",
+            input: {}
+          },
+          {
+            type: "tool-input-available",
+            toolCallId: "call_sibling_b",
+            toolName: "fastClientTool",
+            input: {}
+          },
+          { type: "text-start", id: "text_with_pending_sibling" },
+          {
+            type: "text-delta",
+            id: "text_with_pending_sibling",
+            delta: "Waiting on the tools."
+          },
+          { type: "text-end", id: "text_with_pending_sibling" },
+          { type: "finish-step" },
+          { type: "finish", finishReason: "stop" }
+        ],
+        75,
+        options.abortSignal
+      );
+    }
+
     // Companion control: when the stream stops at the tool call, the result has
     // not yet been consumed and stream finalization must still re-arm it.
     if (options?.body?.finishWithUnconsumedClientTool === true) {

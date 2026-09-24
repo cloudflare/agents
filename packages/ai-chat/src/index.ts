@@ -3180,7 +3180,14 @@ export class AIChatAgent<
     // a normal assistant response, the continuation is stale: firing it would
     // replay a transcript ending in assistant text. Modern Anthropic models
     // reject that request as an unsupported assistant prefill (#1618, #2171).
-    if (finishReason === "stop" && this._continuation.pending) {
+    // A sibling tool call still awaiting its result keeps the continuation:
+    // the stream's text did not answer it, and the continuation is the only
+    // record of the batch's opt-in.
+    if (
+      finishReason === "stop" &&
+      this._continuation.pending &&
+      !this._hasIncompleteToolBatch()
+    ) {
       this._clearPendingAutoContinuation(true);
       return;
     }

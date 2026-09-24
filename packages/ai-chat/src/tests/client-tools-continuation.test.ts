@@ -235,6 +235,85 @@ describe("Client tools continuation", () => {
     }
   });
 
+  it("keeps the continuation when a stop leaves a sibling tool call pending", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const messages = collectMessages(ws);
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const sendResult = (toolCallId: string, autoContinue: boolean) =>
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_RESULT,
+          toolCallId,
+          toolName: "fastClientTool",
+          output: { ok: true },
+          autoContinue
+        })
+      );
+
+    try {
+      let sentA = false;
+      ws.addEventListener("message", (event: MessageEvent) => {
+        const envelope = JSON.parse(event.data as string) as {
+          type?: string;
+          body?: string;
+        };
+        if (
+          sentA ||
+          envelope.type !== MessageType.CF_AGENT_USE_CHAT_RESPONSE ||
+          typeof envelope.body !== "string" ||
+          !envelope.body.includes('"toolCallId":"call_sibling_a"')
+        ) {
+          return;
+        }
+        sentA = true;
+        sendResult("call_sibling_a", true);
+      });
+
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+          id: "req-stop-pending-sibling",
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: "user-stop-pending-sibling",
+                  role: "user",
+                  parts: [{ type: "text", text: "Run both tools" }]
+                }
+              ],
+              stopWithPendingSibling: true
+            })
+          }
+        })
+      );
+
+      await waitForMessage(
+        messages,
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.id === "req-stop-pending-sibling" &&
+          message.done === true
+      );
+      expect(sentA).toBe(true);
+
+      sendResult("call_sibling_b", false);
+      const continued = await waitForMessage(
+        messages,
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.continuation === true &&
+          message.done === true
+      );
+      expect(continued).toBeDefined();
+      expect(await agentStub.getChatMessageCallCountForTest()).toBe(2);
+    } finally {
+      ws.close(1000);
+    }
+  });
+
   it("still continues when the active stream stops at the client tool call", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
