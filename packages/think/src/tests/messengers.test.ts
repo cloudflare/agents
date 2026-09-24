@@ -1312,6 +1312,23 @@ describe("think messengers core", () => {
       expect(await agent.getRecorded("post")).toEqual(["Got"]);
     });
 
+    it("answers the first message at once under a configured queue strategy (#2313)", async () => {
+      const agent = await sendBurst("queue-dm", [
+        { id: "q1", text: "summarize the thread", threadId: "fake:dm-queue" },
+        { id: "q2", text: "for me", threadId: "fake:dm-queue" },
+        { id: "q3", text: "and keep it short", threadId: "fake:dm-queue" }
+      ]);
+
+      const prompts = await agent.getRecorded("prompt");
+      expect(prompts[0]).toBe("summarize the thread");
+      expect(prompts.flatMap((prompt) => prompt.split("\n")).sort()).toEqual([
+        "and keep it short",
+        "for me",
+        "summarize the thread"
+      ]);
+      expect(await agent.getRecorded("post")).toHaveLength(prompts.length);
+    });
+
     it("keeps each sender's label when a group burst mixes senders", async () => {
       const bob = { fullName: "Bob", userId: "user-bob" };
       const ada = { fullName: "Ada", userId: "user-ada" };

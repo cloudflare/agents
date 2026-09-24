@@ -162,6 +162,28 @@ In a subscribed thread, a burst counts as a mention when any of its messages
 mentions the bot. With the default `respondTo`, a mention followed by an
 ordinary line is still answered.
 
+### Change the Concurrency Strategy
+
+Set `messengerConcurrency` to use another Chat SDK concurrency strategy. It
+defaults to `DEFAULT_MESSENGER_CONCURRENCY`, which is
+`{ strategy: "burst", debounceMs: 600 }`. One setting covers every messenger on
+the agent, and it must be a class field, because the runtime reads it before
+`onStart` runs.
+
+```ts
+import { Think } from "@cloudflare/think";
+
+export class SupportAgent extends Think<Env> {
+  // Answer the first message right away. Messages that arrive during the
+  // reply are answered together once it finishes.
+  messengerConcurrency = "queue" as const;
+}
+```
+
+Use `{ strategy: "burst", debounceMs: 1500 }` to wait longer for a burst. The
+`"drop"` strategy discards a message that arrives while a reply is running, and
+`"concurrent"` answers every message in parallel without a thread lock.
+
 ## Conversation Targets
 
 The default conversation mode is one Think sub-agent per Chat SDK thread. This
