@@ -1908,6 +1908,104 @@ describe("useAgentChat onToolCall", () => {
     });
     expect(toolCalls).toEqual(["tc-client"]);
   });
+
+  it("keeps onToolCall held for an observed turn after the socket closes (#2195)", async () => {
+    const target = new EventTarget();
+    const agent = createAgent({
+      name: "ontoolcall-observer-close",
+      url: "ws://localhost:3000/agents/chat/ontoolcall-observer-close?_pk=abc"
+    });
+    (agent as unknown as Record<string, unknown>).addEventListener =
+      target.addEventListener.bind(target);
+    (agent as unknown as Record<string, unknown>).removeEventListener =
+      target.removeEventListener.bind(target);
+    const frame = (chunk: Record<string, unknown> | null) =>
+      target.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "cf_agent_use_chat_response",
+            id: "other-tab-request",
+            body: chunk ? JSON.stringify(chunk) : "",
+            done: chunk === null
+          })
+        })
+      );
+
+    const toolCalls: string[] = [];
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onToolCall: ({ toolCall }) => {
+          toolCalls.push(toolCall.toolCallId);
+        }
+      });
+      return <div data-testid="count">{chat.messages.length}</div>;
+    };
+
+    await act(async () => {
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      frame({ type: "start", messageId: "observed-assistant" });
+      frame({
+        type: "tool-input-available",
+        toolCallId: "tc-server",
+        toolName: "search",
+        input: { q: "weather" }
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual([]);
+
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual([]);
+
+    await act(async () => {
+      frame(null);
+      target.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "cf_agent_chat_messages",
+            messages: [
+              {
+                id: "u1",
+                role: "user",
+                parts: [{ type: "text", text: "Where am I?" }]
+              },
+              {
+                id: "a1",
+                role: "assistant",
+                parts: [
+                  {
+                    type: "tool-getLocation",
+                    toolCallId: "tc-client",
+                    state: "input-available",
+                    input: {}
+                  }
+                ]
+              }
+            ]
+          })
+        })
+      );
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual(["tc-client"]);
+  });
 });
 
 describe("useAgentChat re-render stability", () => {

@@ -1787,6 +1787,9 @@ export function useAgentChat<
   );
 
   const [isServerStreaming, setIsServerStreaming] = useState(false);
+  // A stream observed from another tab whose terminal frame was missed when
+  // the socket closed: its tool parts may still belong to a live server turn.
+  const [observedTurnUnresolved, setObservedTurnUnresolved] = useState(false);
 
   // Effect for new onToolCall callback pattern (v6 style)
   // This fires when there are tool calls that need client-side handling
@@ -1799,7 +1802,12 @@ export function useAgentChat<
     // A server tool sits in `input-available` while the server executes it,
     // and its result arrives in the same stream. Once the stream ends, every
     // part still waiting is one the client has to answer (#2195).
-    if (status === "streaming" || status === "submitted" || isServerStreaming) {
+    if (
+      status === "streaming" ||
+      status === "submitted" ||
+      isServerStreaming ||
+      observedTurnUnresolved
+    ) {
       return;
     }
 
@@ -1874,6 +1882,7 @@ export function useAgentChat<
     chatMessages,
     status,
     isServerStreaming,
+    observedTurnUnresolved,
     sendToolOutputToServer,
     addToolResult,
     finishOnToolCall
@@ -1911,6 +1920,7 @@ export function useAgentChat<
             type: "clear"
           }).state;
           setIsServerStreaming(false);
+          setObservedTurnUnresolved(false);
           setIsRecovering(false);
           // Shared local-state reset — see `resetLocalChatState`.
           resetLocalChatState();
@@ -2124,6 +2134,9 @@ export function useAgentChat<
         }
 
         case MessageType.CF_AGENT_USE_CHAT_RESPONSE: {
+          if (data.done || data.error) {
+            setObservedTurnUnresolved(false);
+          }
           if (localRequestIdsRef.current.has(data.id)) {
             if (data.body?.trim()) {
               try {
@@ -2359,6 +2372,9 @@ export function useAgentChat<
     let disposed = false;
 
     const clearFallbackObserver = () => {
+      if (streamStateRef.current.status === "observing") {
+        setObservedTurnUnresolved(true);
+      }
       const result = broadcastTransition(streamStateRef.current, {
         type: "clear"
       });
@@ -2443,6 +2459,7 @@ export function useAgentChat<
       fallbackAckedResumeRequestIds.clear();
       streamStateRef.current = { status: "idle" };
       setIsServerStreaming(false);
+      setObservedTurnUnresolved(false);
       setIsRecovering(false);
       protectedStreamingAssistantRef.current = null;
       localResponseIds.clear();
