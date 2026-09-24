@@ -4,6 +4,7 @@ import {
   type Context
 } from "@earendil-works/pi-agent-core";
 import type {
+  HarnessDriverCancellation,
   HarnessDriverDriveResult,
   HarnessDriverInspection,
   HarnessDriverRuntime
@@ -116,13 +117,24 @@ export class PiRuntimeAdapter implements HarnessDriverRuntime<
     }
   }
 
-  async cancel(scope: string, operationId: string): Promise<void> {
+  async cancel(
+    scope: string,
+    operationId: string
+  ): Promise<HarnessDriverCancellation<PiOperationResult>> {
     const lane = await this.#lane(scope, BACKGROUND_CONTEXT);
     const result = await lane.getResult(operationId, BACKGROUND_CONTEXT);
-    if (result) return;
+    if (result) {
+      return {
+        status: "completed" as const,
+        result: projectResult(result)
+      };
+    }
     const execution = await lane.inspectExecution(BACKGROUND_CONTEXT);
-    if (execution.current?.id !== operationId) return;
+    if (execution.current?.id !== operationId) {
+      return { status: "not-found" as const };
+    }
     const cancelled = await lane.requestAbort(operationId, BACKGROUND_CONTEXT);
     if (!cancelled.ok) throw cancelled.error;
+    return { status: "cancelled" as const };
   }
 }

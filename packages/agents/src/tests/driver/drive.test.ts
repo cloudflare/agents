@@ -35,6 +35,7 @@ class Runtime implements HarnessDriverRuntime<Input, Result> {
 
   async cancel(_scope: string, _operationId: string) {
     this.calls.push("cancel");
+    return { status: "cancelled" as const };
   }
 }
 
@@ -122,6 +123,89 @@ describe("HarnessDriver drive", () => {
           intakePresent: true
         }
       ]);
+      expect(await driver.pending()).toEqual([]);
+      await storage.deleteAlarm();
+    });
+  });
+
+  it("terminalizes a permanently throwing adapter after bounded attempts", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      let inspections = 0;
+      const failures: Array<{ name: string; message: string }> = [];
+      const runtime: HarnessDriverRuntime<Input, Result> = {
+        inspect: async () => {
+          inspections += 1;
+          throw new TypeError("adapter unavailable");
+        },
+        admit: async () => {},
+        drive: async () => ({ status: "continue" }),
+        cancel: async () => ({ status: "cancelled" })
+      };
+      const driver = new HarnessDriver({
+        id: "test",
+        runtime,
+        maxAttempts: 3,
+        retryBaseMs: 1,
+        fail: (_submission, error) => {
+          failures.push(error);
+        }
+      });
+      const { lifecycle } = install(driver);
+      await lifecycle.start();
+      await driver.submit("main", { text: "hello" }, { operationId: "op-1" });
+      await storage.deleteAlarm();
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+        await driver.waitForIdle("main");
+      }
+
+      expect(inspections).toBe(3);
+      expect(failures).toEqual([
+        { name: "TypeError", message: "adapter unavailable" }
+      ]);
+      expect(await driver.pending()).toEqual([]);
+      expect(driver.jobs()).toEqual([]);
+      await storage.deleteAlarm();
+    });
+  });
+
+  it("retries terminal failure settlement without reinspecting native work", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const runtime = new Runtime();
+      runtime.inspection = {
+        status: "failed",
+        error: { name: "NativeError", message: "native failure" }
+      };
+      let settlements = 0;
+      const driver = new HarnessDriver({
+        id: "test",
+        runtime,
+        retryBaseMs: 1,
+        fail: () => {
+          settlements += 1;
+          if (settlements === 1) throw new Error("stream unavailable");
+        }
+      });
+      const { lifecycle } = install(driver);
+      await lifecycle.start();
+      await driver.submit("main", { text: "hello" }, { operationId: "op-1" });
+      await storage.deleteAlarm();
+
+      await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+      await driver.waitForIdle("main");
+      expect(await driver.pending()).toMatchObject([
+        {
+          operationId: "op-1",
+          failure: { name: "NativeError", message: "native failure" }
+        }
+      ]);
+
+      await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+      await driver.waitForIdle("main");
+
+      expect(runtime.calls).toEqual(["inspect"]);
+      expect(settlements).toBe(2);
       expect(await driver.pending()).toEqual([]);
       await storage.deleteAlarm();
     });

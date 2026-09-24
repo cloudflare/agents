@@ -11,7 +11,7 @@ function runtime(): HarnessDriverRuntime<Input, Result> {
     inspect: async () => ({ status: "not-admitted" }),
     admit: async () => {},
     drive: async () => ({ status: "waiting", notBefore: Date.now() + 1_000 }),
-    cancel: async () => {}
+    cancel: async () => ({ status: "cancelled" })
   };
 }
 

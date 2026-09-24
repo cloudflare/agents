@@ -426,7 +426,7 @@ export class OpenCodeHarness extends LifecycleCapability {
       },
       interrupt: async (sessionId) => {
         const host = await this.#host();
-        await host.sessions.interrupt({ sessionID: sessionId });
+        return host.sessions.interrupt({ sessionID: sessionId });
       }
     };
   }

@@ -7,6 +7,8 @@ import {
 } from "../lifecycle";
 import { HarnessDriverStore } from "./store";
 import type {
+  HarnessDriverCancellation,
+  HarnessDriverError,
   HarnessDriverOptions,
   HarnessDriverReceipt,
   HarnessDriverRuntime,
@@ -15,6 +17,10 @@ import type {
 } from "./types";
 
 const DRIVE_FN = "drive";
+
+class HarnessSettlementError {
+  constructor(readonly cause: unknown) {}
+}
 
 export class HarnessDriver<Input, Result> extends LifecycleCapability {
   readonly #id: string;
@@ -32,7 +38,17 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
       ) => void | Promise<void>)
     | undefined;
   readonly #heartbeatMs: number;
-  readonly #inFlight = new Map<string, Promise<void>>();
+  readonly #maxAttempts: number;
+  readonly #retryBaseMs: number;
+  readonly #retryMaxMs: number;
+  readonly #inFlight = new Map<
+    string,
+    {
+      readonly operationId: string;
+      readonly controller: AbortController;
+      readonly work: Promise<void>;
+    }
+  >();
   #store: HarnessDriverStore | undefined;
 
   constructor(options: HarnessDriverOptions<Input, Result>) {
@@ -43,6 +59,18 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
     this.#settle = options.settle;
     this.#fail = options.fail;
     this.#heartbeatMs = options.heartbeatMs ?? 30_000;
+    this.#maxAttempts = options.maxAttempts ?? 3;
+    this.#retryBaseMs = options.retryBaseMs ?? 1_000;
+    this.#retryMaxMs = options.retryMaxMs ?? 30_000;
+    if (!Number.isInteger(this.#maxAttempts) || this.#maxAttempts < 1) {
+      throw new Error("maxAttempts must be a positive integer");
+    }
+    if (!Number.isFinite(this.#retryBaseMs) || this.#retryBaseMs < 0) {
+      throw new Error("retryBaseMs must be a non-negative number");
+    }
+    if (!Number.isFinite(this.#retryMaxMs) || this.#retryMaxMs < 0) {
+      throw new Error("retryMaxMs must be a non-negative number");
+    }
   }
 
   override async onStart(_context: CapabilityStartContext): Promise<void> {
@@ -110,16 +138,25 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
   async cancel(operationId: string): Promise<boolean> {
     await this.lifecycle.ready();
     const store = this.#submissionStore();
-    const submission = store.get<Input>(operationId);
+    let submission = store.get<Input>(operationId);
     if (!submission) return false;
-    await this.#runtime.cancel(submission.scope, operationId);
-    store.remove(operationId);
-    if (store.head(submission.scope)) {
-      await this.wake(submission.scope);
-    } else {
-      await this.lifecycle.jobs.cancel(this.#jobId(submission.scope));
+    submission = store.requestCancellation<Input>(operationId) ?? submission;
+    const active = this.#inFlight.get(submission.scope);
+    if (active?.operationId === operationId) active.controller.abort();
+    try {
+      const cancelled = await this.#runtime.cancel(
+        submission.scope,
+        operationId
+      );
+      await this.#applyOutcome(
+        submission.scope,
+        await this.#cancellationOutcome(submission, cancelled)
+      );
+      return true;
+    } catch (error) {
+      await this.#retryCancellation(submission, error);
+      throw error;
     }
-    return true;
   }
 
   async onJob(
@@ -128,16 +165,19 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
     if (context.job.fn !== DRIVE_FN) return;
     const scope = this.#scopeFrom(context.job.payload);
     if (!this.#inFlight.has(scope)) {
-      const work = this.#driveScope(scope)
-        .then((outcome) => this.#applyOutcome(scope, outcome))
-        .catch((error: unknown) => {
-          this.lifecycle.events.emit("driver:error", {
-            scope,
-            error: error instanceof Error ? error.message : String(error)
-          });
-        })
-        .finally(() => this.#inFlight.delete(scope));
-      this.#inFlight.set(scope, work);
+      const submission =
+        this.#submissionStore().admitted<Input>(scope) ??
+        this.#submissionStore().head<Input>(scope);
+      if (!submission) return;
+      const controller = new AbortController();
+      const work = this.#runScope(scope, controller.signal).finally(() =>
+        this.#inFlight.delete(scope)
+      );
+      this.#inFlight.set(scope, {
+        operationId: submission.operationId,
+        controller,
+        work
+      });
       this.lifecycle.trackAlarmWork(work);
     }
     return { rescheduleAt: Date.now() + this.#heartbeatMs };
@@ -145,16 +185,29 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
 
   async waitForIdle(scope?: string): Promise<void> {
     if (scope !== undefined) {
-      await this.#inFlight.get(scope);
+      await this.#inFlight.get(scope)?.work;
       return;
     }
-    await Promise.all(this.#inFlight.values());
+    await Promise.all([...this.#inFlight.values()].map(({ work }) => work));
   }
 
-  async #driveScope(scope: string): Promise<LifecycleJobOutcome | void> {
+  async #driveScope(
+    scope: string,
+    signal: AbortSignal
+  ): Promise<LifecycleJobOutcome | void> {
     const store = this.#submissionStore();
     let submission = store.admitted<Input>(scope) ?? store.head<Input>(scope);
     if (!submission) return;
+    if (submission.failure) {
+      return this.#failed(submission, submission.failure);
+    }
+    if (submission.cancelRequested) {
+      const cancelled = await this.#runtime.cancel(
+        scope,
+        submission.operationId
+      );
+      return this.#cancellationOutcome(submission, cancelled);
+    }
 
     const inspection = await this.#runtime.inspect(
       scope,
@@ -164,6 +217,12 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
       return this.#complete(submission, inspection.result);
     }
     if (inspection.status === "failed") {
+      submission =
+        (store.recordAttempt(
+          submission.operationId,
+          submission.attempts,
+          inspection.error
+        ) as HarnessDriverSubmission<Input> | undefined) ?? submission;
       return this.#failed(submission, inspection.error);
     }
     if (inspection.status === "waiting") {
@@ -186,15 +245,116 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
     const outcome = await this.#runtime.drive(
       scope,
       submission.operationId,
-      new AbortController().signal
+      signal
     );
     if (outcome.status === "completed") {
       return this.#complete(submission, outcome.result);
     }
+    store.resetAttempts(submission.operationId);
     if (outcome.status === "waiting") {
       return { rescheduleAt: outcome.notBefore };
     }
     return "yield";
+  }
+
+  async #runScope(scope: string, signal: AbortSignal): Promise<void> {
+    try {
+      await this.#applyOutcome(scope, await this.#driveScope(scope, signal));
+    } catch (error) {
+      await this.#recoverFromError(scope, error);
+    }
+  }
+
+  async #recoverFromError(scope: string, error: unknown): Promise<void> {
+    const cause = error instanceof HarnessSettlementError ? error.cause : error;
+    const normalized = this.#normalizeError(cause);
+    this.lifecycle.events.emit("driver:error", {
+      driverId: this.#id,
+      scope,
+      error: normalized.message
+    });
+    const store = this.#submissionStore();
+    let submission = store.admitted<Input>(scope) ?? store.head<Input>(scope);
+    if (!submission) {
+      await this.#applyOutcome(scope, undefined);
+      return;
+    }
+    if (submission.cancelRequested) {
+      await this.#retryCancellation(submission, cause);
+      return;
+    }
+    if (error instanceof HarnessSettlementError || submission.failure) {
+      await this.#scheduleRetry(scope, submission.attempts + 1);
+      return;
+    }
+    const attempts = submission.attempts + 1;
+    if (attempts < this.#maxAttempts) {
+      store.recordAttempt(submission.operationId, attempts, null);
+      await this.#scheduleRetry(scope, attempts);
+      return;
+    }
+    submission =
+      (store.recordAttempt(submission.operationId, attempts, normalized) as
+        | HarnessDriverSubmission<Input>
+        | undefined) ?? submission;
+    try {
+      await this.#applyOutcome(
+        scope,
+        await this.#failed(submission, normalized)
+      );
+    } catch (settlementError) {
+      const failure =
+        settlementError instanceof HarnessSettlementError
+          ? settlementError.cause
+          : settlementError;
+      this.lifecycle.events.emit("driver:error", {
+        driverId: this.#id,
+        scope,
+        error: this.#normalizeError(failure).message
+      });
+      await this.#scheduleRetry(scope, attempts + 1);
+    }
+  }
+
+  async #retryCancellation(
+    submission: HarnessDriverSubmission<Input>,
+    error: unknown
+  ): Promise<void> {
+    const attempts = submission.attempts + 1;
+    this.#submissionStore().recordAttempt(
+      submission.operationId,
+      attempts,
+      null
+    );
+    this.lifecycle.events.emit("driver:error", {
+      driverId: this.#id,
+      scope: submission.scope,
+      error: this.#normalizeError(error).message
+    });
+    await this.#scheduleRetry(submission.scope, attempts);
+  }
+
+  async #scheduleRetry(scope: string, attempts: number): Promise<void> {
+    const multiplier = 2 ** Math.min(Math.max(attempts - 1, 0), 30);
+    const delay = Math.min(this.#retryBaseMs * multiplier, this.#retryMaxMs);
+    await this.#applyOutcome(scope, { rescheduleAt: Date.now() + delay });
+  }
+
+  #cancellationOutcome(
+    submission: HarnessDriverSubmission<Input>,
+    cancellation: HarnessDriverCancellation<Result>
+  ): LifecycleJobOutcome | Promise<LifecycleJobOutcome | void> | void {
+    if (cancellation.status === "completed") {
+      return this.#complete(submission, cancellation.result);
+    }
+    if (cancellation.status === "pending") {
+      return {
+        rescheduleAt: cancellation.notBefore ?? Date.now() + this.#heartbeatMs
+      };
+    }
+    const store = this.#submissionStore();
+    store.remove(submission.operationId);
+    return store.head(submission.scope) ? "yield" : undefined;
   }
 
   async #applyOutcome(
@@ -219,7 +379,11 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
     submission: HarnessDriverSubmission<Input>,
     result: Result
   ): Promise<LifecycleJobOutcome | void> {
-    await this.#settle?.(submission, result);
+    try {
+      await this.#settle?.(submission, result);
+    } catch (error) {
+      throw new HarnessSettlementError(error);
+    }
     const store = this.#submissionStore();
     store.remove(submission.operationId);
     return store.head(submission.scope) ? "yield" : undefined;
@@ -229,10 +393,20 @@ export class HarnessDriver<Input, Result> extends LifecycleCapability {
     submission: HarnessDriverSubmission<Input>,
     error: { readonly name: string; readonly message: string }
   ): Promise<LifecycleJobOutcome | void> {
-    await this.#fail?.(submission, error);
+    try {
+      await this.#fail?.(submission, error);
+    } catch (failure) {
+      throw new HarnessSettlementError(failure);
+    }
     const store = this.#submissionStore();
     store.remove(submission.operationId);
     return store.head(submission.scope) ? "yield" : undefined;
+  }
+
+  #normalizeError(error: unknown): HarnessDriverError {
+    return error instanceof Error
+      ? { name: error.name, message: error.message }
+      : { name: "Error", message: String(error) };
   }
 
   #scopeFrom(payload: unknown): string {

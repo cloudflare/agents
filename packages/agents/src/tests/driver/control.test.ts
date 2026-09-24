@@ -8,6 +8,10 @@ type Result = { answer: string };
 
 class Runtime implements HarnessDriverRuntime<Input, Result> {
   cancelled: string[] = [];
+  cancelResult:
+    | { status: "cancelled" }
+    | { status: "not-found" }
+    | { status: "pending"; notBefore?: number } = { status: "cancelled" };
 
   async inspect() {
     return { status: "not-admitted" } as const;
@@ -21,6 +25,7 @@ class Runtime implements HarnessDriverRuntime<Input, Result> {
 
   async cancel(_scope: string, operationId: string) {
     this.cancelled.push(operationId);
+    return this.cancelResult;
   }
 }
 
@@ -66,7 +71,7 @@ describe("HarnessDriver control", () => {
           drive: runtime.drive.bind(runtime),
           cancel: async (scope, operationId) => {
             intakePresent = (await driver.pending(scope)).length === 1;
-            await runtime.cancel(scope, operationId);
+            return runtime.cancel(scope, operationId);
           }
         }
       });
@@ -103,6 +108,50 @@ describe("HarnessDriver control", () => {
       ).toEqual(["op-2"]);
       expect(driver.jobs()).toHaveLength(1);
       expect(driver.jobs()[0].payload).toEqual({ scope: "main" });
+      await storage.deleteAlarm();
+    });
+  });
+
+  it("keeps cancellation intake until the runtime acknowledges it", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const runtime = new Runtime();
+      const notBefore = Date.now() + 60_000;
+      runtime.cancelResult = { status: "pending", notBefore };
+      const driver = new HarnessDriver({ id: "test", runtime });
+      const { lifecycle } = install(driver);
+      await lifecycle.start();
+      await driver.submit("main", { text: "first" }, { operationId: "op-1" });
+      await storage.deleteAlarm();
+
+      expect(await driver.cancel("op-1")).toBe(true);
+      await storage.deleteAlarm();
+
+      expect(await driver.pending()).toMatchObject([
+        { operationId: "op-1", cancelRequested: true }
+      ]);
+      expect(driver.jobs()[0].time).toBe(notBefore);
+      await storage.deleteAlarm();
+    });
+  });
+
+  it("keeps cancellation intake when the runtime throws", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const runtime = new Runtime();
+      runtime.cancel = async () => {
+        throw new Error("cancel unavailable");
+      };
+      const driver = new HarnessDriver({ id: "test", runtime });
+      const { lifecycle } = install(driver);
+      await lifecycle.start();
+      await driver.submit("main", { text: "first" }, { operationId: "op-1" });
+      await storage.deleteAlarm();
+
+      await expect(driver.cancel("op-1")).rejects.toThrow("cancel unavailable");
+
+      expect(await driver.pending()).toMatchObject([
+        { operationId: "op-1", cancelRequested: true }
+      ]);
+      expect(driver.jobs()).toHaveLength(1);
       await storage.deleteAlarm();
     });
   });

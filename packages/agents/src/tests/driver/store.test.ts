@@ -3,6 +3,68 @@ import { HarnessDriverStore } from "../../driver/store";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
 describe("HarnessDriverStore", () => {
+  it("rejects invalid identifiers and non-serializable input", async () => {
+    await withCapabilityHarness(({ storage }) => {
+      expect(() => new HarnessDriverStore(storage, " ")).toThrow(
+        "driverId must not be empty"
+      );
+      const store = new HarnessDriverStore(storage, "test");
+      expect(() => store.enqueue(" ", "op-1", null, null)).toThrow(
+        "scope must not be empty"
+      );
+      expect(() => store.enqueue("main", " ", null, null)).toThrow(
+        "operationId must not be empty"
+      );
+      expect(() => store.enqueue("main", "op-1", undefined, null)).toThrow(
+        "input must be JSON-serializable"
+      );
+      const cyclic: { self?: unknown } = {};
+      cyclic.self = cyclic;
+      expect(() => store.enqueue("main", "op-2", cyclic, null)).toThrow();
+      expect(() => store.enqueue("main", "op-3", 1n, null)).toThrow();
+    });
+  });
+
+  it("returns missing results without mutating the queue", async () => {
+    await withCapabilityHarness(({ storage }) => {
+      const store = new HarnessDriverStore(storage, "test");
+      store.enqueue("main", "op-1", null, null);
+
+      expect(store.get("missing")).toBeUndefined();
+      expect(store.markAdmitted("missing")).toBeUndefined();
+      expect(store.requestCancellation("missing")).toBeUndefined();
+      expect(store.remove("missing")).toBe(false);
+      expect(store.list()).toHaveLength(1);
+    });
+  });
+
+  it("migrates submissions created by the initial driver schema", async () => {
+    await withCapabilityHarness(({ storage }) => {
+      storage.sql.exec(`
+        CREATE TABLE cf_agents_harness_submissions (
+          seq INTEGER PRIMARY KEY,
+          driver_id TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          operation_id TEXT NOT NULL,
+          input_json TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('queued', 'admitted')),
+          stream_id TEXT,
+          submitted_at INTEGER NOT NULL,
+          admitted_at INTEGER,
+          UNIQUE (driver_id, operation_id)
+        )
+      `);
+      const store = new HarnessDriverStore(storage, "test");
+
+      expect(
+        store.enqueue("main", "op-1", null, null).submission
+      ).toMatchObject({
+        attempts: 0,
+        failure: null,
+        cancelRequested: false
+      });
+    });
+  });
   it("keeps submissions in FIFO order within each scope", async () => {
     await withCapabilityHarness(({ storage }) => {
       const store = new HarnessDriverStore(storage, "test");

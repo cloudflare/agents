@@ -1,4 +1,5 @@
 import type {
+  HarnessDriverCancellation,
   HarnessDriverDriveResult,
   HarnessDriverInspection,
   HarnessDriverRuntime
@@ -162,8 +163,30 @@ export class OpenCodeRuntimeAdapter implements HarnessDriverRuntime<
     }
   }
 
-  async cancel(scope: string, _operationId: string): Promise<void> {
-    await this.#client.interrupt(scope);
+  async cancel(
+    scope: string,
+    operationId: string
+  ): Promise<HarnessDriverCancellation<OpenCodeResult>> {
+    const inspection = await this.inspect(scope, operationId);
+    if (inspection.status === "completed") {
+      return { status: "completed" as const, result: inspection.result };
+    }
+    if (inspection.status === "not-admitted") {
+      return { status: "not-found" as const };
+    }
+    const response = await this.#client.interrupt(scope);
+    if (
+      typeof response === "object" &&
+      response !== null &&
+      "interrupted" in response &&
+      response.interrupted === true
+    ) {
+      return { status: "cancelled" as const };
+    }
+    return {
+      status: "pending" as const,
+      notBefore: Date.now() + this.#heartbeatMs
+    };
   }
 
   #messageId(operationId: string): string {

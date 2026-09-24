@@ -1,5 +1,10 @@
 export type HarnessDriverSubmissionStatus = "queued" | "admitted";
 
+export type HarnessDriverError = {
+  readonly name: string;
+  readonly message: string;
+};
+
 export type HarnessDriverSubmission<Input = unknown> = {
   readonly seq: number;
   readonly driverId: string;
@@ -10,6 +15,9 @@ export type HarnessDriverSubmission<Input = unknown> = {
   readonly streamId: string | null;
   readonly submittedAt: number;
   readonly admittedAt: number | null;
+  readonly attempts: number;
+  readonly failure: HarnessDriverError | null;
+  readonly cancelRequested: boolean;
 };
 
 export type HarnessDriverEnqueueResult<Input = unknown> = {
@@ -32,6 +40,12 @@ export type HarnessDriverDriveResult<Result> =
   | { readonly status: "waiting"; readonly notBefore: number }
   | { readonly status: "completed"; readonly result: Result };
 
+export type HarnessDriverCancellation<Result = unknown> =
+  | { readonly status: "cancelled" }
+  | { readonly status: "not-found" }
+  | { readonly status: "completed"; readonly result: Result }
+  | { readonly status: "pending"; readonly notBefore?: number };
+
 export interface HarnessDriverRuntime<Input, Result> {
   inspect(
     scope: string,
@@ -43,7 +57,10 @@ export interface HarnessDriverRuntime<Input, Result> {
     operationId: string,
     signal: AbortSignal
   ): Promise<HarnessDriverDriveResult<Result>>;
-  cancel(scope: string, operationId: string): Promise<void>;
+  cancel(
+    scope: string,
+    operationId: string
+  ): Promise<HarnessDriverCancellation<Result>>;
 }
 
 export type HarnessDriverOptions<Input, Result> = {
@@ -55,9 +72,12 @@ export type HarnessDriverOptions<Input, Result> = {
   ) => void | Promise<void>;
   readonly fail?: (
     submission: HarnessDriverSubmission<Input>,
-    error: { readonly name: string; readonly message: string }
+    error: HarnessDriverError
   ) => void | Promise<void>;
   readonly heartbeatMs?: number;
+  readonly maxAttempts?: number;
+  readonly retryBaseMs?: number;
+  readonly retryMaxMs?: number;
 };
 
 export type HarnessDriverSubmitOptions = {

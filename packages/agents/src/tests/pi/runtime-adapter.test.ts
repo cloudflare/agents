@@ -66,6 +66,60 @@ describe("PiRuntimeAdapter", () => {
     });
   });
 
+  it("returns durable cancellation evidence from Pi", async () => {
+    let current: string | null = "op-active";
+    const records = new Map<string, OperationResultRecord>([
+      ["op-done", result("op-done")]
+    ]);
+    const aborted: string[] = [];
+    const lane = {
+      getResult: async (operationId: string) => records.get(operationId),
+      inspectExecution: async () => ({
+        lane: "main",
+        tipId: null,
+        configuredModel: { provider: "test", modelId: "model" },
+        current:
+          current === null
+            ? null
+            : {
+                id: current,
+                kind: "run" as const,
+                status: "open" as const,
+                startedAt: 1,
+                capturedModel: { provider: "test", modelId: "model" }
+              },
+        lastOperationId: null
+      }),
+      accept: async () =>
+        ok({ operationId: "op-active", kind: "run" as const, startedAt: 1 }),
+      drive: async () =>
+        ok({ kind: "settled" as const, outcome: result("op-active") }),
+      requestAbort: async (operationId: string) => {
+        aborted.push(operationId);
+        return ok({
+          operationId,
+          newlyRequested: true,
+          steer: [],
+          followUp: []
+        });
+      }
+    } satisfies PiDriverLane;
+    const adapter = new PiRuntimeAdapter({ lane: async () => lane });
+
+    expect(await adapter.cancel("main", "op-active")).toEqual({
+      status: "cancelled"
+    });
+    expect(await adapter.cancel("main", "op-done")).toEqual({
+      status: "completed",
+      result: expect.objectContaining({ operationId: "op-done" })
+    });
+    current = null;
+    expect(await adapter.cancel("main", "op-missing")).toEqual({
+      status: "not-found"
+    });
+    expect(aborted).toEqual(["op-active"]);
+  });
+
   it("maps Pi retry, deferred, and settlement outcomes", async () => {
     let outcome:
       | {

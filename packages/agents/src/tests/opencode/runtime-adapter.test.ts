@@ -18,6 +18,7 @@ class Client implements OpenCodeRuntimeClient {
   prompts: unknown[] = [];
   agents: unknown[] = [];
   interrupted: string[] = [];
+  interruptResult = { interrupted: true };
   waitPromise: Promise<void> = Promise.resolve();
 
   listMessages() {
@@ -40,7 +41,7 @@ class Client implements OpenCodeRuntimeClient {
 
   interrupt(sessionId: string) {
     this.interrupted.push(sessionId);
-    return Promise.resolve();
+    return Promise.resolve(this.interruptResult);
   }
 }
 
@@ -126,6 +127,55 @@ describe("OpenCodeRuntimeAdapter", () => {
     expect(client.prompts).toEqual([
       { sessionID: "session", id: "msg_op-1", text: "hello" }
     ]);
+  });
+
+  it("acknowledges cancellation only when native execution is interrupted", async () => {
+    const client = new Client();
+    client.messages = [{ info: { id: "msg_op-1", role: "user" } }];
+    const adapter = new OpenCodeRuntimeAdapter({ client, heartbeatMs: 100 });
+
+    expect(await adapter.cancel("session", "op-1")).toEqual({
+      status: "cancelled"
+    });
+
+    client.interruptResult = { interrupted: false };
+    const before = Date.now();
+    const pending = await adapter.cancel("session", "op-1");
+    expect(pending).toMatchObject({ status: "pending" });
+    if (pending.status === "pending") {
+      expect(pending.notBefore).toBeGreaterThanOrEqual(before + 100);
+    }
+
+    expect(client.interrupted).toEqual(["session", "session"]);
+  });
+
+  it("does not interrupt an absent or already completed operation", async () => {
+    const client = new Client();
+    const adapter = new OpenCodeRuntimeAdapter({ client });
+
+    expect(await adapter.cancel("session", "missing")).toEqual({
+      status: "not-found"
+    });
+
+    client.messages = [
+      { info: { id: "msg_op-1", role: "user" } },
+      {
+        info: {
+          id: "assistant-1",
+          role: "assistant",
+          time: { completed: 2 }
+        }
+      }
+    ];
+    expect(await adapter.cancel("session", "op-1")).toEqual({
+      status: "completed",
+      result: {
+        operationId: "op-1",
+        status: "completed",
+        messageId: "assistant-1"
+      }
+    });
+    expect(client.interrupted).toEqual([]);
   });
 
   it("returns a bounded wait while OpenCode remains active", async () => {

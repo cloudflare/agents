@@ -13,6 +13,9 @@ type SubmissionRow = {
   stream_id: string | null;
   submitted_at: number;
   admitted_at: number | null;
+  attempts: number;
+  failure_json: string | null;
+  cancel_requested: number;
 };
 
 function decodeRow<Input>(row: SubmissionRow): HarnessDriverSubmission<Input> {
@@ -25,7 +28,16 @@ function decodeRow<Input>(row: SubmissionRow): HarnessDriverSubmission<Input> {
     status: row.status,
     streamId: row.stream_id,
     submittedAt: row.submitted_at,
-    admittedAt: row.admitted_at
+    admittedAt: row.admitted_at,
+    attempts: row.attempts,
+    failure:
+      row.failure_json === null
+        ? null
+        : (JSON.parse(row.failure_json) as {
+            readonly name: string;
+            readonly message: string;
+          }),
+    cancelRequested: row.cancel_requested === 1
   };
 }
 
@@ -53,6 +65,9 @@ export class HarnessDriverStore {
         stream_id TEXT,
         submitted_at INTEGER NOT NULL,
         admitted_at INTEGER,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        failure_json TEXT,
+        cancel_requested INTEGER NOT NULL DEFAULT 0,
         UNIQUE (driver_id, operation_id)
       );
       CREATE INDEX IF NOT EXISTS cf_agents_harness_scope_queue
@@ -61,6 +76,29 @@ export class HarnessDriverStore {
         ON cf_agents_harness_submissions (driver_id, scope)
         WHERE status = 'admitted';
     `);
+    const columns = new Set(
+      this.#storage.sql
+        .exec<{ name: string }>(
+          "PRAGMA table_info(cf_agents_harness_submissions)"
+        )
+        .toArray()
+        .map((column) => column.name)
+    );
+    if (!columns.has("attempts")) {
+      this.#storage.sql.exec(
+        "ALTER TABLE cf_agents_harness_submissions ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
+      );
+    }
+    if (!columns.has("failure_json")) {
+      this.#storage.sql.exec(
+        "ALTER TABLE cf_agents_harness_submissions ADD COLUMN failure_json TEXT"
+      );
+    }
+    if (!columns.has("cancel_requested")) {
+      this.#storage.sql.exec(
+        "ALTER TABLE cf_agents_harness_submissions ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
+      );
+    }
     this.#ready = true;
   }
 
@@ -104,7 +142,8 @@ export class HarnessDriverStore {
     const row = this.#storage.sql
       .exec<SubmissionRow>(
         `SELECT seq, driver_id, scope, operation_id, input_json, status,
-                stream_id, submitted_at, admitted_at
+                stream_id, submitted_at, admitted_at, attempts, failure_json,
+                cancel_requested
          FROM cf_agents_harness_submissions
          WHERE driver_id = ? AND operation_id = ?`,
         this.#driverId,
@@ -121,7 +160,8 @@ export class HarnessDriverStore {
     const row = this.#storage.sql
       .exec<SubmissionRow>(
         `SELECT seq, driver_id, scope, operation_id, input_json, status,
-                stream_id, submitted_at, admitted_at
+                stream_id, submitted_at, admitted_at, attempts, failure_json,
+                cancel_requested
          FROM cf_agents_harness_submissions
          WHERE driver_id = ? AND scope = ?
          ORDER BY seq ASC LIMIT 1`,
@@ -139,7 +179,8 @@ export class HarnessDriverStore {
     const row = this.#storage.sql
       .exec<SubmissionRow>(
         `SELECT seq, driver_id, scope, operation_id, input_json, status,
-                stream_id, submitted_at, admitted_at
+                stream_id, submitted_at, admitted_at, attempts, failure_json,
+                cancel_requested
          FROM cf_agents_harness_submissions
          WHERE driver_id = ? AND scope = ? AND status = 'admitted'`,
         this.#driverId,
@@ -156,7 +197,8 @@ export class HarnessDriverStore {
         ? this.#storage.sql
             .exec<SubmissionRow>(
               `SELECT seq, driver_id, scope, operation_id, input_json, status,
-                      stream_id, submitted_at, admitted_at
+                      stream_id, submitted_at, admitted_at, attempts, failure_json,
+                cancel_requested
                FROM cf_agents_harness_submissions
                WHERE driver_id = ? ORDER BY seq ASC`,
               this.#driverId
@@ -165,7 +207,8 @@ export class HarnessDriverStore {
         : this.#storage.sql
             .exec<SubmissionRow>(
               `SELECT seq, driver_id, scope, operation_id, input_json, status,
-                      stream_id, submitted_at, admitted_at
+                      stream_id, submitted_at, admitted_at, attempts, failure_json,
+                cancel_requested
                FROM cf_agents_harness_submissions
                WHERE driver_id = ? AND scope = ? ORDER BY seq ASC`,
               this.#driverId,
@@ -199,6 +242,49 @@ export class HarnessDriverStore {
        SET status = 'admitted', admitted_at = ?
        WHERE driver_id = ? AND operation_id = ?`,
       admittedAt,
+      this.#driverId,
+      operationId
+    );
+    return this.get<Input>(operationId);
+  }
+
+  recordAttempt(
+    operationId: string,
+    attempts: number,
+    failure: { readonly name: string; readonly message: string } | null
+  ): HarnessDriverSubmission | undefined {
+    this.ensureTable();
+    this.#storage.sql.exec(
+      `UPDATE cf_agents_harness_submissions
+       SET attempts = ?, failure_json = ?
+       WHERE driver_id = ? AND operation_id = ?`,
+      attempts,
+      failure === null ? null : JSON.stringify(failure),
+      this.#driverId,
+      operationId
+    );
+    return this.get(operationId);
+  }
+
+  resetAttempts(operationId: string): void {
+    this.ensureTable();
+    this.#storage.sql.exec(
+      `UPDATE cf_agents_harness_submissions
+       SET attempts = 0
+       WHERE driver_id = ? AND operation_id = ? AND failure_json IS NULL`,
+      this.#driverId,
+      operationId
+    );
+  }
+
+  requestCancellation<Input = unknown>(
+    operationId: string
+  ): HarnessDriverSubmission<Input> | undefined {
+    this.ensureTable();
+    this.#storage.sql.exec(
+      `UPDATE cf_agents_harness_submissions
+       SET cancel_requested = 1
+       WHERE driver_id = ? AND operation_id = ?`,
       this.#driverId,
       operationId
     );

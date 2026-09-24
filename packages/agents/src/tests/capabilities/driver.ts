@@ -41,6 +41,7 @@ export class DriverHarnessObject extends DurableObject<Cloudflare.Env> {
     },
     cancel: async (_scope, operationId) => {
       await this.ctx.storage.delete(`runtime:${operationId}`);
+      return { status: "cancelled" };
     }
   };
 
