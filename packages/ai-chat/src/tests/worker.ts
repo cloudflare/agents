@@ -2012,14 +2012,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       return makeHangingSSEResponse();
     }
 
-    if (this._failingTurn) {
-      this._failingReaderCalls++;
-      const { message, remaining, prelude } = this._failingTurn;
-      this._failingTurn =
-        remaining > 1 ? { message, remaining: remaining - 1, prelude } : null;
-      return makeFailingSSEResponse(message, prelude);
-    }
-
     if (this._stashData !== null) {
       try {
         this.stash(this._stashData);
@@ -2030,6 +2022,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
           error: e instanceof Error ? e.message : String(e)
         };
       }
+    }
+
+    if (this._failingTurn) {
+      this._failingReaderCalls++;
+      const { message, remaining, prelude } = this._failingTurn;
+      this._failingTurn =
+        remaining > 1 ? { message, remaining: remaining - 1, prelude } : null;
+      return makeFailingSSEResponse(message, prelude);
     }
 
     if (this._emitStreamError) {

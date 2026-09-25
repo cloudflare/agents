@@ -204,6 +204,7 @@ interface ChatRecoveryTestStub {
     }
   ): Promise<"completed" | "error" | "aborted" | "skipped">;
   getFailingReaderCallsForTest(): Promise<number>;
+  setStashData(data: unknown): Promise<void>;
 }
 
 async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
@@ -2797,6 +2798,32 @@ describe("platform-transient reader errors (#1964)", () => {
     await new Promise((resolve) => setTimeout(resolve, 1500));
     expect(await agentStub.getFailingReaderCallsForTest()).toBe(1);
     expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
+  });
+
+  it("passes the live turn's checkpoint and start time to onChatRecovery", async () => {
+    const agentStub = await getTestAgent(
+      `transient-context-${crypto.randomUUID()}`
+    );
+    await agentStub.setRecoveryOverride({ continue: false });
+    await agentStub.setStashData({ responseId: "r-123" });
+    const before = Date.now();
+
+    expect(
+      await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
+    ).toBe("error");
+
+    const contexts = (await agentStub.getRecoveryContexts()) as Array<{
+      recoveryData: unknown;
+      createdAt: number;
+    }>;
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        firstSeenAt: number;
+      }>;
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0].recoveryData).toEqual({ responseId: "r-123" });
+    expect(contexts[0].createdAt).toBeGreaterThanOrEqual(before);
+    expect(contexts[0].createdAt).toBeLessThan(incidents[0].firstSeenAt);
   });
 
   it("exhausts repeated disconnects on the transient retry budget", async () => {

@@ -805,6 +805,17 @@ export class AIChatAgent<
     );
   }
 
+  /**
+   * Start time and latest `stash()` data of each chat turn running in this
+   * isolate, keyed by request id. A live stream failure is recovered while the
+   * turn is still running, so `onChatRecovery` reads these instead of a fiber
+   * snapshot.
+   */
+  private readonly _liveChatRecoveryTurns = new Map<
+    string,
+    { createdAt: number; recoveryData: unknown }
+  >();
+
   private async _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
@@ -819,9 +830,32 @@ export class AIChatAgent<
       lastBody: this._lastBody,
       lastClientTools: this._lastClientTools
     });
-    const wrap = (data: unknown) =>
-      wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data);
+    const liveTurn = { createdAt: Date.now(), recoveryData: null as unknown };
+    const wrap = (data: unknown) => {
+      liveTurn.recoveryData = data;
+      return wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data);
+    };
+    this._liveChatRecoveryTurns.set(requestId, liveTurn);
+    try {
+      return await this._runWrappedChatRecoveryFiber(
+        requestId,
+        continuation,
+        wrap,
+        fn
+      );
+    } finally {
+      if (this._liveChatRecoveryTurns.get(requestId) === liveTurn) {
+        this._liveChatRecoveryTurns.delete(requestId);
+      }
+    }
+  }
 
+  private async _runWrappedChatRecoveryFiber<T>(
+    requestId: string,
+    continuation: boolean,
+    wrap: (data: unknown) => Record<string, unknown>,
+    fn: () => Promise<T>
+  ): Promise<T> {
     // Facet-hosted turns stay on the legacy fiber engine: the Tasks
     // capability does not accept runs on routed sub-agents yet, and facet
     // recovery routes through the root's facet-run index.
@@ -5468,6 +5502,7 @@ export class AIChatAgent<
       return "exhausted";
     }
 
+    const liveTurn = this._liveChatRecoveryTurns.get(input.requestId);
     let options: ChatRecoveryOptions;
     try {
       options =
@@ -5481,11 +5516,11 @@ export class AIChatAgent<
           requestId: input.requestId,
           partialText,
           partialParts: input.partialParts,
-          recoveryData: null,
+          recoveryData: liveTurn?.recoveryData ?? null,
           messages: [...this.messages],
           lastBody: this._lastBody,
           lastClientTools: this._lastClientTools,
-          createdAt: incident.firstSeenAt
+          createdAt: liveTurn?.createdAt ?? incident.firstSeenAt
         })) ?? {};
     } catch (error) {
       console.error(
