@@ -99,19 +99,29 @@ export interface TaskStepAttempt {
 }
 
 /**
+ * Retry policy shape, shared by a `step.do()` config and a run's `interruptions`
+ * so one number never means two things: `limit` counts total attempts
+ * including the first in both places, and `delay`/`backoff` space the
+ * retries out durably.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export interface TaskRetryConfig {
+  /** Total attempts, including the first. */
+  limit?: number;
+  /** Delay before the first retry. */
+  delay?: number | TaskDurationString;
+  /** Delay growth across retries. Defaults to exponential. */
+  backoff?: "constant" | "linear" | "exponential";
+}
+
+/**
  * Retry and timeout policy for one `step.do()` call.
  *
  * @experimental The API surface may change before stabilizing.
  */
 export interface TaskStepConfig {
-  retries?: {
-    /** Total attempts, including the first. */
-    limit?: number;
-    /** Delay before the first retry. */
-    delay?: number | TaskDurationString;
-    /** Delay growth across retries. Defaults to exponential. */
-    backoff?: "constant" | "linear" | "exponential";
-  };
+  retries?: TaskRetryConfig;
 
   /** Timeout of one callback attempt. */
   timeout?: number | TaskDurationString;
@@ -127,15 +137,34 @@ export interface TaskStepConfig {
  */
 export interface TaskStep {
   /**
+   * This execution's claim number for the run: 1 on the first attempt, and
+   * one higher on every later claim — a replay after an unclean
+   * interruption, and equally a wake from a sleep or a step retry park.
+   * It is not the counter a run's `interruptions` bounds; that one counts only
+   * interruptions.
+   */
+  readonly attempt: number;
+
+  /**
    * The step an unclean interruption left mid-execution, or `null` on a
    * clean attempt — the durable evidence a replayed handler branches on
    * before re-entering irreversible work. Populated when a lost attempt's
-   * claim is taken over; a retry park or first attempt sees `null`.
+   * claim is taken over, including across the run's own interruption
+   * backoff park, which replays with the evidence intact. A first attempt,
+   * a sleep wake, and a step retry park all see `null`.
    */
   readonly interrupted: {
     readonly name: string;
     readonly attempt: number;
   } | null;
+
+  /**
+   * Aborted for the whole attempt — on `cancel()`, and when the run's
+   * `deadline` passes — so work awaited outside `step.do()` (a long model
+   * turn, a drain loop) can unwind. Inside a step the per-attempt `signal`
+   * already covers it.
+   */
+  readonly signal: AbortSignal;
 
   /** Run a named step once, replaying its journaled result thereafter. */
   do<T extends TaskValue>(
@@ -180,8 +209,12 @@ export type TaskRunState =
   | "failed"
   | "cancelled";
 
-/** Why a waiting run is waiting. */
-export type TaskWaitReason = "sleep" | "retry";
+/**
+ * Why a waiting run is waiting: parked on a `step.sleep()` deadline, on a
+ * step's retry delay, or on the run's own backoff between an unclean
+ * interruption and the replay of that attempt.
+ */
+export type TaskWaitReason = "sleep" | "retry" | "interrupted";
 
 /** Safe projection of an error retained with a failed run. */
 export interface TaskError {
@@ -206,6 +239,28 @@ export interface TaskRunOptions {
 
   /** Keep terminal state for inspection. Defaults to `true`. */
   retain?: boolean;
+
+  /**
+   * Retry policy for INTERRUPTED attempts: an attempt whose isolate died
+   * mid-execution and is being reclaimed. `limit` counts total attempts
+   * including the first, exactly as a step's does, and counts only
+   * *consecutive* interruptions — reaching a durable boundary under the
+   * attempt's own power (a sleep, a step retry park) clears the count, so a
+   * long-lived run is never killed for having survived enough deploys.
+   * Wakes from those parks are not attempts and cost nothing. Omitted: an
+   * interruption replays immediately, without bound. When present, fields
+   * left unset fall back to the capability's step `retries` defaults, and
+   * the interruption that reaches `limit` fails the run with
+   * `TaskInterruptionsExhaustedError`.
+   */
+  interruptions?: TaskRetryConfig;
+
+  /**
+   * Wall-clock deadline (epoch milliseconds or a `Date`). A live attempt's
+   * `step.signal` aborts and the run fails with `TaskDeadlineExceededError`;
+   * a parked run fails at its next wake, which the deadline brings forward.
+   */
+  deadline?: number | Date;
 }
 
 /**
@@ -323,6 +378,9 @@ export type TaskRunRow = {
   idempotency_key: string | null;
   retain: number;
   attempt: number;
+  deadline_at: number | null;
+  interruptions: number;
+  retry_policy: string | null;
   generation: string | null;
   next_at: number | null;
   wait_reason: TaskWaitReason | null;
