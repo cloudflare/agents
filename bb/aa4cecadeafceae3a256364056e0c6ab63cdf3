@@ -1,0 +1,33 @@
+packages/agents/src/chat/recovery-engine.ts
+  s_368991bdec7f77::t_158c3c72c1da7f 196-201,472-473
+packages/agents/src/chat/resumable-stream.ts
+  s_368991bdec7f77::t_217ac3ed49947a 588-593,596-602,648-654
+packages/agents/src/tests/streams/resumable-stream-settlement.test.ts
+  s_368991bdec7f77::t_65bccffbcf90c6 148-167
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_e51a1091436fe9 4944-4951,4957-4958,5018-5019,5053-5054,5060-5061,5066-5070,5088-5089,5091
+packages/ai-chat/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_51d130574e833a 207-265
+packages/think/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_0d5d9cf07b1444 198-272
+packages/think/src/think.ts
+  s_368991bdec7f77::t_42654237135bf2 16210-16217,16223-16224,16268-16269,16304-16305,16311-16312,16321-16322,18433-18434,18437,18455-18456,18458
+.changeset/terminal-frame-message-ids.md
+  s_368991bdec7f77::t_00578984d83e07 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "bbaa4cecadeafceae3a256364056e0c6ab63cdf3",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
