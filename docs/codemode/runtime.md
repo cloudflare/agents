@@ -21,6 +21,8 @@ const runtime = createCodemodeRuntime({
 });
 ```
 
+Add `validators` to reject semantically incorrect generated programs before the executor starts or concrete connector calls before they execute. See [Validators](./validators.md).
+
 | Handle method                                        | Purpose                                                                                                                                    |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `runtime.tool(options?)`                             | The single model-facing AI SDK tool, `codemode({ code })`                                                                                  |
