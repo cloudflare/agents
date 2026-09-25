@@ -93,6 +93,11 @@ export class BrowserSessions extends LifecycleCapability {
 
   // ── Session surface ──────────────────────────────────────────────────────
 
+  /** The Browser Rendering binding sessions are created against. */
+  get browser(): BrowserBinding {
+    return this.#options.browser;
+  }
+
   /**
    * Resolve the named session — reattach-or-create with loud mortality
    * signaling. See {@link ResolvedBrowserSession.restarted}.

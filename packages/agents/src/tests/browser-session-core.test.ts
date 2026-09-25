@@ -459,6 +459,40 @@ describe("NamedBrowserSessions.connect", () => {
     await expect(sessions.connect()).rejects.toThrow(/\(502\)/);
   });
 
+  it("records the active tab on the session record", async () => {
+    const { browser } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const sessions = new NamedBrowserSessions({ browser, store });
+
+    const first = await sessions.connect("work");
+    expect(first.activeTargetId).toBeUndefined();
+    expect(await first.setActiveTarget("target-7")).toBe(true);
+
+    const second = await sessions.connect("work");
+    expect(second.activeTargetId).toBe("target-7");
+    expect(await second.setActiveTarget(undefined)).toBe(true);
+    expect(
+      store.sessions.get(namedBrowserSessionKey("work"))?.activeTargetId
+    ).toBeUndefined();
+  });
+
+  it("never resurrects a closed session when recording the active tab", async () => {
+    const { browser } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const sessions = new NamedBrowserSessions({ browser, store });
+
+    const connected = await sessions.connect("work");
+    await sessions.close("work");
+
+    expect(await connected.setActiveTarget("target-1")).toBe(false);
+    expect(store.sessions.has(namedBrowserSessionKey("work"))).toBe(false);
+
+    // A replacement browser starts with no active tab.
+    const replaced = await sessions.connect("work");
+    expect(replaced.restarted).toBe(true);
+    expect(replaced.activeTargetId).toBeUndefined();
+  });
+
   it("CDP activity refreshes the record's updatedAt", async () => {
     const { browser } = createFakeBrowser();
     const store = new MemorySessionStore();

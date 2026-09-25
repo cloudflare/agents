@@ -10,6 +10,13 @@ export interface StoredBrowserSession {
    * loudly instead of silently continuing in a fresh browser.
    */
   closedAt?: number;
+  /**
+   * Named sessions only: the tab (CDP `targetId`) the agent last worked in,
+   * so `sessionId: "active"` in a later execution lands on the same page.
+   * CDP session ids die with each connection; target ids live as long as
+   * the tab.
+   */
+  activeTargetId?: string;
 }
 
 export interface BrowserSessionLock {
