@@ -204,6 +204,65 @@ describe("originating message ids on terminal frames (#2280)", () => {
     ws.close(1000);
   });
 
+  it("carries the ids onto a pre-stream turn that exhausts on wake", async () => {
+    const room = crypto.randomUUID();
+    const agent = (await getAgentByName(
+      env.ChatRecoveryTestAgent,
+      room
+    )) as unknown as {
+      enableExhaustedCaptureForTest(maxAttempts: number): Promise<void>;
+      persistMessages(messages: unknown[]): Promise<void>;
+      insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
+      seedIncidentForTest(incident: Record<string, unknown>): Promise<void>;
+      readProgressMarkerForTest(): Promise<number>;
+      triggerFiberRecovery(): Promise<void>;
+      getPendingChatTerminalForTest(): Promise<{
+        requestId: string;
+        messageIds?: string[];
+      } | null>;
+    };
+    await agent.enableExhaustedCaptureForTest(1);
+    await agent.persistMessages([user("msg-x")]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-x", {
+      __cfAIChatFiberSnapshot: {
+        kind: "ai-chat-turn",
+        version: 1,
+        requestId: "req-x",
+        continuation: false,
+        latestMessageId: "msg-x",
+        latestMessageRole: "user",
+        latestUserMessageId: "msg-x",
+        startedAt: Date.now(),
+        originMessageIds: ["msg-x"]
+      },
+      user: null
+    });
+    await agent.seedIncidentForTest({
+      incidentId: "req-x:msg-x",
+      requestId: "req-x",
+      recoveryKind: "retry",
+      attempt: 1,
+      maxAttempts: 1,
+      status: "scheduled",
+      firstSeenAt: Date.now() - 60_000,
+      lastAttemptAt: Date.now() - 60_000,
+      progress: await agent.readProgressMarkerForTest()
+    });
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const terminal = waitForTerminal(ws, "req-x", (frame) => !!frame.error);
+
+    await agent.triggerFiberRecovery();
+    expect((await terminal).messageIds).toEqual(["msg-x"]);
+    expect(await agent.getPendingChatTerminalForTest()).toMatchObject({
+      requestId: "req-x",
+      messageIds: ["msg-x"]
+    });
+
+    ws.close(1000);
+  });
+
   it("omits messageIds when the request carries no trailing user message", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

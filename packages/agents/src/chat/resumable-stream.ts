@@ -585,8 +585,20 @@ export class ResumableStream {
    */
   getOriginMessageIds(requestId: string): string[] | undefined {
     const row = this._latestChatRowByTag(requestId);
-    return row ? parseChatMetadata(row)?.originMessageIds : undefined;
+    return (
+      (row ? parseChatMetadata(row)?.originMessageIds : undefined) ??
+      (this._cutoverOrigin?.requestId === requestId
+        ? this._cutoverOrigin.messageIds
+        : undefined)
+    );
   }
+
+  /**
+   * Origin ids of the stream the last discarding cutover deleted, so a resume
+   * ACK that races the cutover still gets them on its replay terminal.
+   */
+  private _cutoverOrigin: { requestId: string; messageIds: string[] } | null =
+    null;
 
   /**
    * Mark a stream as completed and flush any pending chunks.
@@ -633,6 +645,13 @@ export class ResumableStream {
   ): void {
     this.flushBuffer();
     const discard = options.discard ?? true;
+    if (discard) {
+      const row = this.ops.getStream(streamId);
+      const messageIds = row ? parseChatMetadata(row)?.originMessageIds : null;
+      if (row?.tag && messageIds) {
+        this._cutoverOrigin = { requestId: row.tag, messageIds };
+      }
+    }
     const commit = persist;
     // The discard deletes the rows inside the settle transaction, and the
     // deletion hook retires their segments there, so the marker moves with

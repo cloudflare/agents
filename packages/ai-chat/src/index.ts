@@ -4941,13 +4941,21 @@ export class AIChatAgent<
           "[AIChatAgent] chatRecovery shouldKeepRecovering hook threw",
           error
         ),
-      exhaustChatRecovery: (incident, config, partial, streamId, createdAt) =>
+      exhaustChatRecovery: (
+        incident,
+        config,
+        partial,
+        streamId,
+        createdAt,
+        originMessageIds
+      ) =>
         this._exhaustChatRecovery(
           incident,
           config,
           partial,
           streamId,
-          createdAt
+          createdAt,
+          originMessageIds
         ),
       resolveRecoveryStream: (requestId) =>
         this._resolveAIChatRecoveryStream(requestId),
@@ -5007,7 +5015,8 @@ export class AIChatAgent<
     // user-facing exhausted-context edge below.
     partial: { text: string; parts: unknown[] },
     streamId: string,
-    createdAt: number
+    createdAt: number,
+    originMessageIds?: string[]
   ): Promise<void> {
     // Build + notification (event + onExhausted-swallow) and the
     // notify-before-terminalize invariant live in the engine helper; the
@@ -5041,17 +5050,24 @@ export class AIChatAgent<
           // at-least-once edge). Persisting first gains no durability (the
           // re-run persists either way) while dropping the live banner on the
           // failing pass — so ai-chat matches `Think`'s broadcast-first.
+          const messageIds =
+            this._originMessageIdsFor(ctx.requestId) ?? originMessageIds;
           this._broadcastChatMessage({
             body: ctx.terminalMessage,
             done: true,
             error: true,
             id: ctx.requestId,
-            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+            ...(messageIds ? { messageIds } : {})
           });
           // The durable terminal record (#1645) is replayed to a client that
           // (re)connects after the turn ended (shared
           // `ResumeHandshake._replayTerminalOnResume`).
-          await this._recordChatTerminal(ctx.requestId, ctx.terminalMessage);
+          await this._recordChatTerminal(
+            ctx.requestId,
+            ctx.terminalMessage,
+            messageIds
+          );
           // Exhaustion resolves recovery — clear the "recovering…" status (#1620).
           await this._setChatRecovering(false);
         }
@@ -5069,14 +5085,10 @@ export class AIChatAgent<
    */
   private async _recordChatTerminal(
     requestId: string,
-    body: string
+    body: string,
+    messageIds = this._originMessageIdsFor(requestId)
   ): Promise<void> {
-    await recordChatTerminal(
-      this.ctx.storage,
-      requestId,
-      body,
-      this._originMessageIdsFor(requestId)
-    );
+    await recordChatTerminal(this.ctx.storage, requestId, body, messageIds);
   }
 
   /** Clear the durable terminal record once a later turn supersedes it (#1645). */

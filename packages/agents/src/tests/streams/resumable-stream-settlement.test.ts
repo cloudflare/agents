@@ -145,6 +145,26 @@ describe("ResumableStream originating message ids (#2280)", () => {
     });
   });
 
+  it("keeps them after a cutover deletes the stream", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
+      const stream = createAdapter(instance, ctx.storage.sql);
+      const id = stream.start("req-cut", { originMessageIds: ["m4"] });
+      stream.storeChunk(id, JSON.stringify({ type: "text-delta", delta: "y" }));
+      stream.finish(id);
+      stream.cutover(id, () => {});
+
+      expect(
+        stream.replayCompletedChunksByRequestId(
+          collectingConnection([]),
+          "req-cut"
+        )
+      ).toBe(false);
+      expect(stream.getOriginMessageIds("req-cut")).toEqual(["m4"]);
+      expect(stream.getOriginMessageIds("req-other")).toBeUndefined();
+    });
+  });
+
   it("omits them for a stream started without ids", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {

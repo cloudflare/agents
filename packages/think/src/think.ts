@@ -16215,13 +16215,21 @@ export class Think<
           "[Think] chatRecovery shouldKeepRecovering hook threw",
           error
         ),
-      exhaustChatRecovery: (incident, config, partial, streamId, createdAt) =>
+      exhaustChatRecovery: (
+        incident,
+        config,
+        partial,
+        streamId,
+        createdAt,
+        originMessageIds
+      ) =>
         this._exhaustChatRecovery(
           incident,
           config,
           partial,
           streamId,
-          createdAt
+          createdAt,
+          originMessageIds
         ),
       resolveRecoveryStream: (requestId) =>
         this._resolveThinkRecoveryStream(requestId),
@@ -16265,7 +16273,8 @@ export class Think<
     // user-facing exhausted-context edge below.
     partial: { text: string; parts: unknown[] },
     streamId: string,
-    createdAt: number
+    createdAt: number,
+    originMessageIds?: string[]
   ): Promise<void> {
     // Build + notification (event + onExhausted-swallow) and the
     // notify-before-terminalize invariant live in the engine helper; the
@@ -16300,12 +16309,15 @@ export class Think<
           // `@cloudflare/ai-chat` terminalizes broadcast-first for the same
           // reason; only the set of durable writes below differs (Think also
           // writes a submission row).
+          const messageIds =
+            this._originMessageIdsFor(ctx.requestId) ?? originMessageIds;
           this._broadcastChat({
             type: MSG_CHAT_RESPONSE,
             id: ctx.requestId,
             body: ctx.terminalMessage,
             done: true,
-            error: true
+            error: true,
+            ...(messageIds ? { messageIds } : {})
           });
           // Write the durable terminal record (#1645) FIRST among the storage
           // writes: it's the record a disconnected client replays on reconnect,
@@ -16314,7 +16326,8 @@ export class Think<
           await this._recordTerminalChatStatus(
             "interrupted",
             ctx.requestId,
-            ctx.terminalMessage
+            ctx.terminalMessage,
+            messageIds
           );
           // The recovery root locates the stable submission identity even
           // after request_id has been rebound to an accepted successor.
@@ -18450,10 +18463,11 @@ export class Think<
   private async _recordTerminalChatStatus(
     status: ChatResponseResult["status"] | "interrupted",
     requestId: string,
-    body: string
+    body: string,
+    messageIds?: string[]
   ): Promise<void> {
     if (status === "error" || status === "interrupted") {
-      await this._recordChatTerminal(requestId, body);
+      await this._recordChatTerminal(requestId, body, messageIds);
     } else {
       await this._clearChatTerminal();
     }
@@ -18471,14 +18485,10 @@ export class Think<
    */
   private async _recordChatTerminal(
     requestId: string,
-    body: string
+    body: string,
+    messageIds = this._originMessageIdsFor(requestId)
   ): Promise<void> {
-    await recordChatTerminal(
-      this.ctx.storage,
-      requestId,
-      body,
-      this._originMessageIdsFor(requestId)
-    );
+    await recordChatTerminal(this.ctx.storage, requestId, body, messageIds);
   }
 
   /** Clear the durable terminal record once a later turn supersedes it (#1645). */
