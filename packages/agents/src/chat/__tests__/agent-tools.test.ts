@@ -58,9 +58,30 @@ describe("agentToolEventDedupeKey", () => {
     );
     expect(agentToolEventDedupeKey(replayedFinish)).toBe(
       agentToolEventDedupeKey(
-        frame(9, { kind: "finished", runId, summary: "" })
+        frame(9, { kind: "finished", runId, summary: "done" })
       )
     );
+  });
+
+  it("keeps a later interruption with a different outcome distinct", () => {
+    const interrupted = (
+      sequence: number,
+      reason: "no-progress" | "window-exceeded",
+      childStillRunning: boolean
+    ) =>
+      frame(sequence, {
+        kind: "interrupted",
+        runId,
+        error: "stopped waiting",
+        reason,
+        childStillRunning
+      });
+    expect(agentToolEventDedupeKey(interrupted(5, "no-progress", true))).toBe(
+      agentToolEventDedupeKey(interrupted(2, "no-progress", true))
+    );
+    expect(
+      agentToolEventDedupeKey(interrupted(5, "window-exceeded", false))
+    ).not.toBe(agentToolEventDedupeKey(interrupted(5, "no-progress", true)));
   });
 
   it("keys milestones on their own sequence, not the broadcast sequence", () => {

@@ -6919,21 +6919,23 @@ export class Agent<
       row.run_id,
       timeoutMs
     );
-    if (!chunks) return sequence;
-    const next = this._broadcastAgentToolChunks(
-      row.parent_tool_call_id ?? undefined,
-      row.run_id,
-      chunks,
-      sequence,
-      replay,
-      connection
-    );
+    const next = chunks
+      ? this._broadcastAgentToolChunks(
+          row.parent_tool_call_id ?? undefined,
+          row.run_id,
+          chunks,
+          sequence,
+          replay,
+          connection
+        )
+      : sequence;
     return this._broadcastAgentToolMilestones(
       adapter,
       row,
       next,
       replay,
-      connection
+      connection,
+      timeoutMs
     );
   }
 
@@ -6947,16 +6949,16 @@ export class Agent<
     row: Pick<AgentToolRunStorageRow, "run_id" | "parent_tool_call_id">,
     sequence: number,
     replay?: true,
-    connection?: Connection
+    connection?: Connection,
+    timeoutMs?: number
   ): Promise<number> {
-    let milestones: AgentToolMilestone[] | undefined;
-    try {
-      milestones = (await adapter.inspectAgentToolRun(row.run_id))?.milestones;
-    } catch {
-      return sequence;
-    }
+    const inspection = await this._settleWithinRecoveryTimeout(
+      adapter.inspectAgentToolRun(row.run_id),
+      timeoutMs
+    );
+    const milestones: AgentToolMilestone[] = inspection?.milestones ?? [];
     let next = sequence;
-    for (const milestone of milestones ?? []) {
+    for (const milestone of milestones) {
       this._broadcastAgentToolEvent(
         row.parent_tool_call_id ?? undefined,
         next++,
@@ -8079,14 +8081,25 @@ export class Agent<
     runId: string,
     timeoutMs?: number
   ): Promise<AgentToolStoredChunk[] | undefined> {
-    const chunks = adapter.getAgentToolChunks(runId).catch(() => undefined);
-    if (timeoutMs === undefined || timeoutMs <= 0) return chunks;
+    return this._settleWithinRecoveryTimeout(
+      adapter.getAgentToolChunks(runId),
+      timeoutMs
+    );
+  }
+
+  /** Resolve to `undefined` when `promise` rejects or outlasts `timeoutMs`. */
+  private async _settleWithinRecoveryTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs?: number
+  ): Promise<T | undefined> {
+    const settled = promise.catch(() => undefined);
+    if (timeoutMs === undefined || timeoutMs <= 0) return settled;
 
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<undefined>((resolve) => {
       timeoutId = setTimeout(() => resolve(undefined), timeoutMs);
     });
-    const result = await Promise.race([chunks, timeout]);
+    const result = await Promise.race([settled, timeout]);
     if (timeoutId !== undefined) clearTimeout(timeoutId);
     return result;
   }

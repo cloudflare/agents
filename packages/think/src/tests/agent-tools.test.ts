@@ -93,6 +93,7 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     name: string,
     data: unknown
   ): Promise<number>;
+  failNextChildChunkReadForTest(runId: string): Promise<void>;
   runThinkChildDetachedTerminalForTest(): Promise<string | null>;
   startThinkChildWithoutTailForTest(
     input: string,
@@ -539,6 +540,39 @@ describe("Think agent tools", () => {
       );
       const sequences = replayed.map((event) => event.sequence);
       expect(new Set(sequences).size).toBe(sequences.length);
+      expect(replayed.at(-1)?.event.kind).toBe("finished");
+    });
+
+    it("replays persisted milestones when the child's chunk read fails", async () => {
+      const parent = await freshParent();
+      const runId = crypto.randomUUID();
+      await parent.runThinkChildWithProgressInjectionForTest(
+        "headless parent",
+        progressBody,
+        milestoneBody,
+        10,
+        runId,
+        "terminal"
+      );
+      await parent.persistChildMilestoneForTest(runId, "sources-gathered", {
+        sources: 3
+      });
+      await parent.failNextChildChunkReadForTest(runId);
+
+      const replayed = await parent.replayAgentToolEventsForTest();
+      expect(
+        replayed.some((event) => {
+          if (event.event.kind !== "chunk") return false;
+          const body = JSON.parse((event.event as { body: string }).body) as {
+            type: string;
+            data?: { name?: string };
+          };
+          return (
+            body.type === AGENT_TOOL_MILESTONE_PART &&
+            body.data?.name === "sources-gathered"
+          );
+        })
+      ).toBe(true);
       expect(replayed.at(-1)?.event.kind).toBe("finished");
     });
 

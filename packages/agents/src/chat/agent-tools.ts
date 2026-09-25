@@ -402,8 +402,10 @@ export function createAgentToolEventState<
 /**
  * Identity of an agent-tool event for replay-vs-live dedupe. Live numbering
  * counts transient frames that replay never sees, so only ordinary chunks key
- * on the broadcast `sequence`: lifecycle events key on their kind (one per run)
- * and milestones on their own persisted sequence.
+ * on the broadcast `sequence`. Lifecycle events key on their content: a
+ * reattached run can be interrupted again with a different reason, and the
+ * reducer overwrites on lifecycle events, so re-applying one is harmless.
+ * Milestones key on their own persisted sequence.
  */
 export function agentToolEventDedupeKey(
   message: AgentToolEventMessage
@@ -411,7 +413,7 @@ export function agentToolEventDedupeKey(
   const { event } = message;
   let identity: string;
   if (event.kind !== "chunk") {
-    identity = `kind:${event.kind}`;
+    identity = `event:${JSON.stringify(event)}`;
   } else {
     let milestone: AgentToolMilestone | undefined;
     if (event.body.includes(AGENT_TOOL_MILESTONE_PART)) {

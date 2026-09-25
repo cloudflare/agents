@@ -787,10 +787,20 @@ export class ThinkTestAgent extends Think {
     return null;
   }
 
+  private _failNextChunkRead = false;
+
+  failNextAgentToolChunkReadForTest(): void {
+    this._failNextChunkRead = true;
+  }
+
   override async getAgentToolChunks(
     runId: string,
     options?: { afterSequence?: number }
   ): Promise<AgentToolStoredChunk[]> {
+    if (this._failNextChunkRead) {
+      this._failNextChunkRead = false;
+      throw new Error("chunk read failed");
+    }
     const chunks = await super.getAgentToolChunks(runId, options);
 
     const race = this._attachRaceInjection;
@@ -3289,6 +3299,11 @@ export class ThinkAgentToolParent extends Agent {
   ): Promise<number> {
     const child = await this.subAgent(ThinkTestAgent, runId);
     return child.persistAgentToolMilestoneForTest(runId, name, data);
+  }
+
+  async failNextChildChunkReadForTest(runId: string): Promise<void> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.failNextAgentToolChunkReadForTest();
   }
 
   /** Replay this parent's agent-tool events to a fresh connection. */
