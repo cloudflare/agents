@@ -3254,7 +3254,7 @@ function isMethodOverridden(instance: object, methodName: string): boolean {
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends object = object
 > extends Agent<Env, State, Props> {
   // Root requestId of the in-flight recovery chain, threaded into each
   // continuation's snapshot so chained continuations keep owning the original

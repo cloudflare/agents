@@ -798,16 +798,16 @@ The error message lists available agents. Check:
 
 Routes a request to the appropriate agent.
 
-| Parameter                 | Type                      | Description                                         |
-| ------------------------- | ------------------------- | --------------------------------------------------- |
-| `request`                 | `Request`                 | The incoming request                                |
-| `env`                     | `Env`                     | Environment with agent bindings                     |
-| `options.cors`            | `boolean \| HeadersInit`  | Enable CORS headers                                 |
-| `options.props`           | `Record<string, unknown>` | Props passed to whichever agent handles the request |
-| `options.locationHint`    | `string`                  | Preferred location for agent instances              |
-| `options.jurisdiction`    | `string`                  | Data jurisdiction for agent instances               |
-| `options.onBeforeConnect` | `Function`                | Callback before WebSocket connections               |
-| `options.onBeforeRequest` | `Function`                | Callback before HTTP requests                       |
+| Parameter                 | Type                     | Description                                         |
+| ------------------------- | ------------------------ | --------------------------------------------------- |
+| `request`                 | `Request`                | The incoming request                                |
+| `env`                     | `Env`                    | Environment with agent bindings                     |
+| `options.cors`            | `boolean \| HeadersInit` | Enable CORS headers                                 |
+| `options.props`           | `object`                 | Props passed to whichever agent handles the request |
+| `options.locationHint`    | `string`                 | Preferred location for agent instances              |
+| `options.jurisdiction`    | `string`                 | Data jurisdiction for agent instances               |
+| `options.onBeforeConnect` | `Function`               | Callback before WebSocket connections               |
+| `options.onBeforeRequest` | `Function`               | Callback before HTTP requests                       |
 
 **Returns:** `Promise<Response \| undefined>` - Response if matched, undefined if no agent route
 
@@ -821,7 +821,7 @@ Get an agent instance by name for server-side RPC or request forwarding.
 | `name`                 | `string`                    | Instance name                           |
 | `options.locationHint` | `string`                    | Preferred location                      |
 | `options.jurisdiction` | `string`                    | Data jurisdiction                       |
-| `options.props`        | `Record<string, unknown>`   | Initialization properties for `onStart` |
+| `options.props`        | `object`                    | Initialization properties for `onStart` |
 
 **Returns:** `Promise<DurableObjectStub<T>>` - Typed stub for calling agent methods or forwarding requests
 
