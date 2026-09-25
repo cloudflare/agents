@@ -1,0 +1,31 @@
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_fec7a45678d164 189,198,411-416,1874-1876,2243-2244,5267,5295-5296,5312-5313,5330-5331,5377-5378,5476,5526,5646-5647,5893-5894,5987
+packages/think/src/think.ts
+  s_368991bdec7f77::t_ed40c97c49cd07 1261,1271,3272-3277,16368,16516,16536,16759,16808,16827,17302-17303,17439,17604-17605,17738,18571-18573,18679-18680
+docs/agents/chat-agents.md
+  s_368991bdec7f77::t_df0390a2584238 1703-1707
+packages/ai-chat/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_a557ae32c2aa61 1-2,81-118
+packages/ai-chat/src/tests/worker.ts
+  s_368991bdec7f77::t_88ad831a5502a1 2806-2811
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_46ce84fe04aaf8 1841-1864
+packages/think/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_7adb2e357feed3 94-124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d54c983ef009f35e6cca1c291ab607b826533621",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
