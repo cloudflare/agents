@@ -24,9 +24,9 @@ capabilities push jobs instead of contributing wake times.
   used for wakes that must not be delayed by other work (deferred destroy).
 - **Deadman pre-alarm** — armed before the event loop drives any due job, so
   an isolate death mid-drive still wakes the object to resume its queue.
-- **Tasks** — the capability for durable replayable execution. Every
-  non-terminal run's authoritative `next_at` deadline is mirrored as one queue
-  job per run. Task wakes use one job-dispatch attempt because ReplayStep owns
+- **Tasks** — the capability for durable replayable execution. Every non-null
+  run `next_at` deadline is mirrored as one queue job per run. Task wakes use
+  one job-dispatch attempt because ReplayStep owns
   their durable retry budget; a propagated platform failure must reach a fresh
   alarm invocation instead of entering JobDriver's generic retry loop.
 
@@ -74,14 +74,12 @@ stripped, deadline pushed, state kept so the reclaim still sees an interrupted
 attempt — preventing startup reconciliation from undoing queue backoff. At its
 five-second job handoff it registers the still-running attempt with Lifecycle.
 AI Chat and Think register the post-handoff model dispatch when the callback
-runs under the alarm owner's dispatch — root Task runs and legacy root-owned
-Scheduler rows. Root chat recovery uses the reserved
-`__cf_internal_chat_recovery` definition. Routed dynamic-agent recovery
-temporarily keeps its root-owned Scheduler rows; its callback executes on the
-facet's own Lifecycle, outside any alarm, so `trackAlarmWork` declines there
-and the facet's post-handoff turn is bounded by the incident's own memory-reset
-budget rather than the breaker until Tasks can mirror child wakes to the alarm
-owner. A sealing strike still reaches the facet through the routed
+runs under the alarm owner's dispatch. Root and routed chat recovery use the
+reserved `__cf_internal_chat_recovery` Task definition. A routed Task deadline
+is mirrored to the root, which tracks the dispatch RPC back to the facet until
+handoff. The facet's detached turn then remains bounded by the incident's own
+memory-reset budget because its local `trackAlarmWork` call is outside the
+root alarm scope. A sealing strike still reaches the facet through the routed
 compatibility bridge.
 
 ## Agent integration

@@ -7,12 +7,13 @@
 Object](./lifecycle.md). One `Tasks` capability owns any number of named
 Task definitions. A run of a definition survives process loss, deployments,
 and hibernation: completed steps return journaled results, sleeps consult
-persisted deadlines, and execution continues from the first unfinished step.
+persisted deadlines, external events remain buffered until consumed, and
+execution continues from the first unfinished step.
 
-The capability never touches the Durable Object's physical alarm. Every
-non-terminal run's deadline is mirrored as one job in the Lifecycle work
-queue (a retime is a same-id replace), and Lifecycle derives the single
-physical alarm from queue state — so Tasks, the
+Tasks does not write the Durable Object's physical alarm directly. Every
+non-null run deadline is mirrored as one job in the Lifecycle work queue (a
+retime is a same-id replace), and Lifecycle derives the single physical alarm
+from all queued jobs — so Tasks, the
 [Scheduler](./scheduling.md), and other capabilities coexist on the same
 object.
 
@@ -116,18 +117,89 @@ const buildReport = this.tasks.handle("build-report@v1");
 const run = await buildReport.get(receipt.runId); // result typed by the map
 ```
 
-Inputs, step results, metadata, and final results must be JSON-serializable
-and at most 1 MiB serialized.
+Inputs, step results, metadata, and final results are persisted through a
+`JSON.stringify()`/`JSON.parse()` round trip and must be at most 1 MiB
+serialized.
+
+## Sending and receiving events
+
+Send durable input to an existing run with `sendEvent()`:
+
+```ts
+await this.tasks.sendEvent(
+  receipt.runId,
+  "approval",
+  { approved: true, reviewer: "sam" },
+  { idempotencyKey: `approval:${requestId}` }
+);
+```
+
+Events are scoped to one run, buffered before or during execution, and
+matched by exact, case-sensitive type. Payloads use the JSON data model and
+are returned from their persisted representation. The optional idempotency
+key is limited to 256 characters and deduplicates the same event type and
+serialized payload. Reusing it with different content throws
+`TaskEventIdempotencyConflictError`. Sending a new event to a missing or
+terminal run throws `TaskRunNotFoundError` or `TaskRunTerminalError`.
+
+A `sendEvent()` rejection can be ambiguous: the event may have committed
+before wake synchronization failed. For retryable delivery, provide an
+`idempotencyKey` on the first attempt and retry the same run ID, type, payload,
+and key. While the run remains retained, an identical retry returns the
+original receipt with `accepted: false`, even after the run settles. A receipt
+confirms mailbox acceptance, not consumption. `retain: false` and
+`tasks.delete()` remove this deduplication evidence.
+
+Inside a definition, `waitForEvent()` consumes the oldest matching event or
+suspends the run:
+
+```ts
+const approval = await step.waitForEvent<{ approved: boolean }>(
+  "wait-for-approval",
+  "approval"
+);
+```
+
+The default wait is indefinite and keeps no per-run Lifecycle wake job. Add a
+timeout to receive `null` if no event arrives before the persisted deadline:
+
+```ts
+const approval = await step.waitForEvent<{ approved: boolean }>(
+  "wait-for-approval",
+  "approval",
+  { timeout: "1 day" }
+);
+```
+
+Use `takeEvents()` to consume currently buffered events without waiting. It
+returns events in FIFO order and journals the result, including an empty
+array:
+
+```ts
+const messages = await step.takeEvents<{ text: string }>(
+  "current-messages",
+  "message",
+  { limit: 50 }
+);
+```
+
+Each event is `{ eventId, type, payload, createdAt }`. Consumption and step
+journaling commit together, so replay returns the same event or batch instead
+of consuming a later delivery. Each complete event envelope must fit the
+1 MiB journal limit. `takeEvents()` may return fewer than `limit` when adding
+another event would make its journaled batch exceed 1 MiB.
 
 ## The step API
 
-| Method                        | Behavior                                                                                                     |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `step.do(name, config?, cb)`  | Run a named step once; journaled results replay without re-executing. `config` sets `retries` and `timeout`. |
-| `step.sleep(name, duration)`  | Persist a wake deadline and suspend; no isolate stays resident while waiting.                                |
-| `step.sleepUntil(name, when)` | Sleep until a wall-clock time.                                                                               |
-| `step.status(message)`        | Update observable progress; replays stay silent over old ground.                                             |
-| `step.idempotencyKey(name)`   | The stable external deduplication key `step.do(name, …)` receives.                                           |
+| Method                                    | Behavior                                                                                                     |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `step.do(name, config?, cb)`              | Run a named step once; journaled results replay without re-executing. `config` sets `retries` and `timeout`. |
+| `step.sleep(name, duration)`              | Persist a wake deadline and suspend; no isolate stays resident while waiting.                                |
+| `step.sleepUntil(name, when)`             | Sleep until a wall-clock time.                                                                               |
+| `step.waitForEvent(name, type, options?)` | Consume the oldest matching event or suspend; `options.timeout` returns `null` on expiry.                    |
+| `step.takeEvents(name, type, options?)`   | Consume a FIFO batch of currently buffered events without waiting.                                           |
+| `step.status(message)`                    | Update observable progress; replays stay silent over old ground.                                             |
+| `step.idempotencyKey(name)`               | The stable external deduplication key `step.do(name, …)` receives.                                           |
 
 Each `do` attempt receives `{ attempt, idempotencyKey, signal }`. The signal
 aborts on cancellation and on the attempt timeout (default 5 minutes); a
@@ -213,14 +285,14 @@ await this.tasks.delete({ settledBefore: new Date(Date.now() - 86_400_000) });
 
 A snapshot is discriminated by `state`:
 
-| State       | Meaning                                                            |
-| ----------- | ------------------------------------------------------------------ |
-| `pending`   | Accepted, first attempt not yet claimed.                           |
-| `running`   | An attempt is executing (`attempt`, `startedAt`, `statusMessage`). |
-| `waiting`   | Parked on a durable deadline (`reason`: `sleep` or `retry`).       |
-| `completed` | Settled with `result`.                                             |
-| `failed`    | Settled with a safe `error` projection.                            |
-| `cancelled` | Settled by cancellation, with its optional `reason`.               |
+| State       | Meaning                                                              |
+| ----------- | -------------------------------------------------------------------- |
+| `pending`   | Accepted, first attempt not yet claimed.                             |
+| `running`   | An attempt is executing (`attempt`, `startedAt`, `statusMessage`).   |
+| `waiting`   | Parked on a timer or event (`reason`: `sleep`, `retry`, or `event`). |
+| `completed` | Settled with `result`.                                               |
+| `failed`    | Settled with a safe `error` projection.                              |
+| `cancelled` | Settled by cancellation, with its optional `reason`.                 |
 
 Cancellation is cooperative: a parked run settles immediately, a live attempt
 is aborted through its signal and settles at its next step boundary. An
@@ -228,18 +300,18 @@ external effect already accepted cannot be undone.
 
 ## Choosing an API
 
-| Requirement                                                      | Use                                    |
-| ---------------------------------------------------------------- | -------------------------------------- |
-| Normal request handling or short async work                      | ordinary `await`                       |
-| Wake a named callback at a time or cron cadence                  | [scheduling](./scheduling.md)          |
-| Durable object-local background work with steps, retries, sleeps | a Task                                 |
-| Cross-service orchestration with a managed dashboard             | [Cloudflare Workflows](./workflows.md) |
+| Requirement                                                                         | Use                                    |
+| ----------------------------------------------------------------------------------- | -------------------------------------- |
+| Normal request handling or short async work                                         | ordinary `await`                       |
+| Wake a named callback at a time or cron cadence                                     | [scheduling](./scheduling.md)          |
+| Durable object-local background work with steps, retries, sleeps, or external input | a Task                                 |
+| Cross-service orchestration with a managed dashboard                                | [Cloudflare Workflows](./workflows.md) |
 
 ## Current limits
 
 The first release is deliberately narrow: no `waitForCompletion` mode on
-`run()`, and no runs on routed sub-agents (facet-hosted work stays on the
-legacy fiber engine until owner-path routed dispatch lands). The legacy
+`run()`, and user-defined runs on routed sub-agents remain unsupported.
+Framework-owned recovery Tasks may use the internal routed wake path. The legacy
 `runFiber()`/`startFiber()` APIs are released public API and remain
 unchanged, still recovered by their own scan. The design and its evolution
 are recorded in
