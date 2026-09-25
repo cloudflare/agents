@@ -1,0 +1,23 @@
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_db9c0faf7e5ce8 808-818,833-851,853-858,5505,5519,5523
+packages/ai-chat/src/tests/worker.ts
+  s_368991bdec7f77::t_111e7204275c83 2027-2034
+packages/ai-chat/src/tests/durable-chat-recovery.test.ts
+  s_368991bdec7f77::t_51223153966942 207,2803-2828
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "88f146b5442bc06bd38685245041cd2cc703d2c3",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
