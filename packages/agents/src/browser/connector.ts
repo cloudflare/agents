@@ -1,4 +1,3 @@
-import { Validator, type OutputUnit, type Schema } from "@cfworker/json-schema";
 import {
   CodemodeConnector,
   type ConnectorTool,
@@ -8,6 +7,7 @@ import {
   type ToolExecuteContext
 } from "@cloudflare/codemode";
 import { CdpSession, connectUrl } from "./cdp-session";
+import { validateConnectorArgs } from "./connector-validation";
 import {
   connectBrowser,
   connectBrowserSession,
@@ -158,26 +158,6 @@ function isMissingBrowserSession(error: unknown): boolean {
   );
 }
 
-function formatToolValidationError(
-  connector: string,
-  tool: string,
-  errors: OutputUnit[]
-): string {
-  // A failing property emits both a generic parent `properties` error and a
-  // specific child error. Prefer the latter so the model sees what to fix.
-  const specific = errors.filter((error) => error.keyword !== "properties");
-  const relevant = specific.length > 0 ? specific : errors;
-  const details = relevant.map((error) => {
-    const location = error.instanceLocation
-      .replace(/^#\/?/, "")
-      .replaceAll("~1", "/")
-      .replaceAll("~0", "~")
-      .replaceAll("/", ".");
-    return `${location ? ` at ${location}` : ""}: ${error.error}`;
-  });
-  return `Invalid arguments for ${connector}.${tool}${details.join(";")}`;
-}
-
 interface CachedSocket {
   session: CdpSession;
   /** Browser Run session id the socket is attached to (undefined for cdpUrl). */
@@ -298,27 +278,7 @@ export class BrowserConnector extends CodemodeConnector {
   }
 
   protected override tool(name: string, tool: ConnectorTool): ConnectorTool {
-    if (!tool.inputSchema) return tool;
-
-    // Both types describe draft-7 schemas, but @cfworker's `Schema` type is
-    // narrower than JSONSchema7 around boolean subschemas.
-    const schema = tool.inputSchema as unknown as Schema;
-    const validator = new Validator(schema, "7", false);
-    return {
-      ...tool,
-      execute: async (args, ctx) => {
-        // Browser's argumentless tools are documented as `cdp.spec()` etc.;
-        // treat an omitted argument as the empty object their schemas expect.
-        const input = args === undefined ? {} : args;
-        const result = validator.validate(input);
-        if (!result.valid) {
-          throw new Error(
-            formatToolValidationError(this.name(), name, result.errors)
-          );
-        }
-        return await tool.execute(input, ctx);
-      }
-    };
+    return validateConnectorArgs(this.name(), name, tool);
   }
 
   protected tools(): ConnectorTools {

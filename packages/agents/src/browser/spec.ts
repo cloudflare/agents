@@ -51,6 +51,11 @@ export interface CdpSpecSource {
   cdpUrl?: string;
   /** Headers to send with CDP URL discovery requests */
   cdpHeaders?: Record<string, string>;
+  /**
+   * An existing Browser Run session to read the protocol from. Without it,
+   * loading through the binding creates (and deletes) a throwaway session.
+   */
+  sessionId?: string;
 }
 
 const MISSING_BROWSER_CONFIG =
@@ -143,6 +148,23 @@ async function fetchCdpSpecFromUrl(
   );
 }
 
+async function fetchCdpSpecFromSession(
+  browser: BrowserBinding,
+  sessionId: string
+): Promise<SearchableCdpSpec> {
+  return getCachedSpec(bindingSpecCache, browser, async () => {
+    const response = await browser.fetch(
+      `https://localhost/v1/devtools/browser/${sessionId}/json/protocol`
+    );
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch CDP spec from Browser Rendering: ${response.status}`
+      );
+    }
+    return (await response.json()) as { domains?: RawCdpDomain[] };
+  });
+}
+
 async function fetchCdpSpecFromBrowser(
   browser: BrowserBinding
 ): Promise<SearchableCdpSpec> {
@@ -203,6 +225,9 @@ export async function loadCdpSpec(
 ): Promise<SearchableCdpSpec> {
   if (source.cdpUrl) {
     return fetchCdpSpecFromUrl(source.cdpUrl, source.cdpHeaders);
+  }
+  if (source.browser && source.sessionId) {
+    return fetchCdpSpecFromSession(source.browser, source.sessionId);
   }
   if (source.browser) {
     return fetchCdpSpecFromBrowser(source.browser);
