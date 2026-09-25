@@ -1,0 +1,27 @@
+packages/agents/src/index.ts
+  s_368991bdec7f77::t_9b55e02cd8aed0 6922-6931,6937-6938,6952-6953,6955-6959,6961,8084-8096,8102
+packages/agents/src/chat/__tests__/agent-tools.test.ts
+  s_368991bdec7f77::t_e6d3e7b2711d83 61,66-86
+packages/agents/src/chat/agent-tools.ts
+  s_368991bdec7f77::t_7e0a965cff57c9 405-408,416
+packages/think/src/tests/agent-tools.test.ts
+  s_368991bdec7f77::t_4a9b56054d2a7a 96,546-578
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_d1375462ed1aeb 790-795,800-803,3304-3308
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cf94a0e3be8dd8cc44a7a7f59f66b93e2b87d3c6",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
