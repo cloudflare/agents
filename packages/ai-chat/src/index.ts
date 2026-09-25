@@ -5628,7 +5628,8 @@ export class AIChatAgent<
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: this._lastBody ?? null,
-          lastClientTools: this._lastClientTools ?? null
+          lastClientTools: this._lastClientTools ?? null,
+          ...(originIds ? { originMessageIds: originIds } : {})
         }
       });
       return "scheduled";

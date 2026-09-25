@@ -2843,6 +2843,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return this._failingReaderCalls;
   }
 
+  /** Make the next turn's reader throw `message` after `prelude`. */
+  armFailingReaderTurnForTest(
+    message: string,
+    prelude: FailingReaderPrelude
+  ): void {
+    this._failingTurn = { message, remaining: 1, prelude };
+  }
+
   /**
    * Drive a turn whose response reader throws `message` after `prelude`.
    * `turns` controls how many attempts fail before the normal response;

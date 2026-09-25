@@ -116,6 +116,44 @@ describe("originating message ids on terminal frames (#2280)", () => {
     ws.close(1000);
   });
 
+  it("carries the ids onto a turn re-run after its reader failed before any part", async () => {
+    const room = crypto.randomUUID();
+    const agent = await getAgentByName(env.ChatRecoveryTestAgent, room);
+    await (
+      agent as unknown as {
+        armFailingReaderTurnForTest(message: string, prelude: "none"): void;
+      }
+    ).armFailingReaderTurnForTest("Network connection lost.", "none");
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const successorTerminals: ResponseFrame[] = [];
+    ws.addEventListener("message", (e: MessageEvent) => {
+      const frame = JSON.parse(e.data as string) as ResponseFrame;
+      if (
+        frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+        frame.id !== "req-drop" &&
+        frame.done
+      ) {
+        successorTerminals.push(frame);
+      }
+    });
+
+    const first = waitForTerminal(ws, "req-drop");
+    sendChat(ws, "req-drop", [user("msg-r")]);
+    expect((await first).messageIds).toEqual(["msg-r"]);
+
+    for (let i = 0; i < 100 && successorTerminals.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(successorTerminals.length).toBeGreaterThan(0);
+    for (const frame of successorTerminals) {
+      expect(frame.messageIds).toEqual(["msg-r"]);
+    }
+
+    ws.close(1000);
+  });
+
   it("carries the ids onto a turn recovered before its stream started", async () => {
     const room = crypto.randomUUID();
     const agent = (await getAgentByName(
