@@ -1,6 +1,6 @@
 # Browser Sessions
 
-**Status:** internal (`session-core.ts`, `capability.ts` — not exported)
+**Status:** experimental (`BrowserSessions` exported from `agents/browser`; `NamedBrowserSessions` in `session-core.ts` stays internal)
 
 ## Problem
 
@@ -8,7 +8,7 @@ Harness evaluations of the codemode browser surface ([browser-tools.md](./browse
 
 ## How it works
 
-Two internal layers, added additively. Neither is exported from `agents/browser`; `browser_execute`, quick actions, and the connector keep shipping unchanged. Raw CDP stays the model's interaction surface — these layers change who owns the browser, not how the model drives it.
+Two layers, added additively. `BrowserSessions` is exported from `agents/browser` and drives `createBrowserExecuteTool` ([browser-tools.md](./browser-tools.md#persistent-browser-tool)); the core beneath it stays internal. `createBrowserTools`, quick actions, and `BrowserConnector` keep shipping unchanged. Raw CDP stays the model's interaction surface — these layers change who owns the browser, not how the model drives it.
 
 ### Named session core (`browser/session-core.ts`)
 
@@ -80,4 +80,4 @@ On an `Agent` subclass the only difference is installation — the Agent already
 
 ## Relationship to browser-tools.md
 
-[browser-tools.md](./browser-tools.md) describes the shipping codemode connector surface (`browser_execute`, quick actions, Live View, recording). This document describes the internal session layer being built beneath it. The two share `browser-run.ts`, the session stores, and `live-view.ts`.
+[browser-tools.md](./browser-tools.md) describes the model-facing tools: the original `createBrowserTools` connector and `createBrowserExecuteTool`, which drives a `BrowserSessions` named browser. This document describes the session layer beneath the latter. The two share `browser-run.ts`, the session stores, and `live-view.ts`.
