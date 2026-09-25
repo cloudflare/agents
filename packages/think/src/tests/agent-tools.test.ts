@@ -88,6 +88,11 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     eventDelivery?: "full" | "terminal"
   ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }>;
   replayAgentToolEventsForTest(): Promise<AgentToolEventMessage[]>;
+  persistChildMilestoneForTest(
+    runId: string,
+    name: string,
+    data: unknown
+  ): Promise<number>;
   runThinkChildDetachedTerminalForTest(): Promise<string | null>;
   startThinkChildWithoutTailForTest(
     input: string,
@@ -494,6 +499,46 @@ describe("Think agent tools", () => {
           (body) => body !== progressBody && body !== milestoneBody
         )
       ).toEqual([]);
+      expect(replayed.at(-1)?.event.kind).toBe("finished");
+    });
+
+    it("replays the child's persisted milestones to a fresh connection", async () => {
+      const parent = await freshParent();
+      const runId = crypto.randomUUID();
+      await parent.runThinkChildWithProgressInjectionForTest(
+        "headless parent",
+        progressBody,
+        milestoneBody,
+        10,
+        runId,
+        "terminal"
+      );
+      const sequence = await parent.persistChildMilestoneForTest(
+        runId,
+        "sources-gathered",
+        { sources: 3 }
+      );
+
+      const replayed = await parent.replayAgentToolEventsForTest();
+      const milestones = replayed.flatMap((event) => {
+        if (event.event.kind !== "chunk") return [];
+        const body = JSON.parse((event.event as { body: string }).body) as {
+          type: string;
+          data?: { name: string; sequence: number; data?: unknown };
+        };
+        return body.type === AGENT_TOOL_MILESTONE_PART && body.data
+          ? [body.data]
+          : [];
+      });
+      expect(milestones).toContainEqual(
+        expect.objectContaining({
+          name: "sources-gathered",
+          sequence,
+          data: { sources: 3 }
+        })
+      );
+      const sequences = replayed.map((event) => event.sequence);
+      expect(new Set(sequences).size).toBe(sequences.length);
       expect(replayed.at(-1)?.event.kind).toBe("finished");
     });
 

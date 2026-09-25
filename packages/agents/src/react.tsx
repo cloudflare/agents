@@ -37,6 +37,7 @@ import { MessageType } from "./types";
 
 export type { AgentTransport } from "./websockets/transport-protocol";
 import {
+  agentToolEventDedupeKey,
   applyAgentToolEvent,
   createAgentToolEventState,
   type AgentToolEventMessage,
@@ -1139,14 +1140,6 @@ type AgentToolEventAgent = Pick<
   "addEventListener" | "removeEventListener"
 >;
 
-function agentToolDedupeKey(message: AgentToolEventMessage): string {
-  return [
-    message.parentToolCallId ?? "",
-    message.event.runId,
-    String(message.sequence)
-  ].join("\0");
-}
-
 export function useAgentToolEvents<
   Part extends AgentToolRunPart = AgentToolRunPart
 >(options: {
@@ -1174,7 +1167,7 @@ export function useAgentToolEvents<
         return;
       }
       if (message.type !== "agent-tool-event") return;
-      const key = agentToolDedupeKey(message);
+      const key = agentToolEventDedupeKey(message);
       if (seenRef.current.has(key)) return;
       seenRef.current.add(key);
       setState((prev) => applyAgentToolEvent<Part>(prev, message));

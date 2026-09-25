@@ -6920,7 +6920,7 @@ export class Agent<
       timeoutMs
     );
     if (!chunks) return sequence;
-    return this._broadcastAgentToolChunks(
+    const next = this._broadcastAgentToolChunks(
       row.parent_tool_call_id ?? undefined,
       row.run_id,
       chunks,
@@ -6928,6 +6928,56 @@ export class Agent<
       replay,
       connection
     );
+    return this._broadcastAgentToolMilestones(
+      adapter,
+      row,
+      next,
+      replay,
+      connection
+    );
+  }
+
+  /**
+   * Milestones are persisted on the child run rather than in its chunk log, so
+   * replay re-emits them from the child's inspection. The client dedupes them
+   * on the milestone's own sequence, so a milestone already seen live is a no-op.
+   */
+  private async _broadcastAgentToolMilestones(
+    adapter: AgentToolChildAdapter,
+    row: Pick<AgentToolRunStorageRow, "run_id" | "parent_tool_call_id">,
+    sequence: number,
+    replay?: true,
+    connection?: Connection
+  ): Promise<number> {
+    let milestones: AgentToolMilestone[] | undefined;
+    try {
+      milestones = (await adapter.inspectAgentToolRun(row.run_id))?.milestones;
+    } catch {
+      return sequence;
+    }
+    let next = sequence;
+    for (const milestone of milestones ?? []) {
+      this._broadcastAgentToolEvent(
+        row.parent_tool_call_id ?? undefined,
+        next++,
+        {
+          kind: "chunk",
+          runId: row.run_id,
+          body: JSON.stringify({
+            type: AGENT_TOOL_MILESTONE_PART,
+            data: {
+              name: milestone.name,
+              sequence: milestone.sequence,
+              at: milestone.at,
+              ...(milestone.data !== undefined ? { data: milestone.data } : {})
+            }
+          })
+        },
+        replay,
+        connection
+      );
+    }
+    return next;
   }
 
   private async _forwardAgentToolStream(

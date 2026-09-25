@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  agentToolEventDedupeKey,
   applyAgentToolEvent,
   createAgentToolEventState,
   interceptAgentToolBroadcast,
@@ -24,6 +25,64 @@ function frame(
     event
   };
 }
+
+describe("agentToolEventDedupeKey", () => {
+  const runId = "run-1";
+  const milestoneChunk = (sequence: number, milestoneSequence: number) =>
+    frame(sequence, {
+      kind: "chunk",
+      runId,
+      body: JSON.stringify({
+        type: AGENT_TOOL_MILESTONE_PART,
+        data: { name: "phase", sequence: milestoneSequence, at: 1 }
+      })
+    });
+
+  it("does not collide a replayed terminal with a live chunk at the same sequence", () => {
+    const liveProgress = frame(3, {
+      kind: "chunk",
+      runId,
+      body: JSON.stringify({
+        type: AGENT_TOOL_PROGRESS_PART,
+        transient: true,
+        data: { fraction: 0.5 }
+      })
+    });
+    const replayedFinish = frame(3, {
+      kind: "finished",
+      runId,
+      summary: "done"
+    });
+    expect(agentToolEventDedupeKey(replayedFinish)).not.toBe(
+      agentToolEventDedupeKey(liveProgress)
+    );
+    expect(agentToolEventDedupeKey(replayedFinish)).toBe(
+      agentToolEventDedupeKey(
+        frame(9, { kind: "finished", runId, summary: "" })
+      )
+    );
+  });
+
+  it("keys milestones on their own sequence, not the broadcast sequence", () => {
+    expect(agentToolEventDedupeKey(milestoneChunk(4, 0))).toBe(
+      agentToolEventDedupeKey(milestoneChunk(2, 0))
+    );
+    expect(agentToolEventDedupeKey(milestoneChunk(4, 0))).not.toBe(
+      agentToolEventDedupeKey(milestoneChunk(4, 1))
+    );
+  });
+
+  it("keys ordinary chunks on the broadcast sequence", () => {
+    const chunk = (sequence: number) =>
+      frame(sequence, { kind: "chunk", runId, body: '{"type":"text-delta"}' });
+    expect(agentToolEventDedupeKey(chunk(1))).toBe(
+      agentToolEventDedupeKey(chunk(1))
+    );
+    expect(agentToolEventDedupeKey(chunk(1))).not.toBe(
+      agentToolEventDedupeKey(chunk(2))
+    );
+  });
+});
 
 describe("agent tool event reducer", () => {
   it("groups runs by parent tool call and preserves display order", () => {

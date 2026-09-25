@@ -744,6 +744,24 @@ export class ThinkTestAgent extends Think {
     this._progressInjection = { runId, progressBody, milestoneBody };
   }
 
+  /** Persist a milestone the way `reportProgress({ milestone })` does. */
+  persistAgentToolMilestoneForTest(
+    runId: string,
+    name: string,
+    data: unknown
+  ): number {
+    return (
+      this as unknown as {
+        _persistAgentToolMilestone(
+          runId: string,
+          name: string,
+          data: unknown,
+          at: number
+        ): number;
+      }
+    )._persistAgentToolMilestone(runId, name, data, Date.now());
+  }
+
   /**
    * Bounded-poll until the live child turn has bound its request id (written to
    * the child-run row at turn start) and opened its resumable stream, so a test
@@ -3262,6 +3280,15 @@ export class ThinkAgentToolParent extends Agent {
       ...(eventDelivery ? { eventDelivery } : {})
     });
     return { result, events: this.events };
+  }
+
+  async persistChildMilestoneForTest(
+    runId: string,
+    name: string,
+    data: unknown
+  ): Promise<number> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    return child.persistAgentToolMilestoneForTest(runId, name, data);
   }
 
   /** Replay this parent's agent-tool events to a fresh connection. */
