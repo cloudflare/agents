@@ -228,11 +228,32 @@ export class NamedBrowserSessions {
    * over the socket refresh the record's `updatedAt` (throttled to
    * {@link SESSION_TOUCH_INTERVAL_MS}), so hosts can tell an actively used
    * browser from one the platform has likely reclaimed.
+   *
+   * If the browser expires between the liveness probe and the WebSocket
+   * upgrade, the record is retired and the name resolved once more, so the
+   * caller gets a fresh browser with `restarted: true` instead of an error.
    */
   async connect(
     name = DEFAULT_BROWSER_SESSION_NAME
   ): Promise<ConnectedBrowserSession> {
     const resolved = await this.resolve(name);
+    try {
+      return await this.#attach(resolved);
+    } catch (error) {
+      if (!isMissingBrowserSession(error)) throw error;
+      await this.#retireIfCurrent(name, resolved.sessionId);
+    }
+    // The browser this name held is gone, so report a restart
+    // even when a concurrent resolver already replaced it and this resolve
+    // reattaches to that replacement.
+    const replaced = await this.resolve(name);
+    return this.#attach({ ...replaced, restarted: true });
+  }
+
+  async #attach(
+    resolved: ResolvedBrowserSession
+  ): Promise<ConnectedBrowserSession> {
+    const { name } = resolved;
     const key = namedBrowserSessionKey(name);
     let lastTouchAt = Date.now();
     let touchInFlight = false;
@@ -256,7 +277,7 @@ export class NamedBrowserSessions {
       }
     });
     return {
-      name: resolved.name,
+      name,
       sessionId: resolved.sessionId,
       restarted: resolved.restarted,
       cdp
@@ -319,6 +340,17 @@ export class NamedBrowserSessions {
       }
       await this.#store.set(key, { ...current, updatedAt: Date.now() });
       return true;
+    } finally {
+      await lock.release();
+    }
+  }
+
+  /** Retire the named record if it still holds `sessionId`. */
+  async #retireIfCurrent(name: string, sessionId: string): Promise<void> {
+    const lock = await this.#store.acquireLock(namedBrowserSessionKey(name));
+    try {
+      const current = await this.#store.get(namedBrowserSessionKey(name));
+      if (current?.sessionId === sessionId) await this.#retire(name, current);
     } finally {
       await lock.release();
     }
