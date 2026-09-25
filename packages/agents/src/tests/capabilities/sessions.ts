@@ -138,6 +138,20 @@ export class SessionHarnessObject extends DurableObject<Cloudflare.Env> {
     return rows.length > 0 ? Number(rows[0].content_chunks) : null;
   }
 
+  /** One message row exactly as stored: pointers in place of payloads. */
+  storedMessage(sessionId: string, messageId: string): SessionMessage {
+    return JSON.parse(
+      this.ctx.storage.sql
+        .exec<{ content: string }>(
+          `SELECT content FROM cf_agents_session_messages
+           WHERE session_id = ? AND id = ?`,
+          sessionId,
+          messageId
+        )
+        .one().content
+    ) as SessionMessage;
+  }
+
   /** Stored size of one message row, excluding anything it points at. */
   messageRowBytes(sessionId: string, messageId: string): number {
     return Number(

@@ -940,7 +940,11 @@ export class SessionsCore {
     // Inline media leaves the message before it is serialized, so the row
     // holds a pointer and never the payload. Addresses are computed here, out
     // of the transaction; the transaction only writes.
-    const { message: staged, attachments } = extractAttachments(message);
+    const {
+      message: staged,
+      attachments,
+      references
+    } = extractAttachments(message);
     const slices = splitContent(JSON.stringify(staged));
     const seq = tail.nextSeq;
     this.io.transaction(() => {
@@ -964,11 +968,7 @@ export class SessionsCore {
         ]
       );
       this.#writeContinuations(sessionId, message.id, slices);
-      this.#attachments.addRefs(
-        sessionId,
-        message.id,
-        attachments.map((attachment) => attachment.hash)
-      );
+      this.#attachments.addRefs(sessionId, message.id, references);
       this.#indexFts(sessionId, staged, false);
     });
 
@@ -1024,7 +1024,11 @@ export class SessionsCore {
           (this.#continuations(sessionId, [message.id]).get(message.id) ?? "");
     // Compare in stored form: a re-sent identical image extracts to the same
     // address, so an unchanged update still writes nothing.
-    const { message: staged, attachments } = extractAttachments(message);
+    const {
+      message: staged,
+      attachments,
+      references
+    } = extractAttachments(message);
     const json = JSON.stringify(staged);
     if (oldContent === json) return "unchanged";
 
@@ -1058,11 +1062,7 @@ export class SessionsCore {
       this.#writeContinuations(sessionId, message.id, slices);
       // Payloads are stored before references move, so a hash this message
       // still uses is never momentarily unreferenced and collected.
-      this.#attachments.replaceRefs(
-        sessionId,
-        message.id,
-        attachments.map((attachment) => attachment.hash)
-      );
+      this.#attachments.replaceRefs(sessionId, message.id, references);
       this.#indexFts(sessionId, staged, true);
     });
     const memo = this.#pathTokens.get(sessionId);
@@ -1293,7 +1293,11 @@ export class SessionsCore {
     message: SessionMessage,
     options: { parentId: string | null; createdAt: number }
   ): boolean {
-    const { message: staged, attachments } = extractAttachments(message);
+    const {
+      message: staged,
+      attachments,
+      references
+    } = extractAttachments(message);
     const slices = splitContent(JSON.stringify(staged));
     const tail = this.#tail(sessionId);
     let inserted = 0;
@@ -1319,11 +1323,7 @@ export class SessionsCore {
       );
       if (inserted === 0) return;
       this.#writeContinuations(sessionId, message.id, slices);
-      this.#attachments.addRefs(
-        sessionId,
-        message.id,
-        attachments.map((attachment) => attachment.hash)
-      );
+      this.#attachments.addRefs(sessionId, message.id, references);
       this.#indexFts(sessionId, staged, false);
     });
     if (inserted === 0) return false;
