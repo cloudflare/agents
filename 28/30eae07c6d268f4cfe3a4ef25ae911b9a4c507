@@ -1,0 +1,41 @@
+.changeset/agent-tool-terminal-delivery.md
+  s_368991bdec7f77::t_f894a34ac51cba 1-7
+docs/agents/agent-tools.md
+  s_368991bdec7f77::t_9ea707164187e2 463-484
+packages/agents/src/agent-tool-types.ts
+  s_368991bdec7f77::t_915d1d9f1541fb 274-282,285-286,359-367
+packages/agents/src/agent-tools.ts
+  s_368991bdec7f77::t_31cdb619a9b6fa 223
+packages/agents/src/chat/agent-tools.ts
+  s_368991bdec7f77::t_fa888fc37b962d 454-459,474-476,481,483-485,513,521
+packages/agents/src/index.ts
+  s_368991bdec7f77::t_a899b5f2ab4ba9 222,797-814,1787-1790,5604-5614,5766,5772-5773,5803-5804,6864,6867-6870,6873,6882-6888,6990,6993-7000
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_d25cebfe717d96 13,569-570,874-875,877,882-883,885-890,909-910,915-917,952,954-955,961,967,1684-1686,3875-3879,3894-3895,3903-3905,4014
+packages/ai-chat/src/tests/agent-tools.test.ts
+  s_368991bdec7f77::t_ba5b7a9aca1dd8 18,1182-1210
+packages/ai-chat/src/tests/worker.ts
+  s_368991bdec7f77::t_9ae4689c42cda1 151-178
+packages/think/src/tests/agent-tools.test.ts
+  s_368991bdec7f77::t_d20de2ef507eb0 1,22-24,35,87-88,90-91,450-599
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_5958aac3f97fb2 1597-1626,3249-3250,3261-3262,3267-3296
+packages/think/src/think.ts
+  s_368991bdec7f77::t_6fcf9339eab49b 4583-4584,4611-4612,4614,4619-4620,4622-4627,4647-4648,4653-4655,4692,4694-4695,4701,4707,9198-9200,9592,9598-9599,9601-9603,9609-9611,9694
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2830eae07c6d268f4cfe3a4ef25ae911b9a4c507",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
