@@ -1858,6 +1858,23 @@ describe("createAISDKWrapper oversized tool payloads", () => {
     });
   });
 
+  it("runs a payload's toJSON only once when redacting", async () => {
+    let serialized = 0;
+    const output = {
+      toJSON() {
+        if (serialized++ > 0) throw new Error("already serialized");
+        return { data: IMAGE };
+      }
+    };
+
+    const { attributes } = await traceTool({ execute: () => output });
+
+    expect(serialized).toBe(1);
+    expect(JSON.parse(attributes[RESULT] as string)).toEqual({
+      data: redacted(IMAGE)
+    });
+  });
+
   it("records an omission marker when redaction cannot make it fit", async () => {
     const prose = "ordinary tool text ".repeat(3_000);
 

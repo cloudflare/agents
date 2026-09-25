@@ -347,8 +347,9 @@ function serializeToolPayload(value: unknown): string | undefined {
     return json;
   }
 
-  const redacted = stringify(value, redactBase64Replacer);
-  if (redacted === undefined) return undefined;
+  // Re-serialize the parsed JSON, not the original value, so tool-defined
+  // toJSON methods and getters run only once.
+  const redacted = JSON.stringify(JSON.parse(json), redactBase64Replacer);
   const bytes = byteLength(redacted);
   return bytes <= MAX_ATTRIBUTE_BYTES
     ? redacted
@@ -358,13 +359,10 @@ function serializeToolPayload(value: unknown): string | undefined {
       });
 }
 
-function stringify(
-  value: unknown,
-  replacer?: (this: unknown, key: string, value: unknown) => unknown
-): string | undefined {
+function stringify(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   try {
-    return JSON.stringify(value, replacer);
+    return JSON.stringify(value);
   } catch {
     return undefined;
   }
