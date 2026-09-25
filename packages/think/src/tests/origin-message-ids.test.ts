@@ -196,6 +196,22 @@ describe("Think terminal frames carry originating message ids (#2280)", () => {
     ws.close();
   });
 
+  it("keeps a recovery's ids off requests running outside its scope", async () => {
+    const agent = (await getAgentByName(
+      env.ThinkRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkRecoveryTestAgent>,
+      crypto.randomUUID()
+    )) as unknown as {
+      probeRecoveryOriginScopeForTest(ids: string[]): Promise<{
+        successor: string[] | undefined;
+        unrelated: string[] | undefined;
+      }>;
+    };
+    expect(await agent.probeRecoveryOriginScopeForTest(["msg-u"])).toEqual({
+      successor: ["msg-u"],
+      unrelated: undefined
+    });
+  });
+
   it("carries the ids onto a pre-stream turn that exhausts on wake", async () => {
     const room = crypto.randomUUID();
     const agent = (await getAgentByName(

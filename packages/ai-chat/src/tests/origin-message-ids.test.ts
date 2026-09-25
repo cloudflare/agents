@@ -263,6 +263,22 @@ describe("originating message ids on terminal frames (#2280)", () => {
     ws.close(1000);
   });
 
+  it("keeps a recovery's ids off requests running outside its scope", async () => {
+    const agent = (await getAgentByName(
+      env.ChatRecoveryTestAgent,
+      crypto.randomUUID()
+    )) as unknown as {
+      probeRecoveryOriginScopeForTest(ids: string[]): Promise<{
+        successor: string[] | undefined;
+        unrelated: string[] | undefined;
+      }>;
+    };
+    expect(await agent.probeRecoveryOriginScopeForTest(["msg-u"])).toEqual({
+      successor: ["msg-u"],
+      unrelated: undefined
+    });
+  });
+
   it("omits messageIds when the request carries no trailing user message", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

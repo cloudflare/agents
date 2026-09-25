@@ -3273,9 +3273,16 @@ export class Think<
   /**
    * The originating user message ids of the active recovery chain (#2280),
    * carried in the recovery payload because the successor turn runs under a
-   * fresh request id. Scoped and restored like the root request id above.
+   * fresh request id. Scoped to the recovery callback's async context, so a
+   * concurrent client request never inherits them.
    */
-  private _activeChatRecoveryOriginIds: string[] | undefined;
+  private _chatRecoveryOriginIdsScope = new AsyncLocalStorage<
+    string[] | undefined
+  >();
+
+  private get _activeChatRecoveryOriginIds(): string[] | undefined {
+    return this._chatRecoveryOriginIdsScope.getStore();
+  }
 
   private static readonly CONFIG_KEYS = [
     "_think_config",
@@ -17326,7 +17333,10 @@ export class Think<
     await this._dispatchChatRecovery(
       "_chatRecoveryRetry",
       data,
-      (onTurnStarted) => this._chatRecoveryRetryDetached(data, onTurnStarted)
+      (onTurnStarted) =>
+        this._chatRecoveryOriginIdsScope.run(data?.originMessageIds, () =>
+          this._chatRecoveryRetryDetached(data, onTurnStarted)
+        )
     );
   }
 
@@ -17347,8 +17357,6 @@ export class Think<
     }
 
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
-    const previousOriginIds = this._activeChatRecoveryOriginIds;
-    this._activeChatRecoveryOriginIds = data?.originMessageIds;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
     const controller = recoveredSubmission ? new AbortController() : null;
@@ -17484,7 +17492,6 @@ export class Think<
       );
     } finally {
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
-      this._activeChatRecoveryOriginIds = previousOriginIds;
       if (recoveredSubmission) {
         this._submissionAbortControllers.delete(
           recoveredSubmission.submission_id
@@ -17628,7 +17635,10 @@ export class Think<
     await this._dispatchChatRecovery(
       "_chatRecoveryContinue",
       data,
-      (onTurnStarted) => this._chatRecoveryContinueDetached(data, onTurnStarted)
+      (onTurnStarted) =>
+        this._chatRecoveryOriginIdsScope.run(data?.originMessageIds, () =>
+          this._chatRecoveryContinueDetached(data, onTurnStarted)
+        )
     );
   }
 
@@ -17649,8 +17659,6 @@ export class Think<
     }
 
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
-    const previousOriginIds = this._activeChatRecoveryOriginIds;
-    this._activeChatRecoveryOriginIds = data?.originMessageIds;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
     const controller = recoveredSubmission ? new AbortController() : null;
@@ -17783,7 +17791,6 @@ export class Think<
       );
     } finally {
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
-      this._activeChatRecoveryOriginIds = previousOriginIds;
       if (recoveredSubmission) {
         this._submissionAbortControllers.delete(
           recoveredSubmission.submission_id

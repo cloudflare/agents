@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   UIMessage,
   GenerateTextOnFinishCallback,
@@ -411,9 +412,16 @@ export class AIChatAgent<
   /**
    * The originating user message ids of the active recovery chain (#2280),
    * carried in the recovery payload because the successor turn runs under a
-   * fresh request id. Scoped and restored like the root request id above.
+   * fresh request id. Scoped to the recovery callback's async context, so a
+   * concurrent client request never inherits them.
    */
-  private _activeChatRecoveryOriginIds: string[] | undefined;
+  private _chatRecoveryOriginIdsScope = new AsyncLocalStorage<
+    string[] | undefined
+  >();
+
+  private get _activeChatRecoveryOriginIds(): string[] | undefined {
+    return this._chatRecoveryOriginIdsScope.getStore();
+  }
 
   /**
    * Registry of per-request AbortControllers.
@@ -5379,7 +5387,10 @@ export class AIChatAgent<
     await this._dispatchChatRecovery(
       "_chatRecoveryContinue",
       data,
-      (onTurnStarted) => this._chatRecoveryContinueDetached(data, onTurnStarted)
+      (onTurnStarted) =>
+        this._chatRecoveryOriginIdsScope.run(data?.originMessageIds, () =>
+          this._chatRecoveryContinueDetached(data, onTurnStarted)
+        )
     );
   }
 
@@ -5388,8 +5399,6 @@ export class AIChatAgent<
     onTurnStarted?: () => void
   ): Promise<void> {
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
-    const previousOriginIds = this._activeChatRecoveryOriginIds;
-    this._activeChatRecoveryOriginIds = data?.originMessageIds;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
     try {
@@ -5487,7 +5496,6 @@ export class AIChatAgent<
       throw error;
     } finally {
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
-      this._activeChatRecoveryOriginIds = previousOriginIds;
       // If this facet is an agent-tool child, its recovered turn just settled
       // outside `startAgentToolRun`'s finalizer — eagerly close the run so a
       // re-attached parent collects the terminal immediately rather than
@@ -5896,7 +5904,10 @@ export class AIChatAgent<
     await this._dispatchChatRecovery(
       "_chatRecoveryRetry",
       data,
-      (onTurnStarted) => this._chatRecoveryRetryDetached(data, onTurnStarted)
+      (onTurnStarted) =>
+        this._chatRecoveryOriginIdsScope.run(data?.originMessageIds, () =>
+          this._chatRecoveryRetryDetached(data, onTurnStarted)
+        )
     );
   }
 
@@ -5905,8 +5916,6 @@ export class AIChatAgent<
     onTurnStarted?: () => void
   ): Promise<void> {
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
-    const previousOriginIds = this._activeChatRecoveryOriginIds;
-    this._activeChatRecoveryOriginIds = data?.originMessageIds;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
     try {
@@ -5999,7 +6008,6 @@ export class AIChatAgent<
       throw error;
     } finally {
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
-      this._activeChatRecoveryOriginIds = previousOriginIds;
       // If this facet is an agent-tool child, its recovered turn just settled
       // outside `startAgentToolRun`'s finalizer — eagerly close the run so a
       // re-attached parent collects the terminal immediately rather than

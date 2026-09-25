@@ -3115,6 +3115,33 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return true;
   }
 
+  /**
+   * Look up origin ids for the recovery successor from inside an open recovery
+   * scope, and for an unrelated request concurrently from outside it (#2280).
+   */
+  async probeRecoveryOriginScopeForTest(ids: string[]): Promise<{
+    successor: string[] | undefined;
+    unrelated: string[] | undefined;
+  }> {
+    const self = this as unknown as {
+      _chatRecoveryOriginIdsScope: {
+        run<R>(store: string[], fn: () => R): R;
+      };
+      _originMessageIdsFor(requestId: string): string[] | undefined;
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const scoped = self._chatRecoveryOriginIdsScope.run(ids, async () => {
+      await gate;
+      return self._originMessageIdsFor("successor");
+    });
+    const unrelated = self._originMessageIdsFor("unrelated");
+    release();
+    return { successor: await scoped, unrelated };
+  }
+
   async runScheduledRecoveryRetryForTest(): Promise<void> {
     if (await this._runQueuedRecoveryTaskForTest("_chatRecoveryRetry")) return;
     const rows = this.sql<{ payload: string }>`
