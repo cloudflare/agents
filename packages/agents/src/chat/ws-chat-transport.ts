@@ -170,6 +170,15 @@ export class WebSocketChatTransport<
     return cancelledRequest || cancelledToolContinuation;
   }
 
+  /**
+   * The server turn this transport last attached to that has not reported a
+   * terminal frame. A socket close ends the local stream but keeps this set,
+   * since the server keeps running the turn.
+   */
+  get activeServerTurnId(): string | null {
+    return this._activeServerTurnId;
+  }
+
   private sendCancelFrame(requestId: string) {
     try {
       this.agent.send(

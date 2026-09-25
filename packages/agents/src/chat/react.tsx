@@ -1787,9 +1787,10 @@ export function useAgentChat<
   );
 
   const [isServerStreaming, setIsServerStreaming] = useState(false);
-  // The request of a stream observed from another tab whose terminal frame was
-  // missed when the socket closed: its tool parts may still belong to a live
-  // server turn until that request's terminal frame or an idle probe settles it.
+  // A server turn (this client's own or one observed from another tab) whose
+  // terminal frame was missed when the socket closed: its tool parts may still
+  // belong to a live server turn until that request's terminal frame or an
+  // idle probe settles it.
   const [unresolvedObservedRequestId, setUnresolvedObservedRequestId] =
     useState<string | null>(null);
 
@@ -2438,6 +2439,11 @@ export function useAgentChat<
       socketIsOpen = false;
       sawClose = true;
       fallbackAckedResumeRequestIds.clear();
+
+      const unfinishedTurnId = customTransport.activeServerTurnId;
+      if (unfinishedTurnId !== null) {
+        setUnresolvedObservedRequestId(unfinishedTurnId);
+      }
 
       // resume:false opts out of recovering disconnected streams. There can be
       // no future authoritative probe, so stop claiming that a disconnected
