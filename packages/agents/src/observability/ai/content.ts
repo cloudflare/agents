@@ -343,18 +343,18 @@ function serializeMessages(
  */
 function serializeToolPayload(value: unknown): string | undefined {
   const json = stringify(value);
-  if (json === undefined || byteLength(json) <= MAX_ATTRIBUTE_BYTES) {
-    return json;
-  }
+  if (json === undefined) return undefined;
+  const bytes = byteLength(json);
+  if (bytes <= MAX_ATTRIBUTE_BYTES) return json;
 
   // Re-serialize the parsed JSON, not the original value, so tool-defined
   // toJSON methods and getters run only once.
   const redacted = JSON.stringify(JSON.parse(json), redactBase64Replacer);
-  const bytes = byteLength(redacted);
-  return bytes <= MAX_ATTRIBUTE_BYTES
+  return byteLength(redacted) <= MAX_ATTRIBUTE_BYTES
     ? redacted
     : JSON.stringify({
         omitted: "tool payload exceeds trace attribute limit",
+        // The original payload's size, not the redacted size.
         bytes
       });
 }

@@ -1876,14 +1876,18 @@ describe("createAISDKWrapper oversized tool payloads", () => {
   });
 
   it("records an omission marker when redaction cannot make it fit", async () => {
-    const prose = "ordinary tool text ".repeat(3_000);
+    const payload = {
+      prose: "ordinary tool text ".repeat(3_000),
+      image: IMAGE
+    };
 
     const { attributes } = await traceTool({
-      input: { prose },
-      execute: () => ({ prose })
+      input: payload,
+      execute: () => payload
     });
 
-    const bytes = JSON.stringify({ prose }).length;
+    // The marker reports the original size, including the redacted image.
+    const bytes = JSON.stringify(payload).length;
     const marker = {
       omitted: "tool payload exceeds trace attribute limit",
       bytes
