@@ -288,6 +288,37 @@ importers:
         specifier: ^4.115.0
         version: 4.115.0(@cloudflare/workers-types@5.20260729.1)
 
+  examples/a2a-server:
+    dependencies:
+      '@a2a-js/sdk':
+        specifier: ^1.2.0
+        version: 1.2.0(express@5.2.1)
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+    devDependencies:
+      '@cloudflare/vitest-pool-workers':
+        specifier: ^0.19.1
+        version: 0.19.1(@cloudflare/workers-types@5.20260812.1)(@vitest/runner@4.1.11)(@vitest/snapshot@4.1.11)(vitest@4.1.11)
+      '@cloudflare/workers-types':
+        specifier: ^5.20260729.1
+        version: 5.20260812.1
+      '@types/node':
+        specifier: ^26.0.1
+        version: 26.4.0
+      tsx:
+        specifier: ^4.22.4
+        version: 4.22.4
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.4.0)(@vitest/browser-playwright@4.1.11)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@26.4.0)(typescript@6.0.3))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      wrangler:
+        specifier: ^4.115.0
+        version: 4.120.1(@cloudflare/workers-types@5.20260812.1)
+
   examples/agent-skills:
     dependencies:
       '@cloudflare/kumo':
@@ -4397,7 +4428,7 @@ importers:
         version: 13.0.6
       just-bash:
         specifier: ^3.0.2
-        version: 3.0.2
+        version: 3.0.2(supports-color@7.2.0)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -4508,7 +4539,7 @@ importers:
         version: 4.31.0(ai@7.0.18(zod@4.5.4))(zod@4.5.4)
       just-bash:
         specifier: ^3.0.2
-        version: 3.0.2
+        version: 3.0.2(supports-color@7.2.0)
       workers-ai-provider:
         specifier: ^4.0.0
         version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.5.4))(@ai-sdk/google@4.0.10(zod@4.5.4))(@ai-sdk/openai@4.0.9(zod@4.5.4))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.5.4))
@@ -4740,6 +4771,21 @@ packages:
   '@a2a-js/sdk@0.3.13':
     resolution: {integrity: sha512-BZr0f9JVNQs3GKOM9xINWCh6OKIJWZFPyqqVqTym5mxO2Eemc6I/0zL7zWnljHzGdaf5aZQyQN5xa6PSH62q+A==}
     engines: {node: '>=18'}
+    peerDependencies:
+      '@bufbuild/protobuf': ^2.10.2
+      '@grpc/grpc-js': ^1.11.0
+      express: ^4.21.2 || ^5.1.0
+    peerDependenciesMeta:
+      '@bufbuild/protobuf':
+        optional: true
+      '@grpc/grpc-js':
+        optional: true
+      express:
+        optional: true
+
+  '@a2a-js/sdk@1.2.0':
+    resolution: {integrity: sha512-zxjvBrxhPV4J/RN8QTbsYaUIu9Y9RvmR06IP5o42UdJX42A9I0m1StGVvqrcCQ3bdu3SzWHPm5CeC2FNHARvkw==}
+    engines: {node: '>=20'}
     peerDependencies:
       '@bufbuild/protobuf': ^2.10.2
       '@grpc/grpc-js': ^1.11.0
@@ -12550,6 +12596,12 @@ snapshots:
     optionalDependencies:
       express: 5.2.1
 
+  '@a2a-js/sdk@1.2.0(express@5.2.1)':
+    dependencies:
+      jose: 6.2.3
+    optionalDependencies:
+      express: 5.2.1
+
   '@adobe/css-tools@4.5.0': {}
 
   '@adraffy/ens-normalize@1.11.1': {}
@@ -13918,7 +13970,22 @@ snapshots:
       cjs-module-lexer: 1.2.3
       esbuild: 0.28.1
       miniflare: 4.20260730.0
-      vitest: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.0.1)(@vitest/browser-playwright@4.1.11)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@26.0.1)(typescript@6.0.3))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      vitest: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.4.0)(@vitest/browser-playwright@4.1.11)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@26.4.0)(typescript@6.0.3))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      wrangler: 4.116.0(@cloudflare/workers-types@5.20260812.1)
+      zod: 3.25.76
+    transitivePeerDependencies:
+      - '@cloudflare/workers-types'
+      - bufferutil
+      - utf-8-validate
+
+  '@cloudflare/vitest-pool-workers@0.19.1(@cloudflare/workers-types@5.20260812.1)(@vitest/runner@4.1.11)(@vitest/snapshot@4.1.11)(vitest@4.1.11)':
+    dependencies:
+      '@vitest/runner': 4.1.11
+      '@vitest/snapshot': 4.1.11
+      cjs-module-lexer: 1.2.3
+      esbuild: 0.28.1
+      miniflare: 4.20260730.0
+      vitest: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.4.0)(@vitest/browser-playwright@4.1.11)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@26.4.0)(typescript@6.0.3))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
       wrangler: 4.116.0(@cloudflare/workers-types@5.20260812.1)
       zod: 3.25.76
     transitivePeerDependencies:
@@ -13980,7 +14047,7 @@ snapshots:
   '@cloudflare/workspace@https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@98b74eb(@platformatic/vfs@0.4.0)(diff@9.0.0)(isomorphic-git@1.38.5)':
     dependencies:
       capnweb: 0.8.0
-      just-bash: 3.0.2
+      just-bash: 3.0.2(supports-color@7.2.0)
     optionalDependencies:
       '@platformatic/vfs': 0.4.0
       diff: 9.0.0
@@ -14516,7 +14583,7 @@ snapshots:
 
   '@img/sharp-wasm32@0.35.2':
     dependencies:
-      '@emnapi/runtime': 1.11.1
+      '@emnapi/runtime': 1.11.3
     optional: true
 
   '@img/sharp-wasm32@0.35.4':
@@ -16029,7 +16096,7 @@ snapshots:
       '@types/react': 19.2.17
       '@types/react-dom': 19.2.3(@types/react@19.2.17)
 
-  '@tokenizer/inflate@0.4.1':
+  '@tokenizer/inflate@0.4.1(supports-color@7.2.0)':
     dependencies:
       debug: 4.4.3(supports-color@7.2.0)
       token-types: 6.1.2
@@ -16273,11 +16340,11 @@ snapshots:
 
   '@types/web-push@3.6.4':
     dependencies:
-      '@types/node': 26.2.0
+      '@types/node': 26.4.0
 
   '@types/ws@8.18.1':
     dependencies:
-      '@types/node': 26.2.0
+      '@types/node': 26.4.0
 
   '@typescript/native-preview-darwin-arm64@7.0.0-dev.20260629.1':
     optional: true
@@ -17908,9 +17975,9 @@ snapshots:
       token-types: 6.1.2
       uint8array-extras: 1.5.0
 
-  file-type@21.3.4:
+  file-type@21.3.4(supports-color@7.2.0):
     dependencies:
-      '@tokenizer/inflate': 0.4.1
+      '@tokenizer/inflate': 0.4.1(supports-color@7.2.0)
       strtok3: 10.3.5
       token-types: 6.1.2
       uint8array-extras: 1.5.0
@@ -18539,11 +18606,11 @@ snapshots:
     optionalDependencies:
       graceful-fs: 4.2.11
 
-  just-bash@3.0.2:
+  just-bash@3.0.2(supports-color@7.2.0):
     dependencies:
       diff: 8.0.4
       fast-xml-parser: 5.9.3
-      file-type: 21.3.4
+      file-type: 21.3.4(supports-color@7.2.0)
       ini: 6.0.0
       minimatch: 10.2.5
       modern-tar: 0.7.6
@@ -19902,7 +19969,7 @@ snapshots:
       '@protobufjs/path': 1.1.2
       '@protobufjs/pool': 1.1.0
       '@protobufjs/utf8': 1.1.1
-      '@types/node': 26.2.0
+      '@types/node': 26.4.0
       long: 5.3.2
 
   proxy-addr@2.0.7:

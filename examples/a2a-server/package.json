@@ -1,0 +1,28 @@
+{
+  "name": "@cloudflare/agents-a2a-server-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "tsx demo.ts",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "test": "pnpm run test:node && pnpm run test:workerd",
+    "test:node": "vitest run --config vitest.config.ts",
+    "test:workerd": "vitest run --config vitest.workerd.config.ts",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@a2a-js/sdk": "^1.2.0",
+    "agents": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.19.1",
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "@types/node": "^26.0.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "4.1.11",
+    "wrangler": "^4.115.0"
+  }
+}

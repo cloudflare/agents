@@ -1,0 +1,40 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "agents-a2a-server-example",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "COORDINATOR",
+        "class_name": "CoordinatorAgent"
+      },
+      {
+        "name": "SPECIALIST",
+        "class_name": "SpecialistAgent"
+      }
+    ]
+  },
+  "workflows": [
+    {
+      "name": "a2a-coordinator-task-workflow",
+      "binding": "COORDINATOR_TASK_WORKFLOW",
+      "class_name": "CoordinatorWorkflow"
+    },
+    {
+      "name": "a2a-specialist-task-workflow",
+      "binding": "SPECIALIST_TASK_WORKFLOW",
+      "class_name": "SpecialistWorkflow"
+    }
+  ],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["CoordinatorAgent", "SpecialistAgent"]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
