@@ -1,0 +1,31 @@
+packages/agents/src/chat/__tests__/agent-tools.test.ts
+  s_368991bdec7f77::t_809b38da2e7e97 3,29-86
+packages/agents/src/index.ts
+  s_368991bdec7f77::t_7a0b27ef14aa5f 6923,6931-6980
+packages/agents/src/react.tsx
+  s_368991bdec7f77::t_bcc3e20c49c826 40,1170
+.changeset/agent-tool-terminal-delivery.md
+  s_368991bdec7f77::t_a1feafd3797d94 8-9
+packages/agents/src/chat/agent-tools.ts
+  s_368991bdec7f77::t_fc2ffc9d1471f6 402-430
+packages/think/src/tests/agent-tools.test.ts
+  s_368991bdec7f77::t_92d466e9326eb9 91-95,505-544
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_aaea519e3c6af7 747-764,3285-3293
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cfa03057921e9216517f0dd3243d6368e2d49102",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
