@@ -277,7 +277,7 @@ export class BrowserConnector extends CodemodeConnector {
       );
     } else {
       lines.push(
-        "Use cdp.spec() to discover commands, events, and types when unsure.",
+        "Use cdp.spec() to look up commands, their parameters, events, and types when unsure.",
         "When a step needs a human (login, MFA, CAPTCHA, sensitive input), call cdp.getLiveViewUrl() to get a link they can open to control the browser live — surface it, then make an approval-gated call so the run pauses until they're done."
       );
     }
@@ -438,7 +438,7 @@ export class BrowserConnector extends CodemodeConnector {
 
       spec: {
         description:
-          "Return the searchable Chrome DevTools Protocol spec: domains with their commands, events, and types. Use it to discover method names and capabilities.",
+          "Return the searchable Chrome DevTools Protocol spec: domains with their commands (parameters and returns), events, and types. Use it to find a method and exactly how to call it.",
         replay: "reexecute",
         inputSchema: { type: "object", properties: {} },
         execute: async (): Promise<SearchableCdpSpec> => {
