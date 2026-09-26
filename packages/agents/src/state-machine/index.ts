@@ -9,6 +9,7 @@ export type {
   StateMachineOptions
 } from "./state-machine";
 export { defineGate, defineMachine } from "./definition";
+export { effectPending } from "./effect";
 export { settleStreamOnMachineCommit } from "./streams";
 export { MAX_MACHINE_CHECKPOINT_BYTES } from "./serialization";
 export {
@@ -27,11 +28,14 @@ export type {
   MachineDecision,
   MachineDefinition,
   MachineDefinitions,
+  MachineEffectBackoff,
   MachineEffectInvocation,
   MachineEffectOutcome,
+  MachineEffectPending,
   MachineEffectPlanOptions,
   MachineEffectRecovery,
   MachineEffectRef,
+  MachineEffectRetryPolicy,
   MachineEffectRuntime,
   MachineEffectRuntimes,
   MachineEffectView,
@@ -51,8 +55,10 @@ export type {
   MachinePhased,
   MachineQueuedEvent,
   MachineReceipt,
+  MachineListOptions,
   MachineRunOptions,
   MachineRunSnapshot,
+  MachineRunStatus,
   MachineNotifyOptions,
   MachineNotifyReceipt,
   MachineState,

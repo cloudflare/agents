@@ -60,6 +60,31 @@ describe("StateMachine gates", () => {
     });
   });
 
+  it("reuses the same gate when a waiting phase re-enters", async () => {
+    const stub = createHarnessStub();
+    const receipt = await stub.startReplayGate();
+    await waitFor(stub, receipt.runId, ["waiting"]);
+    const first = await stub.gateRowsFor(receipt.runId);
+
+    await stub.sendMessage(receipt.runId, "replay", "resume", "replay-gate");
+
+    await expect(
+      waitFor(stub, receipt.runId, ["completed"])
+    ).resolves.toMatchObject({ result: first[0]?.gate_id });
+    expect(await stub.gateRowsFor(receipt.runId)).toEqual(first);
+  });
+
+  it("creates a new gate after a committed transition", async () => {
+    const stub = createHarnessStub();
+    const receipt = await stub.startRevisitGate();
+
+    await waitFor(stub, receipt.runId, ["completed"]);
+
+    const gates = await stub.gateRowsFor(receipt.runId);
+    expect(gates).toHaveLength(2);
+    expect(gates[0]?.gate_id).not.toBe(gates[1]?.gate_id);
+  });
+
   it("expires without accepting a late approval", async () => {
     const { stub, receipt, gate } = await startWaitingPermission(20);
     await expect(

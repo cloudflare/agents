@@ -5,6 +5,8 @@ import {
   defineGate,
   defineMachine,
   type MachineDefinition,
+  type MachineEffectOutcome,
+  type MachineListOptions,
   type MachineRunSnapshot
 } from "../state-machine";
 
@@ -42,8 +44,18 @@ const example = defineMachine<
       gate.id satisfies string;
       return context.transition({ phase: "second", value: state.value });
     },
-    second: (state, context) => {
+    second: async (state, context) => {
       state.phase satisfies "second";
+      const outcome = await context.effects.run<{ value: string }, string>(
+        "echo",
+        { value: state.value },
+        {
+          recovery: "safe",
+          timeoutMs: 1_000,
+          retries: { limit: 3, delay: 100, backoff: "exponential" }
+        }
+      );
+      outcome satisfies MachineEffectOutcome<string>;
       return context.complete({ output: state.value });
     }
   }
@@ -69,6 +81,14 @@ object.stateMachine.notify(
   { type: "message", key: "inbox", value: "hello" },
   { eventId: "event_1" }
 );
+const listOptions = {
+  definition: "example",
+  status: ["running", "waiting"],
+  limit: 1
+} as const satisfies MachineListOptions;
+object.stateMachine.list(listOptions) satisfies Promise<
+  MachineRunSnapshot<State, { output: string }>[]
+>;
 object.stateMachine.cancel("machine_1");
 object.stateMachine.pause("machine_1");
 object.stateMachine.resume("machine_1");

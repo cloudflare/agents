@@ -133,6 +133,10 @@ export interface MachineEffectRef<Output extends MachineValue = MachineValue> {
   readonly id: string;
   readonly kind: string;
   readonly recovery: MachineEffectRecovery;
+  /** Maximum duration of each execution or reconciliation attempt. */
+  readonly timeoutMs?: number;
+  /** Durable retry policy carried through a checkpoint. */
+  readonly retries?: MachineEffectRetryPolicy;
   /** @internal Type carrier. */
   readonly __output?: Output;
 }
@@ -140,20 +144,43 @@ export interface MachineEffectRef<Output extends MachineValue = MachineValue> {
 export interface MachineEffectPlanOptions {
   readonly recovery: MachineEffectRecovery;
   readonly externalId?: string;
+  /** Maximum duration of each execution or reconciliation attempt. */
+  readonly timeoutMs?: number;
+  /** Retry policy. `limit` counts the first attempt. */
+  readonly retries?: MachineEffectRetryPolicy;
+}
+
+export type MachineEffectBackoff = "constant" | "linear" | "exponential";
+
+export interface MachineEffectRetryPolicy {
+  readonly limit?: number;
+  readonly delay?: number;
+  readonly backoff?: MachineEffectBackoff;
 }
 
 export interface MachineEffectInvocation {
   readonly effectId: string;
   readonly idempotencyKey: string;
   readonly externalId?: string;
+  readonly attempt: number;
   readonly signal: AbortSignal;
+}
+
+export interface MachineEffectPending {
+  readonly status: "running";
+  readonly externalId: string;
+  /** @internal Runtime validation prevents application-created pending values. */
+  readonly __brand: "MachineEffectPending";
 }
 
 export interface MachineEffectRuntime<
   Input extends MachineJson = MachineJson,
   Output extends MachineValue = MachineValue
 > {
-  execute(input: Input, invocation: MachineEffectInvocation): Promise<Output>;
+  execute(
+    input: Input,
+    invocation: MachineEffectInvocation
+  ): Promise<Output | MachineEffectPending>;
   reconcile?(
     externalId: string,
     invocation: MachineEffectInvocation
@@ -163,16 +190,30 @@ export interface MachineEffectRuntime<
     | { status: "failed"; error: { name: string; message: string } }
     | { status: "not-found" }
   >;
+  cancel?(
+    externalId: string,
+    invocation: MachineEffectInvocation
+  ): Promise<void>;
 }
 
 export type MachineEffectOutcome<Output extends MachineValue> =
-  | { readonly status: "running" }
-  | { readonly status: "completed"; readonly output: Output }
+  | { readonly status: "running"; readonly attempt: number }
+  | {
+      readonly status: "retrying";
+      readonly attempt: number;
+      readonly retryAt: number;
+    }
+  | {
+      readonly status: "completed";
+      readonly output: Output;
+      readonly attempt: number;
+    }
   | {
       readonly status: "failed";
       readonly error: { name: string; message: string };
+      readonly attempt: number;
     }
-  | { readonly status: "interrupted" };
+  | { readonly status: "interrupted"; readonly attempt: number };
 
 export type MachineEffectRuntimes = Record<string, MachineEffectRuntime>;
 
@@ -184,6 +225,12 @@ export interface MachineEffects {
   ): MachineEffectRef<Output>;
   execute<Output extends MachineValue>(
     effect: MachineEffectRef<Output>
+  ): Promise<MachineEffectOutcome<Output>>;
+  /** Commit an effect at the current checkpoint and execute it immediately. */
+  run<Input extends MachineJson, Output extends MachineValue>(
+    kind: string,
+    input: Input,
+    options: MachineEffectPlanOptions
   ): Promise<MachineEffectOutcome<Output>>;
 }
 
@@ -322,6 +369,22 @@ export type MachineCancelReceipt =
   | { readonly status: "not-found" }
   | { readonly status: "terminal" };
 
+export type MachineRunStatus =
+  | "running"
+  | "waiting"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface MachineListOptions {
+  readonly definition?: string;
+  /** An empty list matches no runs. */
+  readonly status?: MachineRunStatus | readonly MachineRunStatus[];
+  /** Defaults to 100 and cannot exceed 1,000. */
+  readonly limit?: number;
+}
+
 export type MachineRunSnapshot<
   State extends MachinePhased = MachinePhased,
   Result extends MachineValue = MachineValue
@@ -379,8 +442,10 @@ export interface MachineEffectView {
   readonly effectId: string;
   readonly kind: string;
   readonly recovery: MachineEffectRecovery;
-  readonly status: string;
+  readonly status: MachineEffectRow["status"];
   readonly externalId?: string;
+  readonly attempt: number;
+  readonly retryAt?: number;
 }
 
 /** @internal Raw StateMachine run row. */
@@ -398,6 +463,8 @@ export interface MachineRunRow {
   phase: string | null;
   checkpoint_json: string | null;
   revision: number;
+  /** Advances on transitions, but not waits, to identify one logical phase visit. */
+  builder_revision: number;
   control_json: string;
   job_id: string | null;
   wait_kind: string | null;
@@ -452,12 +519,21 @@ export interface MachineEffectRow {
   revision: number;
   kind: string;
   recovery: MachineEffectRecovery;
-  status: "pending" | "running" | "completed" | "failed" | "interrupted";
+  status:
+    | "pending"
+    | "running"
+    | "retrying"
+    | "completed"
+    | "failed"
+    | "interrupted";
   input_json: string;
   external_id: string | null;
   result_json: string | null;
   error_name: string | null;
   error_message: string | null;
+  attempt: number;
+  retry_at: number | null;
+  options_json: string;
   created_at: number;
   settled_at: number | null;
 }

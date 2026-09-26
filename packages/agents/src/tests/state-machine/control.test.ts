@@ -59,3 +59,43 @@ describe("StateMachine control", () => {
     ).resolves.toMatchObject({ result: "resumed" });
   });
 });
+
+describe("StateMachine list", () => {
+  it("orders runs newest first and filters by definition and status", async () => {
+    const stub = createHarnessStub();
+    const first = await stub.startWaiter("first");
+    await waitFor(stub, first.runId, ["waiting"]);
+    const second = await stub.startWaiter("second");
+    await waitFor(stub, second.runId, ["waiting"]);
+    await stub.start("pipeline");
+
+    const runs = await stub.listRuns({
+      definition: "waiter",
+      status: ["running", "waiting"],
+      limit: 2
+    });
+    expect(runs.map((run) => run.runId)).toEqual([second.runId, first.runId]);
+  });
+
+  it("uses the definition index for the live-run query", async () => {
+    expect(
+      (await createHarnessStub().listRunsQueryPlan()).join("\n")
+    ).toContain("cf_agents_state_machine_definition");
+  });
+
+  it("treats an empty status list as matching no runs", async () => {
+    const stub = createHarnessStub();
+    await stub.startWaiter("empty");
+
+    expect(await stub.listRuns({ status: [] })).toEqual([]);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 1_001])(
+    "rejects invalid limit %s",
+    async (limit) => {
+      expect(await createHarnessStub().listRunsError({ limit })).toMatch(
+        /integer between 1 and 1000/
+      );
+    }
+  );
+});

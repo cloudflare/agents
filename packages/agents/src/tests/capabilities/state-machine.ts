@@ -33,6 +33,23 @@ type GateState =
   | { phase: "open"; timeoutMs: number }
   | { phase: "waiting"; gateId: string; expiresAt: number };
 
+type HarnessDefinitionName =
+  | "pipeline"
+  | "waiter"
+  | "gracefulCancel"
+  | "revisitGate"
+  | "replayGate"
+  | "permission"
+  | "uncommittedEffect"
+  | "multiRun"
+  | "mixedRun"
+  | "runEffect"
+  | "effect"
+  | "participant"
+  | "streamSettlement"
+  | "streamSettlementFailure"
+  | "participantFailure";
+
 const Permission = defineGate<{ tool: string }, { approved: boolean }>(
   "permission"
 );
@@ -141,6 +158,55 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly #effectRuns: string[] = [];
   readonly #effectReconciles: string[] = [];
   readonly #effectRuntimes = {
+    conflict: {
+      execute: async (
+        input: import("../../state-machine").MachineJson,
+        invocation: import("../../state-machine").MachineEffectInvocation
+      ) => {
+        const runId = invocation.idempotencyKey.split(":", 1)[0]!;
+        this.ctx.storage.sql.exec(
+          `UPDATE cf_agents_state_machine_runs
+           SET revision = revision + 1 WHERE run_id = ?`,
+          runId
+        );
+        const value = (input as { value: string }).value;
+        return `conflict:${value}`;
+      }
+    },
+    flaky: {
+      execute: async (input: import("../../state-machine").MachineJson) => {
+        const { key, failures } = input as { key: string; failures: number };
+        this.ctx.storage.sql.exec(
+          `INSERT INTO state_machine_effect_attempts (key, attempts)
+           VALUES (?, 1)
+           ON CONFLICT (key) DO UPDATE SET attempts = attempts + 1`,
+          key
+        );
+        const row = this.ctx.storage.sql
+          .exec<{ attempts: number }>(
+            "SELECT attempts FROM state_machine_effect_attempts WHERE key = ?",
+            key
+          )
+          .one();
+        if (row.attempts <= failures) {
+          throw new Error(`flaky attempt ${row.attempts} failed`);
+        }
+        return `flaky:ok:${row.attempts}`;
+      }
+    },
+    ignoring: {
+      execute: async () => new Promise<never>(() => {})
+    },
+    late: {
+      execute: async () => {
+        await scheduler.wait(75);
+        return "late-output";
+      }
+    },
+    reconcileBlocking: {
+      execute: async () => "unused",
+      reconcile: async () => new Promise<never>(() => {})
+    },
     blocking: {
       execute: async (
         _input: import("../../state-machine").MachineJson,
@@ -218,6 +284,54 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
       },
       onCancel: (_state, context) => context.complete("cancel-handled")
     }),
+    revisitGate: defineMachine<
+      { phase: "run"; pass: number; expiresAt: number },
+      string,
+      { timeoutMs: number }
+    >({
+      version: 1,
+      initial: (input) => ({
+        phase: "run",
+        pass: 0,
+        expiresAt: Date.now() + input.timeoutMs
+      }),
+      phases: {
+        run: (state, context) => {
+          const gate = context.gates.create(
+            Permission,
+            { tool: `pass-${state.pass}` },
+            { expiresAt: state.expiresAt }
+          );
+          return state.pass === 0
+            ? context.transition({ ...state, pass: 1 })
+            : context.complete(gate.id);
+        }
+      }
+    }),
+    replayGate: defineMachine<
+      { phase: "run"; expiresAt: number },
+      string,
+      { timeoutMs: number },
+      WaitEvent
+    >({
+      version: 1,
+      initial: (input) => ({
+        phase: "run",
+        expiresAt: Date.now() + input.timeoutMs
+      }),
+      phases: {
+        run: (state, context) => {
+          const gate = context.gates.create(
+            Permission,
+            { tool: "replay" },
+            { expiresAt: state.expiresAt }
+          );
+          const event = context.events.take({ type: "message", key: "replay" });
+          if (event) return context.complete(gate.id);
+          return context.wait(state, { type: "message", key: "replay" });
+        }
+      }
+    }),
     permission: defineMachine<GateState, string, { timeoutMs: number }>({
       version: 1,
       initial: (input) => ({ phase: "open", timeoutMs: input.timeoutMs }),
@@ -258,6 +372,144 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
             key: state.gateId,
             timeoutAt: state.expiresAt
           });
+        }
+      }
+    }),
+    uncommittedEffect: defineMachine<{ phase: "run" }, string, undefined>({
+      version: 1,
+      initial: () => ({ phase: "run" }),
+      phases: {
+        run: async (_state, context) => {
+          const effect = context.effects.plan<{ value: string }, string>(
+            "echo",
+            { value: "uncommitted" },
+            { recovery: "safe" }
+          );
+          const outcome = await context.effects.execute(effect);
+          return context.complete(outcome.status);
+        }
+      }
+    }),
+    multiRun: defineMachine<{ phase: "run" }, string, undefined>({
+      version: 1,
+      initial: () => ({ phase: "run" }),
+      phases: {
+        run: async (_state, context) => {
+          const first = await context.effects.run<{ value: string }, string>(
+            "echo",
+            { value: "first" },
+            { recovery: "safe" }
+          );
+          const second = await context.effects.run<{ value: string }, string>(
+            "echo",
+            { value: "second" },
+            { recovery: "safe" }
+          );
+          return context.complete(`${first.status}:${second.status}`);
+        }
+      }
+    }),
+    mixedRun: defineMachine<
+      { phase: "run"; expiresAt: number },
+      string,
+      undefined
+    >({
+      version: 1,
+      initial: () => ({ phase: "run", expiresAt: Date.now() + 60_000 }),
+      phases: {
+        run: async (state, context) => {
+          context.gates.create(
+            Permission,
+            { tool: "mixed" },
+            { expiresAt: state.expiresAt }
+          );
+          const outcome = await context.effects.run<{ value: string }, string>(
+            "echo",
+            { value: "mixed" },
+            { recovery: "safe" }
+          );
+          return context.complete(outcome.status);
+        }
+      }
+    }),
+    runEffect: defineMachine<
+      {
+        phase: "run";
+        value: string;
+        kind: string;
+        recovery: "safe" | "never" | "reconcile";
+        timeoutMs?: number;
+        retries?: {
+          limit?: number;
+          delay?: number;
+          backoff?: "constant" | "linear" | "exponential";
+        };
+      },
+      string,
+      {
+        value: string;
+        kind?: string;
+        recovery?: "safe" | "never" | "reconcile";
+        timeoutMs?: number;
+        retries?: {
+          limit?: number;
+          delay?: number;
+          backoff?: "constant" | "linear" | "exponential";
+        };
+      }
+    >({
+      version: 1,
+      initial: (input) => ({
+        phase: "run",
+        value: input.value,
+        kind: input.kind ?? "echo",
+        recovery: input.recovery ?? "safe",
+        ...(input.timeoutMs === undefined
+          ? {}
+          : { timeoutMs: input.timeoutMs }),
+        ...(input.retries === undefined ? {} : { retries: input.retries })
+      }),
+      phases: {
+        run: async (state, context) => {
+          context.events.take({ type: "effect-retry", key: context.runId });
+          const input: MachineJson =
+            state.kind === "flaky"
+              ? {
+                  key: state.value,
+                  failures: Number(state.value.split(":")[1])
+                }
+              : { value: state.value };
+          const outcome = await context.effects.run<typeof input, string>(
+            state.kind,
+            input,
+            {
+              recovery: state.recovery,
+              ...(state.timeoutMs === undefined
+                ? {}
+                : { timeoutMs: state.timeoutMs }),
+              ...(state.retries === undefined ? {} : { retries: state.retries })
+            }
+          );
+          if (outcome.status === "completed") {
+            return context.complete(
+              `${outcome.output}|attempt=${outcome.attempt}`
+            );
+          }
+          if (outcome.status === "failed") {
+            return context.complete(
+              `failed:${outcome.error.message}|attempt=${outcome.attempt}`
+            );
+          }
+          if (outcome.status === "retrying") {
+            return context.wait(state, {
+              type: "effect-retry",
+              key: context.runId,
+              timeoutAt: outcome.retryAt
+            });
+          }
+          return context.complete(
+            `${outcome.status}|attempt=${outcome.attempt}`
+          );
         }
       }
     }),
@@ -402,6 +654,12 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
       "CREATE TABLE IF NOT EXISTS state_machine_commit_probe (value TEXT NOT NULL)"
     );
     this.ctx.storage.sql.exec(
+      `CREATE TABLE IF NOT EXISTS state_machine_effect_attempts (
+        key TEXT PRIMARY KEY,
+        attempts INTEGER NOT NULL
+      )`
+    );
+    this.ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS sync_job_probe_state (value TEXT NOT NULL)"
     );
     this.ctx.storage.sql.exec(
@@ -455,6 +713,14 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
     return this.#stateMachine.run("waiter", { key, timeoutMs }, { runId });
   }
 
+  sendRetryWake(runId: string, eventId: string) {
+    return this.#stateMachine.notify(
+      runId,
+      { type: "effect-retry", key: runId },
+      { eventId }
+    );
+  }
+
   sendMessage(runId: string, key: string, value: string, eventId: string) {
     return this.#stateMachine.notify(
       runId,
@@ -475,6 +741,24 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
     }
+  }
+
+  startRevisitGate(timeoutMs = 60_000) {
+    return this.#stateMachine.run("revisitGate", { timeoutMs });
+  }
+
+  startReplayGate(timeoutMs = 60_000) {
+    return this.#stateMachine.run("replayGate", { timeoutMs });
+  }
+
+  gateRowsFor(runId: string) {
+    return this.ctx.storage.sql
+      .exec<{ gate_id: string }>(
+        `SELECT gate_id FROM cf_agents_state_machine_gates
+         WHERE run_id = ? ORDER BY gate_id`,
+        runId
+      )
+      .toArray();
   }
 
   startPermission(timeoutMs = 60_000) {
@@ -517,6 +801,205 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
       recovery,
       ...(externalId ? { externalId } : {})
     });
+  }
+
+  startMultiRun() {
+    return this.#stateMachine.run("multiRun", undefined);
+  }
+
+  startMixedRun() {
+    return this.#stateMachine.run("mixedRun", undefined);
+  }
+
+  startRunEffect(options: {
+    value: string;
+    kind?: string;
+    recovery?: "safe" | "never" | "reconcile";
+    timeoutMs?: number;
+    retries?: {
+      limit?: number;
+      delay?: number;
+      backoff?: "constant" | "linear" | "exponential";
+    };
+  }) {
+    return this.#stateMachine.run("runEffect", options);
+  }
+
+  async uncommittedEffectError(): Promise<string> {
+    const receipt = await this.#stateMachine.run(
+      "uncommittedEffect",
+      undefined
+    );
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const run = await this.#stateMachine.get(receipt.runId);
+      if (run?.status === "failed") return run.error.message;
+      await scheduler.wait(10);
+    }
+    return "timed out";
+  }
+
+  effectRowsFor(runId: string) {
+    return this.ctx.storage.sql
+      .exec<{
+        effect_id: string;
+        revision: number;
+        status: string;
+        attempt: number;
+        retry_at: number | null;
+      }>(
+        `SELECT effect_id, revision, status, attempt, retry_at
+         FROM cf_agents_state_machine_effects
+         WHERE run_id = ? ORDER BY created_at, effect_id`,
+        runId
+      )
+      .toArray();
+  }
+
+  async seedReconcileTimeout(timeoutMs: number): Promise<string> {
+    await this.#stateMachine.get("seed-reconcile-schema");
+    const runId = `seed_reconcile_${crypto.randomUUID()}`;
+    const effectId = `effect_${crypto.randomUUID()}`;
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO cf_agents_state_machine_runs
+          (run_id, definition, definition_version, status, phase,
+           checkpoint_json, revision, builder_revision, control_json, job_id,
+           wait_kind, wait_type, wait_key, next_at, cancel_requested,
+           cancel_reason, result_json, error_name, error_message, persist,
+           idempotency_key, created_at, updated_at, settled_at)
+         VALUES (?, 'effect', 1, 'paused', 'execute', ?, 1, 1,
+                 '{"status":"running"}', ?, NULL, NULL, NULL, NULL, 0,
+                 NULL, NULL, NULL, NULL, 1, NULL, ?, ?, NULL)`,
+        runId,
+        JSON.stringify({
+          phase: "execute",
+          effect: {
+            id: effectId,
+            kind: "reconcileBlocking",
+            recovery: "reconcile",
+            timeoutMs
+          }
+        }),
+        `state-machine:${runId}`,
+        now,
+        now
+      );
+      this.ctx.storage.sql.exec(
+        `INSERT INTO cf_agents_state_machine_effects
+          (run_id, effect_id, revision, kind, recovery, status, input_json,
+           external_id, result_json, error_name, error_message, attempt,
+           retry_at, options_json, created_at, settled_at)
+         VALUES (?, ?, 1, 'reconcileBlocking', 'reconcile', 'running', '{}',
+                 'external', NULL, NULL, NULL, 1, NULL, ?, ?, NULL)`,
+        runId,
+        effectId,
+        JSON.stringify({ timeoutMs }),
+        now
+      );
+    });
+    await this.#stateMachine.resume(runId);
+    return runId;
+  }
+
+  async seedRunEffectRecovery(
+    status: "running" | "completed",
+    recovery: "safe" | "never"
+  ): Promise<string> {
+    await this.#stateMachine.get("seed-run-schema");
+    const runId = `seed_run_${crypto.randomUUID()}`;
+    const effectId = `${runId}#effect_0_0`;
+    const value = `${status}-${recovery}`;
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO cf_agents_state_machine_runs
+          (run_id, definition, definition_version, status, phase,
+           checkpoint_json, revision, builder_revision, control_json, job_id,
+           wait_kind, wait_type, wait_key, next_at, cancel_requested,
+           cancel_reason, result_json, error_name, error_message, persist,
+           idempotency_key, created_at, updated_at, settled_at)
+         VALUES (?, 'runEffect', 1, 'paused', 'run', ?, 0, 0,
+                 '{"status":"running"}', ?, NULL, NULL, NULL, NULL, 0,
+                 NULL, NULL, NULL, NULL, 1, NULL, ?, ?, NULL)`,
+        runId,
+        JSON.stringify({
+          phase: "run",
+          value,
+          kind: "echo",
+          recovery
+        }),
+        `state-machine:${runId}`,
+        now,
+        now
+      );
+      this.ctx.storage.sql.exec(
+        `INSERT INTO cf_agents_state_machine_effects
+          (run_id, effect_id, revision, kind, recovery, status, input_json,
+           external_id, result_json, error_name, error_message, attempt,
+           retry_at, created_at, settled_at)
+         VALUES (?, ?, 0, 'echo', ?, ?, ?, NULL, ?, NULL, NULL, 1,
+                 NULL, ?, ?)`,
+        runId,
+        effectId,
+        recovery,
+        status,
+        JSON.stringify({ value }),
+        status === "completed" ? JSON.stringify(`effect:${value}`) : null,
+        now,
+        status === "completed" ? now : null
+      );
+    });
+    await this.#stateMachine.resume(runId);
+    return runId;
+  }
+
+  effectAttempts(key: string): number {
+    return (
+      this.ctx.storage.sql
+        .exec<{ attempts: number }>(
+          "SELECT attempts FROM state_machine_effect_attempts WHERE key = ?",
+          key
+        )
+        .toArray()[0]?.attempts ?? 0
+    );
+  }
+
+  listRuns(
+    options?: Omit<
+      import("../../state-machine").MachineListOptions,
+      "definition"
+    > & { definition?: HarnessDefinitionName }
+  ) {
+    return this.#stateMachine.list(options);
+  }
+
+  async listRunsQueryPlan(): Promise<string[]> {
+    await this.#stateMachine.get("initialize-list-schema");
+    return this.ctx.storage.sql
+      .exec<{ detail: string }>(
+        `EXPLAIN QUERY PLAN
+         SELECT * FROM cf_agents_state_machine_runs
+         WHERE definition = ? AND status IN ('running', 'waiting')
+         ORDER BY created_at DESC, run_id DESC LIMIT 1`,
+        "waiter"
+      )
+      .toArray()
+      .map((row) => row.detail);
+  }
+
+  async listRunsError(
+    options?: Omit<
+      import("../../state-machine").MachineListOptions,
+      "definition"
+    > & { definition?: HarnessDefinitionName }
+  ): Promise<string | null> {
+    try {
+      await this.#stateMachine.list(options);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   effectActivity() {
@@ -631,6 +1114,66 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
       )
       .one();
     return { columns, checkpoint: row.checkpoint_json };
+  }
+
+  async migrateVersionThreeEffects(): Promise<{
+    columns: string[];
+    attempt: number;
+    supportsRetrying: boolean;
+  }> {
+    await this.#stateMachine.get("initialize-schema-v3");
+    await this.ctx.storage.put("cf_agents_state_machine_schema_version", 3);
+    this.ctx.storage.sql.exec("DROP TABLE cf_agents_state_machine_effects");
+    this.ctx.storage.sql.exec(`CREATE TABLE cf_agents_state_machine_effects (
+      run_id TEXT NOT NULL,
+      effect_id TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      recovery TEXT NOT NULL CHECK (recovery IN ('safe', 'never', 'reconcile')),
+      status TEXT NOT NULL CHECK (status IN (
+        'pending', 'running', 'completed', 'failed', 'interrupted'
+      )),
+      input_json TEXT NOT NULL,
+      external_id TEXT,
+      result_json TEXT,
+      error_name TEXT,
+      error_message TEXT,
+      attempt INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      settled_at INTEGER,
+      PRIMARY KEY (run_id, effect_id)
+    ) WITHOUT ROWID`);
+    this.ctx.storage.sql.exec(
+      `INSERT INTO cf_agents_state_machine_effects
+       (run_id, effect_id, revision, kind, recovery, status, input_json,
+        attempt, created_at)
+       VALUES ('migration-run', 'migration-effect', 1, 'echo', 'safe',
+               'failed', '{}', 3, ?)`,
+      Date.now()
+    );
+    await this.#stateMachine.onStart();
+    const columns = this.ctx.storage.sql
+      .exec<{ name: string }>(
+        "PRAGMA table_info(cf_agents_state_machine_effects)"
+      )
+      .toArray()
+      .map((column) => column.name);
+    const attempt = this.ctx.storage.sql
+      .exec<{ attempt: number }>(
+        `SELECT attempt FROM cf_agents_state_machine_effects
+         WHERE effect_id = 'migration-effect'`
+      )
+      .one().attempt;
+    let supportsRetrying = true;
+    try {
+      this.ctx.storage.sql.exec(
+        `UPDATE cf_agents_state_machine_effects SET status = 'retrying'
+         WHERE effect_id = 'migration-effect'`
+      );
+    } catch {
+      supportsRetrying = false;
+    }
+    return { columns, attempt, supportsRetrying };
   }
 
   dispatchStale(runId: string) {

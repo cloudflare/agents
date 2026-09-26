@@ -72,10 +72,17 @@ const receipt = await machines.run(
 );
 
 const snapshot = await machines.get(receipt.runId, "run");
+
+const liveRuns = await machines.list({
+  definition: "run",
+  status: ["running", "waiting"],
+  limit: 20
+});
 ```
 
 A caller-selected `runId` or `idempotencyKey` joins an existing run instead of
-creating another one.
+creating another one. `list()` returns newest runs first. Its default limit is
+100 and its maximum limit is 1,000. An empty status list returns no runs.
 
 ## Notify a machine
 
@@ -168,6 +175,50 @@ const machines = new StateMachine({
 Plan an effect in one phase, commit its reference in state, then execute it from
 the next phase. This makes a crash before intent distinct from an uncertain
 external outcome.
+
+Use `effects.run()` when one phase should commit the effect row and execute it
+without an intermediate state transition:
+
+```ts
+const outcome = await context.effects.run(
+  "command",
+  { command: "pnpm test" },
+  {
+    recovery: "safe",
+    timeoutMs: 30_000,
+    retries: {
+      limit: 3,
+      delay: 1_000,
+      backoff: "exponential"
+    }
+  }
+);
+
+if (outcome.status === "retrying") {
+  return context.wait(state, {
+    type: "effect-retry",
+    key: context.runId,
+    timeoutAt: outcome.retryAt
+  });
+}
+```
+
+`limit` counts the first attempt. Retry delays are durable: the run enters the
+`waiting` state and the Durable Object can leave memory until `retryAt`.
+Constant, linear, and exponential backoff are available.
+
+Calls to `effects.run()`, `effects.plan()`, and `gates.create()` have a stable
+identity while the same phase visit re-enters. Keep builder call order and
+arguments stable until the phase transitions. A later transition back to the
+phase creates new operations.
+
+The engine applies `timeoutMs` to execution and reconciliation. It fails the
+attempt at the deadline even when a runtime does not handle its abort signal.
+A runtime can still use the signal to stop its own work promptly.
+
+After an effect with `recovery: "never"` starts, the engine does not invoke it
+again. This includes runtime errors, timeouts, process failures, and a conflict
+while committing the phase decision.
 
 ## Cancellation and pause
 

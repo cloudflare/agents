@@ -54,6 +54,7 @@ export class StateMachineStore {
       phase TEXT,
       checkpoint_json TEXT,
       revision INTEGER NOT NULL,
+      builder_revision INTEGER NOT NULL DEFAULT 0,
       control_json TEXT NOT NULL,
       job_id TEXT,
       wait_kind TEXT,
@@ -112,6 +113,10 @@ export class StateMachineStore {
     this.sql(`CREATE INDEX IF NOT EXISTS cf_agents_state_machine_gate_run
       ON cf_agents_state_machine_gates (run_id, state, created_at)`);
 
+    this.createEffectTable();
+  }
+
+  createEffectTable(): void {
     this.sql(`CREATE TABLE IF NOT EXISTS cf_agents_state_machine_effects (
       run_id TEXT NOT NULL,
       effect_id TEXT NOT NULL,
@@ -119,13 +124,16 @@ export class StateMachineStore {
       kind TEXT NOT NULL,
       recovery TEXT NOT NULL CHECK (recovery IN ('safe', 'never', 'reconcile')),
       status TEXT NOT NULL CHECK (status IN (
-        'pending', 'running', 'completed', 'failed', 'interrupted'
+        'pending', 'running', 'retrying', 'completed', 'failed', 'interrupted'
       )),
       input_json TEXT NOT NULL,
       external_id TEXT,
       result_json TEXT,
       error_name TEXT,
       error_message TEXT,
+      attempt INTEGER NOT NULL DEFAULT 1,
+      retry_at INTEGER,
+      options_json TEXT NOT NULL DEFAULT '{}',
       created_at INTEGER NOT NULL,
       settled_at INTEGER,
       PRIMARY KEY (run_id, effect_id)
@@ -139,6 +147,33 @@ export class StateMachineStore {
     )[0];
   }
 
+  listRuns(options: {
+    definition?: string;
+    status?: readonly string[];
+    limit: number;
+  }): MachineRunRow[] {
+    const where: string[] = [];
+    const params: (string | number | null)[] = [];
+    if (options.definition !== undefined) {
+      where.push("definition = ?");
+      params.push(options.definition);
+    }
+    if (options.status !== undefined) {
+      if (options.status.length === 0) return [];
+      where.push(`status IN (${options.status.map(() => "?").join(", ")})`);
+      params.push(...options.status);
+    }
+    const clause = where.length === 0 ? "" : `WHERE ${where.join(" AND ")}`;
+    return this.sql<MachineRunRow>(
+      `SELECT * FROM cf_agents_state_machine_runs
+       ${clause}
+       ORDER BY created_at DESC, run_id DESC
+       LIMIT ?`,
+      ...params,
+      options.limit
+    );
+  }
+
   getRunByKey(idempotencyKey: string): MachineRunRow | undefined {
     return this.sql<MachineRunRow>(
       "SELECT * FROM cf_agents_state_machine_runs WHERE idempotency_key = ?",
@@ -150,11 +185,11 @@ export class StateMachineStore {
     this.sql(
       `INSERT INTO cf_agents_state_machine_runs
         (run_id, definition, definition_version, status, phase,
-         checkpoint_json, revision, control_json, job_id, wait_kind, wait_type,
+         checkpoint_json, revision, builder_revision, control_json, job_id, wait_kind, wait_type,
          wait_key, next_at, event_sequence, cancel_requested, cancel_reason,
          result_json, error_name, error_message, persist, idempotency_key,
          created_at, updated_at, settled_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       row.run_id,
       row.definition,
       row.definition_version,
@@ -162,6 +197,7 @@ export class StateMachineStore {
       row.phase,
       row.checkpoint_json,
       row.revision,
+      row.builder_revision,
       row.control_json,
       row.job_id,
       row.wait_kind,
@@ -329,7 +365,9 @@ export class StateMachineStore {
           kind: effect.kind,
           recovery: effect.recovery,
           status: effect.status,
-          ...(effect.external_id ? { externalId: effect.external_id } : {})
+          attempt: effect.attempt,
+          ...(effect.external_id ? { externalId: effect.external_id } : {}),
+          ...(effect.retry_at === null ? {} : { retryAt: effect.retry_at })
         })
       );
       return {

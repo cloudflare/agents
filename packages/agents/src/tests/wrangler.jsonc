@@ -65,6 +65,18 @@
         "name": "StateMachineHarnessObject"
       },
       {
+        "class_name": "StateMachineAdapterHarnessObject",
+        "name": "StateMachineAdapterHarnessObject"
+      },
+      {
+        "class_name": "NativeHarnessObject",
+        "name": "NativeHarnessObject"
+      },
+      {
+        "class_name": "WrappedHarnessObject",
+        "name": "WrappedHarnessObject"
+      },
+      {
         "class_name": "StreamHarnessObject",
         "name": "StreamHarnessObject"
       },
@@ -436,6 +448,9 @@
         "TaskHarnessObject",
         "TaskSchedulerCoexistObject",
         "StateMachineHarnessObject",
+        "StateMachineAdapterHarnessObject",
+        "NativeHarnessObject",
+        "WrappedHarnessObject",
         "StreamHarnessObject",
         "CutoverHarnessObject",
         "SqliteStrategiesBench",

@@ -27,6 +27,10 @@ per capability, all registered in the shared workers project
 - `state-machine.ts` — `StateMachineHarnessObject`, covering checkpointed
   phases, events and waits, gates, effect recovery, cancellation, local
   children, schema migration, and atomic Streams composition.
+- `state-machine-harness.ts`, `native-harness.ts`, and `wrapped-harness.ts` —
+  independent fixtures for the generic adapter, native model/tool loop, and
+  wrapped durable runtime. Their RPC methods mirror the public harness contract
+  without fixture-specific prefixes.
 - `streams.ts` — `StreamHarnessObject` (Streams as the only capability) and
   `TaskStreamComposeObject` (the checkpointed-cursor contract with Tasks,
   including recovery from stream evidence).

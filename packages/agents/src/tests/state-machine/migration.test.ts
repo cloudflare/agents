@@ -13,4 +13,13 @@ describe("StateMachine schema migration", () => {
       label: "migrated"
     });
   });
+
+  it("upgrades version three effects without losing attempts", async () => {
+    const migrated = await createHarnessStub().migrateVersionThreeEffects();
+
+    expect(migrated.columns).toContain("retry_at");
+    expect(migrated.columns).toContain("options_json");
+    expect(migrated.attempt).toBe(3);
+    expect(migrated.supportsRetrying).toBe(true);
+  });
 });
