@@ -144,6 +144,11 @@ function createFakeBrowser(options?: {
         const status = deleteStatuses.shift();
         return new Response(null, { status: status ?? 204 });
       }
+      if (url.endsWith("/json/protocol")) {
+        return Response.json({
+          domains: [{ domain: "Page", commands: [{ name: "navigate" }] }]
+        });
+      }
       if (url.endsWith("/json/list")) {
         const status = listStatuses.shift();
         if (status) return new Response(null, { status });
@@ -433,6 +438,25 @@ describe("NamedBrowserSessions.connect", () => {
     expect(deletes(requests, "session-1")).toHaveLength(0);
   });
 
+  it("reads the CDP spec from the connected browser, not a new one", async () => {
+    const { browser, requests } = createFakeBrowser();
+    const sessions = new NamedBrowserSessions({
+      browser,
+      store: new MemorySessionStore()
+    });
+
+    const connected = await sessions.connect("work");
+    const spec = await connected.spec();
+
+    expect(spec.domains[0].commands[0].method).toBe("Page.navigate");
+    expect(
+      requests.filter((r) => r.url.endsWith("/json/protocol")).map((r) => r.url)
+    ).toEqual([
+      "https://localhost/v1/devtools/browser/session-1/json/protocol"
+    ]);
+    expect(creates(requests)).toHaveLength(1); // only the named browser
+  });
+
   it("replaces a browser that expires between the probe and the upgrade", async () => {
     // The first upgrade finds the just-resolved browser gone (410).
     const { browser, requests } = createFakeBrowser({ upgradeStatuses: [410] });
@@ -457,6 +481,40 @@ describe("NamedBrowserSessions.connect", () => {
     });
 
     await expect(sessions.connect()).rejects.toThrow(/\(502\)/);
+  });
+
+  it("records the active tab on the session record", async () => {
+    const { browser } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const sessions = new NamedBrowserSessions({ browser, store });
+
+    const first = await sessions.connect("work");
+    expect(first.activeTargetId).toBeUndefined();
+    expect(await first.setActiveTarget("target-7")).toBe(true);
+
+    const second = await sessions.connect("work");
+    expect(second.activeTargetId).toBe("target-7");
+    expect(await second.setActiveTarget(undefined)).toBe(true);
+    expect(
+      store.sessions.get(namedBrowserSessionKey("work"))?.activeTargetId
+    ).toBeUndefined();
+  });
+
+  it("never resurrects a closed session when recording the active tab", async () => {
+    const { browser } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const sessions = new NamedBrowserSessions({ browser, store });
+
+    const connected = await sessions.connect("work");
+    await sessions.close("work");
+
+    expect(await connected.setActiveTarget("target-1")).toBe(false);
+    expect(store.sessions.has(namedBrowserSessionKey("work"))).toBe(false);
+
+    // A replacement browser starts with no active tab.
+    const replaced = await sessions.connect("work");
+    expect(replaced.restarted).toBe(true);
+    expect(replaced.activeTargetId).toBeUndefined();
   });
 
   it("CDP activity refreshes the record's updatedAt", async () => {
