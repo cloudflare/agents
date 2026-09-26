@@ -79,6 +79,22 @@ export function createTaskStepEngine(deps: TaskStepEngineDeps): TaskStepEngine {
              ${now}, ${kind === "do" ? now : null}, ${now})
         `;
     },
+    insertEventWait: (name, eventType, metadata, timeoutAt) => {
+      assertCurrent();
+      const now = Date.now();
+      const metadataJson = serializeTaskValue(
+        metadata,
+        `metadata for event step "${name}" in run "${runId}"`
+      );
+      deps.store.sql`
+        INSERT INTO cf_agents_task_steps
+          (run_id, step_name, kind, state, attempt, next_at, event_type,
+           event_metadata, created_at, updated_at)
+        VALUES
+          (${runId}, ${name}, 'event', 'waiting', 0, ${timeoutAt},
+           ${eventType}, ${metadataJson}, ${now}, ${now})
+      `;
+    },
     insertCompletedSleep: (name) => {
       assertCurrent();
       const now = Date.now();

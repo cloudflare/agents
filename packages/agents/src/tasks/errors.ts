@@ -94,6 +94,19 @@ export class MissingTaskDefinitionError extends Error {
   }
 }
 
+/** A durable event wait reached its deadline before delivery. */
+export class TaskEventTimeoutError extends Error {
+  readonly stepName: string;
+  readonly eventType: string;
+
+  constructor(stepName: string, eventType: string) {
+    super(`Task event "${eventType}" timed out at step "${stepName}"`);
+    this.name = "TaskEventTimeoutError";
+    this.stepName = stepName;
+    this.eventType = eventType;
+  }
+}
+
 /**
  * Thrown when a Task input, step result, metadata value, or final result is
  * not JSON-serializable or exceeds the serialized size limit.

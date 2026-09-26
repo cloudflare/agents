@@ -45,6 +45,7 @@ import { deserializeTaskValue, serializeTaskValue } from "./serialization";
 import type {
   Task,
   TaskCallbacks,
+  TaskEventDelivery,
   TaskHandlers,
   TaskInput,
   TaskOutput,
@@ -103,7 +104,7 @@ export function setTaskRoutedMemoryLimitHandler(
 }
 
 const FIBER_SCHEMA_VERSION_KEY = "cf_agents:tasks_schema_version";
-const CURRENT_FIBER_SCHEMA_VERSION = 1;
+const CURRENT_FIBER_SCHEMA_VERSION = 2;
 
 const DEFAULT_STEP_POLICY: ResolvedStepPolicy = {
   retryLimit: 5,
@@ -411,6 +412,7 @@ export class Tasks<
     const version = (await storage.get<number>(FIBER_SCHEMA_VERSION_KEY)) ?? 0;
     if (version < CURRENT_FIBER_SCHEMA_VERSION) {
       this.#store.ensureTables();
+      if (version < 2) this.#store.ensureEventColumns();
       await storage.put(FIBER_SCHEMA_VERSION_KEY, CURRENT_FIBER_SCHEMA_VERSION);
     }
     this.#reconcile();
@@ -906,6 +908,64 @@ export class Tasks<
     }
     // SAFETY: the query selects * from Tasks' own schema.
     return (rows as TaskRunRow[]).map((row) => this.#store.rowToSnapshot(row));
+  }
+
+  /**
+   * Deliver a JSON payload to the current matching event wait.
+   *
+   * The first matching delivery wins. The returned status distinguishes a
+   * successful delivery from duplicate, unknown, terminal, and non-waiting
+   * runs without throwing for normal delivery races.
+   */
+  async sendEvent(
+    runId: string,
+    type: string,
+    payload: TaskValue
+  ): Promise<TaskEventDelivery> {
+    await this.lifecycle.ready();
+    if (typeof type !== "string" || type.length === 0) {
+      throw new Error("Task event types must be non-empty strings");
+    }
+
+    const run = this.#store.getRun(runId);
+    if (!run) return { status: "not-found" };
+    if (TERMINAL_STATES.has(run.state)) return { status: "terminal" };
+
+    const event = this.#store.getEventStep(runId, type);
+    if (!event) {
+      return run.state === "waiting" && run.wait_reason === "event"
+        ? { status: "wrong-event" }
+        : { status: "not-waiting" };
+    }
+    if (event.state === "completed") return { status: "duplicate" };
+    if (event.state !== "waiting" || run.state !== "waiting") {
+      return { status: "not-waiting" };
+    }
+
+    const result = serializeTaskValue(
+      payload,
+      `payload for Task event "${type}" in run "${runId}"`
+    );
+    const now = Date.now();
+    const delivered = this.#store.completeEventWait(
+      runId,
+      event.step_name,
+      type,
+      result,
+      now
+    );
+    if (!delivered) return { status: "duplicate" };
+    this.#emit("task:event:delivered", {
+      runId,
+      definition: run.definition,
+      step: event.step_name,
+      type
+    });
+    await this.#syncWake(runId);
+    if (this.lifecycle.status() !== "starting") {
+      void this.#executeRun(runId).catch(() => {});
+    }
+    return { status: "delivered" };
   }
 
   /**

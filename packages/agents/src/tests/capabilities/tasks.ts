@@ -70,6 +70,33 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         );
       },
 
+      /** Wait for a value supplied by an external caller. */
+      waiter: async (
+        input: { type: string; timeoutMs: number },
+        step: TaskStep
+      ) => {
+        const decision = await step.waitForEvent<{ approved: boolean }>(
+          "decision",
+          {
+            type: input.type,
+            metadata: { kind: "authorization", tool: "exec" },
+            timeout: input.timeoutMs
+          }
+        );
+        return decision.approved ? "approved" : "denied";
+      },
+
+      /** Wait twice on the same event type, using distinct journal steps. */
+      doubleWaiter: async (input: { type: string }, step: TaskStep) => {
+        const first = await step.waitForEvent<string>("first-decision", {
+          type: input.type
+        });
+        const second = await step.waitForEvent<string>("second-decision", {
+          type: input.type
+        });
+        return `${first}:${second}`;
+      },
+
       /** Durable sleep between two journaled steps. */
       sleeper: async (input: { ms: number }, step: TaskStep) => {
         await step.do("before", () => {

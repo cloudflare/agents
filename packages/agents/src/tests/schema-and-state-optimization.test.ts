@@ -115,7 +115,7 @@ const EXPECTED_SCHEMA_DDL = [
   `CREATE TABLE cf_agents_task_steps (
         run_id TEXT NOT NULL,
         step_name TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('do', 'sleep')),
+        kind TEXT NOT NULL CHECK (kind IN ('do', 'sleep', 'event')),
         state TEXT NOT NULL CHECK (state IN (
           'running', 'waiting', 'completed', 'failed'
         )),
@@ -128,6 +128,8 @@ const EXPECTED_SCHEMA_DDL = [
         started_at INTEGER,
         updated_at INTEGER NOT NULL,
         completed_at INTEGER,
+        event_type TEXT,
+        event_metadata TEXT,
         PRIMARY KEY (run_id, step_name)
       ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_workflows (

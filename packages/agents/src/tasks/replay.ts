@@ -17,12 +17,15 @@ import {
 import { parseTaskDuration, type TaskDurationString } from "./duration";
 import {
   DuplicateTaskStepError,
+  TaskEventTimeoutError,
   TaskReplayDivergedError,
   TaskSerializationError,
   isNonRetryableError
 } from "./errors";
 import { deserializeTaskValue } from "./serialization";
 import type {
+  TaskEventWaitOptions,
+  TaskJson,
   TaskStep,
   TaskStepAttempt,
   TaskStepConfig,
@@ -115,6 +118,14 @@ export interface TaskStepEngine {
 
   /** Insert a new step row claimed at attempt 1. */
   insertStep(name: string, kind: "do" | "sleep", wakeAt: number | null): void;
+
+  /** Insert a durable wait for an externally delivered event. */
+  insertEventWait(
+    name: string,
+    eventType: string,
+    metadata: Record<string, TaskJson> | undefined,
+    timeoutAt: number
+  ): void;
 
   /** Journal an already-elapsed sleep born-completed, in one row write. */
   insertCompletedSleep(name: string): void;
@@ -316,6 +327,59 @@ export class ReplayStep implements TaskStep {
       );
     }
     return this.#sleepAt(name, () => wakeAt);
+  }
+
+  async waitForEvent<T extends TaskValue>(
+    name: string,
+    options: TaskEventWaitOptions
+  ): Promise<T> {
+    this.#enterStep(name);
+    if (typeof options.type !== "string" || options.type.length === 0) {
+      throw new Error("Task event types must be non-empty strings");
+    }
+
+    const row = this.#engine.readStep(name);
+    if (row === undefined) {
+      this.#live = true;
+      const timeoutMs = parseTaskDuration(
+        options.timeout ?? "1 day",
+        "event wait timeout"
+      );
+      const timeoutAt = Date.now() + timeoutMs;
+      this.#engine.insertEventWait(
+        name,
+        options.type,
+        options.metadata,
+        timeoutAt
+      );
+      throw new TaskSuspension(timeoutAt, "event");
+    }
+
+    if (row.kind !== "event") {
+      throw new TaskReplayDivergedError(
+        name,
+        `journaled as a ${row.kind} step but replayed as an event step`
+      );
+    }
+    if (row.event_type !== options.type) {
+      throw new TaskReplayDivergedError(
+        name,
+        `waited for event ${JSON.stringify(row.event_type)} but replayed for ${JSON.stringify(options.type)}`
+      );
+    }
+    if (row.state === "completed") {
+      return deserializeTaskValue(row.result) as T;
+    }
+    if (row.state === "failed") throw restoreStepError(row);
+
+    this.#live = true;
+    const timeoutAt = row.next_at ?? Date.now();
+    if (Date.now() >= timeoutAt) {
+      const error = new TaskEventTimeoutError(name, options.type);
+      this.#engine.failStep(name, toErrorSummary(error));
+      throw error;
+    }
+    throw new TaskSuspension(timeoutAt, "event");
   }
 
   async status(message: string): Promise<void> {

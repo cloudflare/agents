@@ -7,7 +7,13 @@
 
 import { SqlError } from "../sql-error";
 import { deserializeTaskValue } from "./serialization";
-import type { TaskJson, TaskRunRow, TaskRunSnapshot, TaskValue } from "./types";
+import type {
+  TaskJson,
+  TaskRunRow,
+  TaskRunSnapshot,
+  TaskStepRow,
+  TaskValue
+} from "./types";
 
 /** @internal SQL-backed store for one Tasks capability instance. */
 export class TaskStore {
@@ -80,6 +86,57 @@ export class TaskStore {
     return rows[0];
   }
 
+  getWaitingEvent(runId: string): TaskStepRow | undefined {
+    return this.sql<TaskStepRow>`
+      SELECT * FROM cf_agents_task_steps
+      WHERE run_id = ${runId} AND kind = 'event' AND state = 'waiting'
+      ORDER BY created_at ASC LIMIT 1
+    `[0];
+  }
+
+  getEventStep(runId: string, eventType: string): TaskStepRow | undefined {
+    return this.sql<TaskStepRow>`
+      SELECT * FROM cf_agents_task_steps
+      WHERE run_id = ${runId} AND kind = 'event' AND event_type = ${eventType}
+      ORDER BY CASE state WHEN 'waiting' THEN 0 ELSE 1 END,
+               created_at ASC
+      LIMIT 1
+    `[0];
+  }
+
+  completeEventWait(
+    runId: string,
+    stepName: string,
+    eventType: string,
+    result: string | null,
+    now: number
+  ): boolean {
+    return this.#storage.transactionSync(() => {
+      const delivered = this.write(
+        `UPDATE cf_agents_task_steps
+         SET state = 'completed', result = ?, next_at = NULL,
+             completed_at = ?, updated_at = ?
+         WHERE run_id = ? AND step_name = ? AND kind = 'event'
+           AND state = 'waiting' AND event_type = ?`,
+        [result, now, now, runId, stepName, eventType]
+      );
+      if (delivered === 0) return false;
+
+      const woke = this.write(
+        `UPDATE cf_agents_task_runs
+         SET state = 'pending', wait_reason = NULL, next_at = ?, updated_at = ?
+         WHERE run_id = ? AND state = 'waiting' AND wait_reason = 'event'`,
+        [now, now, runId]
+      );
+      if (woke !== 1) {
+        throw new Error(
+          `Task event step ${JSON.stringify(stepName)} completed without waking run ${JSON.stringify(runId)}`
+        );
+      }
+      return true;
+    });
+  }
+
   deleteRun(runId: string): void {
     this.sql`DELETE FROM cf_agents_task_steps WHERE run_id = ${runId}`;
     this.sql`DELETE FROM cf_agents_task_runs WHERE run_id = ${runId}`;
@@ -134,7 +191,7 @@ export class TaskStore {
       CREATE TABLE IF NOT EXISTS cf_agents_task_steps (
         run_id TEXT NOT NULL,
         step_name TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('do', 'sleep')),
+        kind TEXT NOT NULL CHECK (kind IN ('do', 'sleep', 'event')),
         state TEXT NOT NULL CHECK (state IN (
           'running', 'waiting', 'completed', 'failed'
         )),
@@ -147,8 +204,56 @@ export class TaskStore {
         started_at INTEGER,
         updated_at INTEGER NOT NULL,
         completed_at INTEGER,
+        event_type TEXT,
+        event_metadata TEXT,
         PRIMARY KEY (run_id, step_name)
       ) WITHOUT ROWID`);
+  }
+
+  ensureEventColumns(): void {
+    const schema = this.sql<{ sql: string }>`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'table' AND name = 'cf_agents_task_steps'
+    `[0]?.sql;
+    if (!schema || schema.includes("'event'")) return;
+
+    this.#storage.transactionSync(() => {
+      this.#storage.sql.exec(
+        "ALTER TABLE cf_agents_task_steps RENAME TO cf_agents_task_steps_v1"
+      );
+      this.#storage.sql.exec(`
+        CREATE TABLE cf_agents_task_steps (
+          run_id TEXT NOT NULL,
+          step_name TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('do', 'sleep', 'event')),
+          state TEXT NOT NULL CHECK (state IN (
+            'running', 'waiting', 'completed', 'failed'
+          )),
+          result TEXT,
+          error_name TEXT,
+          error_message TEXT,
+          attempt INTEGER NOT NULL DEFAULT 0,
+          next_at INTEGER,
+          created_at INTEGER NOT NULL,
+          started_at INTEGER,
+          updated_at INTEGER NOT NULL,
+          completed_at INTEGER,
+          event_type TEXT,
+          event_metadata TEXT,
+          PRIMARY KEY (run_id, step_name)
+        ) WITHOUT ROWID
+      `);
+      this.#storage.sql.exec(`
+        INSERT INTO cf_agents_task_steps
+          (run_id, step_name, kind, state, result, error_name, error_message,
+           attempt, next_at, created_at, started_at, updated_at, completed_at)
+        SELECT run_id, step_name, kind, state, result, error_name,
+               error_message, attempt, next_at, created_at, started_at,
+               updated_at, completed_at
+        FROM cf_agents_task_steps_v1
+      `);
+      this.#storage.sql.exec("DROP TABLE cf_agents_task_steps_v1");
+    });
   }
 
   rowToSnapshot<Output extends TaskValue>(
@@ -177,16 +282,45 @@ export class TaskStore {
             ? { statusMessage: row.status_message }
             : {})
         };
-      case "waiting":
-        return {
+      case "waiting": {
+        const waiting = {
           ...base,
-          state: "waiting",
-          reason: row.wait_reason ?? "sleep",
+          state: "waiting" as const,
           wakeAt: row.next_at ?? row.updated_at,
           ...(row.status_message !== null
             ? { statusMessage: row.status_message }
             : {})
         };
+        if (row.wait_reason !== "event") {
+          return {
+            ...waiting,
+            reason: row.wait_reason === "retry" ? "retry" : "sleep"
+          };
+        }
+
+        const event = this.getWaitingEvent(row.run_id);
+        if (!event?.event_type) {
+          throw new Error(
+            `Task run ${JSON.stringify(row.run_id)} is waiting for an event without a waiting event step`
+          );
+        }
+        return {
+          ...waiting,
+          reason: "event",
+          event: {
+            type: event.event_type,
+            ...(event.event_metadata !== null
+              ? {
+                  metadata: JSON.parse(event.event_metadata) as Record<
+                    string,
+                    TaskJson
+                  >
+                }
+              : {}),
+            timeoutAt: event.next_at ?? row.next_at ?? row.updated_at
+          }
+        };
+      }
       case "completed":
         return {
           ...base,
