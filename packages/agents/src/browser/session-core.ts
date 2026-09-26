@@ -13,6 +13,7 @@ import type {
   BrowserSessionStore,
   StoredBrowserSession
 } from "./session-manager";
+import { loadCdpSpec, type SearchableCdpSpec } from "./spec";
 
 /**
  * Browser Run's server-side `keep_alive` maximum (600 seconds). Named
@@ -125,6 +126,11 @@ export interface ConnectedBrowserSession {
    * session was closed or replaced since this connection resolved it.
    */
   setActiveTarget(targetId: string | undefined): Promise<boolean>;
+  /**
+   * The Chrome DevTools Protocol description this browser serves, read from
+   * the browser itself (cached per binding).
+   */
+  spec(): Promise<SearchableCdpSpec>;
 }
 
 /** One-shot session options for the default Chromium engine. */
@@ -185,11 +191,6 @@ export class NamedBrowserSessions {
       options.touchIntervalMs ?? SESSION_TOUCH_INTERVAL_MS,
       Math.floor(this.keepAliveMs / 2)
     );
-  }
-
-  /** The Browser Rendering binding sessions are created against. */
-  get browser(): BrowserBinding {
-    return this.#browser;
   }
 
   /** The platform `keep_alive` every create applies. */
@@ -311,7 +312,9 @@ export class NamedBrowserSessions {
           ...current,
           activeTargetId: targetId,
           updatedAt: Date.now()
-        }))
+        })),
+      spec: () =>
+        loadCdpSpec({ browser: this.#browser, sessionId: resolved.sessionId })
     };
   }
 
