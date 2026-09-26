@@ -114,6 +114,17 @@ export type LifecycleJobs = {
   readonly push: (options: LifecycleJobPushOptions) => Promise<LifecycleJob>;
   /** Cancel one owned job. Returns false when no job matched. */
   readonly cancel: (id: string) => Promise<boolean>;
+  /**
+   * Push one owned job synchronously without re-arming the physical alarm.
+   * Intended for capability state transactions; call {@link rearm} after the
+   * transaction commits.
+   */
+  readonly pushSync: (options: LifecycleJobPushOptions) => LifecycleJob;
+  /**
+   * Cancel one owned job synchronously without re-arming the physical alarm.
+   * Call {@link rearm} after the transaction commits.
+   */
+  readonly cancelSync: (id: string) => boolean;
   /** Re-time one owned job. Returns false when no job matched. */
   readonly reschedule: (id: string, time: number) => Promise<boolean>;
   /** Read one owned job. */
@@ -170,6 +181,11 @@ export function hungTimeoutMs(row: JobStorageRow): number {
   return (row.hung_timeout_seconds ?? DEFAULT_HUNG_TIMEOUT_SECONDS) * 1000;
 }
 
+function isMissingJobTable(cause: unknown): boolean {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  return message.includes("no such table: cf_agents_jobs");
+}
+
 /** Whether an in-flight single-flight job has crossed its hung timeout. */
 export function isHungRow(row: JobStorageRow, nowMs: number): boolean {
   return nowMs - (row.execution_started_at ?? 0) >= hungTimeoutMs(row);
@@ -191,11 +207,21 @@ export class JobQueue {
     query: string,
     ...params: (string | number | null)[]
   ): T[] {
+    const run = (): T[] => [...this.#storage.sql.exec(query, ...params)] as T[];
     this.#ensureTable();
     try {
-      return [...this.#storage.sql.exec(query, ...params)] as T[];
+      return run();
     } catch (cause) {
-      throw new SqlError(query, cause);
+      if (!isMissingJobTable(cause)) throw new SqlError(query, cause);
+      // The first lazy table creation may have happened inside a caller's
+      // rolled-back transaction. Repair the isolate-local cache and retry.
+      this.#tableEnsured = false;
+      this.#ensureTable();
+      try {
+        return run();
+      } catch (retryCause) {
+        throw new SqlError(query, retryCause);
+      }
     }
   }
 

@@ -121,6 +121,13 @@ export interface StreamsSyncInternal {
     reason: string | null,
     options?: StreamSettleOptions
   ): boolean;
+  /** Settle inside another capability's sync transaction. */
+  settleInTransaction(
+    streamId: string,
+    state: "completed" | "errored",
+    reason: string | null,
+    afterCommit: (callback: () => void) => void
+  ): void;
   /** Delete a stream and its chunks regardless of state. */
   deleteUnchecked(streamId: string): void;
   /** Delete many streams and their chunks regardless of state, silently. */
@@ -454,6 +461,15 @@ export class Streams extends LifecycleCapability {
       },
       settle: (streamId, state, reason, options) =>
         this.#settle(streamId, state, reason, options),
+      settleInTransaction: (streamId, state, reason, afterCommit) => {
+        const settled = this.#settleRow(streamId, state, reason);
+        if (!settled) {
+          throw new Error(
+            `Stream "${streamId}" is not live and cannot join a commit`
+          );
+        }
+        afterCommit(() => this.#emitSettled(streamId, state, reason));
+      },
       deleteUnchecked: (streamId) => {
         const removed = this.#deleteRows(streamId);
         if (removed > 0) this.#emit("stream:deleted", { streamId });

@@ -22,6 +22,9 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/schedule`             | `src/schedule.ts`             | Deprecated scheduling-parser compatibility entry point                       |
 | `agents/schedules`            | `src/schedules/index.ts`      | Dependency-light Lifecycle Scheduler primitive and runtime types             |
 | `agents/schedules/parser`     | `src/schedules/parser.ts`     | Zod-based natural-language scheduling prompt and schema helpers              |
+| `agents/tasks`                | `src/tasks/index.ts`          | Durable replayable background Tasks capability                               |
+| `agents/state-machine`        | `src/state-machine/index.ts`  | Durable checkpointed machines driven by Lifecycle jobs                       |
+| `agents/streams`              | `src/streams/index.ts`        | Durable incremental output Streams capability                                |
 | `agents/observability`        | `src/observability/index.ts`  | Observability event types and emitters                                       |
 | `agents/ai-chat-agent`        | `src/ai-chat-agent.ts`        | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                          |
 | `agents/ai-react`             | `src/ai-react.tsx`            | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                         |
@@ -62,6 +65,9 @@ src/
   workflows.ts          # AgentWorkflow base class
   schedule.ts           # Deprecated parser compatibility re-export
   schedules/            # Scheduler capability, runtime types, and parsing helpers
+  tasks/                # Durable replayable function capability
+  state-machine/        # Durable checkpointed machines over Lifecycle jobs
+  streams/              # Durable incremental output capability
   serializable.ts       # RPC serialization types
   types.ts              # Shared message type enums
   utils.ts              # Helpers (camelCaseToKebabCase, etc.)

@@ -61,6 +61,10 @@
         "name": "TaskSchedulerCoexistObject"
       },
       {
+        "class_name": "StateMachineHarnessObject",
+        "name": "StateMachineHarnessObject"
+      },
+      {
         "class_name": "StreamHarnessObject",
         "name": "StreamHarnessObject"
       },
@@ -431,6 +435,7 @@
         "TestBrowserAgent",
         "TaskHarnessObject",
         "TaskSchedulerCoexistObject",
+        "StateMachineHarnessObject",
         "StreamHarnessObject",
         "CutoverHarnessObject",
         "SqliteStrategiesBench",

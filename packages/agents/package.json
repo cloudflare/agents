@@ -145,6 +145,11 @@
       "import": "./dist/tasks/index.js",
       "require": "./dist/tasks/index.js"
     },
+    "./state-machine": {
+      "types": "./dist/state-machine/index.d.ts",
+      "import": "./dist/state-machine/index.js",
+      "require": "./dist/state-machine/index.js"
+    },
     "./lifecycle": {
       "types": "./dist/lifecycle/index.d.ts",
       "import": "./dist/lifecycle/index.js",
