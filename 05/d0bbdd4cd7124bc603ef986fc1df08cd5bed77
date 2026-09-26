@@ -1,0 +1,29 @@
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_2344b0848846be 1,415-416,418-424,5390-5393,5907-5910
+packages/ai-chat/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_e5debe8d810eb8 266-281
+packages/ai-chat/src/tests/worker.ts
+  s_368991bdec7f77::t_8d80192b6a11b1 3118-3144
+packages/think/src/tests/agents/think-session.ts
+  s_368991bdec7f77::t_d54da4334a9ae5 9139-9165
+packages/think/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_3aa0d87f2824f3 199-214
+packages/think/src/think.ts
+  s_368991bdec7f77::t_a814f23601d0e6 3276-3277,3279-3285,17336-17339,17638-17641
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "05d0bbdd4cd7124bc603ef986fc1df08cd5bed77",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "unknown"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}

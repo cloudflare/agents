@@ -1,0 +1,23 @@
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_2bc913d34ee32a 5631-5632
+packages/ai-chat/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_be7b0cff6ff35d 119-156
+packages/ai-chat/src/tests/worker.ts
+  s_368991bdec7f77::t_ae5341db6a40b0 2846-2853
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1aa48d4f0b4ca40aa5b8daeb71f0f2cd8b5bbd4a",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}

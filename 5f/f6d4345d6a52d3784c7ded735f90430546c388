@@ -1,0 +1,68 @@
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_422bedefaaed07 10,12-13,267-279,7331-7332,7337-7339
+  s_368991bdec7f77::t_293fd9052335d9 5502,5510-5521,5527,5599-5601,5603-5614,7353
+  s_368991bdec7f77::t_9a348900613d89 5493-5495,5503-5505,5529-5535,5550,5552-5564,5566-5568,5570-5598,5602,5617,7354-7355
+  s_368991bdec7f77::t_db9c0faf7e5ce8 810-820,835-853,855-860,5551,5565,5569
+  s_368991bdec7f77::t_68b630d5c953ea 100-101,1220-1223,1230,1514,1866-1870,2223-2246,2248,2796-2804,5062-5067,5078
+packages/ai-chat/src/tests/durable-chat-recovery.test.ts
+  s_368991bdec7f77::t_d58c9cee9fd3ff 198-199,205,2693-2726,2856-2875
+  s_368991bdec7f77::t_6772953bf12eaa 200-204,2727-2782
+  s_368991bdec7f77::t_c448e771329264 206,2783-2802,2829-2855
+  s_368991bdec7f77::t_51223153966942 207,2803-2828
+packages/ai-chat/src/tests/worker.ts
+  s_368991bdec7f77::t_594b8311729ae6 123,125-126,131,141-142,144-156,2839-2840,2844-2846,2849,2871-2879
+  s_368991bdec7f77::t_f38a3d3185bfce 121-122,124,127-130,132-140,143,2829-2833,2841-2843,2847-2848,2850-2870
+  s_368991bdec7f77::t_d99f1813d2a4d2 2834-2838
+  s_368991bdec7f77::t_111e7204275c83 2027-2034
+.changeset/ai-chat-transient-reader-recovery.md
+  s_368991bdec7f77::t_e70b79673a6fe9 1-4
+  s_368991bdec7f77::t_9d0694e94e7f83 5
+docs/agents/chat-agents.md
+  s_368991bdec7f77::t_9f19d037be181a 591
+  s_368991bdec7f77::t_489d6649532ac7 590
+  s_368991bdec7f77::t_af831a55fcb8fe 1692-1713
+packages/agents/src/chat/replay-frames.ts
+  s_368991bdec7f77::t_5993c7db822c33 53-58,69-71
+packages/agents/src/tests/streams/resumable-stream-settlement.test.ts
+  s_368991bdec7f77::t_00f9c9f26037d7 4,88-163
+packages/ai-chat/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_92546b6ee59a60 1-96
+packages/think/src/think.ts
+  s_368991bdec7f77::t_d8d4a7a79e4b5b 239-240,13080-13083,13092,13393,17806-17813,18454-18459,18470,18584-18588,18674-18704
+.changeset/terminal-frame-message-ids.md
+  s_368991bdec7f77::t_f0957039e1a2ea 1-7
+packages/agents/src/chat/__tests__/origin-message-ids.test.ts
+  s_368991bdec7f77::t_26daaf0c1c5c13 1-46
+packages/agents/src/chat/__tests__/resume-handshake.test.ts
+  s_368991bdec7f77::t_fbe96865aff89e 56,87,411-462
+packages/agents/src/chat/index.ts
+  s_368991bdec7f77::t_15e4b4a7e53910 27-28
+packages/agents/src/chat/origin-message-ids.ts
+  s_368991bdec7f77::t_e97dafa4822072 1-39
+packages/agents/src/chat/recovery-incident.ts
+  s_368991bdec7f77::t_3eefc5b344af0c 485-490,501-502,504-506
+packages/agents/src/chat/resumable-stream.ts
+  s_368991bdec7f77::t_5526da057387a8 116-120,523-527,549-551,582-590,850-855,910-911
+packages/agents/src/chat/resume-handshake.ts
+  s_368991bdec7f77::t_0a3ee53e0fff11 36,251,259-260,318-320,328-329
+packages/agents/src/chat/wire-types.ts
+  s_368991bdec7f77::t_3f7f5b574eebd8 86-93
+packages/think/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_51b244fc07ec1a 1-112
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5ff6d4345d6a52d3784c7ded735f90430546c388",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}

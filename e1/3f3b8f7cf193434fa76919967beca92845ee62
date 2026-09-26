@@ -1,0 +1,29 @@
+.changeset/terminal-frame-message-ids.md
+  s_368991bdec7f77::t_b3526caf210162 7
+packages/agents/src/chat/recovery.ts
+  s_368991bdec7f77::t_3b35c3a914e29a 29-30,40-41,50,74-75
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_e0195b7b3d4b5e 841-842,5268-5269
+packages/ai-chat/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_58e74497925216 119-168
+packages/think/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_c058b93dc2126f 10-13,146-197
+packages/think/src/think.ts
+  s_368991bdec7f77::t_79125c62a4b9eb 5631-5632,16768-16769
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e13f3b8f7cf193434fa76919967beca92845ee62",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
