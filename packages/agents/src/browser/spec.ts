@@ -10,37 +10,120 @@
 
 import type { BrowserBinding } from "./browser-run";
 
+/** A parameter, return value, or type property in the raw protocol. */
+interface RawCdpField {
+  name: string;
+  description?: string;
+  optional?: boolean;
+  experimental?: boolean;
+  deprecated?: boolean;
+  type?: string;
+  $ref?: string;
+  enum?: string[];
+  items?: { type?: string; $ref?: string; enum?: string[] };
+}
+
 interface RawCdpCommand {
   name: string;
   description?: string;
+  experimental?: boolean;
+  deprecated?: boolean;
+  parameters?: RawCdpField[];
+  returns?: RawCdpField[];
 }
 
 interface RawCdpEvent {
   name: string;
   description?: string;
+  experimental?: boolean;
+  deprecated?: boolean;
+  parameters?: RawCdpField[];
 }
 
 interface RawCdpType {
   id: string;
   description?: string;
+  experimental?: boolean;
+  deprecated?: boolean;
+  type?: string;
+  enum?: string[];
+  properties?: RawCdpField[];
+  items?: { type?: string; $ref?: string; enum?: string[] };
 }
 
 /** Raw CDP protocol domain from `/json/protocol` */
 interface RawCdpDomain {
   domain: string;
   description?: string;
+  experimental?: boolean;
+  deprecated?: boolean;
   commands?: RawCdpCommand[];
   events?: RawCdpEvent[];
   types?: RawCdpType[];
+}
+
+/**
+ * The element type of an array field or type. `$ref` is always
+ * domain-qualified (`"Network.Cookie"`), matching a type's `name`.
+ */
+export interface CdpItems {
+  type?: string;
+  $ref?: string;
+  enum?: string[];
+}
+
+/**
+ * A command parameter, return value, event parameter, or type property.
+ * Either `type` (a JSON type such as `"string"` or `"array"`) or `$ref`
+ * (a domain-qualified type name matching a type's `name`) is set.
+ */
+export interface CdpField {
+  name: string;
+  description?: string;
+  optional?: boolean;
+  experimental?: boolean;
+  deprecated?: boolean;
+  type?: string;
+  $ref?: string;
+  enum?: string[];
+  items?: CdpItems;
 }
 
 export interface SearchableCdpSpec {
   domains: Array<{
     name: string;
     description?: string;
-    commands: Array<{ name: string; method: string; description?: string }>;
-    events: Array<{ name: string; event: string; description?: string }>;
-    types: Array<{ id: string; name: string; description?: string }>;
+    experimental?: boolean;
+    deprecated?: boolean;
+    commands: Array<{
+      name: string;
+      method: string;
+      description?: string;
+      experimental?: boolean;
+      deprecated?: boolean;
+      parameters: CdpField[];
+      returns: CdpField[];
+    }>;
+    events: Array<{
+      name: string;
+      event: string;
+      description?: string;
+      experimental?: boolean;
+      deprecated?: boolean;
+      parameters: CdpField[];
+    }>;
+    types: Array<{
+      id: string;
+      name: string;
+      description?: string;
+      experimental?: boolean;
+      deprecated?: boolean;
+      /** JSON type of the value, e.g. `"string"`, `"object"`, `"array"`. */
+      type?: string;
+      enum?: string[];
+      properties: CdpField[];
+      items?: CdpItems;
+    }>;
   }>;
 }
 
@@ -66,27 +149,77 @@ const bindingSpecCache = new WeakMap<BrowserBinding, SpecCacheEntry>();
 
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+/** Qualify a same-domain `$ref` (`"FrameId"` → `"Page.FrameId"`). */
+function qualifyRef(domain: string, ref: string | undefined) {
+  if (ref === undefined) return undefined;
+  return ref.includes(".") ? ref : `${domain}.${ref}`;
+}
+
+function normalizeItems(
+  domain: string,
+  items: RawCdpType["items"]
+): CdpItems | undefined {
+  if (!items) return undefined;
+  return {
+    type: items.type,
+    $ref: qualifyRef(domain, items.$ref),
+    enum: items.enum
+  };
+}
+
+function normalizeFields(
+  domain: string,
+  fields: RawCdpField[] | undefined
+): CdpField[] {
+  return (fields ?? []).map((field) => ({
+    name: field.name,
+    description: field.description,
+    optional: field.optional,
+    experimental: field.experimental,
+    deprecated: field.deprecated,
+    type: field.type,
+    $ref: qualifyRef(domain, field.$ref),
+    enum: field.enum,
+    items: normalizeItems(domain, field.items)
+  }));
+}
+
 function normalizeCdpSpec(spec: {
   domains?: RawCdpDomain[];
 }): SearchableCdpSpec {
   return {
-    domains: (spec.domains ?? []).map((domain) => ({
-      name: domain.domain,
-      description: domain.description,
-      commands: (domain.commands ?? []).map((command) => ({
+    domains: (spec.domains ?? []).map(({ domain, ...raw }) => ({
+      name: domain,
+      description: raw.description,
+      experimental: raw.experimental,
+      deprecated: raw.deprecated,
+      commands: (raw.commands ?? []).map((command) => ({
         name: command.name,
-        method: `${domain.domain}.${command.name}`,
-        description: command.description
+        method: `${domain}.${command.name}`,
+        description: command.description,
+        experimental: command.experimental,
+        deprecated: command.deprecated,
+        parameters: normalizeFields(domain, command.parameters),
+        returns: normalizeFields(domain, command.returns)
       })),
-      events: (domain.events ?? []).map((event) => ({
+      events: (raw.events ?? []).map((event) => ({
         name: event.name,
-        event: `${domain.domain}.${event.name}`,
-        description: event.description
+        event: `${domain}.${event.name}`,
+        description: event.description,
+        experimental: event.experimental,
+        deprecated: event.deprecated,
+        parameters: normalizeFields(domain, event.parameters)
       })),
-      types: (domain.types ?? []).map((type) => ({
+      types: (raw.types ?? []).map((type) => ({
         id: type.id,
-        name: `${domain.domain}.${type.id}`,
-        description: type.description
+        name: `${domain}.${type.id}`,
+        description: type.description,
+        experimental: type.experimental,
+        deprecated: type.deprecated,
+        type: type.type,
+        enum: type.enum,
+        properties: normalizeFields(domain, type.properties),
+        items: normalizeItems(domain, type.items)
       }))
     }))
   };

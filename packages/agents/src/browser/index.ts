@@ -58,6 +58,8 @@ export {
 
 export {
   loadCdpSpec,
+  type CdpField,
+  type CdpItems,
   type CdpSpecSource,
   type SearchableCdpSpec
 } from "./spec";

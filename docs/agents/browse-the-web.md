@@ -105,7 +105,7 @@ async () => {
 };
 ```
 
-To discover protocol surface, the model calls `cdp.spec()` — the live, normalized CDP protocol description (domains with commands, events, and types) — or uses the runtime's built-in `codemode.search` / `codemode.describe`.
+To discover protocol surface, the model calls `cdp.spec()` — the live, normalized CDP protocol description (domains with commands, events, and types, including each command's parameters and return values) — or uses the runtime's built-in `codemode.search` / `codemode.describe`.
 
 ## Use with an Agent
 
