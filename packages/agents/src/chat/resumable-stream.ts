@@ -113,6 +113,11 @@ type ChatStreamMetadata = {
    * stream's chunks for ones it already has (#1951).
    */
   seqBase?: number;
+  /**
+   * The user message ids the request originated from, echoed as `messageIds`
+   * on the replayed terminal frame (#2280).
+   */
+  originMessageIds?: string[];
   /** Terminal evidence pinned until its consumer durably settles and releases it. */
 };
 
@@ -515,7 +520,11 @@ export class ResumableStream {
    */
   start(
     requestId: string,
-    options: { messageId?: string; continuation?: boolean } = {}
+    options: {
+      messageId?: string;
+      continuation?: boolean;
+      originMessageIds?: string[];
+    } = {}
   ): string {
     // Flush any pending chunks from previous streams to prevent mixing
     this.flushBuffer();
@@ -537,6 +546,9 @@ export class ResumableStream {
     if (options.messageId != null) metadata.messageId = options.messageId;
     if (this._activeIsContinuation) metadata.isContinuation = 1;
     if (seqBase > 0) metadata.seqBase = seqBase;
+    if (options.originMessageIds?.length) {
+      metadata.originMessageIds = options.originMessageIds;
+    }
     this.ops.insertStream(streamId, requestId, metadata);
 
     return streamId;
@@ -566,6 +578,27 @@ export class ResumableStream {
     if (!row) return null;
     return parseChatMetadata(row)?.messageId ?? null;
   }
+
+  /**
+   * The user message ids the request's latest chat stream was started for
+   * (#2280), or undefined when no stream recorded them.
+   */
+  getOriginMessageIds(requestId: string): string[] | undefined {
+    const row = this._latestChatRowByTag(requestId);
+    return (
+      (row ? parseChatMetadata(row)?.originMessageIds : undefined) ??
+      (this._cutoverOrigin?.requestId === requestId
+        ? this._cutoverOrigin.messageIds
+        : undefined)
+    );
+  }
+
+  /**
+   * Origin ids of the stream the last discarding cutover deleted, so a resume
+   * ACK that races the cutover still gets them on its replay terminal.
+   */
+  private _cutoverOrigin: { requestId: string; messageIds: string[] } | null =
+    null;
 
   /**
    * Mark a stream as completed and flush any pending chunks.
@@ -612,6 +645,13 @@ export class ResumableStream {
   ): void {
     this.flushBuffer();
     const discard = options.discard ?? true;
+    if (discard) {
+      const row = this.ops.getStream(streamId);
+      const messageIds = row ? parseChatMetadata(row)?.originMessageIds : null;
+      if (row?.tag && messageIds) {
+        this._cutoverOrigin = { requestId: row.tag, messageIds };
+      }
+    }
     const commit = persist;
     // The discard deletes the rows inside the settle transaction, and the
     // deletion hook retires their segments there, so the marker moves with
@@ -826,7 +866,12 @@ export class ResumableStream {
       // The orphan-cleanup decision is committed regardless of whether this
       // particular connection received the done frame, so the caller can
       // persist the reconstructed message.
-      sendReplayControl(connection, requestId, { done: true, continuation });
+      const row = this.ops.getStream(streamId);
+      sendReplayControl(connection, requestId, {
+        done: true,
+        continuation,
+        messageIds: row ? parseChatMetadata(row)?.originMessageIds : undefined
+      });
       this.complete(streamId);
       return streamId;
     }
@@ -881,7 +926,8 @@ export class ResumableStream {
     }
     return sendReplayControl(connection, requestId, {
       done: true,
-      continuation
+      continuation,
+      messageIds: chat?.originMessageIds
     });
   }
 

@@ -193,7 +193,12 @@ export interface ChatRecoveryAdapter {
     config: ResolvedChatRecoveryConfig,
     partial: RecoveryPartial,
     streamId: string,
-    createdAt: number
+    createdAt: number,
+    /**
+     * The fiber snapshot's origin ids (#2280). A restored pre-stream turn has
+     * no stream row or live request to recover them from otherwise.
+     */
+    originMessageIds?: string[]
   ): Promise<void>;
   /**
    * Resolve the orphaned stream identity for a (recovery-root) request id —
@@ -464,7 +469,8 @@ export class ChatRecoveryEngine {
         config,
         partial,
         streamId,
-        ctx.createdAt
+        ctx.createdAt,
+        snapshot?.originMessageIds
       );
       return true;
     }

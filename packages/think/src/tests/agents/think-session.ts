@@ -1896,6 +1896,30 @@ export class ThinkTestAgent extends Think {
    * scheduled-continue count, and the recovered transcript so a test can assert
    * the turn recovered. chatRecovery stays at its default (`true`).
    */
+  async armStallOnceForTest(
+    afterChunks: number,
+    timeoutMs: number
+  ): Promise<void> {
+    this._stallAfterChunks = afterChunks;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+  }
+
+  /** Run the queued stall continuation, then disarm the stall. */
+  async runStallContinuationForTest(): Promise<number> {
+    try {
+      const scheduled = recoveryWorkCountForTest(this, "_chatRecoveryContinue");
+      if (scheduled > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      }
+      return scheduled;
+    } finally {
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
   async testChatWithStallThenRecover(
     afterChunks: number,
     timeoutMs: number
@@ -9214,6 +9238,33 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
     await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
+  }
+
+  /**
+   * Look up origin ids for the recovery successor from inside an open recovery
+   * scope, and for an unrelated request concurrently from outside it (#2280).
+   */
+  async probeRecoveryOriginScopeForTest(ids: string[]): Promise<{
+    successor: string[] | undefined;
+    unrelated: string[] | undefined;
+  }> {
+    const self = this as unknown as {
+      _chatRecoveryOriginIdsScope: {
+        run<R>(store: string[], fn: () => R): R;
+      };
+      _originMessageIdsFor(requestId: string): string[] | undefined;
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const scoped = self._chatRecoveryOriginIdsScope.run(ids, async () => {
+      await gate;
+      return self._originMessageIdsFor("successor");
+    });
+    const unrelated = self._originMessageIdsFor("unrelated");
+    release();
+    return { successor: await scoped, unrelated };
   }
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {

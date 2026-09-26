@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   UIMessage,
   GenerateTextOnFinishCallback,
@@ -98,6 +99,8 @@ import {
   recordChatTerminal,
   clearChatTerminal,
   pendingChatTerminal,
+  originMessageIds,
+  withOriginMessageIds,
   buildChatRecoveringFrame,
   setChatRecovering,
   AgentToolStreamProgressThrottle,
@@ -185,6 +188,7 @@ function withAgentSpan<T>(
 type ChatRecoveryRetryData = {
   targetUserId?: string;
   originalRequestId?: string;
+  originMessageIds?: string[];
   incidentId?: string;
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
@@ -193,6 +197,7 @@ type ChatRecoveryRetryData = {
 type ChatRecoveryContinueData = {
   targetAssistantId?: string;
   originalRequestId?: string;
+  originMessageIds?: string[];
   incidentId?: string;
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
@@ -405,6 +410,19 @@ export class AIChatAgent<
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State, Props> {
   private _activeChatRecoveryRootRequestId: string | undefined;
+  /**
+   * The originating user message ids of the active recovery chain (#2280),
+   * carried in the recovery payload because the successor turn runs under a
+   * fresh request id. Scoped to the recovery callback's async context, so a
+   * concurrent client request never inherits them.
+   */
+  private _chatRecoveryOriginIdsScope = new AsyncLocalStorage<
+    string[] | undefined
+  >();
+
+  private get _activeChatRecoveryOriginIds(): string[] | undefined {
+    return this._chatRecoveryOriginIdsScope.getStore();
+  }
 
   /**
    * Registry of per-request AbortControllers.
@@ -831,7 +849,8 @@ export class AIChatAgent<
       continuation,
       messages: this.messages,
       lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools
+      lastClientTools: this._lastClientTools,
+      originMessageIds: this._originMessageIdsFor(requestId)
     });
     const liveTurn = { createdAt: Date.now(), recoveryData: null as unknown };
     const wrap = (data: unknown) => {
@@ -1232,12 +1251,17 @@ export class AIChatAgent<
           const requestBody =
             Object.keys(customBody).length > 0 ? customBody : undefined;
           const epoch = this._turnQueue.generation;
+          const requestOriginIds = originMessageIds(messages);
+          if (requestOriginIds) {
+            this._requestOriginMessageIds.set(chatMessageId, requestOriginIds);
+          }
           const concurrencyDecision =
             this._getSubmitConcurrencyDecision(requestTrigger);
 
           if (concurrencyDecision.action === "drop") {
             this._rollbackDroppedSubmit(connection);
             this._completeSkippedRequest(connection, chatMessageId);
+            this._requestOriginMessageIds.delete(chatMessageId);
             return;
           }
 
@@ -1521,6 +1545,7 @@ export class AIChatAgent<
             // covers a throw in a pre-turn-body step before chatTurnBody's
             // finally could run.
             this._settlePreStreamTurn(chatMessageId);
+            this._requestOriginMessageIds.delete(chatMessageId);
           }
           return;
         }
@@ -1875,7 +1900,13 @@ export class AIChatAgent<
     requestId: string,
     options: { messageId?: string; continuation?: boolean } = {}
   ): string {
-    const streamId = this._resumableStream.start(requestId, options);
+    const originIds =
+      this._requestOriginMessageIds.get(requestId) ??
+      this._activeChatRecoveryOriginIds;
+    const streamId = this._resumableStream.start(requestId, {
+      ...options,
+      ...(originIds && { originMessageIds: originIds })
+    });
     // Flush connections parked during this turn's pre-stream window (#1784)
     // into the normal STREAM_RESUMING path now that a stream exists. Safe for
     // every turn — the awaiting set is empty unless a client reconnected before
@@ -2228,7 +2259,33 @@ export class AIChatAgent<
     }
   }
 
+  /**
+   * User message ids a WebSocket chat request originated from (#2280), keyed
+   * by request id while the request is handled. After that (or after a
+   * restart) the request's stream metadata is the fallback.
+   */
+  private _requestOriginMessageIds = new Map<string, string[]>();
+
+  private _originMessageIdsFor(requestId: string): string[] | undefined {
+    return (
+      this._requestOriginMessageIds.get(requestId) ??
+      this._resumableStream.getOriginMessageIds(requestId) ??
+      this._activeChatRecoveryOriginIds
+    );
+  }
+
+  private _withOriginMessageIds(message: OutgoingMessage): OutgoingMessage {
+    if (
+      message.type !== MessageType.CF_AGENT_USE_CHAT_RESPONSE ||
+      !(message.done || message.error)
+    ) {
+      return message;
+    }
+    return withOriginMessageIds(message, this._originMessageIdsFor(message.id));
+  }
+
   private _broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
+    message = this._withOriginMessageIds(message);
     if (
       message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
       (message.done || message.error)
@@ -2776,12 +2833,15 @@ export class AIChatAgent<
   }
 
   private _completeSkippedRequest(connection: Connection, requestId: string) {
-    this._sendDirectMessage(connection, {
-      body: "",
-      done: true,
-      id: requestId,
-      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-    });
+    this._sendDirectMessage(
+      connection,
+      this._withOriginMessageIds({
+        body: "",
+        done: true,
+        id: requestId,
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+      })
+    );
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
     // admitted (latest/merge supersede) or the queue generation advanced. The
@@ -4917,13 +4977,21 @@ export class AIChatAgent<
           "[AIChatAgent] chatRecovery shouldKeepRecovering hook threw",
           error
         ),
-      exhaustChatRecovery: (incident, config, partial, streamId, createdAt) =>
+      exhaustChatRecovery: (
+        incident,
+        config,
+        partial,
+        streamId,
+        createdAt,
+        originMessageIds
+      ) =>
         this._exhaustChatRecovery(
           incident,
           config,
           partial,
           streamId,
-          createdAt
+          createdAt,
+          originMessageIds
         ),
       resolveRecoveryStream: (requestId) =>
         this._resolveAIChatRecoveryStream(requestId),
@@ -4983,7 +5051,8 @@ export class AIChatAgent<
     // user-facing exhausted-context edge below.
     partial: { text: string; parts: unknown[] },
     streamId: string,
-    createdAt: number
+    createdAt: number,
+    originMessageIds?: string[]
   ): Promise<void> {
     // Build + notification (event + onExhausted-swallow) and the
     // notify-before-terminalize invariant live in the engine helper; the
@@ -5017,17 +5086,24 @@ export class AIChatAgent<
           // at-least-once edge). Persisting first gains no durability (the
           // re-run persists either way) while dropping the live banner on the
           // failing pass — so ai-chat matches `Think`'s broadcast-first.
+          const messageIds =
+            this._originMessageIdsFor(ctx.requestId) ?? originMessageIds;
           this._broadcastChatMessage({
             body: ctx.terminalMessage,
             done: true,
             error: true,
             id: ctx.requestId,
-            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+            ...(messageIds ? { messageIds } : {})
           });
           // The durable terminal record (#1645) is replayed to a client that
           // (re)connects after the turn ended (shared
           // `ResumeHandshake._replayTerminalOnResume`).
-          await this._recordChatTerminal(ctx.requestId, ctx.terminalMessage);
+          await this._recordChatTerminal(
+            ctx.requestId,
+            ctx.terminalMessage,
+            messageIds
+          );
           // Exhaustion resolves recovery — clear the "recovering…" status (#1620).
           await this._setChatRecovering(false);
         }
@@ -5045,9 +5121,10 @@ export class AIChatAgent<
    */
   private async _recordChatTerminal(
     requestId: string,
-    body: string
+    body: string,
+    messageIds = this._originMessageIdsFor(requestId)
   ): Promise<void> {
-    await recordChatTerminal(this.ctx.storage, requestId, body);
+    await recordChatTerminal(this.ctx.storage, requestId, body, messageIds);
   }
 
   /** Clear the durable terminal record once a later turn supersedes it (#1645). */
@@ -5058,6 +5135,7 @@ export class AIChatAgent<
   private async _pendingChatTerminal(): Promise<{
     requestId: string;
     body: string;
+    messageIds?: string[];
   } | null> {
     return pendingChatTerminal(this.ctx.storage);
   }
@@ -5235,6 +5313,8 @@ export class AIChatAgent<
     input: DispatchRecoveredTurnInput<AIChatRecoveryClassification>
   ): Promise<void> {
     const { incident, options, snapshot, recoveryRootRequestId } = input;
+    const originIds =
+      this._originMessageIdsFor(input.requestId) ?? snapshot?.originMessageIds;
     const leaf =
       this.messages.length > 0
         ? this.messages[this.messages.length - 1]
@@ -5262,7 +5342,8 @@ export class AIChatAgent<
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: snapshot?.lastBody ?? null,
-          lastClientTools: snapshot?.lastClientTools ?? null
+          lastClientTools: snapshot?.lastClientTools ?? null,
+          ...(originIds ? { originMessageIds: originIds } : {})
         }
       });
     } else if (lostPartialUserId !== undefined && options.continue !== false) {
@@ -5278,7 +5359,8 @@ export class AIChatAgent<
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: snapshot?.lastBody ?? null,
-          lastClientTools: snapshot?.lastClientTools ?? null
+          lastClientTools: snapshot?.lastClientTools ?? null,
+          ...(originIds ? { originMessageIds: originIds } : {})
         }
       });
     } else if (options.continue !== false) {
@@ -5295,7 +5377,8 @@ export class AIChatAgent<
                 lastBody: snapshot.lastBody ?? null,
                 lastClientTools: snapshot.lastClientTools ?? null
               }
-            : {})
+            : {}),
+          ...(originIds ? { originMessageIds: originIds } : {})
         }
       });
     } else {
@@ -5332,7 +5415,10 @@ export class AIChatAgent<
     await this._dispatchChatRecovery(
       "_chatRecoveryContinue",
       data,
-      (onTurnStarted) => this._chatRecoveryContinueDetached(data, onTurnStarted)
+      (onTurnStarted) =>
+        this._chatRecoveryOriginIdsScope.run(data?.originMessageIds, () =>
+          this._chatRecoveryContinueDetached(data, onTurnStarted)
+        )
     );
   }
 
@@ -5487,6 +5573,7 @@ export class AIChatAgent<
   }): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
+    const originIds = this._originMessageIdsFor(input.requestId);
     const latestUserMessageId =
       [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
     // A new turn that failed before producing any part has nothing to continue:
@@ -5589,7 +5676,8 @@ export class AIChatAgent<
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: this._lastBody ?? null,
-          lastClientTools: this._lastClientTools ?? null
+          lastClientTools: this._lastClientTools ?? null,
+          ...(originIds ? { originMessageIds: originIds } : {})
         }
       });
       return "scheduled";
@@ -5606,7 +5694,8 @@ export class AIChatAgent<
         originalRequestId: recoveryRootRequestId,
         incidentId: incident.incidentId,
         lastBody: this._lastBody ?? null,
-        lastClientTools: this._lastClientTools ?? null
+        lastClientTools: this._lastClientTools ?? null,
+        ...(originIds ? { originMessageIds: originIds } : {})
       }
     });
     return "scheduled";
@@ -5843,7 +5932,10 @@ export class AIChatAgent<
     await this._dispatchChatRecovery(
       "_chatRecoveryRetry",
       data,
-      (onTurnStarted) => this._chatRecoveryRetryDetached(data, onTurnStarted)
+      (onTurnStarted) =>
+        this._chatRecoveryOriginIdsScope.run(data?.originMessageIds, () =>
+          this._chatRecoveryRetryDetached(data, onTurnStarted)
+        )
     );
   }
 

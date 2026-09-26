@@ -236,6 +236,8 @@ import {
   recordChatTerminal,
   clearChatTerminal,
   pendingChatTerminal,
+  originMessageIds,
+  withOriginMessageIds,
   buildChatRecoveringFrame,
   setChatRecovering,
   AgentToolStreamProgressThrottle,
@@ -1256,6 +1258,7 @@ type ChatRecoveryRetryData = {
   targetUserId?: string;
   originalRequestId?: string;
   incidentId?: string;
+  originMessageIds?: string[];
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
   recoveredRequestId?: string;
@@ -1265,6 +1268,7 @@ type ChatRecoveryContinueData = {
   targetAssistantId?: string;
   originalRequestId?: string;
   incidentId?: string;
+  originMessageIds?: string[];
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
   recoveredRequestId?: string;
@@ -3266,6 +3270,19 @@ export class Think<
   // prior value once a continuation settles. If turns ever run concurrently,
   // this must move to per-incident storage.
   private _activeChatRecoveryRootRequestId: string | undefined;
+  /**
+   * The originating user message ids of the active recovery chain (#2280),
+   * carried in the recovery payload because the successor turn runs under a
+   * fresh request id. Scoped to the recovery callback's async context, so a
+   * concurrent client request never inherits them.
+   */
+  private _chatRecoveryOriginIdsScope = new AsyncLocalStorage<
+    string[] | undefined
+  >();
+
+  private get _activeChatRecoveryOriginIds(): string[] | undefined {
+    return this._chatRecoveryOriginIdsScope.getStore();
+  }
 
   private static readonly CONFIG_KEYS = [
     "_think_config",
@@ -5634,7 +5651,8 @@ export class Think<
       continuation,
       messages: this.messages,
       lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools
+      lastClientTools: this._lastClientTools,
+      originMessageIds: this._originMessageIdsFor(requestId)
     });
     const liveTurn = { createdAt: Date.now(), recoveryData: null as unknown };
     const wrap = (data: unknown) => {
@@ -13101,6 +13119,10 @@ export class Think<
     const requestId = event.id;
     let messagesPersisted = false;
     let failureStage: ChatErrorContext["stage"] = "persist";
+    const requestOriginIds = originMessageIds(incomingMessages);
+    if (requestOriginIds) {
+      this._requestOriginMessageIds.set(requestId, requestOriginIds);
+    }
 
     // ── Concurrency decision (before persisting anything) ────────
     const concurrencyDecision =
@@ -13109,6 +13131,7 @@ export class Think<
     if (concurrencyDecision.action === "drop") {
       this._rollbackDroppedSubmit(connection);
       this._completeSkippedRequest(connection, requestId);
+      this._requestOriginMessageIds.delete(requestId);
       return;
     }
 
@@ -13409,6 +13432,7 @@ export class Think<
     } finally {
       releaseIfPending();
       this._aborts.remove(requestId);
+      this._requestOriginMessageIds.delete(requestId);
       // Release any pre-stream parked connections (#1784). No-op when the turn
       // streamed (flushed on _startResumableStream); covers the no-response /
       // pre-stream-failure paths.
@@ -16224,13 +16248,21 @@ export class Think<
           "[Think] chatRecovery shouldKeepRecovering hook threw",
           error
         ),
-      exhaustChatRecovery: (incident, config, partial, streamId, createdAt) =>
+      exhaustChatRecovery: (
+        incident,
+        config,
+        partial,
+        streamId,
+        createdAt,
+        originMessageIds
+      ) =>
         this._exhaustChatRecovery(
           incident,
           config,
           partial,
           streamId,
-          createdAt
+          createdAt,
+          originMessageIds
         ),
       resolveRecoveryStream: (requestId) =>
         this._resolveThinkRecoveryStream(requestId),
@@ -16274,7 +16306,8 @@ export class Think<
     // user-facing exhausted-context edge below.
     partial: { text: string; parts: unknown[] },
     streamId: string,
-    createdAt: number
+    createdAt: number,
+    originMessageIds?: string[]
   ): Promise<void> {
     // Build + notification (event + onExhausted-swallow) and the
     // notify-before-terminalize invariant live in the engine helper; the
@@ -16309,12 +16342,15 @@ export class Think<
           // `@cloudflare/ai-chat` terminalizes broadcast-first for the same
           // reason; only the set of durable writes below differs (Think also
           // writes a submission row).
+          const messageIds =
+            this._originMessageIdsFor(ctx.requestId) ?? originMessageIds;
           this._broadcastChat({
             type: MSG_CHAT_RESPONSE,
             id: ctx.requestId,
             body: ctx.terminalMessage,
             done: true,
-            error: true
+            error: true,
+            ...(messageIds ? { messageIds } : {})
           });
           // Write the durable terminal record (#1645) FIRST among the storage
           // writes: it's the record a disconnected client replays on reconnect,
@@ -16323,7 +16359,8 @@ export class Think<
           await this._recordTerminalChatStatus(
             "interrupted",
             ctx.requestId,
-            ctx.terminalMessage
+            ctx.terminalMessage,
+            messageIds
           );
           // The recovery root locates the stable submission identity even
           // after request_id has been rebound to an accepted successor.
@@ -16383,6 +16420,7 @@ export class Think<
   }): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
+    const originIds = this._originMessageIdsFor(input.requestId);
     const latestUserMessageId =
       [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
     const retryTargetUserId =
@@ -16530,6 +16568,7 @@ export class Think<
           incidentId: incident.incidentId,
           lastBody: this._lastBody ?? null,
           lastClientTools: this._lastClientTools ?? null,
+          ...(originIds ? { originMessageIds: originIds } : {}),
           ...(recoveredRequestId ? { recoveredRequestId } : {})
         }
       });
@@ -16549,6 +16588,7 @@ export class Think<
         incidentId: incident.incidentId,
         lastBody: this._lastBody ?? null,
         lastClientTools: this._lastClientTools ?? null,
+        ...(originIds ? { originMessageIds: originIds } : {}),
         ...(recoveredRequestId ? { recoveredRequestId } : {})
       }
     });
@@ -16771,6 +16811,8 @@ export class Think<
       streamStatus
     } = input;
     const { retryTargetUserId } = input.detail;
+    const originIds =
+      this._originMessageIdsFor(requestId) ?? snapshot?.originMessageIds;
     const streamIsTerminal =
       streamStatus === "completed" || streamStatus === "error";
 
@@ -16819,6 +16861,7 @@ export class Think<
           incidentId: incident.incidentId,
           lastBody: snapshot?.lastBody ?? null,
           lastClientTools: snapshot?.lastClientTools ?? null,
+          ...(originIds ? { originMessageIds: originIds } : {}),
           ...(recoveredRequestId ? { recoveredRequestId } : {})
         }
       });
@@ -16837,6 +16880,7 @@ export class Think<
                 lastClientTools: snapshot.lastClientTools ?? null
               }
             : {}),
+          ...(originIds ? { originMessageIds: originIds } : {}),
           ...(recoveredRequestId ? { recoveredRequestId } : {})
         }
       });
@@ -17315,7 +17359,10 @@ export class Think<
     await this._dispatchChatRecovery(
       "_chatRecoveryRetry",
       data,
-      (onTurnStarted) => this._chatRecoveryRetryDetached(data, onTurnStarted)
+      (onTurnStarted) =>
+        this._chatRecoveryOriginIdsScope.run(data?.originMessageIds, () =>
+          this._chatRecoveryRetryDetached(data, onTurnStarted)
+        )
     );
   }
 
@@ -17614,7 +17661,10 @@ export class Think<
     await this._dispatchChatRecovery(
       "_chatRecoveryContinue",
       data,
-      (onTurnStarted) => this._chatRecoveryContinueDetached(data, onTurnStarted)
+      (onTurnStarted) =>
+        this._chatRecoveryOriginIdsScope.run(data?.originMessageIds, () =>
+          this._chatRecoveryContinueDetached(data, onTurnStarted)
+        )
     );
   }
 
@@ -17821,12 +17871,14 @@ export class Think<
     requestId: string
   ): void {
     connection.send(
-      JSON.stringify({
-        type: MSG_CHAT_RESPONSE,
-        id: requestId,
-        body: "",
-        done: true
-      })
+      JSON.stringify(
+        this._withOriginMessageIds({
+          type: MSG_CHAT_RESPONSE,
+          id: requestId,
+          body: "",
+          done: true
+        })
+      )
     );
     // A skipped turn settles out of the pre-stream set, but must NOT release
     // parked connections (#1784): a skip happens because a NEWER turn was
@@ -18444,10 +18496,11 @@ export class Think<
   private async _recordTerminalChatStatus(
     status: ChatResponseResult["status"] | "interrupted",
     requestId: string,
-    body: string
+    body: string,
+    messageIds?: string[]
   ): Promise<void> {
     if (status === "error" || status === "interrupted") {
-      await this._recordChatTerminal(requestId, body);
+      await this._recordChatTerminal(requestId, body, messageIds);
     } else {
       await this._clearChatTerminal();
     }
@@ -18465,9 +18518,10 @@ export class Think<
    */
   private async _recordChatTerminal(
     requestId: string,
-    body: string
+    body: string,
+    messageIds = this._originMessageIdsFor(requestId)
   ): Promise<void> {
-    await recordChatTerminal(this.ctx.storage, requestId, body);
+    await recordChatTerminal(this.ctx.storage, requestId, body, messageIds);
   }
 
   /** Clear the durable terminal record once a later turn supersedes it (#1645). */
@@ -18478,6 +18532,7 @@ export class Think<
   private async _pendingChatTerminal(): Promise<{
     requestId: string;
     body: string;
+    messageIds?: string[];
   } | null> {
     return pendingChatTerminal(this.ctx.storage);
   }
@@ -18591,7 +18646,13 @@ export class Think<
     requestId: string,
     options?: { messageId?: string; continuation?: boolean }
   ): string {
-    const streamId = this._resumableStream.start(requestId, options);
+    const originIds =
+      this._requestOriginMessageIds.get(requestId) ??
+      this._activeChatRecoveryOriginIds;
+    const streamId = this._resumableStream.start(requestId, {
+      ...options,
+      ...(originIds && { originMessageIds: originIds })
+    });
     // Flush connections parked during this turn's pre-stream window (#1784)
     // into STREAM_RESUMING now that a stream exists. No-op unless a client
     // reconnected before the first chunk. (Continuation-turn parks live in
@@ -18677,7 +18738,38 @@ export class Think<
       ...(exclude || []),
       ...this._pendingResumeConnections
     ];
-    this.broadcast(JSON.stringify(message), allExclusions);
+    this.broadcast(
+      JSON.stringify(this._withOriginMessageIds(message)),
+      allExclusions
+    );
+  }
+
+  /**
+   * User message ids a WebSocket chat request originated from (#2280), keyed
+   * by request id while the request is handled. After that (or after a
+   * restart) the request's stream metadata is the fallback.
+   */
+  private _requestOriginMessageIds = new Map<string, string[]>();
+
+  private _originMessageIdsFor(requestId: string): string[] | undefined {
+    return (
+      this._requestOriginMessageIds.get(requestId) ??
+      this._resumableStream.getOriginMessageIds(requestId) ??
+      this._activeChatRecoveryOriginIds
+    );
+  }
+
+  private _withOriginMessageIds(
+    message: Record<string, unknown>
+  ): Record<string, unknown> {
+    if (
+      message.type !== MSG_CHAT_RESPONSE ||
+      typeof message.id !== "string" ||
+      !(message.done || message.error)
+    ) {
+      return message;
+    }
+    return withOriginMessageIds(message, this._originMessageIdsFor(message.id));
   }
 
   private _broadcast(message: Record<string, unknown>, exclude?: string[]) {

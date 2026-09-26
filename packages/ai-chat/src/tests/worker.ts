@@ -2831,6 +2831,12 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.chatStreamStallTimeoutMs = ms;
   }
 
+  /** Make the next `hangTurns` model streams hang, for a WebSocket-driven turn. */
+  armStallingTurnsForTest(timeoutMs: number, hangTurns: number): void {
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    this._hangTurnsRemaining = hangTurns;
+  }
+
   /**
    * Drive a turn whose model stream hangs after a partial, with a short stall
    * timeout configured, so the inactivity watchdog fires and routes the turn
@@ -2863,6 +2869,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   getFailingReaderCallsForTest(): number {
     return this._failingReaderCalls;
+  }
+
+  /** Make the next turn's reader throw `message` after `prelude`. */
+  armFailingReaderTurnForTest(
+    message: string,
+    prelude: FailingReaderPrelude
+  ): void {
+    this._failingTurn = { message, remaining: 1, prelude };
   }
 
   /**
@@ -3127,6 +3141,33 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     await this.alarm();
     await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
     return true;
+  }
+
+  /**
+   * Look up origin ids for the recovery successor from inside an open recovery
+   * scope, and for an unrelated request concurrently from outside it (#2280).
+   */
+  async probeRecoveryOriginScopeForTest(ids: string[]): Promise<{
+    successor: string[] | undefined;
+    unrelated: string[] | undefined;
+  }> {
+    const self = this as unknown as {
+      _chatRecoveryOriginIdsScope: {
+        run<R>(store: string[], fn: () => R): R;
+      };
+      _originMessageIdsFor(requestId: string): string[] | undefined;
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const scoped = self._chatRecoveryOriginIdsScope.run(ids, async () => {
+      await gate;
+      return self._originMessageIdsFor("successor");
+    });
+    const unrelated = self._originMessageIdsFor("unrelated");
+    release();
+    return { successor: await scoped, unrelated };
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {

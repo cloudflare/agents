@@ -83,6 +83,14 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
        * already applied.
        */
       seq?: number;
+      /**
+       * IDs of the user messages the originating request carried (the
+       * trailing user messages of its `messages`). Set on terminal frames
+       * (`done` or `error`), live and replayed, when the server knows them,
+       * so a client can settle exactly the sends a completion, error, or
+       * cancellation belongs to.
+       */
+      messageIds?: string[];
     }
   | {
       /** Indicates the server is resuming an active stream */
