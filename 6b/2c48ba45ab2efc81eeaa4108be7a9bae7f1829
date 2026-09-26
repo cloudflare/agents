@@ -1,0 +1,47 @@
+docs/agents/chat-agents.md
+  s_368991bdec7f77::t_9482b6a37803b5 902,927-967,1741-1751,1754-1755,1758-1764
+packages/think/src/think.ts
+  s_368991bdec7f77::t_0bab02b769e17e 13402-13403,13990-13991,14044-14045,14486-14490,14537,17888-17889
+.changeset/chat-turn-end-outcome.md
+  s_368991bdec7f77::t_0760efa8294856 1-9
+packages/agents/src/chat/index.ts
+  s_368991bdec7f77::t_00d6db7d35022f 93-97
+packages/agents/src/chat/react.tsx
+  s_368991bdec7f77::t_3b83c621493644 13,366-385,467-478,735,791-794,1949-1978,2221
+packages/agents/src/chat/wire-types.ts
+  s_368991bdec7f77::t_a61fe36b5d57b8 4-21,112-117
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_c85be9875e5c5c 2842-2843,7052,7136,7264,7445
+packages/ai-chat/src/react-tests/use-agent-chat.test.tsx
+  s_368991bdec7f77::t_05933a9d1616e3 9-10,2026-2137
+packages/ai-chat/src/react.tsx
+  s_368991bdec7f77::t_d3185b6f0fa6d4 20-22
+packages/ai-chat/src/tests/cancel-request.test.ts
+  s_368991bdec7f77::t_711d7f3318f605 117,161,259
+packages/ai-chat/src/tests/message-concurrency.test.ts
+  s_368991bdec7f77::t_181abc55d756c8 267-277,305
+packages/ai-chat/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_01c9c2353cbe6e 106-109
+packages/think/src/react.tsx
+  s_368991bdec7f77::t_92364ce0a874f7 21-23
+packages/think/src/tests/client-tools.test.ts
+  s_368991bdec7f77::t_c5eadb6c21efbe 3334,3336,3347-3364
+packages/think/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_9062ad304ed985 23,84-87,119-122,143
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6b2c48ba45ab2efc81eeaa4108be7a9bae7f1829",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
