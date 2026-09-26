@@ -4,6 +4,11 @@ import type {
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
 import { isPlatformFailure } from "../retries";
+import {
+  ATTACHED_CHILD_EFFECT,
+  BACKGROUND_CHILD_EFFECT,
+  MachineChildManager
+} from "./children";
 import { applyMachineCommitParticipant } from "./commit";
 import { createMachineContext, type PendingChanges } from "./context";
 import { MachineEffectManager } from "./effects";
@@ -97,12 +102,19 @@ export class StateMachine<
   #eventManager: MachineEventManager | undefined;
   #gateManager: MachineGateManager | undefined;
   #effectManager: MachineEffectManager | undefined;
+  #childManager: MachineChildManager | undefined;
   readonly gates: StateMachineGateNotifications;
 
   constructor(options: StateMachineOptions<Definitions>) {
     super("state-machine");
     this.#definitions = options.definitions;
     this.#effectRuntimes = options.effects ?? {};
+    if (
+      ATTACHED_CHILD_EFFECT in this.#effectRuntimes ||
+      BACKGROUND_CHILD_EFFECT in this.#effectRuntimes
+    ) {
+      throw new Error("StateMachine child effect kinds are reserved");
+    }
     this.gates = Object.freeze({
       notify: async <Payload extends MachineJson, Answer extends MachineJson>(
         gateId: string,
@@ -148,10 +160,24 @@ export class StateMachine<
   get #effects(): MachineEffectManager {
     this.#effectManager ??= new MachineEffectManager({
       store: this.#store,
-      runtimes: this.#effectRuntimes,
+      runtimes: { ...this.#effectRuntimes, ...this.#children.runtimes },
       emit: (type, payload) => this.lifecycle.events.emit(type, payload)
     });
     return this.#effectManager;
+  }
+
+  get #children(): MachineChildManager {
+    this.#childManager ??= new MachineChildManager({
+      store: this.#store,
+      events: this.#events,
+      definition: (name) => this.#definition(name),
+      assertState: (name, definition, state) =>
+        this.#assertState(name, definition as RuntimeDefinition, state),
+      insertRun: (input) => this.#insertRun(input),
+      pushJob: (runId, revision, time) => this.#pushJob(runId, revision, time),
+      emit: (type, payload) => this.lifecycle.events.emit(type, payload)
+    });
+    return this.#childManager;
   }
 
   async onStart(): Promise<void> {
@@ -368,6 +394,11 @@ export class StateMachine<
       if (!row || !TERMINAL_STATUSES.has(row.status)) return;
       this.lifecycle.jobs.cancelSync(this.#jobId(runId));
       this.#store.deleteOwnedRows(runId);
+      this.#store.write(
+        `DELETE FROM cf_agents_state_machine_children
+         WHERE child_run_id = ?`,
+        [runId]
+      );
       deleted =
         this.#store.write(
           "DELETE FROM cf_agents_state_machine_runs WHERE run_id = ?",
@@ -469,6 +500,7 @@ export class StateMachine<
       events: this.#events,
       gates: this.#gates,
       effects: this.#effects,
+      children: this.#children,
       errorSummary: (error) => this.#errorSummary(error),
       flushPending: (pending) => this.#flushPending(row, pending)
     });
@@ -685,6 +717,7 @@ export class StateMachine<
              WHERE run_id = ? AND state = 'open'`,
             [now, now, row.run_id]
           );
+          this.#children.settleParentRelations(row, decision, now);
           if (row.persist === 0) {
             this.#store.deleteOwnedRows(row.run_id);
             this.#store.write(
@@ -761,6 +794,7 @@ export class StateMachine<
          SET state = 'cancelled', settled_at = ? WHERE run_id = ? AND state = 'open'`,
         [now, row.run_id]
       );
+      this.#children.settleCancelledRelations(row, reason, now);
     });
     await this.lifecycle.jobs.rearm();
   }

@@ -7,6 +7,7 @@ import {
   defineGate,
   defineMachine,
   settleStreamOnMachineCommit,
+  type MachineChildMode,
   type MachineDefinition,
   type MachineJson
 } from "../../state-machine";
@@ -48,7 +49,11 @@ type HarnessDefinitionName =
   | "participant"
   | "streamSettlement"
   | "streamSettlementFailure"
-  | "participantFailure";
+  | "participantFailure"
+  | "child"
+  | "otherChild"
+  | "parent"
+  | "fanout";
 
 const Permission = defineGate<{ tool: string }, { approved: boolean }>(
   "permission"
@@ -86,6 +91,12 @@ type HarnessSnapshot =
         expiresAt: number;
       }>;
       effects?: Array<{ effectId: string; kind: string; status: string }>;
+      children?: Array<{
+        runId: string;
+        definition: string;
+        mode: string;
+        status: string;
+      }>;
       result?: never;
       error?: never;
     }
@@ -98,6 +109,7 @@ type HarnessSnapshot =
       wait?: never;
       gates?: never;
       effects?: never;
+      children?: never;
     }
   | {
       status: "failed" | "cancelled";
@@ -108,6 +120,29 @@ type HarnessSnapshot =
       wait?: never;
       gates?: never;
       effects?: never;
+      children?: never;
+    };
+
+type ParentState =
+  | {
+      phase: "spawn";
+      value: string;
+      mode: MachineChildMode;
+      childRunId?: string;
+      childDefinition: "child" | "otherChild";
+    }
+  | {
+      phase: "join";
+      child: {
+        runId: string;
+        definition: string;
+        mode: MachineChildMode;
+        effect: {
+          id: string;
+          kind: string;
+          recovery: "safe" | "never" | "reconcile";
+        };
+      };
     };
 
 class SyncJobProbe extends LifecycleCapability {
@@ -557,6 +592,104 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
             key: state.effect.id,
             timeoutAt: Date.now() + 1_000
           });
+        }
+      }
+    }),
+    child: defineMachine<
+      { phase: "complete"; value: string },
+      string,
+      { value: string }
+    >({
+      version: 1,
+      initial: (input) => ({ phase: "complete", value: input.value }),
+      phases: {
+        complete: async (state, context) => {
+          if (state.value === "fail") {
+            return context.fail(new Error("child failed"));
+          }
+          if (state.value === "wait") {
+            return context.wait(state, { type: "release" });
+          }
+          if (state.value === "slow") {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+          return context.complete(`child:${state.value}`);
+        }
+      }
+    }),
+    otherChild: defineMachine<
+      { phase: "complete"; value: string },
+      string,
+      { value: string }
+    >({
+      version: 1,
+      initial: (input) => ({ phase: "complete", value: input.value }),
+      phases: {
+        complete: (state, context) => context.complete(`other:${state.value}`)
+      }
+    }),
+    parent: defineMachine<
+      ParentState,
+      string,
+      {
+        value: string;
+        mode: "attached" | "background";
+        childRunId?: string;
+        childDefinition: "child" | "otherChild";
+      }
+    >({
+      version: 1,
+      initial: (input) => ({
+        phase: "spawn",
+        value: input.value,
+        mode: input.mode,
+        childRunId: input.childRunId,
+        childDefinition: input.childDefinition
+      }),
+      phases: {
+        spawn: (state, context) => {
+          const child = context.children.spawn<string>(
+            state.childDefinition,
+            { value: state.value },
+            {
+              mode: state.mode,
+              ...(state.childRunId ? { runId: state.childRunId } : {})
+            }
+          );
+          return context.transition({ phase: "join", child });
+        },
+        join: async (state, context) => {
+          const result = await context.children.join<string>(state.child);
+          if (result) {
+            return result.ok
+              ? context.complete(result.output)
+              : context.fail(new Error(result.error.message));
+          }
+          return context.wait(state, {
+            type: "state-machine:child-completed",
+            key: state.child.runId,
+            timeoutAt: Date.now() + 50
+          });
+        }
+      }
+    }),
+    fanout: defineMachine<
+      { phase: "spawn"; count: number },
+      number,
+      { count: number }
+    >({
+      version: 1,
+      initial: ({ count }) => ({ phase: "spawn", count }),
+      phases: {
+        spawn: (state, context) => {
+          for (let index = 0; index < state.count; index++) {
+            context.children.spawn(
+              "child",
+              { value: `child-${index}` },
+              { runId: `${context.runId}:child-${index}` }
+            );
+          }
+          return context.complete(state.count);
         }
       }
     }),
@@ -1056,8 +1189,76 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
     return runId;
   }
 
+  startParent(
+    value: string,
+    mode: "attached" | "background" = "attached",
+    childRunId?: string,
+    childDefinition: "child" | "otherChild" = "child"
+  ) {
+    return this.#stateMachine.run("parent", {
+      value,
+      mode,
+      childDefinition,
+      ...(childRunId ? { childRunId } : {})
+    });
+  }
+
+  cancelChild(runId: string) {
+    return this.#stateMachine.cancel(runId, "test cancelled child");
+  }
+
+  startFanout(count: number) {
+    return this.#stateMachine.run("fanout", { count });
+  }
+
+  suppressChildCompletion(parentRunId: string, childRunId: string): void {
+    this.ctx.storage.sql.exec(
+      `DELETE FROM cf_agents_state_machine_children
+       WHERE parent_run_id = ? AND child_run_id = ?`,
+      parentRunId,
+      childRunId
+    );
+  }
+
   cancelRun(runId: string, reason?: string) {
     return this.#stateMachine.cancel(runId, reason);
+  }
+
+  dispatchStale(runId: string) {
+    return this.#stateMachine.onJob({
+      attempt: 1,
+      job: {
+        id: `state-machine:${runId}`,
+        capability: "state-machine",
+        fn: "drive",
+        time: Date.now(),
+        payload: { runId, revision: 0 },
+        retry: undefined,
+        singleflight: true,
+        exclusive: false,
+        recoveryLoop: false,
+        createdAt: Date.now()
+      }
+    });
+  }
+
+  async snapshot(runId: string): Promise<HarnessSnapshot | null> {
+    return (await this.#stateMachine.get(
+      runId,
+      "pipeline"
+    )) as unknown as HarnessSnapshot | null;
+  }
+
+  pauseRun(runId: string) {
+    return this.#stateMachine.pause(runId);
+  }
+
+  resumeRun(runId: string) {
+    return this.#stateMachine.resume(runId);
+  }
+
+  deleteRun(runId: string) {
+    return this.#stateMachine.delete(runId);
   }
 
   async migrateVersionOneRun(): Promise<{
@@ -1176,41 +1377,28 @@ export class StateMachineHarnessObject extends DurableObject<Cloudflare.Env> {
     return { columns, attempt, supportsRetrying };
   }
 
-  dispatchStale(runId: string) {
-    return this.#stateMachine.onJob({
-      attempt: 1,
-      job: {
-        id: `state-machine:${runId}`,
-        capability: "state-machine",
-        fn: "drive",
-        time: Date.now(),
-        payload: { runId, revision: 0 },
-        retry: undefined,
-        singleflight: true,
-        exclusive: false,
-        recoveryLoop: false,
-        createdAt: Date.now()
-      }
-    });
-  }
-
-  pauseRun(runId: string) {
-    return this.#stateMachine.pause(runId);
-  }
-
-  resumeRun(runId: string) {
-    return this.#stateMachine.resume(runId);
-  }
-
-  deleteRun(runId: string) {
-    return this.#stateMachine.delete(runId);
-  }
-
-  async snapshot(runId: string): Promise<HarnessSnapshot | null> {
-    return (await this.#stateMachine.get(
-      runId,
-      "pipeline"
-    )) as unknown as HarnessSnapshot | null;
+  async remigrateChildren(): Promise<{ rowCount: number; version?: number }> {
+    await this.#stateMachine.get("initialize-schema");
+    const now = Date.now();
+    this.ctx.storage.sql.exec(
+      `INSERT INTO cf_agents_state_machine_children
+        (parent_run_id, child_run_id, child_definition, mode, status,
+         completion_event_id, created_at, settled_at)
+       VALUES ('parent_b', 'child_keep', 'child', 'attached', 'running',
+               'child_child_keep', ?, NULL)`,
+      now
+    );
+    await this.#stateMachine.onStart();
+    await this.#stateMachine.onStart();
+    const rowCount = this.ctx.storage.sql
+      .exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM cf_agents_state_machine_children"
+      )
+      .one().count;
+    const version = await this.ctx.storage.get<number>(
+      "cf_agents_state_machine_schema_version"
+    );
+    return { rowCount, version };
   }
 
   async runSnapshot(runId: string): Promise<HarnessSnapshot | null> {

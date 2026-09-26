@@ -22,4 +22,12 @@ describe("StateMachine schema migration", () => {
     expect(migrated.attempt).toBe(3);
     expect(migrated.supportsRetrying).toBe(true);
   });
+
+  it("is idempotent when the schema is already current", async () => {
+    const stub = createHarnessStub();
+    const result = await stub.remigrateChildren();
+
+    expect(result.rowCount).toBe(1);
+    expect(result.version).toBe(4);
+  });
 });
