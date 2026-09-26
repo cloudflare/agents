@@ -409,8 +409,11 @@ export async function connectBrowserSession(
 
   const ws = response.webSocket;
   if (!ws) {
-    throw new Error(
-      `Browser Rendering binding did not return a WebSocket for session ${sessionId}`
+    // Carry the upgrade status: a 404/410 here means the browser expired
+    // after the caller last saw it alive (see isMissingBrowserSession).
+    throw new BrowserRenderingError(
+      `Browser Rendering binding did not return a WebSocket for session ${sessionId} (${response.status})`,
+      response.status
     );
   }
 
