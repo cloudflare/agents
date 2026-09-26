@@ -1,0 +1,2 @@
+# Local demonstration value only. Replace it before exposing the Worker.
+A2A_BEARER_TOKEN=replace-with-a-long-random-token
