@@ -7,7 +7,10 @@ import type {
 } from "ai";
 import {
   Agent,
+  isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
+  isDurableObjectStorageReset,
+  isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
   __DO_NOT_USE_WILL_BREAK__withInvocationScope as withInvocationScope,
   type AgentToolLifecycleResult,
@@ -258,6 +261,19 @@ const PROVIDER_TOOL_OPAQUE_STRING_KEY_PREFIX = "encrypted";
  * limit are truncated with a marker so persisted messages stay small.
  */
 const PROVIDER_TOOL_MAX_STRING_LENGTH = 500;
+
+/**
+ * Whether a response-reader error is a platform transient that bounded chat
+ * recovery can retry. A deploy or storage reset is excluded: the isolate is
+ * going away, and the restart's own recovery owns the turn.
+ */
+function isRecoverableStreamReadError(error: unknown): boolean {
+  return (
+    isPlatformTransientError(error) &&
+    !isDurableObjectCodeUpdateReset(error) &&
+    !isDurableObjectStorageReset(error)
+  );
+}
 
 /**
  * Validates that a parsed message has the minimum required structure.
@@ -789,6 +805,17 @@ export class AIChatAgent<
     );
   }
 
+  /**
+   * Start time and latest `stash()` data of each chat turn running in this
+   * isolate, keyed by request id. A live stream failure is recovered while the
+   * turn is still running, so `onChatRecovery` reads these instead of a fiber
+   * snapshot.
+   */
+  private readonly _liveChatRecoveryTurns = new Map<
+    string,
+    { createdAt: number; recoveryData: unknown }
+  >();
+
   private async _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
@@ -803,9 +830,32 @@ export class AIChatAgent<
       lastBody: this._lastBody,
       lastClientTools: this._lastClientTools
     });
-    const wrap = (data: unknown) =>
-      wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data);
+    const liveTurn = { createdAt: Date.now(), recoveryData: null as unknown };
+    const wrap = (data: unknown) => {
+      liveTurn.recoveryData = data;
+      return wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, data);
+    };
+    this._liveChatRecoveryTurns.set(requestId, liveTurn);
+    try {
+      return await this._runWrappedChatRecoveryFiber(
+        requestId,
+        continuation,
+        wrap,
+        fn
+      );
+    } finally {
+      if (this._liveChatRecoveryTurns.get(requestId) === liveTurn) {
+        this._liveChatRecoveryTurns.delete(requestId);
+      }
+    }
+  }
 
+  private async _runWrappedChatRecoveryFiber<T>(
+    requestId: string,
+    continuation: boolean,
+    wrap: (data: unknown) => Record<string, unknown>,
+    fn: () => Promise<T>
+  ): Promise<T> {
     // Facet-hosted turns stay on the legacy fiber engine: the Tasks
     // capability does not accept runs on routed sub-agents yet, and facet
     // recovery routes through the root's facet-run index.
@@ -5394,37 +5444,54 @@ export class AIChatAgent<
    * schedule payload carries no `recoveredRequestId`.
    *
    * Returns `"exhausted"` when the budget was spent (terminal UX already
-   * delivered), or `"scheduled"` when a continuation was queued.
+   * delivered), `"scheduled"` when a continuation was queued, or `"declined"`
+   * / `"failed"` when `onChatRecovery` opted out or threw — the caller then
+   * delivers the ordinary terminal error.
    */
   private async _routeStallToBoundedRecovery(input: {
     requestId: string;
     streamId: string;
     partialParts: MessagePart[];
     targetAssistantId?: string;
-  }): Promise<"scheduled" | "exhausted"> {
+    continuation: boolean;
+    /** Delay the recovery with exponential backoff (transient errors). */
+    backoff?: boolean;
+  }): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
     const latestUserMessageId =
       [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
+    // A new turn that failed before producing any part has nothing to continue:
+    // continuing would clone and merge into the previous assistant (#1691), so
+    // re-run it fresh like `_dispatchRecoveredChatTurn` does after a restart.
+    const leaf = this.messages[this.messages.length - 1];
+    const lostPartialUserId =
+      !input.continuation &&
+      input.partialParts.length === 0 &&
+      leaf?.role === "user" &&
+      leaf.id === latestUserMessageId
+        ? latestUserMessageId
+        : undefined;
+    const recoveryKind = lostPartialUserId ? "retry" : "continue";
     const { incident, config, exhausted } =
       await this._beginChatRecoveryIncident({
         requestId: input.requestId,
         recoveryRootRequestId,
         latestUserMessageId,
-        recoveryKind: "continue"
+        recoveryKind
       });
+    const partialText = input.partialParts
+      .filter(
+        (p): p is { type: "text"; text: string } =>
+          (p as { type?: string }).type === "text"
+      )
+      .map((p) => p.text)
+      .join("");
     if (exhausted) {
       // Budget spent: deliver the SAME terminal UX as deploy-recovery
       // exhaustion (terminalMessage + onExhausted + chat:recovery:exhausted)
       // instead of letting the raw stall error leak out. `firstSeenAt` is the
       // closest available turn-start proxy here.
-      const partialText = input.partialParts
-        .filter(
-          (p): p is { type: "text"; text: string } =>
-            (p as { type?: string }).type === "text"
-        )
-        .map((p) => p.text)
-        .join("");
       await this._exhaustChatRecovery(
         incident,
         config,
@@ -5434,8 +5501,74 @@ export class AIChatAgent<
       );
       return "exhausted";
     }
+
+    const liveTurn = this._liveChatRecoveryTurns.get(input.requestId);
+    let options: ChatRecoveryOptions;
+    try {
+      options =
+        (await this.onChatRecovery({
+          incidentId: incident.incidentId,
+          recoveryRootRequestId,
+          attempt: incident.attempt,
+          maxAttempts: incident.maxAttempts,
+          recoveryKind,
+          streamId: input.streamId,
+          requestId: input.requestId,
+          partialText,
+          partialParts: input.partialParts,
+          recoveryData: liveTurn?.recoveryData ?? null,
+          messages: [...this.messages],
+          lastBody: this._lastBody,
+          lastClientTools: this._lastClientTools,
+          createdAt: liveTurn?.createdAt ?? incident.firstSeenAt
+        })) ?? {};
+    } catch (error) {
+      console.error(
+        "[AIChatAgent] onChatRecovery threw during stream recovery:",
+        error
+      );
+      await this._updateChatRecoveryIncident(
+        incident.incidentId,
+        "failed",
+        error instanceof Error ? error.message : String(error)
+      );
+      return "failed";
+    }
+    if (options.continue === false) {
+      await this._updateChatRecoveryIncident(
+        incident.incidentId,
+        "skipped",
+        "continue_disabled"
+      );
+      return "declined";
+    }
+
+    let delaySeconds: number | undefined;
+    if (input.backoff) {
+      const retries = await this._chatRecoveryEngine().recordTransientRetry(
+        incident.incidentId
+      );
+      delaySeconds = Math.min(2 ** (retries - 1), 30);
+    }
+    if (lostPartialUserId) {
+      await this._chatRecoveryEngine().scheduleRecovery({
+        incident,
+        delaySeconds,
+        recoveryKind,
+        callback: "_chatRecoveryRetry",
+        data: {
+          targetUserId: lostPartialUserId,
+          originalRequestId: recoveryRootRequestId,
+          incidentId: incident.incidentId,
+          lastBody: this._lastBody ?? null,
+          lastClientTools: this._lastClientTools ?? null
+        }
+      });
+      return "scheduled";
+    }
     await this._chatRecoveryEngine().scheduleRecovery({
       incident,
+      delaySeconds,
       recoveryKind: "continue",
       callback: "_chatRecoveryContinue",
       data: {
@@ -7149,13 +7282,15 @@ export class AIChatAgent<
               );
             }
           } catch (error) {
-            // A stall watchdog abort (#1626) is a recoverable interruption, not a
+            // A stall watchdog abort (#1626) or a platform transient such as a
+            // dropped connection (#1964) is a recoverable interruption, not a
             // terminal error. Persist the settled partial (so the continuation
             // re-anchors without re-running completed tool calls, and the user
             // keeps generated content), then route into bounded recovery.
             if (
-              error instanceof ChatStreamStalledError &&
-              !streamCompleted.value
+              !streamCompleted.value &&
+              (error instanceof ChatStreamStalledError ||
+                (!abortSignal?.aborted && isRecoverableStreamReadError(error)))
             ) {
               // The partial generated so far lives on the in-memory `message`; the
               // unconditional post-stream persistence block below writes it under
@@ -7169,7 +7304,9 @@ export class AIChatAgent<
                 requestId: id,
                 streamId,
                 partialParts: message.parts,
-                targetAssistantId
+                targetAssistantId,
+                continuation,
+                backoff: !(error instanceof ChatStreamStalledError)
               });
               if (outcome === "scheduled") {
                 // Recovering: close the stream cleanly (no terminal error frame);

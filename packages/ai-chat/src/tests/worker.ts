@@ -118,6 +118,42 @@ function makeHangingSSEResponse() {
   });
 }
 
+export type FailingReaderPrelude = "partial" | "start-only" | "none";
+
+/**
+ * An SSE response whose reader throws `errorMessage` after `prelude`, the way
+ * a dropped platform connection surfaces mid-stream (#1964).
+ */
+function makeFailingSSEResponse(
+  errorMessage: string,
+  prelude: FailingReaderPrelude = "partial"
+) {
+  const encoder = new TextEncoder();
+  const chunks = {
+    partial: [
+      { type: "start" },
+      { type: "text-start" },
+      { type: "text-delta", delta: "partial before failure" }
+    ],
+    "start-only": [{ type: "start" }],
+    none: []
+  }[prelude];
+  const stream = new ReadableStream({
+    async pull(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      controller.error(new Error(errorMessage));
+    }
+  });
+  return new Response(stream, {
+    headers: { "Content-Type": "text/event-stream" }
+  });
+}
+
 export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
   CustomSanitizeAgent: DurableObjectNamespace<CustomSanitizeAgent>;
@@ -1988,6 +2024,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       }
     }
 
+    if (this._failingTurn) {
+      this._failingReaderCalls++;
+      const { message, remaining, prelude } = this._failingTurn;
+      this._failingTurn =
+        remaining > 1 ? { message, remaining: remaining - 1, prelude } : null;
+      return makeFailingSSEResponse(message, prelude);
+    }
+
     if (this._emitStreamError) {
       // Surface a terminal stream error (the way a provider 500 arrives as an
       // SSE `error` part). The turn resolves with status "error".
@@ -2773,6 +2817,57 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.chatStreamStallTimeoutMs = options?.timeoutMs ?? 50;
     this._hangTurnsRemaining = options?.hangTurns ?? 1;
     const result = await this.saveMessages([
+      {
+        id: `u-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text: "tell me a long story" }]
+      }
+    ]);
+    return result.status;
+  }
+
+  private _failingTurn: {
+    message: string;
+    remaining: number;
+    prelude: FailingReaderPrelude;
+  } | null = null;
+  private _failingReaderCalls = 0;
+
+  getFailingReaderCallsForTest(): number {
+    return this._failingReaderCalls;
+  }
+
+  /**
+   * Drive a turn whose response reader throws `message` after `prelude`.
+   * `turns` controls how many attempts fail before the normal response;
+   * `priorAssistant` seeds an earlier answered exchange first.
+   */
+  async driveFailingReaderTurnForTest(
+    message: string,
+    turns = 1,
+    options: { prelude?: FailingReaderPrelude; priorAssistant?: boolean } = {}
+  ): Promise<SaveMessagesResult["status"]> {
+    if (options.priorAssistant) {
+      await this.persistMessages([
+        {
+          id: "prior-user",
+          role: "user",
+          parts: [{ type: "text", text: "hello" }]
+        },
+        {
+          id: "prior-assistant",
+          role: "assistant",
+          parts: [{ type: "text", text: "Earlier answer." }]
+        }
+      ]);
+    }
+    this._failingTurn = {
+      message,
+      remaining: turns,
+      prelude: options.prelude ?? "partial"
+    };
+    const result = await this.saveMessages((current) => [
+      ...current,
       {
         id: `u-${crypto.randomUUID()}`,
         role: "user",

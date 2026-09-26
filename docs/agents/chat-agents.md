@@ -587,6 +587,8 @@ When a Durable Object is evicted mid-stream (code update, inactivity timeout, re
 
 If the agent is evicted mid-stream, the fiber row survives in SQLite. On the next activation, the framework detects the interrupted fiber, reconstructs the partial response from buffered stream chunks, and calls `onChatRecovery`.
 
+The same bounded recovery handles an `AIChatAgent` stream that fails while the agent stays up. If the response reader throws a platform transient error, such as `Network connection lost.`, the agent keeps the partial response and schedules a continuation instead of ending the turn with an error. If the error arrives before any response part, the agent re-runs the turn instead. The agent calls `onChatRecovery` first, so returning `{ continue: false }` ends the turn with the error. Each repeated transient error waits longer before the next attempt and counts against `maxAttempts`. Other reader errors still end the turn.
+
 Durable recovery is always enabled. Use `chatRecovery` only to tune its budgets and terminal behavior.
 
 > **Assign `chatRecovery` as a class field or in the constructor — never in `onStart()`.** On every wake the SDK evaluates recovery budgets (and may seal an interrupted turn, firing `onExhausted`) _before_ your `onStart()` body runs. A config produced inside `onStart()` is therefore read as the built-in defaults at the moment recovery decides, so your `maxRecoveryWork` / `shouldKeepRecovering` / `onExhausted` silently never apply to the recovery that matters. The SDK logs a one-time warning if it detects `chatRecovery` being assigned during `onStart()`.
