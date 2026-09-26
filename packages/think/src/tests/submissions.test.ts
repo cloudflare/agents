@@ -158,6 +158,15 @@ type ThinkSubmissionTestStub = {
   ): Promise<void>;
   markScheduledRecoveryTaskTerminalForTest(requestId: string): Promise<void>;
   runScheduledRecoveryRetryForTest(): Promise<void>;
+  runScheduledRecoveryContinueForTest(): Promise<void>;
+  persistTestMessage(msg: UIMessage): Promise<void>;
+  interruptChatTurnForTest(input: {
+    requestId: string;
+    latestMessageId: string;
+    latestMessageRole: "user" | "assistant";
+    latestUserMessageId: string;
+    chunks: Array<Record<string, unknown>>;
+  }): Promise<{ scheduledContinueCount: number; scheduledRetryCount: number }>;
   insertSubmissionForTest(options: {
     submissionId: string;
     status?: ThinkSubmissionStatus;
@@ -1352,6 +1361,129 @@ describe("Think durable submissions", () => {
         (message) => message.role !== "assistant"
       )
     ).toBe(true);
+  });
+
+  describe("structured turn interrupted mid-stream (#1727)", () => {
+    const output = { title: "Recovered output", labels: ["ops"] };
+    const structuredMetadata = (id: string) => ({
+      [workflowPromptMetadataKey]: {
+        workflow: {
+          name: "TEST_WORKFLOW",
+          id,
+          stepName: "draft",
+          eventType: `think-prompt-${id}`
+        },
+        output: {
+          schema: {
+            type: "object",
+            properties: {
+              title: { type: "string" },
+              labels: { type: "array", items: { type: "string" } }
+            },
+            required: ["title", "labels"],
+            additionalProperties: false
+          }
+        }
+      }
+    });
+
+    async function seedRunningStructuredSubmission(
+      agent: Awaited<ReturnType<typeof freshAgent>>,
+      id: string
+    ) {
+      await agent.persistTestMessage({
+        id: `u-${id}`,
+        role: "user",
+        parts: [{ type: "text", text: "Draft the report" }]
+      });
+      await agent.insertSubmissionForTest({
+        submissionId: id,
+        requestId: id,
+        status: "running",
+        metadata: structuredMetadata(id),
+        messagesAppliedAt: Date.now(),
+        messageIds: [`u-${id}`]
+      });
+    }
+
+    it("retries a turn cut off inside its final answer and completes with the output", async () => {
+      const agent = await freshAgent();
+      const id = "sub-structured-final-answer-cut";
+      await seedRunningStructuredSubmission(agent, id);
+      await agent.setFinalAnswerResponseForTest(output);
+
+      const scheduled = await agent.interruptChatTurnForTest({
+        requestId: id,
+        latestMessageId: `u-${id}`,
+        latestMessageRole: "user",
+        latestUserMessageId: `u-${id}`,
+        chunks: [
+          { type: "start" },
+          { type: "start-step" },
+          {
+            type: "tool-input-start",
+            toolCallId: "fa-1",
+            toolName: "think_final_answer"
+          },
+          {
+            type: "tool-input-delta",
+            toolCallId: "fa-1",
+            inputTextDelta: '{"title":'
+          }
+        ]
+      });
+      expect(scheduled).toEqual({
+        scheduledContinueCount: 0,
+        scheduledRetryCount: 1
+      });
+      await agent.runScheduledRecoveryRetryForTest();
+
+      await expect(agent.inspectSubmissionForTest(id)).resolves.toMatchObject({
+        status: "completed"
+      });
+      const events = await agent.getWorkflowEventsForTest();
+      expect(events.map((entry) => entry.event.payload)).toEqual([
+        { submissionId: id, status: "completed", output }
+      ]);
+    });
+
+    it("continues a turn cut off after visible content and completes with the output", async () => {
+      const agent = await freshAgent();
+      const id = "sub-structured-text-cut";
+      await seedRunningStructuredSubmission(agent, id);
+      await agent.persistTestMessage({
+        id: `a-${id}`,
+        role: "assistant",
+        parts: [{ type: "text", text: "Looking into it. " }]
+      });
+      await agent.setFinalAnswerResponseForTest(output);
+
+      const scheduled = await agent.interruptChatTurnForTest({
+        requestId: id,
+        latestMessageId: `a-${id}`,
+        latestMessageRole: "assistant",
+        latestUserMessageId: `u-${id}`,
+        chunks: [
+          { type: "start", messageId: `a-${id}` },
+          { type: "start-step" },
+          { type: "text-start", id: "t1" },
+          { type: "text-delta", id: "t1", delta: "Looking into it. " }
+        ]
+      });
+      expect(scheduled).toEqual({
+        scheduledContinueCount: 1,
+        scheduledRetryCount: 0
+      });
+      await agent.runScheduledRecoveryContinueForTest();
+
+      await expect(agent.inspectSubmissionForTest(id)).resolves.toMatchObject({
+        status: "completed"
+      });
+      const events = await agent.getWorkflowEventsForTest();
+      expect(events.map((entry) => entry.event.payload)).toEqual([
+        { submissionId: id, status: "completed", output }
+      ]);
+    });
   });
 
   it("does not persist the internal final-answer tool into the conversation", async () => {

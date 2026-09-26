@@ -7064,6 +7064,67 @@ export class ThinkProgrammaticTestAgent extends Think {
     await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
   }
 
+  async runScheduledRecoveryContinueForTest(): Promise<void> {
+    await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+  }
+
+  async persistTestMessage(msg: UIMessage): Promise<void> {
+    await this.session.appendMessage(msg);
+  }
+
+  /**
+   * Leave the turn `requestId` as a crash does: its chat fiber row and an
+   * open stream holding `chunks`, then run startup fiber recovery.
+   */
+  async interruptChatTurnForTest(input: {
+    requestId: string;
+    latestMessageId: string;
+    latestMessageRole: "user" | "assistant";
+    latestUserMessageId: string;
+    chunks: Array<Record<string, unknown>>;
+  }): Promise<{ scheduledContinueCount: number; scheduledRetryCount: number }> {
+    const internals = this as unknown as {
+      _resumableStream: {
+        start(requestId: string): string;
+        storeChunk(streamId: string, body: string): unknown;
+        flushBuffer(): void;
+      };
+      _checkRunFibers(): Promise<void>;
+    };
+    const streamId = internals._resumableStream.start(input.requestId);
+    for (const chunk of input.chunks) {
+      internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+    }
+    internals._resumableStream.flushBuffer();
+    const snapshot = {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: input.requestId,
+        continuation: false,
+        latestMessageId: input.latestMessageId,
+        latestMessageRole: input.latestMessageRole,
+        latestUserMessageId: input.latestUserMessageId,
+        startedAt: Date.now()
+      },
+      user: null
+    };
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${`fiber-${crypto.randomUUID()}`},
+              ${`${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${input.requestId}`},
+              ${JSON.stringify(snapshot)}, ${Date.now()})
+    `;
+    await internals._checkRunFibers();
+    return {
+      scheduledContinueCount: recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      ),
+      scheduledRetryCount: recoveryWorkCountForTest(this, "_chatRecoveryRetry")
+    };
+  }
+
   async insertSubmissionForTest(options: {
     submissionId: string;
     status?: ThinkSubmissionStatus;
