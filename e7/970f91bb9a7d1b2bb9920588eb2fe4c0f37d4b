@@ -1,0 +1,29 @@
+packages/agents/src/chat/react.tsx
+  s_368991bdec7f77::t_aaf729f54c09db 366-371,1971-1974,1977-1980
+packages/ai-chat/src/index.ts
+  s_368991bdec7f77::t_e70762801e3612 2336-2341
+packages/ai-chat/src/react-tests/use-agent-chat.test.tsx
+  s_368991bdec7f77::t_a493e459975325 2099-2106,2142-2148
+packages/ai-chat/src/tests/terminal-frame-order.test.ts
+  s_368991bdec7f77::t_17caa208ad3e8a 182-188,194
+packages/think/src/tests/origin-message-ids.test.ts
+  s_368991bdec7f77::t_44e59e648d511a 91-114
+packages/think/src/think.ts
+  s_368991bdec7f77::t_b0500bb105f741 14617-14619,14682-14683
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e7970f91bb9a7d1b2bb9920588eb2fe4c0f37d4b",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
