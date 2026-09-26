@@ -179,11 +179,19 @@ describe("AIChatAgent — terminal frame ordering", () => {
     const agent = await getAgentByName(env.ResponseAgent, room);
     await agent.failNextAssistantPersist();
 
+    const outcomes: unknown[] = [];
+    ws.addEventListener("message", (e: MessageEvent) => {
+      const data = JSON.parse(e.data as string) as Record<string, unknown>;
+      if (isUseChatResponseMessage(data) && data.done) {
+        outcomes.push(data.outcome);
+      }
+    });
     const frames = recordUntilDone(ws);
     sendChat(ws, { format: "sse" });
 
     const recorded = await frames;
     expect(recorded.at(-1)).toEqual({ kind: "done", error: true });
+    expect(outcomes).toEqual(["error"]);
     ws.close(1000);
   });
 

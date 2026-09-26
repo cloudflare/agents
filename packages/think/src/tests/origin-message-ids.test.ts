@@ -20,6 +20,7 @@ type TerminalFrame = {
   done?: boolean;
   error?: boolean;
   messageIds?: string[];
+  outcome?: string;
 };
 
 async function freshAgent() {
@@ -80,7 +81,34 @@ describe("Think terminal frames carry originating message ids (#2280)", () => {
   it("echoes the request's user message id on the done frame", async () => {
     const { ws } = await freshAgent();
     const terminals = await sendAndWaitForDone(ws, "req-1", [user("msg-1")]);
-    expect(terminals.at(-1)?.messageIds).toEqual(["msg-1"]);
+    expect(terminals.at(-1)).toMatchObject({
+      messageIds: ["msg-1"],
+      outcome: "completed"
+    });
+    ws.close();
+  });
+
+  it("reports a turn whose final save fails as an error", async () => {
+    const room = crypto.randomUUID();
+    const agent = (await getAgentByName(
+      env.ThinkRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkRecoveryTestAgent>,
+      room
+    )) as unknown as { failNextAssistantPersistForTest(): Promise<void> };
+    await agent.failNextAssistantPersistForTest();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/think-recovery-test-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    const terminals = await sendAndWaitForDone(ws, "req-save", [
+      user("msg-save")
+    ]);
+    expect(terminals.at(-1)).toMatchObject({
+      error: true,
+      outcome: "error",
+      messageIds: ["msg-save"]
+    });
     ws.close();
   });
 
@@ -112,7 +140,10 @@ describe("Think terminal frames carry originating message ids (#2280)", () => {
 
     await agent.armStallOnceForTest(1, 50);
     const first = await sendAndWaitForDone(ws, "req-stall", [user("msg-s")]);
-    expect(first.at(-1)?.messageIds).toEqual(["msg-s"]);
+    expect(first.at(-1)).toMatchObject({
+      messageIds: ["msg-s"],
+      outcome: "recovering"
+    });
 
     for (let i = 0; i < 50 && successorTerminals.length === 0; i++) {
       await agent.runStallContinuationForTest();
@@ -133,6 +164,7 @@ describe("Think terminal frames carry originating message ids (#2280)", () => {
     for (const frame of terminals) {
       expect(frame.messageIds).toEqual(["msg-e"]);
     }
+    expect(terminals.at(-1)?.outcome).toBe("error");
     const pending = (await agent.getPendingChatTerminalForTest()) as {
       requestId: string;
       messageIds?: string[];

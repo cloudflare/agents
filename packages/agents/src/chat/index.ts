@@ -90,7 +90,11 @@ export {
 } from "./protocol";
 
 export { MessageType } from "./wire-types";
-export type { OutgoingMessage, IncomingMessage } from "./wire-types";
+export type {
+  ChatTurnOutcome,
+  OutgoingMessage,
+  IncomingMessage
+} from "./wire-types";
 
 export {
   applyAgentToolEvent,

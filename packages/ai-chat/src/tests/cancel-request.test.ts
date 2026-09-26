@@ -114,6 +114,7 @@ describe("Cancel request", () => {
     const chatResponses = messages.filter(isUseChatResponseMessage);
     const doneMsg = chatResponses.find((m) => m.done === true);
     expect(doneMsg).toBeDefined();
+    expect(doneMsg?.outcome).toBe("aborted");
 
     // Should NOT have received all 100 chunks worth of text-delta events
     const textDeltas = chatResponses.filter((m) => {
@@ -157,6 +158,7 @@ describe("Cancel request", () => {
     const chatResponses = messages.filter(isUseChatResponseMessage);
     const doneMsg = chatResponses.find((m) => m.done === true);
     expect(doneMsg).toBeDefined();
+    expect(doneMsg?.outcome).toBe("aborted");
 
     // Should have fewer chunks than a full stream
     const dataChunks = chatResponses.filter(
@@ -254,6 +256,7 @@ describe("Cancel request", () => {
     const chatResponses = messages.filter(isUseChatResponseMessage);
     const doneMsg = chatResponses.find((m) => m.done === true);
     expect(doneMsg).toBeDefined();
+    expect(doneMsg?.outcome).toBeUndefined();
 
     // Should have all 3 text-delta events
     const textDeltas = chatResponses.filter((m) => {

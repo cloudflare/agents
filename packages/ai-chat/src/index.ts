@@ -2333,7 +2333,12 @@ export class AIChatAgent<
     for (const { message, exclude } of held) {
       this._broadcastChatMessage(
         failed && message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE
-          ? { ...message, body: errorText, error: true }
+          ? {
+              ...message,
+              body: errorText,
+              error: true,
+              ...(message.done && { outcome: "error" as const })
+            }
           : message,
         exclude
       );
@@ -2839,7 +2844,8 @@ export class AIChatAgent<
         body: "",
         done: true,
         id: requestId,
-        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        outcome: "skipped"
       })
     );
     // A skipped turn settles out of the pre-stream set, but must NOT release
@@ -7048,6 +7054,7 @@ export class AIChatAgent<
                     done: true,
                     id,
                     type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                    outcome: "error",
                     ...(continuation && { continuation: true })
                   });
                   return { status: "error", error };
@@ -7131,6 +7138,7 @@ export class AIChatAgent<
         done: true,
         id,
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        outcome: "aborted",
         ...(continuation && { continuation: true })
       });
       return { status: "aborted" };
@@ -7258,6 +7266,7 @@ export class AIChatAgent<
         done: true,
         id,
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        outcome: "aborted",
         ...(continuation && { continuation: true })
       });
       return { status: "aborted" };
@@ -7438,6 +7447,7 @@ export class AIChatAgent<
                   done: true,
                   id,
                   type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                  outcome: "recovering",
                   ...(continuation && { continuation: true })
                 });
                 streamResult = { status: "aborted" };

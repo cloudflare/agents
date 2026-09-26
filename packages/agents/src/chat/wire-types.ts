@@ -2,6 +2,24 @@ import type { JSONSchema7, UIMessage } from "ai";
 import type { StreamResumeNoneReason } from "./protocol";
 
 /**
+ * How a chat request ended.
+ *
+ * - `completed`: the turn finished normally.
+ * - `error`: the turn failed.
+ * - `aborted`: the turn was cancelled while it ran.
+ * - `skipped`: the turn never ran, because a newer send superseded it or the
+ *   concurrency policy dropped it.
+ * - `recovering`: this request stopped, but recovery continues the same turn
+ *   under a new request that carries the same `messageIds`.
+ */
+export type ChatTurnOutcome =
+  | "completed"
+  | "error"
+  | "aborted"
+  | "skipped"
+  | "recovering";
+
+/**
  * Enum for message types to improve type safety and maintainability
  */
 export enum MessageType {
@@ -91,6 +109,12 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
        * cancellation belongs to.
        */
       messageIds?: string[];
+      /**
+       * How the request ended, on its terminal `done` frame. Absent means
+       * `"error"` when the frame (or an earlier frame for the request) carried
+       * `error`, and `"completed"` otherwise.
+       */
+      outcome?: ChatTurnOutcome;
     }
   | {
       /** Indicates the server is resuming an active stream */

@@ -3331,9 +3331,9 @@ describe("Think — messageConcurrency", () => {
 
     const request2 = sendChatRequest(ws, [makeUserMessage("Second")]);
     const done2 = waitForDoneId(ws, request2, 3000);
-    await done2;
+    expect((await done2).at(-1)?.outcome).toBe("skipped");
 
-    await done1;
+    expect((await done1).at(-1)?.outcome).toBe("completed");
     await delay(200);
 
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
@@ -3343,6 +3343,24 @@ describe("Think — messageConcurrency", () => {
     const userMessages = messages.filter((m: UIMessage) => m.role === "user");
     expect(userMessages.length).toBe(1);
 
+    await closeWS(ws);
+  });
+
+  it("reports a cancelled running turn as aborted", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 100, 15);
+    const requestId = sendChatRequest(ws, [makeUserMessage("Cancel me")]);
+    const done = waitForDoneId(ws, requestId, 10000);
+    await waitForActiveTurn(agent);
+    ws.send(
+      JSON.stringify({ type: "cf_agent_chat_request_cancel", id: requestId })
+    );
+
+    expect((await done).at(-1)?.outcome).toBe("aborted");
     await closeWS(ws);
   });
 
