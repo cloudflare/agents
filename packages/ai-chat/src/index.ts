@@ -2333,7 +2333,12 @@ export class AIChatAgent<
     for (const { message, exclude } of held) {
       this._broadcastChatMessage(
         failed && message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE
-          ? { ...message, body: errorText, error: true }
+          ? {
+              ...message,
+              body: errorText,
+              error: true,
+              ...(message.done && { outcome: "error" as const })
+            }
           : message,
         exclude
       );

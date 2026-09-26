@@ -364,6 +364,12 @@ type AddToolOutputOptions = {
 };
 
 /**
+ * Replays re-send only recent terminals, so duplicate suppression needs only
+ * a recent window of ended request ids.
+ */
+const MAX_REMEMBERED_ENDED_TURNS = 500;
+
+/**
  * A chat request that ended, passed to `onTurnEnd`.
  */
 export type ChatTurnEndEvent = {
@@ -1962,11 +1968,16 @@ export function useAgentChat<
       if (!frame.done) return;
       const earlierError = turnErrors.get(frame.id);
       turnErrors.delete(frame.id);
-      const outcome =
-        frame.outcome ??
-        (frame.error || earlierError !== undefined ? "error" : "completed");
+      const outcome = frame.error
+        ? "error"
+        : (frame.outcome ??
+          (earlierError !== undefined ? "error" : "completed"));
       if (outcome === "recovering" || endedTurnIds.has(frame.id)) return;
       endedTurnIds.add(frame.id);
+      if (endedTurnIds.size > MAX_REMEMBERED_ENDED_TURNS) {
+        const oldest = endedTurnIds.values().next().value;
+        if (oldest !== undefined) endedTurnIds.delete(oldest);
+      }
       const error = frame.error ? frame.body : earlierError;
       onTurnEndRef.current?.({
         requestId: frame.id,

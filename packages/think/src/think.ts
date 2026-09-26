@@ -14614,6 +14614,9 @@ export class Think<
             this._programmaticStreamErrors.set(requestId, streamError);
           }
           this._errorResumableStream(streamId, requestId);
+          if (terminalFrame) {
+            terminalFrame = { ...terminalFrame, outcome: "error" };
+          }
         }
       }
 
@@ -14676,7 +14679,8 @@ export class Think<
             terminalFrame = {
               ...terminalFrame,
               body: streamError,
-              error: true
+              error: true,
+              outcome: "error"
             };
           }
         }

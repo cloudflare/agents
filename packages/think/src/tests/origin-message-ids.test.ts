@@ -88,6 +88,30 @@ describe("Think terminal frames carry originating message ids (#2280)", () => {
     ws.close();
   });
 
+  it("reports a turn whose final save fails as an error", async () => {
+    const room = crypto.randomUUID();
+    const agent = (await getAgentByName(
+      env.ThinkRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkRecoveryTestAgent>,
+      room
+    )) as unknown as { failNextAssistantPersistForTest(): Promise<void> };
+    await agent.failNextAssistantPersistForTest();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/think-recovery-test-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    const terminals = await sendAndWaitForDone(ws, "req-save", [
+      user("msg-save")
+    ]);
+    expect(terminals.at(-1)).toMatchObject({
+      error: true,
+      outcome: "error",
+      messageIds: ["msg-save"]
+    });
+    ws.close();
+  });
+
   it("echoes every trailing user message of the request", async () => {
     const { ws } = await freshAgent();
     const terminals = await sendAndWaitForDone(ws, "req-2", [

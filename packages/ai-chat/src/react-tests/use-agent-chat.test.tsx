@@ -2096,6 +2096,14 @@ describe("useAgentChat onToolCall", () => {
         body: "gave up",
         messageIds: ["u5"]
       });
+      frame({
+        id: "req-unsaved",
+        done: true,
+        error: true,
+        outcome: "aborted",
+        body: "Failed to save the response.",
+        messageIds: ["u6"]
+      });
       await sleep(30);
     });
 
@@ -2131,6 +2139,13 @@ describe("useAgentChat onToolCall", () => {
         outcome: "error",
         error: "gave up",
         replay: true
+      },
+      {
+        requestId: "req-unsaved",
+        messageIds: ["u6"],
+        outcome: "error",
+        error: "Failed to save the response.",
+        replay: false
       }
     ]);
   });
