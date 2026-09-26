@@ -460,6 +460,28 @@ bounded only by the absolute `detachedMaxBudgetMs` ceiling — a run is never
 given up on merely for being slow. Set `noProgressBudgetMs` to `0` or `Infinity`
 to disable the resetting window for a run.
 
+### Deliver only progress and the final result
+
+By default, the parent forwards every chunk of the child's stream to its
+clients, and the child broadcasts the same chunks to its own connections. When
+nobody watches the child's text as it streams (for example, a server-side
+pipeline that only reads the result), pass `eventDelivery: "terminal"`:
+
+```ts
+const result = await this.runAgentTool(ResearchAgent, {
+  input: { query: "Durable Objects" },
+  eventDelivery: "terminal"
+});
+```
+
+The run still produces `started`, progress, milestone, and terminal
+(`finished`, `error`, `aborted`, or `interrupted`) events, and the result,
+summary, and output are unchanged. Ordinary child chunks are not forwarded to the
+parent's clients, are not replayed on reconnect, and are not broadcast by the
+child. The child still stores its own conversation, so `getAgentToolChunks()`
+and drill-in continue to work. Detached runs do not support
+`eventDelivery: "terminal"` and reject it.
+
 ## Render child timelines in React
 
 `useAgentToolEvents()` is a headless hook. It subscribes to the existing parent

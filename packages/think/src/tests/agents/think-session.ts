@@ -744,6 +744,24 @@ export class ThinkTestAgent extends Think {
     this._progressInjection = { runId, progressBody, milestoneBody };
   }
 
+  /** Persist a milestone the way `reportProgress({ milestone })` does. */
+  persistAgentToolMilestoneForTest(
+    runId: string,
+    name: string,
+    data: unknown
+  ): number {
+    return (
+      this as unknown as {
+        _persistAgentToolMilestone(
+          runId: string,
+          name: string,
+          data: unknown,
+          at: number
+        ): number;
+      }
+    )._persistAgentToolMilestone(runId, name, data, Date.now());
+  }
+
   /**
    * Bounded-poll until the live child turn has bound its request id (written to
    * the child-run row at turn start) and opened its resumable stream, so a test
@@ -769,10 +787,20 @@ export class ThinkTestAgent extends Think {
     return null;
   }
 
+  private _failNextChunkRead = false;
+
+  failNextAgentToolChunkReadForTest(): void {
+    this._failNextChunkRead = true;
+  }
+
   override async getAgentToolChunks(
     runId: string,
     options?: { afterSequence?: number }
   ): Promise<AgentToolStoredChunk[]> {
+    if (this._failNextChunkRead) {
+      this._failNextChunkRead = false;
+      throw new Error("chunk read failed");
+    }
     const chunks = await super.getAgentToolChunks(runId, options);
 
     const race = this._attachRaceInjection;
@@ -1592,6 +1620,36 @@ export class ThinkTestAgent extends Think {
         ) => Promise<void>;
       }
     )._recordTerminalChatStatus("interrupted", requestId, body);
+  }
+
+  /**
+   * Stand in for a child restarted mid-run (#2298): a persisted in-flight
+   * agent-tool run with empty in-memory state, rebound to a recovery turn's
+   * request id, whose chunk is then broadcast.
+   */
+  async broadcastRecoveredAgentToolChunkForTest(
+    eventDelivery: "full" | "terminal"
+  ): Promise<void> {
+    const internals = this as unknown as {
+      _ensureAgentToolChildRunTable(): void;
+      _rebindAgentToolChildRunRequestId(requestId: string): void;
+    };
+    internals._ensureAgentToolChildRunTable();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, status, started_at, event_delivery)
+      VALUES (${crypto.randomUUID()}, 'pre-restart', 'running', ${Date.now()},
+        ${eventDelivery === "terminal" ? "terminal" : null})
+    `;
+    internals._rebindAgentToolChildRunRequestId("recovered-request");
+    this.broadcast(
+      JSON.stringify({
+        type: "cf_agent_use_chat_response",
+        id: "recovered-request",
+        body: JSON.stringify({ type: "text-delta", id: "t", delta: "hi" }),
+        done: false
+      })
+    );
   }
 
   /** Read the durable terminal record (#1645) so a test can assert it is
@@ -3216,7 +3274,8 @@ export class ThinkAgentToolParent extends Agent {
     progressBody: string,
     milestoneBody: string,
     chunkDelayMs: number,
-    runId = crypto.randomUUID()
+    runId = crypto.randomUUID(),
+    eventDelivery?: "full" | "terminal"
   ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }> {
     this.events = [];
     this.finishes = [];
@@ -3227,9 +3286,54 @@ export class ThinkAgentToolParent extends Agent {
       runId,
       parentToolCallId: "think-tool-call",
       input,
-      inputPreview: input
+      inputPreview: input,
+      ...(eventDelivery ? { eventDelivery } : {})
     });
     return { result, events: this.events };
+  }
+
+  async persistChildMilestoneForTest(
+    runId: string,
+    name: string,
+    data: unknown
+  ): Promise<number> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    return child.persistAgentToolMilestoneForTest(runId, name, data);
+  }
+
+  async failNextChildChunkReadForTest(runId: string): Promise<void> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.failNextAgentToolChunkReadForTest();
+  }
+
+  /** Replay this parent's agent-tool events to a fresh connection. */
+  async replayAgentToolEventsForTest(): Promise<AgentToolEventMessage[]> {
+    const sent: AgentToolEventMessage[] = [];
+    const connection = {
+      id: "replay-probe",
+      send(body: string) {
+        sent.push(JSON.parse(body) as AgentToolEventMessage);
+      }
+    };
+    await (
+      this as unknown as {
+        _replayAgentToolRuns(connection: unknown): Promise<void>;
+      }
+    )._replayAgentToolRuns(connection);
+    return sent;
+  }
+
+  async runThinkChildDetachedTerminalForTest(): Promise<string | null> {
+    try {
+      await this.runAgentTool(ThinkTestAgent, {
+        input: "detached terminal",
+        detached: true,
+        eventDelivery: "terminal"
+      });
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   /**

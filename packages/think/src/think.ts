@@ -4581,6 +4581,8 @@ export class Think<
   private _agentToolLastErrors = new Map<string, string>();
   private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
   private _agentToolLiveSequences = new Map<string, number>();
+  /** Runs started with `eventDelivery: "terminal"`: their chunks are not broadcast. */
+  private _agentToolTerminalOnlyRuns = new Set<string>();
   /**
    * Request id → run id for in-flight agent-tool turns (null = resolved as
    * not an agent-tool turn, cached so unrelated turns don't re-query SQLite
@@ -4607,15 +4609,23 @@ export class Think<
     // allocation-free — only build the snoop hooks while a run is in flight.
     if (
       this._agentToolForwarders.size > 0 ||
-      this._agentToolLiveSequences.size > 0
+      this._agentToolLiveSequences.size > 0 ||
+      this._agentToolTerminalOnlyRuns.size > 0
     ) {
-      interceptAgentToolBroadcast(msg, {
+      const chunkRunId = interceptAgentToolBroadcast(msg, {
         forwarders: this._agentToolForwarders,
         liveSequences: this._agentToolLiveSequences,
         lastErrors: this._agentToolLastErrors,
         responseType: MSG_CHAT_RESPONSE,
-        runForRequest: (requestId) => this._agentToolRunForRequest(requestId)
+        runForRequest: (requestId) => this._agentToolRunForRequest(requestId),
+        terminalOnlyRuns: this._agentToolTerminalOnlyRuns
       });
+      if (
+        chunkRunId !== null &&
+        this._agentToolTerminalOnlyRuns.has(chunkRunId)
+      ) {
+        return;
+      }
     }
     super.broadcast(msg, without);
   }
@@ -4635,12 +4645,15 @@ export class Think<
     // together (the lifecycle invariant), so this is equivalent to
     // `completed_at IS NULL` but states the intent. Kept consistent with
     // `_rebindAgentToolChildRunRequestId` and the ai-chat counterpart.
-    const rows = this.sql<{ run_id: string }>`
-      SELECT run_id FROM cf_agent_tool_child_runs
+    const rows = this.sql<{ run_id: string; event_delivery: string | null }>`
+      SELECT run_id, event_delivery FROM cf_agent_tool_child_runs
       WHERE request_id = ${requestId} AND status IN ('starting', 'running')
       LIMIT 1
     `;
     const runId = rows[0]?.run_id ?? null;
+    if (runId && rows[0]?.event_delivery === "terminal") {
+      this._agentToolTerminalOnlyRuns.add(runId);
+    }
     this._agentToolRunsByRequestId.set(requestId, runId);
     return runId;
   }
@@ -4677,19 +4690,22 @@ export class Think<
    */
   private _rebindAgentToolChildRunRequestId(requestId: string): void {
     let runId: string | undefined;
+    let terminalOnly = false;
     try {
-      const rows = this.sql<{ run_id: string }>`
-        SELECT run_id FROM cf_agent_tool_child_runs
+      const rows = this.sql<{ run_id: string; event_delivery: string | null }>`
+        SELECT run_id, event_delivery FROM cf_agent_tool_child_runs
         WHERE status IN ('starting', 'running')
         ORDER BY started_at DESC
         LIMIT 1
       `;
       runId = rows[0]?.run_id;
+      terminalOnly = rows[0]?.event_delivery === "terminal";
     } catch {
       // No child-run table on facets that never ran as an agent tool.
       return;
     }
     if (!runId) return;
+    if (terminalOnly) this._agentToolTerminalOnlyRuns.add(runId);
     this._agentToolRunsByRequestId.set(requestId, runId);
     this.sql`
       UPDATE cf_agent_tool_child_runs
@@ -9180,6 +9196,9 @@ export class Think<
     this._addAgentToolChildRunColumnIfMissing(
       "ALTER TABLE cf_agent_tool_child_runs ADD COLUMN last_signal_at INTEGER"
     );
+    this._addAgentToolChildRunColumnIfMissing(
+      "ALTER TABLE cf_agent_tool_child_runs ADD COLUMN event_delivery TEXT"
+    );
     // Durable milestones (rfc-detached-agent-tools §progress, 4b). One row per
     // milestone; `sequence` is monotonic per run so replay/live races dedupe.
     this.sql`
@@ -9571,20 +9590,26 @@ export class Think<
 
   async startAgentToolRun(
     input: unknown,
-    options: { runId: string }
+    options: { runId: string; eventDelivery?: "full" | "terminal" }
   ): Promise<AgentToolRunInspection> {
     const existing = this._readAgentToolChildRun(options.runId);
     if (existing) return this._inspectionFromChildRow(existing);
 
     const startedAt = Date.now();
+    const eventDelivery =
+      options.eventDelivery === "terminal" ? "terminal" : null;
     this.sql`
-      INSERT INTO cf_agent_tool_child_runs (run_id, status, started_at)
-      VALUES (${options.runId}, 'starting', ${startedAt})
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, status, started_at, event_delivery)
+      VALUES (${options.runId}, 'starting', ${startedAt}, ${eventDelivery})
     `;
 
     const controller = new AbortController();
     this._agentToolAbortControllers.set(options.runId, controller);
     this._agentToolLiveSequences.set(options.runId, 0);
+    if (eventDelivery === "terminal") {
+      this._agentToolTerminalOnlyRuns.add(options.runId);
+    }
     this._agentToolPreTurnAssistantIds.set(
       options.runId,
       new Set(
@@ -9667,6 +9692,7 @@ export class Think<
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolForwarders.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
+        this._agentToolTerminalOnlyRuns.delete(options.runId);
         // Drop the progress emitter's per-run coalescing state.
         this._agentToolProgressEmitterInstance?.forget(options.runId);
         // Drop this run's request-id mappings. When no runs remain in flight

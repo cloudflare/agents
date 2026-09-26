@@ -219,6 +219,7 @@ export type {
   AgentToolChildAdapter,
   AgentToolDisplayMetadata,
   AgentToolEvent,
+  AgentToolEventDelivery,
   AgentToolEventMessage,
   AgentToolEventState,
   AgentToolFailure,
@@ -750,7 +751,7 @@ type AgentToolRecoveryInspection =
  * every capability uses for its own schema version) and checks it on wake to
  * skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 12;
+const CURRENT_SCHEMA_VERSION = 13;
 const SCHEMA_VERSION_KEY = "cf_agents:schema_version";
 
 // Before the State capability owned `cf_agents_state`, Agent kept its schema
@@ -792,6 +793,24 @@ const CONTROL_CHAR_RE = new RegExp(
   "[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]",
   "g"
 );
+
+/** Progress and milestone frames still reach `eventDelivery: "terminal"` clients. */
+function isAgentToolLifecycleChunk(body: string): boolean {
+  if (
+    !body.includes(AGENT_TOOL_PROGRESS_PART) &&
+    !body.includes(AGENT_TOOL_MILESTONE_PART)
+  ) {
+    return false;
+  }
+  try {
+    const type = (JSON.parse(body) as { type?: unknown } | null)?.type;
+    return (
+      type === AGENT_TOOL_PROGRESS_PART || type === AGENT_TOOL_MILESTONE_PART
+    );
+  } catch {
+    return false;
+  }
+}
 
 function sanitizeErrorString(error: string | null): string | null {
   if (error === null) return null;
@@ -1764,6 +1783,10 @@ export class Agent<
       // deletes it without calling `onFiberRecovered()` (#2305).
       addColumnIfNotExists(
         "ALTER TABLE cf_agents_runs ADD COLUMN completed_at INTEGER"
+      );
+      // `runAgentTool({ eventDelivery: "terminal" })`: NULL means "full".
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN event_delivery TEXT"
       );
 
       // Mark schema as up-to-date
@@ -5578,6 +5601,17 @@ export class Agent<
     const runId = options.runId ?? nanoid(12);
     const agentType = cls.name;
     const detached = this._parseDetachedOption(options.detached);
+    const eventDelivery = options.eventDelivery ?? "full";
+    if (eventDelivery !== "full" && eventDelivery !== "terminal") {
+      throw new Error(
+        `runAgentTool: eventDelivery must be "full" or "terminal", got ${JSON.stringify(eventDelivery)}.`
+      );
+    }
+    if (detached && eventDelivery === "terminal") {
+      throw new Error(
+        'runAgentTool: eventDelivery "terminal" is not supported for detached runs.'
+      );
+    }
 
     const existing = this._readAgentToolRun(runId);
     if (existing) {
@@ -5729,13 +5763,14 @@ export class Agent<
         input_redacted, status, display_metadata, display_order, started_at,
         detached, detached_on_finish, detached_notify_source,
         detached_max_budget_at, detached_no_progress_budget_ms,
-        detached_on_milestones
+        detached_on_milestones, event_delivery
       ) VALUES (
         ${runId}, ${options.parentToolCallId ?? null}, ${agentType},
         ${inputPreviewJson}, 1, 'starting', ${displayJson}, ${displayOrder},
         ${startedAt}, ${detached ? 1 : 0}, ${detached?.onFinishName ?? null},
         ${detached?.notifySource ?? null}, ${detachedMaxBudgetAt},
-        ${detachedNoProgressBudgetMs}, ${detachedOnMilestonesJson}
+        ${detachedNoProgressBudgetMs}, ${detachedOnMilestonesJson},
+        ${eventDelivery === "terminal" ? "terminal" : null}
       )
     `;
 
@@ -5765,7 +5800,8 @@ export class Agent<
     const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
     const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
     const childStart = await adapter.startAgentToolRun(options.input, {
-      runId
+      runId,
+      ...(eventDelivery === "terminal" ? { eventDelivery } : {})
     });
     this._markAgentToolRunning(runId);
 
@@ -6825,17 +6861,29 @@ export class Agent<
     replay?: true,
     connection?: Connection
   ): number {
+    const terminalOnly = this._isTerminalOnlyAgentToolRun(runId);
     let next = sequence;
     for (const chunk of chunks) {
+      // A skipped chunk still takes its sequence, so live and replayed frames
+      // keep the same numbers and dedupe against each other.
+      const chunkSequence = next++;
+      if (terminalOnly && !isAgentToolLifecycleChunk(chunk.body)) continue;
       this._broadcastAgentToolEvent(
         parentToolCallId,
-        next++,
+        chunkSequence,
         { kind: "chunk", runId, body: chunk.body },
         replay,
         connection
       );
     }
     return next;
+  }
+
+  private _isTerminalOnlyAgentToolRun(runId: string): boolean {
+    const rows = this.sql<{ event_delivery: string | null }>`
+      SELECT event_delivery FROM cf_agent_tool_runs WHERE run_id = ${runId}
+    `;
+    return rows[0]?.event_delivery === "terminal";
   }
 
   private async _broadcastAgentToolStoredChunks(
@@ -6871,15 +6919,67 @@ export class Agent<
       row.run_id,
       timeoutMs
     );
-    if (!chunks) return sequence;
-    return this._broadcastAgentToolChunks(
-      row.parent_tool_call_id ?? undefined,
-      row.run_id,
-      chunks,
-      sequence,
+    const next = chunks
+      ? this._broadcastAgentToolChunks(
+          row.parent_tool_call_id ?? undefined,
+          row.run_id,
+          chunks,
+          sequence,
+          replay,
+          connection
+        )
+      : sequence;
+    return this._broadcastAgentToolMilestones(
+      adapter,
+      row,
+      next,
       replay,
-      connection
+      connection,
+      timeoutMs
     );
+  }
+
+  /**
+   * Milestones are persisted on the child run rather than in its chunk log, so
+   * replay re-emits them from the child's inspection. The client dedupes them
+   * on the milestone's own sequence, so a milestone already seen live is a no-op.
+   */
+  private async _broadcastAgentToolMilestones(
+    adapter: AgentToolChildAdapter,
+    row: Pick<AgentToolRunStorageRow, "run_id" | "parent_tool_call_id">,
+    sequence: number,
+    replay?: true,
+    connection?: Connection,
+    timeoutMs?: number
+  ): Promise<number> {
+    const inspection = await this._settleWithinRecoveryTimeout(
+      adapter.inspectAgentToolRun(row.run_id),
+      timeoutMs
+    );
+    const milestones: AgentToolMilestone[] = inspection?.milestones ?? [];
+    let next = sequence;
+    for (const milestone of milestones) {
+      this._broadcastAgentToolEvent(
+        row.parent_tool_call_id ?? undefined,
+        next++,
+        {
+          kind: "chunk",
+          runId: row.run_id,
+          body: JSON.stringify({
+            type: AGENT_TOOL_MILESTONE_PART,
+            data: {
+              name: milestone.name,
+              sequence: milestone.sequence,
+              at: milestone.at,
+              ...(milestone.data !== undefined ? { data: milestone.data } : {})
+            }
+          })
+        },
+        replay,
+        connection
+      );
+    }
+    return next;
   }
 
   private async _forwardAgentToolStream(
@@ -6939,13 +7039,17 @@ export class Agent<
     // produces output (a silent/hung child forwards nothing → no credit → the
     // parent still exhausts on its own no-progress timer).
     let forwardedSinceProgress = false;
+    const terminalOnly = this._isTerminalOnlyAgentToolRun(runId);
     try {
       const forwardChunk = (chunk: AgentToolStoredChunk) => {
-        this._broadcastAgentToolEvent(parentToolCallId, next++, {
-          kind: "chunk",
-          runId,
-          body: chunk.body
-        });
+        const chunkSequence = next++;
+        if (!terminalOnly || isAgentToolLifecycleChunk(chunk.body)) {
+          this._broadcastAgentToolEvent(parentToolCallId, chunkSequence, {
+            kind: "chunk",
+            runId,
+            body: chunk.body
+          });
+        }
         // A reserved `data-agent-progress` frame fires the parent `onProgress`
         // hook + refreshes the cached liveness timestamp. Best-effort: never
         // let a progress observation break the forward loop.
@@ -7977,14 +8081,25 @@ export class Agent<
     runId: string,
     timeoutMs?: number
   ): Promise<AgentToolStoredChunk[] | undefined> {
-    const chunks = adapter.getAgentToolChunks(runId).catch(() => undefined);
-    if (timeoutMs === undefined || timeoutMs <= 0) return chunks;
+    return this._settleWithinRecoveryTimeout(
+      adapter.getAgentToolChunks(runId),
+      timeoutMs
+    );
+  }
+
+  /** Resolve to `undefined` when `promise` rejects or outlasts `timeoutMs`. */
+  private async _settleWithinRecoveryTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs?: number
+  ): Promise<T | undefined> {
+    const settled = promise.catch(() => undefined);
+    if (timeoutMs === undefined || timeoutMs <= 0) return settled;
 
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<undefined>((resolve) => {
       timeoutId = setTimeout(() => resolve(undefined), timeoutMs);
     });
-    const result = await Promise.race([chunks, timeout]);
+    const result = await Promise.race([settled, timeout]);
     if (timeoutId !== undefined) clearTimeout(timeoutId);
     return result;
   }

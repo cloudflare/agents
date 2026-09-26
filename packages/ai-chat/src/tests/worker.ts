@@ -184,6 +184,34 @@ export type Env = {
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
+  /**
+   * Stand in for a child restarted mid-run (#2298): a persisted in-flight
+   * agent-tool run with empty in-memory state, rebound to a recovery turn's
+   * request id, whose chunk is then broadcast.
+   */
+  broadcastRecoveredAgentToolChunkForTest(
+    eventDelivery: "full" | "terminal"
+  ): void {
+    this.sql`
+      insert into cf_ai_chat_agent_tool_runs
+        (run_id, request_id, status, started_at, event_delivery)
+      values (${crypto.randomUUID()}, 'pre-restart', 'running', ${Date.now()},
+        ${eventDelivery === "terminal" ? "terminal" : null})
+    `;
+    (
+      this as unknown as {
+        _rebindAgentToolChildRunRequestId(requestId: string): void;
+      }
+    )._rebindAgentToolChildRunRequestId("recovered-request");
+    this.broadcast(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        id: "recovered-request",
+        body: JSON.stringify({ type: "text-delta", id: "t", delta: "hi" }),
+        done: false
+      })
+    );
+  }
   // Store captured context for testing
   private _capturedContext: {
     hasAgent: boolean;

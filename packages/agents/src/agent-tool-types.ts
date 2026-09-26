@@ -271,7 +271,18 @@ export type RunAgentToolOptions<
    * must outlive the spawning turn; cancel it explicitly via `cancelAgentTool`.
    */
   detached?: boolean | DetachedAgentToolConfig<Self>;
+  /**
+   * Which child events reach the parent's clients. `"full"` (default) forwards
+   * every streamed chunk. `"terminal"` forwards only lifecycle events: started,
+   * progress and milestone frames, and the terminal event. The child still
+   * persists its whole stream, and the parent still tails it for completion,
+   * cancellation, progress and recovery. Use it for a headless parent with no
+   * client watching the child. Not supported with `detached`.
+   */
+  eventDelivery?: AgentToolEventDelivery;
 };
+
+export type AgentToolEventDelivery = "full" | "terminal";
 
 /**
  * Result of dispatching a detached run. Returns immediately after dispatch
@@ -345,7 +356,15 @@ export type AgentToolStoredChunk = {
 export type AgentToolChildAdapter<Input = unknown, Output = unknown> = {
   startAgentToolRun(
     input: Input,
-    options: { runId: string; signal?: AbortSignal }
+    options: {
+      runId: string;
+      signal?: AbortSignal;
+      /**
+       * `"terminal"` means no client is watching this run's chunks, so the
+       * child can skip broadcasting them.
+       */
+      eventDelivery?: AgentToolEventDelivery;
+    }
   ): Promise<AgentToolRunInspection<Output>>;
   cancelAgentToolRun(runId: string, reason?: unknown): Promise<void>;
   inspectAgentToolRun(

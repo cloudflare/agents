@@ -399,6 +399,37 @@ export function createAgentToolEventState<
   };
 }
 
+/**
+ * Identity of an agent-tool event for replay-vs-live dedupe. Live numbering
+ * counts transient frames that replay never sees, so only ordinary chunks key
+ * on the broadcast `sequence`. Lifecycle events key on their content: a
+ * reattached run can be interrupted again with a different reason, and the
+ * reducer overwrites on lifecycle events, so re-applying one is harmless.
+ * Milestones key on their own persisted sequence.
+ */
+export function agentToolEventDedupeKey(
+  message: AgentToolEventMessage
+): string {
+  const { event } = message;
+  let identity: string;
+  if (event.kind !== "chunk") {
+    identity = `event:${JSON.stringify(event)}`;
+  } else {
+    let milestone: AgentToolMilestone | undefined;
+    if (event.body.includes(AGENT_TOOL_MILESTONE_PART)) {
+      try {
+        milestone = readAgentToolMilestoneChunk(JSON.parse(event.body));
+      } catch {
+        milestone = undefined;
+      }
+    }
+    identity = milestone
+      ? `milestone:${milestone.sequence}`
+      : `seq:${message.sequence}`;
+  }
+  return [message.parentToolCallId ?? "", event.runId, identity].join("\0");
+}
+
 export function applyAgentToolEvent<
   Part extends AgentToolRunPart = AgentToolRunPart
 >(
@@ -451,6 +482,12 @@ export interface AgentToolBroadcastHooks {
   responseType: string;
   /** Resolve the agent-tool run that owns a turn request id, or null. */
   runForRequest: (requestId: string) => string | null;
+  /**
+   * Runs whose chunks the host suppresses (`eventDelivery: "terminal"`). Keeps
+   * inspection on after a restart empties the other maps, so a recovered
+   * turn's chunks are still attributed and suppressed.
+   */
+  terminalOnlyRuns?: ReadonlySet<string>;
 }
 
 /**
@@ -465,13 +502,18 @@ export interface AgentToolBroadcastHooks {
  * error capture never depends on tailer timing. A frame belongs to a run iff it
  * carries that run's turn request id, so concurrent runs can't cross-contaminate
  * each other's progress or error state.
+ *
+ * Returns the run id when the frame is one of that run's content chunks, so a
+ * host can skip broadcasting chunks no client is watching.
  */
 export function interceptAgentToolBroadcast(
   msg: string | ArrayBuffer | ArrayBufferView,
   hooks: AgentToolBroadcastHooks
-): void {
+): string | null {
   if (
-    (hooks.forwarders.size > 0 || hooks.liveSequences.size > 0) &&
+    (hooks.forwarders.size > 0 ||
+      hooks.liveSequences.size > 0 ||
+      (hooks.terminalOnlyRuns?.size ?? 0) > 0) &&
     typeof msg === "string"
   ) {
     try {
@@ -499,6 +541,7 @@ export function interceptAgentToolBroadcast(
             if (forwarders) {
               for (const forward of forwarders) forward(chunk);
             }
+            return runId;
           }
         }
       }
@@ -506,4 +549,5 @@ export function interceptAgentToolBroadcast(
       // Non-chat frames pass through unchanged.
     }
   }
+  return null;
 }
