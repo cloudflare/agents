@@ -1,0 +1,38 @@
+packages/agents/src/index.ts
+  s_368991bdec7f77::t_14447380afb976 1633-1634,1782-1786,4285,4307,4333,4343-4352,4356,4364-4366,4460-4461,4475-4482
+  s_368991bdec7f77::t_19581c374b980e 4304-4306,4308-4311
+packages/agents/src/tests/schema-and-state-optimization.test.ts
+  s_368991bdec7f77::t_68db15ee11ea89 79-80
+.changeset/run-fiber-completed-cleanup.md
+  s_368991bdec7f77::t_81ed8ab2bb1488 1-5
+docs/agents/durable-execution.md
+  s_368991bdec7f77::t_31aa248160c2e8 348,465
+packages/agents/src/tests/agents/run-fiber.ts
+  s_368991bdec7f77::t_b8bf0ee42a2396 77,81-90,101-108
+  s_368991bdec7f77::t_c554ed18d0832b 78-80,91-100
+packages/agents/src/tests/agents/sub-agent.ts
+  s_368991bdec7f77::t_fd008e33ca3138 410-417,424-428,1936-1937,1940-1941,1943-1944
+  s_368991bdec7f77::t_388be25bd72824 406-409,418-423,1938-1939,1942
+packages/agents/src/tests/run-fiber.test.ts
+  s_368991bdec7f77::t_cdbe249f80b4c7 64-80
+  s_368991bdec7f77::t_5c678d022f1aed 83-98
+packages/agents/src/tests/sub-agent.test.ts
+  s_368991bdec7f77::t_4d5aefb26a9a4f 1083,1101
+  s_368991bdec7f77::t_643bf35ae43793 1075-1082,1084-1100
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "19a32277c4d0d40dad84ebbb984f582dc14b5d70",
+  "prompts": {},
+  "sessions": {
+    "s_368991bdec7f77": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "33f19914-3d7a-4ae6-a5a9-ac9e68da9c17",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
