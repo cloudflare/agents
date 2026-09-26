@@ -1,12 +1,31 @@
 import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { StateMachineHarnessObject } from "../capabilities/state-machine";
 
-async function waitForSettlement(
-  stub: DurableObjectStub<StateMachineHarnessObject>,
-  runId: string
-) {
+type Snapshot = {
+  status: string;
+  result?: string;
+  error?: { message: string };
+};
+
+type HarnessStub = DurableObjectStub & {
+  startParticipant(value: string, fail?: boolean): Promise<{ runId: string }>;
+  committedValues(): Promise<string[]>;
+  startStreamSettlement(
+    streamId: string,
+    fail?: boolean
+  ): Promise<{ runId: string }>;
+  streamState(streamId: string): Promise<string | null>;
+  runSnapshot(runId: string): Promise<Snapshot | null>;
+};
+
+function harnessStub(): HarnessStub {
+  return env.StateMachineHarnessObject.getByName(
+    crypto.randomUUID()
+  ) as unknown as HarnessStub;
+}
+
+async function waitForSettlement(stub: HarnessStub, runId: string) {
   const deadline = Date.now() + 5_000;
   for (;;) {
     const snapshot = await stub.runSnapshot(runId);
@@ -19,7 +38,7 @@ async function waitForSettlement(
 
 describe("StateMachine durable commits", () => {
   it("commits a participant write with the checkpoint transition", async () => {
-    const stub = env.StateMachineHarnessObject.getByName(crypto.randomUUID());
+    const stub = harnessStub();
     const receipt = await stub.startParticipant("committed");
     await expect(waitForSettlement(stub, receipt.runId)).resolves.toMatchObject(
       {
@@ -31,7 +50,7 @@ describe("StateMachine durable commits", () => {
   });
 
   it("rolls back participant writes when the participant fails", async () => {
-    const stub = env.StateMachineHarnessObject.getByName(crypto.randomUUID());
+    const stub = harnessStub();
     const receipt = await stub.startParticipant("rolled-back", true);
     await expect(waitForSettlement(stub, receipt.runId)).resolves.toMatchObject(
       {
@@ -43,7 +62,7 @@ describe("StateMachine durable commits", () => {
   });
 
   it("settles a stream with the terminal machine commit", async () => {
-    const stub = env.StateMachineHarnessObject.getByName(crypto.randomUUID());
+    const stub = harnessStub();
     const streamId = `stream_${crypto.randomUUID()}`;
     const receipt = await stub.startStreamSettlement(streamId);
 
@@ -57,7 +76,7 @@ describe("StateMachine durable commits", () => {
   });
 
   it("keeps the stream live when a later participant rolls back", async () => {
-    const stub = env.StateMachineHarnessObject.getByName(crypto.randomUUID());
+    const stub = harnessStub();
     const streamId = `stream_${crypto.randomUUID()}`;
     const receipt = await stub.startStreamSettlement(streamId, true);
 

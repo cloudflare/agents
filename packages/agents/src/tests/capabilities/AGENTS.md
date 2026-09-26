@@ -24,6 +24,9 @@ per capability, all registered in the shared workers project
   execution from journal hits, `TaskBatchHarnessObject` (alarm batch
   bound), and the `seedTaskRun()` / `seedTaskStep()` /
   `backdateTaskWake()` helpers that fabricate interrupted or due runs.
+- `state-machine.ts` — `StateMachineHarnessObject`, covering checkpointed
+  phases, events and waits, gates, effect recovery, cancellation, local
+  children, schema migration, and atomic Streams composition.
 - `streams.ts` — `StreamHarnessObject` (Streams as the only capability) and
   `TaskStreamComposeObject` (the checkpointed-cursor contract with Tasks,
   including recovery from stream evidence).

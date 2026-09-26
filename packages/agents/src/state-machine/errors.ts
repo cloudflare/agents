@@ -15,6 +15,13 @@ export class MissingMachineDefinitionError extends Error {
   }
 }
 
+export class MachineEventQueueFullError extends Error {
+  constructor(readonly runId: string) {
+    super(`Machine run "${runId}" event queue is full`);
+    this.name = "MachineEventQueueFullError";
+  }
+}
+
 export class MachineTransitionConflictError extends Error {
   constructor(
     readonly runId: string,
