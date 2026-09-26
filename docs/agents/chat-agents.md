@@ -899,6 +899,7 @@ function Chat() {
 | ----------------------------- | ----------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `agent`                       | `ReturnType<typeof useAgent>`                   | Required | Agent connection from `useAgent`                                                                                                                                                   |
 | `onToolCall`                  | `({ toolCall, addToolOutput }) => void`         | —        | Handle client-side tool execution                                                                                                                                                  |
+| `onTurnEnd`                   | `(event: ChatTurnEndEvent) => void`             | —        | Called once for each chat request that ends, with its `messageIds` and `outcome`. See [Settle sends when a turn ends](#settle-sends-when-a-turn-ends)                              |
 | `autoContinueAfterToolResult` | `boolean`                                       | `true`   | Auto-continue conversation after client tool results and approvals                                                                                                                 |
 | `resume`                      | `boolean`                                       | `true`   | Enable automatic stream resumption on reconnect                                                                                                                                    |
 | `cancelOnClientAbort`         | `boolean`                                       | `false`  | Cancel the server turn when generic client stream abort/cleanup occurs. Explicit `stop()` always cancels the server turn                                                           |
@@ -922,6 +923,47 @@ function Chat() {
 | `isServerStreaming`       | `boolean`                          | `true` when a server-initiated stream is active (e.g. from `saveMessages`)                                                                                                                                                                    |
 | `isStreaming`             | `boolean`                          | `true` when any stream is active (client or server-initiated)                                                                                                                                                                                 |
 | `isRecovering`            | `boolean`                          | `true` while a durable turn is being recovered (interrupted and resuming). Distinct from `isStreaming` — a recovering turn is not producing tokens yet. Render a "recovering…" hint; most UIs treat `isStreaming \|\| isRecovering` as "busy" |
+
+### Settle sends when a turn ends
+
+An application that renders a send as pending before the server answers needs
+to know when that exact send is finished. `onTurnEnd` is called once for each
+chat request that ends, with the ids of the user messages it carried and how it
+ended:
+
+```tsx
+const chat = useAgentChat({
+  agent,
+  onTurnEnd: ({ messageIds, outcome, error }) => {
+    if (!messageIds) return;
+    for (const id of messageIds) {
+      settlePendingSend(id, outcome, error);
+    }
+  }
+});
+```
+
+The event has these fields:
+
+- `requestId`: the transport id of the request.
+- `messageIds`: the ids of the user messages the request ended with. These are
+  the ids the client minted when it sent them. Absent when the request did not
+  end with a user message.
+- `outcome`: `"completed"`, `"error"`, `"aborted"` (cancelled while it ran), or
+  `"skipped"` (it never ran, because a newer send superseded it or the
+  `messageConcurrency` policy dropped it).
+- `error`: the error message, when `outcome` is `"error"`.
+- `replay`: `true` when the outcome was replayed on reconnect rather than seen
+  live.
+
+`onTurnEnd` also fires for requests from other tabs and for outcomes replayed
+after a reconnect, so match `messageIds` against the sends this client is
+tracking. It does not fire when recovery continues a turn under a new request;
+the new request reports the same `messageIds` when it ends.
+
+A message id can appear in more than one event. With the `latest` or `merge`
+policies, a skipped send can still be answered by the turn that superseded it,
+which lists that id again. Treat the last event for an id as its outcome.
 
 ## Tools
 
@@ -1696,18 +1738,30 @@ A `CF_AGENT_USE_CHAT_RESPONSE` frame names its request by `id`. Terminal frames
 messages at the end of the request's `messages`. One send carries one id, and
 queued sends that arrive together carry several. This applies to completion,
 errors before or during the stream, skipped and cancelled requests, and
-terminals replayed on reconnect, so an application that renders optimistic
-sends can settle exactly the ones a terminal belongs to:
+terminals replayed on reconnect.
+
+The final `done` frame of a request can also carry `outcome`: `"completed"`,
+`"error"`, `"aborted"`, `"skipped"`, or `"recovering"`. When it is absent, the
+request errored if that frame or an earlier frame for the request carried
+`error: true`, and completed otherwise. `"recovering"` means the request
+stopped but recovery continues the same turn under a new request, which reports
+the same `messageIds` when it ends.
+
+React applications should use [`onTurnEnd`](#settle-sends-when-a-turn-ends),
+which applies these rules for you. Without React, read the frames directly:
 
 ```ts
+const erroredRequests = new Set<string>();
+
 agent.addEventListener("message", (event) => {
   const frame = JSON.parse(event.data);
-  if (
-    frame.type === "cf_agent_use_chat_response" &&
-    (frame.done || frame.error) &&
-    frame.messageIds
-  ) {
-    settlePendingSends(frame.messageIds, frame.error ? "failed" : "done");
+  if (frame.type !== "cf_agent_use_chat_response") return;
+  if (frame.error) erroredRequests.add(frame.id);
+  if (!frame.done) return;
+  const errored = erroredRequests.delete(frame.id);
+  const outcome = frame.outcome ?? (errored ? "error" : "completed");
+  if (outcome !== "recovering" && frame.messageIds) {
+    settlePendingSends(frame.messageIds, outcome);
   }
 });
 ```

@@ -10,7 +10,7 @@ import type {
 import { nanoid } from "nanoid";
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chatThrottleOptions } from "./chat-throttle";
-import type { OutgoingMessage } from "./wire-types";
+import type { ChatTurnOutcome, OutgoingMessage } from "./wire-types";
 import { STREAM_RESUME_NONE_REASONS } from "./protocol";
 import { MessageType } from "./wire-types";
 import {
@@ -364,6 +364,26 @@ type AddToolOutputOptions = {
 };
 
 /**
+ * A chat request that ended, passed to `onTurnEnd`.
+ */
+export type ChatTurnEndEvent = {
+  /** The transport id of the request. */
+  requestId: string;
+  /**
+   * Ids of the user messages the request ended with. Absent when it did not
+   * end with a user message, or the server no longer has a record of it.
+   */
+  messageIds?: string[];
+  outcome: Exclude<ChatTurnOutcome, "recovering">;
+  /** The error message, when `outcome` is `"error"`. */
+  error?: string;
+  /** Whether this outcome was replayed on reconnect rather than seen live. */
+  replay: boolean;
+};
+
+export type { ChatTurnOutcome };
+
+/**
  * Callback for handling client-side tool execution.
  * Called when a tool without server-side execute is invoked.
  */
@@ -444,6 +464,18 @@ export type UseAgentChatOptions<
    * ```
    */
   onToolCall?: OnToolCallCallback;
+  /**
+   * Called once for each chat request that ends, with the ids of the user
+   * messages it carried. Use it to settle optimistic sends by the ids the
+   * client minted. It fires for this tab's requests, for requests from other
+   * connections, and for outcomes replayed on reconnect. It does not fire for
+   * a request that recovery continues under a new request; that request
+   * reports the same `messageIds` when it ends.
+   *
+   * A message id can appear in more than one event, for example when a send
+   * is skipped and a later turn answers it. The last event for an id wins.
+   */
+  onTurnEnd?: (event: ChatTurnEndEvent) => void;
   /**
    * @deprecated Use `onToolCall` callback instead for automatic tool execution.
    * @description Whether to automatically resolve tool calls that do not require human interaction.
@@ -700,6 +732,7 @@ export function useAgentChat<
     getInitialMessages,
     messages: optionsInitialMessages,
     onToolCall,
+    onTurnEnd,
     onData,
     experimental_automaticToolResolution,
     tools,
@@ -755,6 +788,10 @@ export function useAgentChat<
   // Keep refs to always point to the latest callbacks
   const onToolCallRef = useRef(onToolCall);
   onToolCallRef.current = onToolCall;
+  const onTurnEndRef = useRef(onTurnEnd);
+  onTurnEndRef.current = onTurnEnd;
+  const turnErrorsRef = useRef(new Map<string, string>());
+  const endedTurnIdsRef = useRef(new Set<string>());
   const onDataRef = useRef(onData);
   onDataRef.current = onData;
 
@@ -1909,6 +1946,36 @@ export function useAgentChat<
 
   useEffect(() => {
     const localResponseIds = localResponseMessageIdsRef.current;
+    const turnErrors = turnErrorsRef.current;
+    const endedTurnIds = endedTurnIdsRef.current;
+
+    function reportTurnEnd(
+      frame: Extract<
+        OutgoingMessage<ChatMessage>,
+        { type: MessageType.CF_AGENT_USE_CHAT_RESPONSE }
+      >
+    ) {
+      if (frame.error && !frame.done) {
+        turnErrors.set(frame.id, frame.body);
+        return;
+      }
+      if (!frame.done) return;
+      const earlierError = turnErrors.get(frame.id);
+      turnErrors.delete(frame.id);
+      const outcome =
+        frame.outcome ??
+        (frame.error || earlierError !== undefined ? "error" : "completed");
+      if (outcome === "recovering" || endedTurnIds.has(frame.id)) return;
+      endedTurnIds.add(frame.id);
+      const error = frame.error ? frame.body : earlierError;
+      onTurnEndRef.current?.({
+        requestId: frame.id,
+        ...(frame.messageIds ? { messageIds: frame.messageIds } : {}),
+        outcome,
+        ...(outcome === "error" && error ? { error } : {}),
+        replay: frame.replay === true
+      });
+    }
 
     /**
      * Unified message handler that parses JSON once and dispatches based on type.
@@ -2151,6 +2218,7 @@ export function useAgentChat<
               current === data.id ? null : current
             );
           }
+          reportTurnEnd(data);
           if (localRequestIdsRef.current.has(data.id)) {
             if (data.body?.trim()) {
               try {

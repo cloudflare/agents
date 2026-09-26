@@ -6,7 +6,8 @@ import {
   useAgentChat,
   type PrepareSendMessagesRequestOptions,
   type PrepareSendMessagesRequestResult,
-  type AITool
+  type AITool,
+  type ChatTurnEndEvent
 } from "../react";
 import type { useAgent } from "agents/react";
 
@@ -2020,6 +2021,118 @@ describe("useAgentChat onToolCall", () => {
       await sleep(30);
     });
     expect(toolCalls).toEqual(["tc-client"]);
+  });
+
+  it("reports each ended request once through onTurnEnd (#2280)", async () => {
+    const target = new EventTarget();
+    const agent = createAgent({
+      name: "on-turn-end",
+      url: "ws://localhost:3000/agents/chat/on-turn-end?_pk=abc"
+    });
+    (agent as unknown as Record<string, unknown>).addEventListener =
+      target.addEventListener.bind(target);
+    (agent as unknown as Record<string, unknown>).removeEventListener =
+      target.removeEventListener.bind(target);
+    const frame = (fields: Record<string, unknown>) =>
+      target.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "cf_agent_use_chat_response",
+            body: "",
+            done: false,
+            ...fields
+          })
+        })
+      );
+
+    const events: ChatTurnEndEvent[] = [];
+    const TestComponent = () => {
+      useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onTurnEnd: (event) => {
+          events.push(event);
+        }
+      });
+      return null;
+    };
+
+    await act(async () => {
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      frame({ id: "req-done", done: true, messageIds: ["u1"] });
+      frame({ id: "req-fail", error: true, body: "boom" });
+      frame({ id: "req-fail", done: true, messageIds: ["u2"] });
+      frame({
+        id: "req-skip",
+        done: true,
+        outcome: "skipped",
+        messageIds: ["u3"]
+      });
+      frame({
+        id: "req-stall",
+        done: true,
+        outcome: "recovering",
+        messageIds: ["u4"]
+      });
+      frame({ id: "req-successor", done: true, messageIds: ["u4"] });
+      frame({ id: "req-done", done: true, replay: true, messageIds: ["u1"] });
+      frame({
+        id: "req-lost",
+        done: true,
+        error: true,
+        replay: true,
+        body: "gave up",
+        messageIds: ["u5"]
+      });
+      await sleep(30);
+    });
+
+    expect(events).toEqual([
+      {
+        requestId: "req-done",
+        messageIds: ["u1"],
+        outcome: "completed",
+        replay: false
+      },
+      {
+        requestId: "req-fail",
+        messageIds: ["u2"],
+        outcome: "error",
+        error: "boom",
+        replay: false
+      },
+      {
+        requestId: "req-skip",
+        messageIds: ["u3"],
+        outcome: "skipped",
+        replay: false
+      },
+      {
+        requestId: "req-successor",
+        messageIds: ["u4"],
+        outcome: "completed",
+        replay: false
+      },
+      {
+        requestId: "req-lost",
+        messageIds: ["u5"],
+        outcome: "error",
+        error: "gave up",
+        replay: true
+      }
+    ]);
   });
 
   it("keeps onToolCall held for this client's turn after the socket closes (#2195)", async () => {

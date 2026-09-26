@@ -264,6 +264,17 @@ describe("AIChatAgent messageConcurrency", () => {
     await delay(50);
 
     expect(await agentStub.getStartedRequestIds()).toEqual(["req-drop-1"]);
+    const terminalFor = (requestId: string) =>
+      seenMessages.find(
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.id === requestId &&
+          message.done
+      );
+    expect(terminalFor("req-drop-2")).toMatchObject({
+      outcome: "skipped",
+      messageIds: ["user-1", "user-2"]
+    });
 
     const rollbackMessage = [...seenMessages]
       .reverse()
@@ -291,6 +302,7 @@ describe("AIChatAgent messageConcurrency", () => {
       );
 
     expect(userTexts).toEqual(["Hello"]);
+    expect(terminalFor("req-drop-1")).not.toHaveProperty("outcome");
 
     ws.close(1000);
   });

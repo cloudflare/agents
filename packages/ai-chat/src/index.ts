@@ -2839,7 +2839,8 @@ export class AIChatAgent<
         body: "",
         done: true,
         id: requestId,
-        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        outcome: "skipped"
       })
     );
     // A skipped turn settles out of the pre-stream set, but must NOT release
@@ -7048,6 +7049,7 @@ export class AIChatAgent<
                     done: true,
                     id,
                     type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                    outcome: "error",
                     ...(continuation && { continuation: true })
                   });
                   return { status: "error", error };
@@ -7131,6 +7133,7 @@ export class AIChatAgent<
         done: true,
         id,
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        outcome: "aborted",
         ...(continuation && { continuation: true })
       });
       return { status: "aborted" };
@@ -7258,6 +7261,7 @@ export class AIChatAgent<
         done: true,
         id,
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        outcome: "aborted",
         ...(continuation && { continuation: true })
       });
       return { status: "aborted" };
@@ -7438,6 +7442,7 @@ export class AIChatAgent<
                   done: true,
                   id,
                   type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                  outcome: "recovering",
                   ...(continuation && { continuation: true })
                 });
                 streamResult = { status: "aborted" };

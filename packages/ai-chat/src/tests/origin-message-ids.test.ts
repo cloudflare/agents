@@ -103,7 +103,10 @@ describe("originating message ids on terminal frames (#2280)", () => {
 
     const first = waitForTerminal(ws, "req-stall");
     sendChat(ws, "req-stall", [user("msg-s")]);
-    expect((await first).messageIds).toEqual(["msg-s"]);
+    expect(await first).toMatchObject({
+      messageIds: ["msg-s"],
+      outcome: "recovering"
+    });
 
     for (let i = 0; i < 60 && successorTerminals.length === 0; i++) {
       await new Promise((resolve) => setTimeout(resolve, 50));

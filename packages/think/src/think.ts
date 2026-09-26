@@ -13399,7 +13399,8 @@ export class Think<
             type: MSG_CHAT_RESPONSE,
             id: requestId,
             body: "",
-            done: true
+            done: true,
+            outcome: "skipped"
           });
         }
       });
@@ -13986,7 +13987,8 @@ export class Think<
         type: MSG_CHAT_RESPONSE,
         id: requestId,
         body: "",
-        done: true
+        done: true,
+        outcome: response.status
       });
       doneSent = true;
       // A stripped/empty response still records its outcome with settlement.
@@ -14039,7 +14041,8 @@ export class Think<
               type: MSG_CHAT_RESPONSE,
               id: requestId,
               body: "",
-              done: true
+              done: true,
+              outcome: "recovering"
             });
             doneSent = true;
           }
@@ -14480,6 +14483,11 @@ export class Think<
         id: requestId,
         body: "",
         done: true,
+        outcome: streamError
+          ? "error"
+          : streamAborted
+            ? "aborted"
+            : "completed",
         ...(continuation && { continuation: true })
       };
       doneSent = true;
@@ -14526,6 +14534,7 @@ export class Think<
               id: requestId,
               body: "",
               done: true,
+              outcome: "recovering",
               ...(continuation && { continuation: true })
             });
             doneSent = true;
@@ -17876,7 +17885,8 @@ export class Think<
           type: MSG_CHAT_RESPONSE,
           id: requestId,
           body: "",
-          done: true
+          done: true,
+          outcome: "skipped"
         })
       )
     );
