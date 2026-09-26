@@ -280,6 +280,12 @@
       },
       // Facet-only sub-agent fixtures. These bindings are test-harness-only;
       // production Workers only need to export child classes.
+      // The browser tool's codemode runtime facet (stays out of
+      // new_sqlite_classes; the host owns the SQLite store).
+      {
+        "class_name": "CodemodeRuntime",
+        "name": "CodemodeRuntime"
+      },
       {
         "class_name": "CounterSubAgent",
         "name": "CounterSubAgent"

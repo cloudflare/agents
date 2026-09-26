@@ -68,6 +68,8 @@ import type { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
 export { BrowserHarnessObject } from "./capabilities/browser.ts";
 import type { BrowserHarnessObject } from "./capabilities/browser.ts";
 export { TestBrowserAgent } from "./agents/browser.ts";
+// The browser tool's codemode runtime runs as a facet of the host agent.
+export { CodemodeRuntime } from "@cloudflare/codemode";
 import type { TestBrowserAgent } from "./agents/browser.ts";
 
 // Re-export all test agents so existing imports (e.g. `import { type Env } from "./worker"`)

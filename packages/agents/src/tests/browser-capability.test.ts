@@ -298,3 +298,78 @@ describe("BrowserSessions on an Agent subclass", () => {
     );
   });
 });
+
+describe("createBrowserExecuteTool over BrowserSessions", () => {
+  const code = `async () => cdp.send({
+    method: "Runtime.evaluate",
+    params: { expression: "document.title" },
+    sessionId: "active"
+  })`;
+
+  it("runs model code in the host's persistent browser", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(
+      stub,
+      async (instance: TestBrowserAgent, state) => {
+        const tool = instance.browserExecuteTool();
+        const first = (await tool.execute({ code }, {})) as {
+          status: string;
+          result: unknown;
+          restarted?: boolean;
+        };
+        expect(first.status).toBe("completed");
+        expect(first.result).toEqual({
+          result: { value: "evaluated in target-session-1" }
+        });
+        expect(first.restarted).toBeUndefined();
+
+        // The active tab is saved on the named session's record.
+        const stored = await state.storage.get<StoredBrowserSession>(
+          durableKey("default")
+        );
+        expect(stored?.activeTargetId).toBe("target-session-1");
+
+        // A tool rebuilt next turn reuses the same browser.
+        const second = (await instance
+          .browserExecuteTool()
+          .execute({ code }, {})) as { status: string };
+        expect(second.status).toBe("completed");
+        const creates = instance.browserRequests.filter(
+          (request) => request.method === "POST" && !request.upgrade
+        );
+        expect(creates).toHaveLength(1);
+      }
+    );
+  });
+
+  it("still runs the code after a restart and tells the model", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const tool = instance.browserExecuteTool();
+      await tool.execute({ code }, {});
+      instance.killBrowserSession("session-1");
+
+      const output = (await tool.execute({ code }, {})) as {
+        status: string;
+        result: unknown;
+        restarted?: boolean;
+        notice?: string;
+      };
+      expect(output.status).toBe("completed");
+      expect(output.result).toEqual({
+        result: { value: "evaluated in target-session-2" }
+      });
+      expect(output.restarted).toBe(true);
+      expect(output.notice).toMatch(/restarted/);
+
+      const modelOutput = tool.toModelOutput({ output }) as {
+        value: { restarted?: boolean; notice?: string; calls?: unknown };
+      };
+      expect(modelOutput.value.restarted).toBe(true);
+      expect(modelOutput.value.notice).toMatch(/navigate again/);
+      expect(modelOutput.value.calls).toBeUndefined();
+    });
+  });
+});

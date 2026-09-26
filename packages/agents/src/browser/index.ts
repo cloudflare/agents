@@ -34,6 +34,18 @@ export {
 } from "./session-manager";
 
 export {
+  BrowserSessions,
+  type BrowserSessionsOptions,
+  type BrowserSessionView
+} from "./capability";
+
+export type {
+  BrowserSessionCreateOptions,
+  ConnectedBrowserSession,
+  ResolvedBrowserSession
+} from "./session-core";
+
+export {
   browserContent,
   browserExtract,
   browserLinks,

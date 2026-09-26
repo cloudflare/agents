@@ -28,6 +28,14 @@ import {
   DurableBrowserSessionStore,
   type BrowserSessionStore
 } from "./session-manager";
+import {
+  BrowserSessionConnector,
+  type BrowserExecutionReport,
+  type BrowserSessionSource
+} from "./session-connector";
+import { DEFAULT_BROWSER_SESSION_NAME } from "./session-core";
+
+export type { BrowserNewTab, BrowserSessionSource } from "./session-connector";
 
 export interface CreateBrowserToolsOptions {
   /**
@@ -186,9 +194,19 @@ function browserExecuteModelOutput(
   const screenshot = browserScreenshotOutput(output);
   if (screenshot) {
     const approximateBytes = Math.floor((screenshot.data.length * 3) / 4);
+    const report = output as { notice?: unknown; newTabs?: unknown };
+    const extras = [
+      typeof report.notice === "string" ? report.notice : undefined,
+      Array.isArray(report.newTabs) && report.newTabs.length > 0
+        ? `New tabs opened by the page: ${JSON.stringify(report.newTabs)}`
+        : undefined
+    ].filter(Boolean);
     return {
       type: "text",
-      value: `Screenshot captured successfully (${screenshot.mediaType}, approximately ${approximateBytes.toLocaleString()} bytes); the image is kept for the UI and omitted here.`
+      value: [
+        `Screenshot captured successfully (${screenshot.mediaType}, approximately ${approximateBytes.toLocaleString()} bytes); the image is kept for the UI and omitted here.`,
+        ...extras
+      ].join(" ")
     };
   }
 
@@ -227,9 +245,9 @@ function browserExecuteModelOutput(
  * `createBrowserRuntime` can be called from an Agent method without threading
  * `this.ctx` through.
  */
-function resolveCtx(
-  options: CreateBrowserToolsOptions
-): DurableObjectState | undefined {
+function resolveCtx(options: {
+  ctx?: DurableObjectState;
+}): DurableObjectState | undefined {
   if (options.ctx) return options.ctx;
   const agent = agentContext.getStore()?.agent as
     | { ctx?: DurableObjectState }
@@ -375,6 +393,160 @@ export function createBrowserRuntime(
   }
 
   return { runtime, connector, tools };
+}
+
+// ── Named-session browser tool ────────────────────────────────────────────
+
+export interface CreateBrowserExecuteToolOptions {
+  /**
+   * Where the browser comes from: the host's `BrowserSessions` capability,
+   * installed once on its Lifecycle and shared by every tool built from it.
+   */
+  sessions: BrowserSessionSource;
+
+  /**
+   * WorkerLoader binding for sandboxed code execution.
+   *
+   * Requires `"worker_loaders": [{ "binding": "LOADER" }]` in wrangler.jsonc.
+   */
+  loader: WorkerLoader;
+
+  /**
+   * The named session this tool drives. Defaults to `"default"`. Tools built
+   * with the same name share one browser.
+   */
+  session?: string;
+
+  /** Sandbox execution timeout in milliseconds. Defaults to 30000 (30s). */
+  timeoutMs?: number;
+
+  /**
+   * Durable Object state for the codemode runtime facet. Optional inside an
+   * Agent (resolved via `getCurrentAgent()`); pass it explicitly elsewhere.
+   *
+   * The worker must export the `CodemodeRuntime` class (the
+   * `@cloudflare/codemode/vite` plugin does this automatically, or add
+   * `export { CodemodeRuntime } from "@cloudflare/codemode"` to your entry).
+   */
+  ctx?: DurableObjectState;
+}
+
+/** What {@link createBrowserExecuteTool} returns: one AI SDK tool. */
+export interface BrowserExecuteTools extends ToolSet {
+  browser_execute: ToolSet[string];
+}
+
+const RESTARTED_NOTICE =
+  "The browser was restarted before this run (it expired or was closed): earlier tabs, logins, and page state are gone. Your code ran in a fresh browser — navigate again before relying on page state.";
+
+/**
+ * A codemode runtime name per session. Session names are host-chosen and
+ * unrestricted; runtime names allow only `[a-zA-Z0-9_.-]`, so anything else
+ * (including `.`, the escape) is hex-escaped.
+ */
+function sessionRuntimeName(session: string): string {
+  const escaped = session.replace(
+    /[^a-zA-Z0-9_-]/g,
+    (char) => `.${char.codePointAt(0)?.toString(16)}.`
+  );
+  return `browser-session_${escaped}`;
+}
+
+/** Add what happened to the browser to the tool output the model sees. */
+function withBrowserReport(
+  output: object,
+  report: BrowserExecutionReport | undefined
+): object {
+  if (!report) return output;
+  return {
+    ...output,
+    ...(report.restarted ? { restarted: true, notice: RESTARTED_NOTICE } : {}),
+    ...(report.newTabs.length > 0 ? { newTabs: report.newTabs } : {})
+  };
+}
+
+/**
+ * Create the `browser_execute` tool over a persistent, host-named browser.
+ *
+ * The model writes JavaScript against the `cdp` connector. The browser
+ * persists between executions and is managed by the host: the model never
+ * starts, closes, or resets it, and `sessionId: "active"` addresses the tab
+ * it last worked in. When the browser had to be replaced (it expired or was
+ * closed), the code still runs — in the fresh browser — and the result says
+ * `restarted: true`.
+ *
+ * Browser Run only (Chromium). Configure guardrails, `keepAliveMs`, and
+ * recording on the `BrowserSessions` capability.
+ *
+ * @example
+ * ```ts
+ * import { BrowserSessions } from "agents/browser";
+ * import { createBrowserExecuteTool } from "agents/browser/ai";
+ *
+ * export class MyAgent extends Agent<Env> {
+ *   browser = this.lifecycle.use(
+ *     new BrowserSessions({ browser: this.env.BROWSER })
+ *   );
+ *
+ *   async onChatMessage() {
+ *     const tools = createBrowserExecuteTool({
+ *       sessions: this.browser,
+ *       loader: this.env.LOADER
+ *     });
+ *     // …pass `tools` to streamText / generateText
+ *   }
+ * }
+ * ```
+ */
+export function createBrowserExecuteTool(
+  options: CreateBrowserExecuteToolOptions
+): BrowserExecuteTools {
+  const ctx = resolveCtx(options);
+  if (!ctx) {
+    throw new Error(
+      "createBrowserExecuteTool requires a Durable Object 'ctx' — pass it explicitly, or call from within an Agent so it can be resolved via getCurrentAgent()"
+    );
+  }
+
+  const session = options.session ?? DEFAULT_BROWSER_SESSION_NAME;
+  const connector = new BrowserSessionConnector(ctx, {
+    sessions: options.sessions,
+    session
+  });
+  const runtime = createCodemodeRuntime({
+    ctx,
+    executor: new DynamicWorkerExecutor({
+      loader: options.loader,
+      timeout: options.timeoutMs
+    }),
+    connectors: [connector],
+    name: sessionRuntimeName(session),
+    transformResult: transformBrowserResult
+  });
+
+  const browserExecute = runtime.tool({
+    connectorHints: {
+      cdp: "A persistent browser over CDP — tabs and logins carry over between runs. Use sessionId: \"active\" for page commands. Return screenshots as { type: 'browser_screenshot', mediaType: 'image/png', data: screenshot.data }; the UI keeps the image while the model receives a compact summary."
+    }
+  });
+
+  return {
+    browser_execute: {
+      ...browserExecute,
+      execute: async (
+        input: Parameters<typeof browserExecute.execute>[0],
+        executeOptions: unknown
+      ) => {
+        const output = await browserExecute.execute(input, executeOptions);
+        return withBrowserReport(
+          output,
+          connector.takeReport(output.executionId)
+        );
+      },
+      toModelOutput: ({ output }: { output: unknown }) =>
+        browserExecuteModelOutput(output)
+    }
+  };
 }
 
 /**
