@@ -61,6 +61,39 @@ describe("runFiber", () => {
 
       await agent.triggerRecoveryCheck();
       expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
+      expect(await agent.getRecoveredFibers()).toEqual([]);
+    });
+
+    it("recovers a fiber whose body failed and whose cleanup failed without calling the hook", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "run-cleanup-failure-after-error"
+      );
+
+      await expect(agent.runFailingWithFailingCleanup()).resolves.toBe(
+        "body failed"
+      );
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(1);
+
+      await agent.triggerRecoveryCheck();
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
+      expect(await agent.getRecoveredFibers()).toEqual([]);
+    });
+
+    it("should not recover a synchronously throwing body whose row cleanup failed", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "run-cleanup-failure-after-sync-throw"
+      );
+
+      await expect(agent.runFailingWithFailingCleanup(true)).resolves.toBe(
+        "body failed synchronously"
+      );
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(1);
+
+      await agent.triggerRecoveryCheck();
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
+      expect(await agent.getRecoveredFibers()).toEqual([]);
     });
 
     it("should delete the fiber row on completion", async () => {
