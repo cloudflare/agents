@@ -1,7 +1,0 @@
----
-"@cloudflare/think": patch
----
-
-Resolving a paused execution no longer leaves stale pending-state text in the transcript (#2054).
-
-After a `kind: "durable-pause"` action or a Codemode approval parks, the model can reply in the same turn ("Once approved, the change will be applied."). `approveExecution()` and `rejectExecution()` replaced the paused output but kept that reply, so the continuation read a transcript that contradicted the outcome. The text and reasoning parts after the resolved tool part are now removed from that assistant message; earlier content and later tool and file parts are kept. When the outcome lands while the parking turn is still streaming, the cleanup runs once that turn is persisted, before the next model call (the continuation or a user turn queued ahead of it). The outcome is recorded in Durable Object storage before the transcript is updated and cleared once the cleanup has run, so a restart before either write lands still writes the outcome and removes the text before the next model call. A paused part outside the hydrated window of a long transcript is now resolved in place rather than through an appended note, and a client that resubmits a stale copy of the message no longer restores the paused output or the removed text.

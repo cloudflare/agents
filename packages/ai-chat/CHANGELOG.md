@@ -1,5 +1,31 @@
 # @cloudflare/ai-chat
 
+## 0.13.0
+
+### Minor Changes
+
+- [#2364](https://github.com/cloudflare/agents/pull/2364) [`5e0507e`](https://github.com/cloudflare/agents/commit/5e0507e5f1ba27cc7c2bf2920c380a7c8f9caaad) Thanks [@threepointone](https://github.com/threepointone)! - Add `eventDelivery: "terminal"` to `runAgentTool`. The parent then forwards only lifecycle, progress, and milestone events for the run (live and on replay), and the child stops broadcasting its own stream chunks. Results, summaries, and structured output are unchanged. Detached runs reject the option.
+
+  Replaying agent-tool runs to a new connection now includes the child's persisted milestones, and `useAgentToolEvents` no longer drops a replayed lifecycle event whose sequence matches an earlier live progress frame.
+
+- [#2378](https://github.com/cloudflare/agents/pull/2378) [`dbf170c`](https://github.com/cloudflare/agents/commit/dbf170cf7d0313ffe79d7d6a84201841f2e12184) Thanks [@threepointone](https://github.com/threepointone)! - `useAgentChat` gains `onTurnEnd`, called once for each chat request that ends with its `messageIds`, `outcome`, and error, so an application can settle exactly the optimistic sends a turn belongs to without reading raw WebSocket frames ([#2280](https://github.com/cloudflare/agents/issues/2280)). It fires for this tab's requests, requests from other connections, and outcomes replayed on reconnect, and skips a request that recovery continues under a new one.
+
+  Terminal chat response frames now carry an `outcome` of `"completed"`, `"error"`, `"aborted"`, `"skipped"`, or `"recovering"` where the old `done`/`error` flags could not tell them apart. A skipped or cancelled request previously looked the same as a completed one. The `ChatTurnOutcome` and `ChatTurnEndEvent` types are exported.
+
+- [#2365](https://github.com/cloudflare/agents/pull/2365) [`c5b605b`](https://github.com/cloudflare/agents/commit/c5b605be05bab445d8b65cc8ee7acf68b32d8040) Thanks [@threepointone](https://github.com/threepointone)! - Terminal chat response frames (`done` or `error`) now carry `messageIds`, the ids of the user messages the originating request ended with. This covers completion, pre-stream and stream errors, skipped and cancelled requests, and terminals replayed on reconnect (the ids are stored with the stream and the durable terminal record), so a client can settle exactly the optimistic sends a terminal belongs to. Recovered turns keep the ids too, including a turn interrupted before its stream started (they are stored in the chat fiber snapshot as `originMessageIds`) and one whose recovery budget is exhausted as it wakes. A resume acknowledgement that arrives after a completed turn's stream was cleaned up still receives the ids.
+
+### Patch Changes
+
+- [#2334](https://github.com/cloudflare/agents/pull/2334) [`7f564e7`](https://github.com/cloudflare/agents/commit/7f564e7bfeee6ec976c12ce1e4dbbaa150906d26) Thanks [@threepointone](https://github.com/threepointone)! - Send the terminal `done` frame after the assistant message is persisted and broadcast.
+
+  `useAgentChat` switches to ready on `done`, but `AIChatAgent` sent it before saving the reply and broadcasting `cf_agent_chat_messages`. On programmatic turns (`saveMessages()`, scheduled work, continuations) and in other open tabs, a message the user sent right after the reply finished could be replaced by the late transcript. The terminal frames, including the error frame for an in-band SSE `error` chunk, are now sent after the transcript broadcast, and become error frames if persisting the reply fails.
+
+- [#2352](https://github.com/cloudflare/agents/pull/2352) [`449ac27`](https://github.com/cloudflare/agents/commit/449ac2787a1d101d7246b8035c9751bc8b5f9966) Thanks [@threepointone](https://github.com/threepointone)! - Prevent a pending automatic continuation from firing after an active stream finishes with a normal assistant response.
+
+- [#2360](https://github.com/cloudflare/agents/pull/2360) [`7206134`](https://github.com/cloudflare/agents/commit/720613485a9257e25de89d96be7a30a05c40f623) Thanks [@threepointone](https://github.com/threepointone)! - Route platform transient response-reader errors, such as `Network connection lost.`, into bounded chat recovery instead of ending the turn with an error ([#1964](https://github.com/cloudflare/agents/issues/1964)). The partial response is kept and a continuation is scheduled, as for a stream stall; a new turn that failed before producing any part is re-run instead. `onChatRecovery` can decline the recovery with `{ continue: false }`, and repeated transient errors back off and count against `maxAttempts`. Deploy and storage resets are left to the restart's recovery, and other reader errors still end the turn.
+
+- [#2348](https://github.com/cloudflare/agents/pull/2348) [`39361fa`](https://github.com/cloudflare/agents/commit/39361fa8c2194bb46c2b165454726252cca80c34) Thanks [@threepointone](https://github.com/threepointone)! - Chat stream chunk frames now carry a `seq` that keeps counting across streams restarted under the same request (an overflow retry), and `useAgentChat` skips replayed continuation chunks it has already applied. Reconnecting during a tool continuation previously replayed the whole continuation onto the assistant message that already held it, so its text appeared twice.
+
 ## 0.12.0
 
 ### Minor Changes
