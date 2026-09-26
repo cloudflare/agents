@@ -6,20 +6,17 @@ import {
   type PassEndStatus,
   type ToolExecuteContext
 } from "@cloudflare/codemode";
-import type { BrowserBinding } from "./browser-run";
 import { validateConnectorArgs } from "./connector-validation";
 import type { CdpSession } from "./cdp-session";
 import type { ConnectedBrowserSession } from "./session-core";
 import { DEFAULT_BROWSER_SESSION_NAME } from "./session-core";
-import { loadCdpSpec, type SearchableCdpSpec } from "./spec";
+import type { SearchableCdpSpec } from "./spec";
 
 /**
  * Where a {@link BrowserSessionConnector} gets its browser. Usually a
  * `BrowserSessions` capability installed on the host's Lifecycle.
  */
 export interface BrowserSessionSource {
-  /** The Browser Rendering binding the sessions run on. */
-  readonly browser: BrowserBinding;
   /** Reattach-or-create the named session and open a CDP socket to it. */
   connect(name?: string): Promise<ConnectedBrowserSession>;
 }
@@ -232,10 +229,7 @@ export class BrowserSessionConnector extends CodemodeConnector {
         inputSchema: { type: "object", properties: {} },
         execute: async (_args, ctx): Promise<SearchableCdpSpec> => {
           const state = await this.#state(this.#executionId(ctx));
-          return loadCdpSpec({
-            browser: this.#sessions.browser,
-            sessionId: state.connected.sessionId
-          });
+          return state.connected.spec();
         }
       },
 
@@ -509,10 +503,7 @@ export class BrowserSessionConnector extends CodemodeConnector {
 
   async #isEvent(state: ExecutionState, method: string): Promise<boolean> {
     try {
-      const spec = await loadCdpSpec({
-        browser: this.#sessions.browser,
-        sessionId: state.connected.sessionId
-      });
+      const spec = await state.connected.spec();
       const domain = method.split(".")[0];
       return spec.domains.some(
         (d) => d.name === domain && d.events.some((e) => e.event === method)
