@@ -1,0 +1,14 @@
+[
+  {
+    "text": "Rich streaming smoke test.",
+    "reasoning": [
+      "Checking the live provider."
+    ],
+    "sources": [
+      {
+        "url": "https://example.com",
+        "title": "Example"
+      }
+    ]
+  }
+]

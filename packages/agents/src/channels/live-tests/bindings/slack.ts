@@ -10,6 +10,7 @@ import {
 type SlackMessage = {
   ts: string;
   text: string;
+  user?: string;
   reply_count?: number;
   subtype?: string;
 };
@@ -44,9 +45,13 @@ async function slackApi(
 function createSlackBinding(threaded: boolean): LiveDeliveryBinding {
   const token = requiredEnv("CHANNELS_LIVE_SLACK_BOT_TOKEN");
   const channelId = requiredEnv("CHANNELS_LIVE_SLACK_CHANNEL_ID");
-  const channel = slack({ botToken: token });
+  const channel = slack({
+    botToken: token,
+    renderParts: { tools: true, reasoning: true }
+  });
   const host = new ChannelHost({ channels: { slack: channel } });
   let anchorTs: string | undefined;
+  let botUserId: string | undefined;
   let surface: ChannelMessageSurface = {
     channelKey: "slack",
     version: 1,
@@ -80,7 +85,9 @@ function createSlackBinding(threaded: boolean): LiveDeliveryBinding {
     // Replies must be deleted before their parent. Slack may retain thread
     // tombstones after deletion; those are not messages the bot can delete.
     for (const message of (await messages()).reverse()) {
-      if (message.subtype === "message_deleted") continue;
+      if (message.subtype === "message_deleted" || message.user !== botUserId) {
+        continue;
+      }
       try {
         await slackApi(token, "chat.delete", {
           channel: channelId,
@@ -108,11 +115,12 @@ function createSlackBinding(threaded: boolean): LiveDeliveryBinding {
       ? `Slack thread in channel ${channelId}`
       : `Slack channel ${channelId}`,
     async open() {
+      const identity = await slackApi(token, "auth.test", {});
+      botUserId = identity.user_id;
       await clear();
       if (!threaded) return;
 
       // Native channel streaming needs a thread and the intended reader.
-      const identity = await slackApi(token, "auth.test", {});
       const members = await slackApi(token, "conversations.members", {
         channel: channelId,
         limit: "100"
@@ -143,7 +151,9 @@ function createSlackBinding(threaded: boolean): LiveDeliveryBinding {
     clear,
     async read(): Promise<ObservedMessage[]> {
       return (await messages())
-        .filter((message) => message.ts !== anchorTs)
+        .filter(
+          (message) => message.user === botUserId && message.ts !== anchorTs
+        )
         .map(({ text }) => ({ text }));
     }
   };

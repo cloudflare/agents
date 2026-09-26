@@ -1,0 +1,24 @@
+{
+  "duringStream": [
+    [
+      {
+        "text": "Cloudflare Channels "
+      }
+    ],
+    [
+      {
+        "text": "Cloudflare Channels live streaming "
+      }
+    ],
+    [
+      {
+        "text": "Cloudflare Channels live streaming smoke test."
+      }
+    ]
+  ],
+  "afterStream": [
+    {
+      "text": "Cloudflare Channels live streaming smoke test."
+    }
+  ]
+}

@@ -4,7 +4,8 @@ import {
   consumeChunks,
   type Channel,
   type ChannelChunk,
-  type DeliveryResult
+  type DeliveryResult,
+  type StreamOutcome
 } from "..";
 import { collectText, createPacer } from "../stream";
 
@@ -86,6 +87,28 @@ describe("collectText", () => {
     });
   });
 
+  it("projects rich text without inserting spaces for interleaved metadata", async () => {
+    const chunks: ChannelChunk[] = [
+      { type: "message-start", messageId: "m1" },
+      { type: "text-start", id: "p1" },
+      { type: "text", id: "p1", text: "hel" },
+      { type: "message-metadata", metadata: { progress: 0.5 } },
+      { type: "data", name: "progress", data: 0.5, transient: true },
+      { type: "custom", kind: "provider.event" },
+      { type: "text", id: "p1", text: "lo" },
+      { type: "text-end", id: "p1" },
+      { type: "text-start", id: "p2" },
+      { type: "text", id: "p2", text: "world" },
+      { type: "text-end", id: "p2" },
+      { type: "message-finish", finishReason: "stop" }
+    ];
+
+    await expect(collectText(streamOf(chunks))).resolves.toEqual({
+      text: "hello world",
+      interrupted: false
+    });
+  });
+
   it("reports interruption instead of losing the partial answer", async () => {
     const chunks = streamOf(text("Half an "), new Error("model failed"));
 
@@ -97,6 +120,47 @@ describe("collectText", () => {
 });
 
 describe("consumeChunks", () => {
+  it("finalizes and stops the producer when aborted", async () => {
+    const cancel = vi.fn();
+    const chunks = new ReadableStream<ChannelChunk>({ cancel });
+    const abort = new AbortController();
+    const consuming = consumeChunks(
+      chunks,
+      {
+        onChunk() {},
+        onFinish: (result) => result
+      },
+      { signal: abort.signal }
+    );
+
+    abort.abort("cancelled");
+
+    await expect(consuming).resolves.toEqual({
+      interrupted: true,
+      error: "cancelled"
+    });
+    expect(cancel).toHaveBeenCalledExactlyOnceWith("cancelled");
+  });
+
+  it("does not deliver buffered chunks for a pre-aborted stream", async () => {
+    const abort = new AbortController();
+    abort.abort("cancelled");
+    const onChunk = vi.fn();
+    const onFinish = vi.fn((outcome: StreamOutcome) => outcome);
+
+    await expect(
+      consumeChunks(
+        streamOf(text("never")),
+        { onChunk, onFinish },
+        {
+          signal: abort.signal
+        }
+      )
+    ).resolves.toEqual({ interrupted: true, error: "cancelled" });
+    expect(onChunk).not.toHaveBeenCalled();
+    expect(onFinish).toHaveBeenCalledOnce();
+  });
+
   it("finalizes once when the stream closes normally", async () => {
     const onFinish = vi.fn(() => "done");
 

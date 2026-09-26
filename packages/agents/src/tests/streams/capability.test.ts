@@ -7,7 +7,11 @@ import type {
 } from "../capabilities/streams";
 import { seedTaskRun, seedTaskStep } from "../capabilities/tasks";
 import { captureDiagnosticsEvents } from "../shared/diagnostics-capture";
-import { sseResponse, type StreamChunk } from "../../streams";
+import {
+  sseResponse,
+  type StreamChunk,
+  type StreamListCursor
+} from "../../streams";
 
 /**
  * Capability-level Streams tests: the capability installed on a minimal real
@@ -289,6 +293,35 @@ describe("Streams capability", () => {
       await expect(
         instance.streams.open("t2", { tag: "req-else" })
       ).rejects.toThrow(/refusing reopen/);
+    });
+  });
+
+  it("pages a tag with a cursor taken from the previous page", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      for (const id of ["p1", "p2", "p3", "p4"]) {
+        (await instance.streams.open(id, { tag: "paged" })).close();
+      }
+
+      const seen: string[] = [];
+      let after: StreamListCursor | undefined;
+      for (;;) {
+        const page = await instance.streams.list({
+          tag: "paged",
+          limit: 2,
+          ...(after !== undefined && { after })
+        });
+        if (page.length === 0) break;
+        seen.push(...page.map((status) => status.streamId));
+        const last = page[page.length - 1];
+        after = { createdAt: last.createdAt, streamId: last.streamId };
+      }
+
+      const newestFirst = (await instance.streams.list({ tag: "paged" })).map(
+        (status) => status.streamId
+      );
+      expect(seen).toEqual(newestFirst);
+      expect(new Set(seen).size).toBe(4);
     });
   });
 

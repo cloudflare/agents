@@ -45,6 +45,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/channels/slack`       | `src/channels/slack.ts`       | Slack adapter                                                                |
 | `agents/channels/telegram`    | `src/channels/telegram.ts`    | Telegram adapter                                                             |
 | `agents/channels/voice`       | `src/channels/voice.ts`       | Output-only browser Voice adapter                                            |
+| `agents/channels/web`         | `src/channels/web.ts`         | Browser chat adapter over the WebSockets capability                          |
 | `agents/channels/ai-sdk`      | `src/channels/ai-sdk.ts`      | AI SDK tool and stream adapters                                              |
 | `agents/channels/tanstack-ai` | `src/channels/tanstack-ai.ts` | TanStack AI tool adapter                                                     |
 

@@ -29,9 +29,19 @@ export type ChannelActorInput = Omit<ChannelActor, "identity"> & {
   readonly identity?: ChannelIdentityInput;
 };
 
+/** A client-executed tool advertised without depending on an AI framework. */
+export type ChannelClientTool = {
+  readonly name: string;
+  readonly description?: string;
+  /** JSON Schema, including boolean schemas. */
+  readonly inputSchema?: Record<string, unknown> | boolean;
+};
+
 export type ChannelEventContext = {
   /** Immutable Channel-scoped identity, independent of application routing. */
   readonly eventId: string;
+  /** Opaque identity shared by events belonging to one application operation. */
+  readonly operationId?: string;
   readonly thread: {
     readonly id: string;
     readonly isDirectMessage: boolean | "unknown";
@@ -50,6 +60,8 @@ export type ChannelInboundMessage = ChannelEventContext & {
     readonly title?: string;
     readonly markdown?: string;
     readonly attachments?: readonly ChannelAttachment[];
+    /** Client-advertised tools available for the turn submitted by this message. */
+    readonly clientTools?: readonly ChannelClientTool[];
     readonly isMention?: boolean;
     readonly reply?: {
       readonly id: string;
@@ -66,18 +78,53 @@ export type ChannelInboundMessage = ChannelEventContext & {
   };
 };
 
+/**
+ * A client-reported tool result, not proof that an authorized tool ran.
+ * The application must verify the actor and pending call, reject duplicates,
+ * and decide whether other outstanding results prevent continuation.
+ */
+export type ChannelToolResult = ChannelEventContext & {
+  readonly type: "tool-result";
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly result:
+    | { readonly success: true; readonly output: unknown }
+    | { readonly success: false; readonly error: string };
+  /** Client preference; never overrides application continuation policy. */
+  readonly autoContinue?: boolean;
+  /** Updated client tool schemas available after this result. */
+  readonly clientTools?: readonly ChannelClientTool[];
+};
+
 /** A provider-normalized response to an external approval request. */
 export type ChannelApprovalResponse = ChannelEventContext & {
   readonly type: "approval-response";
   readonly interactionId: string;
   readonly decision: "approve" | "reject";
+  /** Client preference; never overrides application continuation policy. */
+  readonly autoContinue?: boolean;
   /** Provider reference for this inbound response. */
   readonly reference: string;
 };
 
+/** A participant's request to stop one active response attempt. */
+export type ChannelCancelRequest = ChannelEventContext & {
+  readonly type: "cancel-request";
+  /** Correlates this request with the operation exposed on the original event. */
+  readonly operationId: string;
+};
+
+/** A participant's request to reset one conversation. */
+export type ChannelConversationResetRequest = ChannelEventContext & {
+  readonly type: "conversation-reset-request";
+};
+
 export type ChannelIngressEvent =
   | ChannelInboundMessage
-  | ChannelApprovalResponse;
+  | ChannelToolResult
+  | ChannelApprovalResponse
+  | ChannelCancelRequest
+  | ChannelConversationResetRequest;
 
 /** A normalized message before the Host stamps its configured Channel key. */
 export type ChannelEventContextInput = Omit<
@@ -96,6 +143,15 @@ export type ChannelInboundMessageInput = Omit<
   readonly actor?: ChannelActorInput;
 };
 
+/** A normalized tool result before the Host stamps its configured Channel key. */
+export type ChannelToolResultInput = Omit<
+  ChannelToolResult,
+  "replySurface" | "actor"
+> & {
+  readonly replySurface?: ChannelMessageSurfaceInput;
+  readonly actor?: ChannelActorInput;
+};
+
 /** A normalized approval before the Host stamps its configured Channel key. */
 export type ChannelApprovalResponseInput = Omit<
   ChannelApprovalResponse,
@@ -105,15 +161,40 @@ export type ChannelApprovalResponseInput = Omit<
   readonly actor?: ChannelActorInput;
 };
 
+export type ChannelCancelRequestInput = Omit<
+  ChannelCancelRequest,
+  "replySurface" | "actor"
+> & {
+  readonly replySurface?: ChannelMessageSurfaceInput;
+  readonly actor?: ChannelActorInput;
+};
+
+export type ChannelConversationResetRequestInput = Omit<
+  ChannelConversationResetRequest,
+  "replySurface" | "actor"
+> & {
+  readonly replySurface?: ChannelMessageSurfaceInput;
+  readonly actor?: ChannelActorInput;
+};
+
 /** Authenticated event produced by a Channel before Host dispatch. */
 export type ChannelIngressEventInput =
   | ChannelInboundMessageInput
-  | ChannelApprovalResponseInput;
+  | ChannelToolResultInput
+  | ChannelApprovalResponseInput
+  | ChannelCancelRequestInput
+  | ChannelConversationResetRequestInput;
 
 /** Authenticated adapter output retained only until Host routing completes. */
 export type ChannelIngressEnvelope<TRaw = unknown> = {
   event: ChannelIngressEventInput;
   raw: TRaw;
+  /**
+   * Called once the Host resolves routing and before the application handles
+   * the event, so an adapter can commit or discard transient state that only
+   * a routed event may leave behind.
+   */
+  onRouted?: (routed: boolean) => void | Promise<void>;
 };
 
 /** The normalized envelopes and provider acknowledgement produced by ingress. */
