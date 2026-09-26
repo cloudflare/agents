@@ -1001,6 +1001,8 @@ const { messages, sendMessage } = useAgentChat({
 
 When the LLM invokes `getLocation`, the stream pauses. The `onToolCall` callback fires, your code provides the output, and the conversation continues.
 
+`onToolCall` fires once the response stream ends, for each tool call that is still waiting for a result. A server tool runs and resolves in the same stream, so it never reaches `onToolCall`.
+
 ### Dynamic Client Tools (SDK/Platform Pattern)
 
 For SDKs and platforms where tools are defined dynamically by the embedding application at runtime, use the `tools` option on `useAgentChat` and `createToolsFromClientSchemas()` on the server:

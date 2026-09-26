@@ -421,6 +421,9 @@ export type UseAgentChatOptions<
   /**
    * Callback for handling client-side tool execution.
    * Called when a tool without server-side `execute` is invoked by the LLM.
+   * It fires once the response stream ends, for each tool call still waiting
+   * for a result, so server tools that resolve in the same stream never
+   * reach it.
    *
    * Use this for:
    * - Tools that need browser APIs (geolocation, camera, etc.)
@@ -1783,11 +1786,39 @@ export function useAgentChat<
     [autoContinueAfterToolResult, startToolContinuation]
   );
 
+  const [isServerStreaming, setIsServerStreaming] = useState(false);
+  // A server turn (this client's own or one observed from another tab) whose
+  // terminal frame was missed when the socket closed: its tool parts may still
+  // belong to a live server turn until that request's terminal frame or an
+  // idle probe settles it.
+  const [unresolvedObservedRequestId, setUnresolvedObservedRequestId] =
+    useState<string | null>(null);
+
+  // Server turns are serialized, so a request this client submits runs after
+  // the observed turn ends; its own lifecycle gates tool calls from here on.
+  useEffect(() => {
+    if (status === "submitted") {
+      setUnresolvedObservedRequestId(null);
+    }
+  }, [status]);
+
   // Effect for new onToolCall callback pattern (v6 style)
   // This fires when there are tool calls that need client-side handling
   useEffect(() => {
     const currentOnToolCall = onToolCallRef.current;
     if (!currentOnToolCall) {
+      return;
+    }
+
+    // A server tool sits in `input-available` while the server executes it,
+    // and its result arrives in the same stream. Once the stream ends, every
+    // part still waiting is one the client has to answer (#2195).
+    if (
+      status === "streaming" ||
+      status === "submitted" ||
+      isServerStreaming ||
+      unresolvedObservedRequestId !== null
+    ) {
       return;
     }
 
@@ -1858,11 +1889,18 @@ export function useAgentChat<
         });
       }
     }
-  }, [chatMessages, sendToolOutputToServer, addToolResult, finishOnToolCall]);
+  }, [
+    chatMessages,
+    status,
+    isServerStreaming,
+    unresolvedObservedRequestId,
+    sendToolOutputToServer,
+    addToolResult,
+    finishOnToolCall
+  ]);
 
   const streamStateRef = useRef<BroadcastStreamState>({ status: "idle" });
 
-  const [isServerStreaming, setIsServerStreaming] = useState(false);
   // #1620: a durable chat turn is being recovered (interrupted by a
   // deploy/eviction or a stream-stall watchdog abort and now resuming). Driven
   // by the server's `CF_AGENT_CHAT_RECOVERING` frames; surfaced as a "working,
@@ -1893,6 +1931,7 @@ export function useAgentChat<
             type: "clear"
           }).state;
           setIsServerStreaming(false);
+          setUnresolvedObservedRequestId(null);
           setIsRecovering(false);
           // Shared local-state reset — see `resetLocalChatState`.
           resetLocalChatState();
@@ -2024,6 +2063,7 @@ export function useAgentChat<
             });
             streamStateRef.current = result.state;
             setIsServerStreaming(result.isStreaming);
+            setUnresolvedObservedRequestId(null);
             if (observedToolContinuationRequestIdRef.current !== null) {
               resetToolContinuation();
             }
@@ -2106,6 +2146,11 @@ export function useAgentChat<
         }
 
         case MessageType.CF_AGENT_USE_CHAT_RESPONSE: {
+          if (data.done || data.error) {
+            setUnresolvedObservedRequestId((current) =>
+              current === data.id ? null : current
+            );
+          }
           if (localRequestIdsRef.current.has(data.id)) {
             if (data.body?.trim()) {
               try {
@@ -2341,6 +2386,9 @@ export function useAgentChat<
     let disposed = false;
 
     const clearFallbackObserver = () => {
+      if (streamStateRef.current.status === "observing") {
+        setUnresolvedObservedRequestId(streamStateRef.current.streamId);
+      }
       const result = broadcastTransition(streamStateRef.current, {
         type: "clear"
       });
@@ -2392,6 +2440,11 @@ export function useAgentChat<
       sawClose = true;
       fallbackAckedResumeRequestIds.clear();
 
+      const unfinishedTurnId = customTransport.activeServerTurnId;
+      if (unfinishedTurnId !== null) {
+        setUnresolvedObservedRequestId(unfinishedTurnId);
+      }
+
       // resume:false opts out of recovering disconnected streams. There can be
       // no future authoritative probe, so stop claiming that a disconnected
       // fallback observer is live; pending client tool work remains folded into
@@ -2425,6 +2478,7 @@ export function useAgentChat<
       fallbackAckedResumeRequestIds.clear();
       streamStateRef.current = { status: "idle" };
       setIsServerStreaming(false);
+      setUnresolvedObservedRequestId(null);
       setIsRecovering(false);
       protectedStreamingAssistantRef.current = null;
       localResponseIds.clear();
