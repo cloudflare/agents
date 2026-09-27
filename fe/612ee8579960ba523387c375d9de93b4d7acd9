@@ -1,0 +1,23 @@
+packages/think/src/tests/agents/messengers.ts
+  s_671f05444ff5f0::t_d7c714eed8a753 304-334,480,483-486,489
+packages/think/src/tests/messengers.test.ts
+  s_671f05444ff5f0::t_76dade5026a548 1323-1336
+packages/think/src/think.ts
+  s_671f05444ff5f0::t_dc8d085e39f622 18605,18615-18639,18646-18648,18663-18668,18719,18733,18748-18751,18754
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fe612ee8579960ba523387c375d9de93b4d7acd9",
+  "prompts": {},
+  "sessions": {
+    "s_671f05444ff5f0": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "6643b91d-e7d6-4cfa-9d7a-cd394687cb18",
+        "model": "unknown"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
