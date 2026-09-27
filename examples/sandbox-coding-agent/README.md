@@ -18,7 +18,7 @@ This is a local demo. Read this before deploying it anywhere:
 
 - **`/agents/*` has no authentication.** Anyone who can reach the Worker can chat with any orchestrator by name, start containers, and spend your Workers AI and AI Gateway budget. Put it behind [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) or add an auth check before `routeAgentRequest` before deploying.
 - **The container runs model-directed commands with internet access.** Claude Code runs with `--permission-mode bypassPermissions`, so it executes whatever shell commands it decides on, without approval, and the container can reach the public internet (`enableInternet = true`, needed for the `git clone`). Don't put anything in the container you wouldn't hand to an untrusted process.
-- **The Anthropic proxy is bounded, not locked down.** It only forwards `POST /v1/messages` and `POST /v1/messages/count_tokens` and rejects requests above `MAX_OUTPUT_TOKENS`, but any process in the container can still call those endpoints on your account. Set spend limits / rate limits on the gateway.
+- **The Anthropic proxy is bounded, not locked down.** It only forwards `POST /v1/messages` and `POST /v1/messages/count_tokens` and rejects message requests whose `max_tokens` is missing or above `MAX_OUTPUT_TOKENS`, but any process in the container can still call those endpoints on your account. Set spend limits / rate limits on the gateway.
 
 The demo repo is [`threepointone/aywson`](https://github.com/threepointone/aywson), a small JSONC parser with tests.
 

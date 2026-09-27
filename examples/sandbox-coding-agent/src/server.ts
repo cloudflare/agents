@@ -69,12 +69,20 @@ async function anthropicViaGateway(req: Request, env: Env): Promise<Response> {
   } catch {
     return Response.json({ error: "Expected a JSON body." }, { status: 400 });
   }
+  // Only `v1/messages` generates output; `count_tokens` takes no `max_tokens`.
   if (
-    typeof body.max_tokens === "number" &&
-    body.max_tokens > MAX_OUTPUT_TOKENS
+    endpoint === "v1/messages" &&
+    !(
+      typeof body.max_tokens === "number" &&
+      Number.isInteger(body.max_tokens) &&
+      body.max_tokens > 0 &&
+      body.max_tokens <= MAX_OUTPUT_TOKENS
+    )
   ) {
     return Response.json(
-      { error: `max_tokens is capped at ${MAX_OUTPUT_TOKENS}.` },
+      {
+        error: `max_tokens must be an integer from 1 to ${MAX_OUTPUT_TOKENS}.`
+      },
       { status: 400 }
     );
   }
@@ -366,7 +374,27 @@ export class CodingOrchestrator extends Think<Env> {
     if (result.status === "interrupted" && result.childStillRunning !== false) {
       return;
     }
+    // An `error` can also be the parent losing the child's stream while the
+    // child keeps editing; keep a live child's container for the sweep too.
+    if (result.status === "error" && (await this.isChildLive(run.runId))) {
+      return;
+    }
     await this.destroySandbox(run.runId);
+  }
+
+  /** Whether the child still reports its run as in flight (or can't be asked). */
+  private async isChildLive(runId: string): Promise<boolean> {
+    if (!this.hasAgentToolRun(ClaudeCodeAgent, runId)) return false;
+    try {
+      const child = await this.dynamicAgents.get(ClaudeCodeAgent, runId);
+      const inspection = await child.inspectAgentToolRun(runId);
+      return (
+        inspection?.status === "running" || inspection?.status === "starting"
+      );
+    } catch (error) {
+      console.warn(`Could not inspect run ${runId}; keeping it:`, error);
+      return true;
+    }
   }
 
   // Some runs never deliver a usable finish: a child that failed to start, or
@@ -379,21 +407,7 @@ export class CodingOrchestrator extends Think<Env> {
     const tracked = await this.ctx.storage.list({ prefix: SANDBOX_RUN_PREFIX });
     for (const key of tracked.keys()) {
       const runId = key.slice(SANDBOX_RUN_PREFIX.length);
-      if (this.hasAgentToolRun(ClaudeCodeAgent, runId)) {
-        try {
-          const child = await this.dynamicAgents.get(ClaudeCodeAgent, runId);
-          const inspection = await child.inspectAgentToolRun(runId);
-          if (
-            inspection?.status === "running" ||
-            inspection?.status === "starting"
-          ) {
-            continue;
-          }
-        } catch (error) {
-          console.warn(`Could not inspect run ${runId}; keeping it:`, error);
-          continue;
-        }
-      }
+      if (await this.isChildLive(runId)) continue;
       await this.destroySandbox(runId);
     }
   }
