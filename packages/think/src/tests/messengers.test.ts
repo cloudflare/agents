@@ -1849,7 +1849,8 @@ describe("think messengers core", () => {
       ) => {
         await sleep(60);
         callback.onEvent(JSON.stringify({ type: "text-delta", delta: "hi" }));
-      }
+      },
+      log: string[] = []
     ) {
       const posts: string[] = [];
       const delivered = deliverMessengerReply({
@@ -1857,6 +1858,7 @@ describe("think messengers core", () => {
         policy: { typingRefreshMs: 10 },
         surface: {
           async post(message) {
+            log.push("post");
             if (isAsyncIterable(message)) {
               posts.push(...(await collectText(message)));
               return;
@@ -1919,6 +1921,32 @@ describe("think messengers core", () => {
 
       expect(typing).toBe(afterTurn);
       expect(posts).toEqual([ERROR_MESSENGER_RESPONSE]);
+    });
+
+    it("never overlaps slow typing requests or lets one land after the first post", async () => {
+      const log: string[] = [];
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const { delivered, posts } = deliver(
+        async () => {
+          inFlight++;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          log.push("typing:start");
+          await sleep(25);
+          log.push("typing:end");
+          inFlight--;
+        },
+        undefined,
+        log
+      );
+      await delivered;
+      await sleep(50);
+
+      expect(posts).toEqual(["hi"]);
+      expect(maxInFlight).toBe(1);
+      const firstPost = log.indexOf("post");
+      expect(firstPost).toBeGreaterThan(0);
+      expect(log.slice(firstPost).filter((e) => e !== "post")).toEqual([]);
     });
   });
 

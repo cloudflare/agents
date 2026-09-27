@@ -328,7 +328,9 @@ function withoutOverwrittenStartMetadata(
     return chunk;
   }
   const messageMetadata = Object.fromEntries(
-    Object.entries(chunk.messageMetadata).filter(([key]) => !(key in existing))
+    Object.entries(chunk.messageMetadata).filter(
+      ([key]) => !Object.prototype.hasOwnProperty.call(existing, key)
+    )
   );
   return { ...chunk, messageMetadata };
 }

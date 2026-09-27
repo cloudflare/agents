@@ -447,18 +447,28 @@ export async function deliverMessengerReply(
   });
 
   // The typing indicator is cosmetic: a failure to show it must not stop the
-  // turn. It is re-sent until the reply's first text is posted.
-  const sendTyping = async () => {
-    try {
-      await options.surface.startTyping?.("Thinking...");
-    } catch (error) {
-      console.warn("[Think] Messenger typing indicator failed", error);
-    }
+  // turn. It is re-sent until the reply's first text is posted, one request
+  // at a time so a slow one cannot land after the post and re-show it.
+  let typingInFlight: Promise<void> | undefined;
+  let typingStopped = false;
+  const sendTyping = (): Promise<void> => {
+    if (typingStopped) return Promise.resolve();
+    typingInFlight ??= (async () => {
+      try {
+        await options.surface.startTyping?.("Thinking...");
+      } catch (error) {
+        console.warn("[Think] Messenger typing indicator failed", error);
+      } finally {
+        typingInFlight = undefined;
+      }
+    })();
+    return typingInFlight;
   };
   const typingRefreshMs =
     options.policy?.typingRefreshMs ?? DEFAULT_TYPING_REFRESH_MS;
   let typingTimer: ReturnType<typeof setInterval> | undefined;
   const stopTyping = () => {
+    typingStopped = true;
     clearInterval(typingTimer);
     typingTimer = undefined;
   };
@@ -468,8 +478,9 @@ export async function deliverMessengerReply(
   // ahead of the apology on adapters without native streaming.
   const post = callback
     .hasVisibleOutput()
-    .then((visible) => {
+    .then(async (visible) => {
       stopTyping();
+      await typingInFlight;
       return visible ? options.surface.post(callback.stream()) : undefined;
     })
     .catch(async (error: unknown) => {

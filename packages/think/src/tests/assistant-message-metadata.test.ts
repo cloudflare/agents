@@ -241,6 +241,31 @@ describe("Think — server-authored assistant-message metadata", () => {
   );
 
   it(
+    "keeps new recovery metadata keys that shadow Object.prototype names",
+    { timeout: 20_000 },
+    async () => {
+      const agent = await getAgentByName(
+        env.ThinkTestAgent,
+        `metadata-recovery-inherited-${crypto.randomUUID()}`
+      );
+
+      const { assistantMessages, metadata } =
+        await agent.testRecoveryExtensionMetadataForTest({
+          toString: "kept",
+          constructor: "kept"
+        });
+
+      expect(assistantMessages).toBe(1);
+      expect(JSON.parse(metadata)).toEqual({
+        createdAt: 1,
+        continuation: false,
+        toString: "kept",
+        constructor: "kept"
+      });
+    }
+  );
+
+  it(
     "writes metadata on the sub-agent chat() RPC path too",
     { timeout: 15_000 },
     async () => {
