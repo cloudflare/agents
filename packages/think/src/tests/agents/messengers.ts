@@ -227,9 +227,87 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         conversation: this._recoveryMode() === "thread" ? "thread" : "self",
         provider: "fake",
         userName: "fake_bot",
-        verifyWebhook: false
+        verifyWebhook: false,
+        // A `split-…` agent posts each `|`-separated piece separately.
+        ...(this.name.startsWith("split-") && {
+          delivery: { splitText: (text: string) => text.split("|") }
+        })
       })
     };
+  }
+
+  private _failPostForTest: string | null = null;
+
+  /**
+   * Deliver a settled recovered reply whose record says `posted` posts
+   * already went out, through the live path (`replay: false`) or the start
+   * replay. `failPost` rejects that post once. Returns the retry it
+   * scheduled, if any, and whether the record is still pending.
+   */
+  async deliverSettledRecoveryForTest(options: {
+    text: string;
+    posted?: number;
+    failPost?: string;
+    replay?: boolean;
+  }): Promise<{
+    retry: { key: string; attempts: number } | undefined;
+    pending: { posted?: number } | undefined;
+  }> {
+    const incidentId = `${crypto.randomUUID()}:user-1`;
+    const key = `cf_think_messenger_recovery:${incidentId}`;
+    await this.ctx.storage.put(key, {
+      messengerId: "fake",
+      threadId: "fake:dm-split",
+      partialText: "",
+      outcome: "completed",
+      text: options.text,
+      ...(options.posted !== undefined && { posted: options.posted })
+    });
+    this._failPostForTest = options.failPost ?? null;
+    const internal = this as unknown as {
+      _settleMessengerRecovery(
+        incidentId: string,
+        outcome: "completed" | "interrupted"
+      ): void;
+      _replayMessengerRecoveryDeliveries(): Promise<void>;
+    };
+    const retryFor = () =>
+      this.getSchedules()
+        .filter(
+          (schedule) =>
+            schedule.callback === "_cfRetryMessengerRecoveryDelivery"
+        )
+        .map(
+          (schedule) =>
+            schedule.payload as unknown as { key: string; attempts: number }
+        )
+        .find((payload) => payload.key === key);
+    if (options.replay) {
+      await internal._replayMessengerRecoveryDeliveries();
+    } else {
+      internal._settleMessengerRecovery(incidentId, "completed");
+      const deadline = Date.now() + 5_000;
+      while (
+        Date.now() < deadline &&
+        !retryFor() &&
+        (await this.ctx.storage.get(key)) !== undefined
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+    return {
+      retry: retryFor(),
+      pending: await this.ctx.storage.get<{ posted?: number }>(key)
+    };
+  }
+
+  /** Run a scheduled recovered-reply retry now. */
+  async runMessengerRecoveryRetryForTest(payload: {
+    key: string;
+    attempts: number;
+  }): Promise<boolean> {
+    await this._cfRetryMessengerRecoveryDelivery(payload);
+    return (await this.ctx.storage.get(payload.key)) === undefined;
   }
 
   async getRecorded(kind: "prompt" | "post" | "edit"): Promise<string[]> {
@@ -369,6 +447,10 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       },
       isDM: (threadId: string) => threadId.startsWith("fake:dm"),
       postMessage: (threadId: string, message: unknown) => {
+        if (this._failPostForTest === text(message)) {
+          this._failPostForTest = null;
+          return Promise.reject(new Error("simulated post failure"));
+        }
         this._record("post", text(message));
         return Promise.resolve({ id: "reply", raw: {}, threadId });
       },

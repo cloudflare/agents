@@ -763,6 +763,117 @@ describe("Think — error handling", () => {
     expect(result.incidentStatuses).not.toContain("failed");
   });
 
+  it("keeps a post-stream persist failure terminal under a transient classifier", async () => {
+    const agent = await freshAgent(`transient-persist-${crypto.randomUUID()}`);
+    const result = await agent.testPostStreamPersistFailureForTest();
+
+    expect(result.first.error).toContain("simulated persist failure");
+    expect(result.first.interruptedCalls).toBe(0);
+    expect(result.scheduled).toBe(0);
+    expect(result.responses).toBe(1);
+  });
+
+  it.each([false, true])(
+    "does not retry an aborted turn under a transient classifier (inStream: %s)",
+    async (inStream) => {
+      const agent = await freshAgent(`transient-abort-${crypto.randomUUID()}`);
+      const result = await agent.testTransientScenarioForTest({
+        classification: "transient",
+        inStream,
+        abortFirst: true
+      });
+
+      expect(result.first.interruptedCalls).toBe(0);
+      expect(result.scheduled).toBe(0);
+    }
+  );
+
+  it("delivers a terminal error when routing into recovery throws", async () => {
+    const agent = await freshAgent(`transient-route-${crypto.randomUUID()}`);
+    const result = await agent.testTransientScenarioForTest({
+      classification: "transient",
+      inStream: false,
+      failIncidentBegin: true
+    });
+
+    expect(result.first.error).toContain("upstream connection reset");
+    expect(result.first.interruptedCalls).toBe(0);
+    expect(result.scheduled).toBe(0);
+  });
+
+  it("classifies an in-stream error from the provider error object", async () => {
+    const agent = await freshAgent(`transient-original-${crypto.randomUUID()}`);
+    const result = await agent.testTransientScenarioForTest({
+      classification: "structural",
+      inStream: true,
+      error: "api-call-503"
+    });
+
+    expect(result.classified).toEqual(["AI_APICallError"]);
+    expect(result.first.error).toBeUndefined();
+    expect(result.first.interruptedCalls).toBe(1);
+    expect(result.scheduled).toBe(1);
+  });
+
+  it.each([
+    { retryAfter: "7", inStream: true, delay: 7 },
+    { retryAfter: "7", inStream: false, delay: 7 },
+    { retryAfter: "600", inStream: true, delay: 60 },
+    { retryAfter: "0", inStream: true, delay: 1 }
+  ])(
+    "honors Retry-After $retryAfter on a rate limit (inStream: $inStream)",
+    async ({ retryAfter, inStream, delay }) => {
+      const agent = await freshAgent(`rate-limit-${crypto.randomUUID()}`);
+      const result = await agent.testTransientScenarioForTest({
+        classification: "rate_limit",
+        inStream,
+        error: "api-call-503",
+        retryAfter
+      });
+
+      expect(result.scheduled).toBe(1);
+      expect(result.delaySeconds).toBe(delay);
+    }
+  );
+
+  it.each([
+    { error: "code-update-reset" as const, inStream: false },
+    { error: "code-update-reset" as const, inStream: true },
+    { error: "storage-reset" as const, inStream: false }
+  ])(
+    "never schedules live recovery for a Durable Object $error (inStream: $inStream)",
+    async ({ error, inStream }) => {
+      const agent = await freshAgent(`do-reset-${crypto.randomUUID()}`);
+      const result = await agent.testTransientScenarioForTest({
+        classification: "transient",
+        inStream,
+        error
+      });
+
+      expect(result.first.interruptedCalls).toBe(0);
+      expect(result.scheduled).toBe(0);
+    }
+  );
+
+  it("does not run a backed-off recovery the user cancelled", async () => {
+    const agent = await freshAgent(`transient-cancel-${crypto.randomUUID()}`);
+    const result = await agent.testCancelDuringBackoffForTest();
+
+    expect(result.incident).toMatchObject({
+      status: "skipped",
+      reason: "user_cancelled"
+    });
+    expect(result.finalText).toBe(result.textBeforeCancel);
+  });
+
+  it("bounds a turn that streams a chunk and stalls on every attempt", async () => {
+    const agent = await freshAgent(`stall-progress-${crypto.randomUUID()}`);
+    const result = await agent.testRepeatedStallAfterProgressForTest(40);
+
+    expect(result.scheduledAtEnd).toBe(0);
+    expect(result.rounds).toBeLessThanOrEqual(10);
+  });
+
   it("routes a transient WebSocket stream error into bounded recovery (#2085)", async () => {
     const room = `transient-ws-${crypto.randomUUID()}`;
     const agent = await freshAgent(room);

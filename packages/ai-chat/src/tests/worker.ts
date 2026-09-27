@@ -3267,6 +3267,47 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     };
   }
 
+  private _recoveryTaskKeyed: boolean[] = [];
+
+  /** Record whether each recovery enqueued from now on has an idempotency key. */
+  trackRecoveryTaskKeysForTest(): void {
+    const self = this as unknown as {
+      _enqueueChatRecovery(
+        callback: Parameters<typeof chatRecoveryTaskRunOptions>[0]["callback"],
+        data: Record<string, unknown>,
+        reason: Parameters<typeof chatRecoveryTaskRunOptions>[1],
+        delaySeconds: number,
+        dedupeKey?: string
+      ): Promise<void>;
+    };
+    const original = self._enqueueChatRecovery.bind(this);
+    self._enqueueChatRecovery = (callback, data, reason, delaySeconds, key) => {
+      this._recoveryTaskKeyed.push(
+        chatRecoveryTaskRunOptions(
+          { callback, data, delaySeconds },
+          reason,
+          key
+        ).idempotencyKey !== undefined
+      );
+      return original(callback, data, reason, delaySeconds, key);
+    };
+  }
+
+  getRecoveryTaskKeyedForTest(): boolean[] {
+    return this._recoveryTaskKeyed;
+  }
+
+  /** Make the next routing into recovery throw (an incident write failure). */
+  failNextIncidentBeginForTest(): void {
+    const self = this as unknown as {
+      _beginChatRecoveryIncident(...args: unknown[]): Promise<unknown>;
+    };
+    self._beginChatRecoveryIncident = async () => {
+      Reflect.deleteProperty(self, "_beginChatRecoveryIncident");
+      throw new Error("incident write failed");
+    };
+  }
+
   getScheduleCountForCallback(callback: string): number {
     const scheduled = this.sql<{ count: number }>`
       SELECT COUNT(*) as count FROM cf_agents_jobs

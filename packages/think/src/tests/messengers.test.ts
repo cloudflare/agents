@@ -1281,6 +1281,45 @@ describe("think messengers core", () => {
 
       expect(posted).toEqual(["Got", INTERRUPTED_MESSENGER_RESPONSE]);
     });
+
+    it("resumes a multi-post recovered reply after its last checkpoint", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `split-replay-${crypto.randomUUID()}`
+      );
+      const result = await agent.deliverSettledRecoveryForTest({
+        text: "one|two|three",
+        posted: 1,
+        replay: true
+      });
+
+      expect(result.pending).toBeUndefined();
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content)
+      ).toEqual(["two", "three"]);
+    });
+
+    it("retries a recovered reply whose live delivery fails, without re-posting", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `split-live-${crypto.randomUUID()}`
+      );
+      const result = await agent.deliverSettledRecoveryForTest({
+        text: "one|two",
+        failPost: "two"
+      });
+
+      expect(result.retry?.attempts).toBe(1);
+      expect(result.pending?.posted).toBe(1);
+      expect(result.retry).toBeDefined();
+      if (!result.retry) return;
+      expect(await agent.runMessengerRecoveryRetryForTest(result.retry)).toBe(
+        true
+      );
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content)
+      ).toEqual(["one", "two"]);
+    });
   });
 
   describe("burst replies end to end (#2312)", () => {

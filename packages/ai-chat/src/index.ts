@@ -8,9 +8,7 @@ import type {
 } from "ai";
 import {
   Agent,
-  isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
-  isDurableObjectStorageReset,
   isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
   __DO_NOT_USE_WILL_BREAK__withInvocationScope as withInvocationScope,
@@ -104,6 +102,9 @@ import {
   buildChatRecoveringFrame,
   setChatRecovering,
   AgentToolStreamProgressThrottle,
+  chatRecoveryBackoffSeconds,
+  isDurableObjectResetError,
+  partialHasSettledToolResults,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
   type ResolvedRecoveryStream,
@@ -274,12 +275,21 @@ const PROVIDER_TOOL_MAX_STRING_LENGTH = 500;
  * going away, and the restart's own recovery owns the turn.
  */
 function isRecoverableStreamReadError(error: unknown): boolean {
-  return (
-    isPlatformTransientError(error) &&
-    !isDurableObjectCodeUpdateReset(error) &&
-    !isDurableObjectStorageReset(error)
-  );
+  return isPlatformTransientError(error) && !isDurableObjectResetError(error);
 }
+
+/** A live stream interruption (stall or transient error) to route to recovery. */
+type StreamInterruptionRoute = {
+  requestId: string;
+  streamId: string;
+  partialParts: MessagePart[];
+  targetAssistantId?: string;
+  continuation: boolean;
+  /** Delay the recovery with exponential backoff (transient errors). */
+  backoff?: boolean;
+  /** Skip persisting the partial (`onChatRecovery` returned `persist: false`). */
+  discardPartial: () => void;
+};
 
 /**
  * Validates that a parsed message has the minimum required structure.
@@ -1585,6 +1595,7 @@ export class AIChatAgent<
         // Handle request cancellation
         if (event.type === "cancel") {
           this._abortRegistry.cancel(event.id);
+          await this._cancelScheduledRecovery(event.id);
           this._emit("message:cancel", { requestId: event.id });
           return;
         }
@@ -3060,6 +3071,22 @@ export class AIChatAgent<
    */
   protected abortRequest(requestId: string, reason?: unknown): void {
     this._abortRegistry.cancel(requestId, reason);
+  }
+
+  /**
+   * A cancel can land while the turn's recovery is waiting out its backoff,
+   * with nothing in flight to abort: cancel the scheduled recovery instead,
+   * so the queued callback bails when it fires.
+   */
+  private async _cancelScheduledRecovery(requestId: string): Promise<void> {
+    try {
+      await this._chatRecoveryEngine().cancelScheduledRecovery(requestId);
+    } catch (error) {
+      console.error(
+        "[AIChatAgent] failed to cancel a scheduled chat recovery",
+        error
+      );
+    }
   }
 
   /**
@@ -4957,6 +4984,10 @@ export class AIChatAgent<
         sweepStaleChatRecoveryIncidents(this.ctx.storage, now),
       getIncident: async (key) =>
         (await this.ctx.storage.get<ChatRecoveryIncident>(key)) ?? null,
+      listActiveIncidents: async () =>
+        (await listActiveChatRecoveryIncidents(this.ctx.storage)).map(
+          ({ incident }) => incident
+        ),
       readProgress: () => this._chatRecoveryProgressMarker(),
       // A turn parked on a pending CLIENT interaction is waiting on the human,
       // not stuck, so the engine keeps it budget-free.
@@ -5432,6 +5463,11 @@ export class AIChatAgent<
     data?: ChatRecoveryContinueData,
     onTurnStarted?: () => void
   ): Promise<void> {
+    if (
+      await this._chatRecoveryEngine().isRecoveryCancelled(data?.incidentId)
+    ) {
+      return;
+    }
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
@@ -5507,7 +5543,15 @@ export class AIChatAgent<
       // recovered transcript is settled and the next `convertToModelMessages`
       // doesn't 400 with `AI_MissingToolResultsError`.
       onTurnStarted?.();
+      this._takeRecoveryReschedule(data?.incidentId);
       const result = await this.continueLastTurn();
+      if (
+        result.status !== "completed" &&
+        this._takeRecoveryReschedule(data?.incidentId)
+      ) {
+        // Interrupted again: the attempt it scheduled owns the outcome.
+        return;
+      }
       await this._updateChatRecoveryIncident(
         data?.incidentId,
         result.status === "completed"
@@ -5568,15 +5612,9 @@ export class AIChatAgent<
    * / `"failed"` when `onChatRecovery` opted out or threw — the caller then
    * delivers the ordinary terminal error.
    */
-  private async _routeStallToBoundedRecovery(input: {
-    requestId: string;
-    streamId: string;
-    partialParts: MessagePart[];
-    targetAssistantId?: string;
-    continuation: boolean;
-    /** Delay the recovery with exponential backoff (transient errors). */
-    backoff?: boolean;
-  }): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
+  private async _routeStallToBoundedRecovery(
+    input: StreamInterruptionRoute
+  ): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
     const originIds = this._originMessageIdsFor(input.requestId);
@@ -5655,6 +5693,12 @@ export class AIChatAgent<
       );
       return "failed";
     }
+    // `persist: false` drops the partial unless it holds settled tool results
+    // (non-idempotent work that must not re-run), same as Think.
+    const discardPartial =
+      options.persist === false &&
+      !partialHasSettledToolResults(input.partialParts);
+    if (discardPartial) input.discardPartial();
     if (options.continue === false) {
       await this._updateChatRecoveryIncident(
         incident.incidentId,
@@ -5664,21 +5708,36 @@ export class AIChatAgent<
       return "declined";
     }
 
-    let delaySeconds: number | undefined;
-    if (input.backoff) {
-      const retries = await this._chatRecoveryEngine().recordTransientRetry(
-        incident.incidentId
-      );
-      delaySeconds = Math.min(2 ** (retries - 1), 30);
-    }
-    if (lostPartialUserId) {
+    // A dropped partial on a new turn leaves the user's message as the leaf,
+    // so there is nothing to continue: retry the turn instead.
+    const retryUserId =
+      lostPartialUserId ??
+      (discardPartial && !input.continuation && leaf?.role === "user"
+        ? leaf.id
+        : undefined);
+    // Stalls count too: a turn that streams a little and then stalls resets
+    // the progress-keyed attempt cap every time, so this is its only bound.
+    const retries = await this._chatRecoveryEngine().recordTransientRetry(
+      incident.incidentId
+    );
+    const delaySeconds = input.backoff
+      ? chatRecoveryBackoffSeconds(retries)
+      : undefined;
+    // Inside a recovery attempt, the next attempt must not join the run that
+    // is scheduling it (see `ChatRecoveryScheduleReason`).
+    const reason =
+      this._activeChatRecoveryRootRequestId !== undefined
+        ? "chained_retry"
+        : undefined;
+    if (retryUserId) {
       await this._chatRecoveryEngine().scheduleRecovery({
         incident,
         delaySeconds,
-        recoveryKind,
+        reason,
+        recoveryKind: "retry",
         callback: "_chatRecoveryRetry",
         data: {
-          targetUserId: lostPartialUserId,
+          targetUserId: retryUserId,
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: this._lastBody ?? null,
@@ -5686,11 +5745,13 @@ export class AIChatAgent<
           ...(originIds ? { originMessageIds: originIds } : {})
         }
       });
+      this._rescheduledRecoveryIncidents.add(incident.incidentId);
       return "scheduled";
     }
     await this._chatRecoveryEngine().scheduleRecovery({
       incident,
       delaySeconds,
+      reason,
       recoveryKind: "continue",
       callback: "_chatRecoveryContinue",
       data: {
@@ -5704,7 +5765,37 @@ export class AIChatAgent<
         ...(originIds ? { originMessageIds: originIds } : {})
       }
     });
+    this._rescheduledRecoveryIncidents.add(incident.incidentId);
     return "scheduled";
+  }
+
+  /** Incidents whose running recovery attempt scheduled the next attempt. */
+  private _rescheduledRecoveryIncidents = new Set<string>();
+
+  private _takeRecoveryReschedule(incidentId: string | undefined): boolean {
+    return (
+      incidentId !== undefined &&
+      this._rescheduledRecoveryIncidents.delete(incidentId)
+    );
+  }
+
+  /**
+   * {@link _routeStallToBoundedRecovery} for the stream `catch`: a routing
+   * failure (e.g. a rejected incident write) degrades to `"failed"`, so the
+   * caller still delivers its terminal error frame.
+   */
+  private async _routeStreamInterruption(
+    input: StreamInterruptionRoute
+  ): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
+    try {
+      return await this._routeStallToBoundedRecovery(input);
+    } catch (error) {
+      console.error(
+        "[AIChatAgent] routing a stream interruption into recovery failed; delivering the terminal error",
+        error
+      );
+      return "failed";
+    }
   }
 
   /**
@@ -5949,6 +6040,11 @@ export class AIChatAgent<
     data?: ChatRecoveryRetryData,
     onTurnStarted?: () => void
   ): Promise<void> {
+    if (
+      await this._chatRecoveryEngine().isRecoveryCancelled(data?.incidentId)
+    ) {
+      return;
+    }
     const previousRootRequestId = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId =
       data?.originalRequestId ?? previousRootRequestId;
@@ -6020,10 +6116,18 @@ export class AIChatAgent<
       // an unanswered user-message tail (no assistant orphan to repair), so that
       // is a defensive no-op here, but keeps both recovery entrypoints converged.
       onTurnStarted?.();
+      this._takeRecoveryReschedule(data?.incidentId);
       const result = await this._retryLastUserTurn(
         this._lastClientTools,
         this._lastBody
       );
+      if (
+        result.status !== "completed" &&
+        this._takeRecoveryReschedule(data?.incidentId)
+      ) {
+        // Interrupted again: the attempt it scheduled owns the outcome.
+        return;
+      }
       await this._updateChatRecoveryIncident(
         data?.incidentId,
         result.status === "completed"
@@ -7376,6 +7480,9 @@ export class AIChatAgent<
         // (or terminal exhaustion) now owns the turn, so the post-stream
         // persistence + the success `message:response` emit below are skipped.
         let stallRouted = false;
+        // Set when `onChatRecovery` returned `persist: false` for the routed
+        // interruption: the partial is dropped instead of persisted.
+        let discardPartial = false;
 
         // Stream-active gate for the auto-continuation barrier (#1650): while
         // this assistant turn is streaming the parallel tool batch can still
@@ -7429,13 +7536,16 @@ export class AIChatAgent<
               // chunks here — the live `message` is authoritative.)
               const targetAssistantId =
                 message.parts.length > 0 ? message.id : undefined;
-              const outcome = await this._routeStallToBoundedRecovery({
+              const outcome = await this._routeStreamInterruption({
                 requestId: id,
                 streamId,
                 partialParts: message.parts,
                 targetAssistantId,
                 continuation,
-                backoff: !(error instanceof ChatStreamStalledError)
+                backoff: !(error instanceof ChatStreamStalledError),
+                discardPartial: () => {
+                  discardPartial = true;
+                }
               });
               if (outcome === "scheduled") {
                 // Recovering: close the stream cleanly (no terminal error frame);
@@ -7521,7 +7631,7 @@ export class AIChatAgent<
                   discard: !this._agentToolRunsByRequestId.get(id)
                 }
               : null;
-          if (message.parts.length > 0) {
+          if (message.parts.length > 0 && !discardPartial) {
             if (earlyPersistedId) {
               // Message already exists in this.messages from the early persist.
               // Update it in place with the final streaming state.

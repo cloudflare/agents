@@ -636,6 +636,10 @@ export class ThinkTestAgent extends Think {
     afterChunks: number;
     message: string;
     inStream?: boolean;
+    /** Thrown (or handed to `onError` in-stream) instead of a plain error. */
+    error?: unknown;
+    /** Abort the turn right before it fails. */
+    abortFirst?: boolean;
   } | null = null;
   // #2085: when set, only the first N inferences error (then the recovery
   // continuation streams normally). `null` = every inference errors.
@@ -1474,9 +1478,13 @@ export class ThinkTestAgent extends Think {
           ]
         : [];
     const chunkDelayMs = this._streamChunkDelayMs;
+    const abortAll = () => this.cancelAllChats();
 
     return {
-      toUIMessageStream(options?: { sendReasoning?: boolean }) {
+      toUIMessageStream(options?: {
+        sendReasoning?: boolean;
+        onError?: (error: unknown) => string;
+      }) {
         // `StreamableResult.toUIMessageStream()` returns an `AsyncIterable`
         // (not a `ReadableStream`), so consume it via its async iterator
         // rather than `getReader()`.
@@ -1512,14 +1520,22 @@ export class ThinkTestAgent extends Think {
                 while (true) {
                   if (shouldThrow && config) {
                     await iterator.return?.();
+                    if (config.abortFirst) abortAll();
                     if (config.inStream) {
                       erroredInStream = true;
+                      const errorText =
+                        config.error === undefined
+                          ? config.message
+                          : (options?.onError?.(config.error) ??
+                            config.message);
                       return {
                         done: false as const,
-                        value: { type: "error", errorText: config.message }
+                        value: { type: "error", errorText }
                       };
                     }
-                    throw new SimulatedChatError(config.message);
+                    throw (
+                      config.error ?? new SimulatedChatError(config.message)
+                    );
                   }
                   const { done, value } = await iterator.next();
                   if (done) return { done: true as const, value: undefined };
@@ -2281,6 +2297,247 @@ export class ThinkTestAgent extends Think {
       delaySeconds,
       finalRoles: (await this.getMessages()).map((m) => m.role)
     };
+  }
+
+  private async _recoveryIncidentsForTest(): Promise<
+    Array<{
+      status: string;
+      reason?: string;
+      requestId: string;
+      recoveryRootRequestId?: string;
+      transientRetries?: number;
+    }>
+  > {
+    const incidents = await this.ctx.storage.list<{
+      status: string;
+      reason?: string;
+      requestId: string;
+      recoveryRootRequestId?: string;
+      transientRetries?: number;
+    }>({ prefix: "cf:chat-recovery:incident:" });
+    return [...incidents.values()];
+  }
+
+  /**
+   * The stream finishes, then persisting its message fails, under a
+   * classifier that calls every error transient. The failure is past the
+   * stream, so it must stay terminal (a retry would re-run a finished turn).
+   */
+  async testPostStreamPersistFailureForTest(): Promise<{
+    first: TestChatResult;
+    scheduled: number;
+    responses: number;
+  }> {
+    this.classifyChatError = () => "transient";
+    const self = this as unknown as {
+      _persistAssistantMessageWithCutover(...args: unknown[]): Promise<void>;
+    };
+    const original = self._persistAssistantMessageWithCutover;
+    self._persistAssistantMessageWithCutover = async () => {
+      self._persistAssistantMessageWithCutover = original;
+      throw new Error("simulated persist failure");
+    };
+    this._responseLog = [];
+    try {
+      const first = await this.testChat("persist fails after the stream");
+      return {
+        first,
+        scheduled:
+          recoveryWorkCountForTest(this, "_chatRecoveryContinue") +
+          recoveryWorkCountForTest(this, "_chatRecoveryRetry"),
+        responses: this._responseLog.length
+      };
+    } finally {
+      self._persistAssistantMessageWithCutover = original;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
+  /**
+   * One transient-classified failure with a custom setup: `error` is the
+   * failure itself (thrown, or given to the stream's `onError` in-stream),
+   * `abortFirst` aborts the turn right before it fails, and
+   * `failIncidentBegin` makes routing into recovery throw.
+   */
+  async testTransientScenarioForTest(options: {
+    classification: "transient" | "rate_limit" | "structural";
+    inStream: boolean;
+    error?: "api-call-503" | "code-update-reset" | "storage-reset";
+    retryAfter?: string;
+    abortFirst?: boolean;
+    failIncidentBegin?: boolean;
+  }): Promise<{
+    first: TestChatResult;
+    scheduled: number;
+    delaySeconds: number | null;
+    classified: string[];
+  }> {
+    let error: unknown;
+    if (options.error === "api-call-503") {
+      error = Object.assign(new Error("Service Unavailable"), {
+        name: "AI_APICallError",
+        statusCode: 503,
+        isRetryable: true,
+        ...(options.retryAfter
+          ? { responseHeaders: { "retry-after": options.retryAfter } }
+          : {})
+      });
+    } else if (options.error === "code-update-reset") {
+      error = new Error("Durable Object reset because its code was updated.");
+    } else if (options.error === "storage-reset") {
+      error = new Error(
+        "Internal error in Durable Object storage caused object to be reset."
+      );
+    }
+    await this.armTransientErrorForTest({
+      classification: undefined,
+      inStream: options.inStream
+    });
+    if (this._errorConfig) {
+      this._errorConfig.error = error;
+      this._errorConfig.abortFirst = options.abortFirst;
+    }
+    const classified: string[] = [];
+    this.classifyChatError = (err: unknown) => {
+      classified.push(
+        err instanceof Error ? err.name : typeof err === "string" ? err : "?"
+      );
+      if (options.classification !== "structural") {
+        return options.classification;
+      }
+      // A structural classifier: needs the provider error object, not text.
+      return typeof err === "object" &&
+        err !== null &&
+        "statusCode" in err &&
+        err.statusCode === 503
+        ? "transient"
+        : "fatal";
+    };
+    const self = this as unknown as {
+      _beginChatRecoveryIncident(...args: unknown[]): Promise<unknown>;
+    };
+    if (options.failIncidentBegin) {
+      self._beginChatRecoveryIncident = async () => {
+        throw new Error("incident write failed");
+      };
+    }
+    try {
+      const first = await this.testChat("trigger transient scenario");
+      const delaySeconds =
+        this.sql<{ delay: number | null }>`
+          SELECT json_extract(input, '$.delaySeconds') AS delay
+          FROM cf_agents_task_runs
+          WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+          ORDER BY created_at DESC
+          LIMIT 1
+        `[0]?.delay ?? null;
+      return {
+        first,
+        scheduled:
+          recoveryWorkCountForTest(this, "_chatRecoveryContinue") +
+          recoveryWorkCountForTest(this, "_chatRecoveryRetry"),
+        delaySeconds,
+        classified
+      };
+    } finally {
+      Reflect.deleteProperty(this, "_beginChatRecoveryIncident");
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
+  /**
+   * A transient failure schedules a backed-off continuation; the user cancels
+   * the turn during the backoff. The scheduled continuation must not run.
+   */
+  async testCancelDuringBackoffForTest(): Promise<{
+    textBeforeCancel: string;
+    finalText: string;
+    incident: { status: string; reason?: string } | undefined;
+  }> {
+    await this.armTransientErrorForTest({
+      classification: "transient",
+      inStream: true
+    });
+    const assistantText = async () =>
+      (
+        (await this.getMessages()).filter((m) => m.role === "assistant").at(-1)
+          ?.parts ?? []
+      )
+        .map((p) => (p.type === "text" ? p.text : ""))
+        .join("");
+    try {
+      await this.testChat("trigger transient error");
+      const textBeforeCancel = await assistantText();
+      const [scheduled] = await this._recoveryIncidentsForTest();
+      this.cancelChat(
+        scheduled?.recoveryRootRequestId ?? scheduled?.requestId ?? ""
+      );
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        const [incident] = await this._recoveryIncidentsForTest();
+        if (incident?.status !== "scheduled") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      const [incident] = await this._recoveryIncidentsForTest();
+      return {
+        textBeforeCancel,
+        finalText: await assistantText(),
+        incident: incident && {
+          status: incident.status,
+          reason: incident.reason
+        }
+      };
+    } finally {
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
+  /**
+   * Every inference streams a little, then stalls. Each attempt makes
+   * progress, so only the transient counter bounds the loop. Returns how many
+   * recoveries ran before nothing more was scheduled.
+   */
+  async testRepeatedStallAfterProgressForTest(maxRounds: number): Promise<{
+    rounds: number;
+    scheduledAtEnd: number;
+    statuses: string[];
+  }> {
+    this._stallAfterChunks = 3;
+    this._stallAttemptsRemaining = null;
+    this.chatStreamStallTimeoutMs = 50;
+    try {
+      await this.testChat("stall after progress, repeatedly");
+      let rounds = 0;
+      for (; rounds < maxRounds; rounds++) {
+        const continues = recoveryWorkCountForTest(
+          this,
+          "_chatRecoveryContinue"
+        );
+        const retries = recoveryWorkCountForTest(this, "_chatRecoveryRetry");
+        if (continues === 0 && retries === 0) break;
+        await runRecoveryWorkForTest(
+          this,
+          continues > 0 ? "_chatRecoveryContinue" : "_chatRecoveryRetry"
+        );
+      }
+      return {
+        rounds,
+        scheduledAtEnd:
+          recoveryWorkCountForTest(this, "_chatRecoveryContinue") +
+          recoveryWorkCountForTest(this, "_chatRecoveryRetry"),
+        statuses: (await this._recoveryIncidentsForTest()).map(
+          (incident) => incident.status
+        )
+      };
+    } finally {
+      this._stallAfterChunks = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
   }
 
   /**

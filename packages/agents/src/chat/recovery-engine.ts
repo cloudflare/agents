@@ -141,6 +141,12 @@ export interface ChatRecoveryAdapter {
    * fixture) omits it and the engine treats the turn as never parked (`false`).
    */
   isAwaitingClientInteraction?(): boolean;
+  /**
+   * Optional: list the live (not yet terminalized) incidents. Required for
+   * {@link ChatRecoveryEngine.cancelScheduledRecovery}; a host that omits it
+   * cannot cancel a scheduled recovery.
+   */
+  listActiveIncidents?(): Promise<ChatRecoveryIncident[]>;
   /** Persist the evaluated incident under `key`. */
   putIncident(key: string, incident: ChatRecoveryIncident): Promise<void>;
   /**
@@ -709,6 +715,46 @@ export class ChatRecoveryEngine {
   }
 
   /**
+   * The user cancelled `requestId` while its recovery was scheduled but not
+   * yet running (e.g. during a transient-error backoff). Marks every
+   * `scheduled` incident whose recovery root or current attempt is
+   * `requestId` as `skipped` with {@link CHAT_RECOVERY_CANCELLED_REASON}, so
+   * the queued callback bails when it fires (see {@link isRecoveryCancelled}).
+   * Returns whether any incident was cancelled.
+   */
+  async cancelScheduledRecovery(requestId: string): Promise<boolean> {
+    const incidents = (await this.adapter.listActiveIncidents?.()) ?? [];
+    let cancelled = false;
+    for (const incident of incidents) {
+      if (
+        incident.status === "scheduled" &&
+        (incident.recoveryRootRequestId === requestId ||
+          incident.requestId === requestId)
+      ) {
+        await this.updateIncident(
+          incident.incidentId,
+          "skipped",
+          CHAT_RECOVERY_CANCELLED_REASON
+        );
+        cancelled = true;
+      }
+    }
+    return cancelled;
+  }
+
+  /** Whether the user cancelled this incident's scheduled recovery. */
+  async isRecoveryCancelled(incidentId: string | undefined): Promise<boolean> {
+    if (!incidentId) return false;
+    const incident = await this.adapter.getIncident(
+      chatRecoveryIncidentKey(incidentId)
+    );
+    return (
+      incident?.status === "skipped" &&
+      incident.reason === CHAT_RECOVERY_CANCELLED_REASON
+    );
+  }
+
+  /**
    * Record that a recovery callback observed a Durable Object memory-limit reset
    * (the isolate exceeded its 128 MB limit — `isDurableObjectMemoryLimitReset`)
    * and decide what to do next (#1825).
@@ -956,6 +1002,83 @@ export class ChatRecoveryEngine {
       await adapter.setRecovering(false);
     }
   }
+}
+
+/** `incident.reason` for a scheduled recovery the user cancelled. */
+export const CHAT_RECOVERY_CANCELLED_REASON = "user_cancelled";
+
+/** Cap on the exponential backoff between transient-error recoveries. */
+export const CHAT_RECOVERY_MAX_BACKOFF_SECONDS = 30;
+
+/** Cap on a provider `Retry-After` honored for a rate-limited recovery. */
+export const CHAT_RECOVERY_MAX_RETRY_AFTER_SECONDS = 60;
+
+/**
+ * Delay before the `retries`-th transient-error recovery: exponential backoff
+ * capped at {@link CHAT_RECOVERY_MAX_BACKOFF_SECONDS}. A provider
+ * `retryAfterSeconds` (rate limits) extends it, capped at
+ * {@link CHAT_RECOVERY_MAX_RETRY_AFTER_SECONDS}.
+ */
+export function chatRecoveryBackoffSeconds(
+  retries: number,
+  retryAfterSeconds?: number
+): number {
+  const backoff = Math.min(
+    2 ** (retries - 1),
+    CHAT_RECOVERY_MAX_BACKOFF_SECONDS
+  );
+  if (retryAfterSeconds === undefined) return backoff;
+  return Math.min(
+    Math.max(backoff, retryAfterSeconds),
+    CHAT_RECOVERY_MAX_RETRY_AFTER_SECONDS
+  );
+}
+
+/**
+ * The `Retry-After` an error carries, in whole seconds. Reads
+ * `responseHeaders` (AI SDK `APICallError`) or `headers` on the error or its
+ * `cause` chain; accepts delta-seconds or an HTTP date. `undefined` when absent
+ * or unparseable.
+ */
+export function retryAfterSeconds(
+  error: unknown,
+  now: number = Date.now()
+): number | undefined {
+  let current = error;
+  for (let depth = 0; depth < 8 && current != null; depth++) {
+    if (typeof current !== "object") return undefined;
+    const record = current as {
+      responseHeaders?: unknown;
+      headers?: unknown;
+      cause?: unknown;
+    };
+    const value =
+      readRetryAfterHeader(record.responseHeaders) ??
+      readRetryAfterHeader(record.headers);
+    if (value !== undefined) return parseRetryAfter(value, now);
+    current = record.cause;
+  }
+  return undefined;
+}
+
+function readRetryAfterHeader(headers: unknown): string | undefined {
+  if (headers == null || typeof headers !== "object") return undefined;
+  if (headers instanceof Headers)
+    return headers.get("retry-after") ?? undefined;
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() === "retry-after" && typeof value === "string") {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function parseRetryAfter(value: string, now: number): number | undefined {
+  const trimmed = value.trim();
+  if (/^\d+(\.\d+)?$/.test(trimmed)) return Math.ceil(Number(trimmed));
+  const date = Date.parse(trimmed);
+  if (Number.isNaN(date)) return undefined;
+  return Math.max(0, Math.ceil((date - now) / 1000));
 }
 
 /**
