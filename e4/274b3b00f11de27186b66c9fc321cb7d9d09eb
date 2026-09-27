@@ -1,0 +1,65 @@
+.changeset/think-messenger-prompt-review.md
+  s_671f05444ff5f0::t_0b73ca0b0c5361 1-15
+docs/think/index.md
+  s_671f05444ff5f0::t_e88ab9cd10e67b 956,969,984-985
+docs/think/messengers.md
+  s_671f05444ff5f0::t_ae40416a7e87b9 161-163,189-194,244-247
+packages/agents/src/chat-sdk/adapter.ts
+  s_671f05444ff5f0::t_2a6aec6bdab36d 57-61,77,104-108,112,130-152
+packages/agents/src/chat-sdk/types.ts
+  s_671f05444ff5f0::t_2340b3228f9a87 17-26
+packages/agents/src/chat/truncate-older-messages.ts
+  s_671f05444ff5f0::t_419fa435b87678 133-138,150-154,156-162,164-165,171-172,202-209,211,214-216,219,223-225,227-228,232,235-236,245-294
+packages/agents/src/tests/agents/chat-sdk.ts
+  s_671f05444ff5f0::t_3b2cc8e429d500 103-133
+packages/agents/src/tests/chat-sdk.test.ts
+  s_671f05444ff5f0::t_6200b1ec9839d7 54-65
+packages/agents/src/tests/chat/truncate-older-messages.test.ts
+  s_671f05444ff5f0::t_487f8b9dbe8834 243,271,273-276,313-315,319-322,358-516
+packages/think/src/messengers/chat-sdk.ts
+  s_671f05444ff5f0::t_7f4acbdb8af44e 10,52,147-153,156,160-193,267-268,321-323,409-434,476-538,553-555,599-621,627-628,1095-1115,1167-1172,1174,1177-1178,1180-1184,1199-1200,1206-1212
+packages/think/src/messengers/delivery.ts
+  s_671f05444ff5f0::t_3aa67c41feba70 129-142,394-400,404-405,448-474,491-494,595-596
+packages/think/src/messengers/events.ts
+  s_671f05444ff5f0::t_695a442eeea83c 98-102,106,108-116
+packages/think/src/tests/agents/messengers.ts
+  s_671f05444ff5f0::t_e7561112f86d46 2,5-12,157,160-161,170-176,231,328-402,536-546
+packages/think/src/tests/agents/prompt-cache.ts
+  s_671f05444ff5f0::t_49a01d70e679e9 20-21,141-144,148
+packages/think/src/tests/agents/think-session.ts
+  s_671f05444ff5f0::t_41fbdb8348cdc0 49-50,1050-1052,1056-1124,3078-3079,10991-10993
+packages/think/src/tests/assistant-message-metadata.test.ts
+  s_671f05444ff5f0::t_5bb351084b7aba 218-242
+packages/think/src/tests/hooks.test.ts
+  s_671f05444ff5f0::t_ed3ffe34cd61c8 241-258
+packages/think/src/tests/messengers.test.ts
+  s_671f05444ff5f0::t_53b7facee925d8 35,877-999,1549-1634,1759-1873
+packages/think/src/tests/prompt-cache.test.ts
+  s_671f05444ff5f0::t_8f4c35371502ab 77-98
+packages/think/src/think.ts
+  s_93f525f3481953::t_527bcaa5ce8d16 292-294,309-345,347,349,354-381,1539-1545,1552-1555,2715-2719,3512-3516,3539-3545,4254-4258,4292-4295,4338-4344,5099-5106,5137-5148,6009-6013,7301-7305,7312-7314,7335-7337,7352,7402-7407,7693-7695,14691-14698
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e4274b3b00f11de27186b66c9fc321cb7d9d09eb",
+  "prompts": {},
+  "sessions": {
+    "s_671f05444ff5f0": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "6643b91d-e7d6-4cfa-9d7a-cd394687cb18",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_93f525f3481953": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "07fb1119-18c7-479c-bfbf-f3f2f017f34b",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
