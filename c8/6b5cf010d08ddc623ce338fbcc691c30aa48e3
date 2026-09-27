@@ -1,0 +1,59 @@
+packages/agents/src/chat/__tests__/resume-handshake.test.ts
+  s_bf02b3bd8f2bed::t_918ba2ef7b2e5a 99
+packages/agents/src/chat/react.tsx
+  s_bf02b3bd8f2bed::t_50ccad40886c37 1849-1856,1863,1865,1891,1968,1991-1994,2065,2077-2078,2203,2221-2228,2233-2248,2293-2298,2321-2332,2649,2665-2666,2716-2717
+packages/agents/src/chat/resumable-stream.ts
+  s_bf02b3bd8f2bed::t_0c8c7541dcf09b 228-229,666,681,751,989-990,996,999-1000,1121
+packages/agents/src/chat/resume-handshake.ts
+  s_bf02b3bd8f2bed::t_ac39e6bf583d01 254-257
+packages/agents/src/tests/streams/resumable-stream-settlement.test.ts
+  s_bf02b3bd8f2bed::t_d8729f73e0251f 242,251-300
+packages/ai-chat/src/react-tests/use-agent-chat.test.tsx
+  s_bf02b3bd8f2bed::t_4f3016d5082f2a 7727-7952
+packages/ai-chat/src/tests/terminal-frame-order.test.ts
+  s_bf02b3bd8f2bed::t_f215c24f7f7910 73-90,242,250,260-326
+packages/ai-chat/src/tests/worker.ts
+  s_09e0a57194c0b0::t_443b79ef39ad13 2869-2902
+packages/think/src/tests/agents/think-session.ts
+  s_4c7bbb70e827f0::t_049cca3051b7d7 1575-1612
+packages/think/src/tests/onconnect-broadcast.test.ts
+  s_4c7bbb70e827f0::t_e1696be62f93e2 278-306
+.changeset/chat-terminal-frame-fixes.md
+  s_bf02b3bd8f2bed::t_673fe24f81cdd6 9,12-13
+.changeset/think-recovering-stream-outcome.md
+  s_bf02b3bd8f2bed::t_19a7a9abf5d78d 6-7
+packages/think/src/think.ts
+  s_bf02b3bd8f2bed::t_688a9a2c8a6208 18691-18699,18712,18717
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c86b5cf010d08ddc623ce338fbcc691c30aa48e3",
+  "prompts": {},
+  "sessions": {
+    "s_09e0a57194c0b0": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3e4cb243-5cf6-4510-b76c-e9360c2b4e0c",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_4c7bbb70e827f0": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "865639d9-ae91-4b55-8813-2173e007fcb6",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_bf02b3bd8f2bed": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "2560971b-abc9-4eeb-a576-e7e811e04f84",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
