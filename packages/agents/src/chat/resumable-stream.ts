@@ -28,6 +28,7 @@ import { Streams, type StreamsSyncInternal } from "../streams/streams";
 import type { StreamJson, StreamRow, StreamState } from "../streams/types";
 import { sendReplayBodies, sendReplayControl } from "./replay-frames";
 import { CHUNK_MAX_BYTES, storedChunkBytes } from "./chunk-size";
+import type { ChatTurnOutcome } from "./wire-types";
 
 /** Number of chunks to pack into a single stored segment before flushing */
 const CHUNK_BUFFER_SIZE = 10;
@@ -62,6 +63,8 @@ const REPLAY_PAGE_SEGMENTS = 10;
  * the next {@link ResumableStream.start}.
  */
 const ABANDONED_STREAM_RETENTION_MS = 60 * 60 * 1000;
+/** Deleted streams whose terminal details a late resume ACK can still read. */
+const MAX_REMEMBERED_DELETED_TERMINALS = 32;
 
 /**
  * Ceiling for one stored chat segment after JSON serialization, and the
@@ -114,6 +117,12 @@ type ChatStreamMetadata = {
    * on the replayed terminal frame (#2280).
    */
   originMessageIds?: string[];
+  /**
+   * How the request ended, echoed as `outcome` on the replayed terminal
+   * frame. Absent on rows written before it was recorded and on streams
+   * that completed normally.
+   */
+  outcome?: ChatTurnOutcome;
   /** Terminal evidence pinned until its consumer durably settles and releases it. */
 };
 
@@ -212,6 +221,8 @@ export class ResumableStream {
    * write, or {@link finalizePending} it when there is nothing to persist.
    */
   private _pendingCutover: string | null = null;
+  /** The stream most recently closed by complete, finish, or markError. */
+  private _lastClosedStreamId: string | null = null;
 
   private readonly ops: StreamsSyncInternal;
 
@@ -234,7 +245,10 @@ export class ResumableStream {
     deletionHooks.set(
       streams,
       this.ops.onDelete((row, cursor) => {
-        if (parseChatMetadata(row)) this._retire(cursor);
+        const chat = parseChatMetadata(row);
+        if (!chat) return;
+        this._retire(cursor);
+        this._rememberDeleted(row, chat);
       })
     );
     this._migrateLegacyTables(sql);
@@ -583,27 +597,69 @@ export class ResumableStream {
     const row = this._latestChatRowByTag(requestId);
     return (
       (row ? parseChatMetadata(row)?.originMessageIds : undefined) ??
-      (this._cutoverOrigin?.requestId === requestId
-        ? this._cutoverOrigin.messageIds
-        : undefined)
+      this._deletedTerminals.get(requestId)?.messageIds
     );
   }
 
   /**
-   * Origin ids of the stream the last discarding cutover deleted, so a resume
-   * ACK that races the cutover still gets them on its replay terminal.
+   * How the request's latest chat stream ended (recorded by {@link complete}
+   * or {@link finish}), or undefined for a normal completion.
    */
-  private _cutoverOrigin: { requestId: string; messageIds: string[] } | null =
-    null;
+  getOutcome(requestId: string): ChatTurnOutcome | undefined {
+    const row = this._latestChatRowByTag(requestId);
+    return (
+      (row ? parseChatMetadata(row)?.outcome : undefined) ??
+      this._deletedTerminals.get(requestId)?.outcome
+    );
+  }
+
+  /**
+   * Origin ids and outcome of recently deleted streams (cutover, reclaim),
+   * so a resume ACK that arrives after the rows are gone still gets them on
+   * its replay terminal.
+   */
+  private readonly _deletedTerminals = new Map<
+    string,
+    { messageIds?: string[]; outcome?: ChatTurnOutcome }
+  >();
+
+  private _rememberDeleted(row: StreamRow, chat: ChatStreamMetadata): void {
+    if (!row.tag || (!chat.originMessageIds && !chat.outcome)) return;
+    this._deletedTerminals.delete(row.tag);
+    this._deletedTerminals.set(row.tag, {
+      messageIds: chat.originMessageIds,
+      outcome: chat.outcome
+    });
+    if (this._deletedTerminals.size > MAX_REMEMBERED_DELETED_TERMINALS) {
+      const oldest = this._deletedTerminals.keys().next().value;
+      if (oldest !== undefined) this._deletedTerminals.delete(oldest);
+    }
+  }
+
+  private _recordOutcome(streamId: string, outcome?: ChatTurnOutcome): void {
+    if (outcome === undefined || outcome === "completed") return;
+    const row = this.ops.getStream(streamId);
+    const chat = row ? parseChatMetadata(row) : null;
+    if (!chat) return;
+    this.ops.setMetadata(streamId, { ...chat, outcome });
+  }
 
   /**
    * Mark a stream as completed and flush any pending chunks.
    * @param streamId - The stream to mark as completed
+   * @param outcome - How the request ended, when not a normal completion.
+   *   Defaults to `aborted` for a stream restored without a live reader.
    */
-  complete(streamId: string) {
+  complete(streamId: string, outcome?: ChatTurnOutcome) {
     this.flushBuffer();
+    const orphaned = streamId === this._activeStreamId && !this._isLive;
+    this._recordOutcome(
+      streamId,
+      outcome ?? (orphaned ? "aborted" : undefined)
+    );
     this.ops.settle(streamId, "completed", null);
     if (this._pendingCutover === streamId) this._pendingCutover = null;
+    this._lastClosedStreamId = streamId;
     this._clearActive();
   }
 
@@ -614,9 +670,11 @@ export class ResumableStream {
    * live — exactly the evidence recovery rebuilds the message from. The
    * host MUST follow with {@link cutover} or {@link finalizePending}.
    */
-  finish(streamId: string) {
+  finish(streamId: string, outcome?: ChatTurnOutcome) {
     this.flushBuffer();
+    this._recordOutcome(streamId, outcome);
     this._pendingCutover = streamId;
+    this._lastClosedStreamId = streamId;
     this._clearActive();
   }
 
@@ -641,13 +699,6 @@ export class ResumableStream {
   ): void {
     this.flushBuffer();
     const discard = options.discard ?? true;
-    if (discard) {
-      const row = this.ops.getStream(streamId);
-      const messageIds = row ? parseChatMetadata(row)?.originMessageIds : null;
-      if (row?.tag && messageIds) {
-        this._cutoverOrigin = { requestId: row.tag, messageIds };
-      }
-    }
     const commit = persist;
     // The discard deletes the rows inside the settle transaction, and the
     // deletion hook retires their segments there, so the marker moves with
@@ -693,6 +744,7 @@ export class ResumableStream {
     this.flushBuffer();
     this.ops.settle(streamId, "errored", null);
     if (this._pendingCutover === streamId) this._pendingCutover = null;
+    this._lastClosedStreamId = streamId;
     this._clearActive();
   }
 
@@ -866,9 +918,10 @@ export class ResumableStream {
       sendReplayControl(connection, requestId, {
         done: true,
         continuation,
-        messageIds: row ? parseChatMetadata(row)?.originMessageIds : undefined
+        messageIds: row ? parseChatMetadata(row)?.originMessageIds : undefined,
+        outcome: "aborted"
       });
-      this.complete(streamId);
+      this.complete(streamId, "aborted");
       return streamId;
     }
 
@@ -923,7 +976,44 @@ export class ResumableStream {
     return sendReplayControl(connection, requestId, {
       done: true,
       continuation,
-      messageIds: chat?.originMessageIds
+      messageIds: chat?.originMessageIds,
+      outcome: chat?.outcome
+    });
+  }
+
+  /**
+   * Replay the request's just-closed stream (finished and awaiting its
+   * cutover, completed for a recovery, or errored), ending in
+   * `replayComplete` rather than `done`: the host has not sent the request's
+   * terminal frame yet and delivers it live once the message is persisted.
+   * After the cutover deleted the rows, only the `replayComplete` is sent.
+   * @returns False when the connection closed mid-replay.
+   */
+  replayClosedStreamChunks(connection: Connection, requestId: string): boolean {
+    this.flushBuffer();
+    const row =
+      this._lastClosedStreamId !== null
+        ? this.ops.getStream(this._lastClosedStreamId)
+        : undefined;
+    const chat = row?.tag === requestId ? parseChatMetadata(row) : null;
+    const continuation = chat?.isContinuation === 1;
+    if (
+      row &&
+      chat &&
+      !sendReplayBodies(
+        connection,
+        requestId,
+        this._storedBodies(row.stream_id),
+        continuation,
+        chat.seqBase
+      )
+    ) {
+      return false;
+    }
+    return sendReplayControl(connection, requestId, {
+      done: false,
+      replayComplete: true,
+      continuation
     });
   }
 
@@ -1023,6 +1113,8 @@ export class ResumableStream {
     this._chunkBuffer = [];
     this._chunkBufferBytes = 0;
     this._deleteRetiring(this._chatRows());
+    this._deletedTerminals.clear();
+    this._lastClosedStreamId = null;
     this._activeStreamId = null;
     this._activeRequestId = null;
     this._activeIsContinuation = false;

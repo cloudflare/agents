@@ -275,6 +275,35 @@ describe("Think — onConnect broadcast policy", () => {
   });
 });
 
+describe("Think — unacknowledged resume offers", () => {
+  it.each(["finish", "complete", "error"] as const)(
+    "delivers the done frame once the offered stream ends (%s)",
+    async (close) => {
+      const room = crypto.randomUUID();
+      const agent = await freshAgent(room);
+      const { ws } = await connectWS(room);
+      try {
+        await collectMessages(ws);
+        const requestId = crypto.randomUUID();
+        const frames = waitForRequestFrameTypes(
+          ws,
+          requestId,
+          new Set([MSG_STREAM_RESUMING, MSG_CHAT_RESPONSE])
+        );
+
+        await agent.testEndStreamOfferedWithoutAck(requestId, close);
+
+        await expect(frames).resolves.toEqual([
+          MSG_STREAM_RESUMING,
+          MSG_CHAT_RESPONSE
+        ]);
+      } finally {
+        await closeWS(ws);
+      }
+    }
+  );
+});
+
 describe("Think — sub-agent stream frame ordering", () => {
   it("delivers STREAM_RESUMING before a later terminal broadcast", async () => {
     const parentRoom = crypto.randomUUID();

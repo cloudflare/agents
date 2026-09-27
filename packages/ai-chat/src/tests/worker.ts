@@ -118,7 +118,11 @@ function makeHangingSSEResponse() {
   });
 }
 
-export type FailingReaderPrelude = "partial" | "start-only" | "none";
+export type FailingReaderPrelude =
+  | "partial"
+  | "approval"
+  | "start-only"
+  | "none";
 
 /**
  * An SSE response whose reader throws `errorMessage` after `prelude`, the way
@@ -134,6 +138,20 @@ function makeFailingSSEResponse(
       { type: "start" },
       { type: "text-start" },
       { type: "text-delta", delta: "partial before failure" }
+    ],
+    approval: [
+      { type: "start" },
+      {
+        type: "tool-input-available",
+        toolCallId: "call-approval",
+        toolName: "deleteFile",
+        input: { path: "notes.txt" }
+      },
+      {
+        type: "tool-approval-request",
+        approvalId: "approval-1",
+        toolCallId: "call-approval"
+      }
     ],
     "start-only": [{ type: "start" }],
     none: []
@@ -1671,8 +1689,11 @@ export class ResponseAgent extends AIChatAgent<Env> {
           streamError?: string;
           streamErrorAfterText?: boolean;
           useAbortSignal?: boolean;
+          noResponse?: boolean;
         }
       | undefined;
+
+    if (body?.noResponse) return undefined;
 
     const format = body?.format ?? "plaintext";
     const chunkCount = body?.chunkCount ?? 3;
@@ -1760,6 +1781,23 @@ export class ResponseAgent extends AIChatAgent<Env> {
     this._failNextAssistantPersist = true;
   }
 
+  private _blockNextAssistantPersist = false;
+  private _releaseBlockedPersist: (() => void) | null = null;
+
+  /** Hold the next persist that ends in an assistant message until released. */
+  blockNextAssistantPersist(): void {
+    this._blockNextAssistantPersist = true;
+  }
+
+  isAssistantPersistBlocked(): boolean {
+    return this._releaseBlockedPersist !== null;
+  }
+
+  releaseAssistantPersist(): void {
+    this._releaseBlockedPersist?.();
+    this._releaseBlockedPersist = null;
+  }
+
   override async persistMessages(
     messages: ChatMessage[],
     excludeBroadcastIds: string[] = [],
@@ -1771,6 +1809,15 @@ export class ResponseAgent extends AIChatAgent<Env> {
     ) {
       this._failNextAssistantPersist = false;
       throw new Error("Simulated persistence failure");
+    }
+    if (
+      this._blockNextAssistantPersist &&
+      messages.at(-1)?.role === "assistant"
+    ) {
+      this._blockNextAssistantPersist = false;
+      await new Promise<void>((resolve) => {
+        this._releaseBlockedPersist = resolve;
+      });
     }
     return super.persistMessages(messages, excludeBroadcastIds, options);
   }
@@ -2837,6 +2884,40 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this._hangTurnsRemaining = hangTurns;
   }
 
+  private _blockNextAssistantPersist = false;
+  private _releaseBlockedPersist: (() => void) | null = null;
+
+  /** Hold the next persist that ends in an assistant message until released. */
+  blockNextAssistantPersistForTest(): void {
+    this._blockNextAssistantPersist = true;
+  }
+
+  isAssistantPersistBlockedForTest(): boolean {
+    return this._releaseBlockedPersist !== null;
+  }
+
+  releaseAssistantPersistForTest(): void {
+    this._releaseBlockedPersist?.();
+    this._releaseBlockedPersist = null;
+  }
+
+  override async persistMessages(
+    messages: ChatMessage[],
+    excludeBroadcastIds: string[] = [],
+    options?: { _deleteStaleRows?: boolean }
+  ) {
+    if (
+      this._blockNextAssistantPersist &&
+      messages.at(-1)?.role === "assistant"
+    ) {
+      this._blockNextAssistantPersist = false;
+      await new Promise<void>((resolve) => {
+        this._releaseBlockedPersist = resolve;
+      });
+    }
+    return super.persistMessages(messages, excludeBroadcastIds, options);
+  }
+
   /**
    * Drive a turn whose model stream hangs after a partial, with a short stall
    * timeout configured, so the inactivity watchdog fires and routes the turn
@@ -3264,6 +3345,47 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return {
       tasks: tasks[0]?.count ?? 0,
       schedules: schedules[0]?.count ?? 0
+    };
+  }
+
+  private _recoveryTaskKeyed: boolean[] = [];
+
+  /** Record whether each recovery enqueued from now on has an idempotency key. */
+  trackRecoveryTaskKeysForTest(): void {
+    const self = this as unknown as {
+      _enqueueChatRecovery(
+        callback: Parameters<typeof chatRecoveryTaskRunOptions>[0]["callback"],
+        data: Record<string, unknown>,
+        reason: Parameters<typeof chatRecoveryTaskRunOptions>[1],
+        delaySeconds: number,
+        dedupeKey?: string
+      ): Promise<void>;
+    };
+    const original = self._enqueueChatRecovery.bind(this);
+    self._enqueueChatRecovery = (callback, data, reason, delaySeconds, key) => {
+      this._recoveryTaskKeyed.push(
+        chatRecoveryTaskRunOptions(
+          { callback, data, delaySeconds },
+          reason,
+          key
+        ).idempotencyKey !== undefined
+      );
+      return original(callback, data, reason, delaySeconds, key);
+    };
+  }
+
+  getRecoveryTaskKeyedForTest(): boolean[] {
+    return this._recoveryTaskKeyed;
+  }
+
+  /** Make the next routing into recovery throw (an incident write failure). */
+  failNextIncidentBeginForTest(): void {
+    const self = this as unknown as {
+      _beginChatRecoveryIncident(...args: unknown[]): Promise<unknown>;
+    };
+    self._beginChatRecoveryIncident = async () => {
+      Reflect.deleteProperty(self, "_beginChatRecoveryIncident");
+      throw new Error("incident write failed");
     };
   }
 

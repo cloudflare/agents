@@ -144,6 +144,8 @@ describe("Think terminal frames carry originating message ids (#2280)", () => {
       messageIds: ["msg-s"],
       outcome: "recovering"
     });
+    // A resume replaying this stream must report the same outcome.
+    expect(await agent.getStreamOutcomeForTest("req-stall")).toBe("recovering");
 
     for (let i = 0; i < 50 && successorTerminals.length === 0; i++) {
       await agent.runStallContinuationForTest();

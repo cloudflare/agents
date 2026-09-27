@@ -83,6 +83,8 @@ export interface StreamsSyncInternal {
     tag: string | null,
     metadata: Record<string, StreamJson> | undefined
   ): void;
+  /** Replace a stream row's metadata, whatever its state. */
+  setMetadata(streamId: string, metadata: Record<string, StreamJson>): void;
   /** The read-fenced append: one chunk insert at the log tail, reader wakeup. */
   append(streamId: string, chunk: StreamJson): number;
   /**
@@ -441,6 +443,16 @@ export class Streams extends LifecycleCapability {
             (${streamId}, 'streaming', ${tag}, ${metadataJson}, 0, ${now}, ${now})
         `;
         this.#emit("stream:opened", { streamId });
+      },
+      setMetadata: (streamId, metadata) => {
+        const metadataJson = this.#serialize(
+          metadata,
+          `metadata for stream "${streamId}"`
+        );
+        this.#sql`
+          UPDATE cf_agents_streams SET metadata = ${metadataJson}
+          WHERE stream_id = ${streamId}
+        `;
       },
       append: (streamId, chunk) => this.#append(streamId, chunk),
       lastChunkAt: (streamId) => this.#tail(streamId).lastChunkAt,
