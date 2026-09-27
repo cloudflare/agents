@@ -198,6 +198,24 @@ describe("Think — beforeTurn hook", () => {
     expect(catalog.calls.map((call) => call.gateway?.id)).toEqual(["default"]);
   });
 
+  it("does not resolve the default model when beforeTurn overrides it", async () => {
+    const agent = await freshAgent(`model-override-${crypto.randomUUID()}`);
+    const { result, gatewayModels } =
+      await agent.testChatWithBeforeTurnModelOverrideForTest();
+
+    expect(result.error).toBeUndefined();
+    expect(result.done).toBe(true);
+    expect(gatewayModels).toEqual([]);
+  });
+
+  it("rejects a getGateway that returns a Promise with a clear error", async () => {
+    const agent = await freshAgent(`gateway-async-${crypto.randomUUID()}`);
+
+    await expect(agent.resolveModelWithAsyncGatewayForTest()).resolves.toMatch(
+      /getGateway\(\) returned a Promise/
+    );
+  });
+
   it("carries the turn's request id, trigger and abort signal", async () => {
     const agent = await freshAgent("hook-bt-identity");
     await agent.testChat("First");
@@ -1644,6 +1662,19 @@ describe("Think — extension observation hooks", () => {
     } | null;
     expect(recorded).not.toBeNull();
     expect(recorded!.type).toBe("text-delta");
+  });
+
+  it("keeps a beforeTurn model override without resolving the default for extensions", async () => {
+    const agent = await getAgentByName(
+      env.ThinkExtensionBeforeTurnModelAgent,
+      `ext-before-turn-model-${crypto.randomUUID()}`
+    );
+    const result = await agent.testChat("hello");
+
+    expect(result.error).toBeUndefined();
+    expect(result.done).toBe(true);
+    const snapshot = await agent.readBeforeTurnSnapshot();
+    expect(snapshot?.modelId).toBe("mock-tool-model-ext-hooks");
   });
 });
 

@@ -17,6 +17,8 @@ export type PromptCacheScenario = {
   userTextChars?: number;
   /** Attach a data-URL image of this size to the first user message. */
   firstTurnMediaChars?: number;
+  /** Attach a data-URL image of this size to every user message. */
+  everyTurnMediaChars?: number;
   /** Run a Think media eviction pass after each turn. */
   mediaEviction?: MediaEvictionConfig;
   /** Compact every older message into one summary past this token estimate. */
@@ -136,11 +138,14 @@ export class ThinkPromptCacheTestAgent extends Think {
       const before = this._requests.length;
       const text = `question ${turn} ${"q".repeat(scenario.userTextChars ?? 0)}`;
       const parts: UIMessage["parts"] = [{ type: "text", text }];
-      if (turn === 0 && scenario.firstTurnMediaChars) {
+      const mediaChars =
+        scenario.everyTurnMediaChars ??
+        (turn === 0 ? scenario.firstTurnMediaChars : undefined);
+      if (mediaChars) {
         parts.push({
           type: "file",
           mediaType: "image/png",
-          url: `data:image/png;base64,${"A".repeat(scenario.firstTurnMediaChars)}`
+          url: `data:image/png;base64,${"A".repeat(mediaChars)}`
         });
       }
       await this.saveMessages([{ id: `u${turn}`, role: "user", parts }]);

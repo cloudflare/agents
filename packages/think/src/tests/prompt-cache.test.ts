@@ -74,6 +74,28 @@ describe("prompt-cache prefix stability (#2200)", () => {
     expect(report.at(-1)!.requestChars).toBeLessThan(10_000);
   });
 
+  it("evicts media sent every turn once per truncation step, at defaults (#2356)", async () => {
+    const report = await measure("prefix-media-every-turn", {
+      turns: 16,
+      everyTurnMediaChars: 50_000,
+      mediaEviction: {}
+    });
+    expect(prefixBreaks(report)).toEqual([10, 14]);
+    // Media on the most recent 11 messages is never evicted, whatever turn.
+    expect(report.at(-1)!.requestChars).toBeGreaterThan(5 * 50_000);
+    expect(report.at(-1)!.requestChars).toBeLessThan(12 * 50_000);
+  });
+
+  it("never rewrites the prefix when truncationStep is Infinity", async () => {
+    const report = await measure("prefix-step-infinity", {
+      turns: 16,
+      toolOutputChars: 4000,
+      truncationStep: Number.POSITIVE_INFINITY
+    });
+    expect(prefixBreaks(report)).toEqual([]);
+    expect(report.at(-1)!.requestChars).toBeGreaterThan(15 * 4000);
+  });
+
   it("rewrites the prefix once per compaction", async () => {
     const report = await measure("prefix-compaction", {
       turns: 16,

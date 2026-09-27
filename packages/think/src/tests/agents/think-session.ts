@@ -46,7 +46,8 @@ import type {
   StepContext,
   ChunkContext,
   ActiveTurn,
-  CancelSubmissionResult
+  CancelSubmissionResult,
+  ThinkModel
 } from "../../think";
 import type { MessengerContext } from "../../messengers";
 import {
@@ -1427,7 +1428,79 @@ export class ThinkTestAgent extends Think {
   }
 
   override getAIBinding(): Ai {
+    if (this._missingAIBindingForTest) {
+      throw new Error("no AI binding in this test");
+    }
     return this._fakeAIBinding ?? super.getAIBinding();
+  }
+
+  private _stringModelForTest: string | undefined;
+  private _missingAIBindingForTest = false;
+
+  /**
+   * The default model is a string with no AI binding to build it, and
+   * `beforeTurn` supplies its own model: the turn must not resolve the default.
+   */
+  async testChatWithBeforeTurnModelOverrideForTest(): Promise<{
+    result: TestChatResult;
+    gatewayModels: string[];
+  }> {
+    this._stringModelForTest = "@cf/meta/llama-3.1-8b-instruct";
+    this._missingAIBindingForTest = true;
+    this._gatewayModels = [];
+    this._turnConfigOverride = { model: createMockModel("from override") };
+    try {
+      const result = await this.testChat("override the model");
+      return { result, gatewayModels: this._gatewayModels };
+    } finally {
+      this._stringModelForTest = undefined;
+      this._missingAIBindingForTest = false;
+      this._turnConfigOverride = null;
+    }
+  }
+
+  async resolveModelWithAsyncGatewayForTest(): Promise<string> {
+    const gateway = Promise.resolve({ id: "async" });
+    this.getGateway = () => gateway as unknown as GatewayOptions;
+    try {
+      this.resolveModel("@cf/meta/llama-3.1-8b-instruct");
+      return "resolved";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      delete (this as { getGateway?: unknown }).getGateway;
+    }
+  }
+
+  /**
+   * #2321: a stamped `createdAt` must survive the recovery continuation that
+   * extends the interrupted assistant message.
+   */
+  async testRecoveryExtensionMetadataForTest(): Promise<{
+    assistantMessages: number;
+    metadata: string;
+    writerCalls: Array<{ createdAt: number; continuation: boolean }>;
+  }> {
+    const writerCalls: Array<{ createdAt: number; continuation: boolean }> = [];
+    this.messageMetadata = ({ part, continuation }) => {
+      if (part.type !== "start") return undefined;
+      const stamp = { createdAt: writerCalls.length + 1, continuation };
+      writerCalls.push(stamp);
+      return continuation ? { ...stamp, resumed: true } : stamp;
+    };
+    try {
+      const result = await this.testChatWithStallThenRecover(3, 50);
+      const assistant = (await this.getMessages()).filter(
+        (message) => message.role === "assistant"
+      );
+      return {
+        assistantMessages: result.assistantMessages,
+        metadata: JSON.stringify(assistant.at(-1)?.metadata ?? null),
+        writerCalls
+      };
+    } finally {
+      this.messageMetadata = undefined;
+    }
   }
 
   /**
@@ -3454,7 +3527,8 @@ export class ThinkTestAgent extends Think {
     this._reasoningResponse = { response, reasoning };
   }
 
-  override getModel(): LanguageModel {
+  override getModel(): ThinkModel {
+    if (this._stringModelForTest) return this._stringModelForTest;
     if (this._inBandErrorResponse) {
       return createInBandErrorMockModel(
         this._inBandErrorResponse.errorText,
@@ -11454,6 +11528,9 @@ export const POINTER_MEDIA_CHARS = 1_600_000;
  */
 export class ThinkMediaEvictionAgent extends Think {
   override mediaEviction: MediaEvictionConfig | boolean = false;
+  // A step of 1 moves the eviction cutoff with every message, so these
+  // six-message fixtures age `m0`/`m1` without growing to a full step.
+  override truncationStep = 1;
   override getModel(): LanguageModel {
     return createMockModel("media eviction agent response");
   }
