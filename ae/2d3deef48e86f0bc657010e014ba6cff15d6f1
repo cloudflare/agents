@@ -1,0 +1,21 @@
+examples/sandbox-coding-agent/README.md
+  s_4a203d03f07df1::t_f3b0b5ae42a8c1 21
+examples/sandbox-coding-agent/src/server.ts
+  s_4a203d03f07df1::t_2ddc24438f60fc 72,74-80,83-85,377-381,385-399,410
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ae2d3deef48e86f0bc657010e014ba6cff15d6f1",
+  "prompts": {},
+  "sessions": {
+    "s_4a203d03f07df1": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "f049098e-4e01-4235-a0c2-e1885e3e8242",
+        "model": "unknown"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
