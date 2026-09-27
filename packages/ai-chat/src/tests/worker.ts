@@ -4285,6 +4285,198 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }
 
   /**
+   * A warm run that streamed a chunk too large to store, then a tail
+   * re-attaching while a stored chunk is broadcast during its drain, followed
+   * by another oversized chunk and a stored one. Returns what the tail
+   * forwarded (oversized deltas summarized).
+   */
+  async skippedChunkReattachForTest(): Promise<
+    Array<{ sequence: number; delta?: string; unstored: boolean }>
+  > {
+    const runId = "skipped-chunk-run";
+    const requestId = "skipped-chunk-req";
+    const streamId = this["_resumableStream"].start(requestId);
+    this.sql`
+      insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
+      values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
+    `;
+    this["_agentToolRunsByRequestId"].set(requestId, runId);
+    this["_agentToolLiveSequences"].set(runId, 0);
+    const broadcast = (body: string) =>
+      this["_broadcastChatMessage"]({
+        body,
+        done: false,
+        id: requestId,
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+      });
+    const send = async (body: string) => {
+      await this["_storeStreamChunk"](streamId, body);
+      broadcast(body);
+    };
+    const delta = (value: string) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta: value });
+    const oversized = delta("x".repeat(1_900_000));
+
+    await send(JSON.stringify({ type: "text-start", id: "t" }));
+    await send(delta("a"));
+    await send(oversized);
+    await this["_storeStreamChunk"](streamId, delta("c"));
+    this["_resumableStream"].flushBuffer();
+
+    const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
+    broadcast(delta("c"));
+    const reader = (
+      (await tail) as unknown as ReadableStream<Uint8Array>
+    ).getReader();
+    await send(oversized);
+    await send(delta("d"));
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const deadline = Date.now() + 500;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), remaining)
+        )
+      ]);
+      if (next === "timeout" || next.done) break;
+      buffer += decoder.decode(next.value, { stream: true });
+    }
+    await reader.cancel();
+    this["_agentToolRunsByRequestId"].delete(requestId);
+    this["_agentToolLiveSequences"].delete(runId);
+    return buffer
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const chunk = JSON.parse(line) as AgentToolStoredChunk;
+        const body = JSON.parse(chunk.body) as { delta?: string };
+        return {
+          sequence: chunk.sequence,
+          ...(body.delta !== undefined
+            ? { delta: body.delta.length > 10 ? "<oversized>" : body.delta }
+            : {}),
+          unstored: chunk.unstoredId !== undefined
+        };
+      });
+  }
+
+  /**
+   * A running run with a cold live counter (as after a restart) and a stored
+   * backlog 0..2, tailed while the recovered turn broadcasts a new chunk during
+   * the tail's post-drain inspection. Returns the forwarded sequences and the
+   * new chunk (null if dropped).
+   */
+  async broadcastDuringInspectionForTest(): Promise<{
+    drained: number[];
+    postRestart: { sequence: number; body: string } | null;
+  }> {
+    const runId = "inspect-pending-run";
+    const requestId = "inspect-pending-req";
+    const streamId = this["_resumableStream"].start(requestId);
+    const backlog = ["a", "b", "c"].map((delta) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta })
+    );
+    for (const body of backlog) {
+      await this["_storeStreamChunk"](streamId, body);
+    }
+    this["_resumableStream"].flushBuffer();
+    this.sql`
+      insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
+      values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
+    `;
+    this["_agentToolLiveSequences"].delete(runId);
+
+    const self = this as unknown as {
+      inspectAgentToolRun: (runId: string) => Promise<unknown>;
+    };
+    const original = self.inspectAgentToolRun;
+    let reached!: () => void;
+    const atInspection = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    self.inspectAgentToolRun = async (id: string) => {
+      reached();
+      await gate;
+      return original.call(this, id);
+    };
+
+    try {
+      const reader = (
+        (await this.tailAgentToolRun(runId, {
+          afterSequence: -1
+        })) as unknown as ReadableStream<Uint8Array>
+      ).getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const readLine = async (timeoutMs: number): Promise<string | null> => {
+        const deadline = Date.now() + timeoutMs;
+        for (;;) {
+          const nl = buffer.indexOf("\n");
+          if (nl >= 0) {
+            const line = buffer.slice(0, nl);
+            buffer = buffer.slice(nl + 1);
+            if (line) return line;
+            continue;
+          }
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) return null;
+          const next = await Promise.race([
+            reader.read(),
+            new Promise<"timeout">((resolve) =>
+              setTimeout(() => resolve("timeout"), remaining)
+            )
+          ]);
+          if (next === "timeout" || next.done) return null;
+          buffer += decoder.decode(next.value, { stream: true });
+        }
+      };
+
+      const drained: number[] = [];
+      for (let i = 0; i < backlog.length; i++) {
+        const line = await readLine(2000);
+        if (line === null) break;
+        drained.push((JSON.parse(line) as { sequence: number }).sequence);
+      }
+      await atInspection;
+      const postBody = JSON.stringify({
+        type: "text-delta",
+        id: "t",
+        delta: "post-restart"
+      });
+      await this["_storeStreamChunk"](streamId, postBody);
+      this["_broadcastChatMessage"]({
+        body: postBody,
+        done: false,
+        id: requestId,
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+      });
+      release();
+      const postLine = await readLine(500);
+      await reader.cancel();
+      return {
+        drained,
+        postRestart:
+          postLine === null
+            ? null
+            : (JSON.parse(postLine) as { sequence: number; body: string })
+      };
+    } finally {
+      release();
+      self.inspectAgentToolRun = original;
+      this["_agentToolLiveSequences"].delete(runId);
+    }
+  }
+
+  /**
    * Inspect a stale `running` run row (no live run, no recovery) with
    * `reconcile: false`. Returns the reported and the stored status afterwards.
    */
@@ -4909,6 +5101,27 @@ export class AIChatAgentToolParent extends Agent<Env> {
       crypto.randomUUID()
     );
     return child.progressDuringDrainForTest();
+  }
+
+  async skippedChunkChildReattachForTest(): Promise<
+    Array<{ sequence: number; delta?: string; unstored: boolean }>
+  > {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      crypto.randomUUID()
+    );
+    return child.skippedChunkReattachForTest();
+  }
+
+  async broadcastDuringChildInspectionForTest(): Promise<{
+    drained: number[];
+    postRestart: { sequence: number; body: string } | null;
+  }> {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      crypto.randomUUID()
+    );
+    return child.broadcastDuringInspectionForTest();
   }
 
   async inspectStaleChildRunReadOnlyForTest(): Promise<{

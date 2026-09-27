@@ -60,6 +60,30 @@ describe("agent-tool live/replay sequencing", () => {
     expect(state.runsById[runId]?.status).toBe("completed");
   });
 
+  it("replay after a chunk too large to store neither duplicates nor drops text", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `replay-unstored-${crypto.randomUUID()}`
+    );
+    const runId = "run-unstored";
+    const { live, replay } = await agent.captureLiveAndReplayForTest({
+      runId,
+      chunkBodies: [textStart, textDelta("A"), textDelta("B"), textDelta("C")],
+      unstoredChunks: [{ beforeChunk: 2, body: textDelta("X") }]
+    });
+
+    // The client saw X live, then disconnects right after B and misses C.
+    const cut = live.findIndex(
+      (frame) =>
+        frame.event.kind === "chunk" && frame.event.body === textDelta("B")
+    );
+    expect(cut).toBeGreaterThan(0);
+    const state = reduceClient([...live.slice(0, cut + 1), ...replay]);
+
+    expect(runText(state, runId)).toBe("AXBC");
+    expect(state.runsById[runId]?.status).toBe("completed");
+  });
+
   it("recovery re-attach numbers new chunks after the ones clients already saw", async () => {
     const agent = await getAgentByName(
       env.TestAgentToolReplayAgent,

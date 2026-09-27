@@ -7098,17 +7098,22 @@ export class Agent<
     const terminalOnly = this._isTerminalOnlyAgentToolRun(runId);
     try {
       const forwardChunk = (chunk: AgentToolStoredChunk) => {
-        // Progress/milestone frames are broadcast-only on the child and never
-        // replayed from its store, so they must not consume a stored-chunk
-        // sequence or live and replayed numbering drift apart (#2364).
+        // Progress/milestone frames and chunks too large to store are
+        // broadcast-only on the child and never replayed from its store, so
+        // they must not consume a stored-chunk sequence or live and replayed
+        // numbering drift apart (#2364).
         const lifecycle = isAgentToolLifecycleChunk(chunk.body);
-        const chunkSequence = lifecycle ? next : next++;
+        const unstoredId =
+          typeof chunk.unstoredId === "string" ? chunk.unstoredId : undefined;
+        const chunkSequence =
+          lifecycle || unstoredId !== undefined ? next : next++;
         forwarded = true;
         if (!terminalOnly || lifecycle) {
           this._broadcastAgentToolEvent(parentToolCallId, chunkSequence, {
             kind: "chunk",
             runId,
-            body: chunk.body
+            body: chunk.body,
+            ...(unstoredId !== undefined ? { unstoredId } : {})
           });
         }
         // A reserved `data-agent-progress` frame fires the parent `onProgress`

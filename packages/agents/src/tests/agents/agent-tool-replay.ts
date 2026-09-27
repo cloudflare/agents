@@ -25,6 +25,11 @@ type StubRunInput = {
    */
   milestones?: { beforeChunk: number; name: string }[];
   /**
+   * Chunks the live tail emits just before the stored chunk at `beforeChunk`
+   * but that were too large to store, so replay never includes them.
+   */
+  unstoredChunks?: { beforeChunk: number; body: string }[];
+  /**
    * When set, the run stays `running` and these chunks are stored + streamed
    * by the next tail, which then completes the run — a child that keeps
    * producing output after the parent restarts.
@@ -478,7 +483,8 @@ export class TestAgentToolReplayAgent extends Agent {
   async captureLiveAndReplayForTest(options: {
     runId: string;
     chunkBodies: string[];
-    milestones: { beforeChunk: number; name: string }[];
+    milestones?: { beforeChunk: number; name: string }[];
+    unstoredChunks?: { beforeChunk: number; body: string }[];
   }): Promise<{
     live: AgentToolEventMessage[];
     replay: AgentToolEventMessage[];
@@ -489,7 +495,8 @@ export class TestAgentToolReplayAgent extends Agent {
         parentToolCallId: `call-${options.runId}`,
         input: {
           chunkBodies: options.chunkBodies,
-          milestones: options.milestones
+          milestones: options.milestones,
+          unstoredChunks: options.unstoredChunks
         }
       })
     );
@@ -649,6 +656,7 @@ export class TestAgentToolStubChild extends Agent {
         started_at INTEGER NOT NULL,
         completed_at INTEGER,
         milestones_json TEXT,
+        unstored_json TEXT,
         pending_json TEXT,
         inspect_delay_ms INTEGER
       )
@@ -693,14 +701,17 @@ export class TestAgentToolStubChild extends Agent {
     const milestonesJson = input?.milestones
       ? JSON.stringify(input.milestones)
       : null;
+    const unstoredJson = input?.unstoredChunks
+      ? JSON.stringify(input.unstoredChunks)
+      : null;
     const pendingJson = pending ? JSON.stringify(pending) : null;
     this.sql`
       INSERT OR REPLACE INTO cf_test_stub_runs
         (run_id, status, summary, error, started_at, completed_at,
-         milestones_json, pending_json, inspect_delay_ms)
+         milestones_json, unstored_json, pending_json, inspect_delay_ms)
       VALUES
         (${options.runId}, ${status}, ${summary}, ${null}, ${startedAt},
-         ${completedAt}, ${milestonesJson}, ${pendingJson},
+         ${completedAt}, ${milestonesJson}, ${unstoredJson}, ${pendingJson},
          ${input?.inspectDelayMs ?? null})
     `;
     return {
@@ -803,8 +814,21 @@ export class TestAgentToolStubChild extends Agent {
     }
     const chunks = await this.getAgentToolChunks(runId, options);
     const milestones = this._milestones(runId);
+    const unstoredRow = this.sql<{ unstored_json: string | null }>`
+      SELECT unstored_json FROM cf_test_stub_runs WHERE run_id = ${runId}
+    `[0];
+    const unstored: { beforeChunk: number; body: string }[] =
+      unstoredRow?.unstored_json ? JSON.parse(unstoredRow.unstored_json) : [];
     const frames: AgentToolStoredChunk[] = [];
     for (const chunk of chunks) {
+      for (const skipped of unstored) {
+        if (skipped.beforeChunk !== chunk.sequence) continue;
+        frames.push({
+          sequence: chunk.sequence,
+          body: skipped.body,
+          unstoredId: crypto.randomUUID()
+        });
+      }
       milestones.forEach((milestone, sequence) => {
         if (milestone.beforeChunk !== chunk.sequence) return;
         frames.push({

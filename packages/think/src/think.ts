@@ -193,7 +193,7 @@ import {
   awaitWithDeadline,
   drainInteractionApplies,
   interceptAgentToolBroadcast,
-  isAgentToolLifecycleChunk,
+  isPositionlessAgentToolChunk,
   AgentToolProgressEmitter,
   SubmitConcurrencyController,
   createToolsFromClientSchemas,
@@ -9927,6 +9927,27 @@ export class Think<
       .map((chunk) => ({ sequence: chunk.chunk_index, body: chunk.body }));
   }
 
+  /**
+   * After this DO restarts, `_agentToolLiveSequences` is cold while the stored
+   * backlog sits at N, and a chat-recovery resume re-attaches via
+   * `tailAgentToolRun` without re-running `startAgentToolRun` (which seeds the
+   * counter). Unseeded, the broadcast snoop numbers the recovered turn's chunks
+   * from 0 and the tail's high-water dedupe drops them. Seeds only a
+   * non-terminal run, so a terminal one doesn't re-heat the broadcast
+   * idle-guard; a warm counter is authoritative. Returns whether it seeded.
+   */
+  private _seedAgentToolLiveSequence(runId: string): boolean {
+    if (this._agentToolLiveSequences.has(runId)) return false;
+    const row = this._readAgentToolChildRun(runId);
+    if (!row?.stream_id || row.completed_at !== null) return false;
+    this._resumableStream.flushBuffer();
+    this._agentToolLiveSequences.set(
+      runId,
+      this._resumableStream.getStreamChunks(row.stream_id).length
+    );
+    return true;
+  }
+
   async tailAgentToolRun(
     runId: string,
     options?: { afterSequence?: number; signal?: AbortSignal }
@@ -9975,13 +9996,13 @@ export class Think<
         // so a single high-water mark dedupes the stored-replay → live-
         // forwarding handoff: a chunk that lands in both the drained backlog AND
         // the live buffer (stored + broadcast during the drain) is emitted
-        // exactly once, in order. Progress/milestone frames have no stored
-        // position (they reuse the next one), so they bypass the high-water
-        // mark instead of moving it.
+        // exactly once, in order. Progress/milestone frames and unstored
+        // chunks have no stored position (they reuse the next one), so they
+        // bypass the high-water mark instead of moving it.
         let lastEmitted = options?.afterSequence ?? -1;
         const emit = (chunk: AgentToolStoredChunk) => {
           if (closed) return;
-          if (!isAgentToolLifecycleChunk(chunk.body)) {
+          if (!isPositionlessAgentToolChunk(chunk)) {
             if (chunk.sequence <= lastEmitted) return;
             lastEmitted = chunk.sequence;
           }
@@ -10023,6 +10044,10 @@ export class Think<
         // agent returning a remote `toUIMessageStreamResponse()`) hits this
         // window constantly, leaving tool parts stuck at `input-available`
         // (#1589).
+        //
+        // Seed a cold live counter first, so a chunk broadcast while this tail
+        // drains continues the stored numbering.
+        const seeded = self._seedAgentToolLiveSequence(runId);
         const forwarders = self._agentToolForwarders.get(runId) ?? new Set();
         forwarders.add(forward);
         self._agentToolForwarders.set(runId, forwarders);
@@ -10046,27 +10071,12 @@ export class Think<
 
           const row = self._readAgentToolChildRun(runId);
           if (!row || row.completed_at !== null) {
+            // Don't leave a seeded counter re-heating the broadcast idle-guard
+            // for a terminal run.
+            if (seeded) self._agentToolLiveSequences.delete(runId);
             close();
             return;
           }
-
-          // Run is still live: realign the live sequence to continue right after
-          // the highest emitted chunk (which now includes any captured during the
-          // drain). Realigning to `lastEmitted + 1` rather than the backlog's last
-          // sequence keeps a post-restart re-attach — where the in-memory counter
-          // is cold — from colliding with already-emitted chunks. Gating on the
-          // terminal check above also avoids repopulating `_agentToolLiveSequences`
-          // for an already-terminal run, which would re-heat the broadcast
-          // idle-guard for the DO's lifetime. Realign even when nothing was
-          // drained: parent recovery re-attaches with `afterSequence` at the
-          // last stored chunk, so a cold counter would otherwise restart at 0.
-          self._agentToolLiveSequences.set(
-            runId,
-            Math.max(
-              self._agentToolLiveSequences.get(runId) ?? 0,
-              lastEmitted + 1
-            )
-          );
         } catch (error) {
           // A drain/read failure must surface to the consumer; detach first so
           // the forwarder we registered up front doesn't linger on this run.

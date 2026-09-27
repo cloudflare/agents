@@ -118,6 +118,19 @@ export function isAgentToolLifecycleChunk(body: string): boolean {
 }
 
 /**
+ * Whether a forwarded chunk has no stored-chunk position: a progress or
+ * milestone frame, or a chunk too large to store. Such chunks carry the next
+ * stored position without consuming it.
+ */
+export function isPositionlessAgentToolChunk(
+  chunk: AgentToolStoredChunk
+): boolean {
+  return (
+    chunk.unstoredId !== undefined || isAgentToolLifecycleChunk(chunk.body)
+  );
+}
+
+/**
  * Ephemeral progress signal a running sub-agent emits with `reportProgress`. The
  * well-known fields drive generic UI (a bar + status line) with no per-app
  * convention; `data` is an app-specific escape hatch that is **live-only** by
@@ -373,6 +386,12 @@ export type AgentToolRunInspection<Output = unknown> = {
 export type AgentToolStoredChunk = {
   sequence: number;
   body: string;
+  /**
+   * Set when the child broadcast this chunk but could not store it (it exceeds
+   * the stored-chunk size limit). The chunk is never replayed, so it carries
+   * the next stored position without consuming it and dedupes on this id.
+   */
+  unstoredId?: string;
 };
 
 export type AgentToolChildAdapter<Input = unknown, Output = unknown> = {
@@ -422,6 +441,8 @@ export type AgentToolEvent =
       kind: "chunk";
       runId: string;
       body: string;
+      /** See {@link AgentToolStoredChunk.unstoredId}. */
+      unstoredId?: string;
     }
   | {
       kind: "finished";

@@ -113,6 +113,55 @@ describe("agentToolEventDedupeKey", () => {
     );
   });
 
+  it("keys unstored chunks on their id, apart from the stored chunk at their sequence", () => {
+    const unstored = (unstoredId: string) =>
+      frame(2, {
+        kind: "chunk",
+        runId,
+        body: '{"type":"text-delta"}',
+        unstoredId
+      });
+    const stored = frame(2, {
+      kind: "chunk",
+      runId,
+      body: '{"type":"text-delta"}'
+    });
+    expect(agentToolEventDedupeKey(unstored("u1"))).not.toBe(
+      agentToolEventDedupeKey(stored)
+    );
+    expect(agentToolEventDedupeKey(unstored("u1"))).not.toBe(
+      agentToolEventDedupeKey(unstored("u2"))
+    );
+    expect(agentToolEventDedupeKey(unstored("u1"))).toBe(
+      agentToolEventDedupeKey(unstored("u1"))
+    );
+  });
+
+  it("keeps repeated identical progress emissions distinct", () => {
+    const broadcasts: string[] = [];
+    const emitter = new AgentToolProgressEmitter({
+      resolveActiveRun: () => ({ runId, requestId: "req-1" }),
+      broadcast: (_requestId, body) => broadcasts.push(body),
+      persistSnapshot: () => {},
+      persistMilestone: () => 0
+    });
+    // A done frame bypasses coalescing, so both land.
+    emitter.report({ fraction: 1, message: "same" });
+    emitter.report({ fraction: 1, message: "same" });
+    const keys = broadcasts.map((body) =>
+      agentToolEventDedupeKey(frame(2, { kind: "chunk", runId, body }))
+    );
+
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+    // The same emission re-delivered still dedupes.
+    expect(
+      agentToolEventDedupeKey(
+        frame(5, { kind: "chunk", runId, body: broadcasts[0] })
+      )
+    ).toBe(keys[0]);
+  });
+
   it("keys ordinary chunks on the broadcast sequence", () => {
     const chunk = (sequence: number) =>
       frame(sequence, { kind: "chunk", runId, body: '{"type":"text-delta"}' });
@@ -476,6 +525,32 @@ describe("interceptAgentToolBroadcast", () => {
 
     expect(received.map((chunk) => chunk.sequence)).toEqual([0, 1, 1, 1]);
     expect(liveSequences.get("run-1")).toBe(2);
+  });
+
+  it("gives a chunk too large to store the next position and a unique id", () => {
+    const { hooks, forwarders, liveSequences } = makeHooks(() => "run-1");
+    const received: Chunk[] = [];
+    forwarders.set("run-1", new Set([(c) => received.push(c)]));
+    const oversized = JSON.stringify({
+      type: "text-delta",
+      id: "t",
+      delta: "x".repeat(1_900_000)
+    });
+
+    interceptAgentToolBroadcast(frame({ id: "req-1", body: "a" }), hooks);
+    interceptAgentToolBroadcast(frame({ id: "req-1", body: oversized }), hooks);
+    interceptAgentToolBroadcast(frame({ id: "req-1", body: oversized }), hooks);
+    interceptAgentToolBroadcast(frame({ id: "req-1", body: "b" }), hooks);
+
+    expect(received.map((chunk) => chunk.sequence)).toEqual([0, 1, 1, 1]);
+    expect(liveSequences.get("run-1")).toBe(2);
+    const [first, second] = received.slice(1, 3) as Array<
+      Chunk & { unstoredId?: string }
+    >;
+    expect(first.unstoredId).toEqual(expect.any(String));
+    expect(second.unstoredId).toEqual(expect.any(String));
+    expect(first.unstoredId).not.toBe(second.unstoredId);
+    expect(received[3]).not.toHaveProperty("unstoredId");
   });
 
   it("advances the live sequence even with no tailer attached", () => {

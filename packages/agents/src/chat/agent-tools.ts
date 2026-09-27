@@ -1,8 +1,10 @@
 import { applyChunkToParts, type MessagePart } from "./message-builder";
+import { isChunkTooLargeToStore } from "./chunk-size";
 import {
   AGENT_TOOL_MILESTONE_PART,
   AGENT_TOOL_PROGRESS_PART,
-  isAgentToolLifecycleChunk
+  isAgentToolLifecycleChunk,
+  isPositionlessAgentToolChunk
 } from "../agent-tool-types";
 import type {
   AgentToolEventMessage,
@@ -193,10 +195,14 @@ export class AgentToolProgressEmitter {
       ...(typeof progress.phase === "string" ? { phase: progress.phase } : {}),
       ...(progress.data !== undefined ? { data: progress.data } : {})
     };
+    // Identical payloads must not dedupe against each other on a client that
+    // keeps seen keys for its connection's lifetime, including across a child
+    // restart, so the id is unique rather than a per-instance counter.
     this.hooks.broadcast(
       requestId,
       JSON.stringify({
         type: AGENT_TOOL_PROGRESS_PART,
+        id: crypto.randomUUID(),
         transient: true,
         data: wire
       })
@@ -406,9 +412,9 @@ export function createAgentToolEventState<
  * both the live and replay paths. Lifecycle events key on their content: a
  * reattached run can be interrupted again with a different reason, and the
  * reducer overwrites on lifecycle events, so re-applying one is harmless.
- * Milestones key on their own persisted sequence. Progress frames reuse the
- * next stored chunk's sequence without consuming it and are never replayed,
- * so they key apart from ordinary chunks.
+ * Milestones key on their own persisted sequence. Progress frames and chunks
+ * too large to store reuse the next stored chunk's sequence without consuming
+ * it and are never replayed, so they key on their own emitter-assigned id.
  */
 export function agentToolEventDedupeKey(
   message: AgentToolEventMessage
@@ -417,8 +423,11 @@ export function agentToolEventDedupeKey(
   let identity: string;
   if (event.kind !== "chunk") {
     identity = `event:${JSON.stringify(event)}`;
+  } else if (event.unstoredId !== undefined) {
+    identity = `unstored:${event.unstoredId}`;
   } else {
     let milestone: AgentToolMilestone | undefined;
+    let progressId: string | undefined;
     let progress = false;
     if (
       event.body.includes(AGENT_TOOL_MILESTONE_PART) ||
@@ -428,6 +437,8 @@ export function agentToolEventDedupeKey(
         const parsed: unknown = JSON.parse(event.body);
         milestone = readAgentToolMilestoneChunk(parsed);
         progress = readAgentToolProgressChunk(parsed) !== undefined;
+        const id = (parsed as { id?: unknown }).id;
+        if (typeof id === "string") progressId = id;
       } catch {
         milestone = undefined;
       }
@@ -435,7 +446,9 @@ export function agentToolEventDedupeKey(
     identity = milestone
       ? `milestone:${milestone.sequence}`
       : progress
-        ? `progress:${message.sequence}:${event.body}`
+        ? progressId !== undefined
+          ? `progress:${progressId}`
+          : `progress:${message.sequence}:${event.body}`
         : `seq:${message.sequence}`;
   }
   return [message.parentToolCallId ?? "", event.runId, identity].join("\0");
@@ -456,7 +469,7 @@ export function applyAgentToolEvent<
   return { runsById, ...rebuildIndexes(runsById) };
 }
 
-export { isAgentToolLifecycleChunk };
+export { isPositionlessAgentToolChunk };
 
 export type {
   AgentToolEvent,
@@ -480,12 +493,12 @@ export interface AgentToolBroadcastHooks {
    * Progress/milestone frames (`reportProgress`) ride the same
    * `USE_CHAT_RESPONSE` wire type and are forwarded here, but persist
    * out-of-band (progress snapshot / milestone rows) and have no store
-   * position. They carry the next position WITHOUT consuming it, and tails
-   * emit them outside the stored-position high-water dedupe
-   * ({@link isAgentToolLifecycleChunk}); counting them would push later stored
-   * chunks past their stored index, so a chunk stored and broadcast during a
-   * tail's drain would be emitted twice. The tail realigns this counter to the
-   * stored high-water on each (re)attach.
+   * position. Neither do chunks too large to store (they carry an
+   * `unstoredId`). Both carry the next position WITHOUT consuming it, and
+   * tails emit them outside the stored-position high-water dedupe; counting
+   * them would push later stored chunks past their stored index, so a chunk
+   * stored and broadcast during a tail's drain would be emitted twice. A tail
+   * seeds a cold counter from the stored high-water before it attaches.
    */
   liveSequences: Map<string, number>;
   /** Per-run last error body, captured for replay to a late-attaching tailer. */
@@ -545,12 +558,21 @@ export function interceptAgentToolBroadcast(
             parsed.body.length > 0
           ) {
             // Advance the live sequence even with no tailer attached so a tailer
-            // registering mid-run resumes at the right offset. Progress and
-            // milestone frames carry the next position without consuming it.
+            // registering mid-run resumes at the right offset. Progress,
+            // milestone, and unstored frames carry the next position without
+            // consuming it.
             const sequence = hooks.liveSequences.get(runId) ?? 0;
             const lifecycle = isAgentToolLifecycleChunk(parsed.body);
-            hooks.liveSequences.set(runId, lifecycle ? sequence : sequence + 1);
-            const chunk: AgentToolStoredChunk = { sequence, body: parsed.body };
+            const unstored = !lifecycle && isChunkTooLargeToStore(parsed.body);
+            hooks.liveSequences.set(
+              runId,
+              lifecycle || unstored ? sequence : sequence + 1
+            );
+            const chunk: AgentToolStoredChunk = {
+              sequence,
+              body: parsed.body,
+              ...(unstored ? { unstoredId: crypto.randomUUID() } : {})
+            };
             const forwarders = hooks.forwarders.get(runId);
             if (forwarders) {
               for (const forward of forwarders) forward(chunk);

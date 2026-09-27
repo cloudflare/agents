@@ -59,6 +59,13 @@ type ThinkAgentToolTestStub = {
     postRestart: { sequence: number; body: string } | null;
   }>;
   progressDuringDrainForTest(): Promise<string[]>;
+  skippedChunkReattachForTest(): Promise<
+    Array<{ sequence: number; delta: string; unstored: boolean }>
+  >;
+  broadcastDuringDrainForTest(): Promise<{
+    drained: number[];
+    postRestart: { sequence: number; body: string } | null;
+  }>;
   getDefaultReattachBudgetsForTest(): Promise<{
     noProgressTimeoutMs: number;
     maxWindowIsFinite: boolean;
@@ -808,6 +815,25 @@ describe("Think agent tools", () => {
         .filter((chunk) => chunk.type === "data-agent-progress")
         .map((chunk) => chunk.data?.message)
     ).toEqual(["during-drain"]);
+  });
+
+  it("keeps stored numbering across a re-attach after a chunk too large to store", async () => {
+    const agent = await freshAgent();
+    expect(await agent.skippedChunkReattachForTest()).toEqual([
+      { sequence: 0, delta: "a", unstored: false },
+      { sequence: 1, delta: "b", unstored: false },
+      { sequence: 2, delta: "c", unstored: false },
+      { sequence: 3, delta: "<oversized>", unstored: true },
+      { sequence: 3, delta: "d", unstored: false }
+    ]);
+  });
+
+  it("forwards a chunk broadcast while a cold re-attach drains", async () => {
+    const agent = await freshAgent();
+    const { drained, postRestart } = await agent.broadcastDuringDrainForTest();
+
+    expect(drained).toEqual([0, 1, 2]);
+    expect(postRestart).toMatchObject({ sequence: 3 });
   });
 
   it("keeps a completed Think child's stored chunks for a parent attaching afterwards", async () => {

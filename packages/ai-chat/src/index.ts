@@ -83,7 +83,7 @@ import {
   awaitWithDeadline,
   drainInteractionApplies,
   interceptAgentToolBroadcast,
-  isAgentToolLifecycleChunk,
+  isPositionlessAgentToolChunk,
   type ClientToolSchema
 } from "agents/chat";
 import {
@@ -4409,15 +4409,16 @@ export class AIChatAgent<
         // stored-replay → live-forwarding handoff: a chunk that lands in both
         // the drained backlog AND the live buffer (because it was stored and
         // broadcast during the drain) is emitted exactly once, in order.
-        // Progress/milestone frames have no stored position (they reuse the
-        // next one), so they bypass the high-water mark instead of moving it.
+        // Progress/milestone frames and unstored chunks have no stored
+        // position (they reuse the next one), so they bypass the high-water
+        // mark instead of moving it.
         let lastEmitted = options?.afterSequence ?? -1;
         const emit = (chunk: AgentToolStoredChunk) => {
           if (closed) return;
           // Drop out-of-order / duplicate sequences. Guarantees in-order,
           // exactly-once delivery so the parent can rebuild tool-call state
           // (input-available → output-available) without gaps.
-          if (!isAgentToolLifecycleChunk(chunk.body)) {
+          if (!isPositionlessAgentToolChunk(chunk)) {
             if (chunk.sequence <= lastEmitted) return;
             lastEmitted = chunk.sequence;
           }
@@ -4481,6 +4482,10 @@ export class AIChatAgent<
           // returning a remote `toUIMessageStreamResponse()` from
           // `onChatMessage`) hits this window constantly, leaving tool parts
           // stuck at `input-available` on the client (#1589).
+          //
+          // Seed a cold live counter first, so a chunk broadcast while this
+          // tail drains or inspects continues the stored numbering.
+          const seeded = this._seedAgentToolLiveSequence(runId);
           const forwarders =
             this._agentToolForwarders.get(runId) ??
             new Set<(chunk: AgentToolStoredChunk) => void>();
@@ -4506,34 +4511,12 @@ export class AIChatAgent<
 
           const inspection = await this.inspectAgentToolRun(runId);
           if (!inspection || inspection.status !== "running") {
+            // Don't leave a seeded counter re-heating the broadcast idle-guard
+            // for a terminal run.
+            if (seeded) this._agentToolLiveSequences.delete(runId);
             close();
             return;
           }
-
-          // Run is still live: realign the live sequence to continue right
-          // after the highest emitted chunk (the stored high-water plus
-          // anything captured during the drain). On a normal warm attach the
-          // in-memory counter is already in lockstep with the stored
-          // chunk_index, so this is a no-op. But after the CHILD's Durable
-          // Object restarts/wakes from hibernation, `_agentToolLiveSequences`
-          // is cold (empty) while the stored backlog sits at N, and a
-          // chat-recovery resume re-attaches via `tailAgentToolRun` WITHOUT
-          // re-running `startAgentToolRun` (which is what seeds the counter).
-          // Without this realign the broadcast snoop would hand the recovered
-          // turn's new chunks sequences from 0 — all <= N — and `emit`'s
-          // high-water dedupe would silently drop every one, leaving the parent
-          // stuck with no post-restart chunks. Gating on the still-running check
-          // also avoids re-heating the broadcast idle-guard for a terminal run.
-          // Realign even when nothing was drained: parent recovery re-attaches
-          // with `afterSequence` at the last stored chunk. Never move a warm
-          // counter backwards. Mirrors @cloudflare/think's tail.
-          this._agentToolLiveSequences.set(
-            runId,
-            Math.max(
-              this._agentToolLiveSequences.get(runId) ?? 0,
-              lastEmitted + 1
-            )
-          );
         } catch (error) {
           // Detach the up-front-registered forwarder before surfacing the
           // failure so it doesn't linger on this run, then guard
@@ -4575,6 +4558,27 @@ export class AIChatAgent<
 
   private _getAgentToolStreamId(requestId: string): string | undefined {
     return this._resumableStream.latestStreamInfoForRequest(requestId)?.id;
+  }
+
+  /**
+   * After this DO restarts, `_agentToolLiveSequences` is cold while the stored
+   * backlog sits at N, and a chat-recovery resume re-attaches via
+   * `tailAgentToolRun` without re-running `startAgentToolRun` (which seeds the
+   * counter). Unseeded, the broadcast snoop numbers the recovered turn's chunks
+   * from 0 and the tail's high-water dedupe drops them. Seeds only a running
+   * run, so a terminal one doesn't re-heat the broadcast idle-guard; a warm
+   * counter is authoritative. Returns whether it seeded.
+   */
+  private _seedAgentToolLiveSequence(runId: string): boolean {
+    if (this._agentToolLiveSequences.has(runId)) return false;
+    this._flushChunkBuffer();
+    const row = this._getAgentToolRunRow(runId);
+    if (!row?.request_id || row.status !== "running") return false;
+    this._agentToolLiveSequences.set(
+      runId,
+      this._getAgentToolStoredChunks(row.request_id).length
+    );
+    return true;
   }
 
   private _getAgentToolStoredChunks(
