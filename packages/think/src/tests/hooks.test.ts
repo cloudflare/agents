@@ -198,6 +198,46 @@ describe("Think — beforeTurn hook", () => {
     expect(catalog.calls.map((call) => call.gateway?.id)).toEqual(["default"]);
   });
 
+  it.each(["gpt-5", "", "openai/", "/gpt-5"])(
+    "rejects the malformed model id %j before touching the AI binding",
+    async (model) => {
+      const agent = await freshAgent(`resolve-invalid-${model || "empty"}`);
+      const message = await agent.resolveModelErrorForTest(model);
+      expect(message).toContain(`Invalid model id ${JSON.stringify(model)}`);
+      expect(message).toContain("@cf/");
+      expect(message).toContain("<provider>/<model>");
+    }
+  );
+
+  it("explains a missing AI binding for a valid string model id", async () => {
+    const agent = await freshAgent("resolve-missing-binding");
+    const message = await agent.resolveModelErrorForTest(
+      "@cf/meta/llama-3.1-8b-instruct"
+    );
+    expect(message).toContain('Workers AI binding named "AI"');
+    expect(message).toContain("getAIBinding()");
+  });
+
+  it("returns a LanguageModel object unchanged", async () => {
+    const agent = await freshAgent("resolve-passthrough");
+    expect(await agent.resolveModelPassesThroughObjectForTest()).toBe(true);
+  });
+
+  it.each(["beforeTurn", "beforeStep"] as const)(
+    "resolves a string model returned from %s",
+    async (hook) => {
+      const agent = await freshAgent(`resolve-hook-${hook}`);
+      const { models, calls } = await agent.runTurnWithStringModelForTest(
+        hook,
+        "@cf/meta/llama-3.1-8b-instruct"
+      );
+      expect(models).toContain("@cf/meta/llama-3.1-8b-instruct");
+      expect(calls.map((call) => call.model)).toContain(
+        "@cf/meta/llama-3.1-8b-instruct"
+      );
+    }
+  );
+
   it("carries the turn's request id, trigger and abort signal", async () => {
     const agent = await freshAgent("hook-bt-identity");
     await agent.testChat("First");

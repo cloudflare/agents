@@ -4976,6 +4976,16 @@ export class Think<
    */
   resolveModel(model: ThinkModel = this.getModel()): LanguageModel {
     if (typeof model !== "string") return model;
+    // Ids that are neither `@...` nor `<provider>/<model>` would reach
+    // `env.AI.run(model)` and fail only at inference time.
+    const slash = model.indexOf("/");
+    if (!model.startsWith("@") && (slash <= 0 || slash === model.length - 1)) {
+      throw new Error(
+        `Invalid model id ${JSON.stringify(model)}. Use a Workers AI id ` +
+          '(e.g. "@cf/moonshotai/kimi-k2.7-code") or a "<provider>/<model>" ' +
+          'AI Gateway slug (e.g. "openai/gpt-5.5"), or return a LanguageModel.'
+      );
+    }
     this._defaultProvider ??= createWorkersAI({
       binding: this.getAIBinding(),
       providers: [openai, anthropic]

@@ -1054,6 +1054,66 @@ export class ThinkTestAgent extends Think {
     model: string,
     gateway: GatewayOptions | null
   ): Promise<{ models: string[]; calls: GatewayCallForTest[] }> {
+    const calls = this._installFakeAIBindingForTest();
+    this._gatewayForTest = gateway ?? undefined;
+    this._gatewayModels = [];
+    const resolved = this.resolveModel(model) as unknown as {
+      doStream(options: { prompt: unknown[] }): Promise<unknown>;
+    };
+    await resolved
+      .doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }]
+      })
+      .catch(() => {});
+    return { models: this._gatewayModels, calls };
+  }
+
+  /** Resolve `model` without a fake binding and report the thrown message. */
+  async resolveModelErrorForTest(model: string): Promise<string | null> {
+    this._fakeAIBinding = undefined;
+    try {
+      this.resolveModel(model);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /** Whether `resolveModel` returns a `LanguageModel` object unchanged. */
+  async resolveModelPassesThroughObjectForTest(): Promise<boolean> {
+    const model = createMockModel("pass-through");
+    return this.resolveModel(model) === model;
+  }
+
+  /**
+   * Run a turn whose `beforeTurn` (or `beforeStep`) returns a string `model`
+   * and report what reached the fake AI binding. The fake throws, so the turn
+   * itself errors after the model is resolved and called.
+   */
+  async runTurnWithStringModelForTest(
+    hook: "beforeTurn" | "beforeStep",
+    model: string
+  ): Promise<{ models: string[]; calls: GatewayCallForTest[] }> {
+    const calls = this._installFakeAIBindingForTest();
+    this._gatewayForTest = undefined;
+    this._gatewayModels = [];
+    if (hook === "beforeTurn") {
+      this._turnConfigOverride = { model };
+    } else {
+      this._stepConfigOverride = { model };
+    }
+    try {
+      await this.runTurn({ input: "hi" });
+    } catch {
+      // The fake binding throws; only the resolved calls matter here.
+    } finally {
+      this._turnConfigOverride = null;
+      this._stepConfigOverride = null;
+    }
+    return { models: this._gatewayModels, calls };
+  }
+
+  private _installFakeAIBindingForTest(): GatewayCallForTest[] {
     const calls: GatewayCallForTest[] = [];
     this._fakeAIBinding = {
       run: async (
@@ -1077,17 +1137,7 @@ export class ThinkTestAgent extends Think {
         };
       }
     } as unknown as Ai;
-    this._gatewayForTest = gateway ?? undefined;
-    this._gatewayModels = [];
-    const resolved = this.resolveModel(model) as unknown as {
-      doStream(options: { prompt: unknown[] }): Promise<unknown>;
-    };
-    await resolved
-      .doStream({
-        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }]
-      })
-      .catch(() => {});
-    return { models: this._gatewayModels, calls };
+    return calls;
   }
 
   async runConcurrentMessengerTurnsForTest(): Promise<void> {
