@@ -167,10 +167,26 @@ type ParentStub = DurableObjectStub & {
     milestoneBody: string,
     runId?: string
   ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }>;
-  coldCounterChildReattachForTest(): Promise<{
+  coldCounterChildReattachForTest(afterSequence?: number): Promise<{
     drained: number[];
     liveSequenceAfterDrain: number | undefined;
     postRestart: { sequence: number; body: string } | null;
+  }>;
+  terminalOnlyChildAfterRecoveredTurnForTest(): Promise<{
+    afterRebind: boolean;
+    afterClose: boolean;
+  }>;
+  progressDuringChildDrainForTest(): Promise<string[]>;
+  skippedChunkChildReattachForTest(): Promise<
+    Array<{ sequence: number; delta?: string; unstored: boolean }>
+  >;
+  broadcastDuringChildInspectionForTest(): Promise<{
+    drained: number[];
+    postRestart: { sequence: number; body: string } | null;
+  }>;
+  inspectStaleChildRunReadOnlyForTest(): Promise<{
+    reported: string | undefined;
+    stored: string | undefined;
   }>;
   cancelledTailerStarvationChildForTest(): Promise<{
     siblingBodyAfterCancel: string | null;
@@ -573,6 +589,86 @@ describe("AIChatAgent as an agent-tool child", () => {
         toolCallId: "post-restart",
         output: "ok"
       })
+    });
+  });
+
+  it("realigns a cold counter when re-attaching after the last stored chunk", async () => {
+    // Parent recovery re-attaches with `afterSequence` = the last stored index,
+    // so nothing is drained; the counter must still realign past the backlog.
+    const parent = await getParent();
+
+    const { drained, liveSequenceAfterDrain, postRestart } =
+      await parent.coldCounterChildReattachForTest(2);
+
+    expect(drained).toEqual([]);
+    expect(liveSequenceAfterDrain).toBe(3);
+    expect(postRestart).toMatchObject({ sequence: 3 });
+  });
+
+  it("forwards progress and stored chunks exactly once across a tail's drain", async () => {
+    // Progress frames aren't stored, so they must not shift the live numbering
+    // of later stored chunks or be deduped against a stored position.
+    const parent = await getParent();
+    const bodies = await parent.progressDuringChildDrainForTest();
+
+    const parsed = bodies.map(
+      (body) =>
+        JSON.parse(body) as {
+          type: string;
+          delta?: string;
+          data?: { message?: string };
+        }
+    );
+    expect(
+      parsed.filter((chunk) => chunk.type === "text-delta").map((c) => c.delta)
+    ).toEqual(["a", "b"]);
+    expect(
+      parsed
+        .filter((chunk) => chunk.type === "data-agent-progress")
+        .map((chunk) => chunk.data?.message)
+    ).toEqual(["during-drain"]);
+  });
+
+  it("keeps stored numbering across a re-attach after a chunk too large to store", async () => {
+    const parent = await getParent();
+    expect(await parent.skippedChunkChildReattachForTest()).toEqual([
+      { sequence: 0, unstored: false },
+      { sequence: 1, delta: "a", unstored: false },
+      { sequence: 2, delta: "c", unstored: false },
+      { sequence: 3, delta: "<oversized>", unstored: true },
+      { sequence: 3, delta: "d", unstored: false }
+    ]);
+  });
+
+  it("forwards a chunk broadcast while a cold re-attach's inspection is pending", async () => {
+    const parent = await getParent();
+    const { drained, postRestart } =
+      await parent.broadcastDuringChildInspectionForTest();
+
+    expect(drained).toEqual([0, 1, 2]);
+    expect(postRestart).toMatchObject({
+      sequence: 3,
+      body: JSON.stringify({
+        type: "text-delta",
+        id: "t",
+        delta: "post-restart"
+      })
+    });
+  });
+
+  it("inspects a stale run read-only when asked not to reconcile", async () => {
+    const parent = await getParent();
+    expect(await parent.inspectStaleChildRunReadOnlyForTest()).toEqual({
+      reported: "running",
+      stored: "running"
+    });
+  });
+
+  it("drops a terminal-only run from suppression once its recovered turn settles", async () => {
+    const parent = await getParent();
+    expect(await parent.terminalOnlyChildAfterRecoveredTurnForTest()).toEqual({
+      afterRebind: true,
+      afterClose: false
     });
   });
 

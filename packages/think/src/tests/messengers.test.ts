@@ -5,6 +5,7 @@ import type {
   FiberRecoveryResult
 } from "agents";
 import { getAgentByName } from "agents";
+import { Chat } from "chat";
 import type { Adapter } from "chat";
 import { describe, expect, it } from "vitest";
 import {
@@ -32,6 +33,7 @@ import {
   type MessengerMessage,
   type MessengerThinkHost
 } from "../messengers";
+import { mentionsBot, withMessengerQueueTtl } from "../messengers/chat-sdk";
 import telegramMessenger, {
   isExpectedTelegramFinalEditNoop,
   isTelegramIgnorableDeliveryError,
@@ -873,6 +875,129 @@ describe("think messengers core", () => {
       expect(data).toBeInstanceOf(ArrayBuffer);
       expect(data?.byteLength).toBe(0);
     });
+
+    it("returns a view's own buffer without copying when the view spans all of it", async () => {
+      const bytes = new TextEncoder().encode("whole");
+      const data = await fetched(() => Promise.resolve(bytes));
+
+      expect(data).toBe(bytes.buffer);
+    });
+  });
+
+  describe("inline attachment data", () => {
+    function inline(data: unknown) {
+      return toMessengerAttachment({
+        data: data as Buffer,
+        mimeType: "text/plain",
+        name: "hi.txt",
+        type: "file"
+      });
+    }
+
+    it("maps Buffer data and fetches it when the adapter has no fetchData", async () => {
+      const attachment = inline(Buffer.from("hi"));
+
+      expect(new TextDecoder().decode(attachment.data)).toBe("hi");
+      expect(new TextDecoder().decode(await attachment.fetch?.())).toBe("hi");
+    });
+
+    it("maps ArrayBuffer and Uint8Array data", async () => {
+      const buffer = new TextEncoder().encode("ab").buffer;
+      expect(inline(buffer).data).toBe(buffer);
+      expect(
+        new TextDecoder().decode(inline(new TextEncoder().encode("cd")).data)
+      ).toBe("cd");
+    });
+
+    it("fetches Blob data through arrayBuffer()", async () => {
+      const attachment = inline(new Blob(["blob"]));
+
+      expect(attachment.data).toBeUndefined();
+      expect(new TextDecoder().decode(await attachment.fetch?.())).toBe("blob");
+    });
+
+    it("prefers the adapter's fetchData over inline data", async () => {
+      const attachment = toMessengerAttachment({
+        data: Buffer.from("inline"),
+        fetchData: () => Promise.resolve(Buffer.from("fetched")),
+        mimeType: "text/plain",
+        name: "hi.txt",
+        type: "file"
+      });
+
+      expect(new TextDecoder().decode(await attachment.fetch?.())).toBe(
+        "fetched"
+      );
+    });
+  });
+
+  it("keeps raw payloads and attachment bytes out of persisted message metadata", () => {
+    const event: MessengerEvent = {
+      ...baseEvent,
+      raw: { payload: "raw-event" },
+      message: {
+        ...baseEvent.message!,
+        attachments: [
+          {
+            data: new ArrayBuffer(4),
+            fetch: () => Promise.resolve(new ArrayBuffer(4)),
+            mediaType: "text/plain",
+            name: "notes.txt",
+            raw: { payload: "raw-file" }
+          }
+        ],
+        raw: { payload: "raw-message" }
+      },
+      skipped: [
+        {
+          ...baseEvent.message!,
+          id: "message-0",
+          raw: { payload: "raw-skipped" }
+        }
+      ]
+    };
+
+    const metadata = JSON.stringify(toMessengerUserMessage(event).metadata);
+
+    expect(metadata).not.toContain("raw-");
+    expect(metadata).not.toContain('"data"');
+    expect(metadata).toContain("notes.txt");
+  });
+
+  it("detects mentions on messages the adapter did not flag", () => {
+    const definition = {
+      adapter: fakeAdapter({ botUserId: "U123" } as Partial<Adapter>),
+      userName: "fake_bot"
+    };
+
+    expect(mentionsBot(definition, { text: "hey @Fake_Bot, status?" })).toBe(
+      true
+    );
+    expect(mentionsBot(definition, { text: "ping <@U123>" })).toBe(true);
+    expect(mentionsBot(definition, { text: "ping @U123" })).toBe(true);
+    expect(mentionsBot(definition, { text: "no mention here" })).toBe(false);
+    expect(
+      mentionsBot(definition, { isMention: true, text: "no mention here" })
+    ).toBe(true);
+  });
+
+  it("gives queued messages a TTL that outlasts a slow turn", () => {
+    const thirtyMinutes = 30 * 60 * 1000;
+
+    expect(withMessengerQueueTtl("queue")).toEqual({
+      queueEntryTtlMs: thirtyMinutes,
+      strategy: "queue"
+    });
+    expect(
+      withMessengerQueueTtl({ debounceMs: 10, strategy: "burst" })
+    ).toEqual({
+      debounceMs: 10,
+      queueEntryTtlMs: thirtyMinutes,
+      strategy: "burst"
+    });
+    expect(
+      withMessengerQueueTtl({ queueEntryTtlMs: 5, strategy: "queue" })
+    ).toEqual({ queueEntryTtlMs: 5, strategy: "queue" });
   });
 
   it("leaves attachment id undefined when fetchMetadata has no known id key", () => {
@@ -1436,6 +1561,159 @@ describe("think messengers core", () => {
         "Ada: @fake_bot deploy status?\nplease keep it short"
       ]);
     });
+
+    it("finds a skipped mention the adapter did not flag (#2325)", async () => {
+      const threadId = "fake:group-unflagged";
+      const agent = await sendBurst("burst-unflagged", [
+        { id: "u0", isMention: true, text: "@fake_bot hi", threadId }
+      ]);
+      const res = await agent.fetch(
+        "https://example.com/messengers/fake/webhook",
+        {
+          body: JSON.stringify({
+            burst: [
+              { id: "u1", text: "@fake_bot deploy status?", threadId },
+              { id: "u2", text: "please keep it short", threadId }
+            ]
+          }),
+          method: "POST"
+        }
+      );
+      await res.text();
+
+      expect(await agent.getRecorded("prompt")).toEqual([
+        "Ada: @fake_bot hi",
+        "Ada: @fake_bot deploy status?\nplease keep it short"
+      ]);
+    });
+
+    it("answers and subscribes an unsubscribed-thread burst whose mention is not the newest message (#2325)", async () => {
+      const threadId = "fake:group-unsubscribed";
+      const agent = await sendBurst("burst-unsubscribed", [
+        { id: "n1", text: "@fake_bot deploy status?", threadId },
+        { id: "n2", text: "please keep it short", threadId }
+      ]);
+
+      expect(await agent.getRecorded("prompt")).toEqual([
+        "Ada: @fake_bot deploy status?\nplease keep it short"
+      ]);
+      expect(await agent.isSubscribedForTest(threadId)).toBe(true);
+    });
+
+    it("keeps the thread locked through a turn that outlives the lock TTL", async () => {
+      const threadId = "fake:dm-slow";
+      const send = (id: string, text: string) =>
+        agent
+          .fetch("https://example.com/messengers/fake/webhook", {
+            body: JSON.stringify({ id, text, threadId }),
+            method: "POST"
+          })
+          .then((res) => res.text());
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        "slow-dm"
+      );
+      const first = send("l1", "first");
+      for (let i = 0; i < 100; i++) {
+        if ((await agent.getModelLog()).length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      // Past the 300ms lock TTL, well inside the first turn.
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      await send("l2", "second");
+      // Queued behind the running turn, not handled under a lock of its own.
+      expect(await agent.queueDepthForTest(threadId)).toBe(1);
+      await first;
+
+      expect(await agent.getModelLog()).toEqual([
+        { content: "first", kind: "prompt" },
+        { content: "first", kind: "stream-end" },
+        { content: "second", kind: "prompt" },
+        { content: "second", kind: "stream-end" }
+      ]);
+    }, 30_000);
+
+    it("finds the private Chat SDK queue methods the recovery drain relies on", () => {
+      // The drain feature-checks these at runtime and silently skips when a
+      // `chat` release drops or renames them; this fails the upgrade instead.
+      const internals = Chat.prototype as unknown as Record<string, unknown>;
+      expect(typeof internals.getLockKey).toBe("function");
+      expect(typeof internals.drainQueue).toBe("function");
+      expect((internals.getLockKey as () => unknown).length).toBe(2);
+      expect((internals.drainQueue as () => unknown).length).toBe(4);
+    });
+
+    it("drains messages queued behind a reply recovered after a restart", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        "drain-after-recovery"
+      );
+      await agent.recoverWithQueuedFollowUpForTest();
+
+      let prompts: string[] = [];
+      for (let i = 0; i < 50 && prompts.length < 2; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        prompts = await agent.getRecorded("prompt");
+      }
+      expect(prompts).toEqual(["hello", "follow up"]);
+    });
+
+    it("keeps queued messages behind a recovered reply that will be retried", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        "drain-after-retried-recovery"
+      );
+      expect(
+        await agent.recoverWithQueuedFollowUpForTest({
+          failPost: true,
+          retried: true,
+          stage: "streaming"
+        })
+      ).toBe("post failed");
+
+      let prompts: string[] = [];
+      for (let i = 0; i < 15 && prompts.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        prompts = await agent.getRecorded("prompt");
+      }
+      expect(prompts).toEqual([]);
+      expect(await agent.queueDepthForTest("fake:dm-recovered")).toBe(1);
+
+      expect(
+        await agent.recoverWithQueuedFollowUpForTest({
+          enqueue: false,
+          stage: "streaming"
+        })
+      ).toBeNull();
+      let posts: string[] = [];
+      for (let i = 0; i < 50 && posts.length < 2; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        posts = await agent.getRecorded("post");
+      }
+      expect(await agent.getRecorded("prompt")).toEqual(["follow up"]);
+      expect(posts[0]).toBe(INTERRUPTED_MESSENGER_RESPONSE);
+      expect(posts).toHaveLength(2);
+    });
+
+    it("drains queued messages once a failed recovery is not retried", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        "drain-after-failed-recovery"
+      );
+      expect(
+        await agent.recoverWithQueuedFollowUpForTest({
+          failPost: true,
+          stage: "streaming"
+        })
+      ).toBe("post failed");
+
+      let prompts: string[] = [];
+      for (let i = 0; i < 50 && prompts.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        prompts = await agent.getRecorded("prompt");
+      }
+      expect(prompts).toEqual(["follow up"]);
+    });
   });
 
   it("separates text segments across tool-call boundaries (#1841)", async () => {
@@ -1558,6 +1836,121 @@ describe("think messengers core", () => {
     // The one-shot delivery is checkpointed completed (recovery owns the WS
     // answer; this surface won't receive it).
     expect(stages).toContain("completed");
+  });
+
+  describe("typing indicator (#2324)", () => {
+    const sleep = (ms: number) =>
+      new Promise((resolve) => setTimeout(resolve, ms));
+
+    function deliver(
+      startTyping: () => Promise<void>,
+      chat: (callback: TextStreamCallback) => Promise<void> = async (
+        callback
+      ) => {
+        await sleep(60);
+        callback.onEvent(JSON.stringify({ type: "text-delta", delta: "hi" }));
+      }
+    ) {
+      const posts: string[] = [];
+      const delivered = deliverMessengerReply({
+        event: baseEvent,
+        policy: { typingRefreshMs: 10 },
+        surface: {
+          async post(message) {
+            if (isAsyncIterable(message)) {
+              posts.push(...(await collectText(message)));
+              return;
+            }
+            posts.push(
+              typeof message === "string" ? message : message.markdown
+            );
+          },
+          startTyping
+        },
+        target: {
+          cancelChat() {
+            return Promise.resolve(false);
+          },
+          chat: (_message, callback) =>
+            chat(callback as unknown as TextStreamCallback)
+        }
+      });
+      return { delivered, posts };
+    }
+
+    it("still runs the turn when the typing indicator fails", async () => {
+      const { delivered, posts } = deliver(() =>
+        Promise.reject(new Error("typing unavailable"))
+      );
+      await delivered;
+
+      expect(posts).toEqual(["hi"]);
+    });
+
+    it("refreshes until the first text, then stops", async () => {
+      let typing = 0;
+      const { delivered } = deliver(() => {
+        typing++;
+        return Promise.resolve();
+      });
+      await delivered;
+      const afterTurn = typing;
+      await sleep(50);
+
+      expect(afterTurn).toBeGreaterThan(1);
+      expect(typing).toBe(afterTurn);
+    });
+
+    it("stops refreshing when the turn fails", async () => {
+      let typing = 0;
+      const { delivered, posts } = deliver(
+        () => {
+          typing++;
+          return Promise.resolve();
+        },
+        async () => {
+          await sleep(30);
+          throw new Error("model failed");
+        }
+      );
+      await delivered;
+      const afterTurn = typing;
+      await sleep(50);
+
+      expect(typing).toBe(afterTurn);
+      expect(posts).toEqual([ERROR_MESSENGER_RESPONSE]);
+    });
+  });
+
+  it("posts only the apology, never an empty stream, when an interrupted turn has no text", async () => {
+    const posts: string[] = [];
+
+    await deliverMessengerReply({
+      event: baseEvent,
+      surface: {
+        post(message) {
+          posts.push(
+            isAsyncIterable(message)
+              ? "<stream>"
+              : typeof message === "string"
+                ? message
+                : message.markdown
+          );
+          return Promise.resolve();
+        }
+      },
+      target: {
+        cancelChat() {
+          return Promise.resolve(false);
+        },
+        chat(_message, callback) {
+          callback.onInterrupted?.();
+          return Promise.resolve();
+        }
+      }
+    });
+
+    expect(posts).toEqual([INTERRUPTED_MESSENGER_RESPONSE]);
   });
 
   it("skips the apology when the target delivers the recovered reply itself (#2106)", async () => {

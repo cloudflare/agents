@@ -1,8 +1,15 @@
 import type { LanguageModel, UIMessage } from "ai";
-import type { Adapter, ChatInstance } from "chat";
+import type { Adapter, Chat, ChatInstance } from "chat";
 import { Message, parseMarkdown } from "chat";
 import { Think } from "../../think";
-import { chatSdkMessenger, type ThinkMessengers } from "../../messengers";
+import {
+  chatSdkMessenger,
+  MESSENGER_REPLY_FIBER_NAME,
+  messengerReplySnapshot,
+  type MessengerEvent,
+  type ThinkMessengerRuntime,
+  type ThinkMessengers
+} from "../../messengers";
 
 const fakeAdapter = {
   channelIdFromThreadId(threadId: string) {
@@ -147,8 +154,11 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
 
   override getModel(): LanguageModel {
     const record = (text: string) => this._record("prompt", text);
+    const recordEnd = (text: string) => this._record("stream-end", text);
     const mode = this._recoveryMode();
     const nextCall = () => ++this._streamCalls;
+    // An agent named `slow-…` takes 2.5s per model call.
+    const slowMs = this.name.startsWith("slow-") ? 2500 : 0;
     return {
       specificationVersion: "v3",
       provider: "test",
@@ -157,8 +167,13 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       doGenerate() {
         throw new Error("doGenerate not implemented in mock");
       },
-      doStream(options: { prompt: unknown }) {
-        record(lastUserText(options.prompt));
+      async doStream(options: { prompt: unknown }) {
+        const prompt = lastUserText(options.prompt);
+        record(prompt);
+        if (slowMs) {
+          await new Promise((resolve) => setTimeout(resolve, slowMs));
+          recordEnd(prompt);
+        }
         const call = nextCall();
         const fails =
           mode === "exhaust" ||
@@ -213,7 +228,7 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
             controller.close();
           }
         });
-        return Promise.resolve({ stream });
+        return { stream };
       }
     } as LanguageModel;
   }
@@ -234,6 +249,107 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         })
       })
     };
+  }
+
+  /** Model prompts and slow-mode stream ends, in order. */
+  async getModelLog(): Promise<Array<{ kind: string; content: string }>> {
+    this._ensureTable();
+    return this.sql<{ kind: string; content: string }>`
+      SELECT kind, content FROM messenger_delivery_log
+      WHERE kind IN ('prompt', 'stream-end') ORDER BY seq ASC
+    `;
+  }
+
+  async queueDepthForTest(threadId: string): Promise<number> {
+    return (await this._chat?.getState().queueDepth(threadId)) ?? 0;
+  }
+
+  async isSubscribedForTest(threadId: string): Promise<boolean> {
+    return (await this._chat?.getState().isSubscribed(threadId)) ?? false;
+  }
+
+  private _failNextPost = false;
+
+  /**
+   * Recovers an interrupted reply while a follow-up sits in the thread's
+   * queue, as if the lock holder that would have drained it was evicted.
+   * `stage: "streaming"` recovers a reply lost mid-stream, which apologizes;
+   * `failPost` fails the recovered reply's first post; `retried` says the
+   * caller replays recovery after a failure. Resolves to the recovery error
+   * message, if any.
+   */
+  async recoverWithQueuedFollowUpForTest(options?: {
+    enqueue?: boolean;
+    failPost?: boolean;
+    retried?: boolean;
+    stage?: "accepted" | "streaming";
+  }): Promise<string | null> {
+    const runtime = (
+      this as unknown as { _messengerRuntime: ThinkMessengerRuntime }
+    )._messengerRuntime;
+    const chat = (
+      runtime as unknown as { chat: Pick<Chat, "getState" | "initialize"> }
+    ).chat;
+    await chat.initialize();
+    const threadId = "fake:dm-recovered";
+    if (options?.enqueue !== false) {
+      await chat.getState().enqueue(
+        threadId,
+        {
+          enqueuedAt: Date.now(),
+          expiresAt: Date.now() + 60_000,
+          message: this._toMessage({ id: "f1", text: "follow up", threadId })
+        },
+        10
+      );
+    }
+    this._failNextPost = options?.failPost ?? false;
+    const event: MessengerEvent = {
+      capabilities: {},
+      kind: "direct-message",
+      message: {
+        attachments: [],
+        author: { fullName: "Ada", userId: "user-ada" },
+        id: "r1",
+        providerMessageId: "r1",
+        text: "hello"
+      },
+      messengerId: "fake",
+      provider: "fake",
+      thread: {
+        id: threadId,
+        isDirectMessage: true,
+        providerThreadId: threadId
+      }
+    };
+    try {
+      await runtime.handleFiberRecovery(
+        {
+          createdAt: Date.now(),
+          id: "msgr_recovered",
+          name: MESSENGER_REPLY_FIBER_NAME,
+          recoveryReason: "interrupted",
+          snapshot: messengerReplySnapshot(
+            options?.stage ?? "accepted",
+            event,
+            {
+              _type: "chat:Thread",
+              adapterName: "fake",
+              channelId: threadId,
+              id: threadId,
+              isDM: true
+            }
+          )
+        },
+        {
+          persistRecoverySnapshot: () => {},
+          retriesAfter: () => options?.retried ?? false
+        }
+      );
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   private _failPostForTest: string | null = null;
@@ -474,10 +590,25 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       },
       initialize: (chat: ChatInstance) => {
         this._chat = chat;
+        if (this.name.startsWith("slow-")) {
+          // Stand-in for the Chat SDK's fixed 30s lock: short enough that a
+          // slow turn outlives it unless the lock is kept alive.
+          const state = chat.getState();
+          const acquireLock = state.acquireLock.bind(state);
+          const extendLock = state.extendLock.bind(state);
+          state.acquireLock = (threadId, ttlMs) =>
+            acquireLock(threadId, Math.min(ttlMs, 300));
+          state.extendLock = (lock, ttlMs) =>
+            extendLock(lock, Math.min(ttlMs, 300));
+        }
         return Promise.resolve();
       },
       isDM: (threadId: string) => threadId.startsWith("fake:dm"),
       postMessage: async (threadId: string, message: unknown) => {
+        if (this._failNextPost) {
+          this._failNextPost = false;
+          throw new Error("post failed");
+        }
         if (this._failPostForTest === text(message)) {
           this._failPostForTest = null;
           throw new Error("simulated post failure");

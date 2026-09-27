@@ -1,7 +1,10 @@
 import { applyChunkToParts, type MessagePart } from "./message-builder";
+import { isChunkTooLargeToStore } from "./chunk-size";
 import {
   AGENT_TOOL_MILESTONE_PART,
-  AGENT_TOOL_PROGRESS_PART
+  AGENT_TOOL_PROGRESS_PART,
+  isAgentToolLifecycleChunk,
+  isPositionlessAgentToolChunk
 } from "../agent-tool-types";
 import type {
   AgentToolEventMessage,
@@ -192,10 +195,14 @@ export class AgentToolProgressEmitter {
       ...(typeof progress.phase === "string" ? { phase: progress.phase } : {}),
       ...(progress.data !== undefined ? { data: progress.data } : {})
     };
+    // Identical payloads must not dedupe against each other on a client that
+    // keeps seen keys for its connection's lifetime, including across a child
+    // restart, so the id is unique rather than a per-instance counter.
     this.hooks.broadcast(
       requestId,
       JSON.stringify({
         type: AGENT_TOOL_PROGRESS_PART,
+        id: crypto.randomUUID(),
         transient: true,
         data: wire
       })
@@ -400,12 +407,14 @@ export function createAgentToolEventState<
 }
 
 /**
- * Identity of an agent-tool event for replay-vs-live dedupe. Live numbering
- * counts transient frames that replay never sees, so only ordinary chunks key
- * on the broadcast `sequence`. Lifecycle events key on their content: a
+ * Identity of an agent-tool event for replay-vs-live dedupe. Ordinary chunks
+ * key on the broadcast `sequence`, which is their stored-chunk position on
+ * both the live and replay paths. Lifecycle events key on their content: a
  * reattached run can be interrupted again with a different reason, and the
  * reducer overwrites on lifecycle events, so re-applying one is harmless.
- * Milestones key on their own persisted sequence.
+ * Milestones key on their own persisted sequence. Progress frames and chunks
+ * too large to store reuse the next stored chunk's sequence without consuming
+ * it and are never replayed, so they key on their own emitter-assigned id.
  */
 export function agentToolEventDedupeKey(
   message: AgentToolEventMessage
@@ -414,18 +423,33 @@ export function agentToolEventDedupeKey(
   let identity: string;
   if (event.kind !== "chunk") {
     identity = `event:${JSON.stringify(event)}`;
+  } else if (event.unstoredId !== undefined) {
+    identity = `unstored:${event.unstoredId}`;
   } else {
     let milestone: AgentToolMilestone | undefined;
-    if (event.body.includes(AGENT_TOOL_MILESTONE_PART)) {
+    let progressId: string | undefined;
+    let progress = false;
+    if (
+      event.body.includes(AGENT_TOOL_MILESTONE_PART) ||
+      event.body.includes(AGENT_TOOL_PROGRESS_PART)
+    ) {
       try {
-        milestone = readAgentToolMilestoneChunk(JSON.parse(event.body));
+        const parsed: unknown = JSON.parse(event.body);
+        milestone = readAgentToolMilestoneChunk(parsed);
+        progress = readAgentToolProgressChunk(parsed) !== undefined;
+        const id = (parsed as { id?: unknown }).id;
+        if (typeof id === "string") progressId = id;
       } catch {
         milestone = undefined;
       }
     }
     identity = milestone
       ? `milestone:${milestone.sequence}`
-      : `seq:${message.sequence}`;
+      : progress
+        ? progressId !== undefined
+          ? `progress:${progressId}`
+          : `progress:${message.sequence}:${event.body}`
+        : `seq:${message.sequence}`;
   }
   return [message.parentToolCallId ?? "", event.runId, identity].join("\0");
 }
@@ -445,6 +469,8 @@ export function applyAgentToolEvent<
   return { runsById, ...rebuildIndexes(runsById) };
 }
 
+export { isPositionlessAgentToolChunk };
+
 export type {
   AgentToolEvent,
   AgentToolEventMessage,
@@ -461,19 +487,18 @@ export interface AgentToolBroadcastHooks {
   /** Live tailers per run; iterated to forward each progress chunk. */
   forwarders: Map<string, Set<(chunk: AgentToolStoredChunk) => void>>;
   /**
-   * Per-run forwarded-chunk counter; advanced even with no tailer attached.
+   * Per-run live counter of stored chunks; advanced even with no tailer
+   * attached, so a stored chunk's live sequence equals its stored chunk_index.
    *
-   * This is deliberately a SEPARATE counter from the resumable stream's stored
-   * chunk_index — do NOT try to "simplify" it away by sequencing off the store
-   * position. Not every forwarded frame is durably stored: progress/milestone
-   * frames (`reportProgress`) ride the same `USE_CHAT_RESPONSE` wire type and
-   * are snooped + forwarded here, but persist out-of-band (progress snapshot /
-   * milestone rows), so they have no store position. Sourcing the sequence from
-   * the store would give them a colliding position and the tail's high-water
-   * dedupe (`emit`) would silently drop them, breaking live progress/milestone
-   * delivery to the parent. This counter sequences stored AND non-stored frames
-   * on one monotonic line; the tail realigns it to the stored high-water on each
-   * (re)attach so a replay→live handoff stays gap/duplicate-free.
+   * Progress/milestone frames (`reportProgress`) ride the same
+   * `USE_CHAT_RESPONSE` wire type and are forwarded here, but persist
+   * out-of-band (progress snapshot / milestone rows) and have no store
+   * position. Neither do chunks too large to store (they carry an
+   * `unstoredId`). Both carry the next position WITHOUT consuming it, and
+   * tails emit them outside the stored-position high-water dedupe; counting
+   * them would push later stored chunks past their stored index, so a chunk
+   * stored and broadcast during a tail's drain would be emitted twice. A tail
+   * seeds a cold counter from the stored high-water before it attaches.
    */
   liveSequences: Map<string, number>;
   /** Per-run last error body, captured for replay to a late-attaching tailer. */
@@ -533,10 +558,21 @@ export function interceptAgentToolBroadcast(
             parsed.body.length > 0
           ) {
             // Advance the live sequence even with no tailer attached so a tailer
-            // registering mid-run resumes at the right offset.
+            // registering mid-run resumes at the right offset. Progress,
+            // milestone, and unstored frames carry the next position without
+            // consuming it.
             const sequence = hooks.liveSequences.get(runId) ?? 0;
-            hooks.liveSequences.set(runId, sequence + 1);
-            const chunk: AgentToolStoredChunk = { sequence, body: parsed.body };
+            const lifecycle = isAgentToolLifecycleChunk(parsed.body);
+            const unstored = !lifecycle && isChunkTooLargeToStore(parsed.body);
+            hooks.liveSequences.set(
+              runId,
+              lifecycle || unstored ? sequence : sequence + 1
+            );
+            const chunk: AgentToolStoredChunk = {
+              sequence,
+              body: parsed.body,
+              ...(unstored ? { unstoredId: crypto.randomUUID() } : {})
+            };
             const forwarders = hooks.forwarders.get(runId);
             if (forwarders) {
               for (const forward of forwarders) forward(chunk);

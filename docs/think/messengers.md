@@ -158,9 +158,9 @@ them as `input.skipped`, and the default event copies them onto
 too, or start from `defaultChatSdkEvent(definition, input)`, otherwise the
 model sees only the newest message.
 
-In a subscribed thread, a burst counts as a mention when any of its messages
-mentions the bot. With the default `respondTo`, a mention followed by an
-ordinary line is still answered.
+A burst counts as a mention when any of its messages mentions the bot, in a
+subscribed thread or not. With the default `respondTo`, a mention followed by
+an ordinary line is still answered, and the thread is subscribed.
 
 ### Change the Concurrency Strategy
 
@@ -185,6 +185,12 @@ Use `{ strategy: "burst", debounceMs: 1500 }` to wait longer for a burst. The
 `"concurrent"` hands every message to Think without a thread lock, so none are
 batched or dropped. Think still runs the turns of one conversation one at a
 time, so the replies arrive in order rather than in parallel.
+
+Think keeps the thread lock alive for as long as a reply runs, and keeps queued
+messages for 30 minutes (the Chat SDK default is 90 seconds), so a message that
+arrives during a slow reply is still answered after it. Set `queueEntryTtlMs`
+in a `ConcurrencyConfig` to change that. Messages still queued when the Durable
+Object restarts are answered once the interrupted reply is recovered.
 
 ## Conversation Targets
 
@@ -235,7 +241,10 @@ idempotent managed fiber, resolves the conversation target, calls
 `target.chat(message, callback)`, and lets the provider delivery policy post or
 edit visible messages.
 
-While the model is working, Think shows the provider's typing indicator. On
+While the model is working, Think shows the provider's typing indicator and
+re-sends it every 4 seconds until the reply's first text is posted (set the
+messenger's `delivery.typingRefreshMs` to change that; `0` sends it once). A
+provider that fails to show the indicator does not stop the reply. On
 providers with native streaming, the reply streams in place. On providers
 without it, Think posts the reply once the first text arrives and edits that
 message as the rest streams in. It never posts a `...` placeholder first, so

@@ -46,7 +46,8 @@ import type {
   StepContext,
   ChunkContext,
   ActiveTurn,
-  CancelSubmissionResult
+  CancelSubmissionResult,
+  ThinkModel
 } from "../../think";
 import type { MessengerContext } from "../../messengers";
 import {
@@ -904,6 +905,380 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /**
+   * Inspect a stale `running` child-run row (no live run, no recovery) with
+   * `reconcile: false`. Returns the reported and the stored status afterwards.
+   */
+  async inspectStaleRunReadOnlyForTest(): Promise<{
+    reported: string | undefined;
+    stored: string | undefined;
+  }> {
+    const runId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, status, started_at)
+      VALUES (${runId}, 'running', ${Date.now()})
+    `;
+    const inspection = await this.inspectAgentToolRun(runId, {
+      reconcile: false
+    });
+    return {
+      reported: inspection?.status,
+      stored: this["_readAgentToolChildRun"](runId)?.status
+    };
+  }
+
+  /**
+   * Post-restart cold-counter realign: seed a RUNNING run with a stored backlog
+   * 0..2, wipe the in-memory live sequence, tail after `afterSequence` (parent
+   * recovery passes the last stored index), then broadcast a new chunk. Returns
+   * the live counter after the drain and the forwarded chunk (null if dropped).
+   */
+  async coldCounterReattachForTest(afterSequence: number): Promise<{
+    liveSequenceAfterDrain: number | undefined;
+    postRestart: { sequence: number; body: string } | null;
+  }> {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    const streamId = this["_resumableStream"].start(requestId);
+    const backlog = ["a", "b", "c"].map((delta) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta })
+    );
+    for (const body of backlog) {
+      this["_resumableStream"].storeChunk(streamId, body);
+    }
+    this["_resumableStream"].flushBuffer();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, stream_id, status, started_at)
+      VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
+    `;
+    this["_agentToolLiveSequences"].delete(runId);
+
+    const stream = (await this.tailAgentToolRun(runId, {
+      afterSequence
+    })) as unknown as ReadableStream<Uint8Array>;
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const readLine = async (timeoutMs: number): Promise<string | null> => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const nl = buffer.indexOf("\n");
+        if (nl >= 0) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          if (line) return line;
+          continue;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return null;
+        const next = await Promise.race([
+          reader.read(),
+          new Promise<"timeout">((resolve) =>
+            setTimeout(() => resolve("timeout"), remaining)
+          )
+        ]);
+        if (next === "timeout" || next.done) return null;
+        buffer += decoder.decode(next.value, { stream: true });
+      }
+    };
+    for (let i = afterSequence + 1; i < backlog.length; i++) {
+      if ((await readLine(2000)) === null) break;
+    }
+    const deadline = Date.now() + 500;
+    while (
+      this["_agentToolLiveSequences"].get(runId) !== backlog.length &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const liveSequenceAfterDrain = this["_agentToolLiveSequences"].get(runId);
+
+    const postBody = JSON.stringify({
+      type: "text-delta",
+      id: "t",
+      delta: "post-restart"
+    });
+    this.broadcast(
+      JSON.stringify({
+        type: "cf_agent_use_chat_response",
+        id: requestId,
+        body: postBody,
+        done: false
+      })
+    );
+    const postLine = await readLine(500);
+    await reader.cancel();
+    return {
+      liveSequenceAfterDrain,
+      postRestart:
+        postLine === null
+          ? null
+          : (JSON.parse(postLine) as { sequence: number; body: string })
+    };
+  }
+
+  /**
+   * A warm run that streamed a chunk too large to store, then a tail
+   * re-attaching while a stored chunk is broadcast during its drain, followed
+   * by another oversized chunk and a stored one. Returns what the tail
+   * forwarded (oversized deltas summarized).
+   */
+  async skippedChunkReattachForTest(): Promise<
+    Array<{ sequence: number; delta: string; unstored: boolean }>
+  > {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    const streamId = this["_resumableStream"].start(requestId);
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, stream_id, status, started_at)
+      VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
+    `;
+    this["_agentToolLiveSequences"].set(runId, 0);
+    const broadcast = (body: string) =>
+      this.broadcast(
+        JSON.stringify({
+          type: "cf_agent_use_chat_response",
+          id: requestId,
+          body,
+          done: false
+        })
+      );
+    const send = (body: string) => {
+      this["_resumableStream"].storeChunk(streamId, body);
+      broadcast(body);
+    };
+    const delta = (value: string) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta: value });
+    const oversized = delta("x".repeat(1_900_000));
+
+    send(delta("a"));
+    send(delta("b"));
+    send(oversized);
+    this["_resumableStream"].storeChunk(streamId, delta("c"));
+    this["_resumableStream"].flushBuffer();
+
+    const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
+    broadcast(delta("c"));
+    const reader = (
+      (await tail) as unknown as ReadableStream<Uint8Array>
+    ).getReader();
+    send(oversized);
+    send(delta("d"));
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const deadline = Date.now() + 500;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), remaining)
+        )
+      ]);
+      if (next === "timeout" || next.done) break;
+      buffer += decoder.decode(next.value, { stream: true });
+    }
+    await reader.cancel();
+    this["_agentToolLiveSequences"].delete(runId);
+    return buffer
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const chunk = JSON.parse(line) as AgentToolStoredChunk;
+        const { delta: value } = JSON.parse(chunk.body) as { delta: string };
+        return {
+          sequence: chunk.sequence,
+          delta: value.length > 10 ? "<oversized>" : value,
+          unstored: chunk.unstoredId !== undefined
+        };
+      });
+  }
+
+  /**
+   * A running run with a cold live counter (as after a restart) and a stored
+   * backlog 0..2, tailed while the recovered turn stores and broadcasts a new
+   * chunk after the drain read its snapshot. Returns the forwarded sequences
+   * and the new chunk (null if dropped).
+   */
+  async broadcastDuringDrainForTest(): Promise<{
+    drained: number[];
+    postRestart: { sequence: number; body: string } | null;
+  }> {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    const streamId = this["_resumableStream"].start(requestId);
+    const backlog = ["a", "b", "c"].map((delta) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta })
+    );
+    for (const body of backlog) {
+      this["_resumableStream"].storeChunk(streamId, body);
+    }
+    this["_resumableStream"].flushBuffer();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, stream_id, status, started_at)
+      VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
+    `;
+    this["_agentToolLiveSequences"].delete(runId);
+
+    const self = this as unknown as {
+      getAgentToolChunks: (
+        runId: string,
+        options?: { afterSequence?: number }
+      ) => Promise<AgentToolStoredChunk[]>;
+    };
+    const original = self.getAgentToolChunks;
+    let reached!: () => void;
+    const afterSnapshot = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    self.getAgentToolChunks = async (id, options) => {
+      const chunks = await original.call(this, id, options);
+      reached();
+      await gate;
+      return chunks;
+    };
+
+    try {
+      const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
+      await afterSnapshot;
+      const postBody = JSON.stringify({
+        type: "text-delta",
+        id: "t",
+        delta: "post-restart"
+      });
+      this["_resumableStream"].storeChunk(streamId, postBody);
+      this.broadcast(
+        JSON.stringify({
+          type: "cf_agent_use_chat_response",
+          id: requestId,
+          body: postBody,
+          done: false
+        })
+      );
+      release();
+
+      const reader = (
+        (await tail) as unknown as ReadableStream<Uint8Array>
+      ).getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const deadline = Date.now() + 500;
+      for (;;) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        const next = await Promise.race([
+          reader.read(),
+          new Promise<"timeout">((resolve) =>
+            setTimeout(() => resolve("timeout"), remaining)
+          )
+        ]);
+        if (next === "timeout" || next.done) break;
+        buffer += decoder.decode(next.value, { stream: true });
+      }
+      await reader.cancel();
+      const chunks = buffer
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { sequence: number; body: string });
+      return {
+        drained: chunks
+          .filter((chunk) => chunk.body !== postBody)
+          .map((chunk) => chunk.sequence),
+        postRestart: chunks.find((chunk) => chunk.body === postBody) ?? null
+      };
+    } finally {
+      release();
+      self.getAgentToolChunks = original;
+      this["_agentToolLiveSequences"].delete(runId);
+    }
+  }
+
+  /**
+   * A warm run that already broadcast a progress frame, then a tail attaching
+   * while a progress frame and a chunk (stored before the attach) are
+   * broadcast during its drain. Returns every body the tail forwarded.
+   */
+  async progressDuringDrainForTest(): Promise<string[]> {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    const streamId = this["_resumableStream"].start(requestId);
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, stream_id, status, started_at)
+      VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
+    `;
+    this["_agentToolLiveSequences"].set(runId, 0);
+    const broadcast = (body: string) =>
+      this.broadcast(
+        JSON.stringify({
+          type: "cf_agent_use_chat_response",
+          id: requestId,
+          body,
+          done: false
+        })
+      );
+    const progress = (message: string) =>
+      JSON.stringify({
+        type: "data-agent-progress",
+        transient: true,
+        data: { message }
+      });
+
+    const stored = ["a", "b", "c"].map((delta) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta })
+    );
+    for (const body of stored.slice(0, 2)) {
+      this["_resumableStream"].storeChunk(streamId, body);
+      broadcast(body);
+    }
+    broadcast(progress("before-attach"));
+    this["_resumableStream"].storeChunk(streamId, stored[2]);
+    this["_resumableStream"].flushBuffer();
+
+    const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
+    broadcast(progress("during-drain"));
+    broadcast(stored[2]);
+    const reader = (
+      (await tail) as unknown as ReadableStream<Uint8Array>
+    ).getReader();
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const deadline = Date.now() + 500;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), remaining)
+        )
+      ]);
+      if (next === "timeout" || next.done) break;
+      buffer += decoder.decode(next.value, { stream: true });
+    }
+    await reader.cancel();
+    this["_agentToolLiveSequences"].delete(runId);
+    return buffer
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => (JSON.parse(line) as { body: string }).body);
+  }
+
   private _beforeTurnLog: Array<{
     system: string;
     toolNames: string[];
@@ -1053,7 +1428,79 @@ export class ThinkTestAgent extends Think {
   }
 
   override getAIBinding(): Ai {
+    if (this._missingAIBindingForTest) {
+      throw new Error("no AI binding in this test");
+    }
     return this._fakeAIBinding ?? super.getAIBinding();
+  }
+
+  private _stringModelForTest: string | undefined;
+  private _missingAIBindingForTest = false;
+
+  /**
+   * The default model is a string with no AI binding to build it, and
+   * `beforeTurn` supplies its own model: the turn must not resolve the default.
+   */
+  async testChatWithBeforeTurnModelOverrideForTest(): Promise<{
+    result: TestChatResult;
+    gatewayModels: string[];
+  }> {
+    this._stringModelForTest = "@cf/meta/llama-3.1-8b-instruct";
+    this._missingAIBindingForTest = true;
+    this._gatewayModels = [];
+    this._turnConfigOverride = { model: createMockModel("from override") };
+    try {
+      const result = await this.testChat("override the model");
+      return { result, gatewayModels: this._gatewayModels };
+    } finally {
+      this._stringModelForTest = undefined;
+      this._missingAIBindingForTest = false;
+      this._turnConfigOverride = null;
+    }
+  }
+
+  async resolveModelWithAsyncGatewayForTest(): Promise<string> {
+    const gateway = Promise.resolve({ id: "async" });
+    this.getGateway = () => gateway as unknown as GatewayOptions;
+    try {
+      this.resolveModel("@cf/meta/llama-3.1-8b-instruct");
+      return "resolved";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      delete (this as { getGateway?: unknown }).getGateway;
+    }
+  }
+
+  /**
+   * #2321: a stamped `createdAt` must survive the recovery continuation that
+   * extends the interrupted assistant message.
+   */
+  async testRecoveryExtensionMetadataForTest(): Promise<{
+    assistantMessages: number;
+    metadata: string;
+    writerCalls: Array<{ createdAt: number; continuation: boolean }>;
+  }> {
+    const writerCalls: Array<{ createdAt: number; continuation: boolean }> = [];
+    this.messageMetadata = ({ part, continuation }) => {
+      if (part.type !== "start") return undefined;
+      const stamp = { createdAt: writerCalls.length + 1, continuation };
+      writerCalls.push(stamp);
+      return continuation ? { ...stamp, resumed: true } : stamp;
+    };
+    try {
+      const result = await this.testChatWithStallThenRecover(3, 50);
+      const assistant = (await this.getMessages()).filter(
+        (message) => message.role === "assistant"
+      );
+      return {
+        assistantMessages: result.assistantMessages,
+        metadata: JSON.stringify(assistant.at(-1)?.metadata ?? null),
+        writerCalls
+      };
+    } finally {
+      this.messageMetadata = undefined;
+    }
   }
 
   /**
@@ -3130,7 +3577,8 @@ export class ThinkTestAgent extends Think {
     this._reasoningResponse = { response, reasoning };
   }
 
-  override getModel(): LanguageModel {
+  override getModel(): ThinkModel {
+    if (this._stringModelForTest) return this._stringModelForTest;
     if (this._inBandErrorResponse) {
       return createInBandErrorMockModel(
         this._inBandErrorResponse.errorText,
@@ -9992,6 +10440,94 @@ export class ThinkRecoveryTestAgent extends Think {
     )._rebindAgentToolChildRunRequestId(requestId);
   }
 
+  /**
+   * Seed a chat-turn fiber row for `requestId` (settled when `completed`) and
+   * report whether the recoverable-turn checks count it as recovery evidence.
+   */
+  async chatTurnFiberEvidenceForTest(
+    requestId: string,
+    completed: boolean
+  ): Promise<{ recoverable: boolean; freshEvidence: boolean }> {
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at, completed_at)
+      VALUES (
+        ${`fiber-${crypto.randomUUID()}`},
+        ${`${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`},
+        ${null}, ${now}, ${completed ? now : null}
+      )
+    `;
+    const self = this as unknown as {
+      _hasRecoverableChatTurn(requestId: string): boolean;
+      _hasFreshRecoverableSubmissionEvidence(row: {
+        request_id: string;
+      }): boolean;
+    };
+    return {
+      recoverable: self._hasRecoverableChatTurn(requestId),
+      freshEvidence: self._hasFreshRecoverableSubmissionEvidence({
+        request_id: requestId
+      })
+    };
+  }
+
+  /**
+   * Seed an in-flight child-run row in a table created by an older release
+   * (no `event_delivery` column), with this isolate's ensure not yet run — a
+   * fresh isolate after upgrade whose first child-run access is recovery.
+   */
+  async seedLegacyAgentToolChildRunForTest(
+    runId: string,
+    requestId: string
+  ): Promise<void> {
+    this.sql`
+      CREATE TABLE cf_agent_tool_child_runs (
+        run_id TEXT PRIMARY KEY,
+        request_id TEXT,
+        stream_id TEXT,
+        status TEXT NOT NULL,
+        summary TEXT,
+        error_message TEXT,
+        started_at INTEGER NOT NULL,
+        completed_at INTEGER
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, request_id, status, started_at)
+      VALUES (${runId}, ${requestId}, 'running', ${Date.now()})
+    `;
+  }
+
+  /**
+   * Seed an in-flight `eventDelivery: "terminal"` child-run row, rebind it the
+   * way a recovered turn does, then finalize it the way a settled recovered
+   * turn does. Returns whether the run is still in the terminal-only set.
+   */
+  async terminalOnlyRunAfterRecoveredTurnForTest(
+    runId: string,
+    requestId: string
+  ): Promise<{ afterRebind: boolean; afterFinalize: boolean }> {
+    const self = this as unknown as {
+      _ensureAgentToolChildRunTable(): void;
+      _rebindAgentToolChildRunRequestId(requestId: string): void;
+      _finalizeAgentToolChildRunTailers(runId: string): void;
+      _agentToolTerminalOnlyRuns: Set<string>;
+    };
+    self._ensureAgentToolChildRunTable();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, status, started_at, event_delivery)
+      VALUES (${runId}, 'old-req', 'running', ${Date.now()}, 'terminal')
+    `;
+    self._rebindAgentToolChildRunRequestId(requestId);
+    const afterRebind = self._agentToolTerminalOnlyRuns.has(runId);
+    self._finalizeAgentToolChildRunTailers(runId);
+    return {
+      afterRebind,
+      afterFinalize: self._agentToolTerminalOnlyRuns.has(runId)
+    };
+  }
+
   /** Whether this facet has a `cf_agent_tool_child_runs` table at all. */
   async hasAgentToolChildRunTableForTest(): Promise<boolean> {
     const rows = this.sql<{ n: number }>`
@@ -11042,6 +11578,9 @@ export const POINTER_MEDIA_CHARS = 1_600_000;
  */
 export class ThinkMediaEvictionAgent extends Think {
   override mediaEviction: MediaEvictionConfig | boolean = false;
+  // A step of 1 moves the eviction cutoff with every message, so these
+  // six-message fixtures age `m0`/`m1` without growing to a full step.
+  override truncationStep = 1;
   override getModel(): LanguageModel {
     return createMockModel("media eviction agent response");
   }
