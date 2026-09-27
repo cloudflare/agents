@@ -1,0 +1,85 @@
+packages/ai-chat/src/tests/worker.ts
+  s_ce1ab06b2d7180::t_2bce3167a86d05 3270-3310
+packages/think/src/tests/agents/think-session.ts
+  s_da56d18e00076b::t_71848eaaaac966 639-642,1481,1484-1487,1523,1526-1530,1533,1536-1538,2302-2542
+packages/think/src/tests/think-session.test.ts
+  s_da56d18e00076b::t_1430672636fec7 766-876
+packages/agents/src/chat/recovery-engine.ts
+  s_93f525f3481953::t_0b3584fcc2aaa6 144-149,717-756,1007-1083
+.changeset/stream-recovery-review-fixes.md
+  s_7c9867abe4d126::t_c3a9dadb5f9d3e 1-20
+packages/think/src/tests/messengers.test.ts
+  s_f4803804f2d8c8::t_27cf631c0615d5 1284-1322
+packages/ai-chat/src/tests/durable-chat-recovery.test.ts
+  s_ce1ab06b2d7180::t_67c05afe5721d7 208-210,2663-2690,2906-3020
+packages/think/src/think.ts
+  s_7c9867abe4d126::t_b07d9c2389407b 230-232,344-348,351-353,388,391-395,401-412,1871,5376-5377,5383,6581-6583,6585-6586,6588-6608,13093,13552-13590,13884-13889,13893,13921-13926,13967,13977-13985,14063,14081,14110,14119-14127,14130-14135,14137,14144,14146,14235,14406,14427-14432,14492,14502-14510,14628-14634,14636,14639-14643,16366-16369,16564-16566,16692-16699,16721,16742,16747-16765,17540,17843,18575,18585-18587,18593-18598,18612-18631,18636-18690,18717
+packages/agents/src/chat/index.ts
+  s_f6c6c41d005af6::t_3b46cc60961cfb 78,221,275-277
+packages/ai-chat/src/index.ts
+  s_7c9867abe4d126::t_d8b2255e31eae7 105-107,278,281-293,1598,3076-3091,4987-4990,5466-5470,5546,5548-5554,5615-5617,5696-5701,5711-5732,5736-5737,5740,5748,5754,5768,5772-5800,6043-6047,6119,6124-6130,7483-7485,7539,7545-7548,7634
+packages/think/src/tests/agents/messengers.ts
+  s_7c9867abe4d126::t_a005f61a66bf34 230-234,239-312,450-453
+packages/think/src/messengers/chat-sdk.ts
+  s_7c9867abe4d126::t_2c27cb5a393bf6 65-90,626-628,636-637,648-651
+packages/agents/src/retries.ts
+  s_7c9867abe4d126::t_1450587d2ef328 298-310
+packages/agents/src/chat/__tests__/recovery-engine.test.ts
+  s_f6c6c41d005af6::t_5ec2ab6e81105b 5-6,1954-1991
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "debd88094cd96c18c585ff15029490e699672c65",
+  "prompts": {},
+  "sessions": {
+    "s_7c9867abe4d126": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "abc3e726-5121-430d-bf7f-fae36392288e",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_93f525f3481953": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "07fb1119-18c7-479c-bfbf-f3f2f017f34b",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_ce1ab06b2d7180": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "60d19fa2-5d90-4412-8906-5f507fe8341e",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_da56d18e00076b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "f7f55626-fbab-4399-8014-a16a1cac352b",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_f4803804f2d8c8": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "74a18dc3-b102-4463-b272-958aecacfe5c",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_f6c6c41d005af6": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "0bbac664-3a39-457e-ae01-d9ddf59c0ac8",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
