@@ -420,6 +420,14 @@ type MessengerRecoveryDelivery = {
 const MESSENGER_RECOVERY_RETRY_CALLBACK = "_cfRetryMessengerRecoveryDelivery";
 const MESSENGER_RECOVERY_MAX_RETRIES = 8;
 
+const WORKERS_AI_MODEL_PREFIXES = ["@cf/", "@hf/"];
+
+function isWorkersAIModelId(model: string): boolean {
+  return WORKERS_AI_MODEL_PREFIXES.some(
+    (prefix) => model.startsWith(prefix) && model.length > prefix.length
+  );
+}
+
 function messageText(message: UIMessage | undefined): string {
   return (message?.parts ?? [])
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
@@ -5129,6 +5137,20 @@ export class Think<
    */
   resolveModel(model: ThinkModel = this.getModel()): LanguageModel {
     if (typeof model !== "string") return model;
+    // The provider sends every `@...` id straight to `env.AI.run(model)`, so a
+    // malformed one would only fail at inference time.
+    const isWorkersAI = isWorkersAIModelId(model);
+    const slash = model.indexOf("/");
+    if (
+      !isWorkersAI &&
+      (model.startsWith("@") || slash <= 0 || slash === model.length - 1)
+    ) {
+      throw new Error(
+        `Invalid model id ${JSON.stringify(model)}. Use a Workers AI id ` +
+          '(e.g. "@cf/moonshotai/kimi-k2.7-code") or a "<provider>/<model>" ' +
+          'AI Gateway slug (e.g. "openai/gpt-5.5"), or return a LanguageModel.'
+      );
+    }
     const gateway = this.getGateway(model);
     if (
       gateway !== null &&
@@ -5145,11 +5167,11 @@ export class Think<
       binding: this.getAIBinding(),
       providers: [openai, anthropic]
     });
-    // `@cf/...` ids take Workers AI chat settings (sessionAffinity improves
+    // Workers AI ids take Workers AI chat settings (sessionAffinity improves
     // prefix-cache hits). Any other slug is a catalog model routed through AI
     // Gateway; we pass no other per-call settings, which avoids forcing
     // options a given provider/transport would reject.
-    return model.startsWith("@cf/")
+    return isWorkersAI
       ? this._defaultProvider(model, {
           sessionAffinity: this.sessionAffinity,
           ...(gateway && { gateway })

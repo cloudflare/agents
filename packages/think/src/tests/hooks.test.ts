@@ -198,6 +198,71 @@ describe("Think — beforeTurn hook", () => {
     expect(catalog.calls.map((call) => call.gateway?.id)).toEqual(["default"]);
   });
 
+  it("routes @hf/ ids to Workers AI like @cf/ ids", async () => {
+    const agent = await freshAgent("resolve-hf");
+    const { calls } = await agent.resolveModelGatewayForTest(
+      "@hf/nousresearch/hermes-2-pro-mistral-7b",
+      null
+    );
+    expect(calls).toEqual([
+      {
+        kind: "run",
+        model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
+        gateway: null
+      }
+    ]);
+  });
+
+  it.each([
+    "gpt-5",
+    "",
+    "openai/",
+    "/gpt-5",
+    "@",
+    "@bad",
+    "@cf/",
+    "@hf/",
+    "@openai/gpt-5"
+  ])(
+    "rejects the malformed model id %j before touching the AI binding",
+    async (model) => {
+      const agent = await freshAgent(`resolve-invalid-${model || "empty"}`);
+      const message = await agent.resolveModelErrorForTest(model);
+      expect(message).toContain(`Invalid model id ${JSON.stringify(model)}`);
+      expect(message).toContain("@cf/");
+      expect(message).toContain("<provider>/<model>");
+    }
+  );
+
+  it("explains a missing AI binding for a valid string model id", async () => {
+    const agent = await freshAgent("resolve-missing-binding");
+    const message = await agent.resolveModelErrorForTest(
+      "@cf/meta/llama-3.1-8b-instruct"
+    );
+    expect(message).toContain('Workers AI binding named "AI"');
+    expect(message).toContain("getAIBinding()");
+  });
+
+  it("returns a LanguageModel object unchanged", async () => {
+    const agent = await freshAgent("resolve-passthrough");
+    expect(await agent.resolveModelPassesThroughObjectForTest()).toBe(true);
+  });
+
+  it.each(["beforeTurn", "beforeStep"] as const)(
+    "resolves a string model returned from %s",
+    async (hook) => {
+      const agent = await freshAgent(`resolve-hook-${hook}`);
+      const { models, calls } = await agent.runTurnWithStringModelForTest(
+        hook,
+        "@cf/meta/llama-3.1-8b-instruct"
+      );
+      expect(models).toContain("@cf/meta/llama-3.1-8b-instruct");
+      expect(calls.map((call) => call.model)).toContain(
+        "@cf/meta/llama-3.1-8b-instruct"
+      );
+    }
+  );
+
   it("does not resolve the default model when beforeTurn overrides it", async () => {
     const agent = await freshAgent(`model-override-${crypto.randomUUID()}`);
     const { result, gatewayModels } =
