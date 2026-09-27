@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ModelMessage, ToolModelMessage } from "ai";
+import { convertToModelMessages } from "ai";
+import type { ModelMessage, ToolModelMessage, UIMessage } from "ai";
 import {
   truncateOlderMessages,
   truncateOlderToolResults
@@ -532,5 +533,39 @@ describe("truncateOlderToolResults", () => {
         maxToolOutputChars: 100
       })
     ).toBe(modelMessages);
+  });
+
+  it("matches a repeated id past a provider-executed result", async () => {
+    const provider = toolMessage("dup", "p".repeat(2000));
+    (provider.parts[0] as { providerExecuted?: boolean }).providerExecuted =
+      true;
+    const messages = [
+      provider,
+      textMessage("user-2", "again"),
+      toolMessage("dup", "o".repeat(2000)),
+      textMessage("recent-1", "recent one"),
+      textMessage("recent-2", "recent two")
+    ];
+    const modelMessages = await convertToModelMessages(messages as UIMessage[]);
+
+    const truncated = truncateOlderToolResults(modelMessages, messages, {
+      keepRecent: 2,
+      maxToolOutputChars: 100
+    });
+
+    const results = truncated.flatMap((message) =>
+      typeof message.content === "string"
+        ? []
+        : message.content.flatMap((part) =>
+            part.type === "tool-result"
+              ? [{ role: message.role, output: JSON.stringify(part.output) }]
+              : []
+          )
+    );
+    expect(results).toHaveLength(2);
+    expect(results[0].role).toBe("assistant");
+    expect(results[0].output).toContain("p".repeat(2000));
+    expect(results[1].role).toBe("tool");
+    expect(results[1].output).toContain("[truncated");
   });
 });

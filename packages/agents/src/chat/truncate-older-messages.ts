@@ -277,7 +277,11 @@ function omittedMediaMarker(mediaType: string): string {
   return `[${mediaType} omitted from an older tool result]`;
 }
 
-/** Whether `convertToModelMessages` turns this UI tool part into a tool result. */
+/**
+ * Whether `convertToModelMessages` turns this UI tool part into a result in a
+ * `tool` message. Provider-executed results go in the assistant message
+ * instead, unless the part is a denied approval.
+ */
 function producesToolResult(part: object): boolean {
   const { state, approval } = part as {
     state?: unknown;
