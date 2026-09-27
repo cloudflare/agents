@@ -1,7 +1,8 @@
 import { applyChunkToParts, type MessagePart } from "./message-builder";
 import {
   AGENT_TOOL_MILESTONE_PART,
-  AGENT_TOOL_PROGRESS_PART
+  AGENT_TOOL_PROGRESS_PART,
+  isAgentToolLifecycleChunk
 } from "../agent-tool-types";
 import type {
   AgentToolEventMessage,
@@ -455,6 +456,8 @@ export function applyAgentToolEvent<
   return { runsById, ...rebuildIndexes(runsById) };
 }
 
+export { isAgentToolLifecycleChunk };
+
 export type {
   AgentToolEvent,
   AgentToolEventMessage,
@@ -471,19 +474,18 @@ export interface AgentToolBroadcastHooks {
   /** Live tailers per run; iterated to forward each progress chunk. */
   forwarders: Map<string, Set<(chunk: AgentToolStoredChunk) => void>>;
   /**
-   * Per-run forwarded-chunk counter; advanced even with no tailer attached.
+   * Per-run live counter of stored chunks; advanced even with no tailer
+   * attached, so a stored chunk's live sequence equals its stored chunk_index.
    *
-   * This is deliberately a SEPARATE counter from the resumable stream's stored
-   * chunk_index — do NOT try to "simplify" it away by sequencing off the store
-   * position. Not every forwarded frame is durably stored: progress/milestone
-   * frames (`reportProgress`) ride the same `USE_CHAT_RESPONSE` wire type and
-   * are snooped + forwarded here, but persist out-of-band (progress snapshot /
-   * milestone rows), so they have no store position. Sourcing the sequence from
-   * the store would give them a colliding position and the tail's high-water
-   * dedupe (`emit`) would silently drop them, breaking live progress/milestone
-   * delivery to the parent. This counter sequences stored AND non-stored frames
-   * on one monotonic line; the tail realigns it to the stored high-water on each
-   * (re)attach so a replay→live handoff stays gap/duplicate-free.
+   * Progress/milestone frames (`reportProgress`) ride the same
+   * `USE_CHAT_RESPONSE` wire type and are forwarded here, but persist
+   * out-of-band (progress snapshot / milestone rows) and have no store
+   * position. They carry the next position WITHOUT consuming it, and tails
+   * emit them outside the stored-position high-water dedupe
+   * ({@link isAgentToolLifecycleChunk}); counting them would push later stored
+   * chunks past their stored index, so a chunk stored and broadcast during a
+   * tail's drain would be emitted twice. The tail realigns this counter to the
+   * stored high-water on each (re)attach.
    */
   liveSequences: Map<string, number>;
   /** Per-run last error body, captured for replay to a late-attaching tailer. */
@@ -543,9 +545,11 @@ export function interceptAgentToolBroadcast(
             parsed.body.length > 0
           ) {
             // Advance the live sequence even with no tailer attached so a tailer
-            // registering mid-run resumes at the right offset.
+            // registering mid-run resumes at the right offset. Progress and
+            // milestone frames carry the next position without consuming it.
             const sequence = hooks.liveSequences.get(runId) ?? 0;
-            hooks.liveSequences.set(runId, sequence + 1);
+            const lifecycle = isAgentToolLifecycleChunk(parsed.body);
+            hooks.liveSequences.set(runId, lifecycle ? sequence : sequence + 1);
             const chunk: AgentToolStoredChunk = { sequence, body: parsed.body };
             const forwarders = hooks.forwarders.get(runId);
             if (forwarders) {

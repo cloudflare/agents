@@ -1015,6 +1015,79 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /**
+   * A warm run that already broadcast a progress frame, then a tail attaching
+   * while a progress frame and a chunk (stored before the attach) are
+   * broadcast during its drain. Returns every body the tail forwarded.
+   */
+  async progressDuringDrainForTest(): Promise<string[]> {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    const streamId = this["_resumableStream"].start(requestId);
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, stream_id, status, started_at)
+      VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
+    `;
+    this["_agentToolLiveSequences"].set(runId, 0);
+    const broadcast = (body: string) =>
+      this.broadcast(
+        JSON.stringify({
+          type: "cf_agent_use_chat_response",
+          id: requestId,
+          body,
+          done: false
+        })
+      );
+    const progress = (message: string) =>
+      JSON.stringify({
+        type: "data-agent-progress",
+        transient: true,
+        data: { message }
+      });
+
+    const stored = ["a", "b", "c"].map((delta) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta })
+    );
+    for (const body of stored.slice(0, 2)) {
+      this["_resumableStream"].storeChunk(streamId, body);
+      broadcast(body);
+    }
+    broadcast(progress("before-attach"));
+    this["_resumableStream"].storeChunk(streamId, stored[2]);
+    this["_resumableStream"].flushBuffer();
+
+    const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
+    broadcast(progress("during-drain"));
+    broadcast(stored[2]);
+    const reader = (
+      (await tail) as unknown as ReadableStream<Uint8Array>
+    ).getReader();
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const deadline = Date.now() + 500;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), remaining)
+        )
+      ]);
+      if (next === "timeout" || next.done) break;
+      buffer += decoder.decode(next.value, { stream: true });
+    }
+    await reader.cancel();
+    this["_agentToolLiveSequences"].delete(runId);
+    return buffer
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => (JSON.parse(line) as { body: string }).body);
+  }
+
   private _beforeTurnLog: Array<{
     system: string;
     toolNames: string[];

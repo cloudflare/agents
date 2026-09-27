@@ -100,6 +100,7 @@ export {
   applyAgentToolEvent,
   createAgentToolEventState,
   interceptAgentToolBroadcast,
+  isAgentToolLifecycleChunk,
   AgentToolProgressEmitter,
   type AgentToolProgressEmitHooks,
   type AgentToolProgressEmitResult,

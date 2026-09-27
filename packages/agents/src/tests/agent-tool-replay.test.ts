@@ -110,6 +110,31 @@ describe("agent-tool connect-time replay", () => {
       expect(kinds).toEqual(["started", "chunk", "finished"]);
     }
   );
+
+  it(
+    "bounds replay when resolving a child stalls and still replays later runs",
+    { timeout: 20_000 },
+    async () => {
+      const agent = await getAgentByName(
+        env.TestAgentToolReplayAgent,
+        `replay-stalled-resolve-${crypto.randomUUID()}`
+      );
+      const { elapsedMs, frames } =
+        await agent.captureConnectReplayWithStalledResolveForTest({
+          stalledRunId: "run-stalled-resolve",
+          healthyRunId: "run-healthy",
+          resolveDelayMs: 8_000
+        });
+
+      expect(elapsedMs).toBeLessThan(5_000);
+      const kindsFor = (runId: string) =>
+        frames
+          .filter((frame) => frame.event.runId === runId)
+          .map((frame) => frame.event.kind);
+      expect(kindsFor("run-stalled-resolve")).toEqual(["started", "finished"]);
+      expect(kindsFor("run-healthy")).toEqual(["started", "chunk", "finished"]);
+    }
+  );
 });
 
 /**

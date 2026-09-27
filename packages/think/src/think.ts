@@ -193,6 +193,7 @@ import {
   awaitWithDeadline,
   drainInteractionApplies,
   interceptAgentToolBroadcast,
+  isAgentToolLifecycleChunk,
   AgentToolProgressEmitter,
   SubmitConcurrencyController,
   createToolsFromClientSchemas,
@@ -9974,11 +9975,16 @@ export class Think<
         // so a single high-water mark dedupes the stored-replay → live-
         // forwarding handoff: a chunk that lands in both the drained backlog AND
         // the live buffer (stored + broadcast during the drain) is emitted
-        // exactly once, in order.
+        // exactly once, in order. Progress/milestone frames have no stored
+        // position (they reuse the next one), so they bypass the high-water
+        // mark instead of moving it.
         let lastEmitted = options?.afterSequence ?? -1;
         const emit = (chunk: AgentToolStoredChunk) => {
-          if (closed || chunk.sequence <= lastEmitted) return;
-          lastEmitted = chunk.sequence;
+          if (closed) return;
+          if (!isAgentToolLifecycleChunk(chunk.body)) {
+            if (chunk.sequence <= lastEmitted) return;
+            lastEmitted = chunk.sequence;
+          }
           try {
             controller.enqueue(
               agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)

@@ -96,6 +96,28 @@ export const AGENT_TOOL_PROGRESS_PART = "data-agent-progress";
 export const AGENT_TOOL_MILESTONE_PART = "data-agent-milestone";
 
 /**
+ * Whether a chunk body is a progress or milestone frame. These are broadcast
+ * but never written to the child's chunk store, so they have no stored-chunk
+ * position and must not take part in stored-position numbering or dedupe.
+ */
+export function isAgentToolLifecycleChunk(body: string): boolean {
+  if (
+    !body.includes(AGENT_TOOL_PROGRESS_PART) &&
+    !body.includes(AGENT_TOOL_MILESTONE_PART)
+  ) {
+    return false;
+  }
+  try {
+    const type = (JSON.parse(body) as { type?: unknown } | null)?.type;
+    return (
+      type === AGENT_TOOL_PROGRESS_PART || type === AGENT_TOOL_MILESTONE_PART
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Ephemeral progress signal a running sub-agent emits with `reportProgress`. The
  * well-known fields drive generic UI (a bar + status line) with no per-app
  * convention; `data` is an app-specific escape hatch that is **live-only** by

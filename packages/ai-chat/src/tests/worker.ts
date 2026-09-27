@@ -4212,6 +4212,79 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }
 
   /**
+   * A warm run that already broadcast a progress frame, then a tail attaching
+   * while a progress frame and a chunk (stored before the attach) are
+   * broadcast during its drain. Returns every body the tail forwarded.
+   */
+  async progressDuringDrainForTest(): Promise<string[]> {
+    const runId = "progress-drain-run";
+    const requestId = "progress-drain-req";
+    const streamId = this["_resumableStream"].start(requestId);
+    this.sql`
+      insert into cf_ai_chat_agent_tool_runs (run_id, request_id, status, input_json, started_at)
+      values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
+    `;
+    this["_agentToolRunsByRequestId"].set(requestId, runId);
+    this["_agentToolLiveSequences"].set(runId, 0);
+    const broadcast = (body: string) =>
+      this["_broadcastChatMessage"]({
+        body,
+        done: false,
+        id: requestId,
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+      });
+    const progress = (message: string) =>
+      JSON.stringify({
+        type: "data-agent-progress",
+        transient: true,
+        data: { message }
+      });
+
+    const stored = [
+      JSON.stringify({ type: "text-start", id: "t" }),
+      JSON.stringify({ type: "text-delta", id: "t", delta: "a" }),
+      JSON.stringify({ type: "text-delta", id: "t", delta: "b" })
+    ];
+    for (const body of stored.slice(0, 2)) {
+      await this["_storeStreamChunk"](streamId, body);
+      broadcast(body);
+    }
+    broadcast(progress("before-attach"));
+    await this["_storeStreamChunk"](streamId, stored[2]);
+    this["_resumableStream"].flushBuffer();
+
+    const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
+    broadcast(progress("during-drain"));
+    broadcast(stored[2]);
+    const reader = (
+      (await tail) as unknown as ReadableStream<Uint8Array>
+    ).getReader();
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const deadline = Date.now() + 500;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), remaining)
+        )
+      ]);
+      if (next === "timeout" || next.done) break;
+      buffer += decoder.decode(next.value, { stream: true });
+    }
+    await reader.cancel();
+    this["_agentToolRunsByRequestId"].delete(requestId);
+    this["_agentToolLiveSequences"].delete(runId);
+    return buffer
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => (JSON.parse(line) as { body: string }).body);
+  }
+
+  /**
    * Inspect a stale `running` run row (no live run, no recovery) with
    * `reconcile: false`. Returns the reported and the stored status afterwards.
    */
@@ -4828,6 +4901,14 @@ export class AIChatAgentToolParent extends Agent<Env> {
       crypto.randomUUID()
     );
     return child.coldCounterReattachForwardsForTest(afterSequence);
+  }
+
+  async progressDuringChildDrainForTest(): Promise<string[]> {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      crypto.randomUUID()
+    );
+    return child.progressDuringDrainForTest();
   }
 
   async inspectStaleChildRunReadOnlyForTest(): Promise<{

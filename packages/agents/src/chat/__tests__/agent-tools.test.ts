@@ -455,6 +455,29 @@ describe("interceptAgentToolBroadcast", () => {
     expect(liveSequences.get("run-1")).toBe(2);
   });
 
+  it("gives progress and milestone frames the next position without consuming it", () => {
+    const { hooks, forwarders, liveSequences } = makeHooks(() => "run-1");
+    const received: Chunk[] = [];
+    forwarders.set("run-1", new Set([(c) => received.push(c)]));
+    const progress = JSON.stringify({
+      type: AGENT_TOOL_PROGRESS_PART,
+      transient: true,
+      data: { fraction: 0.5 }
+    });
+    const milestone = JSON.stringify({
+      type: AGENT_TOOL_MILESTONE_PART,
+      data: { name: "halfway", sequence: 1, at: 1 }
+    });
+
+    interceptAgentToolBroadcast(frame({ id: "req-1", body: "a" }), hooks);
+    interceptAgentToolBroadcast(frame({ id: "req-1", body: progress }), hooks);
+    interceptAgentToolBroadcast(frame({ id: "req-1", body: milestone }), hooks);
+    interceptAgentToolBroadcast(frame({ id: "req-1", body: "b" }), hooks);
+
+    expect(received.map((chunk) => chunk.sequence)).toEqual([0, 1, 1, 1]);
+    expect(liveSequences.get("run-1")).toBe(2);
+  });
+
   it("advances the live sequence even with no tailer attached", () => {
     const { hooks, liveSequences } = makeHooks(() => "run-1");
     // Gate opens via an existing live sequence (run in flight, no tailer yet).

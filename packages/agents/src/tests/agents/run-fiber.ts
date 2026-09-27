@@ -721,9 +721,50 @@ export class TestRunFiberAgent extends Agent {
          ${now}, ${now}, NULL)
     `;
     this.sql`
-      INSERT INTO cf_agents_runs (id, name, snapshot, created_at, completed_at)
-      VALUES (${id}, ${name}, NULL, ${now}, ${now})
+      INSERT INTO cf_agents_runs
+        (id, name, snapshot, created_at, completed_at, outcome)
+      VALUES (${id}, ${name}, NULL, ${now}, ${now}, 'completed')
     `;
+  }
+
+  /**
+   * Runs a managed fiber whose body throws while both its ledger settle write
+   * and its run-row delete fail, leaving only the run row's settlement stamp.
+   */
+  async runManagedFailingWithFailedSettle(fiberId: string): Promise<void> {
+    this.sql`
+      CREATE TRIGGER fail_managed_fiber_settle
+      BEFORE UPDATE OF status ON cf_agents_fibers
+      WHEN OLD.name = 'managed-settle-failure' AND NEW.status != 'running'
+      BEGIN
+        SELECT RAISE(FAIL, 'simulated ledger settle failure');
+      END
+    `;
+    this.sql`
+      CREATE TRIGGER fail_managed_fiber_cleanup
+      BEFORE DELETE ON cf_agents_runs
+      WHEN OLD.name = 'managed-settle-failure'
+      BEGIN
+        SELECT RAISE(FAIL, 'simulated fiber cleanup failure');
+      END
+    `;
+    try {
+      await this.startFiber(
+        "managed-settle-failure",
+        async () => {
+          throw new Error("managed body failed");
+        },
+        { fiberId }
+      );
+      await (
+        this as unknown as {
+          _managedFiberExecutions: Map<string, Promise<void>>;
+        }
+      )._managedFiberExecutions.get(fiberId);
+    } finally {
+      this.sql`DROP TRIGGER fail_managed_fiber_settle`;
+      this.sql`DROP TRIGGER fail_managed_fiber_cleanup`;
+    }
   }
 
   async triggerRecoveryCheck(): Promise<void> {

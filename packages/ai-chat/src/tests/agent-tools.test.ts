@@ -176,6 +176,7 @@ type ParentStub = DurableObjectStub & {
     afterRebind: boolean;
     afterClose: boolean;
   }>;
+  progressDuringChildDrainForTest(): Promise<string[]>;
   inspectStaleChildRunReadOnlyForTest(): Promise<{
     reported: string | undefined;
     stored: string | undefined;
@@ -595,6 +596,30 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(drained).toEqual([]);
     expect(liveSequenceAfterDrain).toBe(3);
     expect(postRestart).toMatchObject({ sequence: 3 });
+  });
+
+  it("forwards progress and stored chunks exactly once across a tail's drain", async () => {
+    // Progress frames aren't stored, so they must not shift the live numbering
+    // of later stored chunks or be deduped against a stored position.
+    const parent = await getParent();
+    const bodies = await parent.progressDuringChildDrainForTest();
+
+    const parsed = bodies.map(
+      (body) =>
+        JSON.parse(body) as {
+          type: string;
+          delta?: string;
+          data?: { message?: string };
+        }
+    );
+    expect(
+      parsed.filter((chunk) => chunk.type === "text-delta").map((c) => c.delta)
+    ).toEqual(["a", "b"]);
+    expect(
+      parsed
+        .filter((chunk) => chunk.type === "data-agent-progress")
+        .map((chunk) => chunk.data?.message)
+    ).toEqual(["during-drain"]);
   });
 
   it("inspects a stale run read-only when asked not to reconcile", async () => {

@@ -538,6 +538,54 @@ export class TestAgentToolReplayAgent extends Agent {
   }
 
   /**
+   * Connect-time replay of two completed runs where resolving the first run's
+   * child stalls for `resolveDelayMs`.
+   */
+  async captureConnectReplayWithStalledResolveForTest(options: {
+    stalledRunId: string;
+    healthyRunId: string;
+    resolveDelayMs: number;
+  }): Promise<{ elapsedMs: number; frames: AgentToolEventMessage[] }> {
+    const startedAt = Date.now();
+    for (const runId of [options.stalledRunId, options.healthyRunId]) {
+      const child = await this.subAgent(TestAgentToolStubChild, runId);
+      await child.startAgentToolRun(
+        { chunkBodies: [JSON.stringify({ type: "text-start", id: "t" })] },
+        { runId }
+      );
+      this.sql`
+        INSERT INTO cf_agent_tool_runs (
+          run_id, parent_tool_call_id, agent_type, status, summary,
+          display_order, started_at, completed_at, detached
+        ) VALUES (
+          ${runId}, ${`call-${runId}`}, 'TestAgentToolStubChild',
+          'completed', 'done', 0, ${startedAt}, ${startedAt}, 0
+        )
+      `;
+    }
+
+    const self = this as unknown as {
+      _cf_resolveSubAgent(className: string, name: string): Promise<unknown>;
+    };
+    const original = self._cf_resolveSubAgent.bind(this);
+    self._cf_resolveSubAgent = async (className, name) => {
+      if (name === options.stalledRunId) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, options.resolveDelayMs)
+        );
+      }
+      return original(className, name);
+    };
+    const replayStartedAt = Date.now();
+    try {
+      const frames = await this._captureReplayForTest();
+      return { elapsedMs: Date.now() - replayStartedAt, frames };
+    } finally {
+      self._cf_resolveSubAgent = original;
+    }
+  }
+
+  /**
    * A child still running when the parent restarts: a connected client has
    * already seen the stored chunks, then parent recovery re-attaches and
    * forwards the chunks the child produces afterwards.

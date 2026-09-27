@@ -83,6 +83,7 @@ import {
   awaitWithDeadline,
   drainInteractionApplies,
   interceptAgentToolBroadcast,
+  isAgentToolLifecycleChunk,
   type ClientToolSchema
 } from "agents/chat";
 import {
@@ -4408,14 +4409,18 @@ export class AIChatAgent<
         // stored-replay → live-forwarding handoff: a chunk that lands in both
         // the drained backlog AND the live buffer (because it was stored and
         // broadcast during the drain) is emitted exactly once, in order.
+        // Progress/milestone frames have no stored position (they reuse the
+        // next one), so they bypass the high-water mark instead of moving it.
         let lastEmitted = options?.afterSequence ?? -1;
         const emit = (chunk: AgentToolStoredChunk) => {
           if (closed) return;
           // Drop out-of-order / duplicate sequences. Guarantees in-order,
           // exactly-once delivery so the parent can rebuild tool-call state
           // (input-available → output-available) without gaps.
-          if (chunk.sequence <= lastEmitted) return;
-          lastEmitted = chunk.sequence;
+          if (!isAgentToolLifecycleChunk(chunk.body)) {
+            if (chunk.sequence <= lastEmitted) return;
+            lastEmitted = chunk.sequence;
+          }
           try {
             controller.enqueue(
               agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
