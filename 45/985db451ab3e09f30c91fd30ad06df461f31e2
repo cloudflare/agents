@@ -1,0 +1,77 @@
+.changeset/chat-terminal-frame-fixes.md
+  s_ce1ab06b2d7180::t_39525467a59c69 1-15
+packages/agents/src/chat/broadcast-state.ts
+  s_7c9867abe4d126::t_ee27d4b88c9078 145-149,153,159
+packages/agents/src/chat/react.tsx
+  s_93f525f3481953::t_3bcb584246c602 483-485,804,1581-1582,1845-1850,1857,1861-1868,1884-1885,1962,1980-1984,1994-1997,2014,2020-2030,2055,2067,2178-2180,2182,2279-2283,2381-2397,2483,2560-2569,2611-2614
+packages/agents/src/chat/replay-frames.ts
+  s_7c9867abe4d126::t_121d06764fb73f 11,59,73-74
+packages/agents/src/chat/resumable-stream.ts
+  s_f4803804f2d8c8::t_87291a17373425 30,65-66,124-129,250-253,602,607-608,610-647,652-653,655,657-661,674,676,920-921,923,978-1017,1117
+packages/agents/src/chat/resume-handshake.ts
+  s_7c9867abe4d126::t_147f3b187334c8 75-82,253-256,264,273-274
+packages/agents/src/streams/streams.ts
+  s_93f525f3481953::t_c33de0a3530605 86-87,447-456
+packages/agents/src/tests/streams/resumable-stream-settlement.test.ts
+  s_7c9867abe4d126::t_055130a2e2ec4d 168-250
+packages/ai-chat/src/index.ts
+  s_93f525f3481953::t_765a47ebd47961 63-64,1507-1513,1868-1870,1930,1932,1941,1943,7135,7263,7445
+packages/ai-chat/src/react-tests/use-agent-chat.test.tsx
+  s_93f525f3481953::t_4e8b8efd8bc21f 1,7546-7909
+packages/ai-chat/src/tests/terminal-frame-order.test.ts
+  s_ce1ab06b2d7180::t_20619bfc2bf0bf 73-74,78,94,200-267
+packages/agents/src/chat/__tests__/broadcast-state.test.ts
+  s_93f525f3481953::t_eb9c797de757ed 659-681
+packages/agents/src/chat/__tests__/resume-handshake.test.ts
+  s_93f525f3481953::t_c7263538c85760 12,58-63,77,94,98-101,115,118-120,541-578
+packages/ai-chat/src/tests/worker.ts
+  s_93f525f3481953::t_849108edc8dc3e 1674,1678-1679,1766-1782,1795-1803
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "45985db451ab3e09f30c91fd30ad06df461f31e2",
+  "prompts": {},
+  "sessions": {
+    "s_671f05444ff5f0": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "6643b91d-e7d6-4cfa-9d7a-cd394687cb18",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_7c9867abe4d126": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "abc3e726-5121-430d-bf7f-fae36392288e",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_93f525f3481953": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "07fb1119-18c7-479c-bfbf-f3f2f017f34b",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_ce1ab06b2d7180": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "60d19fa2-5d90-4412-8906-5f507fe8341e",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_f4803804f2d8c8": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "74a18dc3-b102-4463-b272-958aecacfe5c",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
