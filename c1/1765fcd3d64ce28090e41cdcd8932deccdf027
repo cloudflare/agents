@@ -1,0 +1,25 @@
+.changeset/think-recovering-stream-outcome.md
+  s_671f05444ff5f0::t_4e3c06a84fc470 1-5
+packages/think/src/tests/origin-message-ids.test.ts
+  s_671f05444ff5f0::t_12ac4e863a59ca 147-148
+packages/think/src/tests/agents/think-session.ts
+  s_671f05444ff5f0::t_f3b3ed7e5dcce7 1891-1895
+packages/think/src/think.ts
+  s_671f05444ff5f0::t_23dffdd1d3261b 265,13962-13965,14040,14482-14485,14536,18686-18690,18698-18702
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c11765fcd3d64ce28090e41cdcd8932deccdf027",
+  "prompts": {},
+  "sessions": {
+    "s_671f05444ff5f0": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "6643b91d-e7d6-4cfa-9d7a-cd394687cb18",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
