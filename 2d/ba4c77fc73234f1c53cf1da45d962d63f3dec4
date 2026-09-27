@@ -1,0 +1,21 @@
+packages/agents/src/tests/chat/truncate-older-messages.test.ts
+  s_f10251de77d2b2::t_3dced4cae62a86 2-3,537-570
+packages/agents/src/chat/truncate-older-messages.ts
+  s_f10251de77d2b2::t_420a7664d4f589 280-284
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2dba4c77fc73234f1c53cf1da45d962d63f3dec4",
+  "prompts": {},
+  "sessions": {
+    "s_f10251de77d2b2": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "8bbcaa1b-9107-4e3d-9afe-56e3c5c29810",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
