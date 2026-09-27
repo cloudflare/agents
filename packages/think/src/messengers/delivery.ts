@@ -402,6 +402,20 @@ export interface MessengerDeliveryPolicy {
 }
 
 const DEFAULT_TYPING_REFRESH_MS = 4_000;
+/** Longest the reply waits on a typing request an adapter never settles. */
+const TYPING_SETTLE_TIMEOUT_MS = 1_000;
+
+async function settleTyping(pending: Promise<void> | undefined) {
+  if (!pending) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    pending,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, TYPING_SETTLE_TIMEOUT_MS);
+    })
+  ]);
+  clearTimeout(timer);
+}
 
 export interface DeliverMessengerReplyOptions {
   checkpoint?: (snapshot: MessengerReplySnapshot) => Promise<void> | void;
@@ -447,18 +461,28 @@ export async function deliverMessengerReply(
   });
 
   // The typing indicator is cosmetic: a failure to show it must not stop the
-  // turn. It is re-sent until the reply's first text is posted.
-  const sendTyping = async () => {
-    try {
-      await options.surface.startTyping?.("Thinking...");
-    } catch (error) {
-      console.warn("[Think] Messenger typing indicator failed", error);
-    }
+  // turn. It is re-sent until the reply's first text is posted, one request
+  // at a time so a slow one cannot land after the post and re-show it.
+  let typingInFlight: Promise<void> | undefined;
+  let typingStopped = false;
+  const sendTyping = (): Promise<void> => {
+    if (typingStopped) return Promise.resolve();
+    typingInFlight ??= (async () => {
+      try {
+        await options.surface.startTyping?.("Thinking...");
+      } catch (error) {
+        console.warn("[Think] Messenger typing indicator failed", error);
+      } finally {
+        typingInFlight = undefined;
+      }
+    })();
+    return typingInFlight;
   };
   const typingRefreshMs =
     options.policy?.typingRefreshMs ?? DEFAULT_TYPING_REFRESH_MS;
   let typingTimer: ReturnType<typeof setInterval> | undefined;
   const stopTyping = () => {
+    typingStopped = true;
     clearInterval(typingTimer);
     typingTimer = undefined;
   };
@@ -468,8 +492,9 @@ export async function deliverMessengerReply(
   // ahead of the apology on adapters without native streaming.
   const post = callback
     .hasVisibleOutput()
-    .then((visible) => {
+    .then(async (visible) => {
       stopTyping();
+      await settleTyping(typingInFlight);
       return visible ? options.surface.post(callback.stream()) : undefined;
     })
     .catch(async (error: unknown) => {
@@ -491,7 +516,7 @@ export async function deliverMessengerReply(
     if (options.surface.startTyping && typingRefreshMs > 0) {
       typingTimer = setInterval(() => void sendTyping(), typingRefreshMs);
     }
-    await sendTyping();
+    await settleTyping(sendTyping());
     const userMessage =
       options.userMessage ?? toMessengerUserMessage(options.event);
     const restoreSurface = options.target.bindActiveDeliverySurface?.(

@@ -1474,9 +1474,12 @@ export class ThinkTestAgent extends Think {
 
   /**
    * #2321: a stamped `createdAt` must survive the recovery continuation that
-   * extends the interrupted assistant message.
+   * extends the interrupted assistant message. `continuationMetadata` is
+   * added by the continuation's writer on top of the original stamp.
    */
-  async testRecoveryExtensionMetadataForTest(): Promise<{
+  async testRecoveryExtensionMetadataForTest(
+    continuationMetadata: Record<string, unknown> = { resumed: true }
+  ): Promise<{
     assistantMessages: number;
     metadata: string;
     writerCalls: Array<{ createdAt: number; continuation: boolean }>;
@@ -1486,7 +1489,7 @@ export class ThinkTestAgent extends Think {
       if (part.type !== "start") return undefined;
       const stamp = { createdAt: writerCalls.length + 1, continuation };
       writerCalls.push(stamp);
-      return continuation ? { ...stamp, resumed: true } : stamp;
+      return continuation ? { ...stamp, ...continuationMetadata } : stamp;
     };
     try {
       const result = await this.testChatWithStallThenRecover(3, 50);
