@@ -131,6 +131,44 @@ export class TestChatSdkStateHostAgent extends Agent {
     };
   }
 
+  async testLockHeartbeatAfterDisconnect(threadId: string): Promise<{
+    extendsAfterDisconnect: number;
+    extendsAfterInFlightAcquire: number;
+  }> {
+    const sleep = (ms: number) =>
+      new Promise((resolve) => setTimeout(resolve, ms));
+    const countExtends = (state: ChatSdkStateAdapter) => {
+      const counter = { calls: 0 };
+      const extendLock = state.extendLock.bind(state);
+      state.extendLock = (lock, ttlMs) => {
+        counter.calls++;
+        return extendLock(lock, ttlMs);
+      };
+      return counter;
+    };
+
+    const state = new ChatSdkStateAdapter({ lockHeartbeat: true });
+    await state.connect();
+    const afterDisconnect = countExtends(state);
+    await state.acquireLock(threadId, 150);
+    await state.disconnect();
+    afterDisconnect.calls = 0;
+    await sleep(300);
+
+    const racing = new ChatSdkStateAdapter({ lockHeartbeat: true });
+    await racing.connect();
+    const afterInFlight = countExtends(racing);
+    const pending = racing.acquireLock(`${threadId}:racing`, 150);
+    await racing.disconnect();
+    await pending;
+    await sleep(300);
+
+    return {
+      extendsAfterDisconnect: afterDisconnect.calls,
+      extendsAfterInFlightAcquire: afterInFlight.calls
+    };
+  }
+
   async testQueue(threadId: string): Promise<TestQueueResult> {
     const state = await this.createState();
 

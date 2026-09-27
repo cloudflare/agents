@@ -63,6 +63,17 @@ describe("agents/chat-sdk StateAdapter", () => {
     });
   });
 
+  it("stops lock heartbeats on disconnect", async () => {
+    const host = await getHost();
+
+    await expect(
+      host.testLockHeartbeatAfterDisconnect("telegram:heartbeat-disconnect")
+    ).resolves.toEqual({
+      extendsAfterDisconnect: 0,
+      extendsAfterInFlightAcquire: 0
+    });
+  });
+
   it("queues messages in FIFO order after max-size trimming", async () => {
     const host = await getHost();
 

@@ -5,6 +5,7 @@ import type {
   FiberRecoveryResult
 } from "agents";
 import { getAgentByName } from "agents";
+import { Chat } from "chat";
 import type { Adapter } from "chat";
 import { describe, expect, it } from "vitest";
 import {
@@ -1578,6 +1579,16 @@ describe("think messengers core", () => {
         { content: "second", kind: "stream-end" }
       ]);
     }, 30_000);
+
+    it("finds the private Chat SDK queue methods the recovery drain relies on", () => {
+      // The drain feature-checks these at runtime and silently skips when a
+      // `chat` release drops or renames them; this fails the upgrade instead.
+      const internals = Chat.prototype as unknown as Record<string, unknown>;
+      expect(typeof internals.getLockKey).toBe("function");
+      expect(typeof internals.drainQueue).toBe("function");
+      expect((internals.getLockKey as () => unknown).length).toBe(2);
+      expect((internals.drainQueue as () => unknown).length).toBe(4);
+    });
 
     it("drains messages queued behind a reply recovered after a restart", async () => {
       const agent = await getAgentByName(

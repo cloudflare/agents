@@ -83,6 +83,8 @@ export class ChatSdkStateAdapter implements ChatSdkStateAdapterInterface {
 
   async disconnect(): Promise<void> {
     this.connected = false;
+    for (const timer of this.lockHeartbeats.values()) clearInterval(timer);
+    this.lockHeartbeats.clear();
   }
 
   async subscribe(threadId: string): Promise<void> {
@@ -128,8 +130,13 @@ export class ChatSdkStateAdapter implements ChatSdkStateAdapterInterface {
   }
 
   private startLockHeartbeat(lock: ChatSdkLock, ttlMs: number): void {
-    if (!this.lockHeartbeat || ttlMs <= 0) return;
+    // An acquire that was in flight when `disconnect()` ran still resolves.
+    if (!this.lockHeartbeat || ttlMs <= 0 || !this.connected) return;
     const timer = setInterval(() => {
+      if (!this.connected) {
+        this.stopLockHeartbeat(lock.token);
+        return;
+      }
       this.extendLock(lock, ttlMs).then(
         (extended) => {
           if (!extended) this.stopLockHeartbeat(lock.token);

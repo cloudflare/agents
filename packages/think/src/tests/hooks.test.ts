@@ -1633,6 +1633,19 @@ describe("Think — extension observation hooks", () => {
     expect(recorded).not.toBeNull();
     expect(recorded!.type).toBe("text-delta");
   });
+
+  it("keeps a beforeTurn model override without resolving the default for extensions", async () => {
+    const agent = await getAgentByName(
+      env.ThinkExtensionBeforeTurnModelAgent,
+      `ext-before-turn-model-${crypto.randomUUID()}`
+    );
+    const result = await agent.testChat("hello");
+
+    expect(result.error).toBeUndefined();
+    expect(result.done).toBe(true);
+    const snapshot = await agent.readBeforeTurnSnapshot();
+    expect(snapshot?.modelId).toBe("mock-tool-model-ext-hooks");
+  });
 });
 
 // ── onChunk ─────────────────────────────────────────────────────

@@ -8177,7 +8177,10 @@ export class Think<
     const { createTurnContextSnapshot, parseHookResult } =
       await import("./extensions/hook-proxy");
 
-    let snapshot = createTurnContextSnapshot(ctx);
+    let snapshot = createTurnContextSnapshot(
+      ctx,
+      subclassConfig.model ?? undefined
+    );
     let accumulated = { ...subclassConfig };
 
     // Apply subclass config to the initial snapshot so extensions
