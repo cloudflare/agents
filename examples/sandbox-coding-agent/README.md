@@ -139,11 +139,20 @@ The orchestrator tears each container down once its run is over:
 
 ```ts
 export class CodingOrchestrator extends Think<Env> {
-  override async onAgentToolFinish(run: AgentToolRunInfo) {
+  override async onAgentToolFinish(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ) {
+    // The orchestrator stopped waiting, but the child may still be working.
+    if (result.status === "interrupted" && result.childStillRunning !== false) {
+      return;
+    }
     await sandboxFor(this.env, this.name, run.runId).destroy();
   }
 }
 ```
+
+An `interrupted` run (the orchestrator gave up waiting, e.g. after a restart) keeps its container while the child may still be working, and a run whose child failed to start never delivers a finish at all. So on every wake the orchestrator also sweeps its tracked containers (`releaseIdleSandboxes`) and destroys any whose child run is no longer `running`.
 
 A turn only counts as successful if the `claude` process exits with code 0 and every `git` command succeeds. A failed clone, a non-zero exit, or a log stream that ends with no exit event (what a container dying mid-turn looks like) is reported in the delegate's panel and marks the run as an error, so the orchestrator sees a failure rather than "no file changes".
 
@@ -164,7 +173,8 @@ The two Durable Objects are SQLite-backed and recover well. The container is the
 | Client disconnect (tab close, nav)       | kept                                              | buffered in SQLite, replayed on reconnect | untouched                          |
 | DO hibernation (idle)                    | persisted; `onStart` rehydrates `claudeSessionId` | n/a                                       | warm if within `sleepAfter`        |
 | DO eviction mid-turn (deploy/restart)    | `chatRecovery` recovers the turn                  | tail lost; turn re-issued                 | keeps running (orphaned)           |
-| Run finishes (any terminal status)       | unaffected; `lastResult` kept                     | n/a                                       | **destroyed** by the orchestrator  |
+| Run finishes (completed/error/aborted)   | unaffected; `lastResult` kept                     | n/a                                       | **destroyed** by the orchestrator  |
+| Run `interrupted`, child still working   | unaffected                                        | child keeps running                       | kept; destroyed by the wake sweep  |
 | Container sleep (`sleepAfter`, 15m idle) | unaffected                                        | n/a                                       | **gone** — fresh disk on next wake |
 
 - **Hibernation is fine.** Both agents use the WebSocket Hibernation API and always-on durable chat recovery. We persist Claude's session id and the last turn's outcome (`lastResult`, including any error) in the facet DO's storage, so between-turn state is durable.

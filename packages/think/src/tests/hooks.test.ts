@@ -198,7 +198,32 @@ describe("Think — beforeTurn hook", () => {
     expect(catalog.calls.map((call) => call.gateway?.id)).toEqual(["default"]);
   });
 
-  it.each(["gpt-5", "", "openai/", "/gpt-5"])(
+  it("routes @hf/ ids to Workers AI like @cf/ ids", async () => {
+    const agent = await freshAgent("resolve-hf");
+    const { calls } = await agent.resolveModelGatewayForTest(
+      "@hf/nousresearch/hermes-2-pro-mistral-7b",
+      null
+    );
+    expect(calls).toEqual([
+      {
+        kind: "run",
+        model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
+        gateway: null
+      }
+    ]);
+  });
+
+  it.each([
+    "gpt-5",
+    "",
+    "openai/",
+    "/gpt-5",
+    "@",
+    "@bad",
+    "@cf/",
+    "@hf/",
+    "@openai/gpt-5"
+  ])(
     "rejects the malformed model id %j before touching the AI binding",
     async (model) => {
       const agent = await freshAgent(`resolve-invalid-${model || "empty"}`);

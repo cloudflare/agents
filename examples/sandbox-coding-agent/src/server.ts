@@ -18,7 +18,11 @@ import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import { getSandbox, Sandbox as BaseSandbox } from "@cloudflare/sandbox";
 import { Think, type TurnConfig } from "@cloudflare/think";
 import { callable, routeAgentRequest } from "agents";
-import { agentTool, type AgentToolRunInfo } from "agents/agent-tools";
+import {
+  agentTool,
+  type AgentToolLifecycleResult,
+  type AgentToolRunInfo
+} from "agents/agent-tools";
 import { tool, type ToolSet, type UIMessage } from "ai";
 import { z } from "zod";
 import { MAX_OUTPUT_TOKENS, runClaudeCode } from "./claude-code";
@@ -352,8 +356,46 @@ export class CodingOrchestrator extends Think<Env> {
     await this.ctx.storage.put(`${SANDBOX_RUN_PREFIX}${run.runId}`, true);
   }
 
-  override async onAgentToolFinish(run: AgentToolRunInfo): Promise<void> {
+  override async onAgentToolFinish(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    // `interrupted` means the orchestrator stopped waiting, not that the child
+    // stopped working (`childStillRunning` is unset when that is unknown). Keep
+    // its container; `releaseIdleSandboxes` frees it once the child settles.
+    if (result.status === "interrupted" && result.childStillRunning !== false) {
+      return;
+    }
     await this.destroySandbox(run.runId);
+  }
+
+  // Some runs never deliver a usable finish: a child that failed to start, or
+  // one kept alive above. Sweep them on every wake.
+  override async onStart(): Promise<void> {
+    this.ctx.waitUntil(this.releaseIdleSandboxes());
+  }
+
+  private async releaseIdleSandboxes(): Promise<void> {
+    const tracked = await this.ctx.storage.list({ prefix: SANDBOX_RUN_PREFIX });
+    for (const key of tracked.keys()) {
+      const runId = key.slice(SANDBOX_RUN_PREFIX.length);
+      if (this.hasAgentToolRun(ClaudeCodeAgent, runId)) {
+        try {
+          const child = await this.dynamicAgents.get(ClaudeCodeAgent, runId);
+          const inspection = await child.inspectAgentToolRun(runId);
+          if (
+            inspection?.status === "running" ||
+            inspection?.status === "starting"
+          ) {
+            continue;
+          }
+        } catch (error) {
+          console.warn(`Could not inspect run ${runId}; keeping it:`, error);
+          continue;
+        }
+      }
+      await this.destroySandbox(runId);
+    }
   }
 
   @callable()
