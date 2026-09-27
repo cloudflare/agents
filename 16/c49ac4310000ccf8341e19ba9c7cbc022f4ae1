@@ -1,0 +1,49 @@
+packages/ai-chat/src/index.ts
+  s_4c7bbb70e827f0::t_7a4d2da34af370 291,5701,5713,5716-5719,7549,7551-7561
+packages/ai-chat/src/tests/durable-chat-recovery.test.ts
+  s_4c7bbb70e827f0::t_ea59acefb38f7e 202,2931-2955
+packages/think/src/tests/messengers.test.ts
+  s_5d099cfa9873e9::t_11826f075488b5 1302,1308,1313,1321
+packages/think/src/think.ts
+  s_bf02b3bd8f2bed::t_db34a0f0fc5b42 13894,14110,14193-14197,14229,14237-14238,14245-14246,14269-14271,14801,18399-18422,18617-18619,18644-18647
+.changeset/stream-recovery-review-fixes.md
+  s_bf02b3bd8f2bed::t_22cec58a4e47ec 9-10,18-19
+packages/ai-chat/src/tests/worker.ts
+  s_bf02b3bd8f2bed::t_53eed6ec6f0f4b 121-125,142-155
+packages/think/src/tests/agents/think-session.ts
+  s_bf02b3bd8f2bed::t_56a23aef6e96ef 2330-2331,2343,2351-2355,2358,2364-2426
+packages/think/src/tests/think-session.test.ts
+  s_bf02b3bd8f2bed::t_f1a6e21ef0bda1 774-786
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "16c49ac4310000ccf8341e19ba9c7cbc022f4ae1",
+  "prompts": {},
+  "sessions": {
+    "s_4c7bbb70e827f0": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "865639d9-ae91-4b55-8813-2173e007fcb6",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_5d099cfa9873e9": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "d6b52f06-048c-4bcc-8bd4-75cfd838c9ec",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_bf02b3bd8f2bed": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "2560971b-abc9-4eeb-a576-e7e811e04f84",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
