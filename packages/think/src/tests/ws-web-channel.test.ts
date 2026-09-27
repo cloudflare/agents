@@ -187,6 +187,21 @@ describe("Think — WebSocket chat runs on the web channel (#2255)", () => {
     ws.close();
   });
 
+  it("keeps the previous turn's channel when a turn fails in beforeTurn", async () => {
+    const { agent, ws } = await freshAgent();
+    await sendChat(ws, [userMessage("hello")]);
+
+    await agent.setBeforeTurnThrowChannelForTest("voice");
+    await agent
+      .runChannelTurnForTest({ input: "hi", channel: "voice" })
+      .catch(() => {});
+    await agent.setBeforeTurnThrowChannelForTest(null);
+
+    expect(await agent.getCapturedTurnChannelsForTest()).toContain("voice");
+    expect(await agent.getAutoContinuationChannelForTest()).toBe("web");
+    ws.close();
+  });
+
   it("resolves a queued continuation's channel when it runs, not when it is admitted", async () => {
     const { agent, ws } = await freshAgent();
     await sendChat(ws, [userMessage("hello")]);

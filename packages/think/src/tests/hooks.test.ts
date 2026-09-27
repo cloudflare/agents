@@ -459,6 +459,36 @@ describe("Think — tool-call hooks expose typed input/output", () => {
     const later = await agent.getToolCallIdentityForTest();
     expect(later.detached.length).toBeGreaterThan(0);
     expect(later.detached.every((id) => id === null)).toBe(true);
+    expect(later.detachedChannel.every((channel) => channel === null)).toBe(
+      true
+    );
+  });
+
+  it("work a tool left behind does not see a later turn's channel", async () => {
+    const agent = await freshLoopToolAgent("hook-tc-leftover-channel");
+    await agent.testChat("Use echo");
+
+    // The next turn runs on the voice channel; its tool releases the work the
+    // first turn's tool left behind and waits for it.
+    await agent.releaseLeftoverInNextToolForTest();
+    const second = await agent.testChatOnChannel("Use echo", "voice");
+    expect(second.done).toBe(true);
+
+    const identity = await agent.getToolCallIdentityForTest();
+    expect(identity.executeChannel).toEqual([null, "voice"]);
+    expect(identity.detached).toEqual([null]);
+    expect(identity.detachedChannel).toEqual([null]);
+    // Without a channel of its own the notice routes to the web transcript,
+    // not the voice turn that happened to be running.
+    expect(identity.detachedNotice).toEqual(["delivered"]);
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(
+      messages.some((message) =>
+        message.parts.some(
+          (part) => part.type === "text" && part.text === "leftover notice"
+        )
+      )
+    ).toBe(true);
   });
 
   it("afterToolCall receives typed output (was always undefined before)", async () => {
