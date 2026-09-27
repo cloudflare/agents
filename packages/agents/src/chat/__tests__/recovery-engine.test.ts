@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   ChatRecoveryEngine,
   buildChatRecoveryExhaustedContext,
+  chatRecoveryBackoffSeconds,
+  retryAfterSeconds,
   notifyChatRecoveryExhausted,
   runChatRecoveryExhaustion,
   type ChatRecoveryAdapter,
@@ -1947,5 +1949,43 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
     expect(h.calls).toContain("exhaust");
     expect(h.calls).not.toContain("dispatch");
+  });
+});
+
+describe("transient recovery backoff", () => {
+  it("doubles per retry, capped at 30s", () => {
+    expect(
+      [1, 2, 3, 5, 6, 12].map((r) => chatRecoveryBackoffSeconds(r))
+    ).toEqual([1, 2, 4, 16, 30, 30]);
+  });
+
+  it("waits at least Retry-After, capped at 60s", () => {
+    expect(chatRecoveryBackoffSeconds(1, 7)).toBe(7);
+    expect(chatRecoveryBackoffSeconds(4, 2)).toBe(8);
+    expect(chatRecoveryBackoffSeconds(1, 600)).toBe(60);
+  });
+
+  it("reads Retry-After from response headers, headers or the cause chain", () => {
+    const now = Date.parse("2026-01-01T00:00:00Z");
+    expect(retryAfterSeconds({ responseHeaders: { "Retry-After": "3" } })).toBe(
+      3
+    );
+    expect(
+      retryAfterSeconds({ headers: new Headers({ "retry-after": "1.2" }) })
+    ).toBe(2);
+    expect(
+      retryAfterSeconds(
+        new Error("wrapped", {
+          cause: {
+            responseHeaders: { "retry-after": "Thu, 01 Jan 2026 00:00:09 GMT" }
+          }
+        }),
+        now
+      )
+    ).toBe(9);
+    expect(
+      retryAfterSeconds({ responseHeaders: { "retry-after": "soon" } })
+    ).toBe(undefined);
+    expect(retryAfterSeconds(new Error("no headers"))).toBeUndefined();
   });
 });

@@ -1406,6 +1406,59 @@ describe("think messengers core", () => {
 
       expect(posted).toEqual(["Got", INTERRUPTED_MESSENGER_RESPONSE]);
     });
+
+    it("resumes a multi-post recovered reply after its last checkpoint", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `split-replay-${crypto.randomUUID()}`
+      );
+      const result = await agent.deliverSettledRecoveryForTest({
+        text: "one|two|three",
+        posted: 1,
+        replay: true
+      });
+
+      expect(result.pending).toBeUndefined();
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content)
+      ).toEqual(["two", "three"]);
+    });
+
+    it("retries a recovered reply whose live delivery fails, never re-sending a rejected post", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `split-live-${crypto.randomUUID()}`
+      );
+      const result = await agent.deliverSettledRecoveryForTest({
+        text: "one|two|three",
+        failPost: "two"
+      });
+
+      expect(result.retry?.attempts).toBe(1);
+      expect(result.pending?.posted).toBe(2);
+      expect(result.retry).toBeDefined();
+      if (!result.retry) return;
+      expect(await agent.runMessengerRecoveryRetryForTest(result.retry)).toBe(
+        true
+      );
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content)
+      ).toEqual(["one", "three"]);
+    });
+
+    it("posts each chunk once when overlapping deliveries share a recovered reply", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `split-overlap-${crypto.randomUUID()}`
+      );
+
+      expect(
+        await agent.deliverRecoveryConcurrentlyForTest("one|two|three")
+      ).toBe(true);
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content)
+      ).toEqual(["one", "two", "three"]);
+    });
   });
 
   describe("burst replies end to end (#2312)", () => {

@@ -64,6 +64,32 @@ export class ThinkMessengerStateAgent extends ChatSdkStateAgent {}
  */
 const FALLBACK_STREAMING_PLACEHOLDER_TEXT = null;
 
+/** The posts that deliver a recovered messenger reply, in order. */
+function recoveredReplyPosts(
+  definition: { delivery?: MessengerDeliveryPolicy },
+  input: {
+    outcome: "completed" | "interrupted";
+    text?: string;
+    partialPosted?: boolean;
+  }
+): Array<string | { markdown: string }> {
+  if (input.outcome === "interrupted") {
+    return [
+      definition.delivery?.interruptedResponseText ??
+        INTERRUPTED_MESSENGER_RESPONSE
+    ];
+  }
+  const text = input.text?.trim() ? input.text : "";
+  if (!text) {
+    return input.partialPosted
+      ? []
+      : [definition.delivery?.emptyResponseText ?? EMPTY_MESSENGER_RESPONSE];
+  }
+  return (definition.delivery?.splitText?.(text) ?? [text]).map((chunk) => ({
+    markdown: chunk
+  }));
+}
+
 export type MessengerRespondTo =
   | "action"
   | "direct-message"
@@ -773,7 +799,9 @@ export class ThinkMessengerRuntime {
   /**
    * Post what chat recovery produced for an interrupted messenger turn: the
    * text the thread has not seen yet, or the interrupted apology when
-   * recovery gave up.
+   * recovery gave up. The reply may span several posts; this posts only post
+   * number `chunk` (skipped when out of range) and returns how many there
+   * are, so the caller can checkpoint between posts.
    */
   async deliverRecoveredReply(input: {
     messengerId: string;
@@ -781,7 +809,8 @@ export class ThinkMessengerRuntime {
     outcome: "completed" | "interrupted";
     text?: string;
     partialPosted?: boolean;
-  }): Promise<void> {
+    chunk: number;
+  }): Promise<{ chunks: number }> {
     const definition = this.definitionsById.get(input.messengerId);
     const surface = await this.resolveDeliverySurface(
       input.messengerId,
@@ -792,25 +821,10 @@ export class ThinkMessengerRuntime {
         `No messenger delivery surface for ${input.messengerId} thread ${input.threadId}`
       );
     }
-    if (input.outcome === "interrupted") {
-      await surface.post(
-        definition.delivery?.interruptedResponseText ??
-          INTERRUPTED_MESSENGER_RESPONSE
-      );
-      return;
-    }
-    const text = input.text?.trim() ? input.text : "";
-    if (!text) {
-      if (!input.partialPosted) {
-        await surface.post(
-          definition.delivery?.emptyResponseText ?? EMPTY_MESSENGER_RESPONSE
-        );
-      }
-      return;
-    }
-    for (const chunk of definition.delivery?.splitText?.(text) ?? [text]) {
-      await surface.post({ markdown: chunk });
-    }
+    const posts = recoveredReplyPosts(definition, input);
+    const post = posts[input.chunk];
+    if (post !== undefined) await surface.post(post);
+    return { chunks: posts.length };
   }
 
   private async resolveTarget(

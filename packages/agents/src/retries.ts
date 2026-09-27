@@ -296,6 +296,19 @@ export function isDurableObjectStorageReset(error: unknown): boolean {
 }
 
 /**
+ * Whether an error (or anything in its `cause` chain) is a Durable Object
+ * reset — a superseded isolate ({@link isDurableObjectCodeUpdateReset}) or a
+ * storage reset ({@link isDurableObjectStorageReset}). The isolate is going
+ * away, so live chat recovery must not schedule a retry for it: the restart's
+ * own recovery owns the turn.
+ */
+export function isDurableObjectResetError(error: unknown): boolean {
+  return (
+    isDurableObjectCodeUpdateReset(error) || isDurableObjectStorageReset(error)
+  );
+}
+
+/**
  * Whether an error (or anything in its `cause` chain, or a raw error-message
  * string) is a Durable Object memory-limit reset — see
  * {@link MEMORY_LIMIT_RESET_PATTERN}. Unlike {@link isPlatformTransientError},

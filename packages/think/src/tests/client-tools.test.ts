@@ -1253,6 +1253,53 @@ describe("Think — auto-continuation", () => {
     await closeWS(ws);
   }, 25000);
 
+  // Port of ai-chat's "does not fire a stale continuation when the active
+  // stream completes with stop" (#2171, #2352). There the stream consumed the
+  // mid-stream result in a later step, so the held continuation was stale.
+  // Think's stream cannot advance past an execute-less client tool call, so a
+  // result that lands mid-stream is never consumed by that stream even when it
+  // finishes with `stop`: the one continuation is owed, and its prompt ends in
+  // the tool result rather than assistant text (no prefill).
+  it("continues exactly once, from the tool result, when a mid-stream result's stream stops (#2352)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setSlowClientToolStreamMode(true, 25, 16, "stop");
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    sendChatRequest(ws, [makeUserMessage("do the thing")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await waitUntil(async () => {
+      const state = await agent.streamingToolCallState("tc-client-1");
+      return state === "input-available";
+    }, 8000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-client-1",
+        toolName: "client_action",
+        output: "mid-stream output",
+        autoContinue: true
+      })
+    );
+
+    await waitUntil(async () => {
+      const log = (await agent.getResponseLog()) as ChatResponseResult[];
+      return log.some((entry) => entry.continuation);
+    }, 8000);
+    await delay(300);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.filter((entry) => entry.continuation)).toHaveLength(1);
+    expect(await agent.getSlowClientToolPromptTailsForTest()).toEqual([
+      "user",
+      "tool"
+    ]);
+
+    await closeWS(ws);
+  }, 25000);
+
   it("does not clobber siblings when parallel results arrive concurrently (#1649)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

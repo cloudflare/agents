@@ -1,4 +1,4 @@
-import { StrictMode, Suspense, act } from "react";
+import { StrictMode, Suspense, act, type ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import type { UIMessage } from "ai";
@@ -7541,5 +7541,595 @@ describe("useAgentChat transparent reconnect re-probe (#1784)", () => {
       .toHaveTextContent("ready");
     expect(sawActiveResponseError(consoleErrorSpy)).toBe(false);
     consoleErrorSpy.mockRestore();
+  });
+});
+
+describe("useAgentChat terminal frames", () => {
+  function setup(name: string) {
+    const target = new EventTarget();
+    const sentMessages: string[] = [];
+    const agent = createAgent({
+      name,
+      url: `ws://localhost:3000/agents/chat/${name}?_pk=abc`,
+      send: (data: string) => sentMessages.push(data)
+    });
+    (agent as unknown as Record<string, unknown>).addEventListener =
+      target.addEventListener.bind(target);
+    (agent as unknown as Record<string, unknown>).removeEventListener =
+      target.removeEventListener.bind(target);
+    const dispatch = (data: Record<string, unknown>) =>
+      target.dispatchEvent(
+        new MessageEvent("message", { data: JSON.stringify(data) })
+      );
+    const frame = (
+      id: string,
+      chunk: Record<string, unknown> | null,
+      fields: Record<string, unknown> = {}
+    ) =>
+      dispatch({
+        type: "cf_agent_use_chat_response",
+        id,
+        body: chunk ? JSON.stringify(chunk) : "",
+        done: chunk === null,
+        ...fields
+      });
+    const sent = () =>
+      sentMessages.map(
+        (message) =>
+          JSON.parse(message) as { type: string; id: string; probeId?: string }
+      );
+    return { agent, target, dispatch, frame, sent };
+  }
+
+  async function mount(ui: ReactElement) {
+    return act(async () => {
+      const screen = render(ui, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+  }
+
+  function assistantTexts(messages: UIMessage[]): string[] {
+    return messages
+      .filter((message) => message.role === "assistant")
+      .map((message) =>
+        message.parts
+          .map((part) => (part.type === "text" ? part.text : ""))
+          .join("")
+      );
+  }
+
+  const clientToolTranscript = [
+    { id: "u1", role: "user", parts: [{ type: "text", text: "Where am I?" }] },
+    {
+      id: "a1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-getLocation",
+          toolCallId: "tc-client",
+          state: "input-available",
+          input: {}
+        }
+      ]
+    }
+  ];
+
+  it("keeps observing a stream when a done for another request arrives", async () => {
+    const { agent, frame } = setup("observer-foreign-done");
+    const events: ChatTurnEndEvent[] = [];
+    let messages: UIMessage[] = [];
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onTurnEnd: (event) => {
+          events.push(event);
+        }
+      });
+      messages = chat.messages;
+      return null;
+    };
+    await mount(<TestComponent />);
+
+    await act(async () => {
+      frame("req-observed", { type: "start", messageId: "a1" });
+      frame("req-observed", { type: "text-start", id: "t1" });
+      frame("req-observed", { type: "text-delta", id: "t1", delta: "Hel" });
+      await sleep(20);
+    });
+    expect(assistantTexts(messages)).toEqual(["Hel"]);
+
+    await act(async () => {
+      frame("req-stale", null, { outcome: "skipped" });
+      await sleep(20);
+    });
+    expect(assistantTexts(messages)).toEqual(["Hel"]);
+
+    await act(async () => {
+      frame("req-observed", { type: "text-delta", id: "t1", delta: "lo" });
+      await sleep(20);
+    });
+    expect(assistantTexts(messages)).toEqual(["Hello"]);
+
+    await act(async () => {
+      frame("req-observed", null);
+      await sleep(20);
+    });
+    expect(assistantTexts(messages)).toEqual(["Hello"]);
+    expect(events.map((event) => [event.requestId, event.outcome])).toEqual([
+      ["req-stale", "skipped"],
+      ["req-observed", "completed"]
+    ]);
+  });
+
+  it("holds onToolCall across a recovering close until recovery ends", async () => {
+    const { agent, dispatch, frame, sent } = setup("ontoolcall-recovering");
+    const toolCalls: string[] = [];
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onToolCall: ({ toolCall }) => {
+          toolCalls.push(toolCall.toolCallId);
+        }
+      });
+      chatInstance = chat;
+      return null;
+    };
+    await mount(<TestComponent />);
+
+    let sendPromise: Promise<void> | undefined;
+    await act(async () => {
+      sendPromise = chatInstance!.sendMessage({ text: "Look it up" });
+      await sleep(10);
+    });
+    const request = sent().find(
+      (message) => message.type === "cf_agent_use_chat_request"
+    );
+    expect(request).toBeDefined();
+
+    await act(async () => {
+      frame(request!.id, {
+        type: "tool-input-available",
+        toolCallId: "tc-server",
+        toolName: "search",
+        input: { q: "weather" }
+      });
+      frame(request!.id, null, { outcome: "recovering" });
+      await sendPromise;
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual([]);
+
+    await act(async () => {
+      frame("req-successor", null);
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: clientToolTranscript
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual(["tc-client"]);
+  });
+
+  async function mountRecoveringClose(name: string) {
+    const harness = setup(name);
+    const toolCalls: string[] = [];
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent: harness.agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onToolCall: ({ toolCall }) => {
+          toolCalls.push(toolCall.toolCallId);
+        }
+      });
+      chatInstance = chat;
+      return null;
+    };
+    await mount(<TestComponent />);
+
+    let sendPromise: Promise<void> | undefined;
+    await act(async () => {
+      sendPromise = chatInstance!.sendMessage({ text: "Look it up" });
+      await sleep(10);
+    });
+    const request = harness
+      .sent()
+      .find((message) => message.type === "cf_agent_use_chat_request");
+    await act(async () => {
+      harness.frame(request!.id, {
+        type: "tool-input-available",
+        toolCallId: "tc-server",
+        toolName: "search",
+        input: { q: "weather" }
+      });
+      harness.frame(request!.id, null, { outcome: "recovering" });
+      await sendPromise;
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual([]);
+    return { ...harness, toolCalls, requestId: request!.id };
+  }
+
+  it("keeps onToolCall held across a replay for another request", async () => {
+    const { dispatch, frame, toolCalls } = await mountRecoveringClose(
+      "ontoolcall-recovering-unrelated"
+    );
+
+    await act(async () => {
+      frame(
+        "req-older",
+        { type: "text-delta", id: "t0", delta: "old" },
+        { replay: true }
+      );
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: clientToolTranscript
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual([]);
+
+    await act(async () => {
+      frame("req-successor", { type: "start", messageId: "a1" });
+      frame("req-successor", null);
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: clientToolTranscript
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual(["tc-client"]);
+  });
+
+  it("releases a recovering hold when recovery ended while disconnected (resume:false)", async () => {
+    const { target, dispatch, sent, toolCalls } = await mountRecoveringClose(
+      "ontoolcall-recovering-offline"
+    );
+
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      target.dispatchEvent(new Event("open"));
+      await sleep(30);
+    });
+    const probe = sent().find(
+      (message) => message.type === "cf_agent_stream_resume_request"
+    );
+    expect(probe?.probeId).toEqual(expect.any(String));
+
+    await act(async () => {
+      dispatch({
+        type: "cf_agent_stream_resume_none",
+        reason: "idle",
+        probeId: probe!.probeId
+      });
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: clientToolTranscript
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual(["tc-client"]);
+  });
+
+  it("keeps a recovering hold when the server reports recovery on reconnect", async () => {
+    const { target, dispatch, sent, toolCalls, requestId } =
+      await mountRecoveringClose("ontoolcall-recovering-reconnect-active");
+
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      target.dispatchEvent(new Event("open"));
+      dispatch({
+        type: "cf_agent_chat_recovering",
+        recovering: true,
+        id: requestId
+      });
+      await sleep(30);
+    });
+    const probe = sent().find(
+      (message) => message.type === "cf_agent_stream_resume_request"
+    );
+    await act(async () => {
+      dispatch({
+        type: "cf_agent_stream_resume_none",
+        reason: "idle",
+        probeId: probe!.probeId
+      });
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: clientToolTranscript
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual([]);
+  });
+
+  it("moves a held onToolCall to the stream a reconnect offers (resume:false)", async () => {
+    const { agent, target, dispatch, frame } = setup(
+      "ontoolcall-no-resume-offer"
+    );
+    const toolCalls: string[] = [];
+    const TestComponent = () => {
+      useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onToolCall: ({ toolCall }) => {
+          toolCalls.push(toolCall.toolCallId);
+        }
+      });
+      return null;
+    };
+    await mount(<TestComponent />);
+
+    await act(async () => {
+      frame("req-a", { type: "start", messageId: "a1" });
+      await sleep(30);
+    });
+
+    // req-a's done is lost; on reconnect the server offers req-b, which it
+    // withholds from this socket until req-b ends.
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      target.dispatchEvent(new Event("open"));
+      dispatch({ type: "cf_agent_stream_resuming", id: "req-b" });
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: clientToolTranscript
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual([]);
+
+    await act(async () => {
+      frame("req-b", null);
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual(["tc-client"]);
+  });
+
+  it("releases a held onToolCall when a probe answer replays a later ended turn (resume:false)", async () => {
+    const { agent, target, dispatch, frame, sent } = setup(
+      "ontoolcall-no-resume-terminal-offer"
+    );
+    const toolCalls: string[] = [];
+    const TestComponent = () => {
+      useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onToolCall: ({ toolCall }) => {
+          toolCalls.push(toolCall.toolCallId);
+        }
+      });
+      return null;
+    };
+    await mount(<TestComponent />);
+
+    await act(async () => {
+      frame("req-a", { type: "start", messageId: "a1" });
+      await sleep(30);
+    });
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      target.dispatchEvent(new Event("open"));
+      await sleep(30);
+    });
+    const probe = sent().find(
+      (message) => message.type === "cf_agent_stream_resume_request"
+    );
+    await act(async () => {
+      dispatch({
+        type: "cf_agent_stream_resuming",
+        id: "req-b",
+        probeId: probe!.probeId
+      });
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: clientToolTranscript
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual(["tc-client"]);
+  });
+
+  it("stays recovering in an observer tab after a recovering done", async () => {
+    const { agent, dispatch, frame } = setup("observer-recovering-done");
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false
+      });
+      return <div data-testid="recovering">{String(chat.isRecovering)}</div>;
+    };
+    const screen = await mount(<TestComponent />);
+
+    await act(async () => {
+      frame("req-stalled", { type: "start", messageId: "a1" });
+      dispatch({
+        type: "cf_agent_chat_recovering",
+        recovering: true,
+        id: "req-stalled"
+      });
+      frame("req-stalled", null, { outcome: "recovering" });
+      await sleep(20);
+    });
+    await expect
+      .element(screen.getByTestId("recovering"))
+      .toHaveTextContent("true");
+  });
+
+  it("lets onTurnEnd send the next message once the turn has settled", async () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const { agent, frame, sent } = setup("on-turn-end-send");
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    let followUps = 0;
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onFinish: () => {},
+        onTurnEnd: () => {
+          if (followUps++ === 0) {
+            void chatInstance!.sendMessage({ text: "Follow up" });
+          }
+        }
+      });
+      chatInstance = chat;
+      return <div data-testid="status">{chat.status}</div>;
+    };
+    const screen = await mount(<TestComponent />);
+    const requests = () =>
+      sent().filter((message) => message.type === "cf_agent_use_chat_request");
+
+    await act(async () => {
+      void chatInstance!.sendMessage({ text: "First" });
+      await sleep(10);
+    });
+    const first = requests()[0];
+    await act(async () => {
+      frame(first.id, { type: "start", messageId: "a1" });
+      frame(first.id, { type: "finish" });
+      frame(first.id, null);
+      await sleep(30);
+    });
+
+    expect(requests()).toHaveLength(2);
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("submitted");
+
+    const second = requests()[1];
+    await act(async () => {
+      frame(second.id, { type: "start", messageId: "a2" });
+      frame(second.id, { type: "finish" });
+      frame(second.id, null);
+      await sleep(30);
+    });
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("ready");
+    expect(chatInstance!.messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ]);
+    expect(sawActiveResponseError(consoleErrorSpy)).toBe(false);
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("releases a held onToolCall when an idle probe answers after reconnect with resume:false", async () => {
+    const { agent, target, dispatch, frame, sent } = setup(
+      "ontoolcall-no-resume-lost-done"
+    );
+    const toolCalls: string[] = [];
+    const TestComponent = () => {
+      useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onToolCall: ({ toolCall }) => {
+          toolCalls.push(toolCall.toolCallId);
+        }
+      });
+      return null;
+    };
+    await mount(<TestComponent />);
+
+    await act(async () => {
+      frame("observed-request", { type: "start", messageId: "a1" });
+      frame("observed-request", {
+        type: "tool-input-available",
+        toolCallId: "tc-server",
+        toolName: "search",
+        input: { q: "weather" }
+      });
+      await sleep(30);
+    });
+
+    // The observed request's done is lost while the socket is down.
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      target.dispatchEvent(new Event("open"));
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual([]);
+    const probe = sent().find(
+      (message) => message.type === "cf_agent_stream_resume_request"
+    );
+    expect(probe?.probeId).toEqual(expect.any(String));
+
+    await act(async () => {
+      dispatch({
+        type: "cf_agent_stream_resume_none",
+        reason: "idle",
+        probeId: probe!.probeId
+      });
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: clientToolTranscript
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual(["tc-client"]);
+  });
+
+  it("bounds remembered turn errors and forgets them on clear", async () => {
+    const { agent, dispatch, frame } = setup("turn-errors-bounded");
+    const events: ChatTurnEndEvent[] = [];
+    const TestComponent = () => {
+      useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onTurnEnd: (event) => {
+          events.push(event);
+        }
+      });
+      return null;
+    };
+    await mount(<TestComponent />);
+
+    await act(async () => {
+      for (let i = 0; i <= 500; i++) {
+        frame(`req-${i}`, null, { done: false, error: true, body: "boom" });
+      }
+      frame("req-0", null);
+      frame("req-cleared", null, { done: false, error: true, body: "boom" });
+      dispatch({ type: "cf_agent_chat_clear" });
+      frame("req-cleared", null);
+      await sleep(20);
+    });
+
+    expect(events.map((event) => [event.requestId, event.outcome])).toEqual([
+      ["req-0", "completed"],
+      ["req-cleared", "completed"]
+    ]);
   });
 });
