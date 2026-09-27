@@ -288,7 +288,7 @@ type StreamInterruptionRoute = {
   /** Delay the recovery with exponential backoff (transient errors). */
   backoff?: boolean;
   /** Skip persisting the partial (`onChatRecovery` returned `persist: false`). */
-  discardPartial: () => void;
+  discardPartial: () => Promise<void>;
 };
 
 /**
@@ -5698,7 +5698,7 @@ export class AIChatAgent<
     const discardPartial =
       options.persist === false &&
       !partialHasSettledToolResults(input.partialParts);
-    if (discardPartial) input.discardPartial();
+    if (discardPartial) await input.discardPartial();
     if (options.continue === false) {
       await this._updateChatRecoveryIncident(
         incident.incidentId,
@@ -5710,10 +5710,13 @@ export class AIChatAgent<
 
     // A dropped partial on a new turn leaves the user's message as the leaf,
     // so there is nothing to continue: retry the turn instead.
+    const leafAfterDiscard = this.messages[this.messages.length - 1];
     const retryUserId =
       lostPartialUserId ??
-      (discardPartial && !input.continuation && leaf?.role === "user"
-        ? leaf.id
+      (discardPartial &&
+      !input.continuation &&
+      leafAfterDiscard?.role === "user"
+        ? leafAfterDiscard.id
         : undefined);
     // Stalls count too: a turn that streams a little and then stalls resets
     // the progress-keyed attempt cap every time, so this is its only bound.
@@ -7543,8 +7546,19 @@ export class AIChatAgent<
                 targetAssistantId,
                 continuation,
                 backoff: !(error instanceof ChatStreamStalledError),
-                discardPartial: () => {
+                discardPartial: async () => {
                   discardPartial = true;
+                  // An approval request already persisted this turn's
+                  // message; drop it too. A continuation's early persist
+                  // overwrote the message it continues, which stays.
+                  const earlyId = this._approvalPersistedMessageId;
+                  if (!earlyId || continuation) return;
+                  this._approvalPersistedMessageId = null;
+                  await this._deleteMessagesByIds([earlyId]);
+                  this._broadcastChatMessage({
+                    messages: this._messagesForClientSync(),
+                    type: MessageType.CF_AGENT_CHAT_MESSAGES
+                  });
                 }
               });
               if (outcome === "scheduled") {

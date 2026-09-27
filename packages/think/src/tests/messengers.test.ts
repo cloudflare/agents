@@ -1299,18 +1299,18 @@ describe("think messengers core", () => {
       ).toEqual(["two", "three"]);
     });
 
-    it("retries a recovered reply whose live delivery fails, without re-posting", async () => {
+    it("retries a recovered reply whose live delivery fails, never re-sending a rejected post", async () => {
       const agent = await getAgentByName(
         env.ThinkMessengerDeliveryTestAgent,
         `split-live-${crypto.randomUUID()}`
       );
       const result = await agent.deliverSettledRecoveryForTest({
-        text: "one|two",
+        text: "one|two|three",
         failPost: "two"
       });
 
       expect(result.retry?.attempts).toBe(1);
-      expect(result.pending?.posted).toBe(1);
+      expect(result.pending?.posted).toBe(2);
       expect(result.retry).toBeDefined();
       if (!result.retry) return;
       expect(await agent.runMessengerRecoveryRetryForTest(result.retry)).toBe(
@@ -1318,7 +1318,7 @@ describe("think messengers core", () => {
       );
       expect(
         (await agent.getAdapterCalls()).map((call) => call.content)
-      ).toEqual(["one", "two"]);
+      ).toEqual(["one", "three"]);
     });
   });
 

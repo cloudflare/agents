@@ -771,6 +771,19 @@ describe("Think — error handling", () => {
     expect(result.first.interruptedCalls).toBe(0);
     expect(result.scheduled).toBe(0);
     expect(result.responses).toBe(1);
+    expect(result.status).toBe("error");
+    expect(result.streamStates).toEqual(["errored"]);
+  });
+
+  it("replays onChatResponse when bookkeeping before it fails", async () => {
+    const agent = await freshAgent(`hook-bookkeeping-${crypto.randomUUID()}`);
+    const result = await agent.testResponseHookBookkeepingFailureForTest();
+
+    expect(result.first.done).toBe(true);
+    expect(result.first.error).toBeUndefined();
+    expect(result.status).toBe("completed");
+    expect(result.liveResponses).toEqual([]);
+    expect(result.replayedResponses).toEqual(["completed"]);
   });
 
   it.each([false, true])(

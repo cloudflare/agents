@@ -118,7 +118,11 @@ function makeHangingSSEResponse() {
   });
 }
 
-export type FailingReaderPrelude = "partial" | "start-only" | "none";
+export type FailingReaderPrelude =
+  | "partial"
+  | "approval"
+  | "start-only"
+  | "none";
 
 /**
  * An SSE response whose reader throws `errorMessage` after `prelude`, the way
@@ -134,6 +138,20 @@ function makeFailingSSEResponse(
       { type: "start" },
       { type: "text-start" },
       { type: "text-delta", delta: "partial before failure" }
+    ],
+    approval: [
+      { type: "start" },
+      {
+        type: "tool-input-available",
+        toolCallId: "call-approval",
+        toolName: "deleteFile",
+        input: { path: "notes.txt" }
+      },
+      {
+        type: "tool-approval-request",
+        approvalId: "approval-1",
+        toolCallId: "call-approval"
+      }
     ],
     "start-only": [{ type: "start" }],
     none: []

@@ -2327,6 +2327,8 @@ export class ThinkTestAgent extends Think {
     first: TestChatResult;
     scheduled: number;
     responses: number;
+    status: string | undefined;
+    streamStates: string[];
   }> {
     this.classifyChatError = () => "transient";
     const self = this as unknown as {
@@ -2338,6 +2340,7 @@ export class ThinkTestAgent extends Think {
       throw new Error("simulated persist failure");
     };
     this._responseLog = [];
+    const rpcStatus = this._captureRpcTurnStatusForTest();
     try {
       const first = await this.testChat("persist fails after the stream");
       return {
@@ -2345,12 +2348,80 @@ export class ThinkTestAgent extends Think {
         scheduled:
           recoveryWorkCountForTest(this, "_chatRecoveryContinue") +
           recoveryWorkCountForTest(this, "_chatRecoveryRetry"),
-        responses: this._responseLog.length
+        responses: this._responseLog.length,
+        status: rpcStatus.read(),
+        streamStates: this.sql<{ state: string }>`
+          SELECT state FROM cf_agents_streams
+        `.map((row) => row.state)
       };
     } finally {
+      rpcStatus.restore();
       self._persistAssistantMessageWithCutover = original;
       Reflect.deleteProperty(this, "classifyChatError");
     }
+  }
+
+  /**
+   * The terminal-status write inside the response hook throws once, before
+   * `onChatResponse` runs. Returns what the live turn delivered, then the
+   * responses after a startup replay of owed hooks.
+   */
+  async testResponseHookBookkeepingFailureForTest(): Promise<{
+    first: TestChatResult;
+    status: string | undefined;
+    liveResponses: string[];
+    replayedResponses: string[];
+  }> {
+    const self = this as unknown as {
+      _recordTerminalChatStatus(...args: unknown[]): Promise<void>;
+      _replayPendingResponseHooks(): Promise<void>;
+    };
+    const original = self._recordTerminalChatStatus;
+    self._recordTerminalChatStatus = async () => {
+      self._recordTerminalChatStatus = original;
+      throw new Error("simulated terminal-status write failure");
+    };
+    this._responseLog = [];
+    const rpcStatus = this._captureRpcTurnStatusForTest();
+    try {
+      const first = await this.testChat("hook bookkeeping fails");
+      const liveResponses = this._responseLog.map((r) => r.status);
+      await self._replayPendingResponseHooks();
+      return {
+        first,
+        status: rpcStatus.read(),
+        liveResponses,
+        replayedResponses: this._responseLog.map((r) => r.status)
+      };
+    } finally {
+      rpcStatus.restore();
+      self._recordTerminalChatStatus = original;
+    }
+  }
+
+  /** Record the status the RPC stream consumer returns for the next turn. */
+  private _captureRpcTurnStatusForTest(): {
+    read(): string | undefined;
+    restore(): void;
+  } {
+    const self = this as unknown as {
+      _streamResultToRpcCallback(
+        ...args: unknown[]
+      ): Promise<{ status: string }>;
+    };
+    const original = self._streamResultToRpcCallback;
+    let status: string | undefined;
+    self._streamResultToRpcCallback = async (...args) => {
+      const result = await original.apply(this, args);
+      status = result.status;
+      return result;
+    };
+    return {
+      read: () => status,
+      restore: () => {
+        self._streamResultToRpcCallback = original;
+      }
+    };
   }
 
   /**

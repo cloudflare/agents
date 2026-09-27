@@ -199,7 +199,7 @@ interface ChatRecoveryTestStub {
     message: string,
     turns?: number,
     options?: {
-      prelude?: "partial" | "start-only" | "none";
+      prelude?: "partial" | "approval" | "start-only" | "none";
       priorAssistant?: boolean;
     }
   ): Promise<"completed" | "error" | "aborted" | "skipped">;
@@ -2926,6 +2926,31 @@ describe("platform-transient reader errors (#1964)", () => {
     await expect
       .poll(() => textsOf(agentStub), { timeout: 5000 })
       .toEqual(["tell me a long story", "Continued response."]);
+  });
+
+  it("drops an early-persisted approval request with the partial under persist: false", async () => {
+    const agentStub = await getTestAgent(
+      `transient-no-persist-approval-${crypto.randomUUID()}`
+    );
+    await agentStub.setRecoveryOverride({ persist: false });
+
+    expect(
+      await agentStub.driveFailingReaderTurnForTest(
+        "Network connection lost.",
+        1,
+        { prelude: "approval" }
+      )
+    ).toBe("aborted");
+
+    await expect
+      .poll(() => textsOf(agentStub), { timeout: 5000 })
+      .toEqual(["tell me a long story", "Continued response."]);
+    const stored = (await agentStub.getPersistedMessages()) as Stored;
+    expect(
+      stored
+        .flatMap((m) => m.parts.map((p) => p.type))
+        .filter((type) => type.startsWith("tool-"))
+    ).toEqual([]);
   });
 
   it("leaves the incident to the attempt a failed recovery schedules", async () => {

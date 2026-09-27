@@ -13886,12 +13886,12 @@ export class Think<
     // hooks begin. A failure past this point is not a stream interruption, so
     // it must never route into recovery (the turn already has its answer).
     let streamDrained = false;
-    let responseHookFired = false;
     let aborted = false;
     let doneSent = false;
     let streamError: string | undefined;
     let streamErrorCause: unknown;
     let pendingRpcError: string | undefined;
+    let thrownError: string | undefined;
     // When a stall-recovery early-return schedules a continuation, the
     // continuation re-runs the turn and its own stream finalize re-triggers the
     // held barrier. Re-arming here too would let the 50ms coalesce timer fire a
@@ -14107,11 +14107,8 @@ export class Think<
       } else if (!aborted) {
         await callback.onDone();
       }
-      responseHookFired = true;
-      await this._fireResponseHook(response);
-      await this._forgetPendingResponseHook(requestId);
+      await this._fireLiveResponseHook(response);
     } catch (error) {
-      await this._forgetPendingResponseHook(requestId).catch(() => {});
       // #1626: a stream-stall watchdog abort is a recoverable interruption, not
       // a terminal error. Persist the settled partial (re-anchor), route into
       // bounded recovery, and suppress the terminal error when a continuation is
@@ -14193,7 +14190,11 @@ export class Think<
           return { status: "aborted" };
         }
       }
-      if (!streamFinalized) {
+      // A finished stream whose final persist threw still awaits its cutover.
+      if (
+        !streamFinalized ||
+        this._resumableStream.pendingCutoverId === streamId
+      ) {
         this._errorResumableStream(streamId, requestId);
         streamFinalized = true;
       }
@@ -14225,6 +14226,7 @@ export class Think<
       });
       const errorMessage =
         wrapped instanceof Error ? wrapped.message : String(wrapped);
+      thrownError = errorMessage;
       this._emit("chat:request:failed", {
         requestId,
         stage: "stream",
@@ -14232,14 +14234,16 @@ export class Think<
         error: errorMessage
       });
 
-      if (assistantMsg && !responseHookFired) {
-        await this._fireResponseHook({
+      if (assistantMsg) {
+        await this._fireLiveResponseHook({
           message: assistantMsg,
           requestId,
           continuation: false,
           status: "error",
           error: errorMessage
         });
+      } else {
+        await this._forgetPendingResponseHook(requestId).catch(() => {});
       }
 
       await callback.onError(errorMessage);
@@ -14262,14 +14266,9 @@ export class Think<
       await callback.onError(pendingRpcError);
     }
 
-    return {
-      status:
-        streamError || pendingRpcError
-          ? "error"
-          : aborted
-            ? "aborted"
-            : "completed"
-    };
+    const error = thrownError ?? pendingRpcError ?? streamError;
+    if (error !== undefined) return { status: "error", error };
+    return { status: aborted ? "aborted" : "completed" };
   }
 
   /**
@@ -14799,8 +14798,7 @@ export class Think<
           // output and terminal outcome still commit with stream settlement.
           this._finalizeSubmissionStream(requestId, submissionResult);
 
-          await this._fireResponseHook(response);
-          await this._forgetPendingResponseHook(requestId);
+          await this._fireLiveResponseHook(response);
         } catch (e) {
           await this._forgetPendingResponseHook(requestId).catch(() => {});
           console.error("Failed to persist assistant message:", e);
@@ -18398,6 +18396,30 @@ export class Think<
     }
   }
 
+  /**
+   * Fire a live turn's response hook, then drop its pending marker. When the
+   * bookkeeping before `onChatResponse` throws (attachment delivery, the
+   * terminal-status write), the hook has not run: the marker is kept, with
+   * this outcome, so the next start replays it.
+   */
+  private async _fireLiveResponseHook(
+    result: ChatResponseResult
+  ): Promise<void> {
+    try {
+      await this._fireResponseHook(result);
+    } catch (error) {
+      console.error("[Think] onChatResponse deferred to replay:", error);
+      await this._rememberPendingResponseHook(result).catch(() => {});
+      this._responseHooksInFlight.delete(result.requestId);
+      return;
+    }
+    await this._forgetPendingResponseHook(result.requestId).catch(
+      (error: unknown) => {
+        console.error("[Think] failed to clear a response hook marker:", error);
+      }
+    );
+  }
+
   /** Request ids whose response hook the live turn still owes. */
   private _responseHooksInFlight = new Set<string>();
   private _pendingResponseHookReplay: Promise<void> | undefined;
@@ -18592,9 +18614,9 @@ export class Think<
 
   /**
    * Post a settled recovered reply, one post at a time, then drop its record.
-   * The cursor advances before each post (a reset mid-post never re-posts
-   * it); a post that throws back to us rewinds the cursor so the retry sends
-   * it again.
+   * Each post goes out at most once: the cursor advances before it, and a
+   * rejected post may still have landed (a timeout after the platform
+   * accepted it), so the retry resumes with the next post.
    */
   private async _deliverMessengerRecovery(
     key: string,
@@ -18619,15 +18641,10 @@ export class Think<
     let chunks = posted + 1;
     while (posted < chunks) {
       await this.ctx.storage.put(key, { ...delivery, posted: posted + 1 });
-      try {
-        ({ chunks } = await host._cf_deliverRecoveredMessengerReply({
-          ...input,
-          chunk: posted
-        }));
-      } catch (error) {
-        await this.ctx.storage.put(key, { ...delivery, posted });
-        throw error;
-      }
+      ({ chunks } = await host._cf_deliverRecoveredMessengerReply({
+        ...input,
+        chunk: posted
+      }));
       posted++;
     }
     await this.ctx.storage.delete(key);
