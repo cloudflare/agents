@@ -402,6 +402,20 @@ export interface MessengerDeliveryPolicy {
 }
 
 const DEFAULT_TYPING_REFRESH_MS = 4_000;
+/** Longest the reply waits on a typing request an adapter never settles. */
+const TYPING_SETTLE_TIMEOUT_MS = 1_000;
+
+async function settleTyping(pending: Promise<void> | undefined) {
+  if (!pending) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    pending,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, TYPING_SETTLE_TIMEOUT_MS);
+    })
+  ]);
+  clearTimeout(timer);
+}
 
 export interface DeliverMessengerReplyOptions {
   checkpoint?: (snapshot: MessengerReplySnapshot) => Promise<void> | void;
@@ -480,7 +494,7 @@ export async function deliverMessengerReply(
     .hasVisibleOutput()
     .then(async (visible) => {
       stopTyping();
-      await typingInFlight;
+      await settleTyping(typingInFlight);
       return visible ? options.surface.post(callback.stream()) : undefined;
     })
     .catch(async (error: unknown) => {
@@ -502,7 +516,7 @@ export async function deliverMessengerReply(
     if (options.surface.startTyping && typingRefreshMs > 0) {
       typingTimer = setInterval(() => void sendTyping(), typingRefreshMs);
     }
-    await sendTyping();
+    await settleTyping(sendTyping());
     const userMessage =
       options.userMessage ?? toMessengerUserMessage(options.event);
     const restoreSurface = options.target.bindActiveDeliverySurface?.(

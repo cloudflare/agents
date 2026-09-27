@@ -1948,6 +1948,22 @@ describe("think messengers core", () => {
       expect(firstPost).toBeGreaterThan(0);
       expect(log.slice(firstPost).filter((e) => e !== "post")).toEqual([]);
     });
+
+    it.each(["first", "refresh"] as const)(
+      "still posts the reply when the %s typing request never settles",
+      async (stalled) => {
+        let calls = 0;
+        const { delivered, posts } = deliver(() => {
+          calls++;
+          return stalled === "first" || calls > 1
+            ? new Promise<void>(() => {})
+            : Promise.resolve();
+        });
+        await delivered;
+
+        expect(posts).toEqual(["hi"]);
+      }
+    );
   });
 
   it("posts only the apology, never an empty stream, when an interrupted turn has no text", async () => {
