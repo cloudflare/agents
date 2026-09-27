@@ -1,0 +1,57 @@
+.changeset/think-messenger-prompt-review.md
+  s_5d099cfa9873e9::t_b4d123feb99682 14-15
+packages/agents/src/chat-sdk/adapter.ts
+  s_5d099cfa9873e9::t_d3de30a41d9c74 86-87,133-134,136-139
+packages/agents/src/tests/agents/chat-sdk.ts
+  s_150285dadff58b::t_91cbd6b89a3df3 134-171
+packages/think/src/extensions/hook-proxy.ts
+  s_5d099cfa9873e9::t_cf66e6178bcb6b 10,63-65,68-69,78-81
+packages/think/src/tests/agents/index.ts
+  s_5d099cfa9873e9::t_cd3ebd7c0a5127 48-51
+packages/think/src/tests/hooks.test.ts
+  s_5d099cfa9873e9::t_988364ebea7269 1636-1648
+packages/think/src/tests/worker.ts
+  s_5d099cfa9873e9::t_b16f1eae7c20d6 51,103,259
+packages/think/src/tests/wrangler.jsonc
+  s_5d099cfa9873e9::t_3827c5914ed1e8 158-161,276
+packages/think/src/think.ts
+  s_a612e55f12d5bd::t_829c85a146d446 8180-8183
+packages/agents/src/tests/chat-sdk.test.ts
+  s_5d099cfa9873e9::t_bdd6b423578cb1 66-76
+packages/think/src/tests/agents/extension-hooks.ts
+  s_5d099cfa9873e9::t_b9edae41331622 13,206-258
+packages/think/src/tests/messengers.test.ts
+  s_5d099cfa9873e9::t_cd43a6a02cd7ab 8,1583-1592
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "165344bb0a5389a769e0dbaa55643a41e8719a65",
+  "prompts": {},
+  "sessions": {
+    "s_150285dadff58b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "1646714c-6080-44ff-890f-cc2ad8eb9d63",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_5d099cfa9873e9": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "d6b52f06-048c-4bcc-8bd4-75cfd838c9ec",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_a612e55f12d5bd": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "72152225-e434-4626-8eaa-616a60f93f34",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
