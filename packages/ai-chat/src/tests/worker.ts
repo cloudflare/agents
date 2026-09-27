@@ -118,7 +118,11 @@ function makeHangingSSEResponse() {
   });
 }
 
-export type FailingReaderPrelude = "partial" | "start-only" | "none";
+export type FailingReaderPrelude =
+  | "partial"
+  | "approval"
+  | "start-only"
+  | "none";
 
 /**
  * An SSE response whose reader throws `errorMessage` after `prelude`, the way
@@ -134,6 +138,20 @@ function makeFailingSSEResponse(
       { type: "start" },
       { type: "text-start" },
       { type: "text-delta", delta: "partial before failure" }
+    ],
+    approval: [
+      { type: "start" },
+      {
+        type: "tool-input-available",
+        toolCallId: "call-approval",
+        toolName: "deleteFile",
+        input: { path: "notes.txt" }
+      },
+      {
+        type: "tool-approval-request",
+        approvalId: "approval-1",
+        toolCallId: "call-approval"
+      }
     ],
     "start-only": [{ type: "start" }],
     none: []
@@ -3327,6 +3345,47 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return {
       tasks: tasks[0]?.count ?? 0,
       schedules: schedules[0]?.count ?? 0
+    };
+  }
+
+  private _recoveryTaskKeyed: boolean[] = [];
+
+  /** Record whether each recovery enqueued from now on has an idempotency key. */
+  trackRecoveryTaskKeysForTest(): void {
+    const self = this as unknown as {
+      _enqueueChatRecovery(
+        callback: Parameters<typeof chatRecoveryTaskRunOptions>[0]["callback"],
+        data: Record<string, unknown>,
+        reason: Parameters<typeof chatRecoveryTaskRunOptions>[1],
+        delaySeconds: number,
+        dedupeKey?: string
+      ): Promise<void>;
+    };
+    const original = self._enqueueChatRecovery.bind(this);
+    self._enqueueChatRecovery = (callback, data, reason, delaySeconds, key) => {
+      this._recoveryTaskKeyed.push(
+        chatRecoveryTaskRunOptions(
+          { callback, data, delaySeconds },
+          reason,
+          key
+        ).idempotencyKey !== undefined
+      );
+      return original(callback, data, reason, delaySeconds, key);
+    };
+  }
+
+  getRecoveryTaskKeyedForTest(): boolean[] {
+    return this._recoveryTaskKeyed;
+  }
+
+  /** Make the next routing into recovery throw (an incident write failure). */
+  failNextIncidentBeginForTest(): void {
+    const self = this as unknown as {
+      _beginChatRecoveryIncident(...args: unknown[]): Promise<unknown>;
+    };
+    self._beginChatRecoveryIncident = async () => {
+      Reflect.deleteProperty(self, "_beginChatRecoveryIncident");
+      throw new Error("incident write failed");
     };
   }
 

@@ -227,6 +227,9 @@ import {
   resolveChatRecoveryConfig,
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
+  chatRecoveryBackoffSeconds,
+  retryAfterSeconds,
+  isDurableObjectResetError,
   ChatStreamStalledError,
   iterateWithStallWatchdog,
   sweepStaleChatRecoveryIncidents,
@@ -339,7 +342,15 @@ type MessengerRecoveryDelivery = {
   partialText: string;
   outcome?: "completed" | "interrupted";
   text?: string;
+  /**
+   * Posts of the reply already attempted. Advanced before each post, so a
+   * reset mid-post resumes after it rather than posting it twice.
+   */
+  posted?: number;
 };
+
+const MESSENGER_RECOVERY_RETRY_CALLBACK = "_cfRetryMessengerRecoveryDelivery";
+const MESSENGER_RECOVERY_MAX_RETRIES = 8;
 
 function messageText(message: UIMessage | undefined): string {
   return (message?.parts ?? [])
@@ -375,13 +386,30 @@ type PendingResponseHook = {
 /**
  * Carries an in-stream error that `classifyChatError` marked transient out of
  * the drain loop, so it reaches the same recovery routing as a thrown error.
+ * `original` is the provider error the stream reported, when it had one.
  */
 class TransientChatStreamError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly classification: ChatErrorClassification,
+    readonly original: unknown
+  ) {
     super(message);
     this.name = "TransientChatStreamError";
   }
 }
+
+/** A live stream interruption (stall or transient error) to route to recovery. */
+type StreamInterruptionRoute = {
+  requestId: string;
+  streamId: string;
+  partialParts: MessagePart[];
+  persistPartial: () => Promise<string | undefined>;
+  /** Delay the continuation with exponential backoff (transient errors). */
+  backoff?: boolean;
+  /** Provider `Retry-After` (rate limits); extends the backoff delay. */
+  retryAfterSeconds?: number;
+};
 
 type ResolvedPauseOutcome = { executionId: string; output: unknown };
 
@@ -1841,7 +1869,7 @@ const recoveredTurnAcceptanceContext = new AsyncLocalStorage<{
 // (with structured output) for that `runTurn` call alone.
 function isTransientClassification(
   classification: ChatErrorClassification | undefined
-): boolean {
+): classification is "transient" | "rate_limit" {
   return classification === "transient" || classification === "rate_limit";
 }
 
@@ -5346,13 +5374,14 @@ export class Think<
     outcome: "completed" | "interrupted";
     text?: string;
     partialPosted?: boolean;
-  }): Promise<void> {
+    chunk: number;
+  }): Promise<{ chunks: number }> {
     if (!this._messengerRuntime) {
       throw new Error(
         `Cannot deliver a recovered reply for messenger "${input.messengerId}": this agent has no messenger runtime`
       );
     }
-    await this._messengerRuntime.deliverRecoveredReply(input);
+    return this._messengerRuntime.deliverRecoveredReply(input);
   }
 
   /**
@@ -6550,17 +6579,34 @@ export class Think<
   }
 
   /**
-   * Whether a stream error is one the app classified as `"transient"` or
-   * `"rate_limit"`. Such errors route into bounded chat recovery like a stream
-   * stall instead of terminalizing the turn (#2085). Without a
+   * The `"transient"` or `"rate_limit"` class the app assigned a stream
+   * error, else `undefined`. Such errors route into bounded chat recovery like
+   * a stream stall instead of terminalizing the turn (#2085). Without a
    * `classifyChatError` override nothing is transient, so today's terminal
-   * behavior is unchanged.
+   * behavior is unchanged. A Durable Object reset is never transient here: the
+   * restart's own recovery owns the turn.
    */
-  private _isTransientStreamError(error: unknown, requestId: string): boolean {
-    if (error instanceof TransientChatStreamError) return true;
-    if (error instanceof ChatStreamStalledError) return false;
-    return isTransientClassification(
-      this._classifyStreamError(error, requestId)
+  private _transientStreamClassification(
+    error: unknown,
+    requestId: string
+  ): ChatErrorClassification | undefined {
+    if (error instanceof TransientChatStreamError) return error.classification;
+    if (error instanceof ChatStreamStalledError) return undefined;
+    if (isDurableObjectResetError(error)) return undefined;
+    const classification = this._classifyStreamError(error, requestId);
+    return isTransientClassification(classification)
+      ? classification
+      : undefined;
+  }
+
+  /** The provider `Retry-After` to honor for a rate-limited stream error. */
+  private _streamErrorRetryAfter(
+    error: unknown,
+    classification: ChatErrorClassification | undefined
+  ): number | undefined {
+    if (classification !== "rate_limit") return undefined;
+    return retryAfterSeconds(
+      error instanceof TransientChatStreamError ? error.original : error
     );
   }
 
@@ -13045,6 +13091,7 @@ export class Think<
 
       case "cancel":
         this._aborts.cancel(event.id);
+        await this._cancelScheduledRecovery(event.id);
         break;
 
       case "messages":
@@ -13503,6 +13550,45 @@ export class Think<
    */
   cancelChat(requestId: string, reason?: string): void {
     this._aborts.cancel(requestId, reason);
+    void this.keepAliveWhile(() => this._cancelScheduledRecovery(requestId));
+  }
+
+  /**
+   * A cancel can land while the turn's recovery is waiting out its backoff,
+   * with nothing in flight to abort: cancel the scheduled recovery instead,
+   * so the queued callback bails when it fires.
+   */
+  private async _cancelScheduledRecovery(requestId: string): Promise<void> {
+    try {
+      await this._chatRecoveryEngine().cancelScheduledRecovery(requestId);
+    } catch (error) {
+      console.error(
+        "[Think] failed to cancel a scheduled chat recovery",
+        error
+      );
+    }
+  }
+
+  /**
+   * Whether the user cancelled this recovery while it was scheduled. A
+   * submission the recovery owned settles as `aborted`.
+   */
+  private async _recoveryCancelled(
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
+  ): Promise<boolean> {
+    if (
+      !(await this._chatRecoveryEngine().isRecoveryCancelled(data?.incidentId))
+    )
+      return false;
+    if (data?.recoveredRequestId) {
+      await this._completeRecoveredSubmission(
+        data.recoveredRequestId,
+        "aborted",
+        null,
+        null
+      );
+    }
+    return true;
   }
 
   /** Abort every in-flight chat turn on this agent. */
@@ -13796,10 +13882,17 @@ export class Think<
 
     let streamFinalized = false;
     let assistantMsg: UIMessage | null = null;
+    let persistedAssistantId: string | undefined;
+    // Set once the stream is fully consumed and end-of-turn persistence and
+    // hooks begin. A failure past this point is not a stream interruption, so
+    // it must never route into recovery (the turn already has its answer).
+    let streamDrained = false;
     let aborted = false;
     let doneSent = false;
     let streamError: string | undefined;
+    let streamErrorCause: unknown;
     let pendingRpcError: string | undefined;
+    let thrownError: string | undefined;
     // When a stall-recovery early-return schedules a continuation, the
     // continuation re-runs the turn and its own stream finalize re-triggers the
     // held barrier. Re-arming here too would let the 50ms coalesce timer fire a
@@ -13826,7 +13919,12 @@ export class Think<
       >();
       try {
         const guardedStream = iterateWithStallWatchdog(
-          result.toUIMessageStream({ onError: streamErrorToString }),
+          result.toUIMessageStream({
+            onError: (error) => {
+              streamErrorCause = error;
+              return streamErrorToString(error);
+            }
+          }),
           stallTimeoutMs,
           () => {
             this._emit("chat:stream:stalled", {
@@ -13867,7 +13965,7 @@ export class Think<
             // re-run. No `message:error`/`chat:request:failed`/error frame here
             // — the turn isn't over.
             const classification = this._classifyStreamError(
-              streamError,
+              streamErrorCause ?? streamError,
               requestId
             );
             if (
@@ -13877,8 +13975,15 @@ export class Think<
               overflowRetry = true;
               break;
             }
-            if (isTransientClassification(classification)) {
-              throw new TransientChatStreamError(streamError);
+            if (
+              isTransientClassification(classification) &&
+              !isDurableObjectResetError(streamErrorCause ?? streamError)
+            ) {
+              throw new TransientChatStreamError(
+                streamError,
+                classification,
+                streamErrorCause
+              );
             }
             this._emit("message:error", { error: streamError });
             // An AI-SDK error surfaces as a stream error part (not a thrown
@@ -13956,6 +14061,7 @@ export class Think<
         return { status: "overflow_retry", error: streamError };
       }
 
+      streamDrained = true;
       if (streamError) {
         this._errorResumableStream(streamId, requestId);
       } else {
@@ -13976,7 +14082,7 @@ export class Think<
       };
       if (accumulator.parts.length > 0) {
         await this._rememberPendingResponseHook(response);
-        await this._persistAssistantMessageWithCutover(
+        persistedAssistantId = await this._persistAssistantMessageWithCutover(
           streamId,
           assistantMsg,
           undefined,
@@ -14005,34 +14111,40 @@ export class Think<
       } else if (!aborted) {
         await callback.onDone();
       }
-      await this._fireResponseHook(response);
-      await this._forgetPendingResponseHook(requestId);
+      await this._fireLiveResponseHook(response);
     } catch (error) {
-      await this._forgetPendingResponseHook(requestId).catch(() => {});
       // #1626: a stream-stall watchdog abort is a recoverable interruption, not
       // a terminal error. Persist the settled partial (re-anchor), route into
       // bounded recovery, and suppress the terminal error when a continuation is
       // scheduled; fall through to terminal only once the budget is exhausted.
-      // Errors the app classifies as transient/rate_limit take the same route.
-      if (
-        error instanceof ChatStreamStalledError ||
-        this._isTransientStreamError(error, requestId)
-      ) {
-        const outcome = await this._routeStallToBoundedRecovery({
+      // Errors the app classifies as transient/rate_limit take the same route,
+      // unless the caller aborted the turn.
+      const stalled = error instanceof ChatStreamStalledError;
+      const transientClassification =
+        stalled || streamDrained || abortSignal?.aborted
+          ? undefined
+          : this._transientStreamClassification(error, requestId);
+      if (!streamDrained && (stalled || transientClassification)) {
+        const outcome = await this._routeStreamInterruption({
           requestId,
           streamId,
-          backoff: !(error instanceof ChatStreamStalledError),
-          partialParts: (assistantMsg ?? accumulator.toMessage()).parts,
+          backoff: !stalled,
+          retryAfterSeconds: this._streamErrorRetryAfter(
+            error,
+            transientClassification
+          ),
+          partialParts: accumulator.toMessage().parts,
           persistPartial: async () => {
-            if (assistantMsg) return assistantMsg.id;
+            if (persistedAssistantId) return persistedAssistantId;
             if (accumulator.parts.length === 0) return undefined;
             const partial = accumulator.toMessage();
             if (!(await this._persistAssistantMessage(partial))) {
               return undefined;
             }
             assistantMsg = partial;
+            persistedAssistantId = partial.id;
             this._broadcastMessages();
-            return assistantMsg.id;
+            return persistedAssistantId;
           }
         });
         if (outcome === "scheduled") {
@@ -14082,7 +14194,11 @@ export class Think<
           return { status: "aborted" };
         }
       }
-      if (!streamFinalized) {
+      // A finished stream whose final persist threw still awaits its cutover.
+      if (
+        !streamFinalized ||
+        this._resumableStream.pendingCutoverId === streamId
+      ) {
         this._errorResumableStream(streamId, requestId);
         streamFinalized = true;
       }
@@ -14114,6 +14230,7 @@ export class Think<
       });
       const errorMessage =
         wrapped instanceof Error ? wrapped.message : String(wrapped);
+      thrownError = errorMessage;
       this._emit("chat:request:failed", {
         requestId,
         stage: "stream",
@@ -14122,13 +14239,15 @@ export class Think<
       });
 
       if (assistantMsg) {
-        await this._fireResponseHook({
+        await this._fireLiveResponseHook({
           message: assistantMsg,
           requestId,
           continuation: false,
           status: "error",
           error: errorMessage
         });
+      } else {
+        await this._forgetPendingResponseHook(requestId).catch(() => {});
       }
 
       await callback.onError(errorMessage);
@@ -14151,14 +14270,9 @@ export class Think<
       await callback.onError(pendingRpcError);
     }
 
-    return {
-      status:
-        streamError || pendingRpcError
-          ? "error"
-          : aborted
-            ? "aborted"
-            : "completed"
-    };
+    const error = thrownError ?? pendingRpcError ?? streamError;
+    if (error !== undefined) return { status: "error", error };
+    return { status: aborted ? "aborted" : "completed" };
   }
 
   /**
@@ -14292,6 +14406,7 @@ export class Think<
     let terminalFrame: Record<string, unknown> | undefined;
     let streamAborted = false;
     let streamError: string | undefined;
+    let streamErrorCause: unknown;
     let output: unknown;
     // Set when an in-stream overflow error is recoverable (opt-in): suppresses
     // terminal delivery so the driver can compact and re-run the turn.
@@ -14312,7 +14427,12 @@ export class Think<
       this._insideInferenceLoop = true;
       try {
         const guardedStream = iterateWithStallWatchdog(
-          result.toUIMessageStream({ onError: streamErrorToString }),
+          result.toUIMessageStream({
+            onError: (error) => {
+              streamErrorCause = error;
+              return streamErrorToString(error);
+            }
+          }),
           stallTimeoutMs,
           () => {
             this._emit("chat:stream:stalled", {
@@ -14372,7 +14492,7 @@ export class Think<
             // the partial after the loop, then signal the driver to compact and
             // re-run. No `message:error`/`chat:request:failed`/error frame here.
             const classification = this._classifyStreamError(
-              streamError,
+              streamErrorCause ?? streamError,
               requestId
             );
             if (
@@ -14382,8 +14502,15 @@ export class Think<
               overflowRetry = true;
               break;
             }
-            if (isTransientClassification(classification)) {
-              throw new TransientChatStreamError(streamError);
+            if (
+              isTransientClassification(classification) &&
+              !isDurableObjectResetError(streamErrorCause ?? streamError)
+            ) {
+              throw new TransientChatStreamError(
+                streamError,
+                classification,
+                streamErrorCause
+              );
             }
             if (options?.captureProgrammaticStreamError) {
               this._programmaticStreamErrors.set(requestId, streamError);
@@ -14504,16 +14631,22 @@ export class Think<
       // re-anchors without re-running completed tool calls), then route into
       // bounded recovery; only fall through to the terminal path below once the
       // budget is exhausted. Errors the app classifies as transient/rate_limit
-      // take the same route.
-      if (
-        error instanceof ChatStreamStalledError ||
-        this._isTransientStreamError(error, requestId)
-      ) {
+      // take the same route, unless the caller aborted the turn.
+      const stalled = error instanceof ChatStreamStalledError;
+      const transientClassification =
+        stalled || abortSignal?.aborted
+          ? undefined
+          : this._transientStreamClassification(error, requestId);
+      if (stalled || transientClassification) {
         const partialMsg = accumulator.toMessage();
-        const outcome = await this._routeStallToBoundedRecovery({
+        const outcome = await this._routeStreamInterruption({
           requestId,
           streamId,
-          backoff: !(error instanceof ChatStreamStalledError),
+          backoff: !stalled,
+          retryAfterSeconds: this._streamErrorRetryAfter(
+            error,
+            transientClassification
+          ),
           partialParts: partialMsg.parts,
           persistPartial: async () => {
             if (
@@ -14672,8 +14805,7 @@ export class Think<
           // output and terminal outcome still commit with stream settlement.
           this._finalizeSubmissionStream(requestId, submissionResult);
 
-          await this._fireResponseHook(response);
-          await this._forgetPendingResponseHook(requestId);
+          await this._fireLiveResponseHook(response);
         } catch (e) {
           await this._forgetPendingResponseHook(requestId).catch(() => {});
           console.error("Failed to persist assistant message:", e);
@@ -16236,6 +16368,10 @@ export class Think<
       // not stuck, so the engine keeps it budget-free. SERVER-tool orphans are
       // excluded by `hasPendingInteraction` and still recover normally.
       isAwaitingClientInteraction: () => this.hasPendingInteraction(),
+      listActiveIncidents: async () =>
+        (await listActiveChatRecoveryIncidents(this.ctx.storage)).map(
+          ({ incident }) => incident
+        ),
       putIncident: (key, incident) => this.ctx.storage.put(key, incident),
       deleteIncident: async (key) => {
         await this.ctx.storage.delete(key);
@@ -16430,14 +16566,9 @@ export class Think<
    * For `"exhausted"` and `"declined"` the terminal UX is already delivered, so
    * the caller must NOT run the generic terminal path.
    */
-  private async _routeStallToBoundedRecovery(input: {
-    requestId: string;
-    streamId: string;
-    partialParts: MessagePart[];
-    persistPartial: () => Promise<string | undefined>;
-    /** Delay the continuation with exponential backoff (transient errors). */
-    backoff?: boolean;
-  }): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
+  private async _routeStallToBoundedRecovery(
+    input: StreamInterruptionRoute
+  ): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
     const recoveryRootRequestId =
       this._activeChatRecoveryRootRequestId ?? input.requestId;
     const originIds = this._originMessageIdsFor(input.requestId);
@@ -16563,14 +16694,14 @@ export class Think<
       incident.incidentId,
       partialText
     );
-    let delaySeconds: number | undefined;
-    if (input.backoff) {
-      const retries = await this._chatRecoveryEngine().recordTransientRetry(
-        incident.incidentId
-      );
-      delaySeconds = Math.min(2 ** (retries - 1), 30);
-    }
-    this._rescheduledRecoveryIncidents.add(incident.incidentId);
+    // Stalls count too: a turn that streams a little and then stalls resets
+    // the progress-keyed attempt cap every time, so this is its only bound.
+    const retries = await this._chatRecoveryEngine().recordTransientRetry(
+      incident.incidentId
+    );
+    const delaySeconds = input.backoff
+      ? chatRecoveryBackoffSeconds(retries, input.retryAfterSeconds)
+      : undefined;
     const reason =
       this._activeChatRecoveryRootRequestId !== undefined
         ? "chained_retry"
@@ -16592,6 +16723,7 @@ export class Think<
           ...(recoveredRequestId ? { recoveredRequestId } : {})
         }
       });
+      this._rescheduledRecoveryIncidents.add(incident.incidentId);
       this._claimSubmissionForRecovery(recoveredRequestId, reason);
       return "scheduled";
     }
@@ -16612,8 +16744,28 @@ export class Think<
         ...(recoveredRequestId ? { recoveredRequestId } : {})
       }
     });
+    this._rescheduledRecoveryIncidents.add(incident.incidentId);
     this._claimSubmissionForRecovery(recoveredRequestId, reason);
     return "scheduled";
+  }
+
+  /**
+   * {@link _routeStallToBoundedRecovery} for a stream consumer's `catch`: a
+   * routing failure (e.g. a rejected incident write) degrades to `"failed"`,
+   * so the caller still delivers its terminal error frame.
+   */
+  private async _routeStreamInterruption(
+    input: StreamInterruptionRoute
+  ): Promise<"scheduled" | "exhausted" | "declined" | "failed"> {
+    try {
+      return await this._routeStallToBoundedRecovery(input);
+    } catch (error) {
+      console.error(
+        "[Think] routing a stream interruption into recovery failed; delivering the terminal error",
+        error
+      );
+      return "failed";
+    }
   }
 
   /**
@@ -17390,6 +17542,7 @@ export class Think<
     data?: ChatRecoveryRetryData,
     onTurnStarted?: () => void
   ): Promise<void> {
+    if (await this._recoveryCancelled(data)) return;
     const recoveredSubmission = data?.recoveredRequestId
       ? this._readRunningSubmissionForRecovery(data.recoveredRequestId)
       : null;
@@ -17692,6 +17845,7 @@ export class Think<
     data?: ChatRecoveryContinueData,
     onTurnStarted?: () => void
   ): Promise<void> {
+    if (await this._recoveryCancelled(data)) return;
     const recoveredSubmission = data?.recoveredRequestId
       ? this._readRunningSubmissionForRecovery(data.recoveredRequestId)
       : null;
@@ -18249,6 +18403,30 @@ export class Think<
     }
   }
 
+  /**
+   * Fire a live turn's response hook, then drop its pending marker. When the
+   * bookkeeping before `onChatResponse` throws (attachment delivery, the
+   * terminal-status write), the hook has not run: the marker is kept, with
+   * this outcome, so the next start replays it.
+   */
+  private async _fireLiveResponseHook(
+    result: ChatResponseResult
+  ): Promise<void> {
+    try {
+      await this._fireResponseHook(result);
+    } catch (error) {
+      console.error("[Think] onChatResponse deferred to replay:", error);
+      await this._rememberPendingResponseHook(result).catch(() => {});
+      this._responseHooksInFlight.delete(result.requestId);
+      return;
+    }
+    await this._forgetPendingResponseHook(result.requestId).catch(
+      (error: unknown) => {
+        console.error("[Think] failed to clear a response hook marker:", error);
+      }
+    );
+  }
+
   /** Request ids whose response hook the live turn still owes. */
   private _responseHooksInFlight = new Set<string>();
   private _pendingResponseHookReplay: Promise<void> | undefined;
@@ -18423,32 +18601,58 @@ export class Think<
         : undefined;
     if (this._settlingMessengerRecoveries.has(incidentId)) return;
     this._settlingMessengerRecoveries.add(incidentId);
+    const key = MESSENGER_RECOVERY_PREFIX + incidentId;
     void this.keepAliveWhile(async () => {
-      const key = MESSENGER_RECOVERY_PREFIX + incidentId;
       let delivery = await this.ctx.storage.get<MessengerRecoveryDelivery>(key);
       if (!delivery) return;
       if (!delivery.outcome) {
         delivery = settleMessengerRecoveryDelivery(delivery, outcome, text);
         await this.ctx.storage.put(key, delivery);
       }
-      await this._deliverMessengerRecovery(key, delivery);
+      await this._deliverMessengerRecovery(key);
     })
-      .catch((error: unknown) => {
-        console.error(
-          "[Think] recovered messenger reply delivery failed",
-          error
-        );
-      })
+      .catch((error: unknown) =>
+        this._retryMessengerRecoveryDeliveryLater(key, 0, error)
+      )
       .finally(() => {
         this._settlingMessengerRecoveries.delete(incidentId);
       });
   }
 
-  private async _deliverMessengerRecovery(
-    key: string,
-    delivery: MessengerRecoveryDelivery
-  ): Promise<void> {
-    if (!delivery.outcome) return;
+  /** The latest delivery of each recovered reply key, in call order. */
+  private _messengerRecoveryDeliveries = new Map<string, Promise<void>>();
+
+  /**
+   * Deliver a recovered reply after any delivery of the same key already
+   * running in this isolate: startup replay, live settlement and scheduled
+   * retries interleave across awaits, and each must see the cursor the
+   * previous one advanced.
+   */
+  private async _deliverMessengerRecovery(key: string): Promise<void> {
+    const previous = this._messengerRecoveryDeliveries.get(key);
+    const run = (previous ?? Promise.resolve()).then(() =>
+      this._postMessengerRecovery(key)
+    );
+    const tail = run.catch(() => {});
+    this._messengerRecoveryDeliveries.set(key, tail);
+    try {
+      await run;
+    } finally {
+      if (this._messengerRecoveryDeliveries.get(key) === tail) {
+        this._messengerRecoveryDeliveries.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Post a settled recovered reply, one post at a time, then drop its record.
+   * Each post goes out at most once: the cursor advances before it, and a
+   * rejected post may still have landed (a timeout after the platform
+   * accepted it), so the retry resumes with the next post.
+   */
+  private async _postMessengerRecovery(key: string): Promise<void> {
+    let delivery = await this.ctx.storage.get<MessengerRecoveryDelivery>(key);
+    if (!delivery?.outcome) return;
     const input = {
       messengerId: delivery.messengerId,
       threadId: delivery.threadId,
@@ -18457,24 +18661,83 @@ export class Think<
       partialPosted: delivery.partialText.trim().length > 0
     };
     const parent = this.parentPath.at(-1);
-    if (parent) {
-      // `parentAgent` resolves the parent by class name only.
-      const host = await this.parentAgent({
-        name: parent.className
-      } as unknown as SubAgentClass<Think>);
-      await host._cf_deliverRecoveredMessengerReply(input);
-    } else {
-      await this._cf_deliverRecoveredMessengerReply(input);
+    // `parentAgent` resolves the parent by class name only.
+    const host = parent
+      ? await this.parentAgent({
+          name: parent.className
+        } as unknown as SubAgentClass<Think>)
+      : this;
+    let chunks: number | undefined;
+    for (;;) {
+      delivery = await this.ctx.storage.get<MessengerRecoveryDelivery>(key);
+      if (!delivery?.outcome) return;
+      const posted = delivery.posted ?? 0;
+      if (chunks !== undefined && posted >= chunks) break;
+      await this.ctx.storage.put(key, { ...delivery, posted: posted + 1 });
+      ({ chunks } = await host._cf_deliverRecoveredMessengerReply({
+        ...input,
+        chunk: posted
+      }));
     }
     await this.ctx.storage.delete(key);
+  }
+
+  /** Retry a recovered messenger reply whose live delivery failed. */
+  private async _retryMessengerRecoveryDeliveryLater(
+    key: string,
+    attempts: number,
+    error: unknown
+  ): Promise<void> {
+    if (attempts >= MESSENGER_RECOVERY_MAX_RETRIES) {
+      console.error(
+        `[Think] recovered messenger reply delivery failed ${attempts + 1} times; the next wake replays it`,
+        error
+      );
+      return;
+    }
+    const delaySeconds = 2 ** (attempts + 1);
+    console.error(
+      `[Think] recovered messenger reply delivery failed; retrying in ${delaySeconds}s`,
+      error
+    );
+    try {
+      await this.schedule(delaySeconds, MESSENGER_RECOVERY_RETRY_CALLBACK, {
+        key,
+        attempts: attempts + 1
+      });
+    } catch (scheduleError) {
+      console.error(
+        "[Think] failed to schedule a recovered messenger reply retry",
+        scheduleError
+      );
+    }
+  }
+
+  /**
+   * Retry delivering a recovered messenger reply (see
+   * {@link _retryMessengerRecoveryDeliveryLater}).
+   * @internal Schedule callback.
+   */
+  async _cfRetryMessengerRecoveryDelivery(payload: {
+    key: string;
+    attempts: number;
+  }): Promise<void> {
+    try {
+      await this._deliverMessengerRecovery(payload.key);
+    } catch (error) {
+      await this._retryMessengerRecoveryDeliveryLater(
+        payload.key,
+        payload.attempts,
+        error
+      );
+    }
   }
 
   private async _replayMessengerRecoveryDeliveries(): Promise<void> {
     const pending = await this.ctx.storage.list<MessengerRecoveryDelivery>({
       prefix: MESSENGER_RECOVERY_PREFIX
     });
-    for (const [key, pendingDelivery] of pending) {
-      let delivery = pendingDelivery;
+    for (const [key, delivery] of pending) {
       if (!delivery.outcome) {
         // Settled while an earlier isolate was delivering: the incident is
         // gone or gave up, and no event will settle this record again.
@@ -18489,16 +18752,15 @@ export class Think<
         ) {
           continue;
         }
-        delivery = settleMessengerRecoveryDelivery(delivery, "interrupted");
-        await this.ctx.storage.put(key, delivery);
+        await this.ctx.storage.put(
+          key,
+          settleMessengerRecoveryDelivery(delivery, "interrupted")
+        );
       }
       try {
-        await this._deliverMessengerRecovery(key, delivery);
+        await this._deliverMessengerRecovery(key);
       } catch (error) {
-        console.error(
-          "[Think] recovered messenger reply delivery failed",
-          error
-        );
+        await this._retryMessengerRecoveryDeliveryLater(key, 0, error);
       }
     }
   }
