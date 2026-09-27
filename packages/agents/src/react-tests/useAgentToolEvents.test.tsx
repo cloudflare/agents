@@ -19,6 +19,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render as _render, cleanup } from "vitest-browser-react";
 import { useAgentToolEvents } from "../react";
+import { AgentToolProgressEmitter } from "../chat/agent-tools";
 import type {
   AgentToolEvent,
   AgentToolEventMessage,
@@ -300,6 +301,68 @@ describe("useAgentToolEvents", () => {
       expect(runsById.evicted?.status).toBe("interrupted");
       expect(runsById.evicted?.reason).toBe("no-progress");
       expect(runsById.evicted?.childStillRunning).toBe(true);
+    });
+  });
+
+  it("refreshes progress on a repeated identical progress emission", async () => {
+    const { agent, dispatch } = createToolAgent();
+    const { container } = await render(<Harness agent={agent} />);
+    const bodies: string[] = [];
+    const emitter = new AgentToolProgressEmitter({
+      resolveActiveRun: () => ({ runId: "r1", requestId: "req-1" }),
+      broadcast: (_requestId, body) => bodies.push(body),
+      persistSnapshot: () => {},
+      persistMilestone: () => 0
+    });
+
+    dispatch(
+      evt(0, { kind: "started", runId: "r1", agentType: "A", order: 0 })
+    );
+    // A done frame bypasses coalescing, so both emissions land.
+    emitter.report({ fraction: 1, message: "working" });
+    dispatch(evt(1, { kind: "chunk", runId: "r1", body: bodies[0] }));
+    let firstAt = 0;
+    await vi.waitFor(() => {
+      firstAt = readState(container).runsById.r1?.progress?.at ?? 0;
+      expect(firstAt).toBeGreaterThan(0);
+    });
+
+    await new Promise((r) => setTimeout(r, 20));
+    emitter.report({ fraction: 1, message: "working" });
+    dispatch(evt(1, { kind: "chunk", runId: "r1", body: bodies[1] }));
+
+    await vi.waitFor(() => {
+      expect(
+        readState(container).runsById.r1?.progress?.at ?? 0
+      ).toBeGreaterThan(firstAt);
+    });
+  });
+
+  it("applies unstored chunks sharing a sequence with each other and a stored chunk", async () => {
+    const { agent, dispatch } = createToolAgent();
+    const { container } = await render(<Harness agent={agent} />);
+
+    dispatch(
+      evt(0, { kind: "started", runId: "r1", agentType: "A", order: 0 })
+    );
+    dispatch(evt(1, { kind: "chunk", runId: "r1", body: TEXT_START }));
+    for (const unstoredId of ["u1", "u2"]) {
+      dispatch(
+        evt(2, {
+          kind: "chunk",
+          runId: "r1",
+          body: delta("X"),
+          unstoredId
+        })
+      );
+    }
+    dispatch(evt(2, { kind: "chunk", runId: "r1", body: delta("B") }));
+    dispatch(
+      evt(2, { kind: "chunk", runId: "r1", body: delta("B") }, { replay: true })
+    );
+
+    await vi.waitFor(() => {
+      expect(runText(readState(container).runsById.r1)).toBe("XXB");
     });
   });
 

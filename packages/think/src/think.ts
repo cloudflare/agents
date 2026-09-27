@@ -194,6 +194,7 @@ import {
   awaitWithDeadline,
   drainInteractionApplies,
   interceptAgentToolBroadcast,
+  isPositionlessAgentToolChunk,
   AgentToolProgressEmitter,
   SubmitConcurrencyController,
   createToolsFromClientSchemas,
@@ -4840,7 +4841,7 @@ export class Think<
    *
    * Safe to call on EVERY recovery continuation:
    *   - Facets that never ran as an agent-tool child have no
-   *     `cf_agent_tool_child_runs` table → the guarded SELECT throws → no-op.
+   *     `cf_agent_tool_child_runs` table → no-op (the table is not created).
    *   - A facet whose run already settled has no `starting`/`running` row → no-op.
    *   - A child DO is addressed by its `runId` (`subAgent(cls, runId)`), so it
    *     owns AT MOST ONE child-run row for its whole lifetime and is never reused
@@ -4853,21 +4854,23 @@ export class Think<
    * invariant note there).
    */
   private _rebindAgentToolChildRunRequestId(requestId: string): void {
-    let runId: string | undefined;
-    let terminalOnly = false;
-    try {
-      const rows = this.sql<{ run_id: string; event_delivery: string | null }>`
-        SELECT run_id, event_delivery FROM cf_agent_tool_child_runs
-        WHERE status IN ('starting', 'running')
-        ORDER BY started_at DESC
-        LIMIT 1
-      `;
-      runId = rows[0]?.run_id;
-      terminalOnly = rows[0]?.event_delivery === "terminal";
-    } catch {
-      // No child-run table on facets that never ran as an agent tool.
-      return;
-    }
+    // No child-run table on facets that never ran as an agent tool; don't
+    // create one. An existing table may predate newer columns (a fresh isolate
+    // after upgrade recovers before any other child-run access), so migrate it.
+    const tables = this.sql<{ name: string }>`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'cf_agent_tool_child_runs'
+    `;
+    if (tables.length === 0) return;
+    this._ensureAgentToolChildRunTable();
+    const rows = this.sql<{ run_id: string; event_delivery: string | null }>`
+      SELECT run_id, event_delivery FROM cf_agent_tool_child_runs
+      WHERE status IN ('starting', 'running')
+      ORDER BY started_at DESC
+      LIMIT 1
+    `;
+    const runId = rows[0]?.run_id;
+    const terminalOnly = rows[0]?.event_delivery === "terminal";
     if (!runId) return;
     if (terminalOnly) this._agentToolTerminalOnlyRuns.add(runId);
     this._agentToolRunsByRequestId.set(requestId, runId);
@@ -10008,7 +10011,8 @@ export class Think<
   }
 
   async inspectAgentToolRun(
-    runId: string
+    runId: string,
+    options?: { reconcile?: boolean }
   ): Promise<AgentToolRunInspection | null> {
     let row = this._readAgentToolChildRun(runId);
     if (!row) return null;
@@ -10016,7 +10020,7 @@ export class Think<
     // original in-isolate run is gone (e.g. the parent was evicted while this
     // child run was in flight, #1630) — lazily reconcile it from the child's
     // own durable recovery before reporting.
-    if (this._isStaleAgentToolChildRun(row)) {
+    if (options?.reconcile !== false && this._isStaleAgentToolChildRun(row)) {
       await this._reconcileStaleAgentToolChildRun(runId);
       row = this._readAgentToolChildRun(runId) ?? row;
     }
@@ -10091,6 +10095,11 @@ export class Think<
     this._agentToolLiveSequences.delete(runId);
     this._agentToolLastErrors.delete(runId);
     this._agentToolPreTurnAssistantIds.delete(runId);
+    // A live in-isolate run keeps suppressing until `startAgentToolRun`'s
+    // finally; a recovered turn never reaches that finally.
+    if (!this._agentToolAbortControllers.has(runId)) {
+      this._agentToolTerminalOnlyRuns.delete(runId);
+    }
   }
 
   /**
@@ -10143,6 +10152,27 @@ export class Think<
       .map((chunk) => ({ sequence: chunk.chunk_index, body: chunk.body }));
   }
 
+  /**
+   * After this DO restarts, `_agentToolLiveSequences` is cold while the stored
+   * backlog sits at N, and a chat-recovery resume re-attaches via
+   * `tailAgentToolRun` without re-running `startAgentToolRun` (which seeds the
+   * counter). Unseeded, the broadcast snoop numbers the recovered turn's chunks
+   * from 0 and the tail's high-water dedupe drops them. Seeds only a
+   * non-terminal run, so a terminal one doesn't re-heat the broadcast
+   * idle-guard; a warm counter is authoritative. Returns whether it seeded.
+   */
+  private _seedAgentToolLiveSequence(runId: string): boolean {
+    if (this._agentToolLiveSequences.has(runId)) return false;
+    const row = this._readAgentToolChildRun(runId);
+    if (!row?.stream_id || row.completed_at !== null) return false;
+    this._resumableStream.flushBuffer();
+    this._agentToolLiveSequences.set(
+      runId,
+      this._resumableStream.getStreamChunks(row.stream_id).length
+    );
+    return true;
+  }
+
   async tailAgentToolRun(
     runId: string,
     options?: { afterSequence?: number; signal?: AbortSignal }
@@ -10191,11 +10221,16 @@ export class Think<
         // so a single high-water mark dedupes the stored-replay → live-
         // forwarding handoff: a chunk that lands in both the drained backlog AND
         // the live buffer (stored + broadcast during the drain) is emitted
-        // exactly once, in order.
+        // exactly once, in order. Progress/milestone frames and unstored
+        // chunks have no stored position (they reuse the next one), so they
+        // bypass the high-water mark instead of moving it.
         let lastEmitted = options?.afterSequence ?? -1;
         const emit = (chunk: AgentToolStoredChunk) => {
-          if (closed || chunk.sequence <= lastEmitted) return;
-          lastEmitted = chunk.sequence;
+          if (closed) return;
+          if (!isPositionlessAgentToolChunk(chunk)) {
+            if (chunk.sequence <= lastEmitted) return;
+            lastEmitted = chunk.sequence;
+          }
           try {
             controller.enqueue(
               agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
@@ -10234,6 +10269,10 @@ export class Think<
         // agent returning a remote `toUIMessageStreamResponse()`) hits this
         // window constantly, leaving tool parts stuck at `input-available`
         // (#1589).
+        //
+        // Seed a cold live counter first, so a chunk broadcast while this tail
+        // drains continues the stored numbering.
+        const seeded = self._seedAgentToolLiveSequence(runId);
         const forwarders = self._agentToolForwarders.get(runId) ?? new Set();
         forwarders.add(forward);
         self._agentToolForwarders.set(runId, forwarders);
@@ -10257,20 +10296,11 @@ export class Think<
 
           const row = self._readAgentToolChildRun(runId);
           if (!row || row.completed_at !== null) {
+            // Don't leave a seeded counter re-heating the broadcast idle-guard
+            // for a terminal run.
+            if (seeded) self._agentToolLiveSequences.delete(runId);
             close();
             return;
-          }
-
-          // Run is still live: realign the live sequence to continue right after
-          // the highest emitted chunk (which now includes any captured during the
-          // drain). Realigning to `lastEmitted + 1` rather than the backlog's last
-          // sequence keeps a post-restart re-attach — where the in-memory counter
-          // is cold — from colliding with already-emitted chunks. Gating on the
-          // terminal check above also avoids repopulating `_agentToolLiveSequences`
-          // for an already-terminal run, which would re-heat the broadcast
-          // idle-guard for the DO's lifetime.
-          if (lastEmitted > (options?.afterSequence ?? -1)) {
-            self._agentToolLiveSequences.set(runId, lastEmitted + 1);
           }
         } catch (error) {
           // A drain/read failure must surface to the consumer; detach first so
@@ -12500,9 +12530,11 @@ export class Think<
   }
 
   private _hasRecoverableChatTurn(requestId: string): boolean {
+    // A settled fiber whose row delete failed keeps `completed_at` (#2363).
     const fiberRows = this.sql<{ id: string }>`
       SELECT id FROM cf_agents_runs
       WHERE name = ${(this.constructor as typeof Think).CHAT_FIBER_NAME + ":" + requestId}
+        AND completed_at IS NULL
       LIMIT 1
     `;
     if (fiberRows.length > 0) return true;
@@ -12523,6 +12555,7 @@ export class Think<
     const fiberRows = this.sql<{ created_at: number }>`
       SELECT created_at FROM cf_agents_runs
       WHERE name = ${(this.constructor as typeof Think).CHAT_FIBER_NAME + ":" + row.request_id}
+        AND completed_at IS NULL
       LIMIT 1
     `;
     if (fiberRows[0] && fiberRows[0].created_at >= cutoff) return true;

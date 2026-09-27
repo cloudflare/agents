@@ -192,7 +192,8 @@ export {
 } from "./agent-tool-types";
 import {
   AGENT_TOOL_MILESTONE_PART,
-  AGENT_TOOL_PROGRESS_PART
+  AGENT_TOOL_PROGRESS_PART,
+  isAgentToolLifecycleChunk
 } from "./agent-tool-types";
 import type {
   AgentToolChildAdapter,
@@ -751,7 +752,7 @@ type AgentToolRecoveryInspection =
  * every capability uses for its own schema version) and checks it on wake to
  * skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 13;
+const CURRENT_SCHEMA_VERSION = 14;
 const SCHEMA_VERSION_KEY = "cf_agents:schema_version";
 
 // Before the State capability owned `cf_agents_state`, Agent kept its schema
@@ -793,24 +794,6 @@ const CONTROL_CHAR_RE = new RegExp(
   "[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]",
   "g"
 );
-
-/** Progress and milestone frames still reach `eventDelivery: "terminal"` clients. */
-function isAgentToolLifecycleChunk(body: string): boolean {
-  if (
-    !body.includes(AGENT_TOOL_PROGRESS_PART) &&
-    !body.includes(AGENT_TOOL_MILESTONE_PART)
-  ) {
-    return false;
-  }
-  try {
-    const type = (JSON.parse(body) as { type?: unknown } | null)?.type;
-    return (
-      type === AGENT_TOOL_PROGRESS_PART || type === AGENT_TOOL_MILESTONE_PART
-    );
-  } catch {
-    return false;
-  }
-}
 
 function sanitizeErrorString(error: string | null): string | null {
   if (error === null) return null;
@@ -1631,7 +1614,9 @@ export class Agent<
           name TEXT NOT NULL,
           snapshot TEXT,
           created_at INTEGER NOT NULL,
-          completed_at INTEGER
+          completed_at INTEGER,
+          outcome TEXT,
+          error_message TEXT
         )
       `;
 
@@ -1783,6 +1768,14 @@ export class Agent<
       // deletes it without calling `onFiberRecovered()` (#2305).
       addColumnIfNotExists(
         "ALTER TABLE cf_agents_runs ADD COLUMN completed_at INTEGER"
+      );
+      // How that settled body ended, so recovery settles a managed ledger
+      // whose own settle write failed with the body's real outcome.
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_runs ADD COLUMN outcome TEXT"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_runs ADD COLUMN error_message TEXT"
       );
       // `runAgentTool({ eventDelivery: "terminal" })`: NULL means "full".
       addColumnIfNotExists(
@@ -4282,7 +4275,9 @@ export class Agent<
 
     let root: RootFacetRpcSurface | undefined;
     let registeredFacetRun = false;
-    let bodySettled = false;
+    let bodyOutcome:
+      | { status: "completed" | "error" | "aborted"; error: string | null }
+      | undefined;
     let dispose: () => void = () => {};
     try {
       if ("initialSnapshot" in (options ?? {})) {
@@ -4306,9 +4301,14 @@ export class Agent<
           result = await _fiberALS.run({ id, signal, stash }, () =>
             fn({ id, signal, stash, snapshot: null })
           );
-        } finally {
-          bodySettled = true;
+        } catch (error) {
+          bodyOutcome = {
+            status: signal.aborted ? "aborted" : "error",
+            error: this._fiberErrorMessage(error)
+          };
+          throw error;
         }
+        bodyOutcome = { status: "completed", error: null };
         options?.beforeRunCleanup?.({ ok: true });
         this._emit("fiber:run:completed", {
           fiberId: id,
@@ -4340,10 +4340,13 @@ export class Agent<
             "cloudflare.agents.fiber.name": name
           },
           () => {
-            if (bodySettled) {
+            if (bodyOutcome) {
               try {
                 this.sql`
-                  UPDATE cf_agents_runs SET completed_at = ${Date.now()}
+                  UPDATE cf_agents_runs
+                  SET completed_at = ${Date.now()},
+                      outcome = ${bodyOutcome.status},
+                      error_message = ${bodyOutcome.error}
                   WHERE id = ${id}
                 `;
               } catch {
@@ -4458,7 +4461,13 @@ export class Agent<
         snapshot: string | null;
         created_at: number;
         completed_at: number | null;
-      }>`SELECT id, name, snapshot, created_at, completed_at FROM cf_agents_runs`;
+        outcome: "completed" | "error" | "aborted" | null;
+        error_message: string | null;
+      }>`
+        SELECT id, name, snapshot, created_at, completed_at, outcome,
+               error_message
+        FROM cf_agents_runs
+      `;
 
       for (const row of rows) {
         if (scanDeadlineMs > 0 && Date.now() - scanStartedAt > scanDeadlineMs) {
@@ -4473,10 +4482,34 @@ export class Agent<
         if (this._runFiberActiveFibers.has(row.id)) continue;
 
         const managedRow = this._readFiber(row.id);
-        if (row.completed_at !== null && !managedRow) {
+        // A managed row needs the recorded outcome; without it the ledger
+        // can't be settled truthfully, so it falls through to recovery.
+        if (
+          row.completed_at !== null &&
+          (!managedRow || row.outcome !== null)
+        ) {
           // The body settled and only its cleanup failed: nothing to recover.
+          // A managed ledger still non-terminal here means its settle write
+          // failed too, so record the body's own outcome.
+          if (managedRow) {
+            this.sql`
+              UPDATE cf_agents_fibers
+              SET status = ${row.outcome},
+                  error_message = ${row.error_message},
+                  completed_at = ${row.completed_at}
+              WHERE fiber_id = ${row.id}
+                AND status IN ('pending', 'running')
+            `;
+          }
           this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
           madeProgress = true;
+          if (managedRow) this._notifyManagedFiberTerminal(row.id);
+          continue;
+        }
+        if (managedRow && this._isTerminalFiberStatus(managedRow.status)) {
+          this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+          madeProgress = true;
+          this._notifyManagedFiberTerminal(row.id);
           continue;
         }
 
@@ -4501,13 +4534,6 @@ export class Agent<
           elapsedMs: Date.now() - row.created_at
         });
         if (managedRow) {
-          if (this._isTerminalFiberStatus(managedRow.status)) {
-            this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
-            madeProgress = true;
-            this._notifyManagedFiberTerminal(row.id);
-            continue;
-          }
-
           const completedAt = Date.now();
           this.sql`
             UPDATE cf_agents_fibers
@@ -6864,8 +6890,9 @@ export class Agent<
     const terminalOnly = this._isTerminalOnlyAgentToolRun(runId);
     let next = sequence;
     for (const chunk of chunks) {
-      // A skipped chunk still takes its sequence, so live and replayed frames
-      // keep the same numbers and dedupe against each other.
+      // Stored chunks are numbered by store position (`started` is 0, stored
+      // chunk i is i + 1) on both the live and replay paths, so they dedupe
+      // against each other. A skipped chunk still takes its sequence.
       const chunkSequence = next++;
       if (terminalOnly && !isAgentToolLifecycleChunk(chunk.body)) continue;
       this._broadcastAgentToolEvent(
@@ -6893,17 +6920,38 @@ export class Agent<
     >,
     sequence: number,
     replay?: true,
-    connection?: Connection
+    connection?: Connection,
+    timeoutMs?: number
   ): Promise<number> {
-    const child = await this._cf_resolveSubAgent(row.agent_type, row.run_id);
+    const deadline = this._agentToolRecoveryDeadline(timeoutMs);
+    const resolving = this._cf_resolveSubAgent(row.agent_type, row.run_id);
+    const child =
+      deadline === undefined
+        ? await resolving
+        : await this._settleWithinRecoveryTimeout(resolving, deadline());
+    if (child === undefined) return sequence;
     const adapter = this._asAgentToolChildAdapter(child);
     return this._broadcastAgentToolStoredChunksFromAdapter(
       adapter,
       row,
       sequence,
       replay,
-      connection
+      connection,
+      deadline?.()
     );
+  }
+
+  /**
+   * One budget shared by every step of a bounded recovery read, so a run's
+   * total time stays within `timeoutMs`. Returns the remaining milliseconds,
+   * never below 1 because a non-positive timeout means "unbounded".
+   */
+  private _agentToolRecoveryDeadline(
+    timeoutMs?: number
+  ): (() => number) | undefined {
+    if (timeoutMs === undefined || timeoutMs <= 0) return undefined;
+    const deadline = Date.now() + timeoutMs;
+    return () => Math.max(1, deadline - Date.now());
   }
 
   private async _broadcastAgentToolStoredChunksFromAdapter(
@@ -6914,10 +6962,11 @@ export class Agent<
     connection?: Connection,
     timeoutMs?: number
   ): Promise<number> {
+    const deadline = this._agentToolRecoveryDeadline(timeoutMs);
     const chunks = await this._getAgentToolChunksForRecovery(
       adapter,
       row.run_id,
-      timeoutMs
+      deadline?.()
     );
     const next = chunks
       ? this._broadcastAgentToolChunks(
@@ -6935,7 +6984,7 @@ export class Agent<
       next,
       replay,
       connection,
-      timeoutMs
+      deadline?.()
     );
   }
 
@@ -6943,6 +6992,8 @@ export class Agent<
    * Milestones are persisted on the child run rather than in its chunk log, so
    * replay re-emits them from the child's inspection. The client dedupes them
    * on the milestone's own sequence, so a milestone already seen live is a no-op.
+   * They carry the next stored-chunk sequence without consuming it, matching
+   * the live path.
    */
   private async _broadcastAgentToolMilestones(
     adapter: AgentToolChildAdapter,
@@ -6952,16 +7003,16 @@ export class Agent<
     connection?: Connection,
     timeoutMs?: number
   ): Promise<number> {
+    // Read-only: replaying milestones must never seal a stale child run.
     const inspection = await this._settleWithinRecoveryTimeout(
-      adapter.inspectAgentToolRun(row.run_id),
+      adapter.inspectAgentToolRun(row.run_id, { reconcile: false }),
       timeoutMs
     );
     const milestones: AgentToolMilestone[] = inspection?.milestones ?? [];
-    let next = sequence;
     for (const milestone of milestones) {
       this._broadcastAgentToolEvent(
         row.parent_tool_call_id ?? undefined,
-        next++,
+        sequence,
         {
           kind: "chunk",
           runId: row.run_id,
@@ -6979,7 +7030,7 @@ export class Agent<
         connection
       );
     }
-    return next;
+    return sequence;
   }
 
   private async _forwardAgentToolStream(
@@ -6989,9 +7040,14 @@ export class Agent<
     sequence: number,
     signal?: AbortSignal,
     idleTimeoutMs?: number
-  ): Promise<{ next: number; ended: "done" | "idle" | "aborted" }> {
+  ): Promise<{
+    next: number;
+    ended: "done" | "idle" | "aborted";
+    forwarded: boolean;
+  }> {
     let next = sequence;
-    if (signal?.aborted) return { next, ended: "aborted" };
+    let forwarded = false;
+    if (signal?.aborted) return { next, ended: "aborted", forwarded };
     // How the forward loop ended, so the re-attach caller can re-arm ONLY on a
     // clean stream-close (`done`) and never abandon a fresh reader per idle
     // cycle: `idle` = a full no-progress window elapsed (stalled), `aborted` =
@@ -7042,12 +7098,22 @@ export class Agent<
     const terminalOnly = this._isTerminalOnlyAgentToolRun(runId);
     try {
       const forwardChunk = (chunk: AgentToolStoredChunk) => {
-        const chunkSequence = next++;
-        if (!terminalOnly || isAgentToolLifecycleChunk(chunk.body)) {
+        // Progress/milestone frames and chunks too large to store are
+        // broadcast-only on the child and never replayed from its store, so
+        // they must not consume a stored-chunk sequence or live and replayed
+        // numbering drift apart (#2364).
+        const lifecycle = isAgentToolLifecycleChunk(chunk.body);
+        const unstoredId =
+          typeof chunk.unstoredId === "string" ? chunk.unstoredId : undefined;
+        const chunkSequence =
+          lifecycle || unstoredId !== undefined ? next : next++;
+        forwarded = true;
+        if (!terminalOnly || lifecycle) {
           this._broadcastAgentToolEvent(parentToolCallId, chunkSequence, {
             kind: "chunk",
             runId,
-            body: chunk.body
+            body: chunk.body,
+            ...(unstoredId !== undefined ? { unstoredId } : {})
           });
         }
         // A reserved `data-agent-progress` frame fires the parent `onProgress`
@@ -7156,7 +7222,7 @@ export class Agent<
       // The re-attach loop re-arms only on `ended === "done"`, so at most ONE
       // such read is ever left pending per re-attach (no per-cycle leak).
     }
-    return { next, ended };
+    return { next, ended, forwarded };
   }
 
   /**
@@ -7604,18 +7670,23 @@ export class Agent<
         // reducer appends by arrival order). Forwarding only chunks produced
         // after this point keeps the live stream correct without dupes.
         let afterSequence = -1;
+        // Tailed chunks continue the stored-position numbering replay uses, so
+        // clients that already saw the stored chunks don't dedupe new ones away.
+        let storedCount = 0;
         try {
           const existing = await adapter.getAgentToolChunks(row.run_id);
           const last = existing[existing.length - 1];
           if (last) afterSequence = last.sequence;
+          storedCount = existing.length;
         } catch {
           // Fall back to a full tail if the chunk probe fails.
         }
+        nextSequence = storedCount + 1;
 
-        const beforeSequence = nextSequence;
         // Defaults to a non-`done` end so a tail that throws below does NOT
         // re-arm (we only re-arm on a verified clean stream-close).
         let streamEnded: "done" | "idle" | "aborted" = "idle";
+        let forwardedAny = false;
         try {
           // NOTE: the ceiling signal is NOT forwarded to `tailAgentToolRun` — an
           // AbortSignal can't be serialized across the child-facet DO RPC. We
@@ -7639,6 +7710,7 @@ export class Agent<
           );
           nextSequence = forwarded.next;
           streamEnded = forwarded.ended;
+          forwardedAny = forwarded.forwarded;
         } catch {
           // Tail failures fall through to an inspect; the child remains
           // authoritative for terminal status and durable chunk replay.
@@ -7660,7 +7732,7 @@ export class Agent<
         // abandon a fresh pending reader every cycle. No progress likewise
         // seals.
         if (streamEnded !== "done") break;
-        if (nextSequence <= beforeSequence) break;
+        if (!forwardedAny) break;
       }
     } finally {
       if (ceilingTimer !== undefined) clearTimeout(ceilingTimer);
@@ -7712,11 +7784,14 @@ export class Agent<
       );
 
       try {
+        // Bounded end to end (child resolution included) so one unresponsive
+        // child can't stall onConnect or every later run's replay.
         sequence = await this._broadcastAgentToolStoredChunks(
           row,
           sequence,
           true,
-          connection
+          connection,
+          DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS
         );
       } catch {
         // Keep replay best-effort per run.
