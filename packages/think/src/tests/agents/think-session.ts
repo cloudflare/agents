@@ -913,6 +913,7 @@ export class ThinkTestAgent extends Think {
   private _beforeTurnMessagesJson: string[] = [];
   private _capturedTurnChannels: string[] = [];
   private _capturedTurnMetadata: (Record<string, unknown> | undefined)[] = [];
+  private _beforeTurnThrowChannel: string | null = null;
 
   override configureChannels() {
     return {
@@ -990,6 +991,12 @@ export class ThinkTestAgent extends Think {
     });
     this._capturedTurnChannels.push(this.activeChannel?.channelId ?? "");
     this._capturedTurnMetadata.push(this.activeTurnMetadata);
+    if (
+      this._beforeTurnThrowChannel !== null &&
+      this.activeChannel?.channelId === this._beforeTurnThrowChannel
+    ) {
+      throw new Error(`beforeTurn failed on ${this._beforeTurnThrowChannel}`);
+    }
     if (this._stashInBeforeTurnForTest !== undefined) {
       this.stash(this._stashInBeforeTurnForTest);
     }
@@ -1230,6 +1237,13 @@ export class ThinkTestAgent extends Think {
 
   async resetCapturedTurnChannelsForTest(): Promise<void> {
     this._capturedTurnChannels = [];
+  }
+
+  /** Make `beforeTurn` throw for turns on `channel` (null disables). */
+  async setBeforeTurnThrowChannelForTest(
+    channel: string | null
+  ): Promise<void> {
+    this._beforeTurnThrowChannel = channel;
   }
 
   async setTurnConfigOverride(config: TurnConfig | null): Promise<void> {
@@ -5225,9 +5239,30 @@ export class ThinkToolsTestAgent extends Think {
       const [pending] = this._listActionPendingRowsForTest();
       if (pending) void this.approveExecution(pending.execution_id);
     }
+    if (this._rejectParkedInNextStepForTest && ctx.stepNumber > 0) {
+      const options = this._rejectParkedInNextStepForTest;
+      this._rejectParkedInNextStepForTest = null;
+      const [pending] = this._listActionPendingRowsForTest();
+      if (pending) {
+        void this.rejectExecution(
+          pending.execution_id,
+          "not now",
+          options
+        ).catch(() => {});
+      }
+    }
   }
 
   private _approveParkedInNextStepForTest = false;
+  private _rejectParkedInNextStepForTest: { autoContinue?: boolean } | null =
+    null;
+
+  /** Reject the parked action from `beforeStep` of the step after it parks. */
+  async rejectParkedInNextStepForTest(options: {
+    autoContinue?: boolean;
+  }): Promise<void> {
+    this._rejectParkedInNextStepForTest = options;
+  }
 
   /**
    * Approve the parked action from `beforeStep` of the step after it parks,
@@ -6465,7 +6500,10 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _capturedTurnContexts: Array<{
     continuation?: boolean;
     body?: RpcJsonObject;
+    channel?: string;
   }> = [];
+  private _waitInSubmissionStatusHook = false;
+  private _submissionStatusHookWaits: string[] = [];
   private _delayedChunks: { chunks: string[]; delayMs: number } | null = null;
   private _throwBeforeTurnError: string | null = null;
   private _submissionStatusDelayMs = 0;
@@ -6478,6 +6516,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     | "submit"
     | "addMessages"
     | "detachedNotify"
+    | "submitThenWait"
     | null = null;
   private _nestedAdmissionAttempted = false;
   private _nestedAdmissionSucceeded = false;
@@ -6629,15 +6668,41 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
     }
     this._submissionLog.push(result);
+    if (
+      this._waitInSubmissionStatusHook &&
+      ["completed", "aborted", "skipped", "error"].includes(result.status)
+    ) {
+      try {
+        const waited = await this.waitForSubmission(result.submissionId, {
+          timeoutMs: 100
+        });
+        this._submissionStatusHookWaits.push(`resolved:${waited?.status}`);
+      } catch (error) {
+        this._submissionStatusHookWaits.push(
+          `error:${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+  }
+
+  /** Call `waitForSubmission` from `onSubmissionStatus` on terminal statuses. */
+  async waitInSubmissionStatusHookForTest(): Promise<void> {
+    this._waitInSubmissionStatusHook = true;
+  }
+
+  async getSubmissionStatusHookWaitsForTest(): Promise<string[]> {
+    return this._submissionStatusHookWaits;
   }
 
   override async beforeTurn(ctx: TurnContext): Promise<void> {
     if (this._throwBeforeTurnError) {
       throw new Error(this._throwBeforeTurnError);
     }
+    const channel = this.activeTurn?.channel;
     this._capturedTurnContexts.push({
       continuation: ctx.continuation,
-      body: ctx.body as RpcJsonObject | undefined
+      body: ctx.body as RpcJsonObject | undefined,
+      ...(channel !== undefined && { channel })
     });
     if (this._nestedAdmissionMode && !this._nestedAdmissionAttempted) {
       this._nestedAdmissionAttempted = true;
@@ -6685,6 +6750,13 @@ export class ThinkProgrammaticTestAgent extends Think {
           notifySource: "nested-detached-source"
         });
         return;
+      case "submitThenWait": {
+        const submitted = await this.runTurn({ mode: "submit", input: msg });
+        await this.waitForSubmission(submitted.submissionId, {
+          timeoutMs: 200
+        });
+        return;
+      }
     }
   }
 
@@ -7196,6 +7268,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     submissionId?: string;
     metadata?: Record<string, unknown>;
     messageTexts?: string[];
+    channel?: string;
   }): Promise<{
     submission: ThinkSubmissionInspection | null;
     messages: UIMessage[];
@@ -7245,7 +7318,8 @@ export class ThinkProgrammaticTestAgent extends Think {
         })),
         {
           submissionId,
-          metadata: options?.metadata
+          metadata: options?.metadata,
+          channel: options?.channel
         }
       );
 
@@ -7991,7 +8065,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   async getCapturedOptions(): Promise<
-    Array<{ continuation?: boolean; body?: RpcJsonObject }>
+    Array<{ continuation?: boolean; body?: RpcJsonObject; channel?: string }>
   > {
     return this._capturedTurnContexts;
   }
