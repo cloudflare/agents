@@ -1572,6 +1572,44 @@ export class ThinkTestAgent extends Think {
     this._resumableStream.flushBuffer();
   }
 
+  /**
+   * Offer a live stream to the connection, which never ACKs, then end the
+   * stream with `close` and broadcast its done frame on the chat channel.
+   */
+  async testEndStreamOfferedWithoutAck(
+    requestId: string,
+    close: "finish" | "complete" | "error"
+  ): Promise<void> {
+    const streamId = this._resumableStream.start(requestId);
+    const [connection] = [...this.getConnections()];
+    if (!connection) {
+      throw new Error(
+        "ThinkTestAgent.testEndStreamOfferedWithoutAck requires a connection"
+      );
+    }
+    // SAFETY: This test-only method drives Think's private resume and
+    // broadcast paths with a real connection returned by this Agent instance.
+    const internals = this as unknown as {
+      _notifyStreamResuming(connection: Connection): void;
+      _broadcastChat(message: Record<string, unknown>): void;
+    };
+    internals._notifyStreamResuming(connection);
+    if (close === "finish") {
+      this._finishResumableStream(streamId);
+      this._resumableStream.finalizePending();
+    } else if (close === "complete") {
+      this._completeResumableStream(streamId);
+    } else {
+      this._errorResumableStream(streamId);
+    }
+    internals._broadcastChat({
+      type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+      id: requestId,
+      done: true,
+      body: ""
+    });
+  }
+
   /** Emit the real resume notification followed by a terminal broadcast. */
   async testSendStreamResumingBeforeTerminal(requestId: string): Promise<void> {
     const streamId = this._resumableStream.start(requestId);
@@ -1886,6 +1924,11 @@ export class ThinkTestAgent extends Think {
     } finally {
       this._errorConfig = null;
     }
+  }
+
+  /** The close outcome recorded on the request's latest chat stream. */
+  async getStreamOutcomeForTest(requestId: string): Promise<string | null> {
+    return this._resumableStream.getOutcome(requestId) ?? null;
   }
 
   /**

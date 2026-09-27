@@ -1671,8 +1671,11 @@ export class ResponseAgent extends AIChatAgent<Env> {
           streamError?: string;
           streamErrorAfterText?: boolean;
           useAbortSignal?: boolean;
+          noResponse?: boolean;
         }
       | undefined;
+
+    if (body?.noResponse) return undefined;
 
     const format = body?.format ?? "plaintext";
     const chunkCount = body?.chunkCount ?? 3;
@@ -1760,6 +1763,23 @@ export class ResponseAgent extends AIChatAgent<Env> {
     this._failNextAssistantPersist = true;
   }
 
+  private _blockNextAssistantPersist = false;
+  private _releaseBlockedPersist: (() => void) | null = null;
+
+  /** Hold the next persist that ends in an assistant message until released. */
+  blockNextAssistantPersist(): void {
+    this._blockNextAssistantPersist = true;
+  }
+
+  isAssistantPersistBlocked(): boolean {
+    return this._releaseBlockedPersist !== null;
+  }
+
+  releaseAssistantPersist(): void {
+    this._releaseBlockedPersist?.();
+    this._releaseBlockedPersist = null;
+  }
+
   override async persistMessages(
     messages: ChatMessage[],
     excludeBroadcastIds: string[] = [],
@@ -1771,6 +1791,15 @@ export class ResponseAgent extends AIChatAgent<Env> {
     ) {
       this._failNextAssistantPersist = false;
       throw new Error("Simulated persistence failure");
+    }
+    if (
+      this._blockNextAssistantPersist &&
+      messages.at(-1)?.role === "assistant"
+    ) {
+      this._blockNextAssistantPersist = false;
+      await new Promise<void>((resolve) => {
+        this._releaseBlockedPersist = resolve;
+      });
     }
     return super.persistMessages(messages, excludeBroadcastIds, options);
   }
@@ -2835,6 +2864,40 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   armStallingTurnsForTest(timeoutMs: number, hangTurns: number): void {
     this.chatStreamStallTimeoutMs = timeoutMs;
     this._hangTurnsRemaining = hangTurns;
+  }
+
+  private _blockNextAssistantPersist = false;
+  private _releaseBlockedPersist: (() => void) | null = null;
+
+  /** Hold the next persist that ends in an assistant message until released. */
+  blockNextAssistantPersistForTest(): void {
+    this._blockNextAssistantPersist = true;
+  }
+
+  isAssistantPersistBlockedForTest(): boolean {
+    return this._releaseBlockedPersist !== null;
+  }
+
+  releaseAssistantPersistForTest(): void {
+    this._releaseBlockedPersist?.();
+    this._releaseBlockedPersist = null;
+  }
+
+  override async persistMessages(
+    messages: ChatMessage[],
+    excludeBroadcastIds: string[] = [],
+    options?: { _deleteStaleRows?: boolean }
+  ) {
+    if (
+      this._blockNextAssistantPersist &&
+      messages.at(-1)?.role === "assistant"
+    ) {
+      this._blockNextAssistantPersist = false;
+      await new Promise<void>((resolve) => {
+        this._releaseBlockedPersist = resolve;
+      });
+    }
+    return super.persistMessages(messages, excludeBroadcastIds, options);
   }
 
   /**

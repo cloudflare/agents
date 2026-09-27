@@ -142,20 +142,21 @@ export function transition(
 
       let messagesUpdate: ((prev: UIMessage[]) => UIMessage[]) | undefined;
 
+      const mergeUnlessDiverged = (prev: UIMessage[]) =>
+        observedDivergesFrom(accumulator, prev)
+          ? prev
+          : accumulator.mergeInto(prev);
+
       if (event.done) {
-        messagesUpdate = (prev) =>
-          observedDivergesFrom(accumulator, prev)
-            ? prev
-            : accumulator.mergeInto(prev);
         return {
           state: { status: "idle" },
-          messagesUpdate,
+          messagesUpdate: mergeUnlessDiverged,
           isStreaming: false
         };
       }
 
       if (event.chunkData && !event.replay) {
-        messagesUpdate = (prev) => accumulator.mergeInto(prev);
+        messagesUpdate = mergeUnlessDiverged;
       } else if (event.replayComplete) {
         messagesUpdate = (prev) => accumulator.mergeInto(prev);
       }

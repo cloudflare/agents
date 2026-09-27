@@ -262,6 +262,7 @@ import type {
   MessagePart,
   SubmitConcurrencyDecision,
   ChatFiberSnapshot,
+  ChatTurnOutcome,
   OrphanPersistStore
 } from "agents/chat";
 import { truncateOlderMessages, truncateOlderToolResults } from "agents/chat";
@@ -13958,7 +13959,10 @@ export class Think<
       if (streamError) {
         this._errorResumableStream(streamId, requestId);
       } else {
-        this._finishResumableStream(streamId);
+        this._finishResumableStream(
+          streamId,
+          aborted ? "aborted" : "completed"
+        );
       }
       streamFinalized = true;
 
@@ -14033,7 +14037,7 @@ export class Think<
         });
         if (outcome === "scheduled") {
           if (!streamFinalized) {
-            this._completeResumableStream(streamId);
+            this._completeResumableStream(streamId, "recovering");
             streamFinalized = true;
           }
           if (!doneSent) {
@@ -14475,7 +14479,10 @@ export class Think<
       if (streamError) {
         this._errorResumableStream(streamId, requestId);
       } else {
-        this._finishResumableStream(streamId);
+        this._finishResumableStream(
+          streamId,
+          streamAborted ? "aborted" : "completed"
+        );
       }
       this._pendingResumeConnections.clear();
       terminalFrame = {
@@ -14526,7 +14533,7 @@ export class Think<
           // Recovering: close the stream cleanly (no terminal error frame); the
           // scheduled continuation drives the turn to completion. Report
           // `aborted` so the caller does not terminalize the turn.
-          this._completeResumableStream(streamId);
+          this._completeResumableStream(streamId, "recovering");
           this._pendingResumeConnections.clear();
           if (!doneSent) {
             this._broadcastChat({
@@ -18676,8 +18683,20 @@ export class Think<
   }
 
   /** Mark a resumable stream completed (settled now, rows kept until reclaim). */
-  protected _completeResumableStream(streamId: string): void {
-    this._resumableStream.complete(streamId);
+  protected _completeResumableStream(
+    streamId: string,
+    outcome?: ChatTurnOutcome
+  ): void {
+    this._resumableStream.complete(streamId, outcome);
+    this._afterResumableStreamEnded();
+  }
+
+  /**
+   * A connection offered the stream that never ACKed (`resume: false`, or
+   * gone quiet) must still get the terminal frame and every later broadcast.
+   */
+  private _afterResumableStreamEnded(): void {
+    this._pendingResumeConnections.clear();
   }
 
   /**
@@ -18685,12 +18704,17 @@ export class Think<
    * assistant message (`_persistAssistantMessageWithCutover`). Every path
    * that calls this must end in that cutover or `finalizePending()`.
    */
-  protected _finishResumableStream(streamId: string): void {
-    this._resumableStream.finish(streamId);
+  protected _finishResumableStream(
+    streamId: string,
+    outcome?: ChatTurnOutcome
+  ): void {
+    this._resumableStream.finish(streamId, outcome);
+    this._afterResumableStreamEnded();
   }
 
   /** Mark a resumable stream errored. */
   protected _errorResumableStream(streamId: string, requestId?: string): void {
+    this._afterResumableStreamEnded();
     this.ctx.storage.transactionSync(() => {
       this._resumableStream.markError(streamId);
       // An error stamp is not necessarily terminal — recovery may retry the
