@@ -361,6 +361,12 @@ export class ThinkMessengerRuntime {
       persistRecoverySnapshot?: (
         snapshot: ReturnType<typeof messengerReplySnapshot>
       ) => Promise<void> | void;
+      /**
+       * Whether the caller replays this recovery after it throws `error`.
+       * Messages queued behind the reply are drained only once it settles,
+       * so they are never answered ahead of it. Default: no replay.
+       */
+      retriesAfter?: (error: unknown) => boolean;
     }
   ): Promise<boolean> {
     if (ctx.name !== MESSENGER_REPLY_FIBER_NAME) {
@@ -380,17 +386,23 @@ export class ThinkMessengerRuntime {
     }
 
     const thread = this.reviveThread(definition, snapshot.thread);
+    let handled: boolean;
     try {
-      return await this.recoverReply(
+      handled = await this.recoverReply(
         ctx,
         definition,
         thread,
         snapshot,
         options
       );
-    } finally {
-      this.drainQueuedMessagesInBackground(definition, thread.id);
+    } catch (error) {
+      if (!options?.retriesAfter?.(error)) {
+        this.drainQueuedMessagesInBackground(definition, thread.id);
+      }
+      throw error;
     }
+    this.drainQueuedMessagesInBackground(definition, thread.id);
+    return handled;
   }
 
   private async recoverReply(

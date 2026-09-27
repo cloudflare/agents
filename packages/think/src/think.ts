@@ -155,6 +155,7 @@ import {
   Agent,
   callable,
   getCurrentAgent,
+  isDurableObjectCodeUpdateReset,
   isDurableObjectMemoryLimitReset,
   isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
@@ -5690,7 +5691,13 @@ export class Think<
               await runtime.handleFiberRecovery(ctx, {
                 persistRecoverySnapshot: async (snapshot) => {
                   await this.ctx.storage.put(persistKey, snapshot);
-                }
+                },
+                // Platform failures leave the step claimed and the run is
+                // replayed; any other error fails this single-attempt step.
+                retriesAfter: (error) =>
+                  isPlatformTransientError(error) ||
+                  isDurableObjectMemoryLimitReset(error) ||
+                  isDurableObjectCodeUpdateReset(error)
               });
               await this.ctx.storage.delete(persistKey);
               return undefined;

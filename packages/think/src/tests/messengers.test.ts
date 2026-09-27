@@ -1604,6 +1604,63 @@ describe("think messengers core", () => {
       }
       expect(prompts).toEqual(["hello", "follow up"]);
     });
+
+    it("keeps queued messages behind a recovered reply that will be retried", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        "drain-after-retried-recovery"
+      );
+      expect(
+        await agent.recoverWithQueuedFollowUpForTest({
+          failPost: true,
+          retried: true,
+          stage: "streaming"
+        })
+      ).toBe("post failed");
+
+      let prompts: string[] = [];
+      for (let i = 0; i < 15 && prompts.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        prompts = await agent.getRecorded("prompt");
+      }
+      expect(prompts).toEqual([]);
+      expect(await agent.queueDepthForTest("fake:dm-recovered")).toBe(1);
+
+      expect(
+        await agent.recoverWithQueuedFollowUpForTest({
+          enqueue: false,
+          stage: "streaming"
+        })
+      ).toBeNull();
+      let posts: string[] = [];
+      for (let i = 0; i < 50 && posts.length < 2; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        posts = await agent.getRecorded("post");
+      }
+      expect(await agent.getRecorded("prompt")).toEqual(["follow up"]);
+      expect(posts[0]).toBe(INTERRUPTED_MESSENGER_RESPONSE);
+      expect(posts).toHaveLength(2);
+    });
+
+    it("drains queued messages once a failed recovery is not retried", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        "drain-after-failed-recovery"
+      );
+      expect(
+        await agent.recoverWithQueuedFollowUpForTest({
+          failPost: true,
+          stage: "streaming"
+        })
+      ).toBe("post failed");
+
+      let prompts: string[] = [];
+      for (let i = 0; i < 50 && prompts.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        prompts = await agent.getRecorded("prompt");
+      }
+      expect(prompts).toEqual(["follow up"]);
+    });
   });
 
   it("separates text segments across tool-call boundaries (#1841)", async () => {
