@@ -1,0 +1,67 @@
+.changeset/think-submission-lifecycle-fixes.md
+  s_f4803804f2d8c8::t_97e854407ae3c5 1-13
+packages/think/src/tests/actions-durable-pause.test.ts
+  s_7c9867abe4d126::t_784c22abfa011a 2,8-10,15-39,424-534,705-792
+packages/think/src/tests/agents/assistant-agent-loop.ts
+  s_ce1ab06b2d7180::t_c92fbf67ebc12b 119-120,141-146,152,305-315,333,349-356,358,360,364-375,377,384,387,390-391,395-403,408-413,417-442,445
+packages/think/src/tests/agents/client-tools.ts
+  s_7c9867abe4d126::t_13fddbf30712d7 96-98,112,164,808-809,895-900,984-985,990-997
+packages/think/src/tests/agents/think-session.ts
+  s_93f525f3481953::t_a54584fc7aa4ed 4857-4868,4872-4880,6118,6120-6121,6134,6286-6309,6316,6319-6320,6368-6374,6886,6936-6937,7683
+packages/think/src/tests/client-tools.test.ts
+  s_ce1ab06b2d7180::t_31a2292596f909 1256-1302
+packages/think/src/tests/hooks.test.ts
+  s_7c9867abe4d126::t_0d875a809a76f6 397-426
+packages/think/src/tests/submissions.test.ts
+  s_da56d18e00076b::t_5bbbf955e8022d 35-37,42-50,91,1026-1162
+packages/think/src/think.ts
+  s_da56d18e00076b::t_15f2be4dc31395 1863-1870,2323-2325,2335-2342,2345-2347,3519-3520,5103-5104,5113-5121,5139-5140,5143-5145,5395,7006-7009,8658,8942-8945,11304,11306-11308,11311-11312,11364-11370,11384-11394,11955-11956,11960-11962,11964,12016-12017,12043-12044,12067-12071,12101,12103-12110,12117,12124-12145,13567,15710-15720,18088-18095,18099-18105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ac440cbba91b81f197f62a5679bb0769cca6a04f",
+  "prompts": {},
+  "sessions": {
+    "s_7c9867abe4d126": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "abc3e726-5121-430d-bf7f-fae36392288e",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_93f525f3481953": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "07fb1119-18c7-479c-bfbf-f3f2f017f34b",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_ce1ab06b2d7180": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "60d19fa2-5d90-4412-8906-5f507fe8341e",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_da56d18e00076b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "f7f55626-fbab-4399-8014-a16a1cac352b",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_f4803804f2d8c8": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "74a18dc3-b102-4463-b272-958aecacfe5c",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
