@@ -1888,6 +1888,11 @@ export class ThinkTestAgent extends Think {
     }
   }
 
+  /** The close outcome recorded on the request's latest chat stream. */
+  async getStreamOutcomeForTest(requestId: string): Promise<string | null> {
+    return this._resumableStream.getOutcome(requestId) ?? null;
+  }
+
   /**
    * #1626: the FIRST inference hangs after `afterChunks` chunks (watchdog
    * aborts it), which must now route into bounded recovery instead of failing
