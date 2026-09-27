@@ -93,7 +93,9 @@ function createClientToolMockModel(): LanguageModel {
 // invocation it emits plain text.
 function createSlowClientToolMockModel(
   delayMs: number,
-  trailingGaps: number
+  trailingGaps: number,
+  finishReason: "tool-calls" | "stop" = "tool-calls",
+  onPrompt?: (prompt: unknown[]) => void
 ): LanguageModel {
   let callCount = 0;
   return {
@@ -107,6 +109,7 @@ function createSlowClientToolMockModel(
     doStream(options: Record<string, unknown>) {
       callCount++;
       const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      onPrompt?.(messages);
       const hasToolResult = messages.some(
         (m: unknown) =>
           typeof m === "object" &&
@@ -158,7 +161,7 @@ function createSlowClientToolMockModel(
             controller.enqueue({ type: "text-end", id: "t-trail" });
             controller.enqueue({
               type: "finish",
-              finishReason: "tool-calls",
+              finishReason,
               usage: { inputTokens: 10, outputTokens: 5 }
             });
           } else {
@@ -802,6 +805,8 @@ export class ThinkClientToolsAgent extends Think {
   private _useSlowClientToolStream = false;
   private _slowClientToolDelayMs = 30;
   private _slowClientToolGaps = 12;
+  private _slowClientToolFinishReason: "tool-calls" | "stop" = "tool-calls";
+  private _slowClientToolPromptTails: string[] = [];
   private _useMidStreamParallelToolStream = false;
   private _midStreamParallelGapMs = 40;
   private _midStreamParallelGapsBeforeSlow = 20;
@@ -887,7 +892,12 @@ export class ThinkClientToolsAgent extends Think {
     if (this._useSlowClientToolStream)
       return createSlowClientToolMockModel(
         this._slowClientToolDelayMs,
-        this._slowClientToolGaps
+        this._slowClientToolGaps,
+        this._slowClientToolFinishReason,
+        (prompt) => {
+          const last = prompt.at(-1) as { role?: string } | undefined;
+          this._slowClientToolPromptTails.push(last?.role ?? "");
+        }
       );
     if (this._useMidStreamParallelToolStream)
       return createMidStreamParallelToolModel(
@@ -971,11 +981,20 @@ export class ThinkClientToolsAgent extends Think {
   async setSlowClientToolStreamMode(
     enabled: boolean,
     delayMs?: number,
-    trailingGaps?: number
+    trailingGaps?: number,
+    finishReason?: "tool-calls" | "stop"
   ): Promise<void> {
     this._useSlowClientToolStream = enabled;
     if (delayMs !== undefined) this._slowClientToolDelayMs = delayMs;
     if (trailingGaps !== undefined) this._slowClientToolGaps = trailingGaps;
+    if (finishReason !== undefined) {
+      this._slowClientToolFinishReason = finishReason;
+    }
+  }
+
+  /** Role of the last prompt message of each slow client-tool model call. */
+  async getSlowClientToolPromptTailsForTest(): Promise<string[]> {
+    return this._slowClientToolPromptTails;
   }
 
   async setMidStreamParallelToolMode(

@@ -1860,6 +1860,14 @@ const waitTurnResultContext = new AsyncLocalStorage<{
   messageIds: Map<string, string>;
 }>();
 
+// Marks code running inside `onSubmissionStatus`. The emit holds a terminal
+// submission's waiters until the hook returns, and runs inside the turn that
+// finalized it, so a wait from the hook can never settle.
+const submissionStatusHookContext = new AsyncLocalStorage<{
+  agent: unknown;
+  ended: boolean;
+}>();
+
 // Drains the underlying model stream when a drain loop exits early (in-stream
 // error break, stall abort, user abort). The AI SDK tees its base stream, so
 // an abandoned tee branch would otherwise leave the tracing wrapper's
@@ -2312,7 +2320,9 @@ function reservedMetadataOf(
 
 /**
  * `parts` without the text and reasoning that follow the part for
- * `toolCallId`. Returns `parts` itself when nothing is dropped.
+ * `toolCallId`, up to the end of the step that read its output: the rest of
+ * the tool call's own step and the next one. Later steps answer other tool
+ * results and are kept. Returns `parts` itself when nothing is dropped.
  */
 function dropGenerationAfterToolCall(
   parts: UIMessage["parts"],
@@ -2322,9 +2332,19 @@ function dropGenerationAfterToolCall(
     (part) => "toolCallId" in part && part.toolCallId === toolCallId
   );
   if (index === -1) return parts;
+  let end = parts.length;
+  let stepStarts = 0;
+  for (let i = index + 1; i < parts.length; i++) {
+    if (parts[i].type === "step-start" && ++stepStarts === 2) {
+      end = i;
+      break;
+    }
+  }
   const kept = parts.filter(
     (part, i) =>
-      i <= index || (part.type !== "text" && part.type !== "reasoning")
+      i <= index ||
+      i >= end ||
+      (part.type !== "text" && part.type !== "reasoning")
   );
   return kept.length === parts.length ? parts : kept;
 }
@@ -3496,8 +3516,8 @@ export class Think<
   private _activeChannelContext?: ChannelContext;
 
   /**
-   * Channel of the latest admitted queue turn, which a continuation without
-   * an explicit channel extends. Differs from the latest user message's
+   * Channel of the latest queue turn that ran inference, which a continuation
+   * without an explicit channel extends. Cleared by `resetTurnState`. Differs from the latest user message's
    * channel when a WebSocket regeneration reuses a message another channel
    * stored, or a continuation ran on an explicit channel. In memory only:
    * after an eviction, continuations fall back to history.
@@ -5080,16 +5100,23 @@ export class Think<
    * later.
    */
   get activeTurn(): ActiveTurn | undefined {
-    const turn = admittedTurnContext.getStore();
-    if (!turn || turn.agent !== this) return undefined;
-    // The store outlives the turn in any async work the turn scheduled.
-    if (this._turnQueue.activeRequestId !== turn.requestId) return undefined;
+    const turn = this._activeAdmittedTurn();
+    if (!turn) return undefined;
     return {
       requestId: turn.requestId,
       trigger: turn.trigger,
       continuation: turn.continuation ?? false,
       ...(turn.channel !== undefined && { channel: turn.channel })
     };
+  }
+
+  /** The admitted-turn store of the turn running now, if the caller is in it. */
+  private _activeAdmittedTurn() {
+    const turn = admittedTurnContext.getStore();
+    if (!turn || turn.agent !== this) return undefined;
+    // The store outlives the turn in any async work the turn scheduled.
+    if (this._turnQueue.activeRequestId !== turn.requestId) return undefined;
+    return turn;
   }
 
   /**
@@ -5109,9 +5136,13 @@ export class Think<
   /**
    * The channel context for the active turn, if the turn resolved to a channel.
    * Readable from tools/hooks during a turn (e.g. to branch on `kind`).
+   * Undefined outside a turn, like {@link activeTurn} — including from work a
+   * turn left behind that runs while a later turn holds another channel.
    */
   get activeChannel(): ChannelContext | undefined {
-    return this._activeChannelContext;
+    const turn = this._activeAdmittedTurn();
+    const context = this._activeChannelContext;
+    return turn && context?.channelId === turn.channel ? context : undefined;
   }
 
   /**
@@ -5361,7 +5392,7 @@ export class Think<
    */
   private _activeChannelId(): string | undefined {
     return (
-      this._activeChannelContext?.channelId ??
+      this.activeChannel?.channelId ??
       this._activeMessengerContext()?.messengerId
     );
   }
@@ -6972,6 +7003,10 @@ export class Think<
    */
   private async _runInferenceLoop(input: TurnInput): Promise<StreamableResult> {
     const turn = admittedTurnContext.getStore();
+    // Recorded here, not at admission: a turn skipped by a reset or a
+    // cancelled submission never ran, so a continuation must not extend it.
+    const active = this._activeAdmittedTurn();
+    if (active) this._lastTurnChannel = { channel: active.channel };
     const invoke = await withAgentSpan(
       this,
       "prepare_agent",
@@ -8620,7 +8655,7 @@ export class Think<
   private _assertNotInsideAdmittedTurn(trigger: TurnTrigger): void {
     if (admittedTurnContext.getStore()?.agent !== this) return;
     throw new Error(
-      `Think turn admission (${trigger}) cannot be called from inside an active turn; use runTurn({ mode: "submit" }) or addMessages() instead`
+      `Think turn admission (${trigger}) cannot be called from inside an active turn; use runTurn({ mode: "submit" }) or addMessages() instead, and do not waitForSubmission() on it from inside the turn`
     );
   }
 
@@ -8677,7 +8712,6 @@ export class Think<
 
                 this._activeTurnReplyAttachments = [];
                 this._activeTurnReplyAttachmentsRequestId = spec.requestId;
-                this._lastTurnChannel = { channel: spec.channel };
 
                 try {
                   const value = await this._withChannelContext(
@@ -8905,8 +8939,10 @@ export class Think<
    * an active turn (a tool `execute`, a lifecycle hook) deadlocks on the turn
    * queue — identical to calling {@link Think.saveMessages} or
    * {@link Think.continueLastTurn} from there. Prefer `mode: "submit"` or
-   * {@link Think.addMessages} instead. Precise nested-call detection is deferred
-   * to `_admitTurn` (step 3).
+   * {@link Think.addMessages} instead. A submitted turn runs only after the
+   * current turn ends, so {@link Think.waitForSubmission} on it from inside
+   * the turn throws rather than deadlocking. Precise nested-call detection is
+   * deferred to `_admitTurn` (step 3).
    *
    * **Empty input (`wait`).** String, single-message, and array inputs that
    * normalize to an empty list short-circuit to `{ status: "skipped" }` without
@@ -11265,10 +11301,15 @@ export class Think<
     }
     try {
       await this.keepAliveWhile(async () => {
+        const hook = { agent: this, ended: false };
         try {
-          await this.onSubmissionStatus(inspection);
+          await submissionStatusHookContext.run(hook, () =>
+            this.onSubmissionStatus(inspection)
+          );
         } catch (error) {
           console.error("[Think] onSubmissionStatus failed", error);
+        } finally {
+          hook.ended = true;
         }
       });
     } finally {
@@ -11320,6 +11361,13 @@ export class Think<
    *
    * The wait lives in this object's memory, so it rejects if the object
    * restarts. The submission itself is durable: call again to keep waiting.
+   *
+   * Throws when called from inside a turn (a tool `execute`, a lifecycle
+   * hook) or from `onSubmissionStatus` for a submission that has not
+   * finished: a submission only runs once the current turn frees the turn
+   * queue, and its status settles only after the hook returns, so the wait
+   * could never resolve. Return the submission id and wait from outside the
+   * turn instead.
    */
   async waitForSubmission(
     submissionId: string,
@@ -11332,6 +11380,17 @@ export class Think<
       !this._terminalStatusEmits.has(submissionId)
     ) {
       return this._inspectionFromSubmissionRow(row);
+    }
+    const hook = submissionStatusHookContext.getStore();
+    if (hook?.agent === this && !hook.ended) {
+      throw new Error(
+        "waitForSubmission() cannot be called from onSubmissionStatus: the submission settles only after the hook returns"
+      );
+    }
+    if (this._activeAdmittedTurn()) {
+      throw new Error(
+        "waitForSubmission() cannot be called from inside an active turn: the submission runs only after this turn ends"
+      );
     }
     return new Promise((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -11892,12 +11951,17 @@ export class Think<
 
     const claimed = this._readSubmission(row.submission_id);
     if (!claimed || claimed.status !== "running") return;
-    await this._emitSubmissionStatus(claimed);
 
+    // Registered before the running hook so a cancel landing during the hook
+    // aborts this run and reports it as running here.
     const controller = new AbortController();
     this._submissionAbortControllers.set(row.submission_id, controller);
     let output: unknown;
+    // Whether this run wrote the terminal status. A cancel or reset that got
+    // there first emits it itself.
+    let finalizedHere = false;
     try {
+      await this._emitSubmissionStatus(claimed);
       const messages = this._parseSubmissionMessages(row.messages_json);
       const metadata = this._parseJsonObject(row.metadata_json);
       const workflowPrompt = this._readWorkflowPromptContext(metadata);
@@ -11949,6 +12013,8 @@ export class Think<
       const errorMessage = result.error ?? streamError ?? null;
       const completedAt = Date.now();
       this.ctx.storage.transactionSync(() => {
+        finalizedHere =
+          this._readSubmission(row.submission_id)?.status === "running";
         this.sql`
           UPDATE cf_think_submissions
           SET status = ${finalStatus},
@@ -11974,6 +12040,8 @@ export class Think<
         error instanceof Error ? error.message : String(error);
       const completedAt = Date.now();
       this.ctx.storage.transactionSync(() => {
+        finalizedHere =
+          this._readSubmission(row.submission_id)?.status === "running";
         this.sql`
           UPDATE cf_think_submissions
           SET status = 'error',
@@ -11996,7 +12064,11 @@ export class Think<
       this._submissionAbortControllers.delete(row.submission_id);
       this._submissionsApplyingMessages.delete(row.submission_id);
       const updated = this._readSubmission(row.submission_id);
-      if (updated && this._isTerminalSubmissionStatus(updated.status)) {
+      if (
+        finalizedHere &&
+        updated &&
+        this._isTerminalSubmissionStatus(updated.status)
+      ) {
         await this._emitSubmissionStatus(updated);
       }
     }
@@ -12026,26 +12098,51 @@ export class Think<
           completed_at = ${Date.now()}
       WHERE status = 'pending'
     `;
+    const skipped: ThinkSubmissionRow[] = [];
     for (const row of pending) {
-      this._enqueueTerminalWorkflowNotification(
-        this._readSubmission(row.submission_id)
-      );
+      const updated = this._readSubmission(row.submission_id);
+      this._enqueueTerminalWorkflowNotification(updated);
+      if (updated) {
+        skipped.push(updated);
+        // Emitted one at a time after this returns; until each emit finishes,
+        // `waitForSubmission` keeps waiting on it.
+        this._terminalStatusEmits.add(updated.submission_id);
+      }
       void this.dequeue(submissionRunItemId(row.submission_id)).catch(
         (error) => {
           console.error("[Think] Failed to dequeue skipped submission", error);
         }
       );
     }
-    return pending;
+    return skipped;
   }
 
   private async _emitSkippedSubmissions(
     skipped: ThinkSubmissionRow[]
   ): Promise<void> {
     for (const row of skipped) {
-      const updated = this._readSubmission(row.submission_id);
-      if (updated?.status === "skipped") {
-        await this._emitSubmissionStatus(updated);
+      const id = row.submission_id;
+      const updated = this._readSubmission(id);
+      if (
+        updated?.status === "skipped" &&
+        updated.created_at === row.created_at
+      ) {
+        try {
+          await this._emitSubmissionStatus(updated);
+          continue;
+        } catch (error) {
+          console.error("[Think] Failed to emit skipped submission", error);
+        }
+      }
+      // Deleted or replaced before its emit (or the emit failed): settle the
+      // waiters held for it so none is stranded.
+      this._terminalStatusEmits.delete(id);
+      const held = this._waitersHeldForDeletedEmit.get(id);
+      this._waitersHeldForDeletedEmit.delete(id);
+      const inspection = this._inspectionFromSubmissionRow(row);
+      for (const waiter of held ?? []) waiter(inspection);
+      if (updated?.created_at === row.created_at) {
+        this._resolveSubmissionWaiters(inspection);
       }
     }
   }
@@ -13467,6 +13564,7 @@ export class Think<
     // leave a stale flag pinning future continuations.
     this._autoContinuation.reset();
     this._submitConcurrency.reset();
+    this._lastTurnChannel = undefined;
     this._pendingInteractionPromise = null;
     // Drop the apply chain so new interactions don't serialize behind a stale
     // (possibly hung) apply from the turn we just reset (#1649).
@@ -15609,6 +15707,17 @@ export class Think<
       });
     }
     if (options?.autoContinue === false) {
+      // No continuation will run the deferred drop, so apply it once the
+      // parking turn has persisted its message.
+      if (toolCallId && this._deferredResolvedPauses.has(toolCallId)) {
+        if (this._streamingAssistant) {
+          this._flushResolvedPausesOnFinalize = true;
+        } else {
+          await this._enqueueInteractionApply(() =>
+            this._flushDeferredResolvedPauses()
+          );
+        }
+      }
       // Re-arm the barrier so a sibling that already opted in fires once the
       // batch is whole, matching the client tool-result/approval path.
       this._rearmPendingAutoContinuationForBatch();
@@ -17976,8 +18085,23 @@ export class Think<
    */
   private _onStreamingTurnFinalized(): void {
     this._streamingAssistant = null;
+    if (this._flushResolvedPausesOnFinalize) {
+      this._flushResolvedPausesOnFinalize = false;
+      void this.keepAliveWhile(() =>
+        this._enqueueInteractionApply(() => this._flushDeferredResolvedPauses())
+      ).catch((error) => {
+        console.error("[Think] Failed to apply resolved pauses", error);
+      });
+    }
     this._autoContinuation.rearmForBatch();
   }
+
+  /**
+   * A pause resolved without a continuation while its turn was streaming; its
+   * deferred drop runs when that turn finalizes instead of at the next
+   * inference.
+   */
+  private _flushResolvedPausesOnFinalize = false;
 
   /**
    * Drain every in-flight tool-result/approval apply, including any enqueued

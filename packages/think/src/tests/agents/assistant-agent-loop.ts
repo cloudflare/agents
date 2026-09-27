@@ -116,7 +116,8 @@ function createMockModel(): LanguageModel {
 }
 
 function createMockToolModel(
-  onCall?: (options: unknown) => void
+  onCall?: (options: unknown) => void,
+  callToolEachTurn = false
 ): LanguageModel {
   let toolCallCount = 0;
   return {
@@ -137,12 +138,18 @@ function createMockToolModel(
           m !== null &&
           (m as Record<string, unknown>).role === "tool"
       );
+      const last = messages[messages.length - 1] as
+        | { role?: unknown }
+        | undefined;
+      const callTool = callToolEachTurn
+        ? last?.role === "user"
+        : !hasToolResult && toolCallCount === 1;
 
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
 
-          if (!hasToolResult && toolCallCount === 1) {
+          if (callTool) {
             controller.enqueue({
               type: "tool-input-start",
               id: "tc1",
@@ -295,6 +302,17 @@ export class LoopTestAgent extends Think {
 
 // ── Test agent: uses default loop with tools ────────────────────────
 
+type ToolCallIdentity = {
+  beforeToolCall: (string | null)[];
+  execute: (string | null)[];
+  executeChannel: (string | null)[];
+  afterToolCall: (string | null)[];
+  detached: (string | null)[];
+  detachedChannel: (string | null)[];
+  detachedNotice: string[];
+  onChatResponse: string[];
+};
+
 export class LoopToolTestAgent extends Think {
   // Stored as JSON strings so the log can flow back over the DO RPC
   // boundary without tripping the type system on `unknown` payloads.
@@ -312,7 +330,7 @@ export class LoopToolTestAgent extends Think {
   }> = [];
 
   getModel(): LanguageModel {
-    return createMockToolModel();
+    return createMockToolModel(undefined, this._noticeFromLeftover);
   }
 
   getSystemPrompt(): string {
@@ -328,53 +346,103 @@ export class LoopToolTestAgent extends Think {
           this._toolCallIdentity.execute.push(
             this.activeTurn?.requestId ?? null
           );
+          this._toolCallIdentity.executeChannel.push(
+            this.activeChannel?.channelId ?? null
+          );
+          if (this._releaseLeftoverInNextTool) {
+            this._releaseLeftoverInNextTool = false;
+            await this.releaseDetachedToolWorkForTest();
+          }
+          let release!: () => void;
           const released = new Promise<void>((resolve) => {
-            this._releaseDetached.push(resolve);
+            release = resolve;
           });
-          void released.then(() => {
+          const done = released.then(async () => {
             this._toolCallIdentity.detached.push(
               this.activeTurn?.requestId ?? null
             );
+            this._toolCallIdentity.detachedChannel.push(
+              this.activeChannel?.channelId ?? null
+            );
+            if (!this._noticeFromLeftover) return;
+            try {
+              await this.deliverNotice("leftover notice");
+              this._toolCallIdentity.detachedNotice.push("delivered");
+            } catch (error) {
+              this._toolCallIdentity.detachedNotice.push(
+                error instanceof Error ? error.message : String(error)
+              );
+            }
           });
+          this._releaseDetached.push({ release, done });
           return `pong: ${message}`;
         }
       })
     };
   }
 
-  private _toolCallIdentity: {
-    beforeToolCall: (string | null)[];
-    execute: (string | null)[];
-    afterToolCall: (string | null)[];
-    detached: (string | null)[];
-    onChatResponse: string[];
-  } = {
+  private _toolCallIdentity: ToolCallIdentity = {
     beforeToolCall: [],
     execute: [],
+    executeChannel: [],
     afterToolCall: [],
     detached: [],
+    detachedChannel: [],
+    detachedNotice: [],
     onChatResponse: []
   };
+
+  override configureChannels() {
+    return {
+      voice: {
+        kind: "voice" as const,
+        ingress: { transport: "voice" as const }
+      }
+    };
+  }
 
   override onChatResponse(result: ChatResponseResult): void {
     this._toolCallIdentity.onChatResponse.push(result.requestId);
   }
 
-  private _releaseDetached: Array<() => void> = [];
+  private _releaseDetached: Array<{
+    release: () => void;
+    done: Promise<void>;
+  }> = [];
+  private _releaseLeftoverInNextTool = false;
+  private _noticeFromLeftover = false;
 
   /** Run the continuations the tool left behind, after its turn ended. */
   async releaseDetachedToolWorkForTest(): Promise<void> {
-    for (const release of this._releaseDetached.splice(0)) release();
-    await Promise.resolve();
+    const pending = this._releaseDetached.splice(0);
+    for (const { release } of pending) release();
+    await Promise.all(pending.map(({ done }) => done));
   }
 
-  async getToolCallIdentityForTest(): Promise<{
-    beforeToolCall: (string | null)[];
-    execute: (string | null)[];
-    afterToolCall: (string | null)[];
-    detached: (string | null)[];
-    onChatResponse: string[];
-  }> {
+  /**
+   * Run the work earlier turns' tools left behind from inside the next tool
+   * call, while that later turn is active, and deliver a notice from it.
+   */
+  async releaseLeftoverInNextToolForTest(): Promise<void> {
+    this._releaseLeftoverInNextTool = true;
+    this._noticeFromLeftover = true;
+  }
+
+  async testChatOnChannel(
+    message: string,
+    channel: string
+  ): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb, { channel });
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
+    };
+  }
+
+  async getToolCallIdentityForTest(): Promise<ToolCallIdentity> {
     return this._toolCallIdentity;
   }
 
