@@ -656,6 +656,29 @@ describe("broadcast stream state machine", () => {
     );
   });
 
+  it("a live chunk after a healing snapshot keeps the stored copy", () => {
+    // chunk → snapshot heals the diverged copy → chunk → done
+    let state = observe(["You", " canYou", " see can"]);
+    let messages = stored("You can see");
+    const chunk = transition(state, {
+      type: "response",
+      streamId: "s-heal",
+      messageId: "tmp",
+      chunkData: { type: "text-delta", id: "t1", delta: " more" }
+    });
+    state = chunk.state;
+    messages = chunk.messagesUpdate!(messages);
+    expect(assistantText(messages)).toBe("You can see");
+
+    const done = transition(state, {
+      type: "response",
+      streamId: "s-heal",
+      messageId: "tmp",
+      done: true
+    });
+    expect(assistantText(done.messagesUpdate!(messages))).toBe("You can see");
+  });
+
   it("done still merges an accumulator that extends the stored copy", () => {
     const state = observe(["You", " can", " see"]);
     const done = transition(state, {

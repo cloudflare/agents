@@ -70,11 +70,12 @@ function expectAssistantTranscriptBeforeDone(frames: Frame[]) {
   expect(doneIndex).toBe(frames.length - 1);
 }
 
-function sendChat(ws: WebSocket, body: Record<string, unknown>) {
+function sendChat(ws: WebSocket, body: Record<string, unknown>): string {
+  const id = crypto.randomUUID();
   ws.send(
     JSON.stringify({
       type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
-      id: crypto.randomUUID(),
+      id,
       init: {
         method: "POST",
         body: JSON.stringify({
@@ -90,6 +91,7 @@ function sendChat(ws: WebSocket, body: Record<string, unknown>) {
       }
     })
   );
+  return id;
 }
 
 describe("AIChatAgent — terminal frame ordering", () => {
@@ -192,6 +194,74 @@ describe("AIChatAgent — terminal frame ordering", () => {
     const recorded = await frames;
     expect(recorded.at(-1)).toEqual({ kind: "done", error: true });
     expect(outcomes).toEqual(["error"]);
+    ws.close(1000);
+  });
+
+  it("holds a resume ACK that lands while the response is being persisted", async () => {
+    const room = crypto.randomUUID();
+    const { ws: sender } = await connectChatWS(
+      `/agents/response-agent/${room}`
+    );
+    await settle();
+    const agent = await getAgentByName(env.ResponseAgent, room);
+    await agent.blockNextAssistantPersist();
+
+    const requestId = sendChat(sender, { format: "sse" });
+    for (
+      let i = 0;
+      i < 100 && !(await agent.isAssistantPersistBlocked());
+      i++
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(await agent.isAssistantPersistBlocked()).toBe(true);
+
+    const { ws: reconnected } = await connectChatWS(
+      `/agents/response-agent/${room}`
+    );
+    await settle();
+    const frames = recordUntilDone(reconnected);
+    reconnected.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+        id: requestId
+      })
+    );
+    await settle();
+    await agent.releaseAssistantPersist();
+
+    const recorded = await frames;
+    expectAssistantTranscriptBeforeDone(recorded);
+    expect(recorded.at(-1)).toEqual({ kind: "done", error: false });
+    sender.close(1000);
+    reconnected.close(1000);
+  });
+
+  it("settles the originating tab when onChatMessage returns no response", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/response-agent/${room}`);
+    await settle();
+
+    const done = new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("Timeout waiting for done")),
+        5000
+      );
+      ws.addEventListener("message", (e: MessageEvent) => {
+        const data = JSON.parse(e.data as string) as Record<string, unknown>;
+        if (isUseChatResponseMessage(data) && data.done) {
+          clearTimeout(timer);
+          resolve(data);
+        }
+      });
+    });
+    const requestId = sendChat(ws, { noResponse: true });
+
+    expect(await done).toMatchObject({
+      id: requestId,
+      done: true,
+      outcome: "completed"
+    });
     ws.close(1000);
   });
 

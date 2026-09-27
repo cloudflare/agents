@@ -165,6 +165,89 @@ describe("ResumableStream originating message ids (#2280)", () => {
     });
   });
 
+  it("replays the outcome a stream was closed with", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
+      const stream = createAdapter(instance, ctx.storage.sql);
+      const outcomeOf = (requestId: string) => {
+        const frames: Record<string, unknown>[] = [];
+        stream.replayCompletedChunksByRequestId(
+          collectingConnection(frames),
+          requestId
+        );
+        return frames.at(-1)?.outcome;
+      };
+
+      stream.complete(stream.start("req-recovering"), "recovering");
+      expect(outcomeOf("req-recovering")).toBe("recovering");
+
+      stream.finish(stream.start("req-aborted"), "aborted");
+      stream.finalizePending();
+      expect(outcomeOf("req-aborted")).toBe("aborted");
+
+      stream.complete(stream.start("req-completed"));
+      expect(outcomeOf("req-completed")).toBeUndefined();
+
+      // The next start reclaims the settled rows; the outcome outlives them.
+      stream.start("req-successor");
+      expect(stream.getOutcome("req-recovering")).toBe("recovering");
+      expect(stream.getOutcome("req-aborted")).toBe("aborted");
+      expect(stream.getOutcome("req-completed")).toBeUndefined();
+    });
+  });
+
+  it("reports an orphaned stream as aborted, not completed", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
+      const first = createAdapter(instance, ctx.storage.sql);
+      const id = first.start("req-orphan-outcome");
+      first.storeChunk(id, JSON.stringify({ type: "text-delta", delta: "x" }));
+      first.flushBuffer();
+
+      const restored = createAdapter(instance, ctx.storage.sql);
+      const live: Record<string, unknown>[] = [];
+      restored.replayChunks(collectingConnection(live), "req-orphan-outcome");
+      expect(live.at(-1)).toMatchObject({ done: true, outcome: "aborted" });
+
+      const later: Record<string, unknown>[] = [];
+      restored.replayCompletedChunksByRequestId(
+        collectingConnection(later),
+        "req-orphan-outcome"
+      );
+      expect(later.at(-1)).toMatchObject({ done: true, outcome: "aborted" });
+    });
+  });
+
+  it("keeps the outcome after a cutover deletes the stream", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
+      const stream = createAdapter(instance, ctx.storage.sql);
+      const id = stream.start("req-cut-aborted");
+      stream.finish(id, "aborted");
+      stream.cutover(id, () => {});
+      expect(stream.getOutcome("req-cut-aborted")).toBe("aborted");
+      expect(stream.getOutcome("req-other")).toBeUndefined();
+    });
+  });
+
+  it("replays a finished stream awaiting its cutover without a terminal", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
+      const stream = createAdapter(instance, ctx.storage.sql);
+      const id = stream.start("req-pending");
+      stream.storeChunk(id, JSON.stringify({ type: "text-delta", delta: "z" }));
+      stream.finish(id);
+
+      const frames: Record<string, unknown>[] = [];
+      stream.replayPendingCutoverChunks(
+        collectingConnection(frames),
+        "req-pending"
+      );
+      expect(frames.map((frame) => frame.done)).toEqual([false, false]);
+      expect(frames.at(-1)).toMatchObject({ replayComplete: true });
+    });
+  });
+
   it("omits them for a stream started without ids", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {

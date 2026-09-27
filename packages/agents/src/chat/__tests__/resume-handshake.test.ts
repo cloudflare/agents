@@ -9,6 +9,7 @@ import { ContinuationState } from "../continuation-state";
 import type { ResumableStream } from "../resumable-stream";
 import { PreStreamTurns } from "../pre-stream-turns";
 import { STREAM_RESUME_NONE_REASONS } from "../protocol";
+import type { ChatTurnOutcome } from "../wire-types";
 import {
   replayDoneFrame,
   streamPendingFrame,
@@ -54,7 +55,12 @@ interface FakeStreamState {
   replayCompletedReturn: boolean;
   replayErroredReturn: boolean;
   originMessageIds?: string[];
-  calls: { replayChunks: string[]; replayErrored: string[] };
+  outcome?: ChatTurnOutcome;
+  calls: {
+    replayChunks: string[];
+    replayErrored: string[];
+    replayPending: string[];
+  };
 }
 
 function makeStream(over: Partial<FakeStreamState> = {}): {
@@ -68,7 +74,7 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
     orphanedStreamId: "",
     replayCompletedReturn: false,
     replayErroredReturn: true,
-    calls: { replayChunks: [], replayErrored: [] },
+    calls: { replayChunks: [], replayErrored: [], replayPending: [] },
     ...over
   };
   const resumableStream = {
@@ -85,9 +91,14 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
     },
     replayCompletedChunksByRequestId: () => state.replayCompletedReturn,
     getOriginMessageIds: () => state.originMessageIds,
+    getOutcome: () => state.outcome,
     replayErroredChunksByRequestId: (_c: Connection, requestId: string) => {
       state.calls.replayErrored.push(requestId);
       return state.replayErroredReturn;
+    },
+    replayPendingCutoverChunks: (_c: Connection, requestId: string) => {
+      state.calls.replayPending.push(requestId);
+      return true;
     }
   } as unknown as ResumableStream;
   return { state, resumableStream };
@@ -101,8 +112,12 @@ function makeHost(opts: {
   pendingResumeConnections?: Set<string>;
   persistCalls?: string[];
   presentConnectionIds?: Set<string>;
+  heldTerminalRequestIds?: Set<string>;
 }): ResumeHandshakeHost {
   return {
+    ...(opts.heldTerminalRequestIds && {
+      holdsTerminalFrames: (id: string) => opts.heldTerminalRequestIds!.has(id)
+    }),
     responseMessageType: RESPONSE_TYPE,
     resumableStream: opts.resumableStream,
     continuation: opts.continuation ?? new ContinuationState<Connection>(),
@@ -522,5 +537,43 @@ describe("ResumeHandshake (driver → golden frames)", () => {
     await handshake.handleResumeAck(makeConnection("c1", frames), "req-done");
 
     expect(frames).toEqual([replayDoneFrame("req-done", RESPONSE_TYPE)]);
+  });
+
+  it("ACK with nothing left to replay echoes the stream's outcome", async () => {
+    const frames: SentFrame[] = [];
+    const { resumableStream } = makeStream({
+      active: false,
+      replayCompletedReturn: false,
+      outcome: "aborted"
+    });
+    const handshake = new ResumeHandshake(makeHost({ resumableStream }));
+
+    await handshake.handleResumeAck(makeConnection("c1", frames), "req-done");
+
+    expect(frames).toEqual([
+      { ...replayDoneFrame("req-done", RESPONSE_TYPE), outcome: "aborted" }
+    ]);
+  });
+
+  it("ACK while the host holds the request's terminal frames sends no early done", async () => {
+    const frames: SentFrame[] = [];
+    const { state, resumableStream } = makeStream({
+      active: false,
+      replayCompletedReturn: false
+    });
+    const handshake = new ResumeHandshake(
+      makeHost({
+        resumableStream,
+        heldTerminalRequestIds: new Set(["req-persisting"])
+      })
+    );
+
+    await handshake.handleResumeAck(
+      makeConnection("c1", frames),
+      "req-persisting"
+    );
+
+    expect(frames).toEqual([]);
+    expect(state.calls.replayPending).toEqual(["req-persisting"]);
   });
 });
