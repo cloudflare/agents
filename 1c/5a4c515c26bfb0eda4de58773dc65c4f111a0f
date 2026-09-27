@@ -1,0 +1,85 @@
+.changeset/agent-tool-replay-recovery-fixes.md
+  s_f6c6c41d005af6::t_84fe0d10d61334 1-14
+docs/agents/agent-tools.md
+  s_f6c6c41d005af6::t_b70f85b2968f41 482-486
+docs/agents/durable-execution.md
+  s_f6c6c41d005af6::t_02e53268408314 465
+packages/agents/src/agent-tool-types.ts
+  s_7c9867abe4d126::t_ad10621976a31e 371-378
+packages/agents/src/chat/__tests__/agent-tools.test.ts
+  s_f6c6c41d005af6::t_2c12ba9309c67a 96-115
+packages/agents/src/chat/agent-tools.ts
+  s_93f525f3481953::t_30eac4f8d0a9e2 403-405,408-410,421-425,427-429,436-438
+packages/agents/src/index.ts
+  s_f4803804f2d8c8::t_08b320d46a8af4 4476,4478-4487,4490-4496,6877-6879,6907-6908,6917-6918,6959-6960,6970,6972,6979,6997,7007-7011,7013-7014,7065-7071,7184,7632-7634,7639,7643,7648,7672,7694,7746-7747,7752-7753
+packages/agents/src/tests/agent-tool-replay.test.ts
+  s_93f525f3481953::t_4088cdca3286dc 4-113
+packages/agents/src/tests/agents/agent-tool-replay.ts
+  s_7c9867abe4d126::t_4e11d88c155c3d 22-34,52,427-575,602-605,610-632,640-643,645-648,651-652,654-656,660,663,677-678,681,688,690,695-703,710-711,742-755,757-771,779-780
+packages/agents/src/tests/agents/run-fiber.ts
+  s_da56d18e00076b::t_d7f03329eec2cd 706-728
+packages/agents/src/tests/run-fiber.test.ts
+  s_da56d18e00076b::t_2c80873e056624 1042-1092
+packages/ai-chat/src/index.ts
+  s_93f525f3481953::t_3715918eeeac83 4303-4304,4314,4522-4531,4609-4613
+packages/ai-chat/src/tests/agent-tools.test.ts
+  s_f6c6c41d005af6::t_8aa9cf9cd30038 170,175-182,587-615
+packages/ai-chat/src/tests/worker.ts
+  s_f6c6c41d005af6::t_f6a2d16a9cb49d 4121,4147,4176,4214-4259,4821,4830-4852
+packages/think/src/tests/agent-tool-rebind-noop.test.ts
+  s_93f525f3481953::t_4980e4bf6a623d 83-127
+packages/think/src/tests/agents/think-session.ts
+  s_f6c6c41d005af6::t_b90921505b4b82 903-1017,9615-9702
+packages/think/src/think.ts
+  s_f4803804f2d8c8::t_b90fb5f455b142 4696,4709-4725,9788-9789,9797,9872-9876,10054-10063,12231,12235,12256
+packages/think/src/tests/agent-tools.test.ts
+  s_f6c6c41d005af6::t_42da4dce9bde55 53-60,549-560,562-563,770-788
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1c5a4c515c26bfb0eda4de58773dc65c4f111a0f",
+  "prompts": {},
+  "sessions": {
+    "s_7c9867abe4d126": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "abc3e726-5121-430d-bf7f-fae36392288e",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_93f525f3481953": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "07fb1119-18c7-479c-bfbf-f3f2f017f34b",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_da56d18e00076b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "f7f55626-fbab-4399-8014-a16a1cac352b",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_f4803804f2d8c8": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "74a18dc3-b102-4463-b272-958aecacfe5c",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_f6c6c41d005af6": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "0bbac664-3a39-457e-ae01-d9ddf59c0ac8",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
