@@ -1320,6 +1320,20 @@ describe("think messengers core", () => {
         (await agent.getAdapterCalls()).map((call) => call.content)
       ).toEqual(["one", "three"]);
     });
+
+    it("posts each chunk once when overlapping deliveries share a recovered reply", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `split-overlap-${crypto.randomUUID()}`
+      );
+
+      expect(
+        await agent.deliverRecoveryConcurrentlyForTest("one|two|three")
+      ).toBe(true);
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content)
+      ).toEqual(["one", "two", "three"]);
+    });
   });
 
   describe("burst replies end to end (#2312)", () => {

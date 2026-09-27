@@ -301,6 +301,37 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     };
   }
 
+  private _slowPostsForTest = false;
+
+  /**
+   * Deliver one settled recovered reply from the start replay and a
+   * scheduled retry at once, with every post slow enough to overlap.
+   */
+  async deliverRecoveryConcurrentlyForTest(text: string): Promise<boolean> {
+    const key = `cf_think_messenger_recovery:${crypto.randomUUID()}:user-1`;
+    await this.ctx.storage.put(key, {
+      messengerId: "fake",
+      threadId: "fake:dm-split",
+      partialText: "",
+      outcome: "completed",
+      text
+    });
+    this._slowPostsForTest = true;
+    try {
+      await Promise.all([
+        (
+          this as unknown as {
+            _replayMessengerRecoveryDeliveries(): Promise<void>;
+          }
+        )._replayMessengerRecoveryDeliveries(),
+        this._cfRetryMessengerRecoveryDelivery({ key, attempts: 1 })
+      ]);
+    } finally {
+      this._slowPostsForTest = false;
+    }
+    return (await this.ctx.storage.get(key)) === undefined;
+  }
+
   /** Run a scheduled recovered-reply retry now. */
   async runMessengerRecoveryRetryForTest(payload: {
     key: string;
@@ -446,13 +477,16 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         return Promise.resolve();
       },
       isDM: (threadId: string) => threadId.startsWith("fake:dm"),
-      postMessage: (threadId: string, message: unknown) => {
+      postMessage: async (threadId: string, message: unknown) => {
         if (this._failPostForTest === text(message)) {
           this._failPostForTest = null;
-          return Promise.reject(new Error("simulated post failure"));
+          throw new Error("simulated post failure");
+        }
+        if (this._slowPostsForTest) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
         }
         this._record("post", text(message));
-        return Promise.resolve({ id: "reply", raw: {}, threadId });
+        return { id: "reply", raw: {}, threadId };
       },
       startTyping: () => Promise.resolve()
     } as unknown as Adapter;

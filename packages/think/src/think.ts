@@ -18602,7 +18602,7 @@ export class Think<
         delivery = settleMessengerRecoveryDelivery(delivery, outcome, text);
         await this.ctx.storage.put(key, delivery);
       }
-      await this._deliverMessengerRecovery(key, delivery);
+      await this._deliverMessengerRecovery(key);
     })
       .catch((error: unknown) =>
         this._retryMessengerRecoveryDeliveryLater(key, 0, error)
@@ -18612,17 +18612,40 @@ export class Think<
       });
   }
 
+  /** The latest delivery of each recovered reply key, in call order. */
+  private _messengerRecoveryDeliveries = new Map<string, Promise<void>>();
+
+  /**
+   * Deliver a recovered reply after any delivery of the same key already
+   * running in this isolate: startup replay, live settlement and scheduled
+   * retries interleave across awaits, and each must see the cursor the
+   * previous one advanced.
+   */
+  private async _deliverMessengerRecovery(key: string): Promise<void> {
+    const previous = this._messengerRecoveryDeliveries.get(key);
+    const run = (previous ?? Promise.resolve()).then(() =>
+      this._postMessengerRecovery(key)
+    );
+    const tail = run.catch(() => {});
+    this._messengerRecoveryDeliveries.set(key, tail);
+    try {
+      await run;
+    } finally {
+      if (this._messengerRecoveryDeliveries.get(key) === tail) {
+        this._messengerRecoveryDeliveries.delete(key);
+      }
+    }
+  }
+
   /**
    * Post a settled recovered reply, one post at a time, then drop its record.
    * Each post goes out at most once: the cursor advances before it, and a
    * rejected post may still have landed (a timeout after the platform
    * accepted it), so the retry resumes with the next post.
    */
-  private async _deliverMessengerRecovery(
-    key: string,
-    delivery: MessengerRecoveryDelivery
-  ): Promise<void> {
-    if (!delivery.outcome) return;
+  private async _postMessengerRecovery(key: string): Promise<void> {
+    let delivery = await this.ctx.storage.get<MessengerRecoveryDelivery>(key);
+    if (!delivery?.outcome) return;
     const input = {
       messengerId: delivery.messengerId,
       threadId: delivery.threadId,
@@ -18637,15 +18660,17 @@ export class Think<
           name: parent.className
         } as unknown as SubAgentClass<Think>)
       : this;
-    let posted = delivery.posted ?? 0;
-    let chunks = posted + 1;
-    while (posted < chunks) {
+    let chunks: number | undefined;
+    for (;;) {
+      delivery = await this.ctx.storage.get<MessengerRecoveryDelivery>(key);
+      if (!delivery?.outcome) return;
+      const posted = delivery.posted ?? 0;
+      if (chunks !== undefined && posted >= chunks) break;
       await this.ctx.storage.put(key, { ...delivery, posted: posted + 1 });
       ({ chunks } = await host._cf_deliverRecoveredMessengerReply({
         ...input,
         chunk: posted
       }));
-      posted++;
     }
     await this.ctx.storage.delete(key);
   }
@@ -18690,12 +18715,8 @@ export class Think<
     key: string;
     attempts: number;
   }): Promise<void> {
-    const delivery = await this.ctx.storage.get<MessengerRecoveryDelivery>(
-      payload.key
-    );
-    if (!delivery) return;
     try {
-      await this._deliverMessengerRecovery(payload.key, delivery);
+      await this._deliverMessengerRecovery(payload.key);
     } catch (error) {
       await this._retryMessengerRecoveryDeliveryLater(
         payload.key,
@@ -18709,8 +18730,7 @@ export class Think<
     const pending = await this.ctx.storage.list<MessengerRecoveryDelivery>({
       prefix: MESSENGER_RECOVERY_PREFIX
     });
-    for (const [key, pendingDelivery] of pending) {
-      let delivery = pendingDelivery;
+    for (const [key, delivery] of pending) {
       if (!delivery.outcome) {
         // Settled while an earlier isolate was delivering: the incident is
         // gone or gave up, and no event will settle this record again.
@@ -18725,11 +18745,13 @@ export class Think<
         ) {
           continue;
         }
-        delivery = settleMessengerRecoveryDelivery(delivery, "interrupted");
-        await this.ctx.storage.put(key, delivery);
+        await this.ctx.storage.put(
+          key,
+          settleMessengerRecoveryDelivery(delivery, "interrupted")
+        );
       }
       try {
-        await this._deliverMessengerRecovery(key, delivery);
+        await this._deliverMessengerRecovery(key);
       } catch (error) {
         await this._retryMessengerRecoveryDeliveryLater(key, 0, error);
       }
