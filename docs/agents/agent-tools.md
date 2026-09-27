@@ -479,8 +479,11 @@ The run still produces `started`, progress, milestone, and terminal
 summary, and output are unchanged. Ordinary child chunks are not forwarded to the
 parent's clients, are not replayed on reconnect, and are not broadcast by the
 child. The child still stores its own conversation, so `getAgentToolChunks()`
-and drill-in continue to work. Detached runs do not support
-`eventDelivery: "terminal"` and reject it.
+keeps working. A client that drills in to the child sees the stored
+conversation when it connects and the final messages when the run ends, but
+does not see text stream live while the run is in flight. Use the default
+`eventDelivery` for runs you expect users to watch. Detached runs do not
+support `eventDelivery: "terminal"` and reject it.
 
 ## Render child timelines in React
 

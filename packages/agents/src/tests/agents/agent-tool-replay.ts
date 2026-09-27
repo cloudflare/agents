@@ -19,6 +19,19 @@ type StubRunInput = {
   /** JSON-encoded UI message chunk bodies, emitted in order. */
   chunkBodies: string[];
   summary?: string;
+  /**
+   * Milestones the live tail emits (broadcast-only, never stored as chunks)
+   * just before the stored chunk at `beforeChunk`; inspection reports them.
+   */
+  milestones?: { beforeChunk: number; name: string }[];
+  /**
+   * When set, the run stays `running` and these chunks are stored + streamed
+   * by the next tail, which then completes the run — a child that keeps
+   * producing output after the parent restarts.
+   */
+  pendingChunkBodies?: string[];
+  /** Stall every inspection for this long (an unresponsive child). */
+  inspectDelayMs?: number;
 };
 
 /**
@@ -36,6 +49,7 @@ type AgentToolInternals = {
   _readAgentToolRun(runId: string): unknown;
   _resultFromAgentToolRow(row: unknown): RunAgentToolResult;
   _replayAgentToolRuns(connection: Connection): Promise<void>;
+  _reconcileAgentToolRuns(): Promise<unknown>;
   _deliverDetachedTerminal(
     runId: string,
     kind: "finish" | "give_up",
@@ -410,6 +424,155 @@ export class TestAgentToolReplayAgent extends Agent {
       }
     });
   }
+
+  /** Run `action` and return every `agent-tool-event` frame it broadcasts. */
+  private async _captureBroadcastsForTest(
+    action: () => Promise<unknown>
+  ): Promise<AgentToolEventMessage[]> {
+    const captured: AgentToolEventMessage[] = [];
+    const self = this as unknown as {
+      broadcast: (
+        body: string | ArrayBuffer | ArrayBufferView,
+        without?: string[]
+      ) => void;
+    };
+    const original = self.broadcast.bind(this);
+    self.broadcast = (body, without) => {
+      if (typeof body === "string") {
+        try {
+          const message = JSON.parse(body) as AgentToolEventMessage;
+          if (message.type === "agent-tool-event") captured.push(message);
+        } catch {
+          // Ignore non-JSON frames.
+        }
+      }
+      return original(body, without);
+    };
+    try {
+      await action();
+    } finally {
+      self.broadcast = original;
+    }
+    return captured;
+  }
+
+  /** Every `agent-tool-event` frame a reconnecting client receives on replay. */
+  private async _captureReplayForTest(): Promise<AgentToolEventMessage[]> {
+    const captured: AgentToolEventMessage[] = [];
+    const connection = {
+      id: "replay-capture",
+      send(body: string | ArrayBuffer | ArrayBufferView) {
+        if (typeof body !== "string") return;
+        const message = JSON.parse(body) as AgentToolEventMessage;
+        if (message.type === "agent-tool-event") captured.push(message);
+      }
+    } as unknown as Connection;
+    await this._agentTool._replayAgentToolRuns(connection);
+    return captured;
+  }
+
+  /**
+   * Live frames of a real `runAgentTool` (with mid-stream milestones) plus the
+   * frames a client reconnecting afterwards receives on replay (#2364).
+   */
+  async captureLiveAndReplayForTest(options: {
+    runId: string;
+    chunkBodies: string[];
+    milestones: { beforeChunk: number; name: string }[];
+  }): Promise<{
+    live: AgentToolEventMessage[];
+    replay: AgentToolEventMessage[];
+  }> {
+    const live = await this._captureBroadcastsForTest(() =>
+      this.runAgentTool<StubRunInput>(TestAgentToolStubChild, {
+        runId: options.runId,
+        parentToolCallId: `call-${options.runId}`,
+        input: {
+          chunkBodies: options.chunkBodies,
+          milestones: options.milestones
+        }
+      })
+    );
+    return { live, replay: await this._captureReplayForTest() };
+  }
+
+  /**
+   * A completed run whose child is then replayed to a connecting client.
+   * Returns how long the replay took, the event kinds it sent, and the
+   * `reconcile` option of every child inspection it made.
+   */
+  async captureConnectReplayForTest(options: {
+    runId: string;
+    chunkBodies: string[];
+    inspectDelayMs?: number;
+  }): Promise<{
+    elapsedMs: number;
+    kinds: AgentToolEvent["kind"][];
+    inspectReconcile: (boolean | undefined)[];
+  }> {
+    const child = await this.subAgent(TestAgentToolStubChild, options.runId);
+    await child.startAgentToolRun(
+      {
+        chunkBodies: options.chunkBodies,
+        milestones: [{ beforeChunk: 0, name: "begin" }],
+        inspectDelayMs: options.inspectDelayMs
+      },
+      { runId: options.runId }
+    );
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, summary,
+        display_order, started_at, completed_at, detached
+      ) VALUES (
+        ${options.runId}, ${`call-${options.runId}`}, 'TestAgentToolStubChild',
+        'completed', 'done', 0, ${Date.now()}, ${Date.now()}, 0
+      )
+    `;
+    const startedAt = Date.now();
+    const replay = await this._captureReplayForTest();
+    return {
+      elapsedMs: Date.now() - startedAt,
+      kinds: replay.map((message) => message.event.kind),
+      inspectReconcile: await child.getInspectReconcileLog()
+    };
+  }
+
+  /**
+   * A child still running when the parent restarts: a connected client has
+   * already seen the stored chunks, then parent recovery re-attaches and
+   * forwards the chunks the child produces afterwards.
+   */
+  async captureRecoveryReattachForTest(options: {
+    runId: string;
+    storedChunkBodies: string[];
+    pendingChunkBodies: string[];
+  }): Promise<{
+    seen: AgentToolEventMessage[];
+    recovery: AgentToolEventMessage[];
+  }> {
+    const child = await this.subAgent(TestAgentToolStubChild, options.runId);
+    await child.startAgentToolRun(
+      {
+        chunkBodies: options.storedChunkBodies,
+        pendingChunkBodies: options.pendingChunkBodies
+      },
+      { runId: options.runId }
+    );
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, detached
+      ) VALUES (
+        ${options.runId}, ${`call-${options.runId}`}, 'TestAgentToolStubChild',
+        'running', 0, ${Date.now()}, 0
+      )
+    `;
+    const seen = await this._captureReplayForTest();
+    const recovery = await this._captureBroadcastsForTest(() =>
+      this._agentTool._reconcileAgentToolRuns()
+    );
+    return { seen, recovery };
+  }
 }
 
 /**
@@ -436,9 +599,35 @@ export class TestAgentToolStubChild extends Agent {
         summary TEXT,
         error TEXT,
         started_at INTEGER NOT NULL,
-        completed_at INTEGER
+        completed_at INTEGER,
+        milestones_json TEXT,
+        pending_json TEXT,
+        inspect_delay_ms INTEGER
       )
     `;
+  }
+
+  /** The `reconcile` option of every `inspectAgentToolRun` call received. */
+  inspectReconcileLog: (boolean | undefined)[] = [];
+
+  getInspectReconcileLog(): (boolean | undefined)[] {
+    return this.inspectReconcileLog;
+  }
+
+  private _storeChunks(runId: string, bodies: string[], offset: number) {
+    bodies.forEach((body, index) => {
+      this.sql`
+        INSERT OR REPLACE INTO cf_test_stub_chunks (run_id, seq, body)
+        VALUES (${runId}, ${offset + index}, ${body})
+      `;
+    });
+  }
+
+  private _milestones(runId: string): { beforeChunk: number; name: string }[] {
+    const row = this.sql<{ milestones_json: string | null }>`
+      SELECT milestones_json FROM cf_test_stub_runs WHERE run_id = ${runId}
+    `[0];
+    return row?.milestones_json ? JSON.parse(row.milestones_json) : [];
   }
 
   async startAgentToolRun(
@@ -448,26 +637,30 @@ export class TestAgentToolStubChild extends Agent {
     this._ensureTables();
     const startedAt = Date.now();
     const chunkBodies = input?.chunkBodies ?? [];
-    chunkBodies.forEach((body, seq) => {
-      this.sql`
-        INSERT OR REPLACE INTO cf_test_stub_chunks (run_id, seq, body)
-        VALUES (${options.runId}, ${seq}, ${body})
-      `;
-    });
-    const completedAt = Date.now();
+    this._storeChunks(options.runId, chunkBodies, 0);
+    const pending = input?.pendingChunkBodies;
+    const status = pending ? "running" : "completed";
+    const completedAt = pending ? null : Date.now();
     const summary = input?.summary ?? null;
+    const milestonesJson = input?.milestones
+      ? JSON.stringify(input.milestones)
+      : null;
+    const pendingJson = pending ? JSON.stringify(pending) : null;
     this.sql`
       INSERT OR REPLACE INTO cf_test_stub_runs
-        (run_id, status, summary, error, started_at, completed_at)
+        (run_id, status, summary, error, started_at, completed_at,
+         milestones_json, pending_json, inspect_delay_ms)
       VALUES
-        (${options.runId}, 'completed', ${summary}, ${null}, ${startedAt}, ${completedAt})
+        (${options.runId}, ${status}, ${summary}, ${null}, ${startedAt},
+         ${completedAt}, ${milestonesJson}, ${pendingJson},
+         ${input?.inspectDelayMs ?? null})
     `;
     return {
       runId: options.runId,
-      status: "completed",
+      status,
       summary: input?.summary,
       startedAt,
-      completedAt
+      completedAt: completedAt ?? undefined
     };
   }
 
@@ -481,28 +674,41 @@ export class TestAgentToolStubChild extends Agent {
   }
 
   async inspectAgentToolRun(
-    runId: string
+    runId: string,
+    options?: { reconcile?: boolean }
   ): Promise<AgentToolRunInspection | null> {
     this._ensureTables();
+    this.inspectReconcileLog.push(options?.reconcile);
     const rows = this.sql<{
       status: string;
       summary: string | null;
       error: string | null;
       started_at: number;
       completed_at: number | null;
+      inspect_delay_ms: number | null;
     }>`
-      SELECT status, summary, error, started_at, completed_at
+      SELECT status, summary, error, started_at, completed_at, inspect_delay_ms
       FROM cf_test_stub_runs WHERE run_id = ${runId}
     `;
     const row = rows[0];
     if (!row) return null;
+    const inspectDelayMs = row.inspect_delay_ms;
+    if (inspectDelayMs) {
+      await new Promise((resolve) => setTimeout(resolve, inspectDelayMs));
+    }
+    const milestones = this._milestones(runId).map((milestone, sequence) => ({
+      name: milestone.name,
+      sequence,
+      at: row.started_at
+    }));
     return {
       runId,
       status: row.status as AgentToolRunInspection["status"],
       summary: row.summary ?? undefined,
       error: row.error ?? undefined,
       startedAt: row.started_at,
-      completedAt: row.completed_at ?? undefined
+      completedAt: row.completed_at ?? undefined,
+      ...(milestones.length > 0 ? { milestones } : {})
     };
   }
 
@@ -533,7 +739,36 @@ export class TestAgentToolStubChild extends Agent {
     runId: string,
     options?: { afterSequence?: number; signal?: AbortSignal }
   ): Promise<ReadableStream<AgentToolStoredChunk>> {
+    this._ensureTables();
+    const run = this.sql<{ pending_json: string | null }>`
+      SELECT pending_json FROM cf_test_stub_runs WHERE run_id = ${runId}
+    `[0];
+    if (run?.pending_json) {
+      const stored = await this.getAgentToolChunks(runId);
+      this._storeChunks(runId, JSON.parse(run.pending_json), stored.length);
+      this.sql`
+        UPDATE cf_test_stub_runs
+        SET status = 'completed', completed_at = ${Date.now()},
+            pending_json = NULL
+        WHERE run_id = ${runId}
+      `;
+    }
     const chunks = await this.getAgentToolChunks(runId, options);
+    const milestones = this._milestones(runId);
+    const frames: AgentToolStoredChunk[] = [];
+    for (const chunk of chunks) {
+      milestones.forEach((milestone, sequence) => {
+        if (milestone.beforeChunk !== chunk.sequence) return;
+        frames.push({
+          sequence: chunk.sequence,
+          body: JSON.stringify({
+            type: "data-agent-milestone",
+            data: { name: milestone.name, sequence, at: Date.now() }
+          })
+        });
+      });
+      frames.push(chunk);
+    }
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -541,8 +776,8 @@ export class TestAgentToolStubChild extends Agent {
           controller.close();
           return;
         }
-        for (const chunk of chunks) {
-          controller.enqueue(encoder.encode(`${JSON.stringify(chunk)}\n`));
+        for (const frame of frames) {
+          controller.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`));
         }
         controller.close();
       }

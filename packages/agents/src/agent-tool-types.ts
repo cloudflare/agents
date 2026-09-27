@@ -368,7 +368,14 @@ export type AgentToolChildAdapter<Input = unknown, Output = unknown> = {
   ): Promise<AgentToolRunInspection<Output>>;
   cancelAgentToolRun(runId: string, reason?: unknown): Promise<void>;
   inspectAgentToolRun(
-    runId: string
+    runId: string,
+    options?: {
+      /**
+       * `false` reports the stored row as-is instead of first reconciling
+       * (and possibly sealing) a stale run. Defaults to `true`.
+       */
+      reconcile?: boolean;
+    }
   ): Promise<AgentToolRunInspection<Output> | null>;
   getAgentToolChunks(
     runId: string,

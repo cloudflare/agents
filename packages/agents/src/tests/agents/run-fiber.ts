@@ -703,6 +703,29 @@ export class TestRunFiberAgent extends Agent {
     await this.insertInterruptedFiber(id, name, snapshot);
   }
 
+  /**
+   * A managed fiber whose body settled (`completed_at` on the run row) but
+   * whose ledger settle and run-row delete both failed.
+   */
+  async insertSettledManagedFiberWithRun(
+    id: string,
+    name: string
+  ): Promise<void> {
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_fibers
+        (fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+         error_message, created_at, started_at, completed_at)
+      VALUES
+        (${id}, ${`key:${id}`}, ${name}, 'running', NULL, NULL, NULL,
+         ${now}, ${now}, NULL)
+    `;
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at, completed_at)
+      VALUES (${id}, ${name}, NULL, ${now}, ${now})
+    `;
+  }
+
   async triggerRecoveryCheck(): Promise<void> {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }

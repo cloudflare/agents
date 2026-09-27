@@ -167,10 +167,18 @@ type ParentStub = DurableObjectStub & {
     milestoneBody: string,
     runId?: string
   ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }>;
-  coldCounterChildReattachForTest(): Promise<{
+  coldCounterChildReattachForTest(afterSequence?: number): Promise<{
     drained: number[];
     liveSequenceAfterDrain: number | undefined;
     postRestart: { sequence: number; body: string } | null;
+  }>;
+  terminalOnlyChildAfterRecoveredTurnForTest(): Promise<{
+    afterRebind: boolean;
+    afterClose: boolean;
+  }>;
+  inspectStaleChildRunReadOnlyForTest(): Promise<{
+    reported: string | undefined;
+    stored: string | undefined;
   }>;
   cancelledTailerStarvationChildForTest(): Promise<{
     siblingBodyAfterCancel: string | null;
@@ -573,6 +581,35 @@ describe("AIChatAgent as an agent-tool child", () => {
         toolCallId: "post-restart",
         output: "ok"
       })
+    });
+  });
+
+  it("realigns a cold counter when re-attaching after the last stored chunk", async () => {
+    // Parent recovery re-attaches with `afterSequence` = the last stored index,
+    // so nothing is drained; the counter must still realign past the backlog.
+    const parent = await getParent();
+
+    const { drained, liveSequenceAfterDrain, postRestart } =
+      await parent.coldCounterChildReattachForTest(2);
+
+    expect(drained).toEqual([]);
+    expect(liveSequenceAfterDrain).toBe(3);
+    expect(postRestart).toMatchObject({ sequence: 3 });
+  });
+
+  it("inspects a stale run read-only when asked not to reconcile", async () => {
+    const parent = await getParent();
+    expect(await parent.inspectStaleChildRunReadOnlyForTest()).toEqual({
+      reported: "running",
+      stored: "running"
+    });
+  });
+
+  it("drops a terminal-only run from suppression once its recovered turn settles", async () => {
+    const parent = await getParent();
+    expect(await parent.terminalOnlyChildAfterRecoveredTurnForTest()).toEqual({
+      afterRebind: true,
+      afterClose: false
     });
   });
 

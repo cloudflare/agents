@@ -4300,7 +4300,8 @@ export class AIChatAgent<
   }
 
   async inspectAgentToolRun(
-    runId: string
+    runId: string,
+    options?: { reconcile?: boolean }
   ): Promise<AgentToolRunInspection | null> {
     const row = this._getAgentToolRunRow(runId);
     if (!row) return null;
@@ -4310,6 +4311,7 @@ export class AIChatAgent<
     // was in flight, #1630) — lazily reconcile it from the child's own durable
     // recovery before reporting (mutates `row` in place when it settles).
     if (
+      options?.reconcile !== false &&
       row.status === "running" &&
       !this._agentToolAbortControllers.has(runId)
     ) {
@@ -4517,10 +4519,16 @@ export class AIChatAgent<
           // high-water dedupe would silently drop every one, leaving the parent
           // stuck with no post-restart chunks. Gating on the still-running check
           // also avoids re-heating the broadcast idle-guard for a terminal run.
-          // Mirrors @cloudflare/think's tail.
-          if (lastEmitted > (options?.afterSequence ?? -1)) {
-            this._agentToolLiveSequences.set(runId, lastEmitted + 1);
-          }
+          // Realign even when nothing was drained: parent recovery re-attaches
+          // with `afterSequence` at the last stored chunk. Never move a warm
+          // counter backwards. Mirrors @cloudflare/think's tail.
+          this._agentToolLiveSequences.set(
+            runId,
+            Math.max(
+              this._agentToolLiveSequences.get(runId) ?? 0,
+              lastEmitted + 1
+            )
+          );
         } catch (error) {
           // Detach the up-front-registered forwarder before surfacing the
           // failure so it doesn't linger on this run, then guard
@@ -4598,6 +4606,11 @@ export class AIChatAgent<
       this._agentToolClosers.delete(runId);
     }
     this._agentToolForwarders.delete(runId);
+    // A live in-isolate run keeps suppressing until `startAgentToolRun`'s
+    // finally; a recovered turn never reaches that finally.
+    if (!this._agentToolAbortControllers.has(runId)) {
+      this._agentToolTerminalOnlyRuns.delete(runId);
+    }
   }
 
   private static _stringifyAgentToolValue(value: unknown): string | null {

@@ -4693,7 +4693,7 @@ export class Think<
    *
    * Safe to call on EVERY recovery continuation:
    *   - Facets that never ran as an agent-tool child have no
-   *     `cf_agent_tool_child_runs` table → the guarded SELECT throws → no-op.
+   *     `cf_agent_tool_child_runs` table → no-op (the table is not created).
    *   - A facet whose run already settled has no `starting`/`running` row → no-op.
    *   - A child DO is addressed by its `runId` (`subAgent(cls, runId)`), so it
    *     owns AT MOST ONE child-run row for its whole lifetime and is never reused
@@ -4706,21 +4706,23 @@ export class Think<
    * invariant note there).
    */
   private _rebindAgentToolChildRunRequestId(requestId: string): void {
-    let runId: string | undefined;
-    let terminalOnly = false;
-    try {
-      const rows = this.sql<{ run_id: string; event_delivery: string | null }>`
-        SELECT run_id, event_delivery FROM cf_agent_tool_child_runs
-        WHERE status IN ('starting', 'running')
-        ORDER BY started_at DESC
-        LIMIT 1
-      `;
-      runId = rows[0]?.run_id;
-      terminalOnly = rows[0]?.event_delivery === "terminal";
-    } catch {
-      // No child-run table on facets that never ran as an agent tool.
-      return;
-    }
+    // No child-run table on facets that never ran as an agent tool; don't
+    // create one. An existing table may predate newer columns (a fresh isolate
+    // after upgrade recovers before any other child-run access), so migrate it.
+    const tables = this.sql<{ name: string }>`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'cf_agent_tool_child_runs'
+    `;
+    if (tables.length === 0) return;
+    this._ensureAgentToolChildRunTable();
+    const rows = this.sql<{ run_id: string; event_delivery: string | null }>`
+      SELECT run_id, event_delivery FROM cf_agent_tool_child_runs
+      WHERE status IN ('starting', 'running')
+      ORDER BY started_at DESC
+      LIMIT 1
+    `;
+    const runId = rows[0]?.run_id;
+    const terminalOnly = rows[0]?.event_delivery === "terminal";
     if (!runId) return;
     if (terminalOnly) this._agentToolTerminalOnlyRuns.add(runId);
     this._agentToolRunsByRequestId.set(requestId, runId);
@@ -9783,7 +9785,8 @@ export class Think<
   }
 
   async inspectAgentToolRun(
-    runId: string
+    runId: string,
+    options?: { reconcile?: boolean }
   ): Promise<AgentToolRunInspection | null> {
     let row = this._readAgentToolChildRun(runId);
     if (!row) return null;
@@ -9791,7 +9794,7 @@ export class Think<
     // original in-isolate run is gone (e.g. the parent was evicted while this
     // child run was in flight, #1630) — lazily reconcile it from the child's
     // own durable recovery before reporting.
-    if (this._isStaleAgentToolChildRun(row)) {
+    if (options?.reconcile !== false && this._isStaleAgentToolChildRun(row)) {
       await this._reconcileStaleAgentToolChildRun(runId);
       row = this._readAgentToolChildRun(runId) ?? row;
     }
@@ -9866,6 +9869,11 @@ export class Think<
     this._agentToolLiveSequences.delete(runId);
     this._agentToolLastErrors.delete(runId);
     this._agentToolPreTurnAssistantIds.delete(runId);
+    // A live in-isolate run keeps suppressing until `startAgentToolRun`'s
+    // finally; a recovered turn never reaches that finally.
+    if (!this._agentToolAbortControllers.has(runId)) {
+      this._agentToolTerminalOnlyRuns.delete(runId);
+    }
   }
 
   /**
@@ -10043,10 +10051,16 @@ export class Think<
           // is cold — from colliding with already-emitted chunks. Gating on the
           // terminal check above also avoids repopulating `_agentToolLiveSequences`
           // for an already-terminal run, which would re-heat the broadcast
-          // idle-guard for the DO's lifetime.
-          if (lastEmitted > (options?.afterSequence ?? -1)) {
-            self._agentToolLiveSequences.set(runId, lastEmitted + 1);
-          }
+          // idle-guard for the DO's lifetime. Realign even when nothing was
+          // drained: parent recovery re-attaches with `afterSequence` at the
+          // last stored chunk, so a cold counter would otherwise restart at 0.
+          self._agentToolLiveSequences.set(
+            runId,
+            Math.max(
+              self._agentToolLiveSequences.get(runId) ?? 0,
+              lastEmitted + 1
+            )
+          );
         } catch (error) {
           // A drain/read failure must surface to the consumer; detach first so
           // the forwarder we registered up front doesn't linger on this run.
@@ -12214,9 +12228,11 @@ export class Think<
   }
 
   private _hasRecoverableChatTurn(requestId: string): boolean {
+    // A settled fiber whose row delete failed keeps `completed_at` (#2363).
     const fiberRows = this.sql<{ id: string }>`
       SELECT id FROM cf_agents_runs
       WHERE name = ${(this.constructor as typeof Think).CHAT_FIBER_NAME + ":" + requestId}
+        AND completed_at IS NULL
       LIMIT 1
     `;
     if (fiberRows.length > 0) return true;
@@ -12237,6 +12253,7 @@ export class Think<
     const fiberRows = this.sql<{ created_at: number }>`
       SELECT created_at FROM cf_agents_runs
       WHERE name = ${(this.constructor as typeof Think).CHAT_FIBER_NAME + ":" + row.request_id}
+        AND completed_at IS NULL
       LIMIT 1
     `;
     if (fiberRows[0] && fiberRows[0].created_at >= cutoff) return true;

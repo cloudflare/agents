@@ -93,6 +93,26 @@ describe("agentToolEventDedupeKey", () => {
     );
   });
 
+  it("keys progress frames apart from the ordinary chunk sharing their sequence", () => {
+    const progress = frame(2, {
+      kind: "chunk",
+      runId,
+      body: JSON.stringify({
+        type: AGENT_TOOL_PROGRESS_PART,
+        transient: true,
+        data: { fraction: 0.5 }
+      })
+    });
+    const ordinary = frame(2, {
+      kind: "chunk",
+      runId,
+      body: '{"type":"text-delta"}'
+    });
+    expect(agentToolEventDedupeKey(progress)).not.toBe(
+      agentToolEventDedupeKey(ordinary)
+    );
+  });
+
   it("keys ordinary chunks on the broadcast sequence", () => {
     const chunk = (sequence: number) =>
       frame(sequence, { kind: "chunk", runId, body: '{"type":"text-delta"}' });

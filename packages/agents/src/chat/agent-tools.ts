@@ -400,12 +400,14 @@ export function createAgentToolEventState<
 }
 
 /**
- * Identity of an agent-tool event for replay-vs-live dedupe. Live numbering
- * counts transient frames that replay never sees, so only ordinary chunks key
- * on the broadcast `sequence`. Lifecycle events key on their content: a
+ * Identity of an agent-tool event for replay-vs-live dedupe. Ordinary chunks
+ * key on the broadcast `sequence`, which is their stored-chunk position on
+ * both the live and replay paths. Lifecycle events key on their content: a
  * reattached run can be interrupted again with a different reason, and the
  * reducer overwrites on lifecycle events, so re-applying one is harmless.
- * Milestones key on their own persisted sequence.
+ * Milestones key on their own persisted sequence. Progress frames reuse the
+ * next stored chunk's sequence without consuming it and are never replayed,
+ * so they key apart from ordinary chunks.
  */
 export function agentToolEventDedupeKey(
   message: AgentToolEventMessage
@@ -416,16 +418,24 @@ export function agentToolEventDedupeKey(
     identity = `event:${JSON.stringify(event)}`;
   } else {
     let milestone: AgentToolMilestone | undefined;
-    if (event.body.includes(AGENT_TOOL_MILESTONE_PART)) {
+    let progress = false;
+    if (
+      event.body.includes(AGENT_TOOL_MILESTONE_PART) ||
+      event.body.includes(AGENT_TOOL_PROGRESS_PART)
+    ) {
       try {
-        milestone = readAgentToolMilestoneChunk(JSON.parse(event.body));
+        const parsed: unknown = JSON.parse(event.body);
+        milestone = readAgentToolMilestoneChunk(parsed);
+        progress = readAgentToolProgressChunk(parsed) !== undefined;
       } catch {
         milestone = undefined;
       }
     }
     identity = milestone
       ? `milestone:${milestone.sequence}`
-      : `seq:${message.sequence}`;
+      : progress
+        ? `progress:${message.sequence}:${event.body}`
+        : `seq:${message.sequence}`;
   }
   return [message.parentToolCallId ?? "", event.runId, identity].join("\0");
 }

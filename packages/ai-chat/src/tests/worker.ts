@@ -4118,7 +4118,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
    * and the forwarded post-restart chunk (null if it was dropped — the pre-fix
    * behaviour).
    */
-  async coldCounterReattachForwardsForTest(): Promise<{
+  async coldCounterReattachForwardsForTest(afterSequence = -1): Promise<{
     drained: number[];
     liveSequenceAfterDrain: number | undefined;
     postRestart: { sequence: number; body: string } | null;
@@ -4144,7 +4144,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     this["_agentToolLiveSequences"].delete(runId);
 
     const stream = (await this.tailAgentToolRun(runId, {
-      afterSequence: -1
+      afterSequence
     })) as unknown as ReadableStream<Uint8Array>;
     const reader = stream.getReader();
     const decoder = new TextDecoder();
@@ -4173,7 +4173,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     };
 
     const drained: number[] = [];
-    for (let i = 0; i < backlog.length; i++) {
+    for (let i = afterSequence + 1; i < backlog.length; i++) {
       const line = await readLine(2000);
       if (line === null) break;
       drained.push((JSON.parse(line) as { sequence: number }).sequence);
@@ -4209,6 +4209,52 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         : (JSON.parse(postLine) as { sequence: number; body: string });
     await reader.cancel();
     return { drained, liveSequenceAfterDrain, postRestart };
+  }
+
+  /**
+   * Inspect a stale `running` run row (no live run, no recovery) with
+   * `reconcile: false`. Returns the reported and the stored status afterwards.
+   */
+  async inspectStaleRunReadOnlyForTest(): Promise<{
+    reported: string | undefined;
+    stored: string | undefined;
+  }> {
+    const runId = crypto.randomUUID();
+    this.sql`
+      insert into cf_ai_chat_agent_tool_runs (run_id, status, input_json, started_at)
+      values (${runId}, 'running', '{}', ${Date.now()})
+    `;
+    const inspection = await this.inspectAgentToolRun(runId, {
+      reconcile: false
+    });
+    return {
+      reported: inspection?.status,
+      stored: this["_getAgentToolRunRow"](runId)?.status
+    };
+  }
+
+  /**
+   * Rebind an in-flight `eventDelivery: "terminal"` run the way a recovered
+   * turn does, then close its tailers the way a settled recovered turn does.
+   * Returns whether the run is still in the terminal-only set.
+   */
+  terminalOnlyRunAfterRecoveredTurnForTest(): {
+    afterRebind: boolean;
+    afterClose: boolean;
+  } {
+    const runId = "terminal-only-recovered-run";
+    this.sql`
+      insert into cf_ai_chat_agent_tool_runs
+        (run_id, request_id, status, input_json, started_at, event_delivery)
+      values (${runId}, 'old-req', 'running', '{}', ${Date.now()}, 'terminal')
+    `;
+    this["_rebindAgentToolChildRunRequestId"]("recovery-req");
+    const afterRebind = this["_agentToolTerminalOnlyRuns"].has(runId);
+    this["_closeAgentToolTailers"](runId);
+    return {
+      afterRebind,
+      afterClose: this["_agentToolTerminalOnlyRuns"].has(runId)
+    };
   }
 
   /**
@@ -4772,7 +4818,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
    * Drive the child's post-restart cold-counter realign probe (Devin review on
    * #1827). Routed through `subAgent` so the child runs in its SQL-enabled DO.
    */
-  async coldCounterChildReattachForTest(): Promise<{
+  async coldCounterChildReattachForTest(afterSequence?: number): Promise<{
     drained: number[];
     liveSequenceAfterDrain: number | undefined;
     postRestart: { sequence: number; body: string } | null;
@@ -4781,7 +4827,29 @@ export class AIChatAgentToolParent extends Agent<Env> {
       AIChatAgentToolChild,
       crypto.randomUUID()
     );
-    return child.coldCounterReattachForwardsForTest();
+    return child.coldCounterReattachForwardsForTest(afterSequence);
+  }
+
+  async inspectStaleChildRunReadOnlyForTest(): Promise<{
+    reported: string | undefined;
+    stored: string | undefined;
+  }> {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      crypto.randomUUID()
+    );
+    return child.inspectStaleRunReadOnlyForTest();
+  }
+
+  async terminalOnlyChildAfterRecoveredTurnForTest(): Promise<{
+    afterRebind: boolean;
+    afterClose: boolean;
+  }> {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      crypto.randomUUID()
+    );
+    return child.terminalOnlyRunAfterRecoveredTurnForTest();
   }
 
   /**
