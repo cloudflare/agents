@@ -1,0 +1,43 @@
+.changeset/think-invalid-model-id.md
+  s_150285dadff58b::t_a9197b087e25e6 5
+examples/sandbox-coding-agent/README.md
+  s_150285dadff58b::t_ee863717316501 142-149,155-156,176-177
+examples/sandbox-coding-agent/src/server.ts
+  s_4c7bbb70e827f0::t_a4848d734f7007 21-25,359-368,372-400
+packages/think/src/tests/hooks.test.ts
+  s_5d099cfa9873e9::t_4c0567c709e036 201-226
+packages/think/src/think.ts
+  s_5d099cfa9873e9::t_220e436c5ba6b3 343-350,4987-4989,4991-4994,5005,5010
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e1638056ab7345312f80820c4875dc45e9d23ff4",
+  "prompts": {},
+  "sessions": {
+    "s_150285dadff58b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "1646714c-6080-44ff-890f-cc2ad8eb9d63",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_4c7bbb70e827f0": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "865639d9-ae91-4b55-8813-2173e007fcb6",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    },
+    "s_5d099cfa9873e9": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "d6b52f06-048c-4bcc-8bd4-75cfd838c9ec",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
