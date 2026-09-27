@@ -18688,6 +18688,15 @@ export class Think<
     outcome?: ChatTurnOutcome
   ): void {
     this._resumableStream.complete(streamId, outcome);
+    this._afterResumableStreamEnded();
+  }
+
+  /**
+   * A connection offered the stream that never ACKed (`resume: false`, or
+   * gone quiet) must still get the terminal frame and every later broadcast.
+   */
+  private _afterResumableStreamEnded(): void {
+    this._pendingResumeConnections.clear();
   }
 
   /**
@@ -18700,10 +18709,12 @@ export class Think<
     outcome?: ChatTurnOutcome
   ): void {
     this._resumableStream.finish(streamId, outcome);
+    this._afterResumableStreamEnded();
   }
 
   /** Mark a resumable stream errored. */
   protected _errorResumableStream(streamId: string, requestId?: string): void {
+    this._afterResumableStreamEnded();
     this.ctx.storage.transactionSync(() => {
       this._resumableStream.markError(streamId);
       // An error stamp is not necessarily terminal — recovery may retry the

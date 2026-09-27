@@ -239,12 +239,62 @@ describe("ResumableStream originating message ids (#2280)", () => {
       stream.finish(id);
 
       const frames: Record<string, unknown>[] = [];
-      stream.replayPendingCutoverChunks(
+      stream.replayClosedStreamChunks(
         collectingConnection(frames),
         "req-pending"
       );
       expect(frames.map((frame) => frame.done)).toEqual([false, false]);
       expect(frames.at(-1)).toMatchObject({ replayComplete: true });
+    });
+  });
+
+  it.each(["recovering", "errored"] as const)(
+    "replays a stream closed as %s without a terminal",
+    async (close) => {
+      const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+      await runInDurableObject(
+        stub,
+        async (instance: StreamBenchObject, ctx) => {
+          const stream = createAdapter(instance, ctx.storage.sql);
+          const id = stream.start("req-closed");
+          stream.storeChunk(
+            id,
+            JSON.stringify({ type: "text-delta", delta: "partial" })
+          );
+          if (close === "recovering") stream.complete(id, "recovering");
+          else stream.markError(id);
+
+          const frames: Record<string, unknown>[] = [];
+          stream.replayClosedStreamChunks(
+            collectingConnection(frames),
+            "req-closed"
+          );
+          expect(frames.map((frame) => frame.done)).toEqual([false, false]);
+          expect(JSON.parse(frames[0].body as string)).toMatchObject({
+            delta: "partial"
+          });
+          expect(frames.at(-1)).toMatchObject({ replayComplete: true });
+        }
+      );
+    }
+  );
+
+  it("sends only replayComplete once the cutover deleted the rows", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
+      const stream = createAdapter(instance, ctx.storage.sql);
+      const id = stream.start("req-cut-held");
+      stream.storeChunk(id, JSON.stringify({ type: "text-delta", delta: "z" }));
+      stream.finish(id);
+      stream.cutover(id, () => {});
+
+      const frames: Record<string, unknown>[] = [];
+      stream.replayClosedStreamChunks(
+        collectingConnection(frames),
+        "req-cut-held"
+      );
+      expect(frames).toHaveLength(1);
+      expect(frames[0]).toMatchObject({ done: false, replayComplete: true });
     });
   });
 

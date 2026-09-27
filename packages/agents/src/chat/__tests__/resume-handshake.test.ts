@@ -96,7 +96,7 @@ function makeStream(over: Partial<FakeStreamState> = {}): {
       state.calls.replayErrored.push(requestId);
       return state.replayErroredReturn;
     },
-    replayPendingCutoverChunks: (_c: Connection, requestId: string) => {
+    replayClosedStreamChunks: (_c: Connection, requestId: string) => {
       state.calls.replayPending.push(requestId);
       return true;
     }

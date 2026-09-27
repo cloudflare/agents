@@ -251,9 +251,10 @@ export class ResumeHandshake {
     } else if (resumableStream.hasActiveStream()) {
       // Ignore ACKs for a different active stream request id.
     } else if (this.host.holdsTerminalFrames?.(requestId)) {
-      // The stream finished but its message is still being persisted; the
-      // held terminal frames are broadcast after the transcript (#2334).
-      resumableStream.replayPendingCutoverChunks(connection, requestId);
+      // The stream closed (finished, recovering, or errored) but its message
+      // is still being persisted; the held terminal frames are broadcast
+      // after the transcript (#2334).
+      resumableStream.replayClosedStreamChunks(connection, requestId);
     } else if (await this._replayTerminalOnAck(connection, requestId)) {
       // Delivered the pending terminal error frame on the resumed stream the
       // client just ACKed (#1645).

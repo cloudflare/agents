@@ -225,6 +225,8 @@ export class ResumableStream {
    * write, or {@link finalizePending} it when there is nothing to persist.
    */
   private _pendingCutover: string | null = null;
+  /** The stream most recently closed by complete, finish, or markError. */
+  private _lastClosedStreamId: string | null = null;
 
   private readonly ops: StreamsSyncInternal;
 
@@ -661,6 +663,7 @@ export class ResumableStream {
     );
     this.ops.settle(streamId, "completed", null);
     if (this._pendingCutover === streamId) this._pendingCutover = null;
+    this._lastClosedStreamId = streamId;
     this._clearActive();
   }
 
@@ -675,6 +678,7 @@ export class ResumableStream {
     this.flushBuffer();
     this._recordOutcome(streamId, outcome);
     this._pendingCutover = streamId;
+    this._lastClosedStreamId = streamId;
     this._clearActive();
   }
 
@@ -744,6 +748,7 @@ export class ResumableStream {
     this.flushBuffer();
     this.ops.settle(streamId, "errored", null);
     if (this._pendingCutover === streamId) this._pendingCutover = null;
+    this._lastClosedStreamId = streamId;
     this._clearActive();
   }
 
@@ -981,20 +986,18 @@ export class ResumableStream {
   }
 
   /**
-   * Replay a {@link finish}ed stream still awaiting its cutover, ending in
+   * Replay the request's just-closed stream (finished and awaiting its
+   * cutover, completed for a recovery, or errored), ending in
    * `replayComplete` rather than `done`: the host has not sent the request's
    * terminal frame yet and delivers it live once the message is persisted.
    * After the cutover deleted the rows, only the `replayComplete` is sent.
    * @returns False when the connection closed mid-replay.
    */
-  replayPendingCutoverChunks(
-    connection: Connection,
-    requestId: string
-  ): boolean {
+  replayClosedStreamChunks(connection: Connection, requestId: string): boolean {
     this.flushBuffer();
     const row =
-      this._pendingCutover !== null
-        ? this.ops.getStream(this._pendingCutover)
+      this._lastClosedStreamId !== null
+        ? this.ops.getStream(this._lastClosedStreamId)
         : undefined;
     const chat = row?.tag === requestId ? parseChatMetadata(row) : null;
     const continuation = chat?.isContinuation === 1;
@@ -1115,6 +1118,7 @@ export class ResumableStream {
     this._chunkBufferBytes = 0;
     this._deleteRetiring(this._chatRows());
     this._deletedTerminals.clear();
+    this._lastClosedStreamId = null;
     this._activeStreamId = null;
     this._activeRequestId = null;
     this._activeIsContinuation = false;

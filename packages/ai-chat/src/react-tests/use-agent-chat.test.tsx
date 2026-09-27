@@ -7724,6 +7724,232 @@ describe("useAgentChat terminal frames", () => {
     expect(toolCalls).toEqual(["tc-client"]);
   });
 
+  async function mountRecoveringClose(name: string) {
+    const harness = setup(name);
+    const toolCalls: string[] = [];
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent: harness.agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onToolCall: ({ toolCall }) => {
+          toolCalls.push(toolCall.toolCallId);
+        }
+      });
+      chatInstance = chat;
+      return null;
+    };
+    await mount(<TestComponent />);
+
+    let sendPromise: Promise<void> | undefined;
+    await act(async () => {
+      sendPromise = chatInstance!.sendMessage({ text: "Look it up" });
+      await sleep(10);
+    });
+    const request = harness
+      .sent()
+      .find((message) => message.type === "cf_agent_use_chat_request");
+    await act(async () => {
+      harness.frame(request!.id, {
+        type: "tool-input-available",
+        toolCallId: "tc-server",
+        toolName: "search",
+        input: { q: "weather" }
+      });
+      harness.frame(request!.id, null, { outcome: "recovering" });
+      await sendPromise;
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual([]);
+    return { ...harness, toolCalls, requestId: request!.id };
+  }
+
+  it("keeps onToolCall held across a replay for another request", async () => {
+    const { dispatch, frame, toolCalls } = await mountRecoveringClose(
+      "ontoolcall-recovering-unrelated"
+    );
+
+    await act(async () => {
+      frame(
+        "req-older",
+        { type: "text-delta", id: "t0", delta: "old" },
+        { replay: true }
+      );
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: clientToolTranscript
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual([]);
+
+    await act(async () => {
+      frame("req-successor", { type: "start", messageId: "a1" });
+      frame("req-successor", null);
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: clientToolTranscript
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual(["tc-client"]);
+  });
+
+  it("releases a recovering hold when recovery ended while disconnected (resume:false)", async () => {
+    const { target, dispatch, sent, toolCalls } = await mountRecoveringClose(
+      "ontoolcall-recovering-offline"
+    );
+
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      target.dispatchEvent(new Event("open"));
+      await sleep(30);
+    });
+    const probe = sent().find(
+      (message) => message.type === "cf_agent_stream_resume_request"
+    );
+    expect(probe?.probeId).toEqual(expect.any(String));
+
+    await act(async () => {
+      dispatch({
+        type: "cf_agent_stream_resume_none",
+        reason: "idle",
+        probeId: probe!.probeId
+      });
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: clientToolTranscript
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual(["tc-client"]);
+  });
+
+  it("keeps a recovering hold when the server reports recovery on reconnect", async () => {
+    const { target, dispatch, sent, toolCalls, requestId } =
+      await mountRecoveringClose("ontoolcall-recovering-reconnect-active");
+
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      target.dispatchEvent(new Event("open"));
+      dispatch({
+        type: "cf_agent_chat_recovering",
+        recovering: true,
+        id: requestId
+      });
+      await sleep(30);
+    });
+    const probe = sent().find(
+      (message) => message.type === "cf_agent_stream_resume_request"
+    );
+    await act(async () => {
+      dispatch({
+        type: "cf_agent_stream_resume_none",
+        reason: "idle",
+        probeId: probe!.probeId
+      });
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: clientToolTranscript
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual([]);
+  });
+
+  it("moves a held onToolCall to the stream a reconnect offers (resume:false)", async () => {
+    const { agent, target, dispatch, frame } = setup(
+      "ontoolcall-no-resume-offer"
+    );
+    const toolCalls: string[] = [];
+    const TestComponent = () => {
+      useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onToolCall: ({ toolCall }) => {
+          toolCalls.push(toolCall.toolCallId);
+        }
+      });
+      return null;
+    };
+    await mount(<TestComponent />);
+
+    await act(async () => {
+      frame("req-a", { type: "start", messageId: "a1" });
+      await sleep(30);
+    });
+
+    // req-a's done is lost; on reconnect the server offers req-b, which it
+    // withholds from this socket until req-b ends.
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      target.dispatchEvent(new Event("open"));
+      dispatch({ type: "cf_agent_stream_resuming", id: "req-b" });
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: clientToolTranscript
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual([]);
+
+    await act(async () => {
+      frame("req-b", null);
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual(["tc-client"]);
+  });
+
+  it("releases a held onToolCall when a probe answer replays a later ended turn (resume:false)", async () => {
+    const { agent, target, dispatch, frame, sent } = setup(
+      "ontoolcall-no-resume-terminal-offer"
+    );
+    const toolCalls: string[] = [];
+    const TestComponent = () => {
+      useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onToolCall: ({ toolCall }) => {
+          toolCalls.push(toolCall.toolCallId);
+        }
+      });
+      return null;
+    };
+    await mount(<TestComponent />);
+
+    await act(async () => {
+      frame("req-a", { type: "start", messageId: "a1" });
+      await sleep(30);
+    });
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      target.dispatchEvent(new Event("open"));
+      await sleep(30);
+    });
+    const probe = sent().find(
+      (message) => message.type === "cf_agent_stream_resume_request"
+    );
+    await act(async () => {
+      dispatch({
+        type: "cf_agent_stream_resuming",
+        id: "req-b",
+        probeId: probe!.probeId
+      });
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: clientToolTranscript
+      });
+      await sleep(30);
+    });
+    expect(toolCalls).toEqual(["tc-client"]);
+  });
+
   it("stays recovering in an observer tab after a recovering done", async () => {
     const { agent, dispatch, frame } = setup("observer-recovering-done");
     const TestComponent = () => {

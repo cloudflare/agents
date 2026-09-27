@@ -1846,17 +1846,23 @@ export function useAgentChat<
   unresolvedObservedRequestIdRef.current = unresolvedObservedRequestId;
   // A request closed with `recovering`: its tool parts still belong to the
   // server until the recovery's successor streams or the turn really ends.
-  const [awaitingRecoverySuccessor, setAwaitingRecoverySuccessor] =
-    useState(false);
+  const [recoveringRequestId, setRecoveringRequestIdState] = useState<
+    string | null
+  >(null);
+  const recoveringRequestIdRef = useRef<string | null>(null);
+  const setRecoveringRequestId = useCallback((requestId: string | null) => {
+    recoveringRequestIdRef.current = requestId;
+    setRecoveringRequestIdState(requestId);
+  }, []);
 
   // Server turns are serialized, so a request this client submits runs after
   // the observed turn ends; its own lifecycle gates tool calls from here on.
   useEffect(() => {
     if (status === "submitted") {
       setUnresolvedObservedRequestId(null);
-      setAwaitingRecoverySuccessor(false);
+      setRecoveringRequestId(null);
     }
-  }, [status]);
+  }, [status, setRecoveringRequestId]);
 
   useEffect(() => {
     if (status === "submitted" || status === "streaming") return;
@@ -1882,7 +1888,7 @@ export function useAgentChat<
       status === "submitted" ||
       isServerStreaming ||
       unresolvedObservedRequestId !== null ||
-      awaitingRecoverySuccessor
+      recoveringRequestId !== null
     ) {
       return;
     }
@@ -1959,7 +1965,7 @@ export function useAgentChat<
     status,
     isServerStreaming,
     unresolvedObservedRequestId,
-    awaitingRecoverySuccessor,
+    recoveringRequestId,
     sendToolOutputToServer,
     addToolResult,
     finishOnToolCall
@@ -1982,6 +1988,10 @@ export function useAgentChat<
     // this probe proves the held turn is over.
     let idleProbeNeeded = false;
     let idleProbeId: string | null = null;
+    // Whether this socket heard that a recovery is in progress. Hosts replay
+    // the status on connect, so after a reconnect its absence plus an idle
+    // probe answer means the recovery ended while we were away.
+    let serverReportsRecovery = false;
 
     function reportTurnEnd(
       frame: Extract<
@@ -2052,7 +2062,7 @@ export function useAgentChat<
           }).state;
           setIsServerStreaming(false);
           setUnresolvedObservedRequestId(null);
-          setAwaitingRecoverySuccessor(false);
+          setRecoveringRequestId(null);
           setIsRecovering(false);
           // Shared local-state reset — see `resetLocalChatState`.
           resetLocalChatState();
@@ -2064,7 +2074,8 @@ export function useAgentChat<
           // frame on any terminal outcome (and locally on stream-resume /
           // terminal response / clear below, for a snappy handoff).
           setIsRecovering(Boolean(data.recovering));
-          if (!data.recovering) setAwaitingRecoverySuccessor(false);
+          serverReportsRecovery = Boolean(data.recovering);
+          if (!data.recovering) setRecoveringRequestId(null);
           break;
 
         case MessageType.CF_AGENT_CHAT_MESSAGES: {
@@ -2189,6 +2200,7 @@ export function useAgentChat<
             streamStateRef.current = result.state;
             setIsServerStreaming(result.isStreaming);
             setUnresolvedObservedRequestId(null);
+            if (!serverReportsRecovery) setRecoveringRequestId(null);
             if (observedToolContinuationRequestIdRef.current !== null) {
               resetToolContinuation();
             }
@@ -2206,11 +2218,34 @@ export function useAgentChat<
           break;
 
         case MessageType.CF_AGENT_STREAM_RESUMING: {
+          // Server turns are serialized: an offer for another request means
+          // the turn we still hold for a missed terminal frame is over.
+          setUnresolvedObservedRequestId((current) =>
+            current === data.id ? current : null
+          );
+          if (data.probeId !== undefined && data.probeId === idleProbeId) {
+            idleProbeId = null;
+          }
           const isEarlyToolContinuation =
             resumingToolContinuationRef.current &&
             !customTransport.isAwaitingResume();
           if (!resume && !customTransport.isAwaitingResume()) {
-            if (!isEarlyToolContinuation) return;
+            if (!isEarlyToolContinuation) {
+              // An offer without a probe id announces a live stream, which
+              // the server withholds from us until its terminal frame; hold
+              // its tool parts (and a recovery it succeeds) until then. A
+              // probe answer can instead replay a turn that already ended.
+              if (data.probeId === undefined) {
+                setUnresolvedObservedRequestId(data.id);
+              }
+              if (
+                recoveringRequestIdRef.current !== null &&
+                recoveringRequestIdRef.current !== data.id
+              ) {
+                setRecoveringRequestId(null);
+              }
+              return;
+            }
           }
           if (!resumingToolContinuationRef.current) {
             pendingReplayResumeRequestIdsRef.current.add(data.id);
@@ -2255,6 +2290,12 @@ export function useAgentChat<
           }).state;
           customTransport.observeServerTurn(data.id);
           setIsServerStreaming(true);
+          if (
+            recoveringRequestIdRef.current !== null &&
+            recoveringRequestIdRef.current !== data.id
+          ) {
+            setRecoveringRequestId(null);
+          }
           // The recovered turn is now streaming live to us — it's no longer
           // "recovering", it's producing the answer (#1620).
           setIsRecovering(false);
@@ -2277,9 +2318,18 @@ export function useAgentChat<
             );
           }
           if (data.done && data.outcome === "recovering") {
-            setAwaitingRecoverySuccessor(true);
-          } else if (data.outcome !== "skipped") {
-            setAwaitingRecoverySuccessor(false);
+            setRecoveringRequestId(data.id);
+          } else if (
+            recoveringRequestIdRef.current !== null &&
+            recoveringRequestIdRef.current !== data.id &&
+            !data.replay &&
+            data.outcome !== "skipped"
+          ) {
+            // The successor is a new request, and turns are serialized: live
+            // frames for any later request mean recovery moved past the
+            // held one. Replays and the recovering request's own frames
+            // prove nothing.
+            setRecoveringRequestId(null);
           }
           reportTurnEnd(data);
           if (localRequestIdsRef.current.has(data.id)) {
@@ -2596,6 +2646,7 @@ export function useAgentChat<
     function onAgentClose() {
       socketIsOpen = false;
       sawClose = true;
+      serverReportsRecovery = false;
       fallbackAckedResumeRequestIds.clear();
 
       const unfinishedTurnId = customTransport.activeServerTurnId;
@@ -2611,7 +2662,8 @@ export function useAgentChat<
         idleProbeNeeded ||=
           unfinishedTurnId !== null ||
           streamStateRef.current.status === "observing" ||
-          unresolvedObservedRequestIdRef.current !== null;
+          unresolvedObservedRequestIdRef.current !== null ||
+          recoveringRequestIdRef.current !== null;
         clearFallbackObserver();
       }
     }
@@ -2661,7 +2713,8 @@ export function useAgentChat<
     resetMatchingHydratedAssistantForReplay,
     restoreProtectedStreamingAssistant,
     resetLocalChatState,
-    invalidateResumeGeneration
+    invalidateResumeGeneration,
+    setRecoveringRequestId
   ]);
 
   // Own mount/chat-generation resumption so StrictMode, reconnects, tool

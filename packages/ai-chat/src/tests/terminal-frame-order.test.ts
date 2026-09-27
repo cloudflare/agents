@@ -70,6 +70,24 @@ function expectAssistantTranscriptBeforeDone(frames: Frame[]) {
   expect(doneIndex).toBe(frames.length - 1);
 }
 
+/** Bodies of the replay frames `ws` receives for `requestId`. */
+function collectReplayBodies(ws: WebSocket, requestId: string): string[] {
+  const bodies: string[] = [];
+  ws.addEventListener("message", (e: MessageEvent) => {
+    const data = JSON.parse(e.data as string) as Record<string, unknown>;
+    if (
+      isUseChatResponseMessage(data) &&
+      data.id === requestId &&
+      data.replay &&
+      typeof data.body === "string" &&
+      data.body
+    ) {
+      bodies.push(data.body);
+    }
+  });
+  return bodies;
+}
+
 function sendChat(ws: WebSocket, body: Record<string, unknown>): string {
   const id = crypto.randomUUID();
   ws.send(
@@ -221,6 +239,7 @@ describe("AIChatAgent — terminal frame ordering", () => {
     );
     await settle();
     const frames = recordUntilDone(reconnected);
+    const replayed = collectReplayBodies(reconnected, requestId);
     reconnected.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
@@ -228,11 +247,79 @@ describe("AIChatAgent — terminal frame ordering", () => {
       })
     );
     await settle();
+    expect(replayed.some((body) => body.includes("chunk-0"))).toBe(true);
     await agent.releaseAssistantPersist();
 
     const recorded = await frames;
     expectAssistantTranscriptBeforeDone(recorded);
     expect(recorded.at(-1)).toEqual({ kind: "done", error: false });
+    sender.close(1000);
+    reconnected.close(1000);
+  });
+
+  it("replays a recovering stream's partial to an ACK that lands while it is persisted", async () => {
+    const room = crypto.randomUUID();
+    const agent = (await getAgentByName(
+      env.ChatRecoveryTestAgent,
+      room
+    )) as unknown as {
+      armStallingTurnsForTest(timeoutMs: number, hangTurns: number): void;
+      blockNextAssistantPersistForTest(): void;
+      isAssistantPersistBlockedForTest(): boolean;
+      releaseAssistantPersistForTest(): void;
+    };
+    await agent.armStallingTurnsForTest(150, 1);
+    await agent.blockNextAssistantPersistForTest();
+    const { ws: sender } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    await settle();
+
+    const requestId = sendChat(sender, {});
+    for (
+      let i = 0;
+      i < 100 && !(await agent.isAssistantPersistBlockedForTest());
+      i++
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(await agent.isAssistantPersistBlockedForTest()).toBe(true);
+
+    const { ws: reconnected } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    await settle();
+    const done = new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("Timeout waiting for done")),
+        10_000
+      );
+      reconnected.addEventListener("message", (e: MessageEvent) => {
+        const data = JSON.parse(e.data as string) as Record<string, unknown>;
+        if (
+          isUseChatResponseMessage(data) &&
+          data.id === requestId &&
+          data.done
+        ) {
+          clearTimeout(timer);
+          resolve(data);
+        }
+      });
+    });
+    const replayed = collectReplayBodies(reconnected, requestId);
+    reconnected.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+        id: requestId
+      })
+    );
+    await settle();
+    expect(replayed.some((body) => body.includes("partial before stall"))).toBe(
+      true
+    );
+    await agent.releaseAssistantPersistForTest();
+
+    expect(await done).toMatchObject({ outcome: "recovering" });
     sender.close(1000);
     reconnected.close(1000);
   });
