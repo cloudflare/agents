@@ -1,0 +1,91 @@
+.changeset/chat-terminal-frame-fixes.md
+  s_671f05444ff5f0::t_971c409604b5cb 1-16
+.changeset/stream-recovery-review-fixes.md
+  s_671f05444ff5f0::t_d986d5e8f17c51 1-21
+.changeset/think-recovering-stream-outcome.md
+  s_671f05444ff5f0::t_9daa5ca23bf792 1-7
+.changeset/think-submission-lifecycle-fixes.md
+  s_671f05444ff5f0::t_a77d353b0069f9 1-13
+packages/agents/src/chat/__tests__/broadcast-state.test.ts
+  s_671f05444ff5f0::t_1027785c369a75 659-681
+packages/agents/src/chat/__tests__/recovery-engine.test.ts
+  s_671f05444ff5f0::t_0deb18a242038a 5-6,1954-1991
+packages/agents/src/chat/__tests__/resume-handshake.test.ts
+  s_671f05444ff5f0::t_2f04046ad23aab 12,58-63,77,94,98-101,115,118-120,541-578
+packages/agents/src/chat/broadcast-state.ts
+  s_671f05444ff5f0::t_2aa391ffc6d124 145-149,153,159
+packages/agents/src/chat/index.ts
+  s_671f05444ff5f0::t_7ae9b2833e4144 78,222,276-278
+packages/agents/src/chat/react.tsx
+  s_671f05444ff5f0::t_7c65b782705b48 483-485,804,1581-1582,1845-1856,1863,1865-1872,1890-1891,1968,1986-1994,2004-2007,2024,2030-2040,2065,2077-2078,2189-2191,2193,2203,2221-2228,2233-2248,2293-2298,2320-2333,2431-2447,2533,2610-2619,2649,2662-2666,2716-2717
+packages/agents/src/chat/recovery-engine.ts
+  s_671f05444ff5f0::t_541f83dba6582c 144-149,717-756,1007-1083
+packages/agents/src/chat/replay-frames.ts
+  s_671f05444ff5f0::t_549756d1dd41d6 11,59,73-74
+packages/agents/src/chat/resume-handshake.ts
+  s_671f05444ff5f0::t_597e99a0546761 75-82,253-257,265,274-275
+packages/agents/src/retries.ts
+  s_671f05444ff5f0::t_8c3082c15aecb7 298-310
+packages/agents/src/streams/streams.ts
+  s_671f05444ff5f0::t_36ac364dba08ff 86-87,447-456
+packages/agents/src/tests/streams/resumable-stream-settlement.test.ts
+  s_671f05444ff5f0::t_8b0ab24599a4ff 168-300
+packages/ai-chat/src/index.ts
+  s_671f05444ff5f0::t_709d18debece73 61-62,107-109,280,283-295,1518-1524,1598,1880-1882,1942,1944,1953,1955,3078-3093,5010-5013,5489-5493,5569,5571-5577,5638-5640,5719-5724,5734-5758,5762-5763,5766,5774,5780,5794,5798-5826,6069-6073,6145,6150-6156,7264,7392,7509-7511,7565,7571-7585,7591,7671
+packages/ai-chat/src/react-tests/use-agent-chat.test.tsx
+  s_671f05444ff5f0::t_2f4d027fd2e25f 1,7546-8135
+packages/ai-chat/src/tests/durable-chat-recovery.test.ts
+  s_671f05444ff5f0::t_bdf82c8b9ac804 202,208-210,2663-2690,2906-3045
+packages/ai-chat/src/tests/terminal-frame-order.test.ts
+  s_671f05444ff5f0::t_3cdfc19b3202ca 73-92,96,112,218-354
+packages/ai-chat/src/tests/worker.ts
+  s_671f05444ff5f0::t_6574216db8910c 121-125,142-155,1692,1696-1697,1784-1800,1813-1821,2887-2920,3351-3391
+packages/think/src/messengers/chat-sdk.ts
+  s_671f05444ff5f0::t_48c2eaac7c716a 65-90,626-628,636-637,648-651
+packages/think/src/tests/actions-durable-pause.test.ts
+  s_671f05444ff5f0::t_f39c716cc6ea65 2,8-10,15-39,424-534,705-792
+packages/think/src/tests/agents/assistant-agent-loop.ts
+  s_671f05444ff5f0::t_1556d12477bfde 119-120,141-146,152,305-315,333,349-356,358,360,364-375,377,384,387,390-391,395-403,408-413,417-442,445
+packages/think/src/tests/agents/client-tools.ts
+  s_671f05444ff5f0::t_795de2cc391c8e 96-98,112,164,808-809,895-900,984-985,990-997
+packages/think/src/tests/agents/messengers.ts
+  s_671f05444ff5f0::t_a2d8e576f77e15 230-234,239-343,480-487,489
+packages/think/src/tests/agents/think-session.ts
+  s_671f05444ff5f0::t_c431d527bbfd54 639-642,1290,1368-1373,1616-1622,1869,1872-1875,1911,1914-1918,1921,1924-1926,1979-2016,2333-2337,2733-3044,5616-5627,5631-5639,6877,6879-6880,6893,7045-7068,7075,7078-7079,7127-7133,7645,7695-7696,8442
+packages/think/src/tests/client-tools.test.ts
+  s_671f05444ff5f0::t_478a22a3f2ddcc 1256-1302
+packages/think/src/tests/hooks.test.ts
+  s_671f05444ff5f0::t_befc4d8da68aef 397-426
+packages/think/src/tests/messengers.test.ts
+  s_671f05444ff5f0::t_7fa6f9bfa4b170 1284-1336
+packages/think/src/tests/onconnect-broadcast.test.ts
+  s_671f05444ff5f0::t_f7b79c841521ab 278-306
+packages/think/src/tests/origin-message-ids.test.ts
+  s_671f05444ff5f0::t_356a8f50dc7d11 147-148
+packages/think/src/tests/submissions.test.ts
+  s_671f05444ff5f0::t_d3ea51edcfc12f 35-37,42-50,91,1026-1162
+packages/think/src/tests/think-session.test.ts
+  s_671f05444ff5f0::t_c3631b01782e51 766-889
+packages/think/src/tests/ws-web-channel.test.ts
+  s_671f05444ff5f0::t_1e12c212af9c79 190-204
+packages/think/src/think.ts
+  s_671f05444ff5f0::t_c47ed1aaf5b1a7 231-233,269,346-350,353-355,390,393-397,403-414,1873,1893-1900,2353-2355,2365-2372,2375-2377,3549-3550,5135-5136,5145-5153,5171-5172,5175-5177,5411-5412,5418,5428,6616-6618,6620-6621,6623-6643,7056,7076-7081,8710,8994-8997,11383,11385-11387,11390-11391,11443-11449,11463-11473,12034-12035,12039-12041,12043,12095-12096,12122-12123,12146-12150,12180,12182-12189,12196,12203-12224,13226,13650,13686-13724,14018-14022,14026,14028,14055-14060,14101,14111-14119,14197,14201-14204,14218,14247,14253-14261,14264-14269,14271,14278,14280,14285,14330-14334,14366,14375,14382-14383,14406-14408,14542,14563-14568,14628,14638-14646,14742-14745,14767-14773,14775,14778-14782,14802,14941,15884-15894,16515-16518,16713-16715,16841-16848,16870,16891,16896-16914,17689,17992,18284-18291,18295-18301,18565-18588,18763,18771,18773-18775,18781-18814,18823-18839,18844-18894,18899,18914-18917,18920,18922,19107-19120,19128-19133,19138
+packages/agents/src/chat/resumable-stream.ts
+  s_671f05444ff5f0::t_a2c93b93497ef5 31,66-67,120-125,224-225,248-251,600,605-606,608-645,650-651,653,655-659,662,673,675,677,747,921-922,924,979-1016,1116-1117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2ecbad840e088f80bbb900f2d42dccd6e4c1fd74",
+  "prompts": {},
+  "sessions": {
+    "s_671f05444ff5f0": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "6643b91d-e7d6-4cfa-9d7a-cd394687cb18",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
