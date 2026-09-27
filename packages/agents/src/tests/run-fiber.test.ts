@@ -1039,6 +1039,76 @@ describe("runFiber", () => {
       await expect(agent.getRunningFiberCount()).resolves.toBe(0);
     });
 
+    it("does not report a terminal managed fiber with a stale run row as interrupted", async () => {
+      const events: ObservabilityEvent[] = [];
+      const unsubscribe = subscribe("fiber", (event) => events.push(event));
+      const agent = await freshManagedAgent("managed-terminal-no-events");
+
+      await agent.insertAbortedManagedFiberWithRun(
+        "managed-aborted-quiet",
+        "managed"
+      );
+      await agent.triggerRecoveryCheck();
+      unsubscribe();
+
+      const types = events
+        .filter(
+          (event) =>
+            (event.payload as { fiberId?: string }).fiberId ===
+            "managed-aborted-quiet"
+        )
+        .map((event) => event.type);
+      expect(types).not.toContain("fiber:recovery:detected");
+      expect(types).not.toContain("fiber:run:interrupted");
+    });
+
+    it("settles a managed fiber whose body settled but cleanup failed (#2363)", async () => {
+      const events: ObservabilityEvent[] = [];
+      const unsubscribe = subscribe("fiber", (event) => events.push(event));
+      const agent = await freshManagedAgent("managed-settled-cleanup-failure");
+
+      await agent.insertSettledManagedFiberWithRun(
+        "managed-settled",
+        "managed"
+      );
+      await agent.triggerRecoveryCheck();
+      unsubscribe();
+
+      expect(await agent.getRecoveredFibers()).toEqual([]);
+      await expect(
+        agent.inspectManagedFiber("managed-settled")
+      ).resolves.toMatchObject({ status: "completed" });
+      await expect(agent.getRunningFiberCount()).resolves.toBe(0);
+      const types = events
+        .filter(
+          (event) =>
+            (event.payload as { fiberId?: string }).fiberId ===
+            "managed-settled"
+        )
+        .map((event) => event.type);
+      expect(types).not.toContain("fiber:recovery:detected");
+      expect(types).not.toContain("fiber:run:interrupted");
+    });
+
+    it("keeps a failed managed fiber's error when its settle and cleanup both failed", async () => {
+      const agent = await freshManagedAgent("managed-failed-settle-failure");
+
+      await agent.runManagedFailingWithFailedSettle("managed-settle-failed");
+      await expect(
+        agent.inspectManagedFiber("managed-settle-failed")
+      ).resolves.toMatchObject({ status: "running" });
+      await agent.triggerRecoveryCheck();
+
+      expect(await agent.getRecoveredFibers()).toEqual([]);
+      await expect(
+        agent.inspectManagedFiber("managed-settle-failed")
+      ).resolves.toMatchObject({
+        status: "error",
+        error: "managed body failed"
+      });
+      await expect(agent.getRunningFiberCount()).resolves.toBe(0);
+    });
+
     it("should apply successful managed recovery outcomes", async () => {
       const agent = await freshManagedAgent("managed-recovery-complete");
 

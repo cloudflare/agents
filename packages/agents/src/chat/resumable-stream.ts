@@ -27,6 +27,7 @@ import type { Connection } from "agents";
 import { Streams, type StreamsSyncInternal } from "../streams/streams";
 import type { StreamJson, StreamRow, StreamState } from "../streams/types";
 import { sendReplayBodies, sendReplayControl } from "./replay-frames";
+import { CHUNK_MAX_BYTES, storedChunkBytes } from "./chunk-size";
 import type { ChatTurnOutcome } from "./wire-types";
 
 /** Number of chunks to pack into a single stored segment before flushing */
@@ -64,8 +65,6 @@ const REPLAY_PAGE_SEGMENTS = 10;
 const ABANDONED_STREAM_RETENTION_MS = 60 * 60 * 1000;
 /** Deleted streams whose terminal details a late resume ACK can still read. */
 const MAX_REMEMBERED_DELETED_TERMINALS = 32;
-/** Shared encoder for UTF-8 byte length measurement */
-const textEncoder = new TextEncoder();
 
 /**
  * Ceiling for one stored chat segment after JSON serialization, and the
@@ -73,9 +72,6 @@ const textEncoder = new TextEncoder();
  * Kept under the 2 MB SQLite row limit with headroom for escaping.
  */
 const CHAT_STREAM_MAX_CHUNK_BYTES = 1_900_000;
-
-/** Maximum serialized chunk body size before skipping storage (bytes). */
-const CHUNK_MAX_BYTES = 1_800_000;
 
 /**
  * Construct the Streams capability instance a chat host must install to back
@@ -769,7 +765,7 @@ export class ResumableStream {
     // Guard against chunks that would exceed the SQLite row limit, measured
     // on the stored (JSON-escaped) encoding. The chunk is still broadcast to
     // live clients; only replay storage is skipped.
-    const bodyBytes = textEncoder.encode(JSON.stringify(body)).byteLength;
+    const bodyBytes = storedChunkBytes(body);
     if (bodyBytes > CHUNK_MAX_BYTES) {
       console.warn(
         `[ResumableStream] Skipping oversized chunk (${bodyBytes} bytes) ` +
