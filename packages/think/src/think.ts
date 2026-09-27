@@ -7003,10 +7003,7 @@ export class Think<
    */
   private async _runInferenceLoop(input: TurnInput): Promise<StreamableResult> {
     const turn = admittedTurnContext.getStore();
-    // Recorded here, not at admission: a turn skipped by a reset or a
-    // cancelled submission never ran, so a continuation must not extend it.
     const active = this._activeAdmittedTurn();
-    if (active) this._lastTurnChannel = { channel: active.channel };
     const invoke = await withAgentSpan(
       this,
       "prepare_agent",
@@ -7026,7 +7023,12 @@ export class Think<
       },
       () => this._prepareInferenceInvocation(input)
     );
-    return invoke();
+    const result = invoke();
+    // Recorded once the stream starts, not at admission: a turn skipped by a
+    // reset or a cancelled submission, or one whose preparation threw, never
+    // ran, so a continuation must not extend it.
+    if (active) this._lastTurnChannel = { channel: active.channel };
+    return result;
   }
 
   private async _prepareInferenceInvocation(

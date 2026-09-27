@@ -909,6 +909,7 @@ export class ThinkTestAgent extends Think {
   private _beforeTurnMessagesJson: string[] = [];
   private _capturedTurnChannels: string[] = [];
   private _capturedTurnMetadata: (Record<string, unknown> | undefined)[] = [];
+  private _beforeTurnThrowChannel: string | null = null;
 
   override configureChannels() {
     return {
@@ -986,6 +987,12 @@ export class ThinkTestAgent extends Think {
     });
     this._capturedTurnChannels.push(this.activeChannel?.channelId ?? "");
     this._capturedTurnMetadata.push(this.activeTurnMetadata);
+    if (
+      this._beforeTurnThrowChannel !== null &&
+      this.activeChannel?.channelId === this._beforeTurnThrowChannel
+    ) {
+      throw new Error(`beforeTurn failed on ${this._beforeTurnThrowChannel}`);
+    }
     if (this._stashInBeforeTurnForTest !== undefined) {
       this.stash(this._stashInBeforeTurnForTest);
     }
@@ -1226,6 +1233,13 @@ export class ThinkTestAgent extends Think {
 
   async resetCapturedTurnChannelsForTest(): Promise<void> {
     this._capturedTurnChannels = [];
+  }
+
+  /** Make `beforeTurn` throw for turns on `channel` (null disables). */
+  async setBeforeTurnThrowChannelForTest(
+    channel: string | null
+  ): Promise<void> {
+    this._beforeTurnThrowChannel = channel;
   }
 
   async setTurnConfigOverride(config: TurnConfig | null): Promise<void> {
