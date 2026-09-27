@@ -51,6 +51,18 @@ describe("agents/chat-sdk StateAdapter", () => {
     );
   });
 
+  it("keeps a lock alive past its TTL while lockHeartbeat is on", async () => {
+    const host = await getHost();
+
+    await expect(
+      host.testLockHeartbeat("telegram:heartbeat-lock")
+    ).resolves.toEqual({
+      heldPastTtl: true,
+      reacquiredAfterRelease: true,
+      expiredWithoutHeartbeat: true
+    });
+  });
+
   it("queues messages in FIFO order after max-size trimming", async () => {
     const host = await getHost();
 

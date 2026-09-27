@@ -100,6 +100,37 @@ export class TestChatSdkStateHostAgent extends Agent {
     return reacquired !== null;
   }
 
+  async testLockHeartbeat(threadId: string): Promise<{
+    heldPastTtl: boolean;
+    reacquiredAfterRelease: boolean;
+    expiredWithoutHeartbeat: boolean;
+  }> {
+    const state = new ChatSdkStateAdapter({ lockHeartbeat: true });
+    await state.connect();
+    const sleep = (ms: number) =>
+      new Promise((resolve) => setTimeout(resolve, ms));
+
+    const lock = await state.acquireLock(threadId, 200);
+    await sleep(600);
+    const contender = await state.acquireLock(threadId, 200);
+    if (lock) await state.releaseLock(lock);
+    const afterRelease = await state.acquireLock(threadId, 200);
+    if (afterRelease) await state.releaseLock(afterRelease);
+
+    const plain = await this.createState();
+    const unbeaten = await plain.acquireLock(`${threadId}:plain`, 200);
+    await sleep(400);
+    const takeover = await plain.acquireLock(`${threadId}:plain`, 200);
+    if (unbeaten) await plain.releaseLock(unbeaten);
+    if (takeover) await plain.releaseLock(takeover);
+
+    return {
+      heldPastTtl: contender === null,
+      reacquiredAfterRelease: afterRelease !== null,
+      expiredWithoutHeartbeat: takeover !== null
+    };
+  }
+
   async testQueue(threadId: string): Promise<TestQueueResult> {
     const state = await this.createState();
 

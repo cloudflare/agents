@@ -54,6 +54,11 @@ export class ChatSdkStateAdapter implements ChatSdkStateAdapterInterface {
   private readonly defaultName: string;
   private readonly keyShard?: (key: string) => string | undefined;
   private readonly shardKey: (threadId: string) => string;
+  private readonly lockHeartbeat: boolean;
+  private readonly lockHeartbeats = new Map<
+    string,
+    ReturnType<typeof setInterval>
+  >();
   private connected = false;
 
   constructor(options: ChatSdkStateAdapterOptions = {}) {
@@ -69,6 +74,7 @@ export class ChatSdkStateAdapter implements ChatSdkStateAdapterInterface {
     this.defaultName = options.name ?? "default";
     this.keyShard = options.keyShard;
     this.shardKey = options.shardKey ?? defaultThreadShard;
+    this.lockHeartbeat = options.lockHeartbeat ?? false;
   }
 
   async connect(): Promise<void> {
@@ -95,10 +101,15 @@ export class ChatSdkStateAdapter implements ChatSdkStateAdapterInterface {
     threadId: string,
     ttlMs: number
   ): Promise<ChatSdkLock | null> {
-    return (await this.stateAgent(threadId)).acquireLock(threadId, ttlMs);
+    const lock = await (
+      await this.stateAgent(threadId)
+    ).acquireLock(threadId, ttlMs);
+    if (lock) this.startLockHeartbeat(lock, ttlMs);
+    return lock;
   }
 
   async releaseLock(lock: ChatSdkLock): Promise<void> {
+    this.stopLockHeartbeat(lock.token);
     await (
       await this.stateAgent(lock.threadId)
     ).releaseLock(lock.threadId, lock.token);
@@ -114,6 +125,29 @@ export class ChatSdkStateAdapter implements ChatSdkStateAdapterInterface {
 
   async forceReleaseLock(threadId: string): Promise<void> {
     await (await this.stateAgent(threadId)).forceReleaseLock(threadId);
+  }
+
+  private startLockHeartbeat(lock: ChatSdkLock, ttlMs: number): void {
+    if (!this.lockHeartbeat || ttlMs <= 0) return;
+    const timer = setInterval(() => {
+      this.extendLock(lock, ttlMs).then(
+        (extended) => {
+          if (!extended) this.stopLockHeartbeat(lock.token);
+        },
+        () => {
+          // A failed extension is retried on the next beat; the lock's own
+          // TTL still bounds how long it outlives this isolate.
+        }
+      );
+    }, ttlMs / 3);
+    this.lockHeartbeats.set(lock.token, timer);
+  }
+
+  private stopLockHeartbeat(token: string): void {
+    const timer = this.lockHeartbeats.get(token);
+    if (timer === undefined) return;
+    clearInterval(timer);
+    this.lockHeartbeats.delete(token);
   }
 
   async enqueue(

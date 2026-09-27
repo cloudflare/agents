@@ -240,7 +240,7 @@ describe("truncateOlderToolResults", () => {
     expect(outputOf(modelMessages[0])).toBe(oldJson);
   });
 
-  it("truncates text items of content results and keeps media", () => {
+  it("truncates text items of content results and replaces inline media", () => {
     const messages = [
       toolMessage("old", {}),
       textMessage("recent-1", "recent one"),
@@ -268,9 +268,12 @@ describe("truncateOlderToolResults", () => {
 
     const output = outputOf(message);
     if (output.type !== "content") throw new Error("expected content");
-    const [text, kept] = output.value;
+    const [text, marker] = output.value;
     expect(text.type === "text" && text.text).toContain("[truncated");
-    expect(kept).toBe(media);
+    expect(marker).toEqual({
+      type: "text",
+      text: "[image/png omitted from an older tool result]"
+    });
   });
 
   it("bounds the combined text of a content result by one budget", () => {
@@ -307,13 +310,16 @@ describe("truncateOlderToolResults", () => {
 
     const output = outputOf(message);
     if (output.type !== "content") throw new Error("expected content");
-    const texts = output.value.flatMap((item) =>
-      item.type === "text" ? [item.text] : []
-    );
+    const texts = output.value
+      .slice(0, -1)
+      .flatMap((item) => (item.type === "text" ? [item.text] : []));
     expect(texts.join("").length).toBeLessThanOrEqual(500);
     expect(texts[0]).toBe("q".repeat(400));
     expect(texts[1]).toContain("[truncated");
-    expect(output.value.at(-1)).toBe(media);
+    expect(output.value.at(-1)).toEqual({
+      type: "text",
+      text: "[image/png omitted from an older tool result]"
+    });
   });
 
   it("marks text dropped after earlier items fill the budget exactly", () => {
@@ -347,6 +353,165 @@ describe("truncateOlderToolResults", () => {
     );
     expect(texts.join("").length).toBeLessThanOrEqual(500);
     expect(texts.at(-1)).toContain("[truncated");
+  });
+
+  it("replaces the bytes of an image-only older result (#2339)", () => {
+    const messages = [
+      toolMessage("old", {}),
+      textMessage("recent-1", "recent one"),
+      textMessage("recent-2", "recent two")
+    ];
+    const modelMessages = [
+      toolResults([
+        "tc-old",
+        {
+          type: "content",
+          value: [
+            {
+              type: "file",
+              mediaType: "image/png",
+              data: { type: "data", data: "A".repeat(10_000) }
+            },
+            {
+              type: "image-data",
+              data: "B".repeat(10_000),
+              mediaType: "image/jpeg"
+            }
+          ]
+        }
+      ])
+    ];
+
+    const [message] = truncateOlderToolResults(modelMessages, messages, {
+      keepRecent: 2,
+      maxToolOutputChars: 500
+    });
+
+    const output = outputOf(message);
+    if (output.type !== "content") throw new Error("expected content");
+    expect(output.value).toEqual([
+      { type: "text", text: "[image/png omitted from an older tool result]" },
+      { type: "text", text: "[image/jpeg omitted from an older tool result]" }
+    ]);
+  });
+
+  it("counts and cuts inline text files against the budget (#2339)", () => {
+    const messages = [
+      toolMessage("old", {}),
+      textMessage("recent-1", "recent one"),
+      textMessage("recent-2", "recent two")
+    ];
+    const modelMessages = [
+      toolResults([
+        "tc-old",
+        {
+          type: "content",
+          value: [
+            {
+              type: "file",
+              mediaType: "text/plain",
+              data: { type: "text", text: "f".repeat(2000) }
+            }
+          ]
+        }
+      ])
+    ];
+
+    const [message] = truncateOlderToolResults(modelMessages, messages, {
+      keepRecent: 2,
+      maxToolOutputChars: 500
+    });
+
+    const output = outputOf(message);
+    if (output.type !== "content") throw new Error("expected content");
+    const [file] = output.value;
+    if (file.type !== "file" || file.data.type !== "text") {
+      throw new Error("expected an inline text file");
+    }
+    expect(file.mediaType).toBe("text/plain");
+    expect(file.data.text.length).toBeLessThanOrEqual(500);
+    expect(file.data.text).toContain("[truncated");
+  });
+
+  it("shares one budget across text, text files and media markers (#2339)", () => {
+    const messages = [
+      toolMessage("old", {}),
+      textMessage("recent-1", "recent one"),
+      textMessage("recent-2", "recent two")
+    ];
+    const linked = {
+      type: "file" as const,
+      mediaType: "image/png",
+      data: { type: "url" as const, url: new URL("https://example.com/a.png") }
+    };
+    const modelMessages = [
+      toolResults([
+        "tc-old",
+        {
+          type: "content",
+          value: [
+            { type: "text", text: "t".repeat(300) },
+            {
+              type: "file",
+              mediaType: "image/png",
+              data: { type: "data", data: "A".repeat(10_000) }
+            },
+            {
+              type: "file",
+              mediaType: "text/markdown",
+              data: { type: "text", text: "m".repeat(300) }
+            },
+            linked
+          ]
+        }
+      ])
+    ];
+
+    const [message] = truncateOlderToolResults(modelMessages, messages, {
+      keepRecent: 2,
+      maxToolOutputChars: 500
+    });
+
+    const output = outputOf(message);
+    if (output.type !== "content") throw new Error("expected content");
+    const [text, marker, file, url] = output.value;
+    expect(text).toEqual({ type: "text", text: "t".repeat(300) });
+    expect(marker).toEqual({
+      type: "text",
+      text: "[image/png omitted from an older tool result]"
+    });
+    if (file.type !== "file" || file.data.type !== "text") {
+      throw new Error("expected an inline text file");
+    }
+    expect(300 + file.data.text.length).toBeLessThanOrEqual(500);
+    expect(file.data.text).toContain("[truncated");
+    expect(url).toBe(linked);
+  });
+
+  it("keeps a recent result whose tool call id repeats an older one (#2339)", () => {
+    const messages = [
+      toolMessage("dup", {}),
+      textMessage("user-2", "again"),
+      toolMessage("dup", {}),
+      textMessage("recent-user", "hi")
+    ];
+    const oldText: ToolResultOutput = { type: "text", value: "o".repeat(1000) };
+    const recentText: ToolResultOutput = {
+      type: "text",
+      value: "r".repeat(1000)
+    };
+    const modelMessages = [
+      toolResults(["tc-dup", oldText]),
+      toolResults(["tc-dup", recentText])
+    ];
+
+    const truncated = truncateOlderToolResults(modelMessages, messages, {
+      keepRecent: 2,
+      maxToolOutputChars: 100
+    });
+
+    expect(JSON.stringify(outputOf(truncated[0]))).toContain("[truncated");
+    expect(outputOf(truncated[1])).toBe(recentText);
   });
 
   it("leaves provider-executed results intact", () => {

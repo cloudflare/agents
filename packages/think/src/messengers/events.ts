@@ -95,19 +95,25 @@ export interface MessengerEvent extends MessengerContext {
   raw?: unknown;
 }
 
+/**
+ * The context persisted on a messenger turn's user message. Built from the
+ * serializable form of the event, so raw platform payloads and attachment
+ * bytes are never stored and a live turn matches its recovered replay.
+ */
 export function messengerContextFromEvent(
   event: MessengerEvent
 ): MessengerContext {
+  const serializable = serializableMessengerEvent(event);
   return {
-    action: event.action,
-    author: event.message?.author ?? event.action?.user,
-    capabilities: event.capabilities,
-    kind: event.kind,
-    message: event.message,
-    messengerId: event.messengerId,
-    provider: event.provider,
-    skipped: event.skipped,
-    thread: event.thread
+    action: serializable.action,
+    author: serializable.message?.author ?? serializable.action?.user,
+    capabilities: serializable.capabilities,
+    kind: serializable.kind,
+    message: serializable.message,
+    messengerId: serializable.messengerId,
+    provider: serializable.provider,
+    skipped: serializable.skipped,
+    thread: serializable.thread
   };
 }
 

@@ -286,9 +286,9 @@ import {
  * - budgeted hydration (`hydrationByteBudget`) is a hard byte ceiling, so a
  *   window of unusually large messages can be shorter than this; the model
  *   then sees what fits rather than exhausting isolate memory;
- * - media eviction never rewrites messages inside it (the
- *   `keepRecentMessages` clamp), so the rows the model replays at full
- *   fidelity are never stripped.
+ * - media eviction never rewrites messages above the stepped truncation
+ *   cutoff (see {@link mediaEvictionCutoff}), so the rows the model replays
+ *   at full fidelity are never stripped.
  */
 const MODEL_RECENT_WINDOW = 4;
 
@@ -303,11 +303,77 @@ const MODEL_RECENT_WINDOW = 4;
  */
 const MODEL_TRUNCATION_STEP = 8;
 
+/**
+ * Drop the keys of a `start` chunk's metadata that the extended assistant
+ * message already carries, so a recovery continuation re-running the metadata
+ * writer cannot overwrite them (#2321).
+ */
+function withoutOverwrittenStartMetadata(
+  chunk: StreamChunkData,
+  existing: unknown
+): StreamChunkData {
+  if (
+    chunk.type !== "start" ||
+    existing === null ||
+    typeof existing !== "object" ||
+    chunk.messageMetadata === null ||
+    typeof chunk.messageMetadata !== "object"
+  ) {
+    return chunk;
+  }
+  const messageMetadata = Object.fromEntries(
+    Object.entries(chunk.messageMetadata).filter(([key]) => !(key in existing))
+  );
+  return { ...chunk, messageMetadata };
+}
+
+/** Copy a turn context without reading its lazily resolved `model`. */
+function turnContextWithoutModel(ctx: TurnContext): Omit<TurnContext, "model"> {
+  const { model: _model, ...descriptors } =
+    Object.getOwnPropertyDescriptors(ctx);
+  return Object.defineProperties({}, descriptors) as Omit<TurnContext, "model">;
+}
+
+/** `Infinity` never moves the cutoff; any other invalid step cuts every turn. */
+function truncationStepSize(step: number): number {
+  if (step === Number.POSITIVE_INFINITY) return step;
+  return Number.isFinite(step) ? Math.max(1, Math.floor(step)) : 1;
+}
+
 function truncationKeepRecent(messageCount: number, step: number): number {
-  const safeStep = Number.isFinite(step) ? Math.max(1, Math.floor(step)) : 1;
+  const safeStep = truncationStepSize(step);
   if (messageCount <= MODEL_RECENT_WINDOW) return MODEL_RECENT_WINDOW;
+  if (safeStep === Number.POSITIVE_INFINITY) return messageCount;
   return (
     MODEL_RECENT_WINDOW + ((messageCount - MODEL_RECENT_WINDOW) % safeStep)
+  );
+}
+
+/**
+ * Index below which media eviction may rewrite messages: the stepped
+ * truncation cutoff, moved back whole steps until at least
+ * `keepRecentMessages` messages stay above it. It only moves when the
+ * truncation cutoff does, so eviction rewrites the cached prompt prefix at
+ * most once per step and never inside the full-fidelity window (#2356).
+ * With stepping disabled (`truncationStep = Infinity`) there is no cutoff to
+ * align with, and eviction keeps exactly `keepRecentMessages`.
+ */
+function mediaEvictionCutoff(
+  messageCount: number,
+  keepRecentMessages: number,
+  step: number
+): number {
+  const keep = Math.max(keepRecentMessages, MODEL_RECENT_WINDOW);
+  const safeStep = truncationStepSize(step);
+  if (safeStep === Number.POSITIVE_INFINITY) {
+    return Math.max(0, messageCount - keep);
+  }
+  const stepsBack = Math.ceil((keep - MODEL_RECENT_WINDOW) / safeStep);
+  return Math.max(
+    0,
+    messageCount -
+      truncationKeepRecent(messageCount, safeStep) -
+      stepsBack * safeStep
   );
 }
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
@@ -1442,13 +1508,23 @@ export interface ChatInterruptedInfo {
  * clients and persisted, so it must be
  * JSON-serializable and must not carry server-only secrets.
  *
+ * `continuation` is true when the turn continues an earlier one (a recovery
+ * continuation or an auto-continue after a tool result). A recovery
+ * continuation streams into the interrupted assistant message, so its `start`
+ * part cannot overwrite keys that message already has: a `createdAt` stamped
+ * on the original `start` survives. Keys the continuation's `start` adds, and
+ * everything from later parts, merge as usual.
+ *
  * The `Metadata` parameter defaults to the opaque `Record<string, unknown>` used
  * everywhere metadata rides today; it is the seam a future typed-metadata story
  * (issue #1676) narrows without a breaking change.
  */
 export type MessageMetadataCallback<
   Metadata extends Record<string, unknown> = Record<string, unknown>
-> = (options: { part: TextStreamPart<ToolSet> }) => Metadata | undefined;
+> = (options: {
+  part: TextStreamPart<ToolSet>;
+  continuation: boolean;
+}) => Metadata | undefined;
 
 /**
  * Minimal interface for the result of the inference loop.
@@ -2588,7 +2664,11 @@ export interface TurnContext {
   messages: ModelMessage[];
   /** Merged tool set (workspace + getTools + session + MCP + client + caller). */
   tools: ToolSet;
-  /** The language model from getModel(). */
+  /**
+   * The language model from getModel(), resolved on first read — a
+   * `beforeTurn` that returns its own `model` without reading this never
+   * resolves the default.
+   */
   model: LanguageModel;
   /** Whether this is a continuation turn. */
   continuation: boolean;
@@ -3381,6 +3461,11 @@ export class Think<
    * non-positive value) to disable windowing and always hydrate the full
    * transcript.
    *
+   * Once the transcript exceeds the budget, the hydrated window's start
+   * slides forward as messages are added, which rewrites the start of the
+   * prompt and defeats provider prompt caching (and the step alignment of
+   * `truncationStep`) until the transcript fits again.
+   *
    * @default 32 * 1024 * 1024
    */
   hydrationByteBudget: number = 32 * 1024 * 1024;
@@ -3403,9 +3488,13 @@ export class Think<
    * `false` keeps aged media in the conversation, so the model keeps seeing
    * it. It does NOT change where Sessions keeps the bytes.
    *
-   * `keepRecentMessages` is clamped to at least the recent window the model
-   * replays at full fidelity (4 messages), so eviction can never rewrite
-   * content the model still sees.
+   * Eviction only rewrites messages below the stepped read-time truncation
+   * cutoff (see `truncationStep`), moved back whole steps until at least
+   * `keepRecentMessages` messages stay above it. It therefore never rewrites
+   * a message the model still replays at full fidelity, and it changes the
+   * cached prompt prefix at most once per truncation step rather than every
+   * turn. The media of up to `keepRecentMessages + truncationStep - 1`
+   * recent messages can stay in context.
    *
    * @default true
    */
@@ -4114,7 +4203,11 @@ export class Think<
     } else {
       const aged = this._cachedMessages.slice(
         0,
-        Math.max(0, this._cachedMessages.length - keepRecent)
+        mediaEvictionCutoff(
+          this._cachedMessages.length,
+          config.keepRecentMessages,
+          this.truncationStep
+        )
       );
       if (
         !aged.some((message) => hasEvictableMedia(message, config.minPartBytes))
@@ -4148,9 +4241,10 @@ export class Think<
    * once the rewritten row is stored, its Sessions attachment reference is
    * gone and the blob is reaped, so the bytes live in exactly one place.
    *
-   * The aged cutoff is `keepRecentMessages` clamped to at least
-   * `MODEL_RECENT_WINDOW`: messages the model still replays at full fidelity
-   * are never rewritten, whatever the configuration says.
+   * The aged cutoff is {@link mediaEvictionCutoff}: the stepped truncation
+   * cutoff, kept at least `keepRecentMessages` back. Messages the model still
+   * replays at full fidelity are never rewritten, whatever the configuration
+   * says, and the cutoff moves only once per truncation step.
    *
    * Best-effort: failures are logged and the next pass retries. When a pass
    * stops at `maxRowsPerPass` having made progress, the next one is scheduled
@@ -4193,11 +4287,14 @@ export class Think<
         return null;
       }
       const stats = await this.session.getHistoryRowStats();
-      const keepRecent = Math.max(
-        config.keepRecentMessages,
-        MODEL_RECENT_WINDOW
+      const aged = stats.slice(
+        0,
+        mediaEvictionCutoff(
+          stats.length,
+          config.keepRecentMessages,
+          this.truncationStep
+        )
       );
-      const aged = stats.slice(0, Math.max(0, stats.length - keepRecent));
 
       let processed = 0;
       for (const row of aged) {
@@ -4951,11 +5048,14 @@ export class Think<
 
   /**
    * Return AI Gateway options for a string model resolved by the default
-   * provider. Called on every {@link resolveModel} call: once per turn, plus
-   * once for each string `model` override returned from `beforeTurn` or
-   * `beforeStep`. It can read {@link activeTurn}, the messenger context, or
-   * agent state. Use it to pick a gateway `id` and to attach `metadata`, which AI
-   * Gateway records on the request log as `cf-aig-metadata`.
+   * provider. Called on every {@link resolveModel} call: once per turn for the
+   * default model (skipped when `beforeTurn` returns its own `model` without
+   * reading `ctx.model`), plus once for each string `model` override returned
+   * from `beforeTurn` or `beforeStep`. It can read {@link activeTurn}, the
+   * messenger context, or agent state. Use it to pick a gateway `id` and to
+   * attach `metadata`, which AI Gateway records on the request log as
+   * `cf-aig-metadata`. It must return synchronously; a returned Promise is
+   * rejected with an error.
    *
    * Defaults to `undefined`: catalog slugs use the account's `default`
    * gateway, and `@cf/...` ids call Workers AI without a gateway. Not called
@@ -4976,6 +5076,18 @@ export class Think<
    */
   resolveModel(model: ThinkModel = this.getModel()): LanguageModel {
     if (typeof model !== "string") return model;
+    const gateway = this.getGateway(model);
+    if (
+      gateway !== null &&
+      typeof gateway === "object" &&
+      typeof (gateway as { then?: unknown }).then === "function"
+    ) {
+      throw new Error(
+        `getGateway() returned a Promise for model "${model}". It must return ` +
+          "GatewayOptions (or undefined) synchronously; resolve any async " +
+          "lookup in beforeTurn and return the model from there instead."
+      );
+    }
     this._defaultProvider ??= createWorkersAI({
       binding: this.getAIBinding(),
       providers: [openai, anthropic]
@@ -4984,7 +5096,6 @@ export class Think<
     // prefix-cache hits). Any other slug is a catalog model routed through AI
     // Gateway; we pass no other per-call settings, which avoids forcing
     // options a given provider/transport would reject.
-    const gateway = this.getGateway(model);
     return model.startsWith("@cf/")
       ? this._defaultProvider(model, {
           sessionAffinity: this.sessionAffinity,
@@ -5825,7 +5936,11 @@ export class Think<
    * the provider's cached prompt prefix survives the turns in between. Up to
    * `truncationStep + 3` recent messages stay at full fidelity. Set it to `1`
    * to cut every turn, which keeps the fewest full-fidelity messages for
-   * models with a small context window.
+   * models with a small context window. `Infinity` never moves the cutoff, so
+   * read-time truncation is off and every message stays at full fidelity;
+   * media eviction then keeps exactly `keepRecentMessages` and rewrites the
+   * prefix whenever a message ages out. Other non-finite or non-positive
+   * values behave like `1`.
    *
    * @default 8
    */
@@ -7092,14 +7207,20 @@ export class Think<
       );
     }
 
-    const model = this.resolveModel();
+    // The default model is resolved on first read, so a `beforeTurn` that
+    // returns its own `model` without reading `ctx.model` never calls
+    // `getGateway` or needs the AI binding for the default.
+    let defaultModel: LanguageModel | undefined;
+    const resolveDefaultModel = () => (defaultModel ??= this.resolveModel());
     const turn = this.activeTurn;
     const messenger = this._activeMessengerContext();
     const ctx: TurnContext = {
       system,
       messages,
       tools,
-      model,
+      get model() {
+        return resolveDefaultModel();
+      },
       continuation: input.continuation,
       body: input.body,
       ...(turn && { requestId: turn.requestId, trigger: turn.trigger }),
@@ -7120,7 +7241,9 @@ export class Think<
     const wantsStructuredOutput = structuredOutputSchema !== undefined;
 
     const finalModel =
-      config.model != null ? this.resolveModel(config.model) : model;
+      config.model != null
+        ? this.resolveModel(config.model)
+        : resolveDefaultModel();
     const finalSystem =
       config.instructions ??
       config.system ??
@@ -7135,7 +7258,7 @@ export class Think<
       ? { ...tools, ...config.tools }
       : tools;
     const finalTurnContext: TurnContext = {
-      ...ctx,
+      ...turnContextWithoutModel(ctx),
       system: finalSystem,
       messages: finalMessages,
       tools: mergedTools,
@@ -7185,7 +7308,12 @@ export class Think<
     const finalMaxSteps =
       config.maxSteps ?? channelDefinition?.maxTurns ?? this.maxSteps;
     const finalSendReasoning = config.sendReasoning ?? this.sendReasoning;
-    const finalMessageMetadata = config.messageMetadata ?? this.messageMetadata;
+    const metadataWriter = config.messageMetadata ?? this.messageMetadata;
+    const continuation = input.continuation ?? false;
+    const finalMessageMetadata =
+      metadataWriter &&
+      ((options: { part: TextStreamPart<ToolSet> }) =>
+        metadataWriter({ ...options, continuation }));
     // Resolve the per-turn stall-watchdog override (explicit `0` = off for this
     // turn). Read by `_streamResult` / `_streamResultToRpcCallback` when arming
     // the watchdog. `??` so a `0` override is honored, not treated as "unset".
@@ -7471,7 +7599,9 @@ export class Think<
               toUIMessageStream: (o: {
                 sendReasoning?: boolean;
                 onError?: (error: unknown) => string;
-                messageMetadata?: MessageMetadataCallback;
+                messageMetadata?: (options: {
+                  part: TextStreamPart<ToolSet>;
+                }) => Record<string, unknown> | undefined;
               }) => ReadableStream;
             }
           ).toUIMessageStream({
@@ -14329,11 +14459,14 @@ export class Think<
             break;
           }
 
-          const streamChunk = this._annotateActionApprovalChunk(
-            requestId,
-            chunk as unknown as StreamChunkData,
-            pendingActionCalls,
-            accumulator.parts
+          const streamChunk = withoutOverwrittenStartMetadata(
+            this._annotateActionApprovalChunk(
+              requestId,
+              chunk as unknown as StreamChunkData,
+              pendingActionCalls,
+              accumulator.parts
+            ),
+            continuationAssistant ? leafMetadata : undefined
           );
           const { action } = accumulator.applyChunk(streamChunk);
           this._applyActionApprovalDescriptorToParts(

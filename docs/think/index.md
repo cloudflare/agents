@@ -953,7 +953,7 @@ Media eviction is a different concern: a context-window technique, not a storage
 
 The bytes are written to the Workspace at that path, raw and with their real mime type — not as a `data:` URL string. The workspace `read` tool recognises `image/*`, so when the agent decides it needs to look at the picture again it reads the path out of the marker and the actual image goes back into context. Eviction is visible to the model and lossy on purpose; nothing reconstructs it behind the model's back.
 
-Passes are bounded (`maxRowsPerPass`, 64 by default) and run in the background after a turn or a hydration read, rescheduling themselves while a backlog remains. Only payloads of at least `minPartBytes` are evicted, and `keepRecentMessages` is clamped to the four messages the model replays at full fidelity, so eviction can never rewrite content the model is still reading. Once a row is rewritten, the Sessions attachment reference is dropped and the blob is reaped: the bytes exist in exactly one place, the Workspace file.
+Passes are bounded (`maxRowsPerPass`, 64 by default) and run in the background after a turn or a hydration read, rescheduling themselves while a backlog remains. Only payloads of at least `minPartBytes` are evicted, and `keepRecentMessages` is clamped to the four messages the model replays at full fidelity, so eviction can never rewrite content the model is still reading. The eviction cutoff moves in the same `truncationStep` steps as read-time truncation, so evicting media does not rewrite the prompt prefix on turns where truncation leaves it alone; media can stay in up to `truncationStep - 1` messages past `keepRecentMessages`. Once a row is rewritten, the Sessions attachment reference is dropped and the blob is reaped: the bytes exist in exactly one place, the Workspace file.
 
 `mediaEviction: false` keeps aged media in the conversation, so the model keeps seeing it. It does not change where Sessions keeps the bytes — a large payload may still be stored as a pointer, which is unobservable.
 
@@ -966,7 +966,7 @@ Providers cache on a byte-identical prompt prefix, so a request only reads the c
 | Mechanism            | What it rewrites                                                                   | How often the prefix changes                |
 | -------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------- |
 | Read-time truncation | Tool outputs over 500 characters and text over 10,000 characters in older messages | Once every 8 messages (about every 4 turns) |
-| Media eviction       | An aged file part becomes a marker                                                 | Once per evicted message                    |
+| Media eviction       | An aged file part becomes a marker                                                 | With the read-time truncation cutoff        |
 | Compaction           | A span of older turns becomes one summary                                          | Once per compaction                         |
 
 Read-time truncation keeps at least the 4 most recent messages at full fidelity and cuts the rest at a multiple of 8 messages, so between cuts up to 11 recent messages stay whole. A cutoff that moved every turn would rewrite a message near the end of the prefix on every turn. In a 16-turn run with a 4,000-character tool output per turn, and cached input billed at a tenth of fresh input, that cost about twice as much as sending the untruncated history. Cutting every 8 messages brings it close to the untruncated cost while still bounding the context.
@@ -980,6 +980,8 @@ export class SmallModelAgent extends Think<Env> {
   truncationStep = 1;
 }
 ```
+
+Set `truncationStep` to `Infinity` to turn read-time truncation off: older messages are never cut, and the prefix only changes on media eviction or compaction. Pair it with compaction so the context stays bounded.
 
 A compaction threshold that the compacted history still exceeds compacts on every append, which rewrites the summary every turn. Set `compactAfter()` well above the size of a summary plus the recent messages it keeps.
 
