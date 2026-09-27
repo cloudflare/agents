@@ -1,0 +1,109 @@
+.changeset/agent-tool-replay-recovery-fixes.md
+  s_4a203d03f07df1::t_45f73f205abba9 1-18
+.changeset/think-messenger-prompt-review.md
+  s_4a203d03f07df1::t_352fb65d8ac2e1 1-15
+docs/agents/agent-tools.md
+  s_4a203d03f07df1::t_2c3e208f79abda 482-486
+docs/agents/durable-execution.md
+  s_4a203d03f07df1::t_ddc6cf74651669 465
+docs/think/index.md
+  s_4a203d03f07df1::t_21021820fb8e4e 956,969,984-985
+docs/think/messengers.md
+  s_4a203d03f07df1::t_92c2e4aa337b85 161-163,189-194,244-247
+packages/agents/src/agent-tool-types.ts
+  s_4a203d03f07df1::t_2c72e81f121a22 98-132,389-394,412-419,444-445
+packages/agents/src/chat-sdk/adapter.ts
+  s_4a203d03f07df1::t_38269670faf95b 57-61,77,86-87,106-110,114,132-159
+packages/agents/src/chat-sdk/types.ts
+  s_4a203d03f07df1::t_71e12bd0f04bd7 17-26
+packages/agents/src/chat/__tests__/agent-tools.test.ts
+  s_4a203d03f07df1::t_6aec6b7b7a9819 96-164,507-555
+packages/agents/src/chat/agent-tools.ts
+  s_4a203d03f07df1::t_c54c17f5b19305 2,5-7,198-200,205,410-412,415-417,426-427,430-435,437-441,448-452,472-473,490-491,493-501,561-563,565-575
+packages/agents/src/chat/chunk-size.ts
+  s_4a203d03f07df1::t_1fdb6eda30183f 1-17
+packages/agents/src/chat/index.ts
+  s_4a203d03f07df1::t_cbefaccf018ef4 103
+packages/agents/src/chat/resumable-stream.ts
+  s_4a203d03f07df1::t_e96330335759d2 30,768
+packages/agents/src/chat/truncate-older-messages.ts
+  s_4a203d03f07df1::t_8c3151663c8e14 133-138,150-154,156-162,164-165,171-172,202-209,211,214-216,219,223-225,227-228,232,235-236,245-298
+packages/agents/src/index.ts
+  s_4a203d03f07df1::t_cccc7adde6abd0 195-196,755,1617-1619,1772-1779,4278-4280,4304-4309,4311,4343,4346-4349,4464-4470,4485-4490,4492-4503,4506-4512,6893-6895,6923-6924,6926-6932,6939-6940,6944-6956,6965,6969,6987,6995-6996,7006,7008,7015,7033,7043-7047,7049-7050,7101-7111,7115-7116,7225,7673-7675,7680,7684,7689,7713,7735,7787-7788,7793-7794
+packages/agents/src/react-tests/useAgentToolEvents.test.tsx
+  s_4a203d03f07df1::t_9a2b127e52c500 22,307-368
+packages/agents/src/tests/agent-tool-replay.test.ts
+  s_4a203d03f07df1::t_c6e0c61337cc93 4-162
+packages/agents/src/tests/agents/agent-tool-replay.ts
+  s_4a203d03f07df1::t_033f330039edfc 22-39,57,432-630,657-661,666-688,696-699,701-707,710-711,713-715,719,722,736-737,740,747,749,754-762,769-770,801-814,816-843,851-852
+packages/agents/src/tests/agents/chat-sdk.ts
+  s_4a203d03f07df1::t_230a0507afb1a7 103-171
+packages/agents/src/tests/agents/run-fiber.ts
+  s_4a203d03f07df1::t_7ca73eb94cb37b 706-769
+packages/agents/src/tests/chat-sdk.test.ts
+  s_4a203d03f07df1::t_8f5179e030e727 54-76
+packages/agents/src/tests/chat/truncate-older-messages.test.ts
+  s_4a203d03f07df1::t_6f3180ddf1d1fc 2-3,244,272,274-277,314-316,320-323,359-517,537-570
+packages/agents/src/tests/run-fiber.test.ts
+  s_4a203d03f07df1::t_7e77dbe08b61cf 1042-1111
+packages/agents/src/tests/schema-and-state-optimization.test.ts
+  s_4a203d03f07df1::t_291ea555a5497c 80-82,153
+packages/ai-chat/src/index.ts
+  s_4a203d03f07df1::t_bf64f8bf3cac14 85,4332-4333,4343,4440-4442,4449-4452,4513-4516,4542-4544,4591-4611,4646-4650
+packages/ai-chat/src/tests/agent-tools.test.ts
+  s_4a203d03f07df1::t_4cd37c89429d3c 170,175-190,595-674
+packages/ai-chat/src/tests/worker.ts
+  s_4a203d03f07df1::t_64e47863a8d1fa 4243,4269,4298,4336-4646,5208,5217-5268
+packages/think/src/extensions/hook-proxy.ts
+  s_4a203d03f07df1::t_dfcfa618b81686 10,63-65,68-69,78-81
+packages/think/src/messengers/chat-sdk.ts
+  s_4a203d03f07df1::t_5f0a818689ac8b 10,52,147-153,156,160-193,267-268,321-323,390-395,415-446,488-550,565-567,611-633,639-640,1107-1127,1179-1184,1186,1189-1190,1192-1196,1211-1212,1218-1224
+packages/think/src/messengers/delivery.ts
+  s_4a203d03f07df1::t_e44d98408e9d3c 129-142,394-400,404-405,448-474,491-494,595-596
+packages/think/src/messengers/events.ts
+  s_4a203d03f07df1::t_0451798ed551c7 98-102,106,108-116
+packages/think/src/tests/agent-tool-rebind-noop.test.ts
+  s_4a203d03f07df1::t_89f2308034db18 83-127
+packages/think/src/tests/agent-tools.test.ts
+  s_4a203d03f07df1::t_2bb25f462dc021 53-68,557-568,570-571,778-838
+packages/think/src/tests/agents/extension-hooks.ts
+  s_4a203d03f07df1::t_77daf97ceaa97a 13,206-258
+packages/think/src/tests/agents/index.ts
+  s_4a203d03f07df1::t_52d12c9d50164b 48-51
+packages/think/src/tests/agents/messengers.ts
+  s_4a203d03f07df1::t_5ff8e1b3dbbd59 2,5-12,157,160-161,170-176,231,254-354,593-603,608-611
+packages/think/src/tests/agents/prompt-cache.ts
+  s_4a203d03f07df1::t_6d14147a5e9f42 20-21,141-144,148
+packages/think/src/tests/agents/think-session.ts
+  s_4a203d03f07df1::t_d95c0923d2f188 49-50,908-1281,1431-1433,1437-1505,3580-3581,10443-10530,11581-11583
+packages/think/src/tests/assistant-message-metadata.test.ts
+  s_4a203d03f07df1::t_70e858721cd7b6 218-242
+packages/think/src/tests/hooks.test.ts
+  s_4a203d03f07df1::t_fe597b8f918e45 266-283,1731-1743
+packages/think/src/tests/messengers.test.ts
+  s_4a203d03f07df1::t_909f291ef97065 8,36,878-1000,1564-1716,1841-1955
+packages/think/src/tests/prompt-cache.test.ts
+  s_4a203d03f07df1::t_d6c71f9817ecf8 77-98
+packages/think/src/tests/worker.ts
+  s_4a203d03f07df1::t_8e849352401115 51,103,259
+packages/think/src/tests/wrangler.jsonc
+  s_4a203d03f07df1::t_d2d193d212d098 158-161,276
+packages/think/src/think.ts
+  s_4a203d03f07df1::t_079d89f4d3240a 158,197,295-297,312-348,350,352,357-384,1550-1556,1563-1566,2726-2730,3523-3527,3550-3556,4265-4269,4303-4306,4349-4355,4852,4865-4881,5112-5119,5154-5165,5780-5786,6032-6036,7326-7330,7337-7339,7360-7362,7377,7427-7432,7718-7720,8296-8299,10036-10037,10045,10120-10124,10177-10197,10246-10248,10251-10255,10294-10297,10321-10323,12555,12559,12580,14751-14758
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9420463603b514c148c39c0683793dfb87a316bf",
+  "prompts": {},
+  "sessions": {
+    "s_4a203d03f07df1": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "f049098e-4e01-4235-a0c2-e1885e3e8242",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
