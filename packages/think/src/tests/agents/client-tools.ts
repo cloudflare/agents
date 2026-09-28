@@ -10,6 +10,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import { Think } from "../../think";
 import type {
+  ChatErrorContext,
   ChatResponseResult,
   MessageConcurrency,
   StreamCallback,
@@ -823,9 +824,27 @@ export class ThinkClientToolsAgent extends Think {
   private _responseLog: ChatResponseResult[] = [];
   private _lastTurnToolNames: string[] = [];
   private _stampMetadata = false;
+  private _failContinuationBeforeStream = false;
+  private _chatErrorLog: ChatErrorContext[] = [];
+
+  override onChatError(error: unknown, ctx: ChatErrorContext): unknown {
+    this._chatErrorLog.push(ctx);
+    return error;
+  }
+
+  async setFailContinuationBeforeStream(value: boolean): Promise<void> {
+    this._failContinuationBeforeStream = value;
+  }
+
+  async getChatErrorLog(): Promise<ChatErrorContext[]> {
+    return this._chatErrorLog;
+  }
 
   override beforeTurn(ctx: TurnContext): TurnConfig | void {
     this._lastTurnToolNames = Object.keys(ctx.tools);
+    if (ctx.continuation && this._failContinuationBeforeStream) {
+      throw new Error("continuation failed before streaming");
+    }
     if (this._stampMetadata) {
       // Per-turn write path (`TurnConfig.messageMetadata`) for issue #1873.
       // `createdAt` on `start` and `source` on `finish` prove the two are

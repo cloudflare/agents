@@ -1871,11 +1871,15 @@ export class ResponseAgent extends AIChatAgent<Env> {
  */
 export class ResponseContinuationAgent extends AIChatAgent<Env> {
   private _responseResults: ChatResponseResult[] = [];
+  private _failContinuation = false;
 
   async onChatMessage(
     _onFinish: GenerateTextOnFinishCallback<ToolSet>,
-    _options?: OnChatMessageOptions
+    options?: OnChatMessageOptions
   ) {
+    if (options?.continuation && this._failContinuation) {
+      throw new Error("continuation failed before streaming");
+    }
     return new Response("Continuation response", {
       headers: { "Content-Type": "text/plain" }
     });
@@ -1887,6 +1891,10 @@ export class ResponseContinuationAgent extends AIChatAgent<Env> {
 
   getChatResponseResults(): ChatResponseResult[] {
     return [...this._responseResults];
+  }
+
+  setFailContinuation(value: boolean): void {
+    this._failContinuation = value;
   }
 
   getPersistedMessages(): Promise<ChatMessage[]> {

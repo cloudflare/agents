@@ -6411,6 +6411,22 @@ export class ThinkToolsTestAgent extends Think {
     this._responseLog.length = 0;
   }
 
+  async getResponseStatusesForTest(): Promise<
+    Array<Pick<ChatResponseResult, "status" | "continuation" | "error">>
+  > {
+    return this._responseLog.map(({ status, continuation, error }) => ({
+      status,
+      continuation,
+      error
+    }));
+  }
+
+  private _failContinuationBeforeStream = false;
+
+  async failContinuationBeforeStreamForTest(): Promise<void> {
+    this._failContinuationBeforeStream = true;
+  }
+
   async mutateLastResponseAttachmentForTest(): Promise<void> {
     const attachment = this._responseLog.at(-1)?.attachments?.[0];
     if (attachment !== undefined) {
@@ -6787,7 +6803,10 @@ export class ThinkToolsTestAgent extends Think {
     this._repairToolCalls = true;
   }
 
-  override beforeTurn(): TurnConfig | void {
+  override beforeTurn(ctx: TurnContext): TurnConfig | void {
+    if (ctx.continuation && this._failContinuationBeforeStream) {
+      throw new Error("continuation failed before streaming");
+    }
     if (this._repairToolCalls) {
       return {
         stopWhen: this._turnStopCondition,

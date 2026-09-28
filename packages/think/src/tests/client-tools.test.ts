@@ -861,6 +861,63 @@ describe("Think — auto-continuation", () => {
     await closeWS(ws);
   });
 
+  it("reports an approval continuation that fails before streaming (#2381)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setServerApprovalToolMode(true);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const initialDone = waitForDone(ws, 15000);
+    sendChatRequest(ws, [makeUserMessage("update my trigger")]);
+    await initialDone;
+
+    await agent.setFailContinuationBeforeStream(true);
+    const continuationDone = waitForDone(ws, 15000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc-server-approval-1",
+        approved: true,
+        autoContinue: true
+      })
+    );
+    const frames = await continuationDone;
+    const terminal = frames.find(
+      (frame) => frame.type === MSG_CHAT_RESPONSE && frame.done === true
+    );
+    expect(terminal).toMatchObject({
+      error: true,
+      continuation: true,
+      body: "continuation failed before streaming"
+    });
+
+    const responseLog = async () =>
+      (await agent.getResponseLog()) as ChatResponseResult[];
+    await vi.waitFor(async () => {
+      expect((await responseLog()).at(-1)).toMatchObject({
+        requestId: terminal?.id,
+        continuation: true,
+        status: "error",
+        error: "continuation failed before streaming"
+      });
+    });
+    await delay(200);
+    expect(
+      (await responseLog()).filter((response) => response.status === "error")
+    ).toHaveLength(1);
+    expect(await agent.getChatErrorLog()).toContainEqual(
+      expect.objectContaining({
+        requestId: terminal?.id,
+        stage: "turn",
+        continuation: true
+      })
+    );
+    expect(await agent.getServerApprovalToolExecutions()).toBe(0);
+
+    await closeWS(ws);
+  });
+
   it("continues after approving a tool that shares its message with a settled tool (#2185)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

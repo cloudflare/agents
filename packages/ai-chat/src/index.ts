@@ -3462,6 +3462,7 @@ export class AIChatAgent<
               },
               async () => {
                 const autoContinuationBody = async () => {
+                  let replying = false;
                   try {
                     await this._repairInterruptedToolsBeforeTurn({
                       continuation: true
@@ -3478,6 +3479,7 @@ export class AIChatAgent<
                     );
 
                     if (response) {
+                      replying = true;
                       const replyResult = await this._reply(
                         requestId,
                         response,
@@ -3496,6 +3498,15 @@ export class AIChatAgent<
                       this._clearPendingAutoContinuation(true);
                       this._activateDeferredAutoContinuation();
                     }
+                  } catch (error) {
+                    if (
+                      !replying &&
+                      !abortSignal?.aborted &&
+                      !isDurableObjectResetError(error)
+                    ) {
+                      await this._reportContinuationFailure(requestId, error);
+                    }
+                    throw error;
                   } finally {
                     this._abortRegistry.remove(requestId);
                   }
@@ -3524,6 +3535,42 @@ export class AIChatAgent<
       this._clearAllAutoContinuationState(true);
       console.error(errorPrefix, error);
     });
+  }
+
+  /**
+   * Report an auto-continuation that failed before it produced a response,
+   * the way a stream error is reported: an error frame, a durable terminal
+   * record, and `onChatResponse` with `status: "error"` for the assistant
+   * message the continuation would have extended. Called inside the turn so
+   * the response hook drains when the turn settles.
+   */
+  private async _reportContinuationFailure(
+    requestId: string,
+    error: unknown
+  ): Promise<void> {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    this._broadcastChatMessage({
+      body: errorMessage,
+      done: true,
+      error: true,
+      id: requestId,
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      continuation: true
+    });
+    const message = [...this.messages]
+      .reverse()
+      .find((candidate) => candidate.role === "assistant");
+    if (message) {
+      this._pendingChatResponseResults.push({
+        message,
+        requestId,
+        continuation: true,
+        status: "error",
+        error: errorMessage
+      });
+    } else {
+      await this._recordChatTerminal(requestId, errorMessage);
+    }
   }
 
   /**
