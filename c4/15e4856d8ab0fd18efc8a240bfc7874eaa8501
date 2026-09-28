@@ -1,0 +1,27 @@
+docs/think/tools.md
+  s_efd49820c22d67::t_b71b48ed2987ad 213
+packages/think/src/think.ts
+  s_efd49820c22d67::t_061831dff2f9f0 7557,7559,7643,7710-7720,7722,7724,8044,8078-8088
+packages/think/src/tests/agents/tool-discovery.ts
+  s_efd49820c22d67::t_319d3247476ad9 1,29-32,34-35,38-42,179,188-194,198-203
+packages/think/src/tests/tool-discovery.test.ts
+  s_efd49820c22d67::t_cd4d09e1b82a12 32-34,75-100,112-114,136-138,154-156,223,228-236,243,285
+packages/think/src/tool-discovery.ts
+  s_efd49820c22d67::t_315c9056d92a8d 56-62,162-167,187-193
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c415e4856d8ab0fd18efc8a240bfc7874eaa8501",
+  "prompts": {},
+  "sessions": {
+    "s_efd49820c22d67": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "50161273-add8-4cb8-9ec3-a4d330172115",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
