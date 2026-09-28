@@ -1,0 +1,33 @@
+packages/agents/src/index.ts
+  s_efd49820c22d67::t_93868d1a22d0da 4777-4791
+  s_efd49820c22d67::t_c43ceae882778e 3172,3176,3199,3209,3212,3221-3223,3232,3236-3237,3244,3248-3249,4729,4732-4733,5082,5086,5089,5093,5097-5098,5101,5106-5107,5110,5114
+.changeset/facet-host-jobs.md
+  s_efd49820c22d67::t_5c518ded5dd749 1-5
+packages/agents/src/tests/agents/sub-agent.ts
+  s_efd49820c22d67::t_0aac3a0b5b3ffc 71-73,524-535,2061-2077
+  s_efd49820c22d67::t_d3e52734d92e8b 1233-1260,1266,2653-2670
+packages/agents/src/tests/sub-agent.test.ts
+  s_efd49820c22d67::t_b9e31725c99dd6 1164-1207
+.changeset/facet-broadcast-root-calls.md
+  s_efd49820c22d67::t_93fa3ca26d08a0 1-5
+packages/agents/src/dynamic-agents/dynamic-agents.ts
+  s_efd49820c22d67::t_d6907a5ffd53e7 105-112,198,243-248,532,736,757,901,905-935,1490-1493,1495
+packages/agents/src/tests/sub-agent-rpc-bridge.test.ts
+  s_efd49820c22d67::t_7884086a868320 2,522-622
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "59d0553ee66ee0c9a1a75e1b5a38566c803283f2",
+  "prompts": {},
+  "sessions": {
+    "s_efd49820c22d67": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "50161273-add8-4cb8-9ec3-a4d330172115",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
