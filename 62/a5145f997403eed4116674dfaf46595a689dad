@@ -1,0 +1,31 @@
+.changeset/context-reminders.md
+  s_efd49820c22d67::t_fb228ac4a3ca79 1-6
+docs/agents/context.md
+  s_efd49820c22d67::t_ea4307eff1c973 99-123,154-155
+packages/agents/src/tests/context/context.test.ts
+  s_efd49820c22d67::t_1fa91b3798d09a 92-197
+packages/think/src/tests/agents/prompt-cache.ts
+  s_efd49820c22d67::t_049feec6fba4de 3,29-32,44-47,60-70,158-162,206-210,216-220
+packages/think/src/tests/prompt-cache.test.ts
+  s_efd49820c22d67::t_ca1b9c275e62ef 34-65
+packages/think/src/think.ts
+  s_efd49820c22d67::t_8f31b83ac69093 1463-1492,2757-2761,6271-6272,7121-7126,7416-7420
+packages/agents/src/context/blocks.ts
+  s_efd49820c22d67::t_62ea58b42ee3ac 10-11,51-93,142-156,224-228,403-406,442-472
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "62a5145f997403eed4116674dfaf46595a689dad",
+  "prompts": {},
+  "sessions": {
+    "s_efd49820c22d67": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "50161273-add8-4cb8-9ec3-a4d330172115",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
