@@ -144,10 +144,10 @@ export interface ExtractionResult {
   /** Payloads to write, deduplicated by address, in encounter order. */
   attachments: PendingAttachment[];
   /**
-   * Every address the stored message points at: the payloads extracted on
-   * this pass and any pointer the message already carried. A message can be
-   * written back with its pointers in place, and its references must follow
-   * what the row says, not what this pass happened to extract.
+   * Every address a read of the stored message restores: the payloads
+   * extracted on this pass and any pointer the message already carried. A
+   * message can be written back with its pointers in place, and its
+   * references must follow what the row says, not what this pass extracted.
    */
   references: string[];
 }
@@ -220,25 +220,28 @@ export function extractAttachments(message: SessionMessage): ExtractionResult {
 }
 
 /**
- * Every attachment address a stored form points at, at any depth. A pointer
- * missed here would let its payload be collected while this row still names
- * it, so the scan goes past the rewrite cap; its own cap only bounds
- * pathological nesting.
+ * The attachment addresses a read of this stored form restores. It walks
+ * exactly as {@link resolveAttachments} does, so a message holds a reference
+ * for every pointer a read would put back and for nothing else.
  */
 function pointersOf(
   value: unknown,
   into = new Set<string>(),
   depth = 0
 ): Set<string> {
-  if (depth > 64 || value === null || typeof value !== "object") return into;
+  if (depth > MAX_WALK_DEPTH || value === null || typeof value !== "object") {
+    return into;
+  }
   if (Array.isArray(value)) {
     for (const entry of value) pointersOf(entry, into, depth + 1);
     return into;
   }
   const record = value as Record<string, unknown>;
-  for (const field of [record.url, record.data]) {
-    const hash = parseAttachmentUrl(field);
-    if (hash) into.add(hash);
+  const hash =
+    parseAttachmentUrl(record.url) ?? parseAttachmentUrl(record.data);
+  if (hash) {
+    into.add(hash);
+    return into;
   }
   for (const entry of Object.values(record)) pointersOf(entry, into, depth + 1);
   return into;

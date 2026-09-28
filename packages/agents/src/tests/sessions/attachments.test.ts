@@ -262,7 +262,7 @@ describe("Sessions attachments", () => {
     });
   });
 
-  it("references a pointer nested past the rewrite depth cap", async () => {
+  it("references a pointer nested inside another part", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
       const session = instance.sessions.session();
@@ -272,11 +272,10 @@ describe("Sessions attachments", () => {
         instance.storedMessage("", "m1").parts[1] as { url: string }
       ).url;
 
-      // Extraction stops rewriting past its depth cap, but a pointer below the
-      // cap still names a payload, and a write that missed it would collect
-      // bytes this row points at.
+      // A copy of the pointer a few levels down, where a read still restores
+      // it, holds its own reference.
       let node: unknown = { url: pointerUrl };
-      for (let i = 0; i < 10; i++) node = { type: "nest", child: node };
+      for (let i = 0; i < 3; i++) node = { type: "nest", child: node };
       await session.appendMessage({
         id: "m2",
         role: "user",
@@ -284,14 +283,14 @@ describe("Sessions attachments", () => {
       });
       expect(instance.attachmentRefCount()).toBe(2);
 
-      // So dropping the message that originally carried the bytes leaves them
-      // in place for the deep pointer that still names them.
+      // So dropping the message that carried the bytes keeps them for it.
       await session.deleteMessages(["m1"]);
       expect(instance.attachmentRefCount()).toBe(1);
       expect(instance.attachmentRecords()).toHaveLength(1);
+      const [copy] = await session.getHistory();
+      expect(JSON.stringify(copy)).toContain(url);
     });
   });
-
   it("returns null for an update whose target is gone and stores nothing", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
