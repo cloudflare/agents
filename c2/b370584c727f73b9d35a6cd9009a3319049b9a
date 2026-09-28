@@ -1,0 +1,21 @@
+packages/agents/src/chat/react.tsx
+  s_c818abc161b40d::t_6a9f0f20797e42 826-839,842-855
+packages/agents/src/react-tests/initial-messages-address-change.test.tsx
+  s_c818abc161b40d::t_2e9eb147235513 9,30-31,37,196-226
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c2b370584c727f73b9d35a6cd9009a3319049b9a",
+  "prompts": {},
+  "sessions": {
+    "s_c818abc161b40d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "ba73f896-6b24-4739-897c-6e7c57b5e20b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
