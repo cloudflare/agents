@@ -157,8 +157,8 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     const recordEnd = (text: string) => this._record("stream-end", text);
     const mode = this._recoveryMode();
     const nextCall = () => ++this._streamCalls;
-    // An agent named `slow-…` takes 2.5s per model call.
-    const slowMs = this.name.startsWith("slow-") ? 2500 : 0;
+    // An agent named `slow-…` takes 4s per model call.
+    const slowMs = this.name.startsWith("slow-") ? 4000 : 0;
     return {
       specificationVersion: "v3",
       provider: "test",
@@ -592,14 +592,15 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         this._chat = chat;
         if (this.name.startsWith("slow-")) {
           // Stand-in for the Chat SDK's fixed 30s lock: short enough that a
-          // slow turn outlives it unless the lock is kept alive.
+          // slow turn outlives it unless the lock is kept alive, long enough
+          // that a loaded runner's stalls do not starve the heartbeat.
           const state = chat.getState();
           const acquireLock = state.acquireLock.bind(state);
           const extendLock = state.extendLock.bind(state);
           state.acquireLock = (threadId, ttlMs) =>
-            acquireLock(threadId, Math.min(ttlMs, 300));
+            acquireLock(threadId, Math.min(ttlMs, 1000));
           state.extendLock = (lock, ttlMs) =>
-            extendLock(lock, Math.min(ttlMs, 300));
+            extendLock(lock, Math.min(ttlMs, 1000));
         }
         return Promise.resolve();
       },
