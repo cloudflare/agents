@@ -194,12 +194,15 @@ describe("tool discovery helpers", () => {
     expect(searchDeferredTools("zz", catalog)).toEqual([]);
   });
 
-  it("keeps two-letter filler from outranking a relevant tool", () => {
+  it("ignores two-letter filler once a tool matches on longer words", () => {
     const tools = [
       { name: "navigate_to_page", description: "Navigate web pages" },
       { name: "forecast", description: "Get weather forecasts" }
     ];
     expect(searchDeferredTools("weather to prepare", tools, 1)).toEqual([
+      "forecast"
+    ]);
+    expect(searchDeferredTools("weather to prepare", tools)).toEqual([
       "forecast"
     ]);
   });
