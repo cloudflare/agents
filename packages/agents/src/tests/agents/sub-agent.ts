@@ -1230,11 +1230,40 @@ export class TestSubAgentParent extends Agent {
     this._subAgentBroadcastFailuresRemaining += 1;
   }
 
+  private _subAgentBroadcastCalls = 0;
+  private _startsInThisInstance = 0;
+
+  onStart(): void {
+    this._startsInThisInstance += 1;
+  }
+
+  /** Read without an RPC so the probe itself cannot start the agent. */
+  get startsInThisInstance(): number {
+    return this._startsInThisInstance;
+  }
+
+  subAgentBroadcastCallCount(): number {
+    return this._subAgentBroadcastCalls;
+  }
+
+  async broadcastFromSubAgentDetached(
+    childName: string,
+    messages: string[]
+  ): Promise<void> {
+    const child = await this.subAgent(SlowReplySubAgent, childName);
+    await child.broadcastDetached(messages);
+  }
+
+  abortSlowReplySubAgent(childName: string): void {
+    this.abortSubAgent(SlowReplySubAgent, childName);
+  }
+
   override async _cf_broadcastToSubAgent(
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
+    this._subAgentBroadcastCalls += 1;
     if (this._subAgentBroadcastFailuresRemaining > 0) {
       this._subAgentBroadcastFailuresRemaining -= 1;
       throw new Error("TestSubAgentParent broadcast forwarding failed");
@@ -2619,6 +2648,39 @@ export class SlowReplySubAgent extends Agent {
   broadcastMessageNow(message: string): string {
     this.broadcast(message);
     return "broadcast";
+  }
+
+  /** Broadcasts and then sends directly, both during the current frame. */
+  @callable()
+  broadcastThenSendNow(broadcast: string, direct: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.broadcastThenSendNow requires an active connection"
+      );
+    }
+
+    this.broadcast(broadcast);
+    connection.send(direct);
+    return "sent";
+  }
+
+  /** Broadcasts after the current frame completes, optionally skipping the caller. */
+  @callable()
+  broadcastMessagesAfterDelay(messages: string[], withoutSelf = false): string {
+    const { connection } = getCurrentAgent();
+    const without = withoutSelf && connection ? [connection.id] : undefined;
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        for (const message of messages) this.broadcast(message, without);
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Broadcasts from a parent RPC, outside any client frame. */
+  broadcastDetached(messages: string[]): void {
+    for (const message of messages) this.broadcast(message);
   }
 
   /** Schedules consecutive messages after the current frame completes. */
