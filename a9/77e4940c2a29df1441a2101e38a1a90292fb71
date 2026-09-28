@@ -1,0 +1,21 @@
+packages/agents/src/react.tsx
+  s_efd49820c22d67::t_ae94a252c9122d 1250
+packages/agents/src/react-tests/useAgent.test.tsx
+  s_efd49820c22d67::t_e63e013c3b49e8 1269-1306
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a977e4940c2a29df1441a2101e38a1a90292fb71",
+  "prompts": {},
+  "sessions": {
+    "s_efd49820c22d67": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "50161273-add8-4cb8-9ec3-a4d330172115",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
