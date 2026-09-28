@@ -514,7 +514,8 @@ export class AgentClient<
 
   /**
    * Whether the client has received identity from the server.
-   * Becomes true after the first identity message is received.
+   * Becomes true with `ready`: after the identity message, or after the
+   * initial state message when the server sends one.
    * Resets to false on connection close.
    */
   identified = false;
@@ -527,6 +528,9 @@ export class AgentClient<
 
   /**
    * Promise that resolves when identity has been received from the server.
+   * When the server also sends the stored state on connect, it resolves only
+   * after that state has been applied, so `state` is current once it settles.
+   * Servers without that signal resolve on identity alone.
    * Useful for waiting before making calls that depend on knowing the instance.
    * Resets on connection close so it can be awaited again after reconnect.
    */
@@ -699,12 +703,18 @@ export class AgentClient<
         }
         if (parsedMessage.type === MessageType.CF_AGENT_STATE) {
           this.state = parsedMessage.state as State;
-          this.options.onStateUpdate?.(parsedMessage.state as State, "server");
-          this.#connect.stateSeen = true;
-          const pending = this.#connect.pendingIdentity;
-          if (pending) {
-            this.#connect.pendingIdentity = null;
-            this.#applyIdentity(pending.name, pending.agent);
+          try {
+            this.options.onStateUpdate?.(
+              parsedMessage.state as State,
+              "server"
+            );
+          } finally {
+            this.#connect.stateSeen = true;
+            const pending = this.#connect.pendingIdentity;
+            if (pending) {
+              this.#connect.pendingIdentity = null;
+              this.#applyIdentity(pending.name, pending.agent);
+            }
           }
           return;
         }

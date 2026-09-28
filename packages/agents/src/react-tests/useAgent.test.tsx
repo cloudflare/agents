@@ -1266,6 +1266,48 @@ describe("useAgent ready and the initial state (#2268)", () => {
     }
   });
 
+  it("resolves ready when onStateUpdate throws on the initial state", async () => {
+    const { host, protocol } = getTestWorkerHost();
+    const onReady = vi.fn();
+    const thrown: unknown[] = [];
+    const onError = (event: ErrorEvent) => {
+      if (event.error?.message !== "state callback failed") return;
+      event.preventDefault();
+      thrown.push(event.error);
+    };
+    window.addEventListener("error", onError);
+    try {
+      await render(
+        <ReadyProbe
+          options={{
+            agent: "TestStateAgent",
+            name: `ready-throw-${crypto.randomUUID()}`,
+            host,
+            protocol,
+            onStateUpdate: () => {
+              throw new Error("state callback failed");
+            }
+          }}
+          onRender={() => {}}
+          onReady={onReady}
+        />
+      );
+
+      await vi.waitFor(
+        () =>
+          expect(onReady).toHaveBeenCalledWith({
+            count: 0,
+            items: [],
+            lastUpdated: null
+          }),
+        { timeout: 10000 }
+      );
+      expect(thrown).toHaveLength(1);
+    } finally {
+      window.removeEventListener("error", onError);
+    }
+  });
+
   it("resolves ready for an agent with no state", async () => {
     const { host, protocol } = getTestWorkerHost();
     const onReady = vi.fn();

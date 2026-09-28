@@ -74,6 +74,40 @@ describe("AgentClient", () => {
       expect(events).toEqual(["state", "identity"]);
     });
 
+    it("resolves ready when onStateUpdate throws on the initial state", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const thrown: unknown[] = [];
+      const onError = (event: ErrorEvent) => {
+        if (event.error?.message !== "state callback failed") return;
+        event.preventDefault();
+        thrown.push(event.error);
+      };
+      window.addEventListener("error", onError);
+      try {
+        client = new AgentClient({
+          agent: "TestStateAgent",
+          name: `client-ready-throw-${crypto.randomUUID()}`,
+          host,
+          protocol,
+          onStateUpdate: () => {
+            throw new Error("state callback failed");
+          }
+        });
+
+        await client.ready;
+
+        expect(client.identified).toBe(true);
+        expect(client.state).toEqual({
+          count: 0,
+          items: [],
+          lastUpdated: null
+        });
+        expect(thrown).toHaveLength(1);
+      } finally {
+        window.removeEventListener("error", onError);
+      }
+    });
+
     it("should reset ready state on close", async () => {
       const { host, protocol } = getTestWorkerHost();
 

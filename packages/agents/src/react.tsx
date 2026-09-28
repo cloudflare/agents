@@ -931,15 +931,18 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
           if (mutableAgentRef.current) {
             mutableAgentRef.current.state = parsedMessage.state as State;
           }
-          options.onStateUpdate?.(parsedMessage.state as State, "server");
           const stateSocket =
             (message.target as PartySocket | null) ?? socketRef.current;
-          const progress = connectProgress(stateSocket);
-          progress.stateSeen = true;
-          const pending = progress.pendingIdentity;
-          if (pending) {
-            progress.pendingIdentity = null;
-            applyIdentity(pending[0], pending[1], stateSocket);
+          try {
+            options.onStateUpdate?.(parsedMessage.state as State, "server");
+          } finally {
+            const progress = connectProgress(stateSocket);
+            progress.stateSeen = true;
+            const pending = progress.pendingIdentity;
+            if (pending) {
+              progress.pendingIdentity = null;
+              applyIdentity(pending[0], pending[1], stateSocket);
+            }
           }
           return;
         }
