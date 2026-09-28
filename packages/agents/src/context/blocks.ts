@@ -57,9 +57,11 @@ const REMINDER_PREAMBLE =
 /**
  * Empty readonly blocks are left out of the prompt. Writable and searchable
  * blocks always render so the model knows which tools can address them.
+ * Remind blocks always render so `promptRendersBlock` can match them exactly:
+ * an absent section cannot be told apart from another label's by prefix.
  */
-function rendersInPrompt(block: ContextBlock): boolean {
-  return !!block.content || block.writable || block.isSearchable;
+function rendersInPrompt(block: ContextBlock, remind: boolean): boolean {
+  return !!block.content || block.writable || block.isSearchable || remind;
 }
 
 function renderSection(block: ContextBlock): string {
@@ -84,11 +86,7 @@ function renderSection(block: ContextBlock): string {
  */
 function promptRendersBlock(prompt: string, block: ContextBlock): boolean {
   const padded = `\n\n${prompt}\n\n${SECTION_RULE}\n`;
-  if (rendersInPrompt(block)) {
-    return padded.includes(`\n\n${renderSection(block)}\n\n${SECTION_RULE}\n`);
-  }
-  const opening = `\n\n${SECTION_RULE}\n${block.label.toUpperCase()}`;
-  return !padded.includes(`${opening} (`) && !padded.includes(`${opening} [`);
+  return padded.includes(`\n\n${renderSection(block)}\n\n${SECTION_RULE}\n`);
 }
 
 /**
@@ -149,6 +147,7 @@ export interface ContextConfig {
    *   the frozen prompt, returns its current value for the host to send
    *   after the cached prefix. The frozen prompt, and the provider's prefix
    *   cache, stay intact until `refreshSystemPrompt()` promotes the value.
+   *   The block renders in the prompt even when empty.
    *
    * A change is any difference in what the provider returns, so return only
    * what should count: a date rather than a timestamp.
@@ -400,8 +399,13 @@ export class ContextBlocks {
   }
 
   private renderPrompt(): string {
+    const remind = new Set(
+      this.configs
+        .filter((config) => config.whenChanged === "remind")
+        .map((config) => config.label)
+    );
     return Array.from(this.blocks.values())
-      .filter(rendersInPrompt)
+      .filter((block) => rendersInPrompt(block, remind.has(block.label)))
       .map(renderSection)
       .join("\n\n");
   }

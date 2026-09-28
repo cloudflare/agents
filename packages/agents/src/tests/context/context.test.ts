@@ -191,6 +191,23 @@ describe("context reminders", () => {
       },
       { label: "environment-extra", provider: new ReadonlyProvider("x") }
     ]);
+    const frozen = await blocks.freezeSystemPrompt();
+    expect(frozen).toContain("ENVIRONMENT (Where you run) [readonly]");
+    expect(await blocks.reminder()).toBeNull();
+  });
+
+  it("does not mistake another label's section for an empty block's", async () => {
+    const blocks = new ContextBlocks([
+      {
+        label: "environment",
+        provider: new ChangingProvider(null),
+        whenChanged: "remind"
+      },
+      {
+        label: "environment (archive)",
+        provider: new ReadonlyProvider("old")
+      }
+    ]);
     await blocks.freezeSystemPrompt();
     expect(await blocks.reminder()).toBeNull();
   });

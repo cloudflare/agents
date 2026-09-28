@@ -117,7 +117,7 @@ const reminder = await context.reminder(); // null until the date changes
 
 `reminder()` re-reads each such block and, for every one whose current rendering no longer appears in the frozen prompt, returns its current value under a short note saying it replaces the prompt's copy. Send that text after the cached prefix, for example at the end of the latest user message, and do not persist it. The frozen prompt does not change, and the reminder keeps coming back on every call until `refreshSystemPrompt()` promotes the value into the prompt. That refresh is the one deliberate cache bust.
 
-The comparison is against the stored prompt, not against in-memory state, so a reminder survives a restart. Any difference in what the provider returns counts as a change, so return only what should count: a date rather than a timestamp.
+The comparison is against the stored prompt, not against in-memory state, so a reminder survives a restart. A remind block always has a section in the prompt, even when it is empty, so the model knows it exists and a later value has a copy to replace. Any difference in what the provider returns counts as a change, so return only what should count: a date rather than a timestamp.
 
 A standing reminder still costs a little cache: it moves to each new user message, so the previous user message falls out of the cached prefix. The system prompt and everything before that message stay cached.
 
