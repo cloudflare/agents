@@ -1247,6 +1247,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     (socketRef.current ?? agent).send(
       JSON.stringify({ state: newState, type: MessageType.CF_AGENT_STATE })
     );
+    if (mutableAgentRef.current) mutableAgentRef.current.state = newState;
     setAgentState(newState);
     options.onStateUpdate?.(newState, "client");
   };

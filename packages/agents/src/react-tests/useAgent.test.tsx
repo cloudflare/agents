@@ -1266,6 +1266,44 @@ describe("useAgent ready and the initial state (#2268)", () => {
     }
   });
 
+  it("resolves ready with a state the initial onStateUpdate set", async () => {
+    const { host, protocol } = getTestWorkerHost();
+    const onReady = vi.fn();
+    const agentRef: { current: { setState(state: unknown): void } | null } = {
+      current: null
+    };
+
+    function SetStateProbe() {
+      const agent = useAgent({
+        agent: "TestStateAgent",
+        name: `ready-set-state-${crypto.randomUUID()}`,
+        host,
+        protocol,
+        onStateUpdate: (state, source) => {
+          if (source !== "server") return;
+          agentRef.current?.setState({ ...(state as object), count: 1 });
+        }
+      });
+      agentRef.current = agent;
+      useEffect(() => {
+        void agent.ready.then(() => onReady(agent.state));
+        // oxlint-disable-next-line react-hooks/exhaustive-deps -- once per socket
+      }, [agent]);
+      return null;
+    }
+
+    await render(<SetStateProbe />);
+
+    await vi.waitFor(() => expect(onReady).toHaveBeenCalled(), {
+      timeout: 10000
+    });
+    expect(onReady).toHaveBeenCalledWith({
+      count: 1,
+      items: [],
+      lastUpdated: null
+    });
+  });
+
   it("resolves ready when onStateUpdate throws on the initial state", async () => {
     const { host, protocol } = getTestWorkerHost();
     const onReady = vi.fn();
