@@ -82,6 +82,18 @@ describe("tool input around approval requests (#1872)", () => {
     expect(part.input).toEqual(INPUT);
   });
 
+  it("keeps the title a late tool-input-available carries", () => {
+    const part = toolPart(
+      applyStream([
+        start,
+        approvalRequest,
+        { ...inputAvailable, title: "Update res-1" }
+      ])
+    );
+    expect(part.input).toEqual(INPUT);
+    expect(part.title).toBe("Update res-1");
+  });
+
   it("lets the canonical input replace one reconstructed from truncated deltas", () => {
     const part = toolPart(
       applyStream([start, deltas[0], approvalRequest, inputAvailable])

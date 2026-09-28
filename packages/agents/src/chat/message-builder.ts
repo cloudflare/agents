@@ -156,6 +156,9 @@ export function applyLateToolInput(
   if (chunk.providerMetadata != null) {
     p.callProviderMetadata = chunk.providerMetadata;
   }
+  if (chunk.title != null) {
+    p.title = chunk.title;
+  }
   return true;
 }
 
