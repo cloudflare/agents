@@ -80,11 +80,11 @@ export function deferredCatalog(
   });
 }
 
-function words(text: string): string[] {
+function words(text: string, minLength: number): string[] {
   return text
     .toLowerCase()
     .split(/[^\p{L}\p{N}]+/u)
-    .filter((word) => word.length > 2);
+    .filter((word) => word.length >= minLength);
 }
 
 /**
@@ -104,12 +104,14 @@ export function searchDeferredTools(
   // A token that named a tool is spent; scoring its parts again would pad
   // the result with every tool sharing a prefix.
   const rest = tokens.filter((token) => !names.has(token)).join(" ");
-  const queryWords = new Set(words(rest));
+  // Two-letter words count against name components (`db` in `db_read`), but
+  // descriptions need three letters, or filler like "to" would match them all.
+  const queryWords = new Set(words(rest, 2));
   const ranked = catalog
     .filter((entry) => !exact.includes(entry.name))
     .map((entry) => {
-      const nameWords = new Set(words(entry.name));
-      const descriptionWords = new Set(words(entry.description));
+      const nameWords = new Set(words(entry.name, 2));
+      const descriptionWords = new Set(words(entry.description, 3));
       let score = 0;
       for (const word of queryWords) {
         if (nameWords.has(word)) score += 3;

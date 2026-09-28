@@ -194,6 +194,19 @@ describe("tool discovery helpers", () => {
     expect(searchDeferredTools("zz", catalog)).toEqual([]);
   });
 
+  it("matches a two-letter keyword against name components only", () => {
+    const withShort = [
+      ...catalog,
+      { name: "db_read", description: "Read database rows" },
+      { name: "db_write", description: "Write rows to the database" }
+    ];
+    expect(searchDeferredTools("db", withShort)).toEqual([
+      "db_read",
+      "db_write"
+    ]);
+    expect(searchDeferredTools("to", withShort)).toEqual([]);
+  });
+
   it("derives activation from discovery results and calls, ignoring others", () => {
     const active = activeDeferredTools(
       {
