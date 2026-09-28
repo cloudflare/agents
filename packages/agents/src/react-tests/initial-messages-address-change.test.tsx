@@ -6,7 +6,7 @@ import { useAgentChat } from "../chat/react";
 import { useAgent } from "../react";
 import { getTestWorkerHost } from "./test-config";
 
-type Address = { name: string; token: string };
+type Address = { name: string; token: string; host?: string };
 type LoaderOptions = { agent: string; name: string; url?: string };
 
 async function mountChat({
@@ -27,13 +27,14 @@ async function mountChat({
   } = { renders: [] };
 
   function TestComponent() {
-    const [{ name, token }, setAddress] = useState(initial);
+    const [address, setAddress] = useState(initial);
+    const { name, token } = address;
     useEffect(() => {
       controls.setAddress = setAddress;
     }, []);
     const agent = useAgent({
       agent: "TestStateAgent",
-      host,
+      host: address.host ?? host,
       name,
       protocol,
       query: { token },
@@ -190,6 +191,37 @@ describe("useAgentChat when the agent address changes", () => {
         String(message).includes("Identity changed on reconnect")
       )
     ).toBe(false);
+  });
+
+  it("loads the new host's history when only the host changes", async () => {
+    const { host } = getTestWorkerHost();
+    const [hostname, port] = host.split(":");
+    const otherHost = `${hostname === "localhost" ? "127.0.0.1" : "localhost"}:${port}`;
+    const getInitialMessages = vi.fn(async (options: LoaderOptions) =>
+      historyFor(new URL(options.url ?? "http://unknown").hostname)
+    );
+    const controls = await mountChat({
+      initial: { name: "host-change", token: "token-a", host },
+      getInitialMessages
+    });
+    await vi.waitFor(() =>
+      expect(controls.renders.at(-1)?.messageIds).toEqual([
+        `${hostname}-message`
+      ])
+    );
+
+    await act(async () => {
+      controls.setAddress?.({
+        name: "host-change",
+        token: "token-a",
+        host: otherHost
+      });
+    });
+    await vi.waitFor(() =>
+      expect(controls.renders.at(-1)?.messageIds).toEqual([
+        `${otherHost.split(":")[0]}-message`
+      ])
+    );
   });
 
   it("does not reload history when only the token changes (#1223)", async () => {

@@ -823,11 +823,36 @@ export function useAgentChat<
     const rawHttpUrl = agent.getHttpUrl();
     const url = rawHttpUrl ? new URL(rawHttpUrl) : null;
     url?.searchParams.delete("_pk");
+    // The socket's route (host, base path, extra path) is part of the address:
+    // the same agent name on another host or route has its own history. The
+    // socket options are set from the first render, and exclude the query.
+    const route = (
+      agent as {
+        partySocketOptions?: {
+          host?: string;
+          basePath?: string;
+          prefix?: string;
+          party?: string;
+          path?: string;
+        };
+      }
+    ).partySocketOptions;
     address = {
       urlString: url?.toString() ?? null,
-      addressKey: Array.isArray(agent.path)
-        ? JSON.stringify(agent.path.map((step) => [step.agent, step.name]))
-        : JSON.stringify([[agent.agent ?? "", agent.name ?? ""]]),
+      addressKey: JSON.stringify([
+        Array.isArray(agent.path)
+          ? agent.path.map((step) => [step.agent, step.name])
+          : [[agent.agent ?? "", agent.name ?? ""]],
+        route
+          ? [
+              route.host ?? null,
+              route.basePath ?? null,
+              route.prefix ?? null,
+              route.party ?? null,
+              route.path ?? null
+            ]
+          : null
+      ]),
       agent: agent.agent,
       name: agent.name
     };
