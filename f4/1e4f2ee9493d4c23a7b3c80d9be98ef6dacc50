@@ -1,0 +1,21 @@
+packages/agents/src/chat/__tests__/message-builder-approval-input.test.ts
+  s_c818abc161b40d::t_2710440e4e578e 85-96
+packages/agents/src/chat/message-builder.ts
+  s_c818abc161b40d::t_e9ef8efa4256d3 159-161
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f41e4f2ee9493d4c23a7b3c80d9be98ef6dacc50",
+  "prompts": {},
+  "sessions": {
+    "s_c818abc161b40d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "ba73f896-6b24-4739-897c-6e7c57b5e20b",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
