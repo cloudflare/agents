@@ -17,7 +17,7 @@ async function waitForStarted(
 }
 
 describe("Driver concurrency", () => {
-  it("starts independent scopes without waiting for either drive to settle", async () => {
+  it("starts independent scopes without waiting for either step to finish", async () => {
     const stub = env.DriverHarnessObject.getByName(crypto.randomUUID());
     await stub.enableGate();
     await stub.submit("main", "op-1", "first");
@@ -39,7 +39,7 @@ describe("Driver concurrency", () => {
     expect(await waitForStarted(stub, 2)).toHaveLength(2);
   });
 
-  it("recovers handed-off work after eviction", async () => {
+  it("steps an operation again after an eviction cuts its step off", async () => {
     const name = crypto.randomUUID();
     const stub = env.DriverHarnessObject.getByName(name);
     await stub.enableGate();
@@ -51,8 +51,10 @@ describe("Driver concurrency", () => {
     const fresh = env.DriverHarnessObject.getByName(name);
     await runDurableObjectAlarm(fresh);
 
-    expect(await fresh.settled("op-1")).toEqual({ answer: "op-1" });
-    expect(await fresh.admissions("op-1")).toBe(1);
+    expect(await fresh.result("op-1")).toEqual({ answer: "op-1" });
+    // The step that was cut off ran once; the replay found nothing to
+    // resume, so it ran the whole step again.
+    expect(await fresh.steps("op-1")).toBe(2);
     expect(await fresh.pending()).toEqual([]);
   });
 });

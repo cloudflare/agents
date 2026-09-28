@@ -1,17 +1,14 @@
 export { Driver } from "./driver";
 export { DurableToolRuns, durableToolRunId } from "./tools";
 export type {
-  DriverCancellation,
-  DriverDriveResult,
-  DriverEnqueueResult,
   DriverError,
   DriverHandle,
-  DriverInspection,
+  DriverOperation,
   DriverReceipt,
   DriverRegistrationOptions,
   DriverRuntime,
+  DriverStep,
   DriverSubmission,
-  DriverSubmissionStatus,
   DriverSubmitOptions
 } from "./types";
 export type {

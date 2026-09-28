@@ -9,32 +9,34 @@ describe("DriverStore", () => {
         "runtimeId must not be empty"
       );
       const store = new DriverStore(storage, "test");
-      expect(() => store.enqueue(" ", "op-1", null, null)).toThrow(
+      expect(() => store.enqueue(" ", "op-1", null)).toThrow(
         "scope must not be empty"
       );
-      expect(() => store.enqueue("main", " ", null, null)).toThrow(
-        "operationId must not be empty"
+      expect(() => store.enqueue("main", " ", null)).toThrow(
+        "id must not be empty"
       );
-      expect(() => store.enqueue("main", "op-1", undefined, null)).toThrow(
+      expect(() => store.enqueue("main", "op-1", undefined)).toThrow(
         "input must be JSON-serializable"
       );
       const cyclic: { self?: unknown } = {};
       cyclic.self = cyclic;
-      expect(() => store.enqueue("main", "op-2", cyclic, null)).toThrow();
-      expect(() => store.enqueue("main", "op-3", 1n, null)).toThrow();
+      expect(() => store.enqueue("main", "op-2", cyclic)).toThrow();
+      expect(() => store.enqueue("main", "op-3", 1n)).toThrow();
     });
   });
 
-  it("returns missing results without mutating the queue", async () => {
+  it("reads a missing id without changing the queue", async () => {
     await withCapabilityHarness(({ storage }) => {
       const store = new DriverStore(storage, "test");
-      store.enqueue("main", "op-1", null, null);
+      store.enqueue("main", "op-1", null);
 
       expect(store.get("missing")).toBeUndefined();
-      expect(store.markAdmitted("missing")).toBeUndefined();
-      expect(store.requestCancellation("missing")).toBeUndefined();
+      store.markRunning("missing");
+      store.requestStop("missing");
       expect(store.remove("missing")).toBe(false);
-      expect(store.list()).toHaveLength(1);
+      expect(store.list()).toMatchObject([
+        { id: "op-1", status: "queued", stopRequested: false }
+      ]);
     });
   });
 
@@ -42,86 +44,96 @@ describe("DriverStore", () => {
     await withCapabilityHarness(({ storage }) => {
       const store = new DriverStore(storage, "test");
 
-      expect(
-        store.enqueue("lane-a", "op-1", { text: "first" }, "s-1")
-      ).toMatchObject({
+      expect(store.enqueue("lane-a", "op-1", { text: "first" })).toMatchObject({
         accepted: true,
-        submission: { operationId: "op-1" }
+        submission: { id: "op-1" }
       });
-      store.enqueue("lane-b", "op-2", { text: "other" }, "s-2");
-      store.enqueue("lane-a", "op-3", { text: "second" }, "s-3");
+      store.enqueue("lane-b", "op-2", { text: "other" });
+      store.enqueue("lane-a", "op-3", { text: "second" });
 
-      expect(store.head("lane-a")?.operationId).toBe("op-1");
-      expect(store.list("lane-a").map((row) => row.operationId)).toEqual([
+      expect(store.head("lane-a")?.id).toBe("op-1");
+      expect(store.list("lane-a").map((row) => row.id)).toEqual([
         "op-1",
         "op-3"
       ]);
-      expect(store.head("lane-b")?.operationId).toBe("op-2");
+      expect(store.head("lane-b")?.id).toBe("op-2");
     });
   });
 
-  it("deduplicates operation identifiers without changing the original row", async () => {
+  it("keeps the first submission of a repeated id", async () => {
     await withCapabilityHarness(({ storage }) => {
       const store = new DriverStore(storage, "test");
-      const first = store.enqueue("lane-a", "op-1", { text: "first" }, "s-1");
-      const duplicate = store.enqueue(
-        "lane-b",
-        "op-1",
-        { text: "replacement" },
-        "s-2"
-      );
+      const first = store.enqueue("lane-a", "op-1", { text: "first" });
+      const duplicate = store.enqueue("lane-b", "op-1", { text: "other" });
 
       expect(first.accepted).toBe(true);
       expect(duplicate).toEqual({
         accepted: false,
         submission: first.submission
       });
-      expect(store.list()).toHaveLength(1);
       expect(store.get("op-1")).toMatchObject({
         scope: "lane-a",
-        input: { text: "first" },
-        streamId: "s-1"
+        input: { text: "first" }
       });
     });
   });
 
-  it("allows one admitted submission per scope", async () => {
+  it("allows one running submission per scope", async () => {
     await withCapabilityHarness(({ storage }) => {
       const store = new DriverStore(storage, "test");
-      store.enqueue("lane-a", "op-1", null, "s-1");
-      store.enqueue("lane-a", "op-2", null, "s-2");
+      store.enqueue("lane-a", "op-1", null);
+      store.enqueue("lane-a", "op-2", null);
 
-      expect(store.markAdmitted("op-1", 100)).toMatchObject({
-        operationId: "op-1",
-        status: "admitted",
-        admittedAt: 100
+      store.markRunning("op-1", 100);
+      expect(store.get("op-1")).toMatchObject({
+        status: "running",
+        startedAt: 100
       });
-      expect(() => store.markAdmitted("op-2", 101)).toThrow();
-      expect(store.admitted("lane-a")?.operationId).toBe("op-1");
+      expect(() => store.markRunning("op-2", 101)).toThrow();
 
       expect(store.remove("op-1")).toBe(true);
-      expect(store.markAdmitted("op-2", 102)?.operationId).toBe("op-2");
+      store.markRunning("op-2", 102);
+      expect(store.get("op-2")?.status).toBe("running");
     });
   });
 
-  it("isolates rows by driver identifier", async () => {
+  it("records attempts and a failure owed to onFail", async () => {
+    await withCapabilityHarness(({ storage }) => {
+      const store = new DriverStore(storage, "test");
+      store.enqueue("main", "op-1", null);
+
+      store.recordAttempt("op-1", 2, null);
+      expect(store.get("op-1")).toMatchObject({ attempt: 2, failure: null });
+
+      store.resetAttempts("op-1");
+      expect(store.get("op-1")?.attempt).toBe(0);
+
+      const failure = { name: "Error", message: "boom" };
+      store.recordAttempt("op-1", 3, failure);
+      store.resetAttempts("op-1");
+      // A recorded failure pins the count until onFail has run.
+      expect(store.get("op-1")).toMatchObject({ attempt: 3, failure });
+    });
+  });
+
+  it("isolates rows by runtime id", async () => {
     await withCapabilityHarness(({ storage }) => {
       const first = new DriverStore(storage, "first");
       const second = new DriverStore(storage, "second");
 
-      expect(first.enqueue("main", "op-1", 1, "a").accepted).toBe(true);
-      expect(second.enqueue("main", "op-1", 2, "b").accepted).toBe(true);
+      expect(first.enqueue("main", "op-1", 1).accepted).toBe(true);
+      expect(second.enqueue("main", "op-1", 2).accepted).toBe(true);
       expect(first.get("op-1")?.input).toBe(1);
       expect(second.get("op-1")?.input).toBe(2);
     });
   });
 
-  it("lists scopes with unsettled submissions", async () => {
+  it("lists scopes that still have submissions", async () => {
     await withCapabilityHarness(({ storage }) => {
       const store = new DriverStore(storage, "test");
-      store.enqueue("lane-b", "op-1", null, "s-1");
-      store.enqueue("lane-a", "op-2", null, "s-2");
-      store.enqueue("lane-b", "op-3", null, "s-3");
+      store.enqueue("lane-b", "op-1", null);
+      store.enqueue("lane-a", "op-2", null);
+      store.enqueue("lane-b", "op-3", null);
 
       expect(store.scopes()).toEqual(["lane-b", "lane-a"]);
       store.remove("op-1");

@@ -1,4 +1,4 @@
-import type { DriverEnqueueResult, DriverSubmission } from "./types";
+import type { DriverError, DriverSubmission } from "./types";
 
 type SubmissionRow = {
   seq: number;
@@ -6,38 +6,41 @@ type SubmissionRow = {
   scope: string;
   operation_id: string;
   input_json: string;
-  status: "queued" | "admitted";
-  stream_id: string | null;
+  status: "queued" | "running";
   submitted_at: number;
-  admitted_at: number | null;
+  started_at: number | null;
   attempts: number;
   failure_json: string | null;
-  cancel_requested: number;
+  stop_requested: number;
 };
 
-function decodeRow<Input>(row: SubmissionRow): DriverSubmission<Input> {
+/** A submission plus the failure the driver still owes an `onFail` for. */
+export type StoredSubmission<Input = unknown> = DriverSubmission<Input> & {
+  readonly failure: DriverError | null;
+};
+
+const COLUMNS = `seq, runtime_id, scope, operation_id, input_json, status,
+  submitted_at, started_at, attempts, failure_json, stop_requested`;
+
+function decodeRow<Input>(row: SubmissionRow): StoredSubmission<Input> {
   return {
-    seq: row.seq,
     runtimeId: row.runtime_id,
     scope: row.scope,
-    operationId: row.operation_id,
+    id: row.operation_id,
     input: JSON.parse(row.input_json) as Input,
     status: row.status,
-    streamId: row.stream_id,
     submittedAt: row.submitted_at,
-    admittedAt: row.admitted_at,
-    attempts: row.attempts,
+    startedAt: row.started_at,
+    attempt: row.attempts,
+    stopRequested: row.stop_requested === 1,
     failure:
       row.failure_json === null
         ? null
-        : (JSON.parse(row.failure_json) as {
-            readonly name: string;
-            readonly message: string;
-          }),
-    cancelRequested: row.cancel_requested === 1
+        : (JSON.parse(row.failure_json) as DriverError)
   };
 }
 
+/** One runtime's rows in the shared submissions table. */
 export class DriverStore {
   readonly #storage: DurableObjectStorage;
   readonly #runtimeId: string;
@@ -58,83 +61,70 @@ export class DriverStore {
         scope TEXT NOT NULL,
         operation_id TEXT NOT NULL,
         input_json TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('queued', 'admitted')),
-        stream_id TEXT,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'running')),
         submitted_at INTEGER NOT NULL,
-        admitted_at INTEGER,
+        started_at INTEGER,
         attempts INTEGER NOT NULL DEFAULT 0,
         failure_json TEXT,
-        cancel_requested INTEGER NOT NULL DEFAULT 0,
+        stop_requested INTEGER NOT NULL DEFAULT 0,
         UNIQUE (runtime_id, operation_id)
       );
       CREATE INDEX IF NOT EXISTS cf_agents_driver_scope_queue
         ON cf_agents_driver_submissions (runtime_id, scope, seq);
-      CREATE UNIQUE INDEX IF NOT EXISTS cf_agents_driver_scope_admitted
+      CREATE UNIQUE INDEX IF NOT EXISTS cf_agents_driver_scope_running
         ON cf_agents_driver_submissions (runtime_id, scope)
-        WHERE status = 'admitted';
+        WHERE status = 'running';
     `);
     this.#ready = true;
   }
 
   enqueue<Input>(
     scope: string,
-    operationId: string,
-    input: Input,
-    streamId: string | null
-  ): DriverEnqueueResult<Input> {
+    id: string,
+    input: Input
+  ): { accepted: boolean; submission: StoredSubmission<Input> } {
     this.ensureTable();
     if (scope.trim() === "") throw new Error("scope must not be empty");
-    if (operationId.trim() === "") {
-      throw new Error("operationId must not be empty");
-    }
+    if (id.trim() === "") throw new Error("id must not be empty");
     const inputJSON = JSON.stringify(input);
-    if (inputJSON === undefined)
+    if (inputJSON === undefined) {
       throw new Error("input must be JSON-serializable");
+    }
     const cursor = this.#storage.sql.exec(
       `INSERT INTO cf_agents_driver_submissions
-        (runtime_id, scope, operation_id, input_json, status, stream_id,
-         submitted_at, admitted_at)
-       VALUES (?, ?, ?, ?, 'queued', ?, ?, NULL)
+        (runtime_id, scope, operation_id, input_json, status, submitted_at)
+       VALUES (?, ?, ?, ?, 'queued', ?)
        ON CONFLICT (runtime_id, operation_id) DO NOTHING`,
       this.#runtimeId,
       scope,
-      operationId,
+      id,
       inputJSON,
-      streamId,
       Date.now()
     );
-    const submission = this.get<Input>(operationId);
-    if (!submission)
-      throw new Error(`Failed to enqueue operation ${operationId}`);
+    const submission = this.get<Input>(id);
+    if (!submission) throw new Error(`Failed to enqueue operation ${id}`);
     return { accepted: cursor.rowsWritten > 0, submission };
   }
 
-  get<Input = unknown>(
-    operationId: string
-  ): DriverSubmission<Input> | undefined {
+  get<Input = unknown>(id: string): StoredSubmission<Input> | undefined {
     this.ensureTable();
     const row = this.#storage.sql
       .exec<SubmissionRow>(
-        `SELECT seq, runtime_id, scope, operation_id, input_json, status,
-                stream_id, submitted_at, admitted_at, attempts, failure_json,
-                cancel_requested
-         FROM cf_agents_driver_submissions
+        `SELECT ${COLUMNS} FROM cf_agents_driver_submissions
          WHERE runtime_id = ? AND operation_id = ?`,
         this.#runtimeId,
-        operationId
+        id
       )
       .toArray()[0];
     return row ? decodeRow<Input>(row) : undefined;
   }
 
-  head<Input = unknown>(scope: string): DriverSubmission<Input> | undefined {
+  /** The oldest submission in a scope: the one the driver steps. */
+  head<Input = unknown>(scope: string): StoredSubmission<Input> | undefined {
     this.ensureTable();
     const row = this.#storage.sql
       .exec<SubmissionRow>(
-        `SELECT seq, runtime_id, scope, operation_id, input_json, status,
-                stream_id, submitted_at, admitted_at, attempts, failure_json,
-                cancel_requested
-         FROM cf_agents_driver_submissions
+        `SELECT ${COLUMNS} FROM cf_agents_driver_submissions
          WHERE runtime_id = ? AND scope = ?
          ORDER BY seq ASC LIMIT 1`,
         this.#runtimeId,
@@ -144,44 +134,20 @@ export class DriverStore {
     return row ? decodeRow<Input>(row) : undefined;
   }
 
-  admitted<Input = unknown>(
-    scope: string
-  ): DriverSubmission<Input> | undefined {
-    this.ensureTable();
-    const row = this.#storage.sql
-      .exec<SubmissionRow>(
-        `SELECT seq, runtime_id, scope, operation_id, input_json, status,
-                stream_id, submitted_at, admitted_at, attempts, failure_json,
-                cancel_requested
-         FROM cf_agents_driver_submissions
-         WHERE runtime_id = ? AND scope = ? AND status = 'admitted'`,
-        this.#runtimeId,
-        scope
-      )
-      .toArray()[0];
-    return row ? decodeRow<Input>(row) : undefined;
-  }
-
-  list<Input = unknown>(scope?: string): DriverSubmission<Input>[] {
+  list<Input = unknown>(scope?: string): StoredSubmission<Input>[] {
     this.ensureTable();
     const rows =
       scope === undefined
         ? this.#storage.sql
             .exec<SubmissionRow>(
-              `SELECT seq, runtime_id, scope, operation_id, input_json, status,
-                      stream_id, submitted_at, admitted_at, attempts, failure_json,
-                cancel_requested
-               FROM cf_agents_driver_submissions
+              `SELECT ${COLUMNS} FROM cf_agents_driver_submissions
                WHERE runtime_id = ? ORDER BY seq ASC`,
               this.#runtimeId
             )
             .toArray()
         : this.#storage.sql
             .exec<SubmissionRow>(
-              `SELECT seq, runtime_id, scope, operation_id, input_json, status,
-                      stream_id, submitted_at, admitted_at, attempts, failure_json,
-                cancel_requested
-               FROM cf_agents_driver_submissions
+              `SELECT ${COLUMNS} FROM cf_agents_driver_submissions
                WHERE runtime_id = ? AND scope = ? ORDER BY seq ASC`,
               this.#runtimeId,
               scope
@@ -204,27 +170,19 @@ export class DriverStore {
       .map((row) => row.scope);
   }
 
-  markAdmitted<Input = unknown>(
-    operationId: string,
-    admittedAt = Date.now()
-  ): DriverSubmission<Input> | undefined {
+  markRunning(id: string, startedAt = Date.now()): void {
     this.ensureTable();
     this.#storage.sql.exec(
       `UPDATE cf_agents_driver_submissions
-       SET status = 'admitted', admitted_at = ?
-       WHERE runtime_id = ? AND operation_id = ?`,
-      admittedAt,
+       SET status = 'running', started_at = ?
+       WHERE runtime_id = ? AND operation_id = ? AND status = 'queued'`,
+      startedAt,
       this.#runtimeId,
-      operationId
+      id
     );
-    return this.get<Input>(operationId);
   }
 
-  recordAttempt<Input = unknown>(
-    operationId: string,
-    attempts: number,
-    failure: { readonly name: string; readonly message: string } | null
-  ): DriverSubmission<Input> | undefined {
+  recordAttempt(id: string, attempts: number, failure: DriverError | null) {
     this.ensureTable();
     this.#storage.sql.exec(
       `UPDATE cf_agents_driver_submissions
@@ -233,44 +191,40 @@ export class DriverStore {
       attempts,
       failure === null ? null : JSON.stringify(failure),
       this.#runtimeId,
-      operationId
+      id
     );
-    return this.get<Input>(operationId);
   }
 
-  resetAttempts(operationId: string): void {
+  resetAttempts(id: string): void {
     this.ensureTable();
     this.#storage.sql.exec(
       `UPDATE cf_agents_driver_submissions
        SET attempts = 0
        WHERE runtime_id = ? AND operation_id = ? AND failure_json IS NULL`,
       this.#runtimeId,
-      operationId
+      id
     );
   }
 
-  requestCancellation<Input = unknown>(
-    operationId: string
-  ): DriverSubmission<Input> | undefined {
+  requestStop(id: string): void {
     this.ensureTable();
     this.#storage.sql.exec(
       `UPDATE cf_agents_driver_submissions
-       SET cancel_requested = 1
+       SET stop_requested = 1
        WHERE runtime_id = ? AND operation_id = ?`,
       this.#runtimeId,
-      operationId
+      id
     );
-    return this.get<Input>(operationId);
   }
 
-  remove(operationId: string): boolean {
+  remove(id: string): boolean {
     this.ensureTable();
     return (
       this.#storage.sql.exec(
         `DELETE FROM cf_agents_driver_submissions
          WHERE runtime_id = ? AND operation_id = ?`,
         this.#runtimeId,
-        operationId
+        id
       ).rowsWritten > 0
     );
   }

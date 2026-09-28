@@ -1,131 +1,116 @@
-export type DriverSubmissionStatus = "queued" | "admitted";
-
 export type DriverError = {
   readonly name: string;
   readonly message: string;
 };
 
-/** One durable submission in a scope's FIFO queue. */
-export type DriverSubmission<Input = unknown> = {
-  readonly seq: number;
-  /** The id the owning runtime registered under. */
-  readonly runtimeId: string;
+/** One operation the driver asks a runtime to step. */
+export type DriverOperation<Input = unknown> = {
+  /** The queue it belongs to, such as one chat. */
   readonly scope: string;
-  readonly operationId: string;
+  /** Stable for the operation's whole life. */
+  readonly id: string;
   readonly input: Input;
-  readonly status: DriverSubmissionStatus;
-  readonly streamId: string | null;
-  readonly submittedAt: number;
-  readonly admittedAt: number | null;
-  readonly attempts: number;
-  readonly failure: DriverError | null;
-  readonly cancelRequested: boolean;
-};
-
-export type DriverEnqueueResult<Input = unknown> = {
-  readonly accepted: boolean;
-  readonly submission: DriverSubmission<Input>;
+  /** Consecutive steps that threw since the last one that returned. */
+  readonly attempt: number;
 };
 
 /**
- * What the runtime's own durable record says about one operation.
+ * What a runtime answers after one step.
  *
- * `waiting` without `notBefore` parks the scope: the driver holds no job for
- * it until {@link DriverHandle.wake} (or the next startup) drives it again.
- * With `notBefore`, the driver re-inspects at that time.
+ * - `continue`: step again now.
+ * - `sleep`: step again at `until` (epoch milliseconds).
+ * - `park`: hold no job and no alarm until {@link DriverHandle.wake}. Use it
+ *   for input nobody can predict, such as a human approval.
+ * - `done`: the operation is finished. The driver removes it and steps the
+ *   next operation in the same scope.
  */
-export type DriverInspection<Result> =
-  | { readonly status: "not-admitted" }
-  | { readonly status: "active" }
-  | { readonly status: "waiting"; readonly notBefore?: number }
-  | { readonly status: "completed"; readonly result: Result }
-  | { readonly status: "failed"; readonly error: DriverError };
-
-/**
- * The outcome of one bounded drive pass.
- *
- * `continue` drives the same operation again on the next job cycle.
- * `waiting` with `notBefore` drives it again at that time. `waiting` without
- * `notBefore` parks the scope until {@link DriverHandle.wake}: use it for
- * input the runtime cannot predict, such as a human approval.
- */
-export type DriverDriveResult<Result> =
-  | { readonly status: "continue" }
-  | { readonly status: "waiting"; readonly notBefore?: number }
-  | { readonly status: "completed"; readonly result: Result };
-
-export type DriverCancellation<Result = unknown> =
-  | { readonly status: "cancelled" }
-  | { readonly status: "not-found" }
-  | { readonly status: "completed"; readonly result: Result }
-  | { readonly status: "pending"; readonly notBefore?: number };
+export type DriverStep<Result> =
+  | { readonly then: "continue" }
+  | { readonly then: "sleep"; readonly until: number }
+  | { readonly then: "park" }
+  | { readonly then: "done"; readonly result: Result };
 
 /**
  * The durable execution a harness plugs into a {@link Driver}.
  *
- * The runtime owns its own state; the driver owns the submission queue and
- * the wake loop. Every method may be called again after an eviction, so each
- * one must read the runtime's durable record rather than process memory.
+ * The driver owns the queue and decides when to call. The runtime owns its
+ * own state and decides what one step does. Any step may be called again for
+ * the same state after an eviction, so `step` reads the runtime's durable
+ * records, never process memory, and repeating it must be safe.
  */
 export interface DriverRuntime<Input, Result> {
-  inspect(
-    scope: string,
-    operationId: string
-  ): Promise<DriverInspection<Result>>;
-  admit(scope: string, operationId: string, input: Input): Promise<void>;
-  drive(
-    scope: string,
-    operationId: string,
+  /** Do the next bounded piece of work on this operation. */
+  step(
+    operation: DriverOperation<Input>,
     signal: AbortSignal
-  ): Promise<DriverDriveResult<Result>>;
-  cancel(
-    scope: string,
-    operationId: string
-  ): Promise<DriverCancellation<Result>>;
+  ): Promise<DriverStep<Result>>;
+  /**
+   * Stop this operation after {@link DriverHandle.stop}. Throw to have the
+   * driver try again later; the operation stays queued until this resolves.
+   */
+  stop?(operation: DriverOperation<Input>): Promise<void>;
 }
 
-/** Per-runtime settlement hooks and retry policy for {@link Driver.register}. */
-export type DriverRegistrationOptions<Input, Result> = {
-  readonly settle?: (
-    submission: DriverSubmission<Input>,
-    result: Result
-  ) => void | Promise<void>;
-  readonly fail?: (
-    submission: DriverSubmission<Input>,
+/** Per-runtime policy for {@link Driver.register}. */
+export type DriverRegistrationOptions<Input> = {
+  /**
+   * Called when a step has thrown `maxAttempts` times in a row. The driver
+   * then removes the operation and moves on. If this throws, the driver
+   * retries it later without stepping the operation again.
+   */
+  readonly onFail?: (
+    operation: DriverOperation<Input>,
     error: DriverError
   ) => void | Promise<void>;
-  /** Job reschedule interval while a drive is in flight. Default 30s. */
+  /** Job reschedule interval while a step is in flight. Default 30s. */
   readonly heartbeatMs?: number;
-  /** Consecutive thrown drives before the operation fails. Default 3. */
+  /** Consecutive throwing steps before `onFail`. Default 3. */
   readonly maxAttempts?: number;
   readonly retryBaseMs?: number;
   readonly retryMaxMs?: number;
 };
 
 export type DriverSubmitOptions = {
-  readonly operationId?: string;
-  readonly streamId?: string;
+  /** Defaults to a random id. Submitting the same id twice is a no-op. */
+  readonly id?: string;
 };
 
 export type DriverReceipt = {
-  readonly operationId: string;
+  readonly id: string;
   readonly scope: string;
   readonly accepted: boolean;
   readonly submittedAt: number;
 };
 
+/** One queued or running operation, as {@link DriverHandle.pending} lists it. */
+export type DriverSubmission<Input = unknown> = {
+  readonly runtimeId: string;
+  readonly scope: string;
+  readonly id: string;
+  readonly input: Input;
+  /** `running` once the driver has stepped it at least once. */
+  readonly status: "queued" | "running";
+  readonly submittedAt: number;
+  readonly startedAt: number | null;
+  readonly attempt: number;
+  readonly stopRequested: boolean;
+};
+
 /** One registered runtime's view of the driver. */
 export interface DriverHandle<Input> {
   readonly id: string;
+  /** Queue an operation in a scope. */
   submit(
     scope: string,
     input: Input,
     options?: DriverSubmitOptions
   ): Promise<DriverReceipt>;
-  pending(scope?: string): Promise<DriverSubmission<Input>[]>;
-  /** Drive a scope now, including one parked on an open-ended wait. */
+  /** Step a scope now, including one that is parked or sleeping. */
   wake(scope: string): Promise<boolean>;
-  defer(scope: string, time: number): Promise<boolean>;
-  cancel(operationId: string): Promise<boolean>;
+  /** Stop one operation, queued or running. */
+  stop(id: string): Promise<boolean>;
+  /** Queued and running operations, oldest first. */
+  pending(scope?: string): Promise<DriverSubmission<Input>[]>;
+  /** Resolve once no step is in flight. For tests. */
   waitForIdle(scope?: string): Promise<void>;
 }

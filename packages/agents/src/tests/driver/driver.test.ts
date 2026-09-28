@@ -8,10 +8,7 @@ type Result = { text: string };
 
 function runtime(): DriverRuntime<Input, Result> {
   return {
-    inspect: async () => ({ status: "not-admitted" }),
-    admit: async () => {},
-    drive: async () => ({ status: "waiting", notBefore: Date.now() + 1_000 }),
-    cancel: async () => ({ status: "cancelled" })
+    step: async () => ({ then: "sleep", until: Date.now() + 1_000 })
   };
 }
 
@@ -27,26 +24,27 @@ describe("Driver", () => {
       const receipt = await driver.submit(
         "lane-a",
         { text: "hello" },
-        { operationId: "op-1", streamId: "stream-1" }
+        { id: "op-1" }
       );
 
       expect(receipt).toMatchObject({
-        operationId: "op-1",
+        id: "op-1",
         scope: "lane-a",
         accepted: true
       });
       expect(receipt.submittedAt).toBeGreaterThanOrEqual(before);
       expect(await driver.pending("lane-a")).toMatchObject([
         {
-          operationId: "op-1",
+          id: "op-1",
           input: { text: "hello" },
-          streamId: "stream-1",
-          status: "queued"
+          status: "queued",
+          attempt: 0,
+          stopRequested: false
         }
       ]);
       expect(capability.jobs()).toHaveLength(1);
       expect(capability.jobs()[0]).toMatchObject({
-        fn: "drive",
+        fn: "step",
         payload: { runtimeId: "test", scope: "lane-a" },
         singleflight: true
       });
@@ -65,12 +63,12 @@ describe("Driver", () => {
       const first = await driver.submit(
         "lane-a",
         { text: "first" },
-        { operationId: "op-1" }
+        { id: "op-1" }
       );
       const duplicate = await driver.submit(
         "lane-b",
         { text: "second" },
-        { operationId: "op-1" }
+        { id: "op-1" }
       );
 
       expect(first.accepted).toBe(true);
@@ -87,7 +85,7 @@ describe("Driver", () => {
       const first = firstCapability.register("test", runtime());
       const installed = install(firstCapability);
       await installed.lifecycle.start();
-      await first.submit("lane-a", { text: "first" }, { operationId: "op-1" });
+      await first.submit("lane-a", { text: "first" }, { id: "op-1" });
       storage.sql.exec(
         "DELETE FROM cf_agents_jobs WHERE capability = ?",
         firstCapability.capabilityId
@@ -118,14 +116,14 @@ describe("Driver", () => {
       const { lifecycle } = install(capability);
       await lifecycle.start();
 
-      await think.submit("main", { text: "a" }, { operationId: "op-1" });
-      await pi.submit("main", { text: "b" }, { operationId: "op-1" });
+      await think.submit("main", { text: "a" }, { id: "op-1" });
+      await pi.submit("main", { text: "b" }, { id: "op-1" });
 
       expect(await think.pending()).toMatchObject([
-        { runtimeId: "think", operationId: "op-1", input: { text: "a" } }
+        { runtimeId: "think", id: "op-1", input: { text: "a" } }
       ]);
       expect(await pi.pending()).toMatchObject([
-        { runtimeId: "pi", operationId: "op-1", input: { text: "b" } }
+        { runtimeId: "pi", id: "op-1", input: { text: "b" } }
       ]);
       expect(
         capability
@@ -157,7 +155,7 @@ describe("Driver", () => {
       const first = firstCapability.register("gone", runtime());
       const installed = install(firstCapability);
       await installed.lifecycle.start();
-      await first.submit("main", { text: "a" }, { operationId: "op-1" });
+      await first.submit("main", { text: "a" }, { id: "op-1" });
       const [job] = firstCapability.jobs();
 
       const secondCapability = new Driver();

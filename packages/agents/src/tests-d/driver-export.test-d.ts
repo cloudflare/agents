@@ -3,7 +3,9 @@ import {
   Driver,
   DurableToolRuns,
   type DriverHandle,
+  type DriverOperation,
   type DriverRuntime,
+  type DriverStep,
   type DurableToolRuntime
 } from "../driver";
 import {
@@ -17,21 +19,22 @@ type Result = { answer: string };
 
 declare const toolRuntime: DurableToolRuntime<Input, Result>;
 
-// A harness receives the host's driver and registers itself as a runtime.
-class EchoHarness
-  extends LifecycleCapability
-  implements DriverRuntime<Input, Result>
-{
+// A harness receives the host's driver and registers a private runtime.
+class EchoHarness extends LifecycleCapability {
   readonly #driver: DriverHandle<Input>;
 
   constructor(options: { driver: Driver }) {
     super("echo");
-    this.#driver = options.driver.register<Input, Result>("echo", this, {
-      settle: (submission, result) => {
-        submission.operationId satisfies string;
-        result.answer satisfies string;
+    this.#driver = options.driver.register<Input, Result>(
+      "echo",
+      { step: (operation, signal) => this.#step(operation, signal) },
+      {
+        onFail: (operation, error) => {
+          operation.input.text satisfies string;
+          error.message satisfies string;
+        }
       }
-    });
+    );
   }
 
   send(text: string) {
@@ -42,15 +45,13 @@ class EchoHarness
     return this.#driver.wake(scope);
   }
 
-  async inspect() {
-    return { status: "not-admitted" } as const;
-  }
-  async admit() {}
-  async drive() {
-    return { status: "waiting" } as const;
-  }
-  async cancel() {
-    return { status: "cancelled" } as const;
+  async #step(
+    operation: DriverOperation<Input>,
+    _signal: AbortSignal
+  ): Promise<DriverStep<Result>> {
+    if (operation.input.text === "") return { then: "park" };
+    if (operation.attempt > 0) return { then: "sleep", until: Date.now() };
+    return { then: "done", result: { answer: operation.input.text } };
   }
 }
 
@@ -74,7 +75,7 @@ class DriverObject extends DurableObject {
 declare const object: DriverObject;
 object.driver satisfies DurableObjectCapability;
 object.harness.send("hello") satisfies Promise<{
-  operationId: string;
+  id: string;
   scope: string;
   accepted: boolean;
   submittedAt: number;
@@ -84,13 +85,26 @@ declare const handle: DriverHandle<Input>;
 handle.pending("main") satisfies Promise<
   Array<{
     runtimeId: string;
-    operationId: string;
+    id: string;
     scope: string;
     input: Input;
+    status: "queued" | "running";
   }>
 >;
+handle.stop("op-1") satisfies Promise<boolean>;
 
 declare const driver: Driver;
-const typed = driver.register<Input, Result>("typed", {} as EchoHarness);
+// `stop` is optional.
+driver.register<Input, Result>("minimal", {
+  step: async () => ({ then: "done", result: { answer: "ok" } })
+});
+
+declare const runtime: DriverRuntime<Input, Result>;
+const typed = driver.register<Input, Result>("typed", runtime);
 // @ts-expect-error the input must match the runtime's input type
 typed.submit("main", { wrong: true });
+
+driver.register<Input, Result>("bad", {
+  // @ts-expect-error a step must answer continue, sleep, park or done
+  step: async () => ({ then: "later" })
+});
