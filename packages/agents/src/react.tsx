@@ -79,6 +79,27 @@ function socketDestinationKey(options: SocketDestination): string {
   ]);
 }
 
+type ReadyEntry = {
+  promise: Promise<void>;
+  resolve: () => void;
+  resolved: boolean;
+};
+
+function createReadyEntry(): ReadyEntry {
+  let resolvePromise!: () => void;
+  const entry: ReadyEntry = {
+    promise: new Promise<void>((r) => {
+      resolvePromise = r;
+    }),
+    resolved: false,
+    resolve: () => {
+      entry.resolved = true;
+      resolvePromise();
+    }
+  };
+  return entry;
+}
+
 /** The host `usePartySocket` connects to when none is given. */
 function defaultSocketHost(): string {
   return typeof window !== "undefined"
@@ -677,21 +698,24 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   }>({ name: null, agent: null });
 
   // Ready promise - resolves when identity is received, resets on close
-  const readyRef = useRef<
-    { promise: Promise<void>; resolve: () => void } | undefined
-  >(undefined);
-
-  const resetReady = () => {
-    let resolve: () => void;
-    const promise = new Promise<void>((r) => {
-      resolve = r;
-    });
-    readyRef.current = { promise, resolve: resolve! };
+  // One entry per socket destination, so `ready` for a newly requested
+  // agent is not the previous agent's resolved promise.
+  const readyRef = useRef(new Map<string, ReadyEntry>());
+  const readyFor = (destination: string): ReadyEntry => {
+    let entry = readyRef.current.get(destination);
+    if (!entry) {
+      entry = createReadyEntry();
+      readyRef.current.set(destination, entry);
+    }
+    return entry;
   };
-
-  if (!readyRef.current) {
-    resetReady();
-  }
+  // A still-pending promise is kept, so a caller already awaiting it is
+  // resolved by the next identity rather than left on a replaced promise.
+  const resetReady = (destination: string) => {
+    if (readyRef.current.get(destination)?.resolved !== false) {
+      readyRef.current.set(destination, createReadyEntry());
+    }
+  };
 
   const mutableAgentRef = useRef<{
     agent: string;
@@ -807,17 +831,20 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
           // Update reactive state (triggers re-render)
           const identifiedSocket =
             (message.target as PartySocket | null) ?? socketRef.current;
+          const identifiedDestination = identifiedSocket
+            ? socketDestinationKey(identifiedSocket.partySocketOptions)
+            : null;
           setIdentity({
             name: newName,
             agent: newAgent,
             identified: true,
-            destination: identifiedSocket
-              ? socketDestinationKey(identifiedSocket.partySocketOptions)
-              : null
+            destination: identifiedDestination
           });
 
           // Resolve ready promise
-          readyRef.current?.resolve();
+          if (identifiedDestination !== null) {
+            readyFor(identifiedDestination).resolve();
+          }
 
           // Detect identity change on reconnect
           if (
@@ -933,7 +960,9 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
 
       if (isCurrentSocket) {
         // Reset ready state for next connection
-        resetReady();
+        if (closedSocket) {
+          resetReady(socketDestinationKey(closedSocket.partySocketOptions));
+        }
         if (mutableAgentRef.current) {
           mutableAgentRef.current.identified = false;
         }
@@ -994,11 +1023,21 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // socket opens.
   const prevSocketRef = useRef<PartySocket | null>(null);
   const prevAddressKeyRef = useRef(addressKey);
+  const prevDestinationRef = useRef(destination);
   useEffect(() => {
     const prev = prevSocketRef.current;
     prevSocketRef.current = agent;
     const prevAddress = prevAddressKeyRef.current;
     prevAddressKeyRef.current = addressKey;
+    const prevDestination = prevDestinationRef.current;
+    prevDestinationRef.current = destination;
+
+    // The caller chose the new destination, so the identity the new socket
+    // reports is not an identity change on reconnect. Options the
+    // destination ignores (`name` under `basePath`) keep the comparison.
+    if (prevDestination !== destination) {
+      previousIdentityRef.current = { name: null, agent: null };
+    }
 
     // Destination guard: if the agent address changed (different agent,
     // name, or path — not just refreshed credentials), calls that are
@@ -1007,17 +1046,18 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     if (prevAddress !== addressKey) {
       connectionErrorAddressKeyRef.current = null;
       setConnectionError(null);
-      // The caller chose the new address, so the identity the new socket
-      // reports is not an identity change on reconnect.
-      previousIdentityRef.current = { name: null, agent: null };
       rejectQueuedCalls(
         "Call discarded: the agent address changed before the request could be sent"
       );
     }
 
+    for (const key of readyRef.current.keys()) {
+      if (key !== destination) readyRef.current.delete(key);
+    }
+
     if (prev && prev !== agent) {
       rejectCallsSentOn(prev, "Connection closed");
-      resetReady();
+      resetReady(socketDestinationKey(agent.partySocketOptions));
       if (mutableAgentRef.current) {
         mutableAgentRef.current.identified = false;
       }
@@ -1027,7 +1067,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     }
     // The helpers only touch refs; re-running on socket/address change is all we need.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agent, addressKey]);
+  }, [agent, addressKey, destination]);
 
   // Create the call method. Deliberately dependency-free: it routes
   // through refs, so even a stale `agent` reference captured by an old
@@ -1169,7 +1209,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     agent as unknown as { path: ReadonlyArray<{ agent: string; name: string }> }
   ).path = fullPath;
   agent.identified = identityIsCurrent && identity.identified;
-  agent.ready = readyRef.current!.promise;
+  agent.ready = readyFor(destination).promise;
   agent.state = agentState;
   agent.connectionError = visibleConnectionError;
   mutableAgentRef.current = agent;

@@ -30,6 +30,12 @@ export class TestCallableAgent extends Agent<
     return a + b;
   }
 
+  // Which instance served the call, for address-change tests.
+  @callable()
+  whoAmI(): string {
+    return this.name;
+  }
+
   // Async method
   @callable()
   async asyncMethod(delayMs: number): Promise<string> {
