@@ -1,0 +1,31 @@
+.changeset/approval-tool-input.md
+  s_c818abc161b40d::t_02a8caa4910e37 12,14
+packages/agents/src/chat/__tests__/message-builder-approval-input.test.ts
+  s_c818abc161b40d::t_3326be4fe8d147 7,145-192
+packages/agents/src/chat/index.ts
+  s_c818abc161b40d::t_4f278950851703 6
+packages/agents/src/chat/message-builder.ts
+  s_c818abc161b40d::t_cd324be0f3402c 108-113,150,152,162-198,377,408,498
+packages/ai-chat/src/index.ts
+  s_c818abc161b40d::t_aaf07c1048c08e 46,7050-7052,7065-7079
+packages/ai-chat/src/tests/late-tool-input.test.ts
+  s_c818abc161b40d::t_3d77ce127c76f7 4,10,14,22,58-74
+packages/think/src/think.ts
+  s_c818abc161b40d::t_683dba30db0413 215,13999,14033-14043,14094-14098,14269,14271,14311-14313,14319-14342,14800,14802,14853-14855,14861-14884
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2a5511133218bd1d7573677e39c3fe3d393f4a9d",
+  "prompts": {},
+  "sessions": {
+    "s_c818abc161b40d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "ba73f896-6b24-4739-897c-6e7c57b5e20b",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
