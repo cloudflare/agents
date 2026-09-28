@@ -80,6 +80,26 @@ export function deferredCatalog(
   });
 }
 
+const FILLER_WORDS = new Set([
+  "an",
+  "as",
+  "at",
+  "be",
+  "by",
+  "if",
+  "in",
+  "is",
+  "it",
+  "me",
+  "my",
+  "of",
+  "on",
+  "or",
+  "so",
+  "to",
+  "we"
+]);
+
 function words(text: string, minLength: number): string[] {
   return text
     .toLowerCase()
@@ -105,10 +125,12 @@ export function searchDeferredTools(
   // the result with every tool sharing a prefix.
   const rest = tokens.filter((token) => !names.has(token)).join(" ");
   // Two-letter words match name components (`db` in `db_read`, `ip` in
-  // `get_ip`), but only break ties once any tool matched on longer words, so
-  // filler like "to" cannot bring in `navigate_to_page`.
-  const queryWords = new Set(words(rest, 2));
-  const scored = catalog
+  // `get_ip`) and rank below longer words; filler like "to" never matches, or
+  // it would bring in `navigate_to_page`.
+  const queryWords = new Set(
+    words(rest, 2).filter((word) => !FILLER_WORDS.has(word))
+  );
+  const ranked = catalog
     .filter((entry) => !exact.includes(entry.name))
     .map((entry) => {
       const nameWords = new Set(words(entry.name, 2));
@@ -122,10 +144,8 @@ export function searchDeferredTools(
         else if (descriptionWords.has(word)) score += 1;
       }
       return { name: entry.name, score, shortScore };
-    });
-  const substantive = scored.some((entry) => entry.score > 0);
-  const ranked = scored
-    .filter((entry) => (substantive ? entry.score > 0 : entry.shortScore > 0))
+    })
+    .filter((entry) => entry.score + entry.shortScore > 0)
     .sort((a, b) => b.score - a.score || b.shortScore - a.shortScore)
     .slice(0, Math.max(0, maxResults - exact.length))
     .map((entry) => entry.name);
