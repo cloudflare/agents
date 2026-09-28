@@ -1611,15 +1611,15 @@ describe("think messengers core", () => {
           .then((res) => res.text());
       const agent = await getAgentByName(
         env.ThinkMessengerDeliveryTestAgent,
-        "slow-dm"
+        `slow-dm-${crypto.randomUUID()}`
       );
       const first = send("l1", "first");
       for (let i = 0; i < 100; i++) {
         if ((await agent.getModelLog()).length > 0) break;
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      // Past the 300ms lock TTL, well inside the first turn.
-      await new Promise((resolve) => setTimeout(resolve, 600));
+      // Past the 1s lock TTL, well inside the 4s first turn.
+      await new Promise((resolve) => setTimeout(resolve, 1500));
       await send("l2", "second");
       // Queued behind the running turn, not handled under a lock of its own.
       expect(await agent.queueDepthForTest(threadId)).toBe(1);
