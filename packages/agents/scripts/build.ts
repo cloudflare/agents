@@ -27,6 +27,7 @@ const entries = [
   "src/schedules/parser.ts",
   "src/tasks/index.ts",
   "src/driver/index.ts",
+  "src/harness/think/index.ts",
   "src/streams/index.ts",
   "src/context/index.ts",
   "src/sessions/index.ts",

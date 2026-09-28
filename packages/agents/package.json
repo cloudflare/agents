@@ -150,6 +150,11 @@
       "import": "./dist/driver/index.js",
       "require": "./dist/driver/index.js"
     },
+    "./harness/think": {
+      "types": "./dist/harness/think/index.d.ts",
+      "import": "./dist/harness/think/index.js",
+      "require": "./dist/harness/think/index.js"
+    },
     "./lifecycle": {
       "types": "./dist/lifecycle/index.d.ts",
       "import": "./dist/lifecycle/index.js",
