@@ -1464,8 +1464,8 @@ function ensureValidContinueCheckpoint(
  * Carry a context reminder (`ContextBlocks.reminder()`) after the cached
  * prefix without persisting it. It joins the final user message when there is
  * one, since not every provider accepts two user messages in a row. A request
- * ending in a partial assistant message keeps that message last, so the
- * continue checkpoint still follows it.
+ * ending in a partial assistant message gets the continue checkpoint here,
+ * carrying the reminder, so `ensureValidContinueCheckpoint` adds nothing.
  */
 function withContextReminder(
   messages: ModelMessage[],
@@ -1482,12 +1482,11 @@ function withContextReminder(
         : [...last.content, part];
     return [...messages.slice(0, lastIndex), { ...last, content }];
   }
-  const at = last.role === "assistant" ? lastIndex : messages.length;
-  return [
-    ...messages.slice(0, at),
-    { role: "user", content: [part] },
-    ...messages.slice(at)
-  ];
+  const content =
+    last.role === "assistant"
+      ? [{ type: "text" as const, text: CONTINUE_CHECKPOINT_PROMPT }, part]
+      : [part];
+  return [...messages, { role: "user", content }];
 }
 
 // (The terminal-record key and the recovering-flag key now live in agents/chat;

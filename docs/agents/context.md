@@ -151,7 +151,7 @@ A block declared without a provider is auto-wired to durable per-agent SQLite. T
 
 The assembled blocks are available as `this.context` after `onStart()`.
 
-Think sends reminders itself. Each turn it calls `reminder()` and adds the result to the last user message of the model request (`TurnContext.messages` in `beforeTurn` already includes it). Nothing is written to the transcript. Think refreshes the prompt after a compaction, which promotes any pending values.
+Think sends reminders itself. Each turn it calls `reminder()` and adds the result to the last user message of the model request, or, when the request continues a partial reply, to the user message that asks the model to continue (`TurnContext.messages` in `beforeTurn` already includes it). Nothing is written to the transcript. Think refreshes the prompt after a compaction, which promotes any pending values.
 
 ## Related
 

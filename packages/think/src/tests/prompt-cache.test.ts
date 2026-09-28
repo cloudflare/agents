@@ -63,6 +63,18 @@ describe("prompt-cache prefix stability (#2200)", () => {
     expect(report[5].firstChangedMessage).toBeNull();
   });
 
+  it("carries a reminder after a partial assistant reply without adjacent user messages", async () => {
+    const agent = await getAgentByName(
+      env.ThinkPromptCacheTestAgent,
+      `reminder-partial-${crypto.randomUUID()}`
+    );
+    const { roles, last } =
+      await agent.continuePartialTurnWithReminderForTest();
+    expect(roles).toEqual(["system", "user", "assistant", "user"]);
+    expect(last).toContain("Continue your previous response");
+    expect(last).toContain("Tuesday");
+  });
+
   it("rewrites truncated tool outputs once per step, not every turn", async () => {
     const report = await measure("prefix-tool-output", {
       turns: 16,

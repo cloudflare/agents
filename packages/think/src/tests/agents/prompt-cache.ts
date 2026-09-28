@@ -212,6 +212,41 @@ export class ThinkPromptCacheTestAgent extends Think {
     }
     return report;
   }
+
+  /**
+   * Continue a partial assistant reply after the remind block changed, and
+   * return the roles and final message of the request the model received.
+   */
+  async continuePartialTurnWithReminderForTest(): Promise<{
+    roles: string[];
+    last: string;
+  }> {
+    this._environment = "Monday";
+    await this.context.freezeSystemPrompt();
+    const self = this as unknown as {
+      _upsertMessageInHistory(msg: UIMessage, parentId?: string): Promise<void>;
+    };
+    await self._upsertMessageInHistory({
+      id: "u1",
+      role: "user",
+      parts: [{ type: "text", text: "Say hello." }]
+    });
+    await self._upsertMessageInHistory(
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Sure, here is" }]
+      },
+      "u1"
+    );
+    this._environment = "Tuesday";
+    await this.continueLastTurn();
+    const request = (this._requests.at(-1) ?? []) as Array<{ role: string }>;
+    return {
+      roles: request.map((message) => message.role),
+      last: JSON.stringify(request.at(-1))
+    };
+  }
 }
 
 function systemOf(prompt: unknown[]): string | undefined {
