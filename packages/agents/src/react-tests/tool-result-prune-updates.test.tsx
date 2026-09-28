@@ -235,4 +235,56 @@ describe("clientToolResults cleanup", () => {
       status: "ready"
     });
   });
+
+  it("prunes a removed tool call's result and keeps the others", async () => {
+    const { agent } = createFakeAgent("tool-result-prune-keep");
+    const toolPart = (toolCallId: string) => ({
+      input: {},
+      state: "input-available",
+      toolCallId,
+      type: "tool-lookup"
+    });
+    const assistant = (...toolCallIds: string[]) =>
+      [
+        { id: "u1", parts: [{ text: "hi", type: "text" }], role: "user" },
+        { id: "a1", parts: toolCallIds.map(toolPart), role: "assistant" }
+      ] as UIMessage[];
+    let chat!: ReturnType<typeof useAgentChat>;
+
+    function TestComponent() {
+      chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: assistant("tc-kept", "tc-removed")
+      });
+      const states = chat.messages
+        .flatMap((m) => m.parts)
+        .filter((p) => "toolCallId" in p)
+        .map((p) => `${p.toolCallId}:${p.state}`)
+        .join(",");
+      return <div data-testid="tools">{states}</div>;
+    }
+
+    const { container } = await render(<TestComponent />);
+    const tools = () =>
+      container.querySelector('[data-testid="tools"]')?.textContent;
+
+    chat.addToolOutput({ output: "kept", toolCallId: "tc-kept" });
+    chat.addToolOutput({ output: "removed", toolCallId: "tc-removed" });
+    await vi.waitFor(() =>
+      expect(tools()).toBe(
+        "tc-kept:output-available,tc-removed:output-available"
+      )
+    );
+
+    chat.setMessages(assistant("tc-kept"));
+    await vi.waitFor(() => expect(tools()).toBe("tc-kept:output-available"));
+
+    chat.setMessages(assistant("tc-kept", "tc-removed"));
+    await vi.waitFor(() =>
+      expect(tools()).toBe(
+        "tc-kept:output-available,tc-removed:input-available"
+      )
+    );
+  });
 });
