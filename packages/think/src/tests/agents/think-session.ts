@@ -46,7 +46,8 @@ import type {
   StepContext,
   ChunkContext,
   ActiveTurn,
-  CancelSubmissionResult
+  CancelSubmissionResult,
+  ThinkModel
 } from "../../think";
 import type { MessengerContext } from "../../messengers";
 import {
@@ -636,6 +637,10 @@ export class ThinkTestAgent extends Think {
     afterChunks: number;
     message: string;
     inStream?: boolean;
+    /** Thrown (or handed to `onError` in-stream) instead of a plain error. */
+    error?: unknown;
+    /** Abort the turn right before it fails. */
+    abortFirst?: boolean;
   } | null = null;
   // #2085: when set, only the first N inferences error (then the recovery
   // continuation streams normally). `null` = every inference errors.
@@ -900,6 +905,438 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /**
+   * Inspect a stale `running` child-run row (no live run, no recovery) with
+   * `reconcile: false`. Returns the reported and the stored status afterwards.
+   */
+  async inspectStaleRunReadOnlyForTest(): Promise<{
+    reported: string | undefined;
+    stored: string | undefined;
+  }> {
+    const runId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, status, started_at)
+      VALUES (${runId}, 'running', ${Date.now()})
+    `;
+    const inspection = await this.inspectAgentToolRun(runId, {
+      reconcile: false
+    });
+    return {
+      reported: inspection?.status,
+      stored: this["_readAgentToolChildRun"](runId)?.status
+    };
+  }
+
+  /**
+   * A child turn that streams error text, then an in-band error, and persists
+   * its assistant reply — but is "evicted" before `startAgentToolRun`'s
+   * finalizer seals the row `error`. Holds the finalizer at the point the turn
+   * returns, drops the run's in-memory state as an eviction would, then
+   * inspects (reconciling the stale `running` row).
+   */
+  async reconcileEvictedErroredRunForTest(): Promise<{
+    before: string | null;
+    assistantText: string;
+    inspection: Awaited<ReturnType<Think["inspectAgentToolRun"]>>;
+  }> {
+    const runId = crypto.randomUUID();
+    const self = this as unknown as {
+      _runProgrammaticMessagesTurn: (...args: unknown[]) => Promise<unknown>;
+    };
+    const original = self._runProgrammaticMessagesTurn;
+    let reached!: () => void;
+    let release!: () => void;
+    const reachedGate = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    self._runProgrammaticMessagesTurn = async (...args) => {
+      self._runProgrammaticMessagesTurn = original;
+      const result = await original.apply(this, args);
+      reached();
+      await released;
+      return result;
+    };
+    this._inBandErrorResponse = {
+      errorText: "model exploded",
+      textChunks: ["Sorry, something went wrong."]
+    };
+    try {
+      await this.startAgentToolRun("fail midway", { runId });
+      await reachedGate;
+      this["_agentToolAbortControllers"].delete(runId);
+      this["_agentToolLastErrors"].delete(runId);
+      this["_agentToolLiveSequences"].delete(runId);
+      this["_agentToolPreTurnAssistantIds"].delete(runId);
+      this["_agentToolRunsByRequestId"].clear();
+      const before = this["_readAgentToolChildRun"](runId)?.status ?? null;
+      const assistantText = this.messages
+        .filter((message) => message.role === "assistant")
+        .flatMap((message) => message.parts)
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("");
+      const inspection = await this.inspectAgentToolRun(runId);
+      return { before, assistantText, inspection };
+    } finally {
+      this._inBandErrorResponse = null;
+      release();
+    }
+  }
+
+  /**
+   * Post-restart cold-counter realign: seed a RUNNING run with a stored backlog
+   * 0..2, wipe the in-memory live sequence, tail after `afterSequence` (parent
+   * recovery passes the last stored index), then broadcast a new chunk. Returns
+   * the live counter after the drain and the forwarded chunk (null if dropped).
+   */
+  async coldCounterReattachForTest(afterSequence: number): Promise<{
+    liveSequenceAfterDrain: number | undefined;
+    postRestart: { sequence: number; body: string } | null;
+  }> {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    const streamId = this["_resumableStream"].start(requestId);
+    const backlog = ["a", "b", "c"].map((delta) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta })
+    );
+    for (const body of backlog) {
+      this["_resumableStream"].storeChunk(streamId, body);
+    }
+    this["_resumableStream"].flushBuffer();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, stream_id, status, started_at)
+      VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
+    `;
+    this["_agentToolLiveSequences"].delete(runId);
+
+    const stream = (await this.tailAgentToolRun(runId, {
+      afterSequence
+    })) as unknown as ReadableStream<Uint8Array>;
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const readLine = async (timeoutMs: number): Promise<string | null> => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const nl = buffer.indexOf("\n");
+        if (nl >= 0) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          if (line) return line;
+          continue;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return null;
+        const next = await Promise.race([
+          reader.read(),
+          new Promise<"timeout">((resolve) =>
+            setTimeout(() => resolve("timeout"), remaining)
+          )
+        ]);
+        if (next === "timeout" || next.done) return null;
+        buffer += decoder.decode(next.value, { stream: true });
+      }
+    };
+    for (let i = afterSequence + 1; i < backlog.length; i++) {
+      if ((await readLine(2000)) === null) break;
+    }
+    const deadline = Date.now() + 500;
+    while (
+      this["_agentToolLiveSequences"].get(runId) !== backlog.length &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const liveSequenceAfterDrain = this["_agentToolLiveSequences"].get(runId);
+
+    const postBody = JSON.stringify({
+      type: "text-delta",
+      id: "t",
+      delta: "post-restart"
+    });
+    this.broadcast(
+      JSON.stringify({
+        type: "cf_agent_use_chat_response",
+        id: requestId,
+        body: postBody,
+        done: false
+      })
+    );
+    const postLine = await readLine(500);
+    await reader.cancel();
+    return {
+      liveSequenceAfterDrain,
+      postRestart:
+        postLine === null
+          ? null
+          : (JSON.parse(postLine) as { sequence: number; body: string })
+    };
+  }
+
+  /**
+   * A warm run that streamed a chunk too large to store, then a tail
+   * re-attaching while a stored chunk is broadcast during its drain, followed
+   * by another oversized chunk and a stored one. Returns what the tail
+   * forwarded (oversized deltas summarized).
+   */
+  async skippedChunkReattachForTest(): Promise<
+    Array<{ sequence: number; delta: string; unstored: boolean }>
+  > {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    const streamId = this["_resumableStream"].start(requestId);
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, stream_id, status, started_at)
+      VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
+    `;
+    this["_agentToolLiveSequences"].set(runId, 0);
+    const broadcast = (body: string) =>
+      this.broadcast(
+        JSON.stringify({
+          type: "cf_agent_use_chat_response",
+          id: requestId,
+          body,
+          done: false
+        })
+      );
+    const send = (body: string) => {
+      this["_resumableStream"].storeChunk(streamId, body);
+      broadcast(body);
+    };
+    const delta = (value: string) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta: value });
+    const oversized = delta("x".repeat(1_900_000));
+
+    send(delta("a"));
+    send(delta("b"));
+    send(oversized);
+    this["_resumableStream"].storeChunk(streamId, delta("c"));
+    this["_resumableStream"].flushBuffer();
+
+    const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
+    broadcast(delta("c"));
+    const reader = (
+      (await tail) as unknown as ReadableStream<Uint8Array>
+    ).getReader();
+    send(oversized);
+    send(delta("d"));
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const deadline = Date.now() + 500;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), remaining)
+        )
+      ]);
+      if (next === "timeout" || next.done) break;
+      buffer += decoder.decode(next.value, { stream: true });
+    }
+    await reader.cancel();
+    this["_agentToolLiveSequences"].delete(runId);
+    return buffer
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const chunk = JSON.parse(line) as AgentToolStoredChunk;
+        const { delta: value } = JSON.parse(chunk.body) as { delta: string };
+        return {
+          sequence: chunk.sequence,
+          delta: value.length > 10 ? "<oversized>" : value,
+          unstored: chunk.unstoredId !== undefined
+        };
+      });
+  }
+
+  /**
+   * A running run with a cold live counter (as after a restart) and a stored
+   * backlog 0..2, tailed while the recovered turn stores and broadcasts a new
+   * chunk after the drain read its snapshot. Returns the forwarded sequences
+   * and the new chunk (null if dropped).
+   */
+  async broadcastDuringDrainForTest(): Promise<{
+    drained: number[];
+    postRestart: { sequence: number; body: string } | null;
+  }> {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    const streamId = this["_resumableStream"].start(requestId);
+    const backlog = ["a", "b", "c"].map((delta) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta })
+    );
+    for (const body of backlog) {
+      this["_resumableStream"].storeChunk(streamId, body);
+    }
+    this["_resumableStream"].flushBuffer();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, stream_id, status, started_at)
+      VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
+    `;
+    this["_agentToolLiveSequences"].delete(runId);
+
+    const self = this as unknown as {
+      getAgentToolChunks: (
+        runId: string,
+        options?: { afterSequence?: number }
+      ) => Promise<AgentToolStoredChunk[]>;
+    };
+    const original = self.getAgentToolChunks;
+    let reached!: () => void;
+    const afterSnapshot = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    self.getAgentToolChunks = async (id, options) => {
+      const chunks = await original.call(this, id, options);
+      reached();
+      await gate;
+      return chunks;
+    };
+
+    try {
+      const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
+      await afterSnapshot;
+      const postBody = JSON.stringify({
+        type: "text-delta",
+        id: "t",
+        delta: "post-restart"
+      });
+      this["_resumableStream"].storeChunk(streamId, postBody);
+      this.broadcast(
+        JSON.stringify({
+          type: "cf_agent_use_chat_response",
+          id: requestId,
+          body: postBody,
+          done: false
+        })
+      );
+      release();
+
+      const reader = (
+        (await tail) as unknown as ReadableStream<Uint8Array>
+      ).getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const deadline = Date.now() + 500;
+      for (;;) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        const next = await Promise.race([
+          reader.read(),
+          new Promise<"timeout">((resolve) =>
+            setTimeout(() => resolve("timeout"), remaining)
+          )
+        ]);
+        if (next === "timeout" || next.done) break;
+        buffer += decoder.decode(next.value, { stream: true });
+      }
+      await reader.cancel();
+      const chunks = buffer
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { sequence: number; body: string });
+      return {
+        drained: chunks
+          .filter((chunk) => chunk.body !== postBody)
+          .map((chunk) => chunk.sequence),
+        postRestart: chunks.find((chunk) => chunk.body === postBody) ?? null
+      };
+    } finally {
+      release();
+      self.getAgentToolChunks = original;
+      this["_agentToolLiveSequences"].delete(runId);
+    }
+  }
+
+  /**
+   * A warm run that already broadcast a progress frame, then a tail attaching
+   * while a progress frame and a chunk (stored before the attach) are
+   * broadcast during its drain. Returns every body the tail forwarded.
+   */
+  async progressDuringDrainForTest(): Promise<string[]> {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    const streamId = this["_resumableStream"].start(requestId);
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, stream_id, status, started_at)
+      VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
+    `;
+    this["_agentToolLiveSequences"].set(runId, 0);
+    const broadcast = (body: string) =>
+      this.broadcast(
+        JSON.stringify({
+          type: "cf_agent_use_chat_response",
+          id: requestId,
+          body,
+          done: false
+        })
+      );
+    const progress = (message: string) =>
+      JSON.stringify({
+        type: "data-agent-progress",
+        transient: true,
+        data: { message }
+      });
+
+    const stored = ["a", "b", "c"].map((delta) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta })
+    );
+    for (const body of stored.slice(0, 2)) {
+      this["_resumableStream"].storeChunk(streamId, body);
+      broadcast(body);
+    }
+    broadcast(progress("before-attach"));
+    this["_resumableStream"].storeChunk(streamId, stored[2]);
+    this["_resumableStream"].flushBuffer();
+
+    const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
+    broadcast(progress("during-drain"));
+    broadcast(stored[2]);
+    const reader = (
+      (await tail) as unknown as ReadableStream<Uint8Array>
+    ).getReader();
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const deadline = Date.now() + 500;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), remaining)
+        )
+      ]);
+      if (next === "timeout" || next.done) break;
+      buffer += decoder.decode(next.value, { stream: true });
+    }
+    await reader.cancel();
+    this["_agentToolLiveSequences"].delete(runId);
+    return buffer
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => (JSON.parse(line) as { body: string }).body);
+  }
+
   private _beforeTurnLog: Array<{
     system: string;
     toolNames: string[];
@@ -909,6 +1346,7 @@ export class ThinkTestAgent extends Think {
   private _beforeTurnMessagesJson: string[] = [];
   private _capturedTurnChannels: string[] = [];
   private _capturedTurnMetadata: (Record<string, unknown> | undefined)[] = [];
+  private _beforeTurnThrowChannel: string | null = null;
 
   override configureChannels() {
     return {
@@ -986,6 +1424,12 @@ export class ThinkTestAgent extends Think {
     });
     this._capturedTurnChannels.push(this.activeChannel?.channelId ?? "");
     this._capturedTurnMetadata.push(this.activeTurnMetadata);
+    if (
+      this._beforeTurnThrowChannel !== null &&
+      this.activeChannel?.channelId === this._beforeTurnThrowChannel
+    ) {
+      throw new Error(`beforeTurn failed on ${this._beforeTurnThrowChannel}`);
+    }
     if (this._stashInBeforeTurnForTest !== undefined) {
       this.stash(this._stashInBeforeTurnForTest);
     }
@@ -1042,7 +1486,82 @@ export class ThinkTestAgent extends Think {
   }
 
   override getAIBinding(): Ai {
+    if (this._missingAIBindingForTest) {
+      throw new Error("no AI binding in this test");
+    }
     return this._fakeAIBinding ?? super.getAIBinding();
+  }
+
+  private _stringModelForTest: string | undefined;
+  private _missingAIBindingForTest = false;
+
+  /**
+   * The default model is a string with no AI binding to build it, and
+   * `beforeTurn` supplies its own model: the turn must not resolve the default.
+   */
+  async testChatWithBeforeTurnModelOverrideForTest(): Promise<{
+    result: TestChatResult;
+    gatewayModels: string[];
+  }> {
+    this._stringModelForTest = "@cf/meta/llama-3.1-8b-instruct";
+    this._missingAIBindingForTest = true;
+    this._gatewayModels = [];
+    this._turnConfigOverride = { model: createMockModel("from override") };
+    try {
+      const result = await this.testChat("override the model");
+      return { result, gatewayModels: this._gatewayModels };
+    } finally {
+      this._stringModelForTest = undefined;
+      this._missingAIBindingForTest = false;
+      this._turnConfigOverride = null;
+    }
+  }
+
+  async resolveModelWithAsyncGatewayForTest(): Promise<string> {
+    const gateway = Promise.resolve({ id: "async" });
+    this.getGateway = () => gateway as unknown as GatewayOptions;
+    try {
+      this.resolveModel("@cf/meta/llama-3.1-8b-instruct");
+      return "resolved";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      delete (this as { getGateway?: unknown }).getGateway;
+    }
+  }
+
+  /**
+   * #2321: a stamped `createdAt` must survive the recovery continuation that
+   * extends the interrupted assistant message. `continuationMetadata` is
+   * added by the continuation's writer on top of the original stamp.
+   */
+  async testRecoveryExtensionMetadataForTest(
+    continuationMetadata: Record<string, unknown> = { resumed: true }
+  ): Promise<{
+    assistantMessages: number;
+    metadata: string;
+    writerCalls: Array<{ createdAt: number; continuation: boolean }>;
+  }> {
+    const writerCalls: Array<{ createdAt: number; continuation: boolean }> = [];
+    this.messageMetadata = ({ part, continuation }) => {
+      if (part.type !== "start") return undefined;
+      const stamp = { createdAt: writerCalls.length + 1, continuation };
+      writerCalls.push(stamp);
+      return continuation ? { ...stamp, ...continuationMetadata } : stamp;
+    };
+    try {
+      const result = await this.testChatWithStallThenRecover(3, 50);
+      const assistant = (await this.getMessages()).filter(
+        (message) => message.role === "assistant"
+      );
+      return {
+        assistantMessages: result.assistantMessages,
+        metadata: JSON.stringify(assistant.at(-1)?.metadata ?? null),
+        writerCalls
+      };
+    } finally {
+      this.messageMetadata = undefined;
+    }
   }
 
   /**
@@ -1054,6 +1573,66 @@ export class ThinkTestAgent extends Think {
     model: string,
     gateway: GatewayOptions | null
   ): Promise<{ models: string[]; calls: GatewayCallForTest[] }> {
+    const calls = this._installFakeAIBindingForTest();
+    this._gatewayForTest = gateway ?? undefined;
+    this._gatewayModels = [];
+    const resolved = this.resolveModel(model) as unknown as {
+      doStream(options: { prompt: unknown[] }): Promise<unknown>;
+    };
+    await resolved
+      .doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }]
+      })
+      .catch(() => {});
+    return { models: this._gatewayModels, calls };
+  }
+
+  /** Resolve `model` without a fake binding and report the thrown message. */
+  async resolveModelErrorForTest(model: string): Promise<string | null> {
+    this._fakeAIBinding = undefined;
+    try {
+      this.resolveModel(model);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /** Whether `resolveModel` returns a `LanguageModel` object unchanged. */
+  async resolveModelPassesThroughObjectForTest(): Promise<boolean> {
+    const model = createMockModel("pass-through");
+    return this.resolveModel(model) === model;
+  }
+
+  /**
+   * Run a turn whose `beforeTurn` (or `beforeStep`) returns a string `model`
+   * and report what reached the fake AI binding. The fake throws, so the turn
+   * itself errors after the model is resolved and called.
+   */
+  async runTurnWithStringModelForTest(
+    hook: "beforeTurn" | "beforeStep",
+    model: string
+  ): Promise<{ models: string[]; calls: GatewayCallForTest[] }> {
+    const calls = this._installFakeAIBindingForTest();
+    this._gatewayForTest = undefined;
+    this._gatewayModels = [];
+    if (hook === "beforeTurn") {
+      this._turnConfigOverride = { model };
+    } else {
+      this._stepConfigOverride = { model };
+    }
+    try {
+      await this.runTurn({ input: "hi" });
+    } catch {
+      // The fake binding throws; only the resolved calls matter here.
+    } finally {
+      this._turnConfigOverride = null;
+      this._stepConfigOverride = null;
+    }
+    return { models: this._gatewayModels, calls };
+  }
+
+  private _installFakeAIBindingForTest(): GatewayCallForTest[] {
     const calls: GatewayCallForTest[] = [];
     this._fakeAIBinding = {
       run: async (
@@ -1077,17 +1656,7 @@ export class ThinkTestAgent extends Think {
         };
       }
     } as unknown as Ai;
-    this._gatewayForTest = gateway ?? undefined;
-    this._gatewayModels = [];
-    const resolved = this.resolveModel(model) as unknown as {
-      doStream(options: { prompt: unknown[] }): Promise<unknown>;
-    };
-    await resolved
-      .doStream({
-        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }]
-      })
-      .catch(() => {});
-    return { models: this._gatewayModels, calls };
+    return calls;
   }
 
   async runConcurrentMessengerTurnsForTest(): Promise<void> {
@@ -1226,6 +1795,13 @@ export class ThinkTestAgent extends Think {
 
   async resetCapturedTurnChannelsForTest(): Promise<void> {
     this._capturedTurnChannels = [];
+  }
+
+  /** Make `beforeTurn` throw for turns on `channel` (null disables). */
+  async setBeforeTurnThrowChannelForTest(
+    channel: string | null
+  ): Promise<void> {
+    this._beforeTurnThrowChannel = channel;
   }
 
   async setTurnConfigOverride(config: TurnConfig | null): Promise<void> {
@@ -1474,9 +2050,13 @@ export class ThinkTestAgent extends Think {
           ]
         : [];
     const chunkDelayMs = this._streamChunkDelayMs;
+    const abortAll = () => this.cancelAllChats();
 
     return {
-      toUIMessageStream(options?: { sendReasoning?: boolean }) {
+      toUIMessageStream(options?: {
+        sendReasoning?: boolean;
+        onError?: (error: unknown) => string;
+      }) {
         // `StreamableResult.toUIMessageStream()` returns an `AsyncIterable`
         // (not a `ReadableStream`), so consume it via its async iterator
         // rather than `getReader()`.
@@ -1512,14 +2092,22 @@ export class ThinkTestAgent extends Think {
                 while (true) {
                   if (shouldThrow && config) {
                     await iterator.return?.();
+                    if (config.abortFirst) abortAll();
                     if (config.inStream) {
                       erroredInStream = true;
+                      const errorText =
+                        config.error === undefined
+                          ? config.message
+                          : (options?.onError?.(config.error) ??
+                            config.message);
                       return {
                         done: false as const,
-                        value: { type: "error", errorText: config.message }
+                        value: { type: "error", errorText }
                       };
                     }
-                    throw new SimulatedChatError(config.message);
+                    throw (
+                      config.error ?? new SimulatedChatError(config.message)
+                    );
                   }
                   const { done, value } = await iterator.next();
                   if (done) return { done: true as const, value: undefined };
@@ -1570,6 +2158,44 @@ export class ThinkTestAgent extends Think {
   async testStoreResumableChunk(streamId: string, body: string): Promise<void> {
     this._resumableStream.storeChunk(streamId, body);
     this._resumableStream.flushBuffer();
+  }
+
+  /**
+   * Offer a live stream to the connection, which never ACKs, then end the
+   * stream with `close` and broadcast its done frame on the chat channel.
+   */
+  async testEndStreamOfferedWithoutAck(
+    requestId: string,
+    close: "finish" | "complete" | "error"
+  ): Promise<void> {
+    const streamId = this._resumableStream.start(requestId);
+    const [connection] = [...this.getConnections()];
+    if (!connection) {
+      throw new Error(
+        "ThinkTestAgent.testEndStreamOfferedWithoutAck requires a connection"
+      );
+    }
+    // SAFETY: This test-only method drives Think's private resume and
+    // broadcast paths with a real connection returned by this Agent instance.
+    const internals = this as unknown as {
+      _notifyStreamResuming(connection: Connection): void;
+      _broadcastChat(message: Record<string, unknown>): void;
+    };
+    internals._notifyStreamResuming(connection);
+    if (close === "finish") {
+      this._finishResumableStream(streamId);
+      this._resumableStream.finalizePending();
+    } else if (close === "complete") {
+      this._completeResumableStream(streamId);
+    } else {
+      this._errorResumableStream(streamId);
+    }
+    internals._broadcastChat({
+      type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+      id: requestId,
+      done: true,
+      body: ""
+    });
   }
 
   /** Emit the real resume notification followed by a terminal broadcast. */
@@ -1886,6 +2512,11 @@ export class ThinkTestAgent extends Think {
     } finally {
       this._errorConfig = null;
     }
+  }
+
+  /** The close outcome recorded on the request's latest chat stream. */
+  async getStreamOutcomeForTest(requestId: string): Promise<string | null> {
+    return this._resumableStream.getOutcome(requestId) ?? null;
   }
 
   /**
@@ -2281,6 +2912,318 @@ export class ThinkTestAgent extends Think {
       delaySeconds,
       finalRoles: (await this.getMessages()).map((m) => m.role)
     };
+  }
+
+  private async _recoveryIncidentsForTest(): Promise<
+    Array<{
+      status: string;
+      reason?: string;
+      requestId: string;
+      recoveryRootRequestId?: string;
+      transientRetries?: number;
+    }>
+  > {
+    const incidents = await this.ctx.storage.list<{
+      status: string;
+      reason?: string;
+      requestId: string;
+      recoveryRootRequestId?: string;
+      transientRetries?: number;
+    }>({ prefix: "cf:chat-recovery:incident:" });
+    return [...incidents.values()];
+  }
+
+  /**
+   * The stream finishes, then persisting its message fails, under a
+   * classifier that calls every error transient. The failure is past the
+   * stream, so it must stay terminal (a retry would re-run a finished turn).
+   */
+  async testPostStreamPersistFailureForTest(): Promise<{
+    first: TestChatResult;
+    scheduled: number;
+    responses: number;
+    status: string | undefined;
+    streamStates: string[];
+  }> {
+    this.classifyChatError = () => "transient";
+    const self = this as unknown as {
+      _persistAssistantMessageWithCutover(...args: unknown[]): Promise<void>;
+    };
+    const original = self._persistAssistantMessageWithCutover;
+    self._persistAssistantMessageWithCutover = async () => {
+      self._persistAssistantMessageWithCutover = original;
+      throw new Error("simulated persist failure");
+    };
+    this._responseLog = [];
+    const rpcStatus = this._captureRpcTurnStatusForTest();
+    try {
+      const first = await this.testChat("persist fails after the stream");
+      return {
+        first,
+        scheduled:
+          recoveryWorkCountForTest(this, "_chatRecoveryContinue") +
+          recoveryWorkCountForTest(this, "_chatRecoveryRetry"),
+        responses: this._responseLog.length,
+        status: rpcStatus.read(),
+        streamStates: this.sql<{ state: string }>`
+          SELECT state FROM cf_agents_streams
+        `.map((row) => row.state)
+      };
+    } finally {
+      rpcStatus.restore();
+      self._persistAssistantMessageWithCutover = original;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
+  /**
+   * The terminal-status write inside the response hook throws once, before
+   * `onChatResponse` runs. Returns what the live turn delivered, then the
+   * responses after a startup replay of owed hooks.
+   */
+  async testResponseHookBookkeepingFailureForTest(): Promise<{
+    first: TestChatResult;
+    status: string | undefined;
+    liveResponses: string[];
+    replayedResponses: string[];
+  }> {
+    const self = this as unknown as {
+      _recordTerminalChatStatus(...args: unknown[]): Promise<void>;
+      _replayPendingResponseHooks(): Promise<void>;
+    };
+    const original = self._recordTerminalChatStatus;
+    self._recordTerminalChatStatus = async () => {
+      self._recordTerminalChatStatus = original;
+      throw new Error("simulated terminal-status write failure");
+    };
+    this._responseLog = [];
+    const rpcStatus = this._captureRpcTurnStatusForTest();
+    try {
+      const first = await this.testChat("hook bookkeeping fails");
+      const liveResponses = this._responseLog.map((r) => r.status);
+      await self._replayPendingResponseHooks();
+      return {
+        first,
+        status: rpcStatus.read(),
+        liveResponses,
+        replayedResponses: this._responseLog.map((r) => r.status)
+      };
+    } finally {
+      rpcStatus.restore();
+      self._recordTerminalChatStatus = original;
+    }
+  }
+
+  /** Record the status the RPC stream consumer returns for the next turn. */
+  private _captureRpcTurnStatusForTest(): {
+    read(): string | undefined;
+    restore(): void;
+  } {
+    const self = this as unknown as {
+      _streamResultToRpcCallback(
+        ...args: unknown[]
+      ): Promise<{ status: string }>;
+    };
+    const original = self._streamResultToRpcCallback;
+    let status: string | undefined;
+    self._streamResultToRpcCallback = async (...args) => {
+      const result = await original.apply(this, args);
+      status = result.status;
+      return result;
+    };
+    return {
+      read: () => status,
+      restore: () => {
+        self._streamResultToRpcCallback = original;
+      }
+    };
+  }
+
+  /**
+   * One transient-classified failure with a custom setup: `error` is the
+   * failure itself (thrown, or given to the stream's `onError` in-stream),
+   * `abortFirst` aborts the turn right before it fails, and
+   * `failIncidentBegin` makes routing into recovery throw.
+   */
+  async testTransientScenarioForTest(options: {
+    classification: "transient" | "rate_limit" | "structural";
+    inStream: boolean;
+    error?: "api-call-503" | "code-update-reset" | "storage-reset";
+    retryAfter?: string;
+    abortFirst?: boolean;
+    failIncidentBegin?: boolean;
+  }): Promise<{
+    first: TestChatResult;
+    scheduled: number;
+    delaySeconds: number | null;
+    classified: string[];
+  }> {
+    let error: unknown;
+    if (options.error === "api-call-503") {
+      error = Object.assign(new Error("Service Unavailable"), {
+        name: "AI_APICallError",
+        statusCode: 503,
+        isRetryable: true,
+        ...(options.retryAfter
+          ? { responseHeaders: { "retry-after": options.retryAfter } }
+          : {})
+      });
+    } else if (options.error === "code-update-reset") {
+      error = new Error("Durable Object reset because its code was updated.");
+    } else if (options.error === "storage-reset") {
+      error = new Error(
+        "Internal error in Durable Object storage caused object to be reset."
+      );
+    }
+    await this.armTransientErrorForTest({
+      classification: undefined,
+      inStream: options.inStream
+    });
+    if (this._errorConfig) {
+      this._errorConfig.error = error;
+      this._errorConfig.abortFirst = options.abortFirst;
+    }
+    const classified: string[] = [];
+    this.classifyChatError = (err: unknown) => {
+      classified.push(
+        err instanceof Error ? err.name : typeof err === "string" ? err : "?"
+      );
+      if (options.classification !== "structural") {
+        return options.classification;
+      }
+      // A structural classifier: needs the provider error object, not text.
+      return typeof err === "object" &&
+        err !== null &&
+        "statusCode" in err &&
+        err.statusCode === 503
+        ? "transient"
+        : "fatal";
+    };
+    const self = this as unknown as {
+      _beginChatRecoveryIncident(...args: unknown[]): Promise<unknown>;
+    };
+    if (options.failIncidentBegin) {
+      self._beginChatRecoveryIncident = async () => {
+        throw new Error("incident write failed");
+      };
+    }
+    try {
+      const first = await this.testChat("trigger transient scenario");
+      const delaySeconds =
+        this.sql<{ delay: number | null }>`
+          SELECT json_extract(input, '$.delaySeconds') AS delay
+          FROM cf_agents_task_runs
+          WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+          ORDER BY created_at DESC
+          LIMIT 1
+        `[0]?.delay ?? null;
+      return {
+        first,
+        scheduled:
+          recoveryWorkCountForTest(this, "_chatRecoveryContinue") +
+          recoveryWorkCountForTest(this, "_chatRecoveryRetry"),
+        delaySeconds,
+        classified
+      };
+    } finally {
+      Reflect.deleteProperty(this, "_beginChatRecoveryIncident");
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
+  /**
+   * A transient failure schedules a backed-off continuation; the user cancels
+   * the turn during the backoff. The scheduled continuation must not run.
+   */
+  async testCancelDuringBackoffForTest(): Promise<{
+    textBeforeCancel: string;
+    finalText: string;
+    incident: { status: string; reason?: string } | undefined;
+  }> {
+    await this.armTransientErrorForTest({
+      classification: "transient",
+      inStream: true
+    });
+    const assistantText = async () =>
+      (
+        (await this.getMessages()).filter((m) => m.role === "assistant").at(-1)
+          ?.parts ?? []
+      )
+        .map((p) => (p.type === "text" ? p.text : ""))
+        .join("");
+    try {
+      await this.testChat("trigger transient error");
+      const textBeforeCancel = await assistantText();
+      const [scheduled] = await this._recoveryIncidentsForTest();
+      this.cancelChat(
+        scheduled?.recoveryRootRequestId ?? scheduled?.requestId ?? ""
+      );
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        const [incident] = await this._recoveryIncidentsForTest();
+        if (incident?.status !== "scheduled") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      const [incident] = await this._recoveryIncidentsForTest();
+      return {
+        textBeforeCancel,
+        finalText: await assistantText(),
+        incident: incident && {
+          status: incident.status,
+          reason: incident.reason
+        }
+      };
+    } finally {
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
+  /**
+   * Every inference streams a little, then stalls. Each attempt makes
+   * progress, so only the transient counter bounds the loop. Returns how many
+   * recoveries ran before nothing more was scheduled.
+   */
+  async testRepeatedStallAfterProgressForTest(maxRounds: number): Promise<{
+    rounds: number;
+    scheduledAtEnd: number;
+    statuses: string[];
+  }> {
+    this._stallAfterChunks = 3;
+    this._stallAttemptsRemaining = null;
+    this.chatStreamStallTimeoutMs = 50;
+    try {
+      await this.testChat("stall after progress, repeatedly");
+      let rounds = 0;
+      for (; rounds < maxRounds; rounds++) {
+        const continues = recoveryWorkCountForTest(
+          this,
+          "_chatRecoveryContinue"
+        );
+        const retries = recoveryWorkCountForTest(this, "_chatRecoveryRetry");
+        if (continues === 0 && retries === 0) break;
+        await runRecoveryWorkForTest(
+          this,
+          continues > 0 ? "_chatRecoveryContinue" : "_chatRecoveryRetry"
+        );
+      }
+      return {
+        rounds,
+        scheduledAtEnd:
+          recoveryWorkCountForTest(this, "_chatRecoveryContinue") +
+          recoveryWorkCountForTest(this, "_chatRecoveryRetry"),
+        statuses: (await this._recoveryIncidentsForTest()).map(
+          (incident) => incident.status
+        )
+      };
+    } finally {
+      this._stallAfterChunks = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
   }
 
   /**
@@ -2695,7 +3638,8 @@ export class ThinkTestAgent extends Think {
     this._reasoningResponse = { response, reasoning };
   }
 
-  override getModel(): LanguageModel {
+  override getModel(): ThinkModel {
+    if (this._stringModelForTest) return this._stringModelForTest;
     if (this._inBandErrorResponse) {
       return createInBandErrorMockModel(
         this._inBandErrorResponse.errorText,
@@ -4854,9 +5798,30 @@ export class ThinkToolsTestAgent extends Think {
       const [pending] = this._listActionPendingRowsForTest();
       if (pending) void this.approveExecution(pending.execution_id);
     }
+    if (this._rejectParkedInNextStepForTest && ctx.stepNumber > 0) {
+      const options = this._rejectParkedInNextStepForTest;
+      this._rejectParkedInNextStepForTest = null;
+      const [pending] = this._listActionPendingRowsForTest();
+      if (pending) {
+        void this.rejectExecution(
+          pending.execution_id,
+          "not now",
+          options
+        ).catch(() => {});
+      }
+    }
   }
 
   private _approveParkedInNextStepForTest = false;
+  private _rejectParkedInNextStepForTest: { autoContinue?: boolean } | null =
+    null;
+
+  /** Reject the parked action from `beforeStep` of the step after it parks. */
+  async rejectParkedInNextStepForTest(options: {
+    autoContinue?: boolean;
+  }): Promise<void> {
+    this._rejectParkedInNextStepForTest = options;
+  }
 
   /**
    * Approve the parked action from `beforeStep` of the step after it parks,
@@ -6094,7 +7059,10 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _capturedTurnContexts: Array<{
     continuation?: boolean;
     body?: RpcJsonObject;
+    channel?: string;
   }> = [];
+  private _waitInSubmissionStatusHook = false;
+  private _submissionStatusHookWaits: string[] = [];
   private _delayedChunks: { chunks: string[]; delayMs: number } | null = null;
   private _throwBeforeTurnError: string | null = null;
   private _submissionStatusDelayMs = 0;
@@ -6107,6 +7075,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     | "submit"
     | "addMessages"
     | "detachedNotify"
+    | "submitThenWait"
     | null = null;
   private _nestedAdmissionAttempted = false;
   private _nestedAdmissionSucceeded = false;
@@ -6258,15 +7227,41 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
     }
     this._submissionLog.push(result);
+    if (
+      this._waitInSubmissionStatusHook &&
+      ["completed", "aborted", "skipped", "error"].includes(result.status)
+    ) {
+      try {
+        const waited = await this.waitForSubmission(result.submissionId, {
+          timeoutMs: 100
+        });
+        this._submissionStatusHookWaits.push(`resolved:${waited?.status}`);
+      } catch (error) {
+        this._submissionStatusHookWaits.push(
+          `error:${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+  }
+
+  /** Call `waitForSubmission` from `onSubmissionStatus` on terminal statuses. */
+  async waitInSubmissionStatusHookForTest(): Promise<void> {
+    this._waitInSubmissionStatusHook = true;
+  }
+
+  async getSubmissionStatusHookWaitsForTest(): Promise<string[]> {
+    return this._submissionStatusHookWaits;
   }
 
   override async beforeTurn(ctx: TurnContext): Promise<void> {
     if (this._throwBeforeTurnError) {
       throw new Error(this._throwBeforeTurnError);
     }
+    const channel = this.activeTurn?.channel;
     this._capturedTurnContexts.push({
       continuation: ctx.continuation,
-      body: ctx.body as RpcJsonObject | undefined
+      body: ctx.body as RpcJsonObject | undefined,
+      ...(channel !== undefined && { channel })
     });
     if (this._nestedAdmissionMode && !this._nestedAdmissionAttempted) {
       this._nestedAdmissionAttempted = true;
@@ -6314,6 +7309,13 @@ export class ThinkProgrammaticTestAgent extends Think {
           notifySource: "nested-detached-source"
         });
         return;
+      case "submitThenWait": {
+        const submitted = await this.runTurn({ mode: "submit", input: msg });
+        await this.waitForSubmission(submitted.submissionId, {
+          timeoutMs: 200
+        });
+        return;
+      }
     }
   }
 
@@ -6825,6 +7827,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     submissionId?: string;
     metadata?: Record<string, unknown>;
     messageTexts?: string[];
+    channel?: string;
   }): Promise<{
     submission: ThinkSubmissionInspection | null;
     messages: UIMessage[];
@@ -6874,7 +7877,8 @@ export class ThinkProgrammaticTestAgent extends Think {
         })),
         {
           submissionId,
-          metadata: options?.metadata
+          metadata: options?.metadata,
+          channel: options?.channel
         }
       );
 
@@ -7620,7 +8624,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   async getCapturedOptions(): Promise<
-    Array<{ continuation?: boolean; body?: RpcJsonObject }>
+    Array<{ continuation?: boolean; body?: RpcJsonObject; channel?: string }>
   > {
     return this._capturedTurnContexts;
   }
@@ -9497,6 +10501,94 @@ export class ThinkRecoveryTestAgent extends Think {
     )._rebindAgentToolChildRunRequestId(requestId);
   }
 
+  /**
+   * Seed a chat-turn fiber row for `requestId` (settled when `completed`) and
+   * report whether the recoverable-turn checks count it as recovery evidence.
+   */
+  async chatTurnFiberEvidenceForTest(
+    requestId: string,
+    completed: boolean
+  ): Promise<{ recoverable: boolean; freshEvidence: boolean }> {
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at, completed_at)
+      VALUES (
+        ${`fiber-${crypto.randomUUID()}`},
+        ${`${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`},
+        ${null}, ${now}, ${completed ? now : null}
+      )
+    `;
+    const self = this as unknown as {
+      _hasRecoverableChatTurn(requestId: string): boolean;
+      _hasFreshRecoverableSubmissionEvidence(row: {
+        request_id: string;
+      }): boolean;
+    };
+    return {
+      recoverable: self._hasRecoverableChatTurn(requestId),
+      freshEvidence: self._hasFreshRecoverableSubmissionEvidence({
+        request_id: requestId
+      })
+    };
+  }
+
+  /**
+   * Seed an in-flight child-run row in a table created by an older release
+   * (no `event_delivery` column), with this isolate's ensure not yet run — a
+   * fresh isolate after upgrade whose first child-run access is recovery.
+   */
+  async seedLegacyAgentToolChildRunForTest(
+    runId: string,
+    requestId: string
+  ): Promise<void> {
+    this.sql`
+      CREATE TABLE cf_agent_tool_child_runs (
+        run_id TEXT PRIMARY KEY,
+        request_id TEXT,
+        stream_id TEXT,
+        status TEXT NOT NULL,
+        summary TEXT,
+        error_message TEXT,
+        started_at INTEGER NOT NULL,
+        completed_at INTEGER
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, request_id, status, started_at)
+      VALUES (${runId}, ${requestId}, 'running', ${Date.now()})
+    `;
+  }
+
+  /**
+   * Seed an in-flight `eventDelivery: "terminal"` child-run row, rebind it the
+   * way a recovered turn does, then finalize it the way a settled recovered
+   * turn does. Returns whether the run is still in the terminal-only set.
+   */
+  async terminalOnlyRunAfterRecoveredTurnForTest(
+    runId: string,
+    requestId: string
+  ): Promise<{ afterRebind: boolean; afterFinalize: boolean }> {
+    const self = this as unknown as {
+      _ensureAgentToolChildRunTable(): void;
+      _rebindAgentToolChildRunRequestId(requestId: string): void;
+      _finalizeAgentToolChildRunTailers(runId: string): void;
+      _agentToolTerminalOnlyRuns: Set<string>;
+    };
+    self._ensureAgentToolChildRunTable();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, status, started_at, event_delivery)
+      VALUES (${runId}, 'old-req', 'running', ${Date.now()}, 'terminal')
+    `;
+    self._rebindAgentToolChildRunRequestId(requestId);
+    const afterRebind = self._agentToolTerminalOnlyRuns.has(runId);
+    self._finalizeAgentToolChildRunTailers(runId);
+    return {
+      afterRebind,
+      afterFinalize: self._agentToolTerminalOnlyRuns.has(runId)
+    };
+  }
+
   /** Whether this facet has a `cf_agent_tool_child_runs` table at all. */
   async hasAgentToolChildRunTableForTest(): Promise<boolean> {
     const rows = this.sql<{ n: number }>`
@@ -10547,6 +11639,9 @@ export const POINTER_MEDIA_CHARS = 1_600_000;
  */
 export class ThinkMediaEvictionAgent extends Think {
   override mediaEviction: MediaEvictionConfig | boolean = false;
+  // A step of 1 moves the eviction cutoff with every message, so these
+  // six-message fixtures age `m0`/`m1` without growing to a full step.
+  override truncationStep = 1;
   override getModel(): LanguageModel {
     return createMockModel("media eviction agent response");
   }

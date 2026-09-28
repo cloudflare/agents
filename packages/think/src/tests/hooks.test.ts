@@ -198,6 +198,89 @@ describe("Think — beforeTurn hook", () => {
     expect(catalog.calls.map((call) => call.gateway?.id)).toEqual(["default"]);
   });
 
+  it("routes @hf/ ids to Workers AI like @cf/ ids", async () => {
+    const agent = await freshAgent("resolve-hf");
+    const { calls } = await agent.resolveModelGatewayForTest(
+      "@hf/nousresearch/hermes-2-pro-mistral-7b",
+      null
+    );
+    expect(calls).toEqual([
+      {
+        kind: "run",
+        model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
+        gateway: null
+      }
+    ]);
+  });
+
+  it.each([
+    "gpt-5",
+    "",
+    "openai/",
+    "/gpt-5",
+    "@",
+    "@bad",
+    "@cf/",
+    "@hf/",
+    "@openai/gpt-5"
+  ])(
+    "rejects the malformed model id %j before touching the AI binding",
+    async (model) => {
+      const agent = await freshAgent(`resolve-invalid-${model || "empty"}`);
+      const message = await agent.resolveModelErrorForTest(model);
+      expect(message).toContain(`Invalid model id ${JSON.stringify(model)}`);
+      expect(message).toContain("@cf/");
+      expect(message).toContain("<provider>/<model>");
+    }
+  );
+
+  it("explains a missing AI binding for a valid string model id", async () => {
+    const agent = await freshAgent("resolve-missing-binding");
+    const message = await agent.resolveModelErrorForTest(
+      "@cf/meta/llama-3.1-8b-instruct"
+    );
+    expect(message).toContain('Workers AI binding named "AI"');
+    expect(message).toContain("getAIBinding()");
+  });
+
+  it("returns a LanguageModel object unchanged", async () => {
+    const agent = await freshAgent("resolve-passthrough");
+    expect(await agent.resolveModelPassesThroughObjectForTest()).toBe(true);
+  });
+
+  it.each(["beforeTurn", "beforeStep"] as const)(
+    "resolves a string model returned from %s",
+    async (hook) => {
+      const agent = await freshAgent(`resolve-hook-${hook}`);
+      const { models, calls } = await agent.runTurnWithStringModelForTest(
+        hook,
+        "@cf/meta/llama-3.1-8b-instruct"
+      );
+      expect(models).toContain("@cf/meta/llama-3.1-8b-instruct");
+      expect(calls.map((call) => call.model)).toContain(
+        "@cf/meta/llama-3.1-8b-instruct"
+      );
+    }
+  );
+
+  it("does not resolve the default model when beforeTurn overrides it", async () => {
+    const agent = await freshAgent(`model-override-${crypto.randomUUID()}`);
+    const { result, gatewayModels } =
+      await agent.testChatWithBeforeTurnModelOverrideForTest();
+
+    expect(result.error).toBeUndefined();
+    expect(result.done).toBe(true);
+    expect(gatewayModels).toEqual([]);
+  });
+
+  it("rejects a getGateway that returns a Promise with a clear error", async () => {
+    const agent = await freshAgent(`gateway-async-${crypto.randomUUID()}`);
+
+    await expect(agent.resolveModelWithAsyncGatewayForTest()).resolves.toMatch(
+      /getGateway\(\) returned a Promise/
+    );
+  });
+
   it("carries the turn's request id, trigger and abort signal", async () => {
     const agent = await freshAgent("hook-bt-identity");
     await agent.testChat("First");
@@ -394,6 +477,36 @@ describe("Think — tool-call hooks expose typed input/output", () => {
     const later = await agent.getToolCallIdentityForTest();
     expect(later.detached.length).toBeGreaterThan(0);
     expect(later.detached.every((id) => id === null)).toBe(true);
+    expect(later.detachedChannel.every((channel) => channel === null)).toBe(
+      true
+    );
+  });
+
+  it("work a tool left behind does not see a later turn's channel", async () => {
+    const agent = await freshLoopToolAgent("hook-tc-leftover-channel");
+    await agent.testChat("Use echo");
+
+    // The next turn runs on the voice channel; its tool releases the work the
+    // first turn's tool left behind and waits for it.
+    await agent.releaseLeftoverInNextToolForTest();
+    const second = await agent.testChatOnChannel("Use echo", "voice");
+    expect(second.done).toBe(true);
+
+    const identity = await agent.getToolCallIdentityForTest();
+    expect(identity.executeChannel).toEqual([null, "voice"]);
+    expect(identity.detached).toEqual([null]);
+    expect(identity.detachedChannel).toEqual([null]);
+    // Without a channel of its own the notice routes to the web transcript,
+    // not the voice turn that happened to be running.
+    expect(identity.detachedNotice).toEqual(["delivered"]);
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(
+      messages.some((message) =>
+        message.parts.some(
+          (part) => part.type === "text" && part.text === "leftover notice"
+        )
+      )
+    ).toBe(true);
   });
 
   it("afterToolCall receives typed output (was always undefined before)", async () => {
@@ -1614,6 +1727,19 @@ describe("Think — extension observation hooks", () => {
     } | null;
     expect(recorded).not.toBeNull();
     expect(recorded!.type).toBe("text-delta");
+  });
+
+  it("keeps a beforeTurn model override without resolving the default for extensions", async () => {
+    const agent = await getAgentByName(
+      env.ThinkExtensionBeforeTurnModelAgent,
+      `ext-before-turn-model-${crypto.randomUUID()}`
+    );
+    const result = await agent.testChat("hello");
+
+    expect(result.error).toBeUndefined();
+    expect(result.done).toBe(true);
+    const snapshot = await agent.readBeforeTurnSnapshot();
+    expect(snapshot?.modelId).toBe("mock-tool-model-ext-hooks");
   });
 });
 

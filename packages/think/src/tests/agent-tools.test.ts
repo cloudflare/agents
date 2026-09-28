@@ -50,6 +50,27 @@ type ThinkAgentToolTestStub = {
     runId: string,
     requestId: string
   ): Promise<{ running: string | null; unknown: string | null }>;
+  inspectStaleRunReadOnlyForTest(): Promise<{
+    reported: string | undefined;
+    stored: string | undefined;
+  }>;
+  reconcileEvictedErroredRunForTest(): Promise<{
+    before: string | null;
+    assistantText: string;
+    inspection: AgentToolInspection;
+  }>;
+  coldCounterReattachForTest(afterSequence: number): Promise<{
+    liveSequenceAfterDrain: number | undefined;
+    postRestart: { sequence: number; body: string } | null;
+  }>;
+  progressDuringDrainForTest(): Promise<string[]>;
+  skippedChunkReattachForTest(): Promise<
+    Array<{ sequence: number; delta: string; unstored: boolean }>
+  >;
+  broadcastDuringDrainForTest(): Promise<{
+    drained: number[];
+    postRestart: { sequence: number; body: string } | null;
+  }>;
   getDefaultReattachBudgetsForTest(): Promise<{
     noProgressTimeoutMs: number;
     maxWindowIsFinite: boolean;
@@ -538,8 +559,21 @@ describe("Think agent tools", () => {
           data: { sources: 3 }
         })
       );
-      const sequences = replayed.map((event) => event.sequence);
+      // Milestone and progress frames reuse the current sequence; clients
+      // dedupe milestones by their own sequence instead.
+      const sequences = replayed
+        .filter((event) => {
+          if (event.event.kind !== "chunk") return true;
+          const body = event.event.body;
+          return (
+            !body.includes(AGENT_TOOL_MILESTONE_PART) &&
+            !body.includes(AGENT_TOOL_PROGRESS_PART)
+          );
+        })
+        .map((event) => event.sequence);
       expect(new Set(sequences).size).toBe(sequences.length);
+      const milestoneSequences = milestones.map((m) => m.sequence);
+      expect(new Set(milestoneSequences).size).toBe(milestoneSequences.length);
       expect(replayed.at(-1)?.event.kind).toBe("finished");
     });
 
@@ -744,6 +778,82 @@ describe("Think agent tools", () => {
 
     expect(resolved.running).toBe(runId);
     expect(resolved.unknown).toBeNull();
+  });
+
+  it("inspects a stale run read-only when asked not to reconcile", async () => {
+    const agent = await freshAgent();
+    expect(await agent.inspectStaleRunReadOnlyForTest()).toEqual({
+      reported: "running",
+      stored: "running"
+    });
+  });
+
+  it("reconciles a child evicted after a stream error as error, not completed", async () => {
+    // The turn broadcast an error chunk and persisted an assistant reply, but
+    // the child was evicted before the finalizer sealed the row `error`.
+    const agent = await freshAgent();
+    const { before, assistantText, inspection } =
+      await agent.reconcileEvictedErroredRunForTest();
+
+    expect(before).toBe("running");
+    expect(assistantText).toContain("Sorry, something went wrong.");
+    expect(inspection).toMatchObject({
+      status: "error",
+      error: "model exploded"
+    });
+  });
+
+  it("realigns a cold live counter when re-attaching after the last stored chunk", async () => {
+    // Parent recovery re-attaches with `afterSequence` = the last stored index,
+    // so nothing drains; a new chunk must still forward past the backlog.
+    const agent = await freshAgent();
+    const { liveSequenceAfterDrain, postRestart } =
+      await agent.coldCounterReattachForTest(2);
+
+    expect(liveSequenceAfterDrain).toBe(3);
+    expect(postRestart).toMatchObject({ sequence: 3 });
+  });
+
+  it("forwards progress and stored chunks exactly once across a tail's drain", async () => {
+    // Progress frames aren't stored, so they must not shift the live numbering
+    // of later stored chunks or be deduped against a stored position.
+    const agent = await freshAgent();
+    const parsed = (await agent.progressDuringDrainForTest()).map(
+      (body) =>
+        JSON.parse(body) as {
+          type: string;
+          delta?: string;
+          data?: { message?: string };
+        }
+    );
+
+    expect(
+      parsed.filter((chunk) => chunk.type === "text-delta").map((c) => c.delta)
+    ).toEqual(["a", "b", "c"]);
+    expect(
+      parsed
+        .filter((chunk) => chunk.type === "data-agent-progress")
+        .map((chunk) => chunk.data?.message)
+    ).toEqual(["during-drain"]);
+  });
+
+  it("keeps stored numbering across a re-attach after a chunk too large to store", async () => {
+    const agent = await freshAgent();
+    expect(await agent.skippedChunkReattachForTest()).toEqual([
+      { sequence: 0, delta: "a", unstored: false },
+      { sequence: 1, delta: "b", unstored: false },
+      { sequence: 2, delta: "c", unstored: false },
+      { sequence: 3, delta: "<oversized>", unstored: true },
+      { sequence: 3, delta: "d", unstored: false }
+    ]);
+  });
+
+  it("forwards a chunk broadcast while a cold re-attach drains", async () => {
+    const agent = await freshAgent();
+    const { drained, postRestart } = await agent.broadcastDuringDrainForTest();
+
+    expect(drained).toEqual([0, 1, 2]);
+    expect(postRestart).toMatchObject({ sequence: 3 });
   });
 
   it("keeps a completed Think child's stored chunks for a parent attaching afterwards", async () => {

@@ -130,6 +130,12 @@ export interface TruncateToolResultsOptions {
  *
  * The converted result is what the model reads, after any `toModelOutput`, so
  * no tool schema applies to it. Provider-executed results are left intact.
+ * Inline file and image bytes in an older `content` result are replaced by a
+ * short text marker.
+ *
+ * Tool call ids are not unique across turns, so each converted result is
+ * matched to the UI tool part it came from by order: the Nth result for an id
+ * belongs to the Nth UI part with that id that converts to a tool result.
  */
 export function truncateOlderToolResults<M extends ModelMessage>(
   modelMessages: M[],
@@ -141,22 +147,29 @@ export function truncateOlderToolResults<M extends ModelMessage>(
   const cutoff = messages.length - keepRecent;
   if (cutoff <= 0) return modelMessages;
 
-  const olderToolCallIds = new Set<string>();
-  for (const message of messages.slice(0, cutoff)) {
+  // Per tool call id, in transcript order: whether each result it converts
+  // to may be truncated.
+  const resultsById = new Map<string, boolean[]>();
+  let hasOlderResult = false;
+  messages.forEach((message, index) => {
     for (const part of message.parts) {
-      if (isToolPart(part) && !isProviderExecuted(part)) {
-        olderToolCallIds.add((part as { toolCallId: string }).toolCallId);
-      }
+      if (!isToolPart(part) || !producesToolResult(part)) continue;
+      const truncatable = index < cutoff && !isProviderExecuted(part);
+      const toolCallId = (part as { toolCallId: string }).toolCallId;
+      const results = resultsById.get(toolCallId) ?? [];
+      results.push(truncatable);
+      resultsById.set(toolCallId, results);
+      hasOlderResult ||= truncatable;
     }
-  }
-  if (olderToolCallIds.size === 0) return modelMessages;
+  });
+  if (!hasOlderResult) return modelMessages;
 
   return modelMessages.map((message) => {
     if (message.role !== "tool") return message;
     let changed = false;
     const content = message.content.map((part) => {
-      if (part.type !== "tool-result" || !olderToolCallIds.has(part.toolCallId))
-        return part;
+      if (part.type !== "tool-result") return part;
+      if (!resultsById.get(part.toolCallId)?.shift()) return part;
       const output = truncateModelOutput(part.output, maxChars);
       if (output === part.output) return part;
       changed = true;
@@ -186,36 +199,101 @@ function truncateModelOutput(
         : output;
     }
     case "content": {
+      type ContentItem = (typeof output.value)[number];
+      let changed = false;
+      const withoutBytes = output.value.map((item): ContentItem => {
+        const mediaType = inlineBinaryMediaType(item);
+        if (mediaType === undefined) return item;
+        changed = true;
+        return { type: "text", text: omittedMediaMarker(mediaType) };
+      });
       const total = output.value.reduce(
-        (sum, item) => sum + (item.type === "text" ? item.text.length : 0),
+        (sum, item) => sum + (inlineText(item)?.length ?? 0),
         0
       );
-      if (total <= maxChars) return output;
+      if (total <= maxChars) {
+        return changed ? { ...output, value: withoutBytes } : output;
+      }
       // `maxChars` bounds the whole result, so text items share one budget,
       // and room is kept for the marker so a dropped tail is never silent.
+      // Markers for omitted bytes are not part of that budget.
       const suffix = truncatedSuffix(total);
       let remaining = Math.max(0, maxChars - suffix.length);
       let truncated = false;
-      type ContentItem = (typeof output.value)[number];
-      const value = output.value.flatMap((item): ContentItem[] => {
-        if (item.type !== "text") return [item];
+      const value = output.value.flatMap((item, index): ContentItem[] => {
+        const text = inlineText(item);
+        if (text === undefined) return [withoutBytes[index]];
         if (truncated) return [];
-        if (item.text.length <= remaining) {
-          remaining -= item.text.length;
+        if (text.length <= remaining) {
+          remaining -= text.length;
           return [item];
         }
         truncated = true;
-        const text =
+        const cut =
           maxChars <= suffix.length
             ? suffix.slice(0, maxChars)
-            : `${item.text.slice(0, remaining)}${suffix}`;
-        return [{ ...item, text }];
+            : `${text.slice(0, remaining)}${suffix}`;
+        return [withInlineText(item, cut)];
       });
       return { ...output, value };
     }
     default:
       return output;
   }
+}
+
+type ContentOutputItem = Extract<
+  ToolResultOutput,
+  { type: "content" }
+>["value"][number];
+
+/** Text a content item carries inline: a text item, or a text file. */
+function inlineText(item: ContentOutputItem): string | undefined {
+  if (item.type === "text") return item.text;
+  if (item.type === "file" && item.data.type === "text") return item.data.text;
+  return undefined;
+}
+
+function withInlineText(
+  item: ContentOutputItem,
+  text: string
+): ContentOutputItem {
+  if (item.type === "file" && item.data.type === "text") {
+    return { ...item, data: { ...item.data, text } };
+  }
+  return { ...item, text } as ContentOutputItem;
+}
+
+/** Media type of a content item that carries file or image bytes inline. */
+function inlineBinaryMediaType(item: ContentOutputItem): string | undefined {
+  if (item.type === "file-data" || item.type === "image-data") {
+    return item.mediaType;
+  }
+  if (item.type === "file" && item.data.type === "data") return item.mediaType;
+  return undefined;
+}
+
+function omittedMediaMarker(mediaType: string): string {
+  return `[${mediaType} omitted from an older tool result]`;
+}
+
+/**
+ * Whether `convertToModelMessages` turns this UI tool part into a result in a
+ * `tool` message. Provider-executed results go in the assistant message
+ * instead, unless the part is a denied approval.
+ */
+function producesToolResult(part: object): boolean {
+  const { state, approval } = part as {
+    state?: unknown;
+    approval?: { approved?: unknown };
+  };
+  if (state === "approval-responded") return approval?.approved === false;
+  if (isProviderExecuted(part)) return false;
+  return (
+    state === "output-available" ||
+    state === "output-error" ||
+    state === "output-denied"
+  );
 }
 
 function isToolPart(part: { type: string }): boolean {

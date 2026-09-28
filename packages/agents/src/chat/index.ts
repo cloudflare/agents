@@ -75,7 +75,7 @@ export { MAX_BOUND_PARAMS, buildInClauseStrings } from "./sql-batch";
  * @internal Platform-failure classifier shared with the chat hosts'
  * queue-dispatch deferral (#1730); sibling-package support, not a public API.
  */
-export { isPlatformFailure } from "../retries";
+export { isPlatformFailure, isDurableObjectResetError } from "../retries";
 
 export {
   createToolsFromClientSchemas,
@@ -100,6 +100,7 @@ export {
   applyAgentToolEvent,
   createAgentToolEventState,
   interceptAgentToolBroadcast,
+  isPositionlessAgentToolChunk,
   AgentToolProgressEmitter,
   type AgentToolProgressEmitHooks,
   type AgentToolProgressEmitResult,
@@ -218,6 +219,7 @@ export {
  */
 export {
   aiSdkRecoveryCodec,
+  partialHasSettledToolResults,
   shouldCreditStreamProgress,
   type ChatRecoveryCodec,
   type ProgressCreditThrottle
@@ -271,6 +273,9 @@ export {
 export {
   ChatRecoveryEngine,
   runChatRecoveryExhaustion,
+  chatRecoveryBackoffSeconds,
+  retryAfterSeconds,
+  CHAT_RECOVERY_CANCELLED_REASON,
   type ChatRecoveryScheduleReason,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryAdapter,

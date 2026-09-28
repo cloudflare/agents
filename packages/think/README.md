@@ -972,12 +972,19 @@ Tools belong to the child agent; define them with `getTools()` or use
 `configure()` and `getConfig()` persist a JSON-serializable config blob in SQLite — useful for private server-side settings that should survive hibernation and restarts. Pass the config shape as a method generic for typed call sites:
 
 ```ts
+import { Think } from "@cloudflare/think";
+
 type MyConfig = { modelTier: "fast" | "capable"; systemPrompt: string };
+
+const MODEL_IDS = {
+  fast: "@cf/meta/llama-3.1-8b-instruct",
+  capable: "@cf/moonshotai/kimi-k2.7-code"
+} as const;
 
 export class MyAgent extends Think<Env> {
   getModel() {
     const tier = this.getConfig<MyConfig>()?.modelTier ?? "fast";
-    return createWorkersAI({ binding: this.env.AI })(MODEL_IDS[tier]);
+    return MODEL_IDS[tier];
   }
 }
 ```

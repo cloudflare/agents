@@ -126,6 +126,20 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
     return this.text.trim().length > 0;
   }
 
+  /**
+   * Resolves `true` once there is visible text to post, or `false` when the
+   * stream ends without any, so a caller can avoid posting an empty reply.
+   */
+  async hasVisibleOutput(): Promise<boolean> {
+    while (true) {
+      if (this.visibleChunks.length > 0) return true;
+      if (this.error || this.closed || this.visibleClosed) return false;
+      await new Promise<void>((resolve) => {
+        this.wakeups.push(resolve);
+      });
+    }
+  }
+
   remainingText(): string {
     return this.text.slice(this.visibleTextValue.length);
   }
@@ -377,7 +391,30 @@ export interface MessengerDeliveryPolicy {
     callback: TextStreamCallback
   ): boolean;
   splitText?(text: string): string[];
+  /**
+   * How often, in milliseconds, the typing indicator is re-sent until the
+   * reply's first text is posted. Platforms expire the indicator after a few
+   * seconds. `0` sends it once.
+   * @default 4000
+   */
+  typingRefreshMs?: number;
   visibleSoftLimit?: number;
+}
+
+const DEFAULT_TYPING_REFRESH_MS = 4_000;
+/** Longest the reply waits on a typing request an adapter never settles. */
+const TYPING_SETTLE_TIMEOUT_MS = 1_000;
+
+async function settleTyping(pending: Promise<void> | undefined) {
+  if (!pending) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    pending,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, TYPING_SETTLE_TIMEOUT_MS);
+    })
+  ]);
+  clearTimeout(timer);
 }
 
 export interface DeliverMessengerReplyOptions {
@@ -422,8 +459,44 @@ export async function deliverMessengerReply(
     },
     visibleSoftLimit: options.policy?.visibleSoftLimit
   });
-  const post = options.surface
-    .post(callback.stream())
+
+  // The typing indicator is cosmetic: a failure to show it must not stop the
+  // turn. It is re-sent until the reply's first text is posted, one request
+  // at a time so a slow one cannot land after the post and re-show it.
+  let typingInFlight: Promise<void> | undefined;
+  let typingStopped = false;
+  const sendTyping = (): Promise<void> => {
+    if (typingStopped) return Promise.resolve();
+    typingInFlight ??= (async () => {
+      try {
+        await options.surface.startTyping?.("Thinking...");
+      } catch (error) {
+        console.warn("[Think] Messenger typing indicator failed", error);
+      } finally {
+        typingInFlight = undefined;
+      }
+    })();
+    return typingInFlight;
+  };
+  const typingRefreshMs =
+    options.policy?.typingRefreshMs ?? DEFAULT_TYPING_REFRESH_MS;
+  let typingTimer: ReturnType<typeof setInterval> | undefined;
+  const stopTyping = () => {
+    typingStopped = true;
+    clearInterval(typingTimer);
+    typingTimer = undefined;
+  };
+
+  // Posting waits for the first visible text: a stream that ends without any
+  // (an interrupted turn, a failure) would otherwise post a blank message
+  // ahead of the apology on adapters without native streaming.
+  const post = callback
+    .hasVisibleOutput()
+    .then(async (visible) => {
+      stopTyping();
+      await settleTyping(typingInFlight);
+      return visible ? options.surface.post(callback.stream()) : undefined;
+    })
     .catch(async (error: unknown) => {
       if (options.policy?.isExpectedDeliveryCompletion?.(error, callback)) {
         return;
@@ -440,7 +513,10 @@ export async function deliverMessengerReply(
     });
 
   try {
-    await options.surface.startTyping?.("Thinking...");
+    if (options.surface.startTyping && typingRefreshMs > 0) {
+      typingTimer = setInterval(() => void sendTyping(), typingRefreshMs);
+    }
+    await settleTyping(sendTyping());
     const userMessage =
       options.userMessage ?? toMessengerUserMessage(options.event);
     const restoreSurface = options.target.bindActiveDeliverySurface?.(
@@ -541,6 +617,8 @@ export async function deliverMessengerReply(
         markdown: errorResponseText
       })
       .catch(() => undefined);
+  } finally {
+    stopTyping();
   }
 }
 

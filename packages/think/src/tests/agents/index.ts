@@ -45,7 +45,10 @@ export { ThinkExecuteToolAgent } from "./execute-tool";
 export { ThinkExecuteHitlAgent } from "./execute-hitl";
 export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";
-export { ThinkExtensionHookAgent } from "./extension-hooks";
+export {
+  ThinkExtensionHookAgent,
+  ThinkExtensionBeforeTurnModelAgent
+} from "./extension-hooks";
 export {
   ThinkMessengerDeliveryTestAgent,
   ThinkMessengerRouteTestAgent
