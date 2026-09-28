@@ -9,6 +9,7 @@ export { ThinkHarness } from "./harness";
 export type {
   ThinkHarnessHooks,
   ThinkHarnessOptions,
+  ThinkStepConfig,
   ThinkToolCall,
   ThinkToolCallDecision,
   ThinkToolRecovery,

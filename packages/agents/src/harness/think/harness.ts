@@ -4,6 +4,7 @@ import {
   stepCountIs,
   streamText,
   type ModelMessage,
+  type StepResult,
   type Tool,
   type ToolSet,
   type UIMessage,
@@ -43,6 +44,9 @@ import type {
 } from "./types";
 
 type TurnResult = { readonly status: ThinkTurnStatus };
+
+/** A failure of the harness's own records, which the driver should retry. */
+class HarnessError extends Error {}
 
 const INTERRUPTED_TOOL =
   "The tool call was interrupted before it finished. It may or may not have taken effect.";
@@ -203,6 +207,24 @@ export class ThinkHarness extends LifecycleCapability {
 
     const context = this.#context(turn, operation.input.body);
     const session = this.#session(turn.chat);
+    // Errors from the host's hooks, model or tools end the turn at once, as
+    // Think does. Only the harness's own failures reach the driver's retries.
+    try {
+      return await this.#stepTurn(session, context, turn, signal);
+    } catch (error) {
+      if (signal.aborted || error instanceof HarnessError) throw error;
+      const text = errorText(error);
+      this.#emit(context, { type: "error", errorText: text });
+      return this.#finish(context, turn, "error", text);
+    }
+  }
+
+  async #stepTurn(
+    session: Session,
+    context: ThinkTurnContext,
+    turn: ThinkTurnRecord,
+    signal: AbortSignal
+  ): Promise<DriverStep<TurnResult>> {
     const config = await this.#config(context);
     const tools = config.tools ?? (await this.#options.tools?.(context)) ?? {};
     const message = await this.#message(session, turn);
@@ -273,22 +295,36 @@ export class ThinkHarness extends LifecycleCapability {
     signal: AbortSignal
   ): Promise<string | undefined> {
     const history = (await session.getHistory()) as unknown as UIMessage[];
-    const model = config.model ?? (await this.#options.model(context));
-    const system = config.system ?? (await this.#options.system?.(context));
-    const messages =
+    const turnModel = config.model ?? (await this.#options.model(context));
+    const turnSystem = config.system ?? (await this.#options.system?.(context));
+    const turnMessages =
       config.messages ??
       (await convertToModelMessages(history, {
         tools,
         ignoreIncompleteToolCalls: true
       }));
+    const step =
+      (await this.#options.hooks?.beforeStep?.({
+        ...context,
+        model: turnModel,
+        system: turnSystem,
+        messages: turnMessages
+      })) ?? {};
+    const model = step.model ?? turnModel;
+    const system = step.system ?? turnSystem;
+    const messages = step.messages ?? turnMessages;
+    const activeTools = step.activeTools ?? config.activeTools;
+    const toolChoice = step.toolChoice ?? config.toolChoice;
+    const providerOptions = step.providerOptions ?? config.providerOptions;
+    let stepResult: StepResult<ToolSet> | undefined;
 
     const result = streamText({
       model,
       ...(system !== undefined ? { system } : {}),
       messages,
       tools: toModelTools(tools),
-      ...(config.activeTools ? { activeTools: config.activeTools } : {}),
-      ...(config.toolChoice ? { toolChoice: config.toolChoice } : {}),
+      ...(activeTools ? { activeTools } : {}),
+      ...(toolChoice ? { toolChoice } : {}),
       ...(config.maxOutputTokens !== undefined
         ? { maxOutputTokens: config.maxOutputTokens }
         : {}),
@@ -297,12 +333,16 @@ export class ThinkHarness extends LifecycleCapability {
         : {}),
       ...(config.topP !== undefined ? { topP: config.topP } : {}),
       ...(config.topK !== undefined ? { topK: config.topK } : {}),
-      ...(config.providerOptions
-        ? { providerOptions: config.providerOptions }
-        : {}),
+      ...(providerOptions ? { providerOptions } : {}),
       // One model call per driver step: the harness runs the tools.
       stopWhen: stepCountIs(1),
-      abortSignal: signal
+      abortSignal: signal,
+      onChunk: async ({ chunk }) => {
+        await this.#options.hooks?.onModelChunk?.({ ...context, chunk });
+      },
+      onStepFinish: (finished) => {
+        stepResult = finished as unknown as StepResult<ToolSet>;
+      }
     });
 
     let streamError: string | undefined;
@@ -367,6 +407,7 @@ export class ThinkHarness extends LifecycleCapability {
     this.#turns().completeStep(turn.turnId);
     await this.#options.hooks?.onStepFinish?.({
       ...context,
+      result: stepResult,
       finishReason,
       toolCalls
     });
@@ -617,7 +658,9 @@ export class ThinkHarness extends LifecycleCapability {
   }
 
   #turns(): ThinkStore {
-    this.#store ??= new ThinkStore(this.lifecycle.storage);
+    this.#store ??= new ThinkStore(this.lifecycle.storage, (error) => {
+      throw new HarnessError(errorText(error), { cause: error });
+    });
     return this.#store;
   }
 }

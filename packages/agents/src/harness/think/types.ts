@@ -1,7 +1,9 @@
 import type {
   LanguageModel,
   ModelMessage,
+  StepResult,
   StopCondition,
+  TextStreamPart,
   ToolSet,
   UIMessage,
   UIMessageChunk,
@@ -48,6 +50,16 @@ export type ThinkTurnConfig = {
   readonly temperature?: StreamTextOptions["temperature"];
   readonly topP?: StreamTextOptions["topP"];
   readonly topK?: StreamTextOptions["topK"];
+  readonly providerOptions?: StreamTextOptions["providerOptions"];
+};
+
+/** Per-step overrides `beforeStep` may return. */
+export type ThinkStepConfig = {
+  readonly model?: LanguageModel;
+  readonly system?: string;
+  readonly messages?: ModelMessage[];
+  readonly activeTools?: string[];
+  readonly toolChoice?: StreamTextOptions["toolChoice"];
   readonly providerOptions?: StreamTextOptions["providerOptions"];
 };
 
@@ -101,10 +113,24 @@ export interface ThinkHarnessHooks {
       readonly result: ThinkToolResult;
     }
   ): void | Promise<void>;
+  /** Before every model call, with the step number across the whole turn. */
+  beforeStep?(
+    turn: ThinkTurnContext & {
+      readonly model: LanguageModel;
+      readonly system: string | undefined;
+      readonly messages: ModelMessage[];
+    }
+  ): ThinkStepConfig | void | Promise<ThinkStepConfig | void>;
   /** Every UI message chunk the turn produces, in order. */
   onChunk?(turn: ThinkTurnContext & { readonly chunk: UIMessageChunk }): void;
+  /** Every part of the model's own stream, as `streamText`'s `onChunk` sees it. */
+  onModelChunk?(
+    turn: ThinkTurnContext & { readonly chunk: TextStreamPart<ToolSet> }
+  ): void | Promise<void>;
   onStepFinish?(
     turn: ThinkTurnContext & {
+      /** The AI SDK's result for this model call. */
+      readonly result: StepResult<ToolSet> | undefined;
       readonly finishReason: string | undefined;
       readonly toolCalls: ThinkToolCall[];
     }
