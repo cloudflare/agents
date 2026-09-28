@@ -1,0 +1,21 @@
+packages/agents/src/tests/agents/sub-agent.ts
+  s_efd49820c22d67::t_132490b9a87869 2653-2667
+packages/agents/src/tests/sub-agent-rpc-bridge.test.ts
+  s_efd49820c22d67::t_afb2b9c731994d 396-413
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "52853b12c79a4f4de05474a3b3dd852fedaf6e3c",
+  "prompts": {},
+  "sessions": {
+    "s_efd49820c22d67": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "50161273-add8-4cb8-9ec3-a4d330172115",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
