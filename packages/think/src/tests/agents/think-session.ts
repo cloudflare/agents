@@ -929,6 +929,64 @@ export class ThinkTestAgent extends Think {
   }
 
   /**
+   * A child turn that streams error text, then an in-band error, and persists
+   * its assistant reply — but is "evicted" before `startAgentToolRun`'s
+   * finalizer seals the row `error`. Holds the finalizer at the point the turn
+   * returns, drops the run's in-memory state as an eviction would, then
+   * inspects (reconciling the stale `running` row).
+   */
+  async reconcileEvictedErroredRunForTest(): Promise<{
+    before: string | null;
+    assistantText: string;
+    inspection: Awaited<ReturnType<Think["inspectAgentToolRun"]>>;
+  }> {
+    const runId = crypto.randomUUID();
+    const self = this as unknown as {
+      _runProgrammaticMessagesTurn: (...args: unknown[]) => Promise<unknown>;
+    };
+    const original = self._runProgrammaticMessagesTurn;
+    let reached!: () => void;
+    let release!: () => void;
+    const reachedGate = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    self._runProgrammaticMessagesTurn = async (...args) => {
+      self._runProgrammaticMessagesTurn = original;
+      const result = await original.apply(this, args);
+      reached();
+      await released;
+      return result;
+    };
+    this._inBandErrorResponse = {
+      errorText: "model exploded",
+      textChunks: ["Sorry, something went wrong."]
+    };
+    try {
+      await this.startAgentToolRun("fail midway", { runId });
+      await reachedGate;
+      this["_agentToolAbortControllers"].delete(runId);
+      this["_agentToolLastErrors"].delete(runId);
+      this["_agentToolLiveSequences"].delete(runId);
+      this["_agentToolPreTurnAssistantIds"].delete(runId);
+      this["_agentToolRunsByRequestId"].clear();
+      const before = this["_readAgentToolChildRun"](runId)?.status ?? null;
+      const assistantText = this.messages
+        .filter((message) => message.role === "assistant")
+        .flatMap((message) => message.parts)
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("");
+      const inspection = await this.inspectAgentToolRun(runId);
+      return { before, assistantText, inspection };
+    } finally {
+      this._inBandErrorResponse = null;
+      release();
+    }
+  }
+
+  /**
    * Post-restart cold-counter realign: seed a RUNNING run with a stored backlog
    * 0..2, wipe the in-memory live sequence, tail after `afterSequence` (parent
    * recovery passes the last stored index), then broadcast a new chunk. Returns

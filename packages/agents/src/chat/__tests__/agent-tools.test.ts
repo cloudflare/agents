@@ -579,6 +579,22 @@ describe("interceptAgentToolBroadcast", () => {
     expect(liveSequences.has("run-1")).toBe(false);
   });
 
+  it("reports a captured error body to onError", () => {
+    const { hooks, forwarders } = makeHooks(() => "run-1");
+    forwarders.set("run-1", new Set());
+    const onError = vi.fn();
+    hooks.onError = onError;
+
+    interceptAgentToolBroadcast(
+      frame({ id: "req-1", error: true, body: "boom" }),
+      hooks
+    );
+    interceptAgentToolBroadcast(frame({ id: "req-1", body: "a" }), hooks);
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith("run-1", "boom");
+  });
+
   it("ignores frames whose type is not the response type", () => {
     const { hooks, forwarders } = makeHooks(() => "run-1");
     const received: Chunk[] = [];
