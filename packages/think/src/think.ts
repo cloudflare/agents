@@ -211,6 +211,7 @@ import {
   aiSdkRecoveryCodec,
   ResumeHandshake,
   normalizeToolInput,
+  isLateToolInputChunk,
   repairInterruptedToolParts,
   toolPartHasSettledResult,
   persistReconstructedOrphan,
@@ -14286,11 +14287,18 @@ export class Think<
             pendingActionCalls,
             accumulator.parts
           );
+          const lateToolInput = isLateToolInputChunk(
+            accumulator.parts,
+            streamChunk
+          );
           const { action } = accumulator.applyChunk(streamChunk);
           this._applyActionApprovalDescriptorToParts(
             streamChunk,
             accumulator.parts
           );
+          // Server-side only: the parent's stream consumer would move its
+          // approval part back to `input-available`.
+          if (lateToolInput) continue;
 
           if (action?.type === "error") {
             streamError = action.error;
@@ -14796,11 +14804,18 @@ export class Think<
             ),
             continuationAssistant ? leafMetadata : undefined
           );
+          const lateToolInput = isLateToolInputChunk(
+            accumulator.parts,
+            streamChunk
+          );
           const { action } = accumulator.applyChunk(streamChunk);
           this._applyActionApprovalDescriptorToParts(
             streamChunk,
             accumulator.parts
           );
+          // Server-side only: forwarding it (live or on resume replay) would
+          // move the client's approval part back to `input-available`.
+          if (lateToolInput) continue;
 
           // Approved server tools execute during a continuation stream, but
           // their original tool part lives in an earlier assistant message.

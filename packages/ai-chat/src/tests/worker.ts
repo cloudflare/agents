@@ -311,6 +311,31 @@ export class TestChatAgent extends AIChatAgent<Env> {
       ]);
     }
 
+    // A custom stream that emits the approval request before the canonical
+    // tool input, with no input deltas (#1872).
+    if (options?.body?.lateToolInput === true) {
+      return makeSSEChunkResponse([
+        { type: "start" },
+        {
+          type: "tool-input-start",
+          toolCallId: "call-late-input",
+          toolName: "deleteFile"
+        },
+        {
+          type: "tool-approval-request",
+          toolCallId: "call-late-input",
+          approvalId: "approval-late-input"
+        },
+        {
+          type: "tool-input-available",
+          toolCallId: "call-late-input",
+          toolName: "deleteFile",
+          input: { path: "notes.txt" }
+        },
+        { type: "finish" }
+      ]);
+    }
+
     // Mirrors the common provider (e.g. Workers AI) that emits a `start`
     // chunk WITHOUT a messageId, so the server must stamp its allocated id.
     if (options?.body?.sseWithoutMessageId === true) {

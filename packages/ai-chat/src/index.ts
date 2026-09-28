@@ -42,6 +42,7 @@ import {
 } from "agents/chat";
 import {
   applyChunkToParts,
+  applyLateToolInput,
   AgentToolProgressEmitter,
   aiSdkRecoveryCodec,
   ResumeHandshake,
@@ -7043,6 +7044,22 @@ export class AIChatAgent<
             // already has when the replay matches, so it's
             // semantically a no-op on the client too.
             if (isReplayChunk(message.parts, data as StreamChunkData)) {
+              // A `tool-input-available` that lands after its approval
+              // request still carries the canonical input the approved
+              // call executes with. Keep it server-side only, and refresh
+              // the approval snapshot persisted without it.
+              if (
+                applyLateToolInput(message.parts, data as StreamChunkData) &&
+                this._approvalPersistedMessageId !== null &&
+                this._streamingMessage
+              ) {
+                await this.#session.upsertMessage(
+                  this._sanitizeMessageForPersistence({
+                    ...this._streamingMessage,
+                    parts: [...this._streamingMessage.parts]
+                  })
+                );
+              }
               continue;
             }
 
