@@ -1,0 +1,147 @@
+packages/agents/src/index.ts
+  s_efd49820c22d67::t_93868d1a22d0da 4776-4790
+  s_efd49820c22d67::t_c43ceae882778e 3171,3175,3198,3208,3211,3220-3222,3231,3235-3236,3243,3247-3248,4728,4731-4732,5087,5091,5094,5098,5102-5103,5106,5111-5112,5115,5119
+  s_efd49820c22d67::t_ebf6b1265d0ae1 50-51,5000-5006,5009
+  s_efd49820c22d67::t_ef6b190036ca01 2260-2271,2304,2308
+.changeset/facet-host-jobs.md
+  s_efd49820c22d67::t_5c518ded5dd749 1-5
+packages/agents/src/tests/agents/sub-agent.ts
+  s_efd49820c22d67::t_0aac3a0b5b3ffc 71-73,524-535,2061-2077
+  s_efd49820c22d67::t_d3e52734d92e8b 1233-1260,1266,2689-2706
+  s_efd49820c22d67::t_132490b9a87869 2674-2688
+  s_efd49820c22d67::t_b77dab6e3d83c6 2446,2448-2454,2498-2501,2534-2543
+packages/agents/src/tests/sub-agent.test.ts
+  s_efd49820c22d67::t_b9e31725c99dd6 1164-1207
+.changeset/facet-broadcast-root-calls.md
+  s_efd49820c22d67::t_93fa3ca26d08a0 1-5
+packages/agents/src/dynamic-agents/dynamic-agents.ts
+  s_efd49820c22d67::t_d6907a5ffd53e7 132-139,225,270-275,559,763,784,928,932-962,1525-1528,1530
+  s_efd49820c22d67::t_85924a24ce5fb9 1287-1294
+  s_efd49820c22d67::t_e667c8da68a135 60-86,1257-1258
+packages/agents/src/tests/sub-agent-rpc-bridge.test.ts
+  s_efd49820c22d67::t_7884086a868320 2,540-640
+  s_efd49820c22d67::t_afb2b9c731994d 396-413
+.changeset/nested-sub-agent-websockets.md
+  s_efd49820c22d67::t_fe9d13786fd21d 1-5
+packages/agents/src/tests/sub-agent-routing.test.ts
+  s_efd49820c22d67::t_dc2ae1c49078cf 64-134
+  s_efd49820c22d67::t_4c2213e74fbbae 341-402
+docs/agents/sub-agents.md
+  s_efd49820c22d67::t_e53da7675c4b7f 249-257
+packages/agents/src/client.ts
+  s_efd49820c22d67::t_df8f1f4a3a0072 43-90,167-171,524-525,641-649,671,774,780,788,792
+  s_efd49820c22d67::t_398491dbc415e5 569-621,691-699,701,718,778
+  s_efd49820c22d67::t_d306ecf1dfb72c 517-518,531-533,706-717
+packages/agents/src/react-tests/client.test.ts
+  s_efd49820c22d67::t_56ffe4ac7cf1ff 579-607,613-621,623-642,646-651,653-709
+  s_efd49820c22d67::t_a6e222ff4def12 608-612,622,643-645,652
+  s_efd49820c22d67::t_f35f9f679159dd 58-76,227,231
+  s_efd49820c22d67::t_6338f95855c7cc 77-110
+packages/agents/src/react-tests/rpc-robustness.test.tsx
+  s_efd49820c22d67::t_e150645e66eed5 17,563-664
+packages/agents/src/react.tsx
+  s_efd49820c22d67::t_4edc9fed608af3 20,678-685,687,1007,1009,1017,1032,1043
+  s_efd49820c22d67::t_f4a04e4afdc081 732,804-888,915-922,924,929-933,934-935,946,1008
+  s_efd49820c22d67::t_1c4643b1e0ad53 936-945
+packages/agents/src/tests/agents/index.ts
+  s_efd49820c22d67::t_358cdde77444ad 68
+packages/agents/src/tests/worker.ts
+  s_efd49820c22d67::t_2a9ea2d5c583c5 126
+packages/agents/src/tests/wrangler.jsonc
+  s_efd49820c22d67::t_d3917981d113d3 291-294
+.changeset/rejected-sub-agent-socket.md
+  s_efd49820c22d67::t_503e888e8257de 1-9
+packages/agents/src/react-tests/useAgent.test.tsx
+  s_efd49820c22d67::t_1a82881e18ea45 1217-1268,1349-1370
+  s_efd49820c22d67::t_34288b35669c4c 1307-1348
+packages/agents/src/tests/protocol-messages.test.ts
+  s_efd49820c22d67::t_73158480305116 168-196
+packages/agents/src/websockets/websockets.ts
+  s_efd49820c22d67::t_b0524372123310 290,429-433,435,437-460,462-474,484-490
+.changeset/ready-after-state.md
+  s_efd49820c22d67::t_50b8c91d3e2e48 1-7
+docs/agents/lifecycle.md
+  s_efd49820c22d67::t_6f7a63589a160f 344-347,352-354
+docs/agents/state.md
+  s_efd49820c22d67::t_0fbdae080d332a 304
+packages/agents/src/tests/lifecycle/websockets-capability.test.ts
+  s_efd49820c22d67::t_9782763777a4c5 382,387-392
+packages/agents/src/websockets/options.ts
+  s_efd49820c22d67::t_3ee263b0787073 84-85
+packages/agents/src/chat/react.tsx
+  s_efd49820c22d67::t_48856990596c3d 1356-1357,2922-2931,2933-2935
+packages/agents/src/react-tests/tool-result-prune-updates.test.tsx
+  s_efd49820c22d67::t_138bd5343cf624 1-237,290
+  s_efd49820c22d67::t_2cef245aa175ad 238-289
+.changeset/tool-result-cleanup-updates.md
+  s_efd49820c22d67::t_2bff36281155d8 1-5
+packages/agents/src/react-tests/resume-replay-burst.test.tsx
+  s_efd49820c22d67::t_f1db64c0716dda 303-307
+packages/agents/src/sessions/index.ts
+  s_efd49820c22d67::t_2a60ee485859b0 10
+packages/agents/src/tests/sessions/capability.test.ts
+  s_efd49820c22d67::t_18cc53ca4d6911 508-603
+.changeset/session-mirror.md
+  s_efd49820c22d67::t_eb0229b2d0abcd 1-7
+packages/think/src/think.ts
+  s_efd49820c22d67::t_3bead257f7d001 3863-3877,3879-3918,3920,4683-4684,4686-4689,4693-4696,4698-4699
+  s_efd49820c22d67::t_8f31b83ac69093 1470-1473,1476-1491,1497-1498,2764-2768,6301-6302,7153-7158,7448-7452
+  s_efd49820c22d67::t_2d53fe6a898072 609-615,1526,3790-3812,6312-6313,7546-7551,7630-7632,7693,7697-7709,8018-8065,8070,8082-8085
+packages/ai-chat/src/index.ts
+  s_efd49820c22d67::t_5e36022c4f0950 2567-2572
+packages/agents/src/sessions/mirror.ts
+  s_efd49820c22d67::t_da3e1b36d00500 1-85
+packages/agents/src/sessions/handle.ts
+  s_efd49820c22d67::t_ef9dd95cf5a44b 14,71-86
+docs/agents/sessions.md
+  s_efd49820c22d67::t_89009870ad6de2 364-382
+.changeset/context-reminders.md
+  s_efd49820c22d67::t_fb228ac4a3ca79 1-6
+docs/agents/context.md
+  s_efd49820c22d67::t_ea4307eff1c973 99-119,121-123,155
+  s_efd49820c22d67::t_3e2fd7b8faf8e4 120
+packages/agents/src/tests/context/context.test.ts
+  s_efd49820c22d67::t_1fa91b3798d09a 92-193,211-214
+  s_efd49820c22d67::t_522ed54eefb1df 194-210
+packages/think/src/tests/agents/prompt-cache.ts
+  s_efd49820c22d67::t_049feec6fba4de 3,29-32,44-47,60-70,158-162,206-210,251-255
+packages/think/src/tests/prompt-cache.test.ts
+  s_efd49820c22d67::t_ca1b9c275e62ef 34-65
+packages/agents/src/context/blocks.ts
+  s_efd49820c22d67::t_62ea58b42ee3ac 10-11,51-59,62,65-88,90-91,140-149,151-155,223-227,407,409-410,446-476
+  s_efd49820c22d67::t_c13ca71b5a7dae 60-61,63-64,89,150,402-406,408
+docs/think/tools.md
+  s_efd49820c22d67::t_4c684e6425280e 183-216
+packages/think/src/tests/agents/index.ts
+  s_efd49820c22d67::t_3d5dc580655902 58
+packages/think/src/tests/tool-discovery.test.ts
+  s_efd49820c22d67::t_d171546c19aa39 1-209
+packages/think/src/tests/wrangler.jsonc
+  s_efd49820c22d67::t_3929388f963a26 206-209,292
+docs/think/index.md
+  s_efd49820c22d67::t_22b7e5b605b777 420
+packages/think/src/tests/worker.ts
+  s_efd49820c22d67::t_936147d660f6b7 63,116,273
+.changeset/think-tool-discovery.md
+  s_efd49820c22d67::t_63f53d5c288769 1-5
+packages/think/src/tool-discovery.ts
+  s_efd49820c22d67::t_676dbb4786c41a 1-226
+packages/think/src/tests/agents/tool-discovery.ts
+  s_efd49820c22d67::t_20448fa9cace63 1-194
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ea945abdade7de0dd21c4102182b3bf5189782e8",
+  "prompts": {},
+  "sessions": {
+    "s_efd49820c22d67": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "50161273-add8-4cb8-9ec3-a4d330172115",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
