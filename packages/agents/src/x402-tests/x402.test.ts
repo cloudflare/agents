@@ -821,6 +821,7 @@ describe("withX402Client", () => {
     expect(hook).toBeTypeOf("function");
     const run = (amount: string) =>
       hook({
+        paymentRequired: {},
         selectedRequirements: { ...samplePaymentRequirements[0], amount }
       });
     await expect(run("100")).resolves.toBeUndefined();
@@ -923,19 +924,59 @@ describe("withX402Client", () => {
       content: [{ type: "text", text: "payment required" }]
     });
 
-    mockPaymentClient.createPaymentPayload.mockRejectedValue(
-      new Error("signing failed")
-    );
-
     const augmented = withX402Client(client, {
       account: mockSigner as unknown as X402ClientConfig["account"]
     });
+    // Selection succeeds and runs the cap hook; signing then fails.
+    const [hook] =
+      mockPaymentClient.onBeforePaymentCreation.mock.calls.at(-1) ?? [];
+    mockPaymentClient.createPaymentPayload.mockImplementationOnce(
+      async (paymentRequired: { accepts: unknown[] }) => {
+        await hook({
+          paymentRequired,
+          selectedRequirements: paymentRequired.accepts[0]
+        });
+        throw new Error("signing failed");
+      }
+    );
 
     const result = await augmented.callTool(null, { name: "test-tool" });
 
     expect(result.isError).toBe(true);
     const content = result.content as Array<{ text: string }>;
     expect(content[0].text).toBe("Failed to create payment payload");
+  });
+
+  it("returns the original 402 result when selection finds nothing to sign", async () => {
+    const client = createMockMcpClient();
+    const paymentRequired = {
+      isError: true,
+      _meta: {
+        "x402/error": {
+          x402Version: 2,
+          error: "PAYMENT_REQUIRED",
+          resource: {
+            url: "x402://test",
+            description: "test",
+            mimeType: "application/json"
+          },
+          accepts: samplePaymentRequirements
+        }
+      },
+      content: [{ type: "text", text: "payment required" }]
+    };
+    client.callTool.mockResolvedValueOnce(paymentRequired);
+    // Selection fails before any hook runs.
+    mockPaymentClient.createPaymentPayload.mockRejectedValueOnce(
+      new Error("No network/scheme registered")
+    );
+
+    const augmented = withX402Client(client, {
+      account: mockSigner as unknown as X402ClientConfig["account"]
+    });
+    const result = await augmented.callTool(null, { name: "test-tool" });
+
+    expect(result).toEqual(paymentRequired);
   });
 
   it("registers a network preference policy when network is provided", () => {

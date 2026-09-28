@@ -364,26 +364,34 @@ export function withX402Client<T extends CompatibleMcpClient>(
   const paymentClient = new x402Client();
   registerClientEvmScheme(paymentClient, { signer: account });
 
+  // Payment requests whose selection reached the hook below. x402 selects a
+  // requirement before it runs any hook, so a request that failed without
+  // getting here offered nothing this client can sign.
+  const selected = new WeakSet<PaymentRequired>();
+
   // Selection applies scheme support and network preference before this hook.
   // Enforce the cap on the requirement that will actually be signed. We throw
   // rather than return `{ abort: true }` because @x402/core rewraps an abort in
   // a plain Error, which would lose the typed errors the catch below relies on.
-  paymentClient.onBeforePaymentCreation(async ({ selectedRequirements }) => {
-    const { scheme, amount } = selectedRequirements;
-    if (scheme !== "exact") throw new PaymentPassthroughError();
-    let value: bigint;
-    try {
-      value = BigInt(amount);
-    } catch {
-      throw new PaymentPassthroughError(); // malformed amount
+  paymentClient.onBeforePaymentCreation(
+    async ({ paymentRequired, selectedRequirements }) => {
+      selected.add(paymentRequired);
+      const { scheme, amount } = selectedRequirements;
+      if (scheme !== "exact") throw new PaymentPassthroughError();
+      let value: bigint;
+      try {
+        value = BigInt(amount);
+      } catch {
+        throw new PaymentPassthroughError(); // malformed amount
+      }
+      if (value < 0n) throw new PaymentPassthroughError();
+      if (value > maxPaymentValue) {
+        throw new PaymentCapError(
+          `Payment exceeds client cap: ${value} > ${maxPaymentValue}`
+        );
+      }
     }
-    if (value < 0n) throw new PaymentPassthroughError();
-    if (value > maxPaymentValue) {
-      throw new PaymentCapError(
-        `Payment exceeds client cap: ${value} > ${maxPaymentValue}`
-      );
-    }
-  });
+  );
 
   // If a preferred network is specified, register a policy to prefer it
   if (x402Config.network) {
@@ -442,7 +450,11 @@ export function withX402Client<T extends CompatibleMcpClient>(
       Array.isArray(maybeX402Error.accepts) &&
       maybeX402Error.accepts.length > 0
     ) {
-      const accepts = maybeX402Error.accepts;
+      // Snapshot the requirements: what is cap-checked and signed below is
+      // this copy, not the server's result object or anything aliasing it.
+      const accepts = structuredClone(
+        maybeX402Error.accepts
+      ) as PaymentRequirements[];
       const confirmationCallback =
         x402ConfirmationCallback ?? x402Config.confirmationCallback;
 
@@ -459,9 +471,6 @@ export function withX402Client<T extends CompatibleMcpClient>(
           content: [{ type: "text", text: "User declined payment" }]
         };
       }
-
-      // No signable requirement: return the original error, as before
-      if (!accepts.some((req) => req.scheme === "exact")) return res;
 
       // Reconstruct the PaymentRequired response for the v2 x402 client
       const paymentRequiredResponse: PaymentRequired = {
@@ -484,7 +493,14 @@ export function withX402Client<T extends CompatibleMcpClient>(
           paymentRequiredResponse
         );
       } catch (error) {
-        if (error instanceof PaymentPassthroughError) return res;
+        // Nothing this client can sign, or a selection it cannot cap-check:
+        // return the server's 402 with its payment options, as before.
+        if (
+          error instanceof PaymentPassthroughError ||
+          !selected.has(paymentRequiredResponse)
+        ) {
+          return res;
+        }
         return {
           isError: true,
           content: [

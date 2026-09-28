@@ -160,6 +160,28 @@ describe("x402 selected-payment cap", () => {
     expect(signTypedData).toHaveBeenCalledOnce();
   });
 
+  it.each<{ offers: string; accepts: PaymentRequirements[] }>([
+    {
+      offers: "only a non-exact offer",
+      accepts: [{ ...requirement, scheme: "upto" }]
+    },
+    {
+      offers:
+        "a non-exact offer, then an exact offer on an unsupported network",
+      accepts: [
+        { ...requirement, scheme: "upto" },
+        { ...requirement, network: "solana:unsupported" }
+      ]
+    }
+  ])("returns the original 402 result for $offers", async ({ accepts }) => {
+    const { client, callTool, signTypedData } = setup(accepts);
+    const result = await client.callTool(null, { name: "test" });
+    expect(result.isError).toBe(true);
+    expect(result._meta?.["x402/error"]).toBeDefined();
+    expect(signTypedData).not.toHaveBeenCalled();
+    expect(callTool).toHaveBeenCalledOnce();
+  });
+
   it.each(["-1", "1.5", "nope"])(
     "returns the original 402 result for malformed selected amount %s",
     async (amount) => {
