@@ -1871,14 +1871,21 @@ export class ResponseAgent extends AIChatAgent<Env> {
  */
 export class ResponseContinuationAgent extends AIChatAgent<Env> {
   private _responseResults: ChatResponseResult[] = [];
-  private _failContinuation = false;
+  private _failContinuation: false | "throw" | "locked-body" = false;
 
   async onChatMessage(
     _onFinish: GenerateTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
   ) {
-    if (options?.continuation && this._failContinuation) {
+    if (options?.continuation && this._failContinuation === "throw") {
       throw new Error("continuation failed before streaming");
+    }
+    if (options?.continuation && this._failContinuation === "locked-body") {
+      const response = new Response("unreadable", {
+        headers: { "Content-Type": "text/plain" }
+      });
+      response.body?.getReader();
+      return response;
     }
     return new Response("Continuation response", {
       headers: { "Content-Type": "text/plain" }
@@ -1893,7 +1900,7 @@ export class ResponseContinuationAgent extends AIChatAgent<Env> {
     return [...this._responseResults];
   }
 
-  setFailContinuation(value: boolean): void {
+  setFailContinuation(value: false | "throw" | "locked-body"): void {
     this._failContinuation = value;
   }
 

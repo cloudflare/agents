@@ -3479,14 +3479,16 @@ export class AIChatAgent<
                     );
 
                     if (response) {
-                      replying = true;
                       const replyResult = await this._reply(
                         requestId,
                         response,
                         [],
                         {
                           continuation: true,
-                          chatMessageId: requestId
+                          chatMessageId: requestId,
+                          onStreamStart: () => {
+                            replying = true;
+                          }
                         }
                       );
                       if (replyResult.status === "error") {
@@ -7574,9 +7576,17 @@ export class AIChatAgent<
     id: string,
     response: Response,
     excludeBroadcastIds: string[] = [],
-    options: { continuation?: boolean; chatMessageId?: string } = {}
+    options: {
+      continuation?: boolean;
+      chatMessageId?: string;
+      /**
+       * Called once the stream is set up. From then on `_reply` reports its
+       * own failures to clients; a throw before it is the caller's to report.
+       */
+      onStreamStart?: () => void;
+    } = {}
   ): Promise<StreamResultStatus> {
-    const { continuation = false, chatMessageId } = options;
+    const { continuation = false, chatMessageId, onStreamStart } = options;
     // Look up the abort signal for this request so we can cancel the reader
     // loop if the client sends a cancel message. This is a safety net —
     // users should also pass abortSignal to streamText for proper cancellation.
@@ -7601,6 +7611,10 @@ export class AIChatAgent<
           return { status: "completed" };
         }
 
+        // Take the reader before the stream starts: an unreadable body must
+        // fail while nothing has been sent, not leave a started stream behind.
+        const reader = response.body.getReader();
+
         // Parsing state adapted from:
         // https://github.com/vercel/ai/blob/main/packages/ai/src/ui-message-stream/ui-message-chunks.ts#L295
         const message = this._createStreamingAssistantMessage(continuation);
@@ -7621,8 +7635,6 @@ export class AIChatAgent<
           messageId: message.id,
           continuation
         });
-
-        const reader = response.body.getReader();
 
         // Track the streaming message so tool results can be applied before persistence
         this._streamingMessage = message;
@@ -7654,6 +7666,7 @@ export class AIChatAgent<
         this._streamingTurnActive = true;
         this._heldTerminalFrames.set(id, []);
         let persisted = false;
+        onStreamStart?.();
         try {
           try {
             if (isSSE) {
