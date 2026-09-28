@@ -1,6 +1,9 @@
 export {
   applyChunkToParts,
+  applyLateToolInput,
+  isLateToolInputChunk,
   isReplayChunk,
+  lateToolInputForwardChunks,
   normalizeToolInput,
   type MessageParts,
   type MessagePart,
