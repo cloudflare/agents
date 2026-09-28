@@ -204,7 +204,23 @@ describe("tool discovery helpers", () => {
     ]);
   });
 
-  it("matches a two-letter keyword against a leading name component", () => {
+  it("finds a tool by a two-letter name component in any position", () => {
+    const tools = [
+      { name: "get_ip", description: "Look up an address" },
+      { name: "read_file", description: "Read a file" }
+    ];
+    expect(searchDeferredTools("ip", tools)).toEqual(["get_ip"]);
+  });
+
+  it("breaks ties on two-letter name components", () => {
+    const tools = [
+      { name: "read_file", description: "Read a file" },
+      { name: "db_read", description: "Read database rows" }
+    ];
+    expect(searchDeferredTools("db read", tools, 1)).toEqual(["db_read"]);
+  });
+
+  it("matches a two-letter keyword against names, not descriptions", () => {
     const withShort = [
       ...catalog,
       { name: "db_read", description: "Read database rows" },

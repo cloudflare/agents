@@ -104,25 +104,27 @@ export function searchDeferredTools(
   // A token that named a tool is spent; scoring its parts again would pad
   // the result with every tool sharing a prefix.
   const rest = tokens.filter((token) => !names.has(token)).join(" ");
-  // A two-letter word only matches a leading name component (`db` in
-  // `db_read`); anywhere else, filler like "to" would match `navigate_to_page`.
+  // Two-letter words match name components (`db` in `db_read`, `ip` in
+  // `get_ip`) but only break ties, so filler like "to" in the query cannot
+  // push out a tool that matched on real words.
   const queryWords = new Set(words(rest, 2));
   const ranked = catalog
     .filter((entry) => !exact.includes(entry.name))
     .map((entry) => {
-      const nameWords = new Set(words(entry.name, 3));
-      const [prefix] = words(entry.name, 1);
-      if (prefix?.length === 2) nameWords.add(prefix);
+      const nameWords = new Set(words(entry.name, 2));
       const descriptionWords = new Set(words(entry.description, 3));
       let score = 0;
+      let shortScore = 0;
       for (const word of queryWords) {
-        if (nameWords.has(word)) score += 3;
+        if (word.length === 2) {
+          if (nameWords.has(word)) shortScore += 1;
+        } else if (nameWords.has(word)) score += 3;
         else if (descriptionWords.has(word)) score += 1;
       }
-      return { name: entry.name, score };
+      return { name: entry.name, score, shortScore };
     })
-    .filter((entry) => entry.score > 0)
-    .sort((a, b) => b.score - a.score)
+    .filter((entry) => entry.score + entry.shortScore > 0)
+    .sort((a, b) => b.score - a.score || b.shortScore - a.shortScore)
     .slice(0, Math.max(0, maxResults - exact.length))
     .map((entry) => entry.name);
   return [...exact, ...ranked];
