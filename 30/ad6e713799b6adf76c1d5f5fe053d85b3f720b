@@ -1,0 +1,41 @@
+packages/agents/src/client.ts
+  s_efd49820c22d67::t_398491dbc415e5 565-617,687-695,697,703-708,768
+packages/agents/src/react-tests/client.test.ts
+  s_efd49820c22d67::t_f35f9f679159dd 58-76,193,197
+packages/agents/src/react-tests/useAgent.test.tsx
+  s_efd49820c22d67::t_1a82881e18ea45 1217-1290
+packages/agents/src/react.tsx
+  s_efd49820c22d67::t_f4a04e4afdc081 732,804-888,915-922,924,929-933,935-943,1005
+packages/agents/src/tests/protocol-messages.test.ts
+  s_efd49820c22d67::t_73158480305116 168-196
+packages/agents/src/websockets/websockets.ts
+  s_efd49820c22d67::t_b0524372123310 290,429-433,435,437-460,462-474,484-490
+.changeset/ready-after-state.md
+  s_efd49820c22d67::t_50b8c91d3e2e48 1-7
+docs/agents/lifecycle.md
+  s_efd49820c22d67::t_6f7a63589a160f 344-347,352-354
+docs/agents/state.md
+  s_efd49820c22d67::t_0fbdae080d332a 304
+packages/agents/src/index.ts
+  s_efd49820c22d67::t_ef6b190036ca01 2260-2271,2304,2308
+packages/agents/src/tests/lifecycle/websockets-capability.test.ts
+  s_efd49820c22d67::t_9782763777a4c5 382,387-392
+packages/agents/src/websockets/options.ts
+  s_efd49820c22d67::t_3ee263b0787073 84-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "30ad6e713799b6adf76c1d5f5fe053d85b3f720b",
+  "prompts": {},
+  "sessions": {
+    "s_efd49820c22d67": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "50161273-add8-4cb8-9ec3-a4d330172115",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
