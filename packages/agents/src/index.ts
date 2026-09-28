@@ -3169,10 +3169,11 @@ export class Agent<
   }
 
   /** Single native-RPC aperture for routed Lifecycle capabilities. */
-  _cf_routeLifecycle(
+  async _cf_routeLifecycle(
     target: LifecycleRouteAddress | undefined,
     envelope: LifecycleRouteEnvelope
   ): Promise<unknown> {
+    await this.__unsafe_ensureInitialized();
     return this._dynamicAgents.routeLifecycle(target, envelope);
   }
 
@@ -3195,6 +3196,7 @@ export class Agent<
   async _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     await this._dynamicAgents.cleanupPrefix(ownerPath);
   }
 
@@ -3204,9 +3206,10 @@ export class Agent<
    * physical alarm, so this lets facet work use the root alarm heartbeat.
    * @internal
    */
-  _cf_acquireFacetKeepAlive(
+  async _cf_acquireFacetKeepAlive(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<string> {
+    await this.__unsafe_ensureInitialized();
     return this._dynamicAgents.acquireKeepAlive(ownerPath);
   }
 
@@ -3215,8 +3218,9 @@ export class Agent<
    * Idempotent so disposer calls can safely race or run twice.
    * @internal
    */
-  _cf_releaseFacetKeepAlive(token: string): Promise<void> {
-    return this._dynamicAgents.releaseKeepAlive(token);
+  async _cf_releaseFacetKeepAlive(token: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.releaseKeepAlive(token);
   }
 
   /**
@@ -3225,22 +3229,24 @@ export class Agent<
    * The facet remains authoritative for snapshots and recovery hooks.
    * @internal
    */
-  _cf_registerFacetRun(
+  async _cf_registerFacetRun(
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
-    return this._dynamicAgents.registerRun(ownerPath, runId);
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.registerRun(ownerPath, runId);
   }
 
   /**
    * Remove a completed facet fiber from the root-side index.
    * @internal
    */
-  _cf_unregisterFacetRun(
+  async _cf_unregisterFacetRun(
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
-    return this._dynamicAgents.unregisterRun(ownerPath, runId);
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.unregisterRun(ownerPath, runId);
   }
 
   /**
@@ -4720,10 +4726,11 @@ export class Agent<
    * cleanup as `parent.deleteSubAgent(Cls, name)` from the parent.
    * @internal
    */
-  _cf_destroyDescendantFacet(
+  async _cf_destroyDescendantFacet(
     targetPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
-    return this._dynamicAgents.destroyDescendant(targetPath);
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.destroyDescendant(targetPath);
   }
 
   /**
@@ -5072,34 +5079,39 @@ export class Agent<
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     await this._dynamicAgents.broadcastToPath(ownerPath, message, without);
   }
 
-  _cf_subAgentConnectionMetas(
+  async _cf_subAgentConnectionMetas(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<SubAgentConnectionMeta[]> {
+    await this.__unsafe_ensureInitialized();
     return this._dynamicAgents.connectionMetas(ownerPath);
   }
 
-  _cf_sendToSubAgentConnection(
+  async _cf_sendToSubAgentConnection(
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
   ): Promise<void> {
-    return this._dynamicAgents.sendToConnection(connectionId, message);
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.sendToConnection(connectionId, message);
   }
 
-  _cf_closeSubAgentConnection(
+  async _cf_closeSubAgentConnection(
     connectionId: string,
     code?: number,
     reason?: string
   ): Promise<void> {
-    return this._dynamicAgents.closeConnection(connectionId, code, reason);
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.closeConnection(connectionId, code, reason);
   }
 
-  _cf_setSubAgentConnectionState(
+  async _cf_setSubAgentConnectionState(
     connectionId: string,
     state: unknown
   ): Promise<unknown> {
+    await this.__unsafe_ensureInitialized();
     return this._dynamicAgents.setConnectionState(connectionId, state);
   }
 

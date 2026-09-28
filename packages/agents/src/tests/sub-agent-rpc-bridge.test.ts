@@ -1,4 +1,5 @@
 import { env, exports } from "cloudflare:workers";
+import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { getAgentByName, type RPCRequest, type RPCResponse } from "../index";
 import { MessageType } from "../types";
@@ -516,5 +517,106 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     } finally {
       ws.close();
     }
+  });
+});
+
+describe("facet broadcasts outside a client frame (issue #2252)", () => {
+  const sleep = (ms: number) =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+
+  it("does not call the root when the sub-agent has no connections", async () => {
+    const parent = await getAgentByName(env.TestSubAgentParent, uniqueName());
+    await parent.broadcastFromSubAgentDetached(uniqueName(), ["a", "b", "c"]);
+    await sleep(100);
+    expect(await parent.subAgentBroadcastCallCount()).toBe(0);
+  });
+
+  it("does not call the root when every connection is excluded", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    const received: unknown[] = [];
+    ws.addEventListener("message", (event) => {
+      received.push(event.data);
+    });
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      const before = await parent.subAgentBroadcastCallCount();
+      const message = `excluded-${crypto.randomUUID()}`;
+
+      const scheduled = await callRPC(ws, "broadcastMessagesAfterDelay", [
+        [message],
+        true
+      ]);
+      expectSuccessfulResult(scheduled, "scheduled");
+      await sleep(150);
+
+      expect(await parent.subAgentBroadcastCallCount()).toBe(before);
+      expect(received).not.toContain(message);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("makes one root call per broadcast to a connected client", async () => {
+    const parentName = uniqueName();
+    const ws = await connectWS(parentName, uniqueName());
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      const before = await parent.subAgentBroadcastCallCount();
+      const messages = [
+        `first-${crypto.randomUUID()}`,
+        `second-${crypto.randomUUID()}`
+      ];
+      const delivered = waitForTextMessages(ws, new Set(messages));
+
+      const scheduled = await callRPC(ws, "broadcastMessagesAfterDelay", [
+        messages
+      ]);
+      expectSuccessfulResult(scheduled, "scheduled");
+
+      await expect(delivered).resolves.toEqual(messages);
+      expect(await parent.subAgentBroadcastCallCount()).toBe(before + 2);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("still reaches a root-held client after the sub-agent restarts", async () => {
+    const parentName = uniqueName();
+    const childName = uniqueName();
+    const ws = await connectWS(parentName, childName);
+    try {
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      await parent.abortSlowReplySubAgent(childName);
+
+      const message = `after-restart-${crypto.randomUUID()}`;
+      const delivered = waitForTextMessage(ws, message);
+      await parent.broadcastFromSubAgentDetached(childName, [message]);
+      await expect(delivered).resolves.toBe(message);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("starts an evicted root before it serves a sub-agent call", async () => {
+    const name = uniqueName();
+    await getAgentByName(env.TestSubAgentParent, name);
+    const stub = env.TestSubAgentParent.get(
+      env.TestSubAgentParent.idFromName(name)
+    );
+    await evictDurableObject(stub);
+
+    await (
+      stub as unknown as {
+        _cf_subAgentConnectionMetas(ownerPath: unknown[]): Promise<unknown>;
+      }
+    )._cf_subAgentConnectionMetas([
+      { className: "TestSubAgentParent", name },
+      { className: "SlowReplySubAgent", name: "absent" }
+    ]);
+
+    await expect(
+      runInDurableObject(stub, (instance) => instance.startsInThisInstance)
+    ).resolves.toBe(1);
   });
 });

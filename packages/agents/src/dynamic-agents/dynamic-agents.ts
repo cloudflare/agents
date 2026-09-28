@@ -19,9 +19,7 @@ import {
   parseSubAgentPath,
   type AgentPathStep
 } from "../sub-routing";
-import { getAgentByName } from "../agent-routing";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "../utils";
-import type { Agent } from "../index";
 import { agentPathKey, isValidParentPath } from "./identity";
 import { DynamicAgentRegistry } from "./registry";
 import {
@@ -103,6 +101,14 @@ export class DynamicAgentsInternal extends LifecycleCapability {
    * route back through the live frame bridge or the root over RPC.
    */
   #virtualConnections = new Map<string, StoredDynamicAgentConnection>();
+
+  /**
+   * Whether `#virtualConnections` has been seeded from the root's sockets
+   * since this instance started. Until then the mirror can miss hibernated
+   * root sockets, so it cannot prove a broadcast has no recipients.
+   */
+  #virtualConnectionsHydrated = false;
+  #virtualConnectionsHydration?: Promise<void>;
 
   /** Per-connection operation queues (send/setState/close ordering). */
   #connectionOperationTails = new Map<string, Promise<void>>();
@@ -189,7 +195,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       if (this.#host._isFacet) {
         await (await this.rootAlarmOwner())._cf_cleanupFacetPrefix(stalePath);
       } else {
-        await this.#host._cf_cleanupFacetPrefix(stalePath);
+        await this.cleanupPrefix(stalePath);
       }
       return false;
     }
@@ -234,10 +240,12 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       );
     }
 
-    return (await getAgentByName<Cloudflare.Env, Agent>(
-      binding as unknown as DurableObjectNamespace<Agent>,
-      root.name
-    )) as unknown as RootFacetRpcSurface;
+    // Every root endpoint on this surface starts the root's lifecycle itself,
+    // so a plain stub is enough. `getAgentByName()` would spend an extra
+    // `__unsafe_ensureInitialized` round trip on every broadcast and send.
+    return binding.get(
+      binding.idFromName(root.name)
+    ) as unknown as RootFacetRpcSurface;
   }
 
   rootResolvesToSelf(): boolean {
@@ -521,7 +529,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     // upfront so we don't have to make an extra round trip back from
     // each intermediate hop.
     if (this.#host._parentPath.length === 0) {
-      await this.#host._cf_cleanupFacetPrefix(targetPath);
+      await this.cleanupPrefix(targetPath);
     }
 
     if (selfPath.length === targetPath.length - 1) {
@@ -725,7 +733,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       const root = await this.rootAlarmOwner();
       await root._cf_cleanupFacetPrefix(childPath);
     } else {
-      await this.#host._cf_cleanupFacetPrefix(childPath);
+      await this.cleanupPrefix(childPath);
     }
 
     // Idempotent: make `ctx.facets.delete` tolerant of missing keys.
@@ -746,6 +754,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   /** Drop all facet-side virtual connections (test/rehydration hook). */
   clearVirtualConnections(): void {
     this.#virtualConnections.clear();
+    this.#virtualConnectionsHydrated = false;
   }
 
   /** Facet-side lookup of a virtual connection by id. */
@@ -889,7 +898,39 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
+    if (this.#broadcastHasNoRecipients(without)) return;
     await this.routeBroadcast(this.#host.selfPath, message, without);
+  }
+
+  /**
+   * Whether a hydrated mirror proves no root socket targets this facet
+   * outside `without`. Stale mirror entries only cost a root call; a socket
+   * missing from a hydrated mirror has not had its connect forwarded here
+   * yet, so it has not been through `onConnect`. Synchronous so a skipped
+   * broadcast never reorders later operations.
+   */
+  #broadcastHasNoRecipients(without: string[] | undefined): boolean {
+    if (!this.#virtualConnectionsHydrated) {
+      this.#hydrateVirtualConnectionsInBackground();
+      return false;
+    }
+    for (const id of this.#virtualConnections.keys()) {
+      if (!without?.includes(id)) return false;
+    }
+    return true;
+  }
+
+  #hydrateVirtualConnectionsInBackground(): void {
+    if (this.#virtualConnectionsHydration) return;
+    const hydration = this.hydrateConnectionsFromRoot()
+      .catch(() => {
+        // Best-effort: the next broadcast retries.
+      })
+      .finally(() => {
+        this.#virtualConnectionsHydration = undefined;
+      });
+    this.#virtualConnectionsHydration = hydration;
+    this.#host.ctx.waitUntil(hydration);
   }
 
   async broadcastToPath(
@@ -1446,8 +1487,12 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     const root = await this.rootAlarmOwner();
     const metas = await root._cf_subAgentConnectionMetas(this.#host.selfPath);
     for (const meta of metas) {
-      this.#virtualConnections.set(meta.id, { meta });
+      // A connection forwarded while the root read was in flight is fresher.
+      if (!this.#virtualConnections.has(meta.id)) {
+        this.#virtualConnections.set(meta.id, { meta });
+      }
     }
+    this.#virtualConnectionsHydrated = true;
   }
 
   getRawConnectionState(connection: Connection): unknown {

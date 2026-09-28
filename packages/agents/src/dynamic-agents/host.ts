@@ -43,9 +43,6 @@ export interface DynamicAgentHostPort {
   ): boolean;
   hasSubAgent(className: string, name: string): boolean;
   _cf_resolveSubAgent(className: string, name: string): Promise<unknown>;
-  _cf_cleanupFacetPrefix(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<void>;
   _cf_routeLifecycle(
     target: LifecycleRouteAddress | undefined,
     envelope: LifecycleRouteEnvelope
