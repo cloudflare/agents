@@ -1,0 +1,33 @@
+packages/agents/src/chat/__tests__/message-builder-approval-input.test.ts
+  s_c818abc161b40d::t_bf6029fc8fcbac 1-144
+packages/ai-chat/src/index.ts
+  s_c818abc161b40d::t_cf47e3eeede9f1 45,7047-7062
+packages/ai-chat/src/tests/late-tool-input.test.ts
+  s_c818abc161b40d::t_d26f0f21a3ba29 1-70
+.changeset/approval-tool-input.md
+  s_c818abc161b40d::t_93f509aaaf5147 1-14
+packages/agents/src/chat/index.ts
+  s_c818abc161b40d::t_fb9727ea641670 3-4
+packages/agents/src/chat/message-builder.ts
+  s_c818abc161b40d::t_f72300c203b667 101-157,327-336,351-352,365-367,449-457
+packages/ai-chat/src/tests/worker.ts
+  s_c818abc161b40d::t_22aef93b22cc2f 314-338
+packages/think/src/think.ts
+  s_c818abc161b40d::t_7acc9452fc3e48 214,14290-14293,14299-14301,14807-14810,14816-14818
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ba804ae2c50b76889c4c282419dab7d2c9dd5aa1",
+  "prompts": {},
+  "sessions": {
+    "s_c818abc161b40d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "ba73f896-6b24-4739-897c-6e7c57b5e20b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
