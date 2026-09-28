@@ -32,6 +32,7 @@ import {
   type AgentTransport
 } from "./websockets/transport-protocol";
 import { buildSubAgentPathUnchecked } from "./sub-routing";
+import { SOCKET_ADDRESS_PENDING } from "./socket-address";
 import { camelCaseToKebabCase } from "./utils";
 import { MessageType } from "./types";
 
@@ -57,6 +58,33 @@ interface CacheEntry {
 }
 
 const queryCache = new Map<string, CacheEntry>();
+
+type SocketDestination = {
+  host?: string;
+  basePath?: string;
+  party?: string;
+  prefix?: string;
+  room?: string;
+  path?: string;
+};
+
+function socketDestinationKey(options: SocketDestination): string {
+  return JSON.stringify([
+    options.host ?? null,
+    options.basePath ?? null,
+    options.party ?? null,
+    options.prefix ?? null,
+    options.room ?? null,
+    options.path ?? null
+  ]);
+}
+
+/** The host `usePartySocket` connects to when none is given. */
+function defaultSocketHost(): string {
+  return typeof window !== "undefined"
+    ? window.location.host
+    : "dummy-domain.com";
+}
 
 function createCacheKey(
   agentNamespace: string,
@@ -632,11 +660,15 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // Store identity in React state for reactivity. Seed with the
   // leaf's address — what the server will echo back in
   // `cf_agent_identity`.
-  const [identity, setIdentity] = useState({
+  // `destination` records which socket destination the identity came from,
+  // so an address change can stop exposing the previous agent's identity
+  // before the new socket reports its own.
+  const [identity, setIdentity] = useState(() => ({
     name: leafName,
     agent: camelCaseToKebabCase(leafAgent),
-    identified: false
-  });
+    identified: false,
+    destination: null as string | null
+  }));
 
   // Track previous identity for change detection
   const previousIdentityRef = useRef<{
@@ -723,6 +755,13 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     combinedPath || null,
     transport
   ]);
+  const destination = socketDestinationKey({
+    ...socketOptions,
+    host: socketOptions.host || defaultSocketHost()
+  });
+  // The seeded identity (before any identity message) belongs to the
+  // destination of the first render.
+  const seedDestinationRef = useRef(destination);
   const visibleConnectionError =
     connectionErrorAddressKeyRef.current === addressKey
       ? connectionError
@@ -766,7 +805,16 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
           }
 
           // Update reactive state (triggers re-render)
-          setIdentity({ name: newName, agent: newAgent, identified: true });
+          const identifiedSocket =
+            (message.target as PartySocket | null) ?? socketRef.current;
+          setIdentity({
+            name: newName,
+            agent: newAgent,
+            identified: true,
+            destination: identifiedSocket
+              ? socketDestinationKey(identifiedSocket.partySocketOptions)
+              : null
+          });
 
           // Resolve ready promise
           readyRef.current?.resolve();
@@ -928,6 +976,14 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // Update the live-socket ref before anything below can use it.
   socketRef.current = agent;
 
+  // `usePartySocket` swaps in a socket for new options in an effect, so for
+  // at least one render after the destination changes (and for as long as
+  // the socket is disabled) `agent` still points at the previous one. Query
+  // params are not part of the destination: a token refresh reaches the
+  // same agent.
+  const socketAddressPending =
+    socketDestinationKey(agent.partySocketOptions) !== destination;
+
   // When `usePartySocket` replaces the socket object (connection options
   // changed — async query refresh, path change, enabled toggle, ...) the
   // old socket's event listeners are detached at the same commit, so its
@@ -951,6 +1007,9 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     if (prevAddress !== addressKey) {
       connectionErrorAddressKeyRef.current = null;
       setConnectionError(null);
+      // The caller chose the new address, so the identity the new socket
+      // reports is not an identity change on reconnect.
+      previousIdentityRef.current = { name: null, agent: null };
       rejectQueuedCalls(
         "Call discarded: the agent address changed before the request could be sent"
       );
@@ -1090,9 +1149,17 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   };
 
   agent.call = call;
-  // Use reactive identity state (updates on identity message)
-  agent.agent = identity.agent;
-  agent.name = identity.name;
+  // Use reactive identity state (updates on identity message). Once the
+  // address moves away from the one the identity came from, expose the new
+  // leaf until the new socket identifies. A `basePath` connection keeps the
+  // server-reported identity: the server owns its name.
+  const identityIsCurrent =
+    !!options.basePath ||
+    (identity.destination ?? seedDestinationRef.current) === destination;
+  agent.agent = identityIsCurrent
+    ? identity.agent
+    : camelCaseToKebabCase(leafAgent);
+  agent.name = identityIsCurrent ? identity.name : leafName;
   // Full root-first chain including the leaf. Computed from the
   // user-provided options — the server doesn't need to echo it
   // back because the client already knows. Write past the
@@ -1101,7 +1168,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   (
     agent as unknown as { path: ReadonlyArray<{ agent: string; name: string }> }
   ).path = fullPath;
-  agent.identified = identity.identified;
+  agent.identified = identityIsCurrent && identity.identified;
   agent.ready = readyRef.current!.promise;
   agent.state = agentState;
   agent.connectionError = visibleConnectionError;
@@ -1110,7 +1177,12 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // (call is already stable via useCallback)
   const stub = useMemo(() => createStubProxy(call), [call]);
   agent.stub = stub;
+  (agent as { [SOCKET_ADDRESS_PENDING]?: boolean })[SOCKET_ADDRESS_PENDING] =
+    socketAddressPending;
   agent.getHttpUrl = () => {
+    // The previous socket's URL names the previous agent and carries its
+    // credentials.
+    if (socketAddressPending) return "";
     // TODO: upstream to partysocket — expose an HTTP URL property
     // @ts-expect-error accessing protected PartySocket internals
     const wsUrl: string = (agent._url as string | null) || agent._pkurl || "";
