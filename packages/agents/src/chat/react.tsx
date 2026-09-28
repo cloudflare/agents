@@ -1353,6 +1353,8 @@ export function useAgentChat<
   const [clientToolResults, setClientToolResults] = useState<
     Map<string, unknown>
   >(new Map());
+  const clientToolResultsRef = useRef(clientToolResults);
+  clientToolResultsRef.current = clientToolResults;
 
   const initialMessagesRef = useRef(initialMessages);
   initialMessagesRef.current = initialMessages;
@@ -2906,8 +2908,6 @@ export function useAgentChat<
 
   // Cleanup stale entries from clientToolResults when messages change
   // to prevent memory leak in long conversations.
-  // Note: We intentionally exclude clientToolResults from deps to avoid infinite loops.
-  // The functional update form gives us access to the previous state.
   useEffect(() => {
     // Collect all current toolCallIds from messages
     const currentToolCallIds = new Set<string>();
@@ -2919,30 +2919,20 @@ export function useAgentChat<
       }
     }
 
-    // Use functional update to check and clean stale entries atomically
-    setClientToolResults((prev) => {
-      if (prev.size === 0) return prev;
-
-      // Check if any entries are stale
-      let hasStaleEntries = false;
-      for (const toolCallId of prev.keys()) {
-        if (!currentToolCallIds.has(toolCallId)) {
-          hasStaleEntries = true;
-          break;
+    // Decide before dispatching: an updater that returns `prev` still
+    // re-renders while another update is pending, which during a stream is
+    // every chunk, and each such passive-effect update counts toward React's
+    // nested update limit ("Maximum update depth exceeded", #2217).
+    const isStale = (id: string) => !currentToolCallIds.has(id);
+    if ([...clientToolResultsRef.current.keys()].some(isStale)) {
+      setClientToolResults((prev) => {
+        const next = new Map<string, unknown>();
+        for (const [id, output] of prev) {
+          if (!isStale(id)) next.set(id, output);
         }
-      }
-
-      // Only create new Map if there are stale entries to remove
-      if (!hasStaleEntries) return prev;
-
-      const newMap = new Map<string, unknown>();
-      for (const [id, output] of prev) {
-        if (currentToolCallIds.has(id)) {
-          newMap.set(id, output);
-        }
-      }
-      return newMap;
-    });
+        return next.size === prev.size ? prev : next;
+      });
+    }
 
     // Also cleanup processedToolCalls to prevent issues in long conversations
     for (const toolCallId of processedToolCalls.current) {

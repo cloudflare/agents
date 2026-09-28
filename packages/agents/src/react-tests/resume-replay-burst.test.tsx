@@ -300,10 +300,11 @@ describe("#1913 — resume replay burst", () => {
       replayComplete: true,
       type: CHAT_RESPONSE
     });
-    await sleep(20);
-
-    // Replayed prefix is applied at the boundary, before any live chunk.
-    expect(h.read("chars")).toBe(String(expectedChars(80)));
+    // Replayed prefix is applied at the boundary, before any live chunk is
+    // sent. It renders on the chat throttle's schedule, so wait for it.
+    await vi.waitFor(() =>
+      expect(h.read("chars")).toBe(String(expectedChars(80)))
+    );
 
     dispatch(h.target, {
       body: JSON.stringify({ delta: "LIVE", id: "t1", type: "text-delta" }),
