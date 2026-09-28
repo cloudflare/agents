@@ -143,6 +143,13 @@ export interface ExtractionResult {
   message: SessionMessage;
   /** Payloads to write, deduplicated by address, in encounter order. */
   attachments: PendingAttachment[];
+  /**
+   * Every address a read of the stored message restores: the payloads
+   * extracted on this pass and any pointer the message already carried. A
+   * message can be written back with its pointers in place, and its
+   * references must follow what the row says, not what this pass extracted.
+   */
+  references: string[];
 }
 
 /**
@@ -203,10 +210,41 @@ export function extractAttachments(message: SessionMessage): ExtractionResult {
     return changed ? next : value;
   };
 
-  if (message.parts.length === 0) return { message, attachments };
+  if (message.parts.length === 0) {
+    return { message, attachments, references: [] };
+  }
   const parts = walk(message.parts, 0) as SessionMessagePart[];
-  if (parts === message.parts) return { message, attachments };
-  return { message: { ...message, parts }, attachments };
+  const references = [...pointersOf(parts)];
+  if (parts === message.parts) return { message, attachments, references };
+  return { message: { ...message, parts }, attachments, references };
+}
+
+/**
+ * The attachment addresses a read of this stored form restores. It walks
+ * exactly as {@link resolveAttachments} does, so a message holds a reference
+ * for every pointer a read would put back and for nothing else.
+ */
+function pointersOf(
+  value: unknown,
+  into = new Set<string>(),
+  depth = 0
+): Set<string> {
+  if (depth > MAX_WALK_DEPTH || value === null || typeof value !== "object") {
+    return into;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) pointersOf(entry, into, depth + 1);
+    return into;
+  }
+  const record = value as Record<string, unknown>;
+  const hash =
+    parseAttachmentUrl(record.url) ?? parseAttachmentUrl(record.data);
+  if (hash) {
+    into.add(hash);
+    return into;
+  }
+  for (const entry of Object.values(record)) pointersOf(entry, into, depth + 1);
+  return into;
 }
 
 /**
