@@ -344,6 +344,29 @@ describe("durable-pause actions (turn-driven, connection-less)", () => {
     expect(await agent.listActionPendingForTest()).toHaveLength(0);
   });
 
+  it("reports a connection-less continuation that fails before streaming (#2381)", async () => {
+    const agent = await freshPauseAgent(`dp-fail-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+
+    const first = await agent.testChat("call pauseAction");
+    expect(first.done).toBe(true);
+    const [pending] = await agent.listActionPendingForTest();
+
+    await agent.failContinuationBeforeStreamForTest();
+    await agent.approveExecutionForTest(pending.execution_id);
+
+    await vi.waitFor(
+      async () => {
+        expect((await agent.getResponseStatusesForTest()).at(-1)).toEqual({
+          status: "error",
+          continuation: true,
+          error: "continuation failed before streaming"
+        });
+      },
+      { timeout: 5000, interval: 50 }
+    );
+  });
+
   it("labels orphaned durable-pause outcomes without re-invoking the action", async () => {
     const agent = await freshPauseAgent(`dp-orphan-${crypto.randomUUID()}`);
     await agent.useDurablePauseActionForTest();

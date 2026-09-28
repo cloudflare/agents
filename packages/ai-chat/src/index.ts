@@ -3462,6 +3462,7 @@ export class AIChatAgent<
               },
               async () => {
                 const autoContinuationBody = async () => {
+                  let replying = false;
                   try {
                     await this._repairInterruptedToolsBeforeTurn({
                       continuation: true
@@ -3484,7 +3485,10 @@ export class AIChatAgent<
                         [],
                         {
                           continuation: true,
-                          chatMessageId: requestId
+                          chatMessageId: requestId,
+                          onStreamStart: () => {
+                            replying = true;
+                          }
                         }
                       );
                       if (replyResult.status === "error") {
@@ -3496,6 +3500,15 @@ export class AIChatAgent<
                       this._clearPendingAutoContinuation(true);
                       this._activateDeferredAutoContinuation();
                     }
+                  } catch (error) {
+                    if (
+                      !replying &&
+                      !abortSignal?.aborted &&
+                      !isDurableObjectResetError(error)
+                    ) {
+                      await this._reportContinuationFailure(requestId, error);
+                    }
+                    throw error;
                   } finally {
                     this._abortRegistry.remove(requestId);
                   }
@@ -3524,6 +3537,42 @@ export class AIChatAgent<
       this._clearAllAutoContinuationState(true);
       console.error(errorPrefix, error);
     });
+  }
+
+  /**
+   * Report an auto-continuation that failed before it produced a response,
+   * the way a stream error is reported: an error frame, a durable terminal
+   * record, and `onChatResponse` with `status: "error"` for the assistant
+   * message the continuation would have extended. Called inside the turn so
+   * the response hook drains when the turn settles.
+   */
+  private async _reportContinuationFailure(
+    requestId: string,
+    error: unknown
+  ): Promise<void> {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    this._broadcastChatMessage({
+      body: errorMessage,
+      done: true,
+      error: true,
+      id: requestId,
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      continuation: true
+    });
+    const message = [...this.messages]
+      .reverse()
+      .find((candidate) => candidate.role === "assistant");
+    if (message) {
+      this._pendingChatResponseResults.push({
+        message,
+        requestId,
+        continuation: true,
+        status: "error",
+        error: errorMessage
+      });
+    } else {
+      await this._recordChatTerminal(requestId, errorMessage);
+    }
   }
 
   /**
@@ -7527,9 +7576,17 @@ export class AIChatAgent<
     id: string,
     response: Response,
     excludeBroadcastIds: string[] = [],
-    options: { continuation?: boolean; chatMessageId?: string } = {}
+    options: {
+      continuation?: boolean;
+      chatMessageId?: string;
+      /**
+       * Called once the stream is set up. From then on `_reply` reports its
+       * own failures to clients; a throw before it is the caller's to report.
+       */
+      onStreamStart?: () => void;
+    } = {}
   ): Promise<StreamResultStatus> {
-    const { continuation = false, chatMessageId } = options;
+    const { continuation = false, chatMessageId, onStreamStart } = options;
     // Look up the abort signal for this request so we can cancel the reader
     // loop if the client sends a cancel message. This is a safety net —
     // users should also pass abortSignal to streamText for proper cancellation.
@@ -7554,28 +7611,37 @@ export class AIChatAgent<
           return { status: "completed" };
         }
 
-        // Parsing state adapted from:
-        // https://github.com/vercel/ai/blob/main/packages/ai/src/ui-message-stream/ui-message-chunks.ts#L295
-        const message = this._createStreamingAssistantMessage(continuation);
-
-        // Start tracking this stream for resumability. The allocated message id
-        // is persisted in stream metadata so orphan recovery (#1691) can
-        // re-associate reconstructed chunks with the right assistant message —
-        // even when the provider stream carries no `start.messageId`. For a
-        // continuation this is the cloned last-assistant id, so recovery merges
-        // into it; for a new turn it is a fresh id, so recovery keeps it
-        // distinct.
-        // The continuation flag is persisted in stream metadata so replayed
-        // frames carry `continuation: true` exactly like the live broadcast
-        // frames below (#1733) — a reconnecting client needs it to append to
-        // the existing assistant message instead of rebuilding it from
-        // scratch and dropping the pre-continuation parts.
-        const streamId = this._startStream(id, {
-          messageId: message.id,
-          continuation
-        });
-
+        // Take the reader before the stream starts: an unreadable body must
+        // fail while nothing has been sent, not leave a started stream behind.
         const reader = response.body.getReader();
+        let message: UIMessage;
+        let streamId: string;
+        try {
+          // Parsing state adapted from:
+          // https://github.com/vercel/ai/blob/main/packages/ai/src/ui-message-stream/ui-message-chunks.ts#L295
+          message = this._createStreamingAssistantMessage(continuation);
+
+          // Start tracking this stream for resumability. The allocated message id
+          // is persisted in stream metadata so orphan recovery (#1691) can
+          // re-associate reconstructed chunks with the right assistant message —
+          // even when the provider stream carries no `start.messageId`. For a
+          // continuation this is the cloned last-assistant id, so recovery merges
+          // into it; for a new turn it is a fresh id, so recovery keeps it
+          // distinct.
+          // The continuation flag is persisted in stream metadata so replayed
+          // frames carry `continuation: true` exactly like the live broadcast
+          // frames below (#1733) — a reconnecting client needs it to append to
+          // the existing assistant message instead of rebuilding it from
+          // scratch and dropping the pre-continuation parts.
+          streamId = this._startStream(id, {
+            messageId: message.id,
+            continuation
+          });
+        } catch (error) {
+          // The streaming `finally` that releases the reader is not entered yet.
+          reader.cancel(error).catch(() => {});
+          throw error;
+        }
 
         // Track the streaming message so tool results can be applied before persistence
         this._streamingMessage = message;
@@ -7607,6 +7673,7 @@ export class AIChatAgent<
         this._streamingTurnActive = true;
         this._heldTerminalFrames.set(id, []);
         let persisted = false;
+        onStreamStart?.();
         try {
           try {
             if (isSSE) {

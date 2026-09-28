@@ -3048,6 +3048,12 @@ export interface ChatErrorContext {
   stage: "parse" | "persist" | "turn" | "stream" | "recovery" | "transcript";
   messagesPersisted?: boolean;
   /**
+   * `true` when the failed turn was a server-started continuation (for
+   * example after a tool approval or a client tool result) rather than a
+   * turn a client or caller submitted.
+   */
+  continuation?: boolean;
+  /**
    * App-provided semantic classification (from `classifyChatError`), when
    * known. Lets `onChatError` overrides and observers distinguish e.g. a
    * context-overflow from a generic provider failure without re-matching
@@ -18654,6 +18660,7 @@ export class Think<
     const { connection, requestId, clientTools } = pending;
     const abortSignal = this._aborts.getSignal(requestId);
 
+    let reported = false;
     this._admitTurn({
       admission: "queue",
       trigger: "auto-continuation",
@@ -18692,6 +18699,15 @@ export class Think<
           };
 
           await this._runChatRecoveryFiber(requestId, true, continuationBody);
+        } catch (error) {
+          if (!streamed) {
+            reported = await this._reportContinuationFailure(
+              requestId,
+              error,
+              abortSignal
+            );
+          }
+          throw error;
         } finally {
           this._aborts.remove(requestId);
           if (!streamed) {
@@ -18702,9 +18718,75 @@ export class Think<
         }
       }
     }).catch((error) => {
-      console.error("[Think] Auto-continuation failed:", error);
+      if (!reported) {
+        console.error("[Think] Auto-continuation failed:", error);
+      }
       this._aborts.remove(requestId);
     });
+  }
+
+  /**
+   * Report a continuation turn that failed before it streamed, the way a
+   * failed client turn is reported: `onChatError`, `chat:request:failed`, a
+   * recorded terminal status, `onChatResponse` for the assistant message it
+   * would have extended, and an error frame. Aborts and Durable Object resets
+   * are left to their own paths.
+   *
+   * @returns Whether the failure was reported.
+   */
+  private async _reportContinuationFailure(
+    requestId: string,
+    error: unknown,
+    abortSignal: AbortSignal | undefined
+  ): Promise<boolean> {
+    if (abortSignal?.aborted || isDurableObjectResetError(error)) return false;
+    const wrapped = this.onChatError(error, {
+      requestId,
+      stage: "turn",
+      messagesPersisted: true,
+      continuation: true
+    });
+    const errorMessage =
+      wrapped instanceof Error ? wrapped.message : String(wrapped);
+    this._emit("chat:request:failed", {
+      requestId,
+      stage: "turn",
+      messagesPersisted: true,
+      error: errorMessage
+    });
+    // Clients learn the turn failed before `onChatResponse` runs: a slow
+    // hook must not hold the error frame.
+    await this._recordTerminalChatStatus(
+      "error",
+      requestId,
+      errorMessage
+    ).catch((recordError: unknown) => {
+      console.error(
+        "[Think] failed to record a continuation failure:",
+        recordError
+      );
+    });
+    this._broadcastChat({
+      type: MSG_CHAT_RESPONSE,
+      id: requestId,
+      body: errorMessage,
+      done: true,
+      error: true,
+      continuation: true
+    });
+    const message = [...this.messages]
+      .reverse()
+      .find((candidate) => candidate.role === "assistant");
+    if (message) {
+      await this._fireLiveResponseHook({
+        message,
+        requestId,
+        continuation: true,
+        status: "error",
+        error: errorMessage
+      });
+    }
+    return true;
   }
 
   private _activateDeferredContinuation(): void {
@@ -18738,6 +18820,8 @@ export class Think<
   async _cfRunConnectionlessContinuation(): Promise<void> {
     const requestId = crypto.randomUUID();
     const abortSignal = this._aborts.getSignal(requestId);
+    let streamed = false;
+    let reported = false;
     try {
       await this._admitTurn({
         admission: "queue",
@@ -18767,14 +18851,28 @@ export class Think<
               await this._streamResult(requestId, result, abortSignal, {
                 continuation: true
               });
+              streamed = true;
             }
           };
 
-          await this._runChatRecoveryFiber(requestId, true, continuationBody);
+          try {
+            await this._runChatRecoveryFiber(requestId, true, continuationBody);
+          } catch (error) {
+            if (!streamed) {
+              reported = await this._reportContinuationFailure(
+                requestId,
+                error,
+                abortSignal
+              );
+            }
+            throw error;
+          }
         }
       });
     } catch (error) {
-      console.error("[Think] Connection-less continuation failed:", error);
+      if (!reported) {
+        console.error("[Think] Connection-less continuation failed:", error);
+      }
     } finally {
       this._aborts.remove(requestId);
     }
