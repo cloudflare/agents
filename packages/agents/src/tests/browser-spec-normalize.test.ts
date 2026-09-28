@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { CdpField, CdpItems } from "../browser";
 import { loadCdpSpec } from "../browser/spec";
 
 // A trimmed slice of Chrome's real /json/protocol shape.
@@ -30,6 +31,7 @@ const RAW_PROTOCOL = {
       ],
       types: [
         { id: "FrameId", type: "string" },
+        { id: "AdFrameType", type: "string", enum: ["none", "child", "root"] },
         {
           id: "TransitionType",
           type: "string",
@@ -50,6 +52,10 @@ const RAW_PROTOCOL = {
           ]
         }
       ]
+    },
+    {
+      domain: "Network",
+      types: [{ id: "LoaderId", type: "string" }]
     }
   ]
 };
@@ -120,11 +126,37 @@ describe("loadCdpSpec normalization", () => {
 
   it("qualifies every $ref so it resolves to a type by name", async () => {
     const spec = await loadCdpSpec({ browser: fakeBinding() });
-    const [page] = spec.domains;
-    const typeNames = new Set(page.types.map((t) => t.name));
+    const typeNames = new Set(
+      spec.domains.flatMap((d) => d.types.map((t) => t.name))
+    );
 
-    for (const param of page.commands[0].parameters) {
-      if (param.$ref) expect(typeNames.has(param.$ref)).toBe(true);
+    // Every $ref the spec can carry: parameters, return values, event
+    // parameters, type properties, and array items at each of those levels.
+    const refs: string[] = [];
+    const collect = (item: CdpField | CdpItems | undefined) => {
+      if (item?.$ref) refs.push(item.$ref);
+      if (item && "items" in item) collect(item.items);
+    };
+    for (const domain of spec.domains) {
+      for (const command of domain.commands) {
+        [...command.parameters, ...command.returns].forEach(collect);
+      }
+      for (const event of domain.events) event.parameters.forEach(collect);
+      for (const type of domain.types) {
+        type.properties.forEach(collect);
+        collect(type.items);
+      }
     }
+
+    // The fixture has refs in parameters, returns, and array items,
+    // including one that crosses domains.
+    expect(refs).toEqual(
+      expect.arrayContaining([
+        "Page.TransitionType",
+        "Network.LoaderId",
+        "Page.AdFrameType"
+      ])
+    );
+    for (const ref of refs) expect(typeNames).toContain(ref);
   });
 });
