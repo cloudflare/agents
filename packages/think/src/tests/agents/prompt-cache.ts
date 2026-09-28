@@ -1,5 +1,6 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
+import type { ContextConfig } from "agents/context";
 import { z } from "zod";
 import { Think } from "../../think";
 import type { MediaEvictionConfig } from "../../think";
@@ -25,6 +26,10 @@ export type PromptCacheScenario = {
   compactAfterTokens?: number;
   /** Override `truncationStep`. */
   truncationStep?: number;
+  /** Value of the `whenChanged: "remind"` environment block at each turn. */
+  environmentByTurn?: (string | null)[];
+  /** Call `refreshSystemPrompt()` before these turns. */
+  refreshSystemPromptAtTurns?: number[];
 };
 
 export type PromptCacheTurn = {
@@ -36,6 +41,10 @@ export type PromptCacheTurn = {
   /** Index of the first model message that differs, or null if none did. */
   firstChangedMessage: number | null;
   compactionCalls?: number[];
+  /** The system message of this turn's first request. */
+  system?: string;
+  /** Whether this turn's first request carried a context reminder. */
+  reminded?: boolean;
 };
 
 const v3Usage = {
@@ -48,6 +57,17 @@ export class ThinkPromptCacheTestAgent extends Think {
   private _requests: unknown[][] = [];
   private _toolOutputChars = 0;
   private _compactionCalls: number[] = [];
+  private _environment: string | null = null;
+
+  override configureContext(): ContextConfig[] {
+    return [
+      {
+        label: "environment",
+        provider: { get: async () => this._environment },
+        whenChanged: "remind"
+      }
+    ];
+  }
 
   override getModel(): LanguageModel {
     const requests = this._requests;
@@ -135,6 +155,11 @@ export class ThinkPromptCacheTestAgent extends Think {
 
     const report: PromptCacheTurn[] = [];
     for (let turn = 0; turn < scenario.turns; turn++) {
+      const environment = scenario.environmentByTurn?.[turn];
+      if (environment !== undefined) this._environment = environment;
+      if (scenario.refreshSystemPromptAtTurns?.includes(turn)) {
+        await this.context.refreshSystemPrompt();
+      }
       const before = this._requests.length;
       const text = `question ${turn} ${"q".repeat(scenario.userTextChars ?? 0)}`;
       const parts: UIMessage["parts"] = [{ type: "text", text }];
@@ -178,9 +203,53 @@ export class ThinkPromptCacheTestAgent extends Think {
         requestChars: serialized.length,
         sharedPrefixChars,
         firstChangedMessage,
-        compactionCalls: [...this._compactionCalls]
+        compactionCalls: [...this._compactionCalls],
+        system: systemOf(current),
+        reminded: JSON.stringify(current.at(-1)).includes(
+          "replace the ones in the system prompt"
+        )
       });
     }
     return report;
   }
+
+  /**
+   * Continue a partial assistant reply after the remind block changed, and
+   * return the roles and final message of the request the model received.
+   */
+  async continuePartialTurnWithReminderForTest(): Promise<{
+    roles: string[];
+    last: string;
+  }> {
+    this._environment = "Monday";
+    await this.context.freezeSystemPrompt();
+    const self = this as unknown as {
+      _upsertMessageInHistory(msg: UIMessage, parentId?: string): Promise<void>;
+    };
+    await self._upsertMessageInHistory({
+      id: "u1",
+      role: "user",
+      parts: [{ type: "text", text: "Say hello." }]
+    });
+    await self._upsertMessageInHistory(
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Sure, here is" }]
+      },
+      "u1"
+    );
+    this._environment = "Tuesday";
+    await this.continueLastTurn();
+    const request = (this._requests.at(-1) ?? []) as Array<{ role: string }>;
+    return {
+      roles: request.map((message) => message.role),
+      last: JSON.stringify(request.at(-1))
+    };
+  }
+}
+
+function systemOf(prompt: unknown[]): string | undefined {
+  const first = prompt[0] as { role?: string; content?: unknown } | undefined;
+  return first?.role === "system" ? String(first.content) : undefined;
 }
