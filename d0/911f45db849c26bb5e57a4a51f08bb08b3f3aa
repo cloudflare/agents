@@ -1,0 +1,25 @@
+packages/agents/src/client.ts
+  s_efd49820c22d67::t_d306ecf1dfb72c 517-518,531-533,706-717
+packages/agents/src/react.tsx
+  s_efd49820c22d67::t_1c4643b1e0ad53 936-945
+packages/agents/src/react-tests/client.test.ts
+  s_efd49820c22d67::t_6338f95855c7cc 77-110
+packages/agents/src/react-tests/useAgent.test.tsx
+  s_efd49820c22d67::t_34288b35669c4c 1269-1310
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d0911f45db849c26bb5e57a4a51f08bb08b3f3aa",
+  "prompts": {},
+  "sessions": {
+    "s_efd49820c22d67": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "50161273-add8-4cb8-9ec3-a4d330172115",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
