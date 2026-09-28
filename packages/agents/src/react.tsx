@@ -17,7 +17,7 @@ import {
   createStubProxy,
   DEFAULT_CALL_TIMEOUT_MS,
   AgentConnectionError as AgentConnectionErrorCtor,
-  isTerminalCloseEvent,
+  createCloseClassifier,
   nativeCall,
   NativeCallQueue,
   splitCallOptions
@@ -675,12 +675,16 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   const connectionErrorAddressKeyRef = useRef<string | null>(null);
   const shouldReconnectOnCloseRef = useRef(shouldReconnectOnClose);
   shouldReconnectOnCloseRef.current = shouldReconnectOnClose;
-  const classifyReconnect = useCallback(
-    (event: CloseEvent) =>
-      (shouldReconnectOnCloseRef.current?.(event) ?? true) &&
-      !isTerminalCloseEvent(event),
-    []
+  const maxRetriesRef = useRef(restOptions.maxRetries);
+  maxRetriesRef.current = restOptions.maxRetries;
+  const [closeClassifier] = useState(() =>
+    createCloseClassifier({
+      socket: () => socketRef.current,
+      shouldReconnectOnClose: () => shouldReconnectOnCloseRef.current,
+      maxRetries: () => maxRetriesRef.current
+    })
   );
+  const classifyReconnect = closeClassifier.shouldReconnectOnClose;
 
   // Store identity in React state for reactivity. Seed with the
   // leaf's address — what the server will echo back in
@@ -949,7 +953,8 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       const closedSocket =
         (event.target as PartySocket | null) ?? socketRef.current;
       const isCurrentSocket = closedSocket === socketRef.current;
-      const terminalClose = isTerminalCloseEvent(event);
+      const finalClose = closeClassifier.takeFinalClose();
+      const reconnecting = !!closedSocket?.shouldReconnect && !finalClose;
 
       // Calls transmitted on the closed socket can never receive their
       // response — reject them. Calls still queued (never transmitted)
@@ -957,7 +962,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       // in flight on a *different* (newer) socket are untouched.
       if (closedSocket) {
         rejectCallsSentOn(closedSocket, "Connection closed");
-        if (isCurrentSocket && !closedSocket.shouldReconnect) {
+        if (isCurrentSocket && !reconnecting) {
           rejectQueuedCalls("Connection closed");
         }
       }
@@ -972,7 +977,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         }
         setIdentity((prev) => ({ ...prev, identified: false }));
 
-        if (closedSocket?.shouldReconnect) {
+        if (reconnecting) {
           // Pause reconnection for async queries until fresh query params are ready.
           if (isAsyncQuery) {
             setAwaitingQueryRefresh(true);
@@ -983,7 +988,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
           setCacheInvalidatedAt(Date.now());
         }
 
-        if (!closedSocket?.shouldReconnect && terminalClose) {
+        if (finalClose) {
           const error = new AgentConnectionErrorCtor(event);
           connectionErrorAddressKeyRef.current = addressKey;
           setConnectionError(error);
