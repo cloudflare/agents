@@ -68,6 +68,9 @@ export class CounterSubAgent extends Agent {
       VALUES
         (${ctx.id}, ${ctx.name}, ${JSON.stringify(ctx.snapshot)}, ${ctx.createdAt})
     `;
+    if (ctx.name === "recovery-throws") {
+      throw new Error("recovery hook failed");
+    }
     if (ctx.name === "managed-recovery-complete") {
       return { status: "completed", snapshot: { recovered: true } };
     }
@@ -516,6 +519,18 @@ export class CounterSubAgent extends Agent {
       SELECT COUNT(*) as count FROM cf_agents_runs
     `;
     return rows[0]?.count ?? 0;
+  }
+
+  getLocalJobIds(): string[] {
+    return this.lifecycle.jobs.list().map((job) => job.id);
+  }
+
+  /** Persist a host job row the way a failed pre-#2299 facet push left it. */
+  insertStaleHostJob(id: string, fn: string): void {
+    this.sql`
+      INSERT INTO cf_agents_jobs (id, capability, fn, time)
+      VALUES (${id}, 'host', ${fn}, ${Date.now()})
+    `;
   }
 
   async inspectManagedFiber(fiberId: string): Promise<FiberInspection | null> {
@@ -2012,6 +2027,23 @@ export class TestSubAgentParent extends Agent {
   async subAgentTryCancelSchedule(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.tryCancelSchedule();
+  }
+
+  async subAgentInsertStaleHostJob(
+    subAgentName: string,
+    id: string,
+    fn: string
+  ): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.insertStaleHostJob(id, fn);
+  }
+
+  async subAgentLocalJobIdsAfterRestart(
+    subAgentName: string
+  ): Promise<string[]> {
+    this.abortSubAgent(CounterSubAgent, subAgentName);
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.getLocalJobIds();
   }
 
   async subAgentTryScheduleAfterAbort(subAgentName: string): Promise<string> {

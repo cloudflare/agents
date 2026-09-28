@@ -4767,6 +4767,21 @@ export class Agent<
    */
   private async _syncHostJobs(): Promise<void> {
     if (this._destroyed) return;
+    if (this._isFacet) {
+      // A facet has no alarm slot (`setAlarm()` throws): the root holds its
+      // keepAlive refs and facet-run leases, and facets never write the
+      // destroy marker. Earlier releases could persist a host job here
+      // before the re-arm threw; drop it so it cannot re-arm again.
+      const work = this.lifecycle.jobs;
+      for (const id of [
+        HOST_JOB_DESTROY_ID,
+        HOST_JOB_KEEP_ALIVE_ID,
+        HOST_JOB_HOUSEKEEPING_ID
+      ]) {
+        if (work.get(id)) await work.cancel(id);
+      }
+      return;
+    }
     await this._withAgentSpan("schedule_agent_alarm", "alarm", {}, async () => {
       const work = this.lifecycle.jobs;
       const nowMs = Date.now();

@@ -1161,6 +1161,50 @@ describe("SubAgent", () => {
     ]);
   });
 
+  it("leaves host jobs to the root while a sub-agent's fiber recovery is pending (#2299)", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertSubAgentInterruptedFiber(
+      "orphan-wake-child",
+      "fiber-orphan-wake-1",
+      "recovery-throws"
+    );
+
+    // Startup recovery throws, so the orphaned row survives the wake. The
+    // root's facet-run lease owns the retry; the facet queues nothing.
+    await expect(
+      agent.subAgentLocalJobIdsAfterRestart("orphan-wake-child")
+    ).resolves.toEqual([]);
+    expect(await agent.subAgentRunningFiberCount("orphan-wake-child")).toBe(1);
+    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
+      "fiber-orphan-wake-1"
+    );
+  });
+
+  it("drops host jobs an earlier release left in a sub-agent's queue (#2299)", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.subAgentInsertStaleHostJob(
+      "stale-jobs-child",
+      "cf:housekeeping",
+      "housekeeping"
+    );
+    await agent.subAgentInsertStaleHostJob(
+      "stale-jobs-child",
+      "cf:keep-alive",
+      "keepAlive"
+    );
+
+    await expect(
+      agent.subAgentLocalJobIdsAfterRestart("stale-jobs-child")
+    ).resolves.toEqual([]);
+    await expect(
+      agent.subAgentIncrement("stale-jobs-child", "c")
+    ).resolves.toBe(1);
+  });
+
   it("applies managed sub-agent fiber recovery outcomes from the child", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
