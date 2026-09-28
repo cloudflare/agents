@@ -1,0 +1,19 @@
+packages/agents/src/react-tests/client.test.ts
+  s_efd49820c22d67::t_a6e222ff4def12 555-559,569,590-592,599
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "92de61ddc2be7d9fea0ed3a7363534a9e583dea3",
+  "prompts": {},
+  "sessions": {
+    "s_efd49820c22d67": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "50161273-add8-4cb8-9ec3-a4d330172115",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}

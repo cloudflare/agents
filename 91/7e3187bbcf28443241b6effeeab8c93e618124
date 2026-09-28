@@ -1,0 +1,60 @@
+packages/agents/src/index.ts
+  s_efd49820c22d67::t_93868d1a22d0da 4778-4792
+  s_efd49820c22d67::t_c43ceae882778e 3173,3177,3200,3210,3213,3222-3224,3233,3237-3238,3245,3249-3250,4730,4733-4734,5089,5093,5096,5100,5104-5105,5108,5113-5114,5117,5121
+  s_efd49820c22d67::t_ebf6b1265d0ae1 50-51,5002-5008,5011
+.changeset/facet-host-jobs.md
+  s_efd49820c22d67::t_5c518ded5dd749 1-5
+packages/agents/src/tests/agents/sub-agent.ts
+  s_efd49820c22d67::t_0aac3a0b5b3ffc 71-73,524-535,2061-2077
+  s_efd49820c22d67::t_d3e52734d92e8b 1233-1260,1266,2689-2706
+  s_efd49820c22d67::t_b77dab6e3d83c6 2446,2448-2454,2498-2501,2534-2543
+packages/agents/src/tests/sub-agent.test.ts
+  s_efd49820c22d67::t_b9e31725c99dd6 1164-1207
+.changeset/facet-broadcast-root-calls.md
+  s_efd49820c22d67::t_93fa3ca26d08a0 1-5
+packages/agents/src/dynamic-agents/dynamic-agents.ts
+  s_efd49820c22d67::t_d6907a5ffd53e7 132-139,225,270-275,559,763,784,928,932-962,1525-1528,1530
+  s_efd49820c22d67::t_85924a24ce5fb9 1287-1294
+  s_efd49820c22d67::t_e667c8da68a135 60-86,1257-1258
+packages/agents/src/tests/sub-agent-rpc-bridge.test.ts
+  s_efd49820c22d67::t_7884086a868320 2,540-640
+.changeset/nested-sub-agent-websockets.md
+  s_efd49820c22d67::t_fe9d13786fd21d 1-5
+packages/agents/src/tests/sub-agent-routing.test.ts
+  s_efd49820c22d67::t_dc2ae1c49078cf 64-134
+  s_efd49820c22d67::t_4c2213e74fbbae 341-402
+docs/agents/sub-agents.md
+  s_efd49820c22d67::t_e53da7675c4b7f 249-257
+packages/agents/src/client.ts
+  s_efd49820c22d67::t_df8f1f4a3a0072 43-90,167-171,523-524,584-592,614,745,750,758,762
+packages/agents/src/react-tests/client.test.ts
+  s_efd49820c22d67::t_56ffe4ac7cf1ff 526-650
+packages/agents/src/react-tests/rpc-robustness.test.tsx
+  s_efd49820c22d67::t_e150645e66eed5 17,563-664
+packages/agents/src/react.tsx
+  s_efd49820c22d67::t_4edc9fed608af3 20,678-685,687,956-957,965,980,991
+packages/agents/src/tests/agents/index.ts
+  s_efd49820c22d67::t_358cdde77444ad 68
+packages/agents/src/tests/worker.ts
+  s_efd49820c22d67::t_2a9ea2d5c583c5 126
+packages/agents/src/tests/wrangler.jsonc
+  s_efd49820c22d67::t_d3917981d113d3 291-294
+.changeset/rejected-sub-agent-socket.md
+  s_efd49820c22d67::t_503e888e8257de 1-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "917e3187bbcf28443241b6effeeab8c93e618124",
+  "prompts": {},
+  "sessions": {
+    "s_efd49820c22d67": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "50161273-add8-4cb8-9ec3-a4d330172115",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
