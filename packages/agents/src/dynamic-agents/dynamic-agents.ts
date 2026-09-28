@@ -58,6 +58,33 @@ export const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
 export const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
 
 /**
+ * The close frame a rejected sub-agent WebSocket receives in place of the
+ * `onBeforeSubAgent` response, which a browser cannot read from a failed
+ * handshake. A 4xx closes with `4000 + status`, which clients treat as
+ * final; anything else closes with 1011 so the client retries.
+ */
+export function subAgentRejectionClose(response: Response): {
+  code: number;
+  reason: string;
+} {
+  const { status } = response;
+  const code = status >= 400 && status < 500 ? 4000 + status : 1011;
+  return { code, reason: `Sub-agent connection rejected (${status})` };
+}
+
+/**
+ * Upgrade a rejected sub-agent WebSocket only to close it, so the client
+ * sees a close frame instead of a failed handshake that reconnects forever.
+ */
+export function rejectSubAgentWebSocket(response: Response): Response {
+  const { code, reason } = subAgentRejectionClose(response);
+  const [client, server] = Object.values(new WebSocketPair());
+  server.accept();
+  server.close(code, reason);
+  return new Response(null, { status: 101, webSocket: client });
+}
+
+/**
  * The facet-backed dynamic-agent machinery, extracted from the Agent
  * class. One instance per Agent, installed as a Lifecycle capability
  * (`capabilityId: "dynamic-agents"`); the host port documents exactly
@@ -1227,7 +1254,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         name: match.childName
       });
       if (decision instanceof Response) {
-        connection.close(1008, "Sub-agent connection rejected");
+        const { code, reason } = subAgentRejectionClose(decision);
+        connection.close(code, reason);
         return null;
       }
       forwardReq = decision instanceof Request ? decision : request;

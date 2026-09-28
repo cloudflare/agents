@@ -2443,8 +2443,15 @@ export class HookingSubAgentParent extends Agent {
     `;
   }
 
+  @callable()
   async setHookMode(
-    mode: "allow" | "deny-404" | "deny-401" | "mutate" | "strict-registry"
+    mode:
+      | "allow"
+      | "deny-404"
+      | "deny-401"
+      | "deny-503"
+      | "mutate"
+      | "strict-registry"
   ): Promise<void> {
     this.sql`UPDATE hook_mode SET value = ${mode} WHERE id = 1`;
   }
@@ -2488,6 +2495,10 @@ export class HookingSubAgentParent extends Agent {
       });
     }
 
+    if (mode === "deny-503") {
+      return new Response("unavailable", { status: 503 });
+    }
+
     if (mode === "mutate") {
       // Inject a header and pass through.
       const headers = new Headers(req.headers);
@@ -2517,6 +2528,16 @@ export class HookingSubAgentParent extends Agent {
       SELECT url FROM last_url WHERE id = 1
     `;
     return rows[0]?.url ?? null;
+  }
+}
+
+// ── Facet that rejects every child request ──────────────────────────
+// Pins how a gate at a nested hop rejects a WebSocket the root already
+// accepted.
+
+export class DenyingSubAgent extends Agent {
+  override async onBeforeSubAgent(): Promise<Response> {
+    return new Response("forbidden", { status: 403 });
   }
 }
 

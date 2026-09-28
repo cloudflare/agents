@@ -123,6 +123,7 @@ export {
   CounterSubAgent,
   OuterSubAgent,
   InnerSubAgent,
+  DenyingSubAgent,
   LeafSubAgent,
   CallbackSubAgent,
   BroadcastSubAgent,

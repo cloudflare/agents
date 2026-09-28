@@ -65,6 +65,7 @@ export {
   BroadcastSubAgent,
   SlowReplySubAgent,
   HookingSubAgentParent,
+  DenyingSubAgent,
   Sub,
   SUB,
   Sub_,

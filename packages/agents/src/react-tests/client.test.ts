@@ -523,6 +523,137 @@ describe("AgentClient", () => {
       );
     });
 
+    it("reports a sub-agent rejected by onBeforeSubAgent instead of retrying forever (#2118)", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const parent = `rejected-sub-parent-${crypto.randomUUID()}`;
+      const gate = new AgentClient({
+        agent: "HookingSubAgentParent",
+        name: parent,
+        host,
+        protocol
+      });
+      try {
+        await gate.ready;
+        await gate.call("setHookMode", ["deny-404"]);
+      } finally {
+        gate.close();
+      }
+
+      const onConnectionError = vi.fn();
+      const onOpen = vi.fn();
+      client = new AgentClient({
+        agent: "HookingSubAgentParent",
+        name: parent,
+        path: "sub/counter-sub-agent/denied-child",
+        host,
+        protocol,
+        minReconnectionDelay: 10,
+        maxReconnectionDelay: 10,
+        onConnectionError
+      });
+      client.addEventListener("open", onOpen);
+      // Assert now: the close rejects the call during the waitFor below, and
+      // a rejection with no handler by then is reported as unhandled.
+      const pending = expect(client.call("add", [1, 2])).rejects.toThrow(
+        "Connection closed"
+      );
+
+      await vi.waitFor(() => {
+        expect(onConnectionError).toHaveBeenCalledOnce();
+      });
+      expect(client.connectionError).toMatchObject({
+        code: 4404,
+        reason: "Sub-agent connection rejected (404)"
+      });
+      expect(client.shouldReconnect).toBe(false);
+      await pending;
+
+      const opens = onOpen.mock.calls.length;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(onOpen).toHaveBeenCalledTimes(opens);
+    });
+
+    it("reports a connection error once maxRetries is spent", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const onConnectionError = vi.fn();
+
+      client = new AgentClient({
+        agent: "NoSuchAgentForRetries",
+        name: `max-retries-${crypto.randomUUID()}`,
+        host,
+        protocol,
+        maxRetries: 2,
+        minReconnectionDelay: 10,
+        maxReconnectionDelay: 10,
+        onConnectionError
+      });
+      const pending = expect(client.call("add", [1, 2])).rejects.toThrow(
+        "Connection closed"
+      );
+
+      await vi.waitFor(() => {
+        expect(onConnectionError).toHaveBeenCalledOnce();
+      });
+      expect(client.retryCount).toBe(2);
+      expect(client.connectionError).toBeInstanceOf(Error);
+      await pending;
+    });
+
+    it("reports a connection error when shouldReconnectOnClose declines", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const onConnectionError = vi.fn();
+
+      client = new AgentClient({
+        agent: "TestCallableAgent",
+        name: `declined-reconnect-${crypto.randomUUID()}`,
+        host,
+        protocol,
+        shouldReconnectOnClose: (event) => event.code !== 1011,
+        onConnectionError
+      });
+      await client.ready;
+
+      await expect(
+        client.call("closeConnectionsForTest", [1011, "going away"])
+      ).resolves.toBeGreaterThan(0);
+
+      await vi.waitFor(() => {
+        expect(onConnectionError).toHaveBeenCalledOnce();
+      });
+      expect(client.connectionError).toMatchObject({
+        code: 1011,
+        reason: "going away"
+      });
+      expect(client.shouldReconnect).toBe(false);
+    });
+
+    it("does not report a connection error for an explicit close", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const onConnectionError = vi.fn();
+      const onClose = vi.fn();
+
+      client = new AgentClient({
+        agent: "TestCallableAgent",
+        name: `explicit-close-${crypto.randomUUID()}`,
+        host,
+        protocol,
+        maxRetries: 0,
+        shouldReconnectOnClose: () => false,
+        onConnectionError
+      });
+      client.addEventListener("close", onClose);
+      await client.ready;
+
+      client.close();
+
+      await vi.waitFor(() => {
+        expect(onClose).toHaveBeenCalled();
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(onConnectionError).not.toHaveBeenCalled();
+      expect(client.connectionError).toBeNull();
+    });
+
     it("keeps buffered (untransmitted) calls pending across a transient disconnect and flushes them on reconnect", async () => {
       const { host, protocol } = getTestWorkerHost();
 

@@ -289,6 +289,10 @@
         "name": "OuterSubAgent"
       },
       {
+        "class_name": "DenyingSubAgent",
+        "name": "DenyingSubAgent"
+      },
+      {
         "class_name": "InnerSubAgent",
         "name": "InnerSubAgent"
       },

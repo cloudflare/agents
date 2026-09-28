@@ -246,6 +246,15 @@ The hook receives the **original** request with its URL intact — including the
 
 WebSocket upgrade requests flow through this hook the same way as plain HTTP. If you return a mutated `Request`, keep the original `Upgrade: websocket` and `Sec-WebSocket-*` headers — cloning via `new Headers(req.headers)` and only adding or replacing entries is the safest recipe.
 
+When the hook returns a `Response` for a WebSocket upgrade, the framework accepts the socket and immediately closes it, because browsers hide the status of a failed handshake and reconnecting clients would retry it forever. The close code carries the status:
+
+| Returned status | Close code      | Client behavior                                                       |
+| --------------- | --------------- | --------------------------------------------------------------------- |
+| `4xx`           | `4000 + status` | Terminal: `useAgent` and `AgentClient` stop and set `connectionError` |
+| anything else   | `1011`          | Retried with backoff                                                  |
+
+The close reason is `Sub-agent connection rejected (<status>)`, so a `404` arrives as code `4404`. At the first `/sub/` hop, a returned `Response` that already carries a `webSocket` is passed through unchanged; deeper hops always close with the mapped code.
+
 ### `this.parentPath` and `this.selfPath`
 
 Root-first ancestor chains. `parentPath` covers strict ancestors; `selfPath` includes the current agent.

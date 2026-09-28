@@ -47,7 +47,8 @@ import {
 import {
   CF_SUB_AGENT_OUTER_URL_KEY,
   CF_SUB_AGENT_TAGS_KEY,
-  SUB_AGENT_OUTER_URL_HEADER
+  SUB_AGENT_OUTER_URL_HEADER,
+  rejectSubAgentWebSocket
 } from "./dynamic-agents/dynamic-agents";
 import { logicalNameFromPathV2Identity } from "./dynamic-agents/identity";
 import { DynamicAgentsInternal } from "./dynamic-agents/dynamic-agents";
@@ -4998,10 +4999,16 @@ export class Agent<
       className: match.childClass,
       name: match.childName
     });
-    if (decision instanceof Response) return decision;
+    const isWebSocketUpgrade =
+      request.headers.get("Upgrade")?.toLowerCase() === "websocket";
+    if (decision instanceof Response) {
+      return isWebSocketUpgrade && !decision.webSocket
+        ? rejectSubAgentWebSocket(decision)
+        : decision;
+    }
     const forwardReq = decision instanceof Request ? decision : request;
 
-    if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+    if (isWebSocketUpgrade) {
       const acceptHeaders = new Headers(forwardReq.headers);
       const routedUrl = new URL(forwardReq.url);
       routedUrl.pathname = new URL(request.url).pathname;

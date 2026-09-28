@@ -338,6 +338,68 @@ describe("onBeforeSubAgent hook — allow / reject / mutate", () => {
     expect(res.headers.get("WWW-Authenticate")).toBe("Bearer");
   });
 
+  it.each([
+    ["deny-404", 4404, true],
+    ["deny-401", 4401, true],
+    ["deny-503", 1011, false]
+  ] as const)(
+    "closes a WebSocket rejected with %s instead of failing the handshake (#2118)",
+    async (mode, code, terminal) => {
+      const parent = uniqueName();
+      const child = uniqueName();
+      const parentStub = await getAgentByName(
+        env.HookingSubAgentParent,
+        parent
+      );
+      await parentStub.setHookMode(mode);
+
+      const res = await exports.default.fetch(
+        `http://x/custom-sub/${parent}/sub/counter-sub-agent/${child}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      expect(res.status).toBe(101);
+      const ws = res.webSocket;
+      if (!ws) throw new Error("expected a WebSocket");
+      const closed = new Promise<CloseEvent>((resolve) => {
+        ws.addEventListener("close", resolve);
+      });
+      ws.accept();
+
+      const event = await closed;
+      expect(event.code).toBe(code);
+      expect(event.reason).toBe(
+        `Sub-agent connection rejected (${mode.slice(5)})`
+      );
+      expect(event.code >= 4000 && event.code <= 4999).toBe(terminal);
+      expect(await parentStub.hasSubAgent("CounterSubAgent", child)).toBe(
+        false
+      );
+    }
+  );
+
+  it("closes with the rejected status when a nested hop's gate rejects a WebSocket (#2118)", async () => {
+    const pathname = buildAgentPath([
+      { className: "TestSubAgentParent", name: uniqueName() },
+      { className: "DenyingSubAgent", name: uniqueName() },
+      { className: "CounterSubAgent", name: uniqueName() }
+    ]);
+
+    const res = await exports.default.fetch(`http://x${pathname}`, {
+      headers: { Upgrade: "websocket" }
+    });
+    expect(res.status).toBe(101);
+    const ws = res.webSocket;
+    if (!ws) throw new Error("expected a WebSocket");
+    const closed = new Promise<CloseEvent>((resolve) => {
+      ws.addEventListener("close", resolve);
+    });
+    ws.accept();
+
+    const event = await closed;
+    expect(event.code).toBe(4403);
+    expect(event.reason).toBe("Sub-agent connection rejected (403)");
+  });
+
   it("strict-registry mode rejects unknown children but allows pre-registered ones", async () => {
     const parent = uniqueName();
     const unknownChild = uniqueName();

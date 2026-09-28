@@ -40,6 +40,54 @@ export function isTerminalCloseEvent(event: CloseEvent): boolean {
   return event.code === 1008 || (event.code >= 4000 && event.code <= 4999);
 }
 
+type ReconnectingSocket = { shouldReconnect: boolean; retryCount: number };
+
+/**
+ * PartySocket's `shouldReconnectOnClose`, plus a record of whether that
+ * decision ended reconnection so the close can surface a connection error.
+ *
+ * Reconnection ends on a terminal close code, when the caller's
+ * `shouldReconnectOnClose` declines, or when `maxRetries` is spent (a
+ * failed handshake never reaches the server's close codes, so it only
+ * stops this way). An explicit `close()` has already cleared
+ * `shouldReconnect` by the time PartySocket asks, and is not an error.
+ * PartySocket asks before it schedules the next attempt, so `retryCount`
+ * still counts the attempt that just closed.
+ * @internal
+ */
+export function createCloseClassifier(options: {
+  socket: () => ReconnectingSocket | null | undefined;
+  shouldReconnectOnClose: () => ((event: CloseEvent) => boolean) | undefined;
+  maxRetries: () => number | undefined;
+}): {
+  shouldReconnectOnClose: (event: CloseEvent) => boolean;
+  takeFinalClose: () => boolean;
+} {
+  let finalClose = false;
+  return {
+    shouldReconnectOnClose(event) {
+      const reconnect =
+        (options.shouldReconnectOnClose()?.(event) ?? true) &&
+        !isTerminalCloseEvent(event);
+      const socket = options.socket();
+      if (socket?.shouldReconnect === false) {
+        finalClose = false;
+      } else if (!reconnect) {
+        finalClose = true;
+      } else {
+        const maxRetries = options.maxRetries() ?? Number.POSITIVE_INFINITY;
+        finalClose = (socket?.retryCount ?? 0) >= maxRetries;
+      }
+      return reconnect;
+    },
+    takeFinalClose() {
+      const final = finalClose;
+      finalClose = false;
+      return final;
+    }
+  };
+}
+
 type TerminalReconnectOptions = {
   shouldReconnectOnClose?: (event: CloseEvent) => boolean;
 };
@@ -116,7 +164,11 @@ export type AgentClientOptions<State = unknown> = Omit<
      * Set to `0` to disable. Streaming calls never get a default timeout.
      */
     defaultCallTimeout?: number;
-    /** Called when the connection closes with a terminal code and will not reconnect. */
+    /**
+     * Called when the connection closes and will not reconnect on its own: a
+     * terminal close code (1008 or 4000-4999), `shouldReconnectOnClose`
+     * returning false, or `maxRetries` spent.
+     */
     onConnectionError?: (error: AgentConnectionError) => void;
   };
 
@@ -468,8 +520,8 @@ export class AgentClient<
   identified = false;
 
   /**
-   * Terminal connection error, if the server closed the socket with a code
-   * that should not be retried automatically.
+   * Set when the connection closed and will not reconnect on its own (see
+   * `onConnectionError`). Cleared when a connection opens.
    */
   connectionError: AgentConnectionError | null = null;
 
@@ -529,9 +581,15 @@ export class AgentClient<
           }
         : {};
     const agentNamespace = camelCaseToKebabCase(options.agent);
-    const shouldReconnectOnClose = options.shouldReconnectOnClose;
-    const classifyReconnect = (event: CloseEvent) =>
-      (shouldReconnectOnClose?.(event) ?? true) && !isTerminalCloseEvent(event);
+    const self: { current: AgentClient<AgentT, State> | null } = {
+      current: null
+    };
+    const closeClassifier = createCloseClassifier({
+      socket: () => self.current,
+      shouldReconnectOnClose: () => options.shouldReconnectOnClose,
+      maxRetries: () => options.maxRetries
+    });
+    const classifyReconnect = closeClassifier.shouldReconnectOnClose;
 
     // If basePath is provided, use it directly; otherwise construct from agent/name
     const socketOptions = options.basePath
@@ -553,6 +611,7 @@ export class AgentClient<
         };
 
     super(socketOptions);
+    self.current = this;
     this.#capnWeb = capnWeb;
     this.agent = agentNamespace;
     this.name = options.name || "default";
@@ -683,12 +742,12 @@ export class AgentClient<
 
     // Clean up pending calls and reset ready state when connection closes
     this.addEventListener("close", (event) => {
-      const terminalClose = isTerminalCloseEvent(event);
+      const finalClose = closeClassifier.takeFinalClose();
       // Reset ready state for next connection
       this.identified = false;
       this._resetReady();
 
-      if (this.shouldReconnect) {
+      if (this.shouldReconnect && !finalClose) {
         // Transient disconnect: reject calls whose request was already
         // transmitted — their response can never arrive. Buffered calls
         // stay pending; PartySocket re-sends them on reconnect.
@@ -696,11 +755,11 @@ export class AgentClient<
           onlyTransmitted: true
         });
       } else {
-        // Permanent close (close() called or retries exhausted): nothing
+        // Permanent close (close() called or reconnection ended): nothing
         // will ever flush the buffer, so reject everything.
         this._rejectPendingCalls("Connection closed");
         this.#nativeQueue.rejectAll("Connection closed");
-        if (terminalClose) {
+        if (finalClose) {
           const error = new AgentConnectionError(event);
           this.connectionError = error;
           this.options.onConnectionError?.(error);
