@@ -552,7 +552,11 @@ describe("AgentClient", () => {
         onConnectionError
       });
       client.addEventListener("open", onOpen);
-      const pending = client.call("add", [1, 2]);
+      // Assert now: the close rejects the call during the waitFor below, and
+      // a rejection with no handler by then is reported as unhandled.
+      const pending = expect(client.call("add", [1, 2])).rejects.toThrow(
+        "Connection closed"
+      );
 
       await vi.waitFor(() => {
         expect(onConnectionError).toHaveBeenCalledOnce();
@@ -562,7 +566,7 @@ describe("AgentClient", () => {
         reason: "Sub-agent connection rejected (404)"
       });
       expect(client.shouldReconnect).toBe(false);
-      await expect(pending).rejects.toThrow("Connection closed");
+      await pending;
 
       const opens = onOpen.mock.calls.length;
       await new Promise((resolve) => setTimeout(resolve, 200));
@@ -583,14 +587,16 @@ describe("AgentClient", () => {
         maxReconnectionDelay: 10,
         onConnectionError
       });
-      const pending = client.call("add", [1, 2]);
+      const pending = expect(client.call("add", [1, 2])).rejects.toThrow(
+        "Connection closed"
+      );
 
       await vi.waitFor(() => {
         expect(onConnectionError).toHaveBeenCalledOnce();
       });
       expect(client.retryCount).toBe(2);
       expect(client.connectionError).toBeInstanceOf(Error);
-      await expect(pending).rejects.toThrow("Connection closed");
+      await pending;
     });
 
     it("reports a connection error when shouldReconnectOnClose declines", async () => {
