@@ -11,6 +11,7 @@
 import type { CompactResult } from "./compaction-helpers";
 import { COMPACTION_PREFIX } from "./compaction-helpers";
 import type { SessionsCore } from "./core";
+import { mirrorSessionChanges, type SessionMirrorOptions } from "./mirror";
 import { byteLength, sanitizeMessage } from "./sanitize";
 import type {
   AppendOptions,
@@ -65,6 +66,22 @@ export class Session {
   compactAfter(tokenThreshold: number): this {
     this.#tokenThreshold = tokenThreshold;
     return this;
+  }
+
+  // ── Change feed ──────────────────────────────────────────────────────────
+
+  /**
+   * Keep an in-memory transcript in step with this session's change feed,
+   * so write sites never hand-patch it. Returns the unsubscribe function.
+   */
+  mirror<M extends { id: string }>(
+    options: SessionMirrorOptions<M>
+  ): () => void {
+    return mirrorSessionChanges(
+      (listener) => this.#core.subscribe(listener),
+      this.sessionId,
+      options
+    );
   }
 
   // ── Reads ────────────────────────────────────────────────────────────────

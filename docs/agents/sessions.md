@@ -361,6 +361,25 @@ const unsubscribe = sessions.subscribe(async (event) => {
 
 `import` fires once per `importMessage()` and carries the row; it is deliberately not an `append`, so a projection does not patch itself per imported row during a migration — it marks itself stale and re-derives once. `compaction` fires when an overlay is stored directly through `addCompaction()`; `compact()` reports its own overlay as `compact`.
 
+A host that keeps an in-memory transcript does not need to write that reduction itself. `session.mirror()` subscribes for one session and patches an array in place: an append or update replaces the entry with the same id (or pushes a new row), a delete filters, and a clear empties it:
+
+```ts
+const stop = sessions.session("").mirror<UIMessage>({
+  get: () => this.messages,
+  set: (messages) => {
+    this.messages = messages;
+  },
+  transform: (message) => toCachedMessage(message),
+  intercept: async (event) => {
+    if (event.type !== "compact") return false;
+    this.messages = await reloadFromStorage();
+    return true;
+  }
+});
+```
+
+`get()` is read on every event, so reassigning the array is safe. `intercept` handles an event instead of the default reduction. Use it for changes an in-place patch cannot express, such as a branch append or a compaction. `onApplied` runs after an append or update was written, with the entry it replaced.
+
 This is a local cache-coherence feed, not a cross-object event log. Capability diagnostics are also emitted through Lifecycle observability.
 
 ## Errors

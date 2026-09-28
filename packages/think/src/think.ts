@@ -3796,62 +3796,64 @@ export class Think<
           // as soon as the object has started.
           await this.#contextBlocks.load();
           this._unsubscribeSessionChanges?.();
-          this._unsubscribeSessionChanges = this.sessions.subscribe(
-            async (event) => {
-              if (event.sessionId !== this.session.sessionId) return;
-              switch (event.type) {
-                case "append":
-                  if (!event.inserted || event.parentId !== undefined) {
+          this._unsubscribeSessionChanges = this.sessions
+            .session(this.session.sessionId)
+            .mirror<UIMessage>({
+              get: () => this._cachedMessages,
+              set: (messages) => {
+                this._replaceCachedMessages(messages);
+              },
+              transform: (message) => message as UIMessage,
+              intercept: async (event) => {
+                switch (event.type) {
+                  case "append":
+                    // A branch append moves the path itself, which no
+                    // in-place patch expresses.
+                    if (event.inserted && event.parentId === undefined) {
+                      return false;
+                    }
                     await this._syncMessages();
-                  } else {
-                    this._upsertCachedMessage(event.message as UIMessage);
-                    // A linear append is what ages older messages, so this
-                    // is where an eviction pass becomes worth scheduling;
-                    // the gate decides from memory. It also grows the cache
-                    // past what the last refresh measured.
-                    this._noteCachedGrowth(
-                      cachedMessageBytes(event.message as UIMessage)
-                    );
-                    if (this._mediaEvictionFruitless) {
-                      this._mediaEvictionFruitless.appendsSince++;
-                    }
-                    if (this._mediaEvictionRunning) {
-                      this._mediaEvictionAppendsDuringPass++;
-                    }
-                    this._scheduleMediaEvictionPass();
-                  }
-                  break;
-                case "import":
-                  // A row the cache never saw. Re-derive at the next safe
-                  // boundary instead of mirroring a migration row by row.
-                  this._cacheCoversActivePath = false;
-                  break;
-                case "compaction":
-                  await this._syncMessages();
-                  break;
-                case "update":
-                  if (
-                    this._cachedMessages.some(
-                      (message) => message.id === event.message.id
-                    )
-                  ) {
-                    this._patchCachedMessage(event.message as UIMessage);
-                  }
-                  break;
-                case "clear":
-                  this._replaceCachedMessages([]);
-                  this._cacheCoversActivePath = true;
-                  break;
-                case "delete":
-                  await this._syncMessages();
-                  break;
-                case "compact":
-                  await this._syncMessages();
-                  await this.#contextBlocks?.refreshSystemPrompt();
-                  break;
+                    return true;
+                  case "import":
+                    // A row the cache never saw. Re-derive at the next safe
+                    // boundary instead of mirroring a migration row by row.
+                    this._cacheCoversActivePath = false;
+                    return true;
+                  case "clear":
+                    this._replaceCachedMessages([]);
+                    this._cacheCoversActivePath = true;
+                    return true;
+                  case "compaction":
+                  case "delete":
+                    await this._syncMessages();
+                    return true;
+                  case "compact":
+                    await this._syncMessages();
+                    await this.#contextBlocks?.refreshSystemPrompt();
+                    return true;
+                  default:
+                    return false;
+                }
+              },
+              onApplied: (event, message, previous) => {
+                if (event.type === "update") {
+                  if (previous) this._noteCachedReplacement(previous, message);
+                  return;
+                }
+                // A linear append is what ages older messages, so this is
+                // where an eviction pass becomes worth scheduling; the gate
+                // decides from memory. It also grows the cache past what the
+                // last refresh measured.
+                this._noteCachedGrowth(cachedMessageBytes(message));
+                if (this._mediaEvictionFruitless) {
+                  this._mediaEvictionFruitless.appendsSince++;
+                }
+                if (this._mediaEvictionRunning) {
+                  this._mediaEvictionAppendsDuringPass++;
+                }
+                this._scheduleMediaEvictionPass();
               }
-            }
-          );
+            });
 
           await this._initializeSkills();
         }
@@ -4614,30 +4616,23 @@ export class Think<
     return hydrated;
   }
 
-  /** Patch or append one message in the live cache after a durable write. */
-  private _upsertCachedMessage(message: UIMessage): void {
-    const index = this._cachedMessages.findIndex((m) => m.id === message.id);
-    if (index === -1) {
-      this._cachedMessages.push(message);
-    } else {
-      this._cachedMessages[index] = message;
-    }
-  }
-
-  /**
-   * Patch a message that is already present in the live cache. An update
-   * that enlarges the message (a tool result landing on it) grows the cache
-   * exactly as an append does, so it is charged against the hydration
-   * budget the same way; and it may have put an inline payload on an aged
-   * row, so a fruitless eviction pass no longer stands.
-   */
+  /** Patch a message that is already present in the live cache. */
   private _patchCachedMessage(message: UIMessage): void {
     const index = this._cachedMessages.findIndex((m) => m.id === message.id);
     if (index === -1) return;
-    const grew =
-      cachedMessageBytes(message) -
-      cachedMessageBytes(this._cachedMessages[index]);
+    const previous = this._cachedMessages[index];
     this._cachedMessages[index] = message;
+    this._noteCachedReplacement(previous, message);
+  }
+
+  /**
+   * An update that enlarges a cached message (a tool result landing on it)
+   * grows the cache exactly as an append does, so it is charged against the
+   * hydration budget the same way; and it may have put an inline payload on
+   * an aged row, so a fruitless eviction pass no longer stands.
+   */
+  private _noteCachedReplacement(previous: UIMessage, next: UIMessage): void {
+    const grew = cachedMessageBytes(next) - cachedMessageBytes(previous);
     if (grew > 0) {
       this._noteCachedGrowth(grew);
       this._mediaEvictionFruitless = null;
