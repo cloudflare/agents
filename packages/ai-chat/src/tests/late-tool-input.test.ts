@@ -1,7 +1,11 @@
 import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
-import { applyChunkToParts, type MessagePart } from "agents/chat";
+import {
+  applyChunkToParts,
+  type MessagePart,
+  type StreamChunkData
+} from "agents/chat";
 import { MessageType } from "../types";
 import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
 import { getAgentByName } from "agents";
@@ -11,7 +15,7 @@ describe("tool-input-available after tool-approval-request (#1872)", () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-    const streamed: Array<Record<string, unknown>> = [];
+    const streamed: StreamChunkData[] = [];
     const done = new Promise<boolean>((resolve) => {
       const timeout = setTimeout(() => resolve(false), 5000);
       ws.addEventListener("message", (e: MessageEvent) => {
