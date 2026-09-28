@@ -1,4 +1,5 @@
 import { Suspense, act, useEffect, useState } from "react";
+import type { UIMessage } from "ai";
 import { cleanup, render } from "vitest-browser-react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAgentChat } from "../chat/react";
@@ -14,7 +15,7 @@ async function mountChat({
   onIdentityChange
 }: {
   initial: Address;
-  getInitialMessages?: (options: LoaderOptions) => Promise<never[]>;
+  getInitialMessages?: (options: LoaderOptions) => Promise<UIMessage[]>;
   onIdentityChange?: () => void;
 }) {
   const { host, protocol } = getTestWorkerHost();
@@ -22,7 +23,8 @@ async function mountChat({
     setAddress?: (address: Address) => void;
     agentName?: string;
     identified?: boolean;
-  } = {};
+    renders: { name: string; messageIds: string[] }[];
+  } = { renders: [] };
 
   function TestComponent() {
     const [{ name, token }, setAddress] = useState(initial);
@@ -39,7 +41,15 @@ async function mountChat({
     });
     controls.agentName = agent.name;
     controls.identified = agent.identified;
-    useAgentChat({ agent, getInitialMessages, resume: false });
+    const { messages } = useAgentChat({
+      agent,
+      getInitialMessages,
+      resume: false
+    });
+    controls.renders.push({
+      name: agent.name,
+      messageIds: messages.map((message) => message.id)
+    });
     return <div data-testid="ready">ready</div>;
   }
 
@@ -54,6 +64,16 @@ async function mountChat({
   return controls;
 }
 
+function historyFor(name: string): UIMessage[] {
+  return [
+    {
+      id: `${name}-message`,
+      role: "user",
+      parts: [{ type: "text", text: `hello ${name}` }]
+    }
+  ];
+}
+
 describe("useAgentChat when the agent address changes", () => {
   afterEach(() => {
     cleanup();
@@ -61,7 +81,9 @@ describe("useAgentChat when the agent address changes", () => {
   });
 
   it("loads the new agent's history through the new socket URL (#1864, #1874)", async () => {
-    const getInitialMessages = vi.fn(async (_options: LoaderOptions) => []);
+    const getInitialMessages = vi.fn(async (options: LoaderOptions) =>
+      historyFor(options.name)
+    );
     const controls = await mountChat({
       initial: { name: "address-change-a", token: "token-a" },
       getInitialMessages
@@ -75,6 +97,12 @@ describe("useAgentChat when the agent address changes", () => {
           "/agents/test-state-agent/address-change-a?token=token-a"
         )
       })
+    );
+
+    await vi.waitFor(() =>
+      expect(controls.renders.at(-1)?.messageIds).toEqual([
+        "address-change-a-message"
+      ])
     );
 
     getInitialMessages.mockClear();
@@ -94,6 +122,19 @@ describe("useAgentChat when the agent address changes", () => {
           )
         })
       );
+    }
+
+    await vi.waitFor(() =>
+      expect(controls.renders.at(-1)?.messageIds).toEqual([
+        "address-change-b-message"
+      ])
+    );
+    // Once the new history is shown, the previous one never comes back.
+    const firstB = controls.renders.findIndex(({ messageIds }) =>
+      messageIds.includes("address-change-b-message")
+    );
+    for (const { messageIds } of controls.renders.slice(firstB)) {
+      expect(messageIds).toEqual(["address-change-b-message"]);
     }
   });
 

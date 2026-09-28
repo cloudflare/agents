@@ -74,4 +74,45 @@ describe("useAgent when the name changes", () => {
     await expect(switched.call).resolves.toBe("address-rpc-b");
     await expect(switched.readyThenIdentified).resolves.toBe("address-rpc-b");
   });
+
+  it("resolves a ready promise taken before switching away and back", async () => {
+    const { host, protocol } = getTestWorkerHost();
+    let readyForA: Promise<void> | undefined;
+    let identifiedAs: string | undefined;
+    let setName: ((name: string) => void) | undefined;
+
+    function TestComponent() {
+      const [name, setNameState] = useState("address-ready-a");
+      const agent = useAgent({
+        agent: "TestCallableAgent",
+        host,
+        name,
+        protocol
+      });
+      readyForA ??= agent.ready;
+      identifiedAs = agent.identified ? agent.name : undefined;
+      useEffect(() => {
+        setName = setNameState;
+        // Leave A before its first socket can identify.
+        setNameState("address-ready-b");
+      }, []);
+      return <div>{name}</div>;
+    }
+
+    await render(
+      <Suspense fallback="loading">
+        <TestComponent />
+      </Suspense>
+    );
+    await vi.waitFor(() => expect(identifiedAs).toBe("address-ready-b"));
+
+    setName?.("address-ready-a");
+    await vi.waitFor(() => expect(identifiedAs).toBe("address-ready-a"));
+    await expect(
+      Promise.race([
+        readyForA!.then(() => "resolved"),
+        new Promise((resolve) => setTimeout(() => resolve("pending"), 2000))
+      ])
+    ).resolves.toBe("resolved");
+  });
 });

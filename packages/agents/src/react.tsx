@@ -66,6 +66,8 @@ type SocketDestination = {
   prefix?: string;
   room?: string;
   path?: string;
+  protocol?: string;
+  protocols?: unknown;
 };
 
 function socketDestinationKey(options: SocketDestination): string {
@@ -75,7 +77,9 @@ function socketDestinationKey(options: SocketDestination): string {
     options.party ?? null,
     options.prefix ?? null,
     options.room ?? null,
-    options.path ?? null
+    options.path ?? null,
+    options.protocol ?? null,
+    options.protocols ?? null
   ]);
 }
 
@@ -1051,8 +1055,10 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       );
     }
 
-    for (const key of readyRef.current.keys()) {
-      if (key !== destination) readyRef.current.delete(key);
+    // Pending entries stay: a caller may still await one, and returning to
+    // that destination must resolve the promise it already holds.
+    for (const [key, entry] of readyRef.current) {
+      if (key !== destination && entry.resolved) readyRef.current.delete(key);
     }
 
     if (prev && prev !== agent) {
