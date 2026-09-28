@@ -1,17 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { HarnessDriver } from "../../driver";
+import { Driver } from "../../driver";
 import type {
-  HarnessDriverInspection,
-  HarnessDriverRuntime,
-  HarnessDriverSubmission
+  DriverHandle,
+  DriverInspection,
+  DriverRuntime,
+  DriverSubmission
 } from "../../driver";
 import { withCapabilityHarness } from "../shared/capability-harness";
 
 type Input = { text: string };
 type Result = { answer: string };
 
-class Runtime implements HarnessDriverRuntime<Input, Result> {
-  inspection: HarnessDriverInspection<Result> = { status: "not-admitted" };
+class Runtime implements DriverRuntime<Input, Result> {
+  inspection: DriverInspection<Result> = { status: "not-admitted" };
   driveResult:
     | { status: "continue" }
     | { status: "waiting"; notBefore: number }
@@ -39,23 +40,24 @@ class Runtime implements HarnessDriverRuntime<Input, Result> {
   }
 }
 
-describe("HarnessDriver drive", () => {
+describe("Driver drive", () => {
   it("admits the queue head and reschedules a native wait", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const runtime = new Runtime();
       const notBefore = Date.now() + 60_000;
       runtime.driveResult = { status: "waiting", notBefore };
-      const driver = new HarnessDriver({ id: "test", runtime });
-      const { lifecycle } = install(driver);
+      const capability = new Driver();
+      const driver = capability.register("test", runtime);
+      const { lifecycle } = install(capability);
       await lifecycle.start();
       await driver.submit("main", { text: "hello" }, { operationId: "op-1" });
       await storage.deleteAlarm();
 
-      await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+      await capability.onJob({ job: capability.jobs()[0], attempt: 1 });
       await driver.waitForIdle("main");
 
       expect(runtime.calls).toEqual(["inspect", "admit", "drive"]);
-      expect(driver.jobs()[0].time).toBe(notBefore);
+      expect(capability.jobs()[0].time).toBe(notBefore);
       expect(await driver.pending("main")).toMatchObject([
         { operationId: "op-1", status: "admitted" }
       ]);
@@ -68,17 +70,18 @@ describe("HarnessDriver drive", () => {
       const runtime = new Runtime();
       const notBefore = Date.now() + 60_000;
       runtime.inspection = { status: "waiting", notBefore };
-      const driver = new HarnessDriver({ id: "test", runtime });
-      const { lifecycle } = install(driver);
+      const capability = new Driver();
+      const driver = capability.register("test", runtime);
+      const { lifecycle } = install(capability);
       await lifecycle.start();
       await driver.submit("main", { text: "hello" }, { operationId: "op-1" });
       await storage.deleteAlarm();
 
-      await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+      await capability.onJob({ job: capability.jobs()[0], attempt: 1 });
       await driver.waitForIdle("main");
 
       expect(runtime.calls).toEqual(["inspect"]);
-      expect(driver.jobs()[0].time).toBe(notBefore);
+      expect(capability.jobs()[0].time).toBe(notBefore);
       await storage.deleteAlarm();
     });
   });
@@ -91,13 +94,14 @@ describe("HarnessDriver drive", () => {
         status: "waiting",
         notBefore: Date.now() + 60_000
       };
-      const driver = new HarnessDriver({ id: "test", runtime });
-      const { lifecycle } = install(driver);
+      const capability = new Driver();
+      const driver = capability.register("test", runtime);
+      const { lifecycle } = install(capability);
       await lifecycle.start();
       await driver.submit("main", { text: "hello" }, { operationId: "op-1" });
       await storage.deleteAlarm();
 
-      await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+      await capability.onJob({ job: capability.jobs()[0], attempt: 1 });
       await driver.waitForIdle("main");
 
       expect(runtime.calls).toEqual(["inspect", "drive"]);
@@ -113,14 +117,12 @@ describe("HarnessDriver drive", () => {
       const runtime = new Runtime();
       runtime.inspection = { status: "completed", result: { answer: "done" } };
       const settled: Array<{
-        submission: HarnessDriverSubmission<Input>;
+        submission: DriverSubmission<Input>;
         result: Result;
         intakePresent: boolean;
       }> = [];
-      let driver: HarnessDriver<Input, Result>;
-      driver = new HarnessDriver({
-        id: "test",
-        runtime,
+      const capability = new Driver();
+      const driver: DriverHandle<Input> = capability.register("test", runtime, {
         settle: async (submission, result) => {
           settled.push({
             submission,
@@ -129,12 +131,12 @@ describe("HarnessDriver drive", () => {
           });
         }
       });
-      const { lifecycle } = install(driver);
+      const { lifecycle } = install(capability);
       await lifecycle.start();
       await driver.submit("main", { text: "hello" }, { operationId: "op-1" });
       await storage.deleteAlarm();
 
-      await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+      await capability.onJob({ job: capability.jobs()[0], attempt: 1 });
       await driver.waitForIdle("main");
       expect(settled).toMatchObject([
         {
@@ -152,7 +154,7 @@ describe("HarnessDriver drive", () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       let inspections = 0;
       const failures: Array<{ name: string; message: string }> = [];
-      const runtime: HarnessDriverRuntime<Input, Result> = {
+      const runtime: DriverRuntime<Input, Result> = {
         inspect: async () => {
           inspections += 1;
           throw new TypeError("adapter unavailable");
@@ -161,22 +163,21 @@ describe("HarnessDriver drive", () => {
         drive: async () => ({ status: "continue" }),
         cancel: async () => ({ status: "cancelled" })
       };
-      const driver = new HarnessDriver({
-        id: "test",
-        runtime,
+      const capability = new Driver();
+      const driver: DriverHandle<Input> = capability.register("test", runtime, {
         maxAttempts: 3,
         retryBaseMs: 1,
         fail: (_submission, error) => {
           failures.push(error);
         }
       });
-      const { lifecycle } = install(driver);
+      const { lifecycle } = install(capability);
       await lifecycle.start();
       await driver.submit("main", { text: "hello" }, { operationId: "op-1" });
       await storage.deleteAlarm();
 
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+        await capability.onJob({ job: capability.jobs()[0], attempt: 1 });
         await driver.waitForIdle("main");
       }
 
@@ -185,7 +186,7 @@ describe("HarnessDriver drive", () => {
         { name: "TypeError", message: "adapter unavailable" }
       ]);
       expect(await driver.pending()).toEqual([]);
-      expect(driver.jobs()).toEqual([]);
+      expect(capability.jobs()).toEqual([]);
       await storage.deleteAlarm();
     });
   });
@@ -198,21 +199,20 @@ describe("HarnessDriver drive", () => {
         error: { name: "NativeError", message: "native failure" }
       };
       let settlements = 0;
-      const driver = new HarnessDriver({
-        id: "test",
-        runtime,
+      const capability = new Driver();
+      const driver: DriverHandle<Input> = capability.register("test", runtime, {
         retryBaseMs: 1,
         fail: () => {
           settlements += 1;
           if (settlements === 1) throw new Error("stream unavailable");
         }
       });
-      const { lifecycle } = install(driver);
+      const { lifecycle } = install(capability);
       await lifecycle.start();
       await driver.submit("main", { text: "hello" }, { operationId: "op-1" });
       await storage.deleteAlarm();
 
-      await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+      await capability.onJob({ job: capability.jobs()[0], attempt: 1 });
       await driver.waitForIdle("main");
       expect(await driver.pending()).toMatchObject([
         {
@@ -221,7 +221,7 @@ describe("HarnessDriver drive", () => {
         }
       ]);
 
-      await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+      await capability.onJob({ job: capability.jobs()[0], attempt: 1 });
       await driver.waitForIdle("main");
 
       expect(runtime.calls).toEqual(["inspect"]);
@@ -237,9 +237,8 @@ describe("HarnessDriver drive", () => {
       runtime.inspection = { status: "completed", result: { answer: "done" } };
       let settlements = 0;
       let failures = 0;
-      const driver = new HarnessDriver({
-        id: "test",
-        runtime,
+      const capability = new Driver();
+      const driver: DriverHandle<Input> = capability.register("test", runtime, {
         retryBaseMs: 1,
         settle: () => {
           settlements += 1;
@@ -249,14 +248,14 @@ describe("HarnessDriver drive", () => {
           failures += 1;
         }
       });
-      const { lifecycle } = install(driver);
+      const { lifecycle } = install(capability);
       await lifecycle.start();
       await driver.submit("main", { text: "hello" }, { operationId: "op-1" });
       await storage.deleteAlarm();
 
-      await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+      await capability.onJob({ job: capability.jobs()[0], attempt: 1 });
       await driver.waitForIdle("main");
-      await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+      await capability.onJob({ job: capability.jobs()[0], attempt: 1 });
       await driver.waitForIdle("main");
 
       expect(settlements).toBe(2);
@@ -270,17 +269,18 @@ describe("HarnessDriver drive", () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const runtime = new Runtime();
       runtime.inspection = { status: "completed", result: { answer: "done" } };
-      const driver = new HarnessDriver({ id: "test", runtime });
-      const { lifecycle } = install(driver);
+      const capability = new Driver();
+      const driver = capability.register("test", runtime);
+      const { lifecycle } = install(capability);
       await lifecycle.start();
       await driver.submit("main", { text: "first" }, { operationId: "op-1" });
       await driver.submit("main", { text: "second" }, { operationId: "op-2" });
       await storage.deleteAlarm();
 
-      await driver.onJob({ job: driver.jobs()[0], attempt: 1 });
+      await capability.onJob({ job: capability.jobs()[0], attempt: 1 });
       await driver.waitForIdle("main");
 
-      expect(driver.jobs()).toHaveLength(1);
+      expect(capability.jobs()).toHaveLength(1);
       expect(
         (await driver.pending("main")).map((row) => row.operationId)
       ).toEqual(["op-2"]);

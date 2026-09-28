@@ -1,11 +1,8 @@
-import type {
-  HarnessDriverEnqueueResult,
-  HarnessDriverSubmission
-} from "./types";
+import type { DriverEnqueueResult, DriverSubmission } from "./types";
 
 type SubmissionRow = {
   seq: number;
-  driver_id: string;
+  runtime_id: string;
   scope: string;
   operation_id: string;
   input_json: string;
@@ -18,10 +15,10 @@ type SubmissionRow = {
   cancel_requested: number;
 };
 
-function decodeRow<Input>(row: SubmissionRow): HarnessDriverSubmission<Input> {
+function decodeRow<Input>(row: SubmissionRow): DriverSubmission<Input> {
   return {
     seq: row.seq,
-    driverId: row.driver_id,
+    runtimeId: row.runtime_id,
     scope: row.scope,
     operationId: row.operation_id,
     input: JSON.parse(row.input_json) as Input,
@@ -41,23 +38,23 @@ function decodeRow<Input>(row: SubmissionRow): HarnessDriverSubmission<Input> {
   };
 }
 
-export class HarnessDriverStore {
+export class DriverStore {
   readonly #storage: DurableObjectStorage;
-  readonly #driverId: string;
+  readonly #runtimeId: string;
   #ready = false;
 
-  constructor(storage: DurableObjectStorage, driverId: string) {
-    if (driverId.trim() === "") throw new Error("driverId must not be empty");
+  constructor(storage: DurableObjectStorage, runtimeId: string) {
+    if (runtimeId.trim() === "") throw new Error("runtimeId must not be empty");
     this.#storage = storage;
-    this.#driverId = driverId;
+    this.#runtimeId = runtimeId;
   }
 
   ensureTable(): void {
     if (this.#ready) return;
     this.#storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS cf_agents_harness_submissions (
+      CREATE TABLE IF NOT EXISTS cf_agents_driver_submissions (
         seq INTEGER PRIMARY KEY,
-        driver_id TEXT NOT NULL,
+        runtime_id TEXT NOT NULL,
         scope TEXT NOT NULL,
         operation_id TEXT NOT NULL,
         input_json TEXT NOT NULL,
@@ -68,37 +65,14 @@ export class HarnessDriverStore {
         attempts INTEGER NOT NULL DEFAULT 0,
         failure_json TEXT,
         cancel_requested INTEGER NOT NULL DEFAULT 0,
-        UNIQUE (driver_id, operation_id)
+        UNIQUE (runtime_id, operation_id)
       );
-      CREATE INDEX IF NOT EXISTS cf_agents_harness_scope_queue
-        ON cf_agents_harness_submissions (driver_id, scope, seq);
-      CREATE UNIQUE INDEX IF NOT EXISTS cf_agents_harness_scope_admitted
-        ON cf_agents_harness_submissions (driver_id, scope)
+      CREATE INDEX IF NOT EXISTS cf_agents_driver_scope_queue
+        ON cf_agents_driver_submissions (runtime_id, scope, seq);
+      CREATE UNIQUE INDEX IF NOT EXISTS cf_agents_driver_scope_admitted
+        ON cf_agents_driver_submissions (runtime_id, scope)
         WHERE status = 'admitted';
     `);
-    const columns = new Set(
-      this.#storage.sql
-        .exec<{ name: string }>(
-          "PRAGMA table_info(cf_agents_harness_submissions)"
-        )
-        .toArray()
-        .map((column) => column.name)
-    );
-    if (!columns.has("attempts")) {
-      this.#storage.sql.exec(
-        "ALTER TABLE cf_agents_harness_submissions ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
-      );
-    }
-    if (!columns.has("failure_json")) {
-      this.#storage.sql.exec(
-        "ALTER TABLE cf_agents_harness_submissions ADD COLUMN failure_json TEXT"
-      );
-    }
-    if (!columns.has("cancel_requested")) {
-      this.#storage.sql.exec(
-        "ALTER TABLE cf_agents_harness_submissions ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
-      );
-    }
     this.#ready = true;
   }
 
@@ -107,7 +81,7 @@ export class HarnessDriverStore {
     operationId: string,
     input: Input,
     streamId: string | null
-  ): HarnessDriverEnqueueResult<Input> {
+  ): DriverEnqueueResult<Input> {
     this.ensureTable();
     if (scope.trim() === "") throw new Error("scope must not be empty");
     if (operationId.trim() === "") {
@@ -117,12 +91,12 @@ export class HarnessDriverStore {
     if (inputJSON === undefined)
       throw new Error("input must be JSON-serializable");
     const cursor = this.#storage.sql.exec(
-      `INSERT INTO cf_agents_harness_submissions
-        (driver_id, scope, operation_id, input_json, status, stream_id,
+      `INSERT INTO cf_agents_driver_submissions
+        (runtime_id, scope, operation_id, input_json, status, stream_id,
          submitted_at, admitted_at)
        VALUES (?, ?, ?, ?, 'queued', ?, ?, NULL)
-       ON CONFLICT (driver_id, operation_id) DO NOTHING`,
-      this.#driverId,
+       ON CONFLICT (runtime_id, operation_id) DO NOTHING`,
+      this.#runtimeId,
       scope,
       operationId,
       inputJSON,
@@ -137,35 +111,33 @@ export class HarnessDriverStore {
 
   get<Input = unknown>(
     operationId: string
-  ): HarnessDriverSubmission<Input> | undefined {
+  ): DriverSubmission<Input> | undefined {
     this.ensureTable();
     const row = this.#storage.sql
       .exec<SubmissionRow>(
-        `SELECT seq, driver_id, scope, operation_id, input_json, status,
+        `SELECT seq, runtime_id, scope, operation_id, input_json, status,
                 stream_id, submitted_at, admitted_at, attempts, failure_json,
                 cancel_requested
-         FROM cf_agents_harness_submissions
-         WHERE driver_id = ? AND operation_id = ?`,
-        this.#driverId,
+         FROM cf_agents_driver_submissions
+         WHERE runtime_id = ? AND operation_id = ?`,
+        this.#runtimeId,
         operationId
       )
       .toArray()[0];
     return row ? decodeRow<Input>(row) : undefined;
   }
 
-  head<Input = unknown>(
-    scope: string
-  ): HarnessDriverSubmission<Input> | undefined {
+  head<Input = unknown>(scope: string): DriverSubmission<Input> | undefined {
     this.ensureTable();
     const row = this.#storage.sql
       .exec<SubmissionRow>(
-        `SELECT seq, driver_id, scope, operation_id, input_json, status,
+        `SELECT seq, runtime_id, scope, operation_id, input_json, status,
                 stream_id, submitted_at, admitted_at, attempts, failure_json,
                 cancel_requested
-         FROM cf_agents_harness_submissions
-         WHERE driver_id = ? AND scope = ?
+         FROM cf_agents_driver_submissions
+         WHERE runtime_id = ? AND scope = ?
          ORDER BY seq ASC LIMIT 1`,
-        this.#driverId,
+        this.#runtimeId,
         scope
       )
       .toArray()[0];
@@ -174,44 +146,44 @@ export class HarnessDriverStore {
 
   admitted<Input = unknown>(
     scope: string
-  ): HarnessDriverSubmission<Input> | undefined {
+  ): DriverSubmission<Input> | undefined {
     this.ensureTable();
     const row = this.#storage.sql
       .exec<SubmissionRow>(
-        `SELECT seq, driver_id, scope, operation_id, input_json, status,
+        `SELECT seq, runtime_id, scope, operation_id, input_json, status,
                 stream_id, submitted_at, admitted_at, attempts, failure_json,
                 cancel_requested
-         FROM cf_agents_harness_submissions
-         WHERE driver_id = ? AND scope = ? AND status = 'admitted'`,
-        this.#driverId,
+         FROM cf_agents_driver_submissions
+         WHERE runtime_id = ? AND scope = ? AND status = 'admitted'`,
+        this.#runtimeId,
         scope
       )
       .toArray()[0];
     return row ? decodeRow<Input>(row) : undefined;
   }
 
-  list<Input = unknown>(scope?: string): HarnessDriverSubmission<Input>[] {
+  list<Input = unknown>(scope?: string): DriverSubmission<Input>[] {
     this.ensureTable();
     const rows =
       scope === undefined
         ? this.#storage.sql
             .exec<SubmissionRow>(
-              `SELECT seq, driver_id, scope, operation_id, input_json, status,
+              `SELECT seq, runtime_id, scope, operation_id, input_json, status,
                       stream_id, submitted_at, admitted_at, attempts, failure_json,
                 cancel_requested
-               FROM cf_agents_harness_submissions
-               WHERE driver_id = ? ORDER BY seq ASC`,
-              this.#driverId
+               FROM cf_agents_driver_submissions
+               WHERE runtime_id = ? ORDER BY seq ASC`,
+              this.#runtimeId
             )
             .toArray()
         : this.#storage.sql
             .exec<SubmissionRow>(
-              `SELECT seq, driver_id, scope, operation_id, input_json, status,
+              `SELECT seq, runtime_id, scope, operation_id, input_json, status,
                       stream_id, submitted_at, admitted_at, attempts, failure_json,
                 cancel_requested
-               FROM cf_agents_harness_submissions
-               WHERE driver_id = ? AND scope = ? ORDER BY seq ASC`,
-              this.#driverId,
+               FROM cf_agents_driver_submissions
+               WHERE runtime_id = ? AND scope = ? ORDER BY seq ASC`,
+              this.#runtimeId,
               scope
             )
             .toArray();
@@ -223,10 +195,10 @@ export class HarnessDriverStore {
     return this.#storage.sql
       .exec<{ scope: string; first_seq: number }>(
         `SELECT scope, MIN(seq) AS first_seq
-         FROM cf_agents_harness_submissions
-         WHERE driver_id = ?
+         FROM cf_agents_driver_submissions
+         WHERE runtime_id = ?
          GROUP BY scope ORDER BY first_seq ASC`,
-        this.#driverId
+        this.#runtimeId
       )
       .toArray()
       .map((row) => row.scope);
@@ -235,57 +207,57 @@ export class HarnessDriverStore {
   markAdmitted<Input = unknown>(
     operationId: string,
     admittedAt = Date.now()
-  ): HarnessDriverSubmission<Input> | undefined {
+  ): DriverSubmission<Input> | undefined {
     this.ensureTable();
     this.#storage.sql.exec(
-      `UPDATE cf_agents_harness_submissions
+      `UPDATE cf_agents_driver_submissions
        SET status = 'admitted', admitted_at = ?
-       WHERE driver_id = ? AND operation_id = ?`,
+       WHERE runtime_id = ? AND operation_id = ?`,
       admittedAt,
-      this.#driverId,
+      this.#runtimeId,
       operationId
     );
     return this.get<Input>(operationId);
   }
 
-  recordAttempt(
+  recordAttempt<Input = unknown>(
     operationId: string,
     attempts: number,
     failure: { readonly name: string; readonly message: string } | null
-  ): HarnessDriverSubmission | undefined {
+  ): DriverSubmission<Input> | undefined {
     this.ensureTable();
     this.#storage.sql.exec(
-      `UPDATE cf_agents_harness_submissions
+      `UPDATE cf_agents_driver_submissions
        SET attempts = ?, failure_json = ?
-       WHERE driver_id = ? AND operation_id = ?`,
+       WHERE runtime_id = ? AND operation_id = ?`,
       attempts,
       failure === null ? null : JSON.stringify(failure),
-      this.#driverId,
+      this.#runtimeId,
       operationId
     );
-    return this.get(operationId);
+    return this.get<Input>(operationId);
   }
 
   resetAttempts(operationId: string): void {
     this.ensureTable();
     this.#storage.sql.exec(
-      `UPDATE cf_agents_harness_submissions
+      `UPDATE cf_agents_driver_submissions
        SET attempts = 0
-       WHERE driver_id = ? AND operation_id = ? AND failure_json IS NULL`,
-      this.#driverId,
+       WHERE runtime_id = ? AND operation_id = ? AND failure_json IS NULL`,
+      this.#runtimeId,
       operationId
     );
   }
 
   requestCancellation<Input = unknown>(
     operationId: string
-  ): HarnessDriverSubmission<Input> | undefined {
+  ): DriverSubmission<Input> | undefined {
     this.ensureTable();
     this.#storage.sql.exec(
-      `UPDATE cf_agents_harness_submissions
+      `UPDATE cf_agents_driver_submissions
        SET cancel_requested = 1
-       WHERE driver_id = ? AND operation_id = ?`,
-      this.#driverId,
+       WHERE runtime_id = ? AND operation_id = ?`,
+      this.#runtimeId,
       operationId
     );
     return this.get<Input>(operationId);
@@ -295,9 +267,9 @@ export class HarnessDriverStore {
     this.ensureTable();
     return (
       this.#storage.sql.exec(
-        `DELETE FROM cf_agents_harness_submissions
-         WHERE driver_id = ? AND operation_id = ?`,
-        this.#driverId,
+        `DELETE FROM cf_agents_driver_submissions
+         WHERE runtime_id = ? AND operation_id = ?`,
+        this.#runtimeId,
         operationId
       ).rowsWritten > 0
     );

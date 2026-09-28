@@ -50,7 +50,7 @@ function decodeRun<Input, Result>(
 }
 
 export function durableToolRunId(owner: DurableToolOwner): string {
-  return [owner.driverId, owner.scope, owner.operationId, owner.toolCallId]
+  return [owner.runtimeId, owner.scope, owner.operationId, owner.toolCallId]
     .map((value) => `${value.length}:${value}`)
     .join(":");
 }

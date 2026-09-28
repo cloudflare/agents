@@ -12,7 +12,7 @@ type Input = { value: number };
 type Result = { value: number };
 
 const foreground: DurableToolOwner = {
-  driverId: "pi",
+  runtimeId: "pi",
   scope: "main",
   operationId: "operation",
   toolCallId: "tool-call",

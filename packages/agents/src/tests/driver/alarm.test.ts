@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
-describe("HarnessDriver alarm", () => {
+describe("Driver alarm", () => {
   it("drives a submitted operation to native settlement", async () => {
     const stub = env.DriverHarnessObject.getByName(crypto.randomUUID());
 

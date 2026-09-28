@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { HarnessDriver, type HarnessDriverRuntime } from "../../driver";
+import { Driver, type DriverRuntime } from "../../driver";
 import { Lifecycle } from "../../lifecycle";
 
 type DriverInput = { text: string };
@@ -14,7 +14,7 @@ export class DriverHarnessObject extends DurableObject<Cloudflare.Env> {
   #releaseGate: (() => void) | undefined;
   #started = new Set<string>();
 
-  readonly runtime: HarnessDriverRuntime<DriverInput, DriverResult> = {
+  readonly runtime: DriverRuntime<DriverInput, DriverResult> = {
     inspect: async (_scope, operationId) => {
       const state = await this.ctx.storage.get<RuntimeState>(
         `runtime:${operationId}`
@@ -45,9 +45,8 @@ export class DriverHarnessObject extends DurableObject<Cloudflare.Env> {
     }
   };
 
-  readonly driver = new HarnessDriver({
-    id: "test",
-    runtime: this.runtime,
+  readonly driver = new Driver();
+  readonly #handle = this.driver.register("test", this.runtime, {
     settle: async (submission, result) => {
       await this.ctx.storage.put(`settled:${submission.operationId}`, result);
     }
@@ -56,7 +55,7 @@ export class DriverHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly lifecycle = Lifecycle.install(this).use(this.driver);
 
   submit(scope: string, operationId: string, text: string) {
-    return this.driver.submit(scope, { text }, { operationId });
+    return this.#handle.submit(scope, { text }, { operationId });
   }
 
   settled(operationId: string) {
@@ -68,7 +67,7 @@ export class DriverHarnessObject extends DurableObject<Cloudflare.Env> {
   }
 
   pending(scope?: string) {
-    return this.driver.pending(scope);
+    return this.#handle.pending(scope);
   }
 
   enableGate() {

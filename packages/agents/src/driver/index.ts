@@ -1,17 +1,18 @@
-export { HarnessDriver } from "./driver";
+export { Driver } from "./driver";
 export { DurableToolRuns, durableToolRunId } from "./tools";
 export type {
-  HarnessDriverCancellation,
-  HarnessDriverDriveResult,
-  HarnessDriverError,
-  HarnessDriverEnqueueResult,
-  HarnessDriverInspection,
-  HarnessDriverOptions,
-  HarnessDriverReceipt,
-  HarnessDriverRuntime,
-  HarnessDriverSubmission,
-  HarnessDriverSubmissionStatus,
-  HarnessDriverSubmitOptions
+  DriverCancellation,
+  DriverDriveResult,
+  DriverEnqueueResult,
+  DriverError,
+  DriverHandle,
+  DriverInspection,
+  DriverReceipt,
+  DriverRegistrationOptions,
+  DriverRuntime,
+  DriverSubmission,
+  DriverSubmissionStatus,
+  DriverSubmitOptions
 } from "./types";
 export type {
   DurableToolError,

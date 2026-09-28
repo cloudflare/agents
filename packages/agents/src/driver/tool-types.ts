@@ -1,5 +1,5 @@
 export type DurableToolOwner = {
-  readonly driverId: string;
+  readonly runtimeId: string;
   readonly scope: string;
   readonly operationId: string;
   readonly toolCallId: string;

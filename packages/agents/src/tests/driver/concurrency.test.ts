@@ -16,7 +16,7 @@ async function waitForStarted(
   }
 }
 
-describe("HarnessDriver concurrency", () => {
+describe("Driver concurrency", () => {
   it("starts independent scopes without waiting for either drive to settle", async () => {
     const stub = env.DriverHarnessObject.getByName(crypto.randomUUID());
     await stub.enableGate();
