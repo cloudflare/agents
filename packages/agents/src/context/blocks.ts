@@ -7,6 +7,8 @@
  * - Updated via setBlock() which writes to the provider immediately
  *   but does NOT update the frozen snapshot (preserves LLM prefix cache)
  * - Re-snapshotted on next toSystemPrompt() call
+ * - Reported by reminder(), when declared `whenChanged: "remind"`, while
+ *   their current value differs from the frozen snapshot
  *
  * Provider type determines behavior:
  * - ContextProvider (get only)        → readonly block in system prompt
@@ -44,6 +46,49 @@ function contextEntryKey(metadataTitle: string | undefined, content: string) {
 
   const slug = slugify(content) || "entry";
   return `${slug}-${stableHash(content)}`;
+}
+
+const SECTION_RULE = "═".repeat(46);
+
+const REMINDER_PREAMBLE =
+  "These context blocks changed after the system prompt was written. " +
+  "Their current values below replace the ones in the system prompt.";
+
+/**
+ * Empty readonly blocks are left out of the prompt. Writable and searchable
+ * blocks always render so the model knows which tools can address them.
+ */
+function rendersInPrompt(block: ContextBlock): boolean {
+  return !!block.content || block.writable || block.isSearchable;
+}
+
+function renderSection(block: ContextBlock): string {
+  let header = block.label.toUpperCase();
+  if (block.description) header += ` (${block.description})`;
+  if (block.maxTokens) {
+    const pct = Math.round((block.tokens / block.maxTokens) * 100);
+    header += ` [${pct}% — ${block.tokens}/${block.maxTokens} tokens]`;
+  }
+  if (block.isSearchable) header += " [searchable]";
+  else if (!block.writable) header += " [readonly]";
+  else header += " [writable]";
+  return `${SECTION_RULE}\n${header}\n${SECTION_RULE}\n${block.content}`;
+}
+
+/**
+ * Whether `prompt` renders `block` exactly as it stands now. Sections are
+ * joined by a blank line and each opens with a rule, so padding the prompt
+ * with a blank line in front and a rule behind lets one containment test
+ * pin both ends of a section: content that only grew or shrank at the
+ * edges does not pass for unchanged.
+ */
+function promptRendersBlock(prompt: string, block: ContextBlock): boolean {
+  const padded = `\n\n${prompt}\n\n${SECTION_RULE}\n`;
+  if (rendersInPrompt(block)) {
+    return padded.includes(`\n\n${renderSection(block)}\n\n${SECTION_RULE}\n`);
+  }
+  const opening = `\n\n${SECTION_RULE}\n${block.label.toUpperCase()}`;
+  return !padded.includes(`${opening} (`) && !padded.includes(`${opening} [`);
 }
 
 /**
@@ -94,6 +139,21 @@ export interface ContextConfig {
    *  - SearchProvider (get+search+set?) → searchable via search_context
    *  If omitted, auto-wired to writable SQLite when using builder. */
   provider?: ContextProvider | WritableContextProvider | SearchProvider;
+  /**
+   * What the model sees when this block's value moves on after the system
+   * prompt was frozen.
+   *
+   * - `"wait"` (default): nothing, until `refreshSystemPrompt()` rebuilds
+   *   the prompt.
+   * - `"remind"`: `reminder()` re-reads the block and, while it differs from
+   *   the frozen prompt, returns its current value for the host to send
+   *   after the cached prefix. The frozen prompt, and the provider's prefix
+   *   cache, stay intact until `refreshSystemPrompt()` promotes the value.
+   *
+   * A change is any difference in what the provider returns, so return only
+   * what should count: a date rather than a timestamp.
+   */
+  whenChanged?: "wait" | "remind";
 }
 
 /**
@@ -161,8 +221,12 @@ export class ContextBlocks {
 
   /** Initialize a block's provider and read its current content. */
   private async loadBlock(config: ContextConfig): Promise<ContextBlock> {
+    config.provider?.init?.(config.label);
+    return this.readBlock(config);
+  }
+
+  private async readBlock(config: ContextConfig): Promise<ContextBlock> {
     const provider = config.provider;
-    provider?.init?.(config.label);
     const content = provider ? ((await provider.get()) ?? "") : "";
     const searchable = isSearchProvider(provider);
     return {
@@ -336,28 +400,10 @@ export class ContextBlocks {
   }
 
   private renderPrompt(): string {
-    const parts: string[] = [];
-    const sep = "═".repeat(46);
-
-    for (const block of this.blocks.values()) {
-      // Skip empty readonly blocks — writable and searchable blocks always
-      // render so the LLM knows which tools can address them.
-      if (!block.content && !block.writable && !block.isSearchable) continue;
-
-      let header = block.label.toUpperCase();
-      if (block.description) header += ` (${block.description})`;
-      if (block.maxTokens) {
-        const pct = Math.round((block.tokens / block.maxTokens) * 100);
-        header += ` [${pct}% — ${block.tokens}/${block.maxTokens} tokens]`;
-      }
-      if (block.isSearchable) header += " [searchable]";
-      else if (!block.writable) header += " [readonly]";
-      else header += " [writable]";
-
-      parts.push(`${sep}\n${header}\n${sep}\n${block.content}`);
-    }
-
-    return parts.join("\n\n");
+    return Array.from(this.blocks.values())
+      .filter(rendersInPrompt)
+      .map(renderSection)
+      .join("\n\n");
   }
 
   // ── Public API ──────────────────────────────────────────────────
@@ -391,6 +437,37 @@ export class ContextBlocks {
     this.snapshot = this.renderPrompt();
     await this.promptStore?.set(this.snapshot);
     return this.snapshot;
+  }
+
+  /**
+   * Current values of the `whenChanged: "remind"` blocks that no longer
+   * match the frozen prompt, rendered for the host to send after the cached
+   * prefix: at the end of the conversation, not in the system prompt. `null`
+   * when nothing has changed or nothing is frozen yet.
+   *
+   * Each call re-reads those blocks from their providers. The comparison is
+   * against the frozen prompt itself, so it holds across restarts, and a
+   * reminder keeps appearing on every call until `refreshSystemPrompt()`
+   * folds the value in.
+   */
+  async reminder(): Promise<string | null> {
+    if (!this.loaded) await this.load();
+    const frozen = this.promptStore
+      ? ((await this.promptStore.get()) ?? this.snapshot)
+      : this.snapshot;
+    if (frozen === null) return null;
+
+    const sections: string[] = [];
+    for (const config of this.configs) {
+      if (config.whenChanged !== "remind") continue;
+      const block = await this.readBlock(config);
+      this.blocks.set(config.label, block);
+      if (!promptRendersBlock(frozen, block)) {
+        sections.push(renderSection(block));
+      }
+    }
+    if (sections.length === 0) return null;
+    return [REMINDER_PREAMBLE, ...sections].join("\n\n");
   }
 
   /**

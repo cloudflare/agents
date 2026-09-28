@@ -31,6 +31,38 @@ describe("prompt-cache prefix stability (#2200)", () => {
     expect(prefixBreaks(report)).toEqual([]);
   });
 
+  it("sends a changed remind block after the prefix until a refresh promotes it (#2089)", async () => {
+    const report = await measure("prefix-context-reminder", {
+      turns: 6,
+      environmentByTurn: [
+        "Today is 2026-09-28.",
+        "Today is 2026-09-28.",
+        "Today is 2026-09-29."
+      ],
+      refreshSystemPromptAtTurns: [0, 4]
+    });
+    const [first] = report;
+    expect(first.system).toContain("Today is 2026-09-28.");
+    expect(report.map((turn) => turn.reminded)).toEqual([
+      false,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]);
+    expect(report.slice(0, 4).map((turn) => turn.system)).toEqual(
+      Array(4).fill(first.system)
+    );
+    expect(report[4].system).toContain("Today is 2026-09-29.");
+    // A standing reminder moves to each new user message, so only the
+    // previous user message falls out of the cache, never the system prompt.
+    expect(report[2].firstChangedMessage).toBeNull();
+    expect(report[3].firstChangedMessage).toBe(report[2].messages - 1);
+    expect(report[4].firstChangedMessage).toBe(0);
+    expect(report[5].firstChangedMessage).toBeNull();
+  });
+
   it("rewrites truncated tool outputs once per step, not every turn", async () => {
     const report = await measure("prefix-tool-output", {
       turns: 16,

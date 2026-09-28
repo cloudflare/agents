@@ -96,6 +96,31 @@ const system = await context.freezeSystemPrompt();
 
 `refreshSystemPrompt()` reloads every provider, re-renders, and overwrites the stored prompt.
 
+### Reminders for changing blocks
+
+Some blocks go stale while the prompt is frozen: the current date, workspace state, project instructions. Refreshing the prompt keeps them current but throws away the cached prefix. Mark such a block `whenChanged: "remind"` to keep both:
+
+```ts
+const context = new ContextBlocks([
+  {
+    label: "environment",
+    provider: {
+      get: async () => `Today is ${new Date().toISOString().slice(0, 10)}.`
+    },
+    whenChanged: "remind"
+  }
+]);
+
+const system = await context.freezeSystemPrompt();
+const reminder = await context.reminder(); // null until the date changes
+```
+
+`reminder()` re-reads each such block and, for every one whose current rendering no longer appears in the frozen prompt, returns its current value under a short note saying it replaces the prompt's copy. Send that text after the cached prefix, for example at the end of the latest user message, and do not persist it. The frozen prompt does not change, and the reminder keeps coming back on every call until `refreshSystemPrompt()` promotes the value into the prompt. That refresh is the one deliberate cache bust.
+
+The comparison is against the stored prompt, not against in-memory state, so a reminder survives a restart. Any difference in what the provider returns counts as a change, so return only what should count: a date rather than a timestamp.
+
+A standing reminder still costs a little cache: it moves to each new user message, so the previous user message falls out of the cached prefix. The system prompt and everything before that message stay cached.
+
 ## Tools
 
 `tools()` returns an AI SDK `ToolSet` wired from what the blocks can do:
@@ -125,6 +150,8 @@ class MyAgent extends Think<Env> {
 A block declared without a provider is auto-wired to durable per-agent SQLite. The frozen system prompt is always persisted, in `_system_prompt`, so there is nothing to opt into.
 
 The assembled blocks are available as `this.context` after `onStart()`.
+
+Think sends reminders itself. Each turn it calls `reminder()` and adds the result to the last user message of the model request (`TurnContext.messages` in `beforeTurn` already includes it). Nothing is written to the transcript. Think refreshes the prompt after a compaction, which promotes any pending values.
 
 ## Related
 

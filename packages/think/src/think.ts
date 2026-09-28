@@ -1460,6 +1460,36 @@ function ensureValidContinueCheckpoint(
   return [...messages, { role: "user", content: CONTINUE_CHECKPOINT_PROMPT }];
 }
 
+/**
+ * Carry a context reminder (`ContextBlocks.reminder()`) after the cached
+ * prefix without persisting it. It joins the final user message when there is
+ * one, since not every provider accepts two user messages in a row. A request
+ * ending in a partial assistant message keeps that message last, so the
+ * continue checkpoint still follows it.
+ */
+function withContextReminder(
+  messages: ModelMessage[],
+  reminder: string | null
+): ModelMessage[] {
+  if (!reminder || messages.length === 0) return messages;
+  const part = { type: "text" as const, text: reminder };
+  const lastIndex = messages.length - 1;
+  const last = messages[lastIndex];
+  if (last.role === "user") {
+    const content =
+      typeof last.content === "string"
+        ? [{ type: "text" as const, text: last.content }, part]
+        : [...last.content, part];
+    return [...messages.slice(0, lastIndex), { ...last, content }];
+  }
+  const at = last.role === "assistant" ? lastIndex : messages.length;
+  return [
+    ...messages.slice(0, at),
+    { role: "user", content: [part] },
+    ...messages.slice(at)
+  ];
+}
+
 // (The terminal-record key and the recovering-flag key now live in agents/chat;
 // the durable terminal/recovering records are driven via the shared
 // `recordChatTerminal` / `clearChatTerminal` / `pendingChatTerminal` /
@@ -2724,7 +2754,11 @@ export interface TurnInput {
 export interface TurnContext {
   /** Assembled system prompt (from context blocks or getSystemPrompt fallback). */
   system: string;
-  /** Assembled model messages (truncated, pruned). */
+  /**
+   * Assembled model messages (truncated, pruned). When a `whenChanged:
+   * "remind"` context block has changed since the prompt froze, its current
+   * value rides at the end, inside the last user message when there is one.
+   */
   messages: ModelMessage[];
   /** Merged tool set (workspace + getTools + session + MCP + client + caller). */
   tools: ToolSet;
@@ -6234,6 +6268,8 @@ export class Think<
    * are serialized, so a single value is safe.
    */
   private _turnModelMessageBaseline = 0;
+  /** The context reminder the current turn was assembled with. */
+  private _turnContextReminder: string | null = null;
 
   /**
    * The assembled tool set for the current turn, captured in
@@ -7082,7 +7118,12 @@ export class Think<
 
       // Rebuild the compacted head, then splice this turn's in-flight steps
       // (which are not yet persisted to the session) back onto the tail.
-      const head = await this._assembleModelMessages(this._activeTurnTools);
+      // The compaction refreshed the stored prompt, but this request keeps
+      // the system prompt it started with, so it still needs the reminder.
+      const head = withContextReminder(
+        await this._assembleModelMessages(this._activeTurnTools),
+        this._turnContextReminder
+      );
       const tail = event.messages.slice(this._turnModelMessageBaseline);
       const merged = [...head, ...tail];
       // Re-baseline so a second guard fire this turn keeps the new tail. This
@@ -7372,7 +7413,11 @@ export class Think<
       : rawBaseSystem;
     const system = this._systemPromptForTurn(baseSystem, tools);
 
-    const messages = await this._assembleModelMessages(tools);
+    this._turnContextReminder = await this.context.reminder();
+    const messages = withContextReminder(
+      await this._assembleModelMessages(tools),
+      this._turnContextReminder
+    );
 
     if (messages.length === 0) {
       throw new Error(
