@@ -1,0 +1,25 @@
+packages/agents/src/index.ts
+  s_efd49820c22d67::t_93868d1a22d0da 4770-4784
+.changeset/facet-host-jobs.md
+  s_efd49820c22d67::t_5c518ded5dd749 1-5
+packages/agents/src/tests/agents/sub-agent.ts
+  s_efd49820c22d67::t_0aac3a0b5b3ffc 71-73,524-535,2032-2048
+packages/agents/src/tests/sub-agent.test.ts
+  s_efd49820c22d67::t_b9e31725c99dd6 1164-1207
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ef729c6053647c38a736f16863fab85b6e0eaa0a",
+  "prompts": {},
+  "sessions": {
+    "s_efd49820c22d67": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "50161273-add8-4cb8-9ec3-a4d330172115",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
