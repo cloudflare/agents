@@ -606,6 +606,13 @@ import {
 import { createWorkspaceTools } from "./tools/workspace";
 import { createFetchTools } from "./tools/fetch";
 import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
+import {
+  activeDeferredTools,
+  createDiscoverTool,
+  deferredCatalog,
+  DISCOVER_TOOLS_TOOL_NAME
+} from "./tool-discovery";
+import type { ToolDiscovery } from "./tool-discovery";
 import { truncatePausedExecutionOutput } from "./tools/execute";
 import { ExtensionManager, sanitizeName } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
@@ -1516,6 +1523,7 @@ export interface OnStartDegradation {
 }
 
 export type { MediaEvictionConfig } from "./media-eviction";
+export type { DeferredTool, ToolDiscovery } from "./tool-discovery";
 
 /**
  * Callback interface for streaming chat events from a Think sub-agent.
@@ -3778,6 +3786,29 @@ export class Think<
    */
   fetchTools: false | Omit<CreateFetchToolsOptions, "workspace" | "onEvent"> =
     false;
+
+  /**
+   * Opt-in deferred tool discovery. Tools selected by `defer` stay out of the
+   * model request; a `discover_tools` tool lets the model find them by
+   * keyword or name, and each tool it finds is sent, and callable, from the
+   * next step on. Discovered tools run through the same hooks as any other
+   * tool: validation, `beforeToolCall`, approvals, and action authorization.
+   *
+   * Only tools the turn already exposes are discoverable: `activeTools` from
+   * `beforeTurn` and channel tool filters narrow the catalog, and actions
+   * whose static permissions `authorizeTurn` did not grant are left out.
+   *
+   * A tool stays active for the rest of the conversation. That is derived
+   * from the transcript (a discovery result naming it, or a call to it), so
+   * resumed and recovered turns rebuild the same tool set. Each activation
+   * changes the request's tool list once, which a provider's prompt cache
+   * sees as a new prefix.
+   *
+   * ```ts
+   * toolDiscovery = { defer: (name) => name.startsWith("crm_") };
+   * ```
+   */
+  toolDiscovery: false | ToolDiscovery = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     snapshotDeclaredMembers(new.target.prototype);
@@ -6278,6 +6309,8 @@ export class Think<
    */
   private _activeTurnTools: ToolSet = {};
   private _activeTurnActionMetadata = new Map<string, CompiledActionMetadata>();
+  /** Static permissions of every action this turn, keyed by tool name. */
+  private _activeTurnActionPermissions = new Map<string, string[]>();
   private _activeTurnAuthorization: NormalizedActionAuthorization = {
     allowed: true
   };
@@ -7510,6 +7543,12 @@ export class Think<
         execute: async () => "Final answer recorded."
       });
     }
+    const discoveryActiveTools = this._prepareToolDiscovery(
+      mergedTools,
+      finalTools,
+      config.activeTools ?? Object.keys(mergedTools),
+      structuredOutputSchema ? [finalAnswerToolName] : []
+    );
 
     // Baseline for the proactive context guard: everything the AI SDK appends
     // to the model-message list after the assembled turn messages belongs to
@@ -7588,8 +7627,9 @@ export class Think<
       // Keep the synthetic final-answer tool callable even when a caller
       // restricts `activeTools` — otherwise a structured turn could never call
       // it and would fail to produce output.
-      activeTools:
-        wantsStructuredOutput && config.activeTools
+      activeTools: discoveryActiveTools
+        ? discoveryActiveTools(finalMessages)
+        : wantsStructuredOutput && config.activeTools
           ? [...config.activeTools, finalAnswerToolName]
           : config.activeTools,
       toolChoice: finalToolChoice,
@@ -7650,10 +7690,23 @@ export class Think<
         // Only apply the guard's recompacted messages when the subclass didn't
         // set its own `messages` override for this step.
         const baseMessages = (base as { messages?: unknown }).messages;
-        const withMessages =
+        const withGuard =
           guarded && baseMessages === undefined
             ? { ...base, messages: guarded }
             : base;
+        // Tools discovered in an earlier step join this one, unless the
+        // subclass chose this step's tools itself.
+        const withMessages =
+          discoveryActiveTools &&
+          (withGuard as { activeTools?: unknown }).activeTools === undefined
+            ? {
+                ...withGuard,
+                activeTools: discoveryActiveTools(
+                  (withGuard as { messages?: ModelMessage[] }).messages ??
+                    event.messages
+                )
+              }
+            : withGuard;
         // Safety net for structured workflow turns: on the final permitted step,
         // force the model to call `final_answer` so the turn always terminates
         // with a schema-shaped result instead of running out of steps. Respect a
@@ -7962,10 +8015,59 @@ export class Think<
     };
   }
 
+  /**
+   * Add this turn's discovery tool when `toolDiscovery` defers any tool in
+   * `visible`, and return the resolver for each step's `activeTools`.
+   */
+  private _prepareToolDiscovery(
+    tools: ToolSet,
+    finalTools: ToolSet,
+    visible: readonly string[],
+    alwaysActive: readonly string[]
+  ): ((messages: readonly ModelMessage[]) => string[]) | undefined {
+    const discovery = this.toolDiscovery;
+    if (!discovery) return undefined;
+    const authorization = this._activeTurnAuthorization;
+    const granted =
+      authorization.grantedPermissions &&
+      new Set(authorization.grantedPermissions);
+    const selected = deferredCatalog(tools, visible, discovery);
+    if (selected.length === 0) return undefined;
+    const deferred = new Set(selected.map((entry) => entry.name));
+    const eager = visible.filter((name) => !deferred.has(name));
+    // A deferred tool the turn may not run stays hidden, not eager.
+    const catalog = selected.filter(({ name }) => {
+      const required = this._activeTurnActionPermissions.get(name);
+      if (required === undefined) return true;
+      if (!authorization.allowed) return false;
+      return !granted || required.every((p) => granted.has(p));
+    });
+    if (catalog.length === 0) return () => [...eager, ...alwaysActive];
+
+    let discoverName = DISCOVER_TOOLS_TOOL_NAME;
+    for (let suffix = 1; discoverName in finalTools; suffix++) {
+      discoverName = `${DISCOVER_TOOLS_TOOL_NAME}_${suffix}`;
+    }
+    finalTools[discoverName] = createDiscoverTool(catalog, discovery);
+    const fromTranscript = activeDeferredTools(
+      { transcript: this.messages },
+      discoverName,
+      catalog
+    );
+    return (messages) => [
+      ...eager,
+      ...fromTranscript,
+      ...activeDeferredTools({ messages }, discoverName, catalog),
+      discoverName,
+      ...alwaysActive
+    ];
+  }
+
   private async _compileActionTools(): Promise<ToolSet> {
     const actions = await this.getActions();
     const tools: ToolSet = {};
     this._activeTurnActionMetadata = new Map();
+    this._activeTurnActionPermissions = new Map();
     this._activeTurnActionApprovalDescriptors = new Map();
     for (const [registrationName, descriptor] of Object.entries(actions)) {
       if (!isAction(descriptor)) {
@@ -7977,10 +8079,11 @@ export class Think<
       const kind =
         descriptor.config.kind ??
         (descriptor.config.approval ? "approval-gated" : "server");
+      const staticPermissions = Array.isArray(descriptor.config.permissions)
+        ? [...descriptor.config.permissions]
+        : undefined;
+      this._activeTurnActionPermissions.set(toolName, staticPermissions ?? []);
       if (kind === "approval-gated" || kind === "durable-pause") {
-        const staticPermissions = Array.isArray(descriptor.config.permissions)
-          ? [...descriptor.config.permissions]
-          : undefined;
         this._activeTurnActionMetadata.set(toolName, {
           actionName: toolName,
           summary:

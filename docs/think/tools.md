@@ -180,6 +180,40 @@ beforeTurn(ctx: TurnContext) {
 
 `activeTools` limits which tools the model can call. `tools` adds extra tools for this turn only (merged on top of existing tools).
 
+### Deferred Tool Discovery
+
+Every tool's full input schema is sent with every model request. With many tools, most of those schemas are never used. Set `toolDiscovery` to keep some of them out of the request until the model asks for them:
+
+```typescript
+export class MyAgent extends Think<Env> {
+  toolDiscovery = {
+    defer: (name: string) => name.startsWith("crm_") || name.startsWith("tool_")
+  };
+}
+```
+
+`defer` is a list of tool names or a predicate over every tool in the turn: your own tools, actions, MCP tools, client tools, and the built-in ones. Deferred tools are left out of the request, and Think adds a `discover_tools` tool whose description lists their names. The model calls it with keywords or exact names, and every tool it finds is sent, and callable, from the next step on. A deferred tool the model calls without discovering it first fails as an unknown tool and does not run.
+
+Discovered tools run through the normal lifecycle: input validation, `beforeToolCall` and `afterToolCall`, approvals, and action authorization. Discovery never widens what a turn may do:
+
+- Only tools the turn already exposes are discoverable. `activeTools` from `beforeTurn` and channel tool filters narrow the catalog.
+- An action whose static `permissions` were not granted by `authorizeTurn` is left out of the catalog, and it is not sent eagerly either. Every call is still authorized when it runs.
+- Names that a custom `search` returns are only honored if they are in the catalog.
+
+The default search returns exact tool names from the query, then up to `maxResults` (default 5) tools ranked by how many query words appear in their names and descriptions. Supply `search` to rank with your own index, and set `listCatalog: false` when the catalog is large enough that listing its names is itself a cost:
+
+```typescript
+toolDiscovery = {
+  defer: (name: string) => name.startsWith("crm_"),
+  listCatalog: false,
+  search: async (query, catalog) => this.rankTools(query, catalog)
+};
+```
+
+A tool stays active for the rest of the conversation. Think derives that from the transcript: a discovery result that names the tool, or a call to it. Resumed and recovered turns, approval continuations, and later turns therefore rebuild the same tool set without extra state. A tool falls out again only once compaction removes that evidence. A step that returns its own `activeTools` from `beforeStep` replaces this selection for that step.
+
+Each activation changes the list of tools in the request, and providers cache tools as part of the prompt prefix, so the step after a discovery reads less from the cache. Because activations persist, that happens once per discovered tool, not every turn.
+
 ## MCP Tools
 
 Think inherits MCP client support from the `Agent` base class. By default, tools from connected MCP servers are converted to AI SDK tools and merged into every turn.

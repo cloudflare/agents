@@ -204,6 +204,10 @@
         "name": "ThinkPromptCacheTestAgent"
       },
       {
+        "class_name": "ThinkToolDiscoveryAgent",
+        "name": "ThinkToolDiscoveryAgent"
+      },
+      {
         "class_name": "ThinkMediaEvictionAutoAgent",
         "name": "ThinkMediaEvictionAutoAgent"
       },
@@ -285,6 +289,7 @@
         "ThinkWindowedHydrationAgent",
         "ThinkMediaEvictionAgent",
         "ThinkPromptCacheTestAgent",
+        "ThinkToolDiscoveryAgent",
         "ThinkMediaEvictionAutoAgent",
         "ThinkPointerHydrationAgent",
         "ThinkLegacySessionApiAgent",
