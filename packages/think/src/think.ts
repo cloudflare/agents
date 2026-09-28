@@ -4791,6 +4791,7 @@ export class Think<
         forwarders: this._agentToolForwarders,
         liveSequences: this._agentToolLiveSequences,
         lastErrors: this._agentToolLastErrors,
+        onError: (runId, body) => this._recordAgentToolStreamError(runId, body),
         responseType: MSG_CHAT_RESPONSE,
         runForRequest: (requestId) => this._agentToolRunForRequest(requestId),
         terminalOnlyRuns: this._agentToolTerminalOnlyRuns
@@ -4803,6 +4804,23 @@ export class Think<
       }
     }
     super.broadcast(msg, without);
+  }
+
+  /**
+   * Durably record a run's stream error on its still-open child-run row, so a
+   * stale-row reconcile after an eviction (before the finalizer seals `error`)
+   * still sees the failure. Leaves `status` to the finalizer / reconcile.
+   */
+  private _recordAgentToolStreamError(runId: string, body: string): void {
+    try {
+      this.sql`
+        UPDATE cf_agent_tool_child_runs
+        SET error_message = ${body}
+        WHERE run_id = ${runId} AND completed_at IS NULL
+      `;
+    } catch {
+      // Best-effort: broadcast must never throw; the in-memory capture remains.
+    }
   }
 
   /**
@@ -9572,7 +9590,11 @@ export class Think<
       streamId: row.stream_id ?? undefined,
       output: storedOutput,
       summary: row.summary ?? undefined,
-      error: row.error_message ?? undefined,
+      // An open row may carry a recorded stream error that isn't terminal yet.
+      error:
+        row.completed_at === null
+          ? undefined
+          : (row.error_message ?? undefined),
       startedAt: row.started_at,
       completedAt: row.completed_at ?? undefined,
       ...(() => {
@@ -10074,6 +10096,21 @@ export class Think<
   private async _reconcileStaleAgentToolChildRun(runId: string): Promise<void> {
     const recovery = await this._classifyAgentToolChildRecovery();
     if (recovery === "in-progress" || this._resumableStream.hasActiveStream()) {
+      return;
+    }
+    // A stream error recorded on the open row means the turn failed even if it
+    // persisted an assistant reply — matching the live finalizer, which fails a
+    // run whenever a stream error was captured.
+    const recordedError = this._readAgentToolChildRun(runId)?.error_message;
+    if (recordedError != null) {
+      this.sql`
+        UPDATE cf_agent_tool_child_runs
+        SET status = 'error',
+            error_message = ${recordedError},
+            completed_at = ${Date.now()}
+        WHERE run_id = ${runId} AND completed_at IS NULL
+      `;
+      this._finalizeAgentToolChildRunTailers(runId);
       return;
     }
     // A settled recovery that produced an assistant turn is `completed`, even if

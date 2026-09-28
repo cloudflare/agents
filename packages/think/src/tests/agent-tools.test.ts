@@ -54,6 +54,11 @@ type ThinkAgentToolTestStub = {
     reported: string | undefined;
     stored: string | undefined;
   }>;
+  reconcileEvictedErroredRunForTest(): Promise<{
+    before: string | null;
+    assistantText: string;
+    inspection: AgentToolInspection;
+  }>;
   coldCounterReattachForTest(afterSequence: number): Promise<{
     liveSequenceAfterDrain: number | undefined;
     postRestart: { sequence: number; body: string } | null;
@@ -780,6 +785,21 @@ describe("Think agent tools", () => {
     expect(await agent.inspectStaleRunReadOnlyForTest()).toEqual({
       reported: "running",
       stored: "running"
+    });
+  });
+
+  it("reconciles a child evicted after a stream error as error, not completed", async () => {
+    // The turn broadcast an error chunk and persisted an assistant reply, but
+    // the child was evicted before the finalizer sealed the row `error`.
+    const agent = await freshAgent();
+    const { before, assistantText, inspection } =
+      await agent.reconcileEvictedErroredRunForTest();
+
+    expect(before).toBe("running");
+    expect(assistantText).toContain("Sorry, something went wrong.");
+    expect(inspection).toMatchObject({
+      status: "error",
+      error: "model exploded"
     });
   });
 

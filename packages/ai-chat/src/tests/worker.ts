@@ -3890,6 +3890,8 @@ type AgentToolInput = {
   chunkDelayMs?: number;
   structured?: boolean;
   streamError?: string;
+  /** Text streamed (and persisted) before `streamError`'s error chunk. */
+  streamErrorText?: string;
 };
 
 const FACET_OOM_TEST_TASK_NAME = "__cf_test_facetRecoveryOom";
@@ -4092,7 +4094,16 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     await delayWithAbort(Number(input?.delayMs ?? 0), options?.abortSignal);
     if (input?.streamError) {
       return makeDelayedSSEChunkResponse(
-        [{ type: "error", errorText: input.streamError }],
+        [
+          ...(input.streamErrorText
+            ? [
+                { type: "text-start" },
+                { type: "text-delta", delta: input.streamErrorText },
+                { type: "text-end" }
+              ]
+            : []),
+          { type: "error", errorText: input.streamError }
+        ],
         Number(input?.chunkDelayMs ?? 0),
         options?.abortSignal
       );
@@ -4618,6 +4629,76 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       reported: inspection?.status,
       stored: this["_getAgentToolRunRow"](runId)?.status
     };
+  }
+
+  private _finalizeGateForTest: {
+    reached: () => void;
+    released: Promise<void>;
+  } | null = null;
+
+  override async saveMessages(
+    ...args: Parameters<AIChatAgent<Env>["saveMessages"]>
+  ): Promise<SaveMessagesResult> {
+    const result = await super.saveMessages(...args);
+    const gate = this._finalizeGateForTest;
+    if (gate) {
+      this._finalizeGateForTest = null;
+      gate.reached();
+      await gate.released;
+    }
+    return result;
+  }
+
+  /**
+   * A child turn that streams error text, then an error chunk, and persists its
+   * assistant reply — but is "evicted" before `startAgentToolRun`'s finalizer
+   * seals the row `error`. Holds the finalizer at the point the turn returns,
+   * drops the run's in-memory state as an eviction would, then inspects
+   * (reconciling the stale `running` row).
+   */
+  async reconcileEvictedErroredRunForTest(): Promise<{
+    before: string | null;
+    assistantText: string;
+    inspection: AgentToolRunInspection | null;
+  }> {
+    const runId = crypto.randomUUID();
+    let reached!: () => void;
+    let release!: () => void;
+    const reachedGate = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    this._finalizeGateForTest = {
+      reached,
+      released: new Promise<void>((resolve) => {
+        release = resolve;
+      })
+    };
+    await this.startAgentToolRun(
+      {
+        prompt: "fail midway",
+        streamError: "model exploded",
+        streamErrorText: "Sorry, something went wrong."
+      },
+      { runId }
+    );
+    await reachedGate;
+    try {
+      this["_agentToolAbortControllers"].delete(runId);
+      this["_agentToolLastErrors"].delete(runId);
+      this["_agentToolLiveSequences"].delete(runId);
+      this["_agentToolPreTurnAssistantIds"].delete(runId);
+      this["_agentToolRunsByRequestId"].clear();
+      const before = this._readChildRunStatusForTest(runId);
+      const assistantText = this.messages
+        .filter((message) => message.role === "assistant")
+        .flatMap((message) => message.parts)
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("");
+      const inspection = await this.inspectAgentToolRun(runId);
+      return { before, assistantText, inspection };
+    } finally {
+      release();
+    }
   }
 
   /**
@@ -5255,6 +5336,18 @@ export class AIChatAgentToolParent extends Agent<Env> {
       crypto.randomUUID()
     );
     return child.inspectStaleRunReadOnlyForTest();
+  }
+
+  async reconcileEvictedErroredChildForTest(): Promise<{
+    before: string | null;
+    assistantText: string;
+    inspection: AgentToolRunInspection | null;
+  }> {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      crypto.randomUUID()
+    );
+    return child.reconcileEvictedErroredRunForTest();
   }
 
   async terminalOnlyChildAfterRecoveredTurnForTest(): Promise<{

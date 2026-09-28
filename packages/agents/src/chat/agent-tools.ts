@@ -503,6 +503,12 @@ export interface AgentToolBroadcastHooks {
   liveSequences: Map<string, number>;
   /** Per-run last error body, captured for replay to a late-attaching tailer. */
   lastErrors: Map<string, string>;
+  /**
+   * Called after a run's error body is captured, so the host can record it
+   * durably on the still-open run row (the in-memory {@link lastErrors} entry
+   * is lost if the DO is evicted before the run is finalized).
+   */
+  onError?: (runId: string, body: string) => void;
   /** The host's use-chat-response wire type (`CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE`). */
   responseType: string;
   /** Resolve the agent-tool run that owns a turn request id, or null. */
@@ -553,6 +559,7 @@ export function interceptAgentToolBroadcast(
         if (runId !== null) {
           if (parsed.error === true && typeof parsed.body === "string") {
             hooks.lastErrors.set(runId, parsed.body);
+            hooks.onError?.(runId, parsed.body);
           } else if (
             typeof parsed.body === "string" &&
             parsed.body.length > 0

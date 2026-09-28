@@ -959,6 +959,7 @@ export class AIChatAgent<
         forwarders: this._agentToolForwarders,
         liveSequences: this._agentToolLiveSequences,
         lastErrors: this._agentToolLastErrors,
+        onError: (runId, body) => this._recordAgentToolStreamError(runId, body),
         responseType: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
         runForRequest: (requestId) => this._agentToolRunForRequest(requestId),
         terminalOnlyRuns: this._agentToolTerminalOnlyRuns
@@ -971,6 +972,23 @@ export class AIChatAgent<
       }
     }
     super.broadcast(msg, without);
+  }
+
+  /**
+   * Durably record a run's stream error on its still-open row, so a stale-row
+   * reconcile after an eviction (before the finalizer seals `error`) still
+   * sees the failure. Leaves `status` to the finalizer / reconcile.
+   */
+  private _recordAgentToolStreamError(runId: string, body: string): void {
+    try {
+      this.sql`
+        update cf_ai_chat_agent_tool_runs
+        set error_message = ${body}
+        where run_id = ${runId} and status = 'running'
+      `;
+    } catch {
+      // Best-effort: broadcast must never throw; the in-memory capture remains.
+    }
   }
 
   /**
@@ -4239,6 +4257,22 @@ export class AIChatAgent<
   ): Promise<void> {
     const recovery = await this._classifyAgentToolChildRecovery();
     if (recovery === "in-progress" || this._resumableStream.hasActiveStream()) {
+      return;
+    }
+    // A stream error recorded on the open row means the turn failed even if it
+    // persisted an assistant reply — matching the live finalizer, which fails a
+    // run whenever a stream error was captured.
+    if (row.error_message !== null) {
+      const completedAt = Date.now();
+      this.sql`
+        update cf_ai_chat_agent_tool_runs
+        set status = 'error', error_message = ${row.error_message},
+            completed_at = ${completedAt}
+        where run_id = ${runId}
+      `;
+      row.status = "error";
+      row.completed_at = completedAt;
+      this._closeAgentToolTailers(runId);
       return;
     }
     const messagesAfterStart = this._getAgentToolMessagesAfterStart(runId);

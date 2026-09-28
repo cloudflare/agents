@@ -188,6 +188,11 @@ type ParentStub = DurableObjectStub & {
     reported: string | undefined;
     stored: string | undefined;
   }>;
+  reconcileEvictedErroredChildForTest(): Promise<{
+    before: string | null;
+    assistantText: string;
+    inspection: AgentToolRunInspection | null;
+  }>;
   cancelledTailerStarvationChildForTest(): Promise<{
     siblingBodyAfterCancel: string | null;
   }>;
@@ -661,6 +666,21 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(await parent.inspectStaleChildRunReadOnlyForTest()).toEqual({
       reported: "running",
       stored: "running"
+    });
+  });
+
+  it("reconciles a child evicted after a stream error as error, not completed", async () => {
+    // The turn broadcast an error chunk and persisted an assistant reply, but
+    // the child was evicted before the finalizer sealed the row `error`.
+    const parent = await getParent();
+    const { before, assistantText, inspection } =
+      await parent.reconcileEvictedErroredChildForTest();
+
+    expect(before).toBe("running");
+    expect(assistantText).toContain("Sorry, something went wrong.");
+    expect(inspection).toMatchObject({
+      status: "error",
+      error: "model exploded"
     });
   });
 
