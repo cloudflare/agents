@@ -287,13 +287,7 @@ export class WebSockets extends LifecycleCapability {
           ? this.#protocol(connection, ctx)
           : true;
       if (enabled) {
-        this.#connecting.add(connection);
-        try {
-          this.sendIdentity(connection);
-          this.sendState(connection);
-        } finally {
-          this.#connecting.delete(connection);
-        }
+        this.sendConnectFrames(connection);
       } else {
         setConnectionProtocolEnabled(connection, false);
       }
@@ -432,17 +426,52 @@ export class WebSockets extends LifecycleCapability {
   // `protocol: false` the host calls these at the moments it chooses.
 
   /**
-   * Send the identity frame, unless the connection is no-protocol. The
-   * defaults are the Durable Object's routed name and host class; a host
-   * whose public identity differs — an `Agent` facet, whose routed name
-   * is an internal encoding of its logical name — passes its own.
+   * Send the connect sequence: the identity frame, then the current state
+   * when one is stored. The identity carries `stateFollows` in that case,
+   * so clients resolve `ready` only once the state has landed. Nothing is
+   * sent to a no-protocol connection. Identity defaults as for
+   * `sendIdentity()`.
+   */
+  sendConnectFrames(
+    connection: Connection,
+    identity: { name: string; agent: string } = this.#defaultIdentity()
+  ): void {
+    if (!isConnectionProtocolEnabled(connection)) return;
+    this.#connecting.add(connection);
+    try {
+      const current = this.#state?.get();
+      // Serialized first: a flagged identity must never go out without
+      // the state frame the client will wait for.
+      const stateFrame =
+        current === undefined
+          ? undefined
+          : JSON.stringify({
+              type: MessageType.CF_AGENT_STATE,
+              state: current
+            });
+      this.#sendFrame(connection, {
+        type: MessageType.CF_AGENT_IDENTITY,
+        name: identity.name,
+        agent: identity.agent,
+        ...(stateFrame !== undefined && { stateFollows: true })
+      });
+      if (stateFrame !== undefined) this.#send(connection, stateFrame);
+    } finally {
+      this.#connecting.delete(connection);
+    }
+  }
+
+  /**
+   * Send the identity frame alone, unless the connection is no-protocol.
+   * Clients resolve `ready` on it, so a host that also pushes state on
+   * connect should use `sendConnectFrames()`. The defaults are the Durable
+   * Object's routed name and host class; a host whose public identity
+   * differs — an `Agent` facet, whose routed name is an internal encoding
+   * of its logical name — passes its own.
    */
   sendIdentity(
     connection: Connection,
-    identity: { name: string; agent: string } = {
-      name: this.lifecycle.name,
-      agent: camelCaseToKebabCase(this.lifecycle.className)
-    }
+    identity: { name: string; agent: string } = this.#defaultIdentity()
   ): void {
     if (!isConnectionProtocolEnabled(connection)) return;
     this.#sendFrame(connection, {
@@ -450,6 +479,13 @@ export class WebSockets extends LifecycleCapability {
       name: identity.name,
       agent: identity.agent
     });
+  }
+
+  #defaultIdentity(): { name: string; agent: string } {
+    return {
+      name: this.lifecycle.name,
+      agent: camelCaseToKebabCase(this.lifecycle.className)
+    };
   }
 
   /**

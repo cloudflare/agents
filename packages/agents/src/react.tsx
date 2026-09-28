@@ -729,6 +729,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     agent: string;
     name: string;
     identified: boolean;
+    state: State | undefined;
   } | null>(null);
 
   // Combine the sub-agent chain with the user-provided `path`.
@@ -800,6 +801,91 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       : null;
   connectionErrorRef.current = visibleConnectionError;
 
+  // Connect-sequence progress per socket: whether the state frame has
+  // landed, and an identity held back until it does.
+  const connectProgressRef = useRef(
+    new WeakMap<
+      PartySocket,
+      { stateSeen: boolean; pendingIdentity: [string, string] | null }
+    >()
+  );
+  const connectProgress = (socket: PartySocket | null) => {
+    if (!socket) return { stateSeen: false, pendingIdentity: null };
+    let progress = connectProgressRef.current.get(socket);
+    if (!progress) {
+      progress = { stateSeen: false, pendingIdentity: null };
+      connectProgressRef.current.set(socket, progress);
+    }
+    return progress;
+  };
+
+  const applyIdentity = (
+    newName: string,
+    newAgent: string,
+    identifiedSocket: PartySocket | null
+  ) => {
+    const oldName = previousIdentityRef.current.name;
+    const oldAgent = previousIdentityRef.current.agent;
+
+    const currentAgent = mutableAgentRef.current;
+    if (currentAgent) {
+      currentAgent.name = newName;
+      currentAgent.agent = newAgent;
+      currentAgent.identified = true;
+    }
+
+    // Update reactive state (triggers re-render)
+    const identifiedDestination = identifiedSocket
+      ? socketDestinationKey(identifiedSocket.partySocketOptions)
+      : null;
+    setIdentity({
+      name: newName,
+      agent: newAgent,
+      identified: true,
+      destination: identifiedDestination
+    });
+
+    // Resolve ready promise
+    if (identifiedDestination !== null) {
+      readyFor(identifiedDestination).resolve();
+    }
+
+    // Detect identity change on reconnect
+    if (
+      oldName !== null &&
+      oldAgent !== null &&
+      (oldName !== newName || oldAgent !== newAgent)
+    ) {
+      if (options.onIdentityChange) {
+        options.onIdentityChange(oldName, newName, oldAgent, newAgent);
+      } else {
+        const agentChanged = oldAgent !== newAgent;
+        const nameChanged = oldName !== newName;
+        let changeDescription = "";
+        if (agentChanged && nameChanged) {
+          changeDescription = `agent "${oldAgent}" → "${newAgent}", instance "${oldName}" → "${newName}"`;
+        } else if (agentChanged) {
+          changeDescription = `agent "${oldAgent}" → "${newAgent}"`;
+        } else {
+          changeDescription = `instance "${oldName}" → "${newName}"`;
+        }
+        console.warn(
+          `[agents] Identity changed on reconnect: ${changeDescription}. ` +
+            "This can happen with server-side routing (e.g., basePath with getAgentByName) " +
+            "where the instance is determined by auth/session. " +
+            "Provide onIdentityChange callback to handle this explicitly, " +
+            "or ignore if this is expected for your routing pattern."
+        );
+      }
+    }
+
+    // Track for next change detection
+    previousIdentityRef.current = { name: newName, agent: newAgent };
+
+    // Call onIdentity callback
+    options.onIdentity?.(newName, newAgent);
+  };
+
   const agent = usePartySocket({
     ...socketOptions,
     enabled: socketEnabled,
@@ -824,75 +910,40 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
           return options.onMessage?.(message);
         }
         if (parsedMessage.type === MessageType.CF_AGENT_IDENTITY) {
-          const oldName = previousIdentityRef.current.name;
-          const oldAgent = previousIdentityRef.current.agent;
-          const newName = parsedMessage.name as string;
-          const newAgent = parsedMessage.agent as string;
-
-          const currentAgent = mutableAgentRef.current;
-          if (currentAgent) {
-            currentAgent.name = newName;
-            currentAgent.agent = newAgent;
-            currentAgent.identified = true;
-          }
-
-          // Update reactive state (triggers re-render)
           const identifiedSocket =
             (message.target as PartySocket | null) ?? socketRef.current;
-          const identifiedDestination = identifiedSocket
-            ? socketDestinationKey(identifiedSocket.partySocketOptions)
-            : null;
-          setIdentity({
-            name: newName,
-            agent: newAgent,
-            identified: true,
-            destination: identifiedDestination
-          });
-
-          // Resolve ready promise
-          if (identifiedDestination !== null) {
-            readyFor(identifiedDestination).resolve();
+          const newName = parsedMessage.name as string;
+          const newAgent = parsedMessage.agent as string;
+          const progress = connectProgress(identifiedSocket);
+          // The server flags an identity whose state frame is next, so
+          // `ready` never resolves with the stored state still missing.
+          if (parsedMessage.stateFollows === true && !progress.stateSeen) {
+            progress.pendingIdentity = [newName, newAgent];
+            return;
           }
-
-          // Detect identity change on reconnect
-          if (
-            oldName !== null &&
-            oldAgent !== null &&
-            (oldName !== newName || oldAgent !== newAgent)
-          ) {
-            if (options.onIdentityChange) {
-              options.onIdentityChange(oldName, newName, oldAgent, newAgent);
-            } else {
-              const agentChanged = oldAgent !== newAgent;
-              const nameChanged = oldName !== newName;
-              let changeDescription = "";
-              if (agentChanged && nameChanged) {
-                changeDescription = `agent "${oldAgent}" → "${newAgent}", instance "${oldName}" → "${newName}"`;
-              } else if (agentChanged) {
-                changeDescription = `agent "${oldAgent}" → "${newAgent}"`;
-              } else {
-                changeDescription = `instance "${oldName}" → "${newName}"`;
-              }
-              console.warn(
-                `[agents] Identity changed on reconnect: ${changeDescription}. ` +
-                  "This can happen with server-side routing (e.g., basePath with getAgentByName) " +
-                  "where the instance is determined by auth/session. " +
-                  "Provide onIdentityChange callback to handle this explicitly, " +
-                  "or ignore if this is expected for your routing pattern."
-              );
-            }
-          }
-
-          // Track for next change detection
-          previousIdentityRef.current = { name: newName, agent: newAgent };
-
-          // Call onIdentity callback
-          options.onIdentity?.(newName, newAgent);
+          applyIdentity(newName, newAgent, identifiedSocket);
           return;
         }
         if (parsedMessage.type === MessageType.CF_AGENT_STATE) {
           setAgentState(parsedMessage.state as State);
-          options.onStateUpdate?.(parsedMessage.state as State, "server");
+          // Before `ready` can resolve below: a caller awaiting it reads
+          // the live object, not the next render.
+          if (mutableAgentRef.current) {
+            mutableAgentRef.current.state = parsedMessage.state as State;
+          }
+          const stateSocket =
+            (message.target as PartySocket | null) ?? socketRef.current;
+          try {
+            options.onStateUpdate?.(parsedMessage.state as State, "server");
+          } finally {
+            const progress = connectProgress(stateSocket);
+            progress.stateSeen = true;
+            const pending = progress.pendingIdentity;
+            if (pending) {
+              progress.pendingIdentity = null;
+              applyIdentity(pending[0], pending[1], stateSocket);
+            }
+          }
           return;
         }
         if (parsedMessage.type === MessageType.CF_AGENT_STATE_ERROR) {
@@ -954,6 +1005,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         (event.target as PartySocket | null) ?? socketRef.current;
       const isCurrentSocket = closedSocket === socketRef.current;
       const finalClose = closeClassifier.takeFinalClose();
+      if (closedSocket) connectProgressRef.current.delete(closedSocket);
       const reconnecting = !!closedSocket?.shouldReconnect && !finalClose;
 
       // Calls transmitted on the closed socket can never receive their
@@ -1195,6 +1247,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     (socketRef.current ?? agent).send(
       JSON.stringify({ state: newState, type: MessageType.CF_AGENT_STATE })
     );
+    if (mutableAgentRef.current) mutableAgentRef.current.state = newState;
     setAgentState(newState);
     options.onStateUpdate?.(newState, "client");
   };

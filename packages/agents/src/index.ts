@@ -2257,6 +2257,18 @@ export class Agent<
           // connection. When disabled, no identity/state/MCP text frames
           // are sent — useful for binary-only clients (e.g. MQTT devices).
           if (this.shouldSendProtocolMessages(connection, ctx)) {
+            const wasExcludedFromStateInitBroadcast =
+              this._protocolBroadcastExcludeIds.has(connection.id);
+            let currentState: TState | undefined;
+            this._protocolBroadcastExcludeIds.add(connection.id);
+            try {
+              currentState = this.state;
+            } finally {
+              if (!wasExcludedFromStateInitBroadcast) {
+                this._protocolBroadcastExcludeIds.delete(connection.id);
+              }
+            }
+
             // Send agent identity first so client knows which instance it's connected to
             // Can be disabled via static options for security-sensitive instance names
             if (this._resolvedOptions.sendIdentityOnConnect) {
@@ -2289,25 +2301,11 @@ export class Agent<
               }
               // Agent's public identity: the logical name (a facet's routed
               // name is an internal encoding of it) and the exported class.
-              this._webSockets.sendIdentity(connection, {
+              this._webSockets.sendConnectFrames(connection, {
                 name: this.name,
                 agent: camelCaseToKebabCase(this._ParentClass.name)
               });
-            }
-
-            const wasExcludedFromStateInitBroadcast =
-              this._protocolBroadcastExcludeIds.has(connection.id);
-            let currentState: TState | undefined;
-            this._protocolBroadcastExcludeIds.add(connection.id);
-            try {
-              currentState = this.state;
-            } finally {
-              if (!wasExcludedFromStateInitBroadcast) {
-                this._protocolBroadcastExcludeIds.delete(connection.id);
-              }
-            }
-
-            if (currentState !== undefined) {
+            } else if (currentState !== undefined) {
               this._webSockets.sendState(connection);
             }
 

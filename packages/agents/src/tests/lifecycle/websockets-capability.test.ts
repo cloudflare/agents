@@ -379,12 +379,17 @@ describe("state sync over connections on a plain host", () => {
   const hostUrl = (name: string) =>
     new URL(`/agents/stateful-plain-object/${name}`, "https://example.com");
 
-  it("pushes state on connect, after identity", async () => {
+  it("pushes state on connect, after an identity that says it follows", async () => {
     const name = crypto.randomUUID();
     const socket = await upgrade(hostUrl(name));
     const next = frameReader(socket);
     try {
-      expect(await next()).toMatchObject({ type: "cf_agent_identity", name });
+      expect(await next()).toEqual({
+        type: "cf_agent_identity",
+        name,
+        agent: "stateful-plain-object",
+        stateFollows: true
+      });
       expect(await next()).toEqual({
         type: "cf_agent_state",
         state: { count: 0 }
