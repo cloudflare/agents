@@ -742,8 +742,11 @@ export class Lifecycle<
     return Object.freeze({
       push: (options: LifecycleJobPushOptions) =>
         rearmAfter(() => this.#jobQueue.push(owner, options)),
+      pushSync: (options: LifecycleJobPushOptions) =>
+        this.#jobQueue.push(owner, options),
       cancel: (id: string) =>
         rearmAfter(() => this.#jobQueue.cancel(owner, id)),
+      cancelSync: (id: string) => this.#jobQueue.cancel(owner, id),
       reschedule: (id: string, time: number) =>
         rearmAfter(() => this.#jobQueue.reschedule(owner, id, time)),
       get: (id: string) => this.#jobQueue.get(owner, id),
