@@ -18754,6 +18754,26 @@ export class Think<
       messagesPersisted: true,
       error: errorMessage
     });
+    // Clients learn the turn failed before `onChatResponse` runs: a slow
+    // hook must not hold the error frame.
+    await this._recordTerminalChatStatus(
+      "error",
+      requestId,
+      errorMessage
+    ).catch((recordError: unknown) => {
+      console.error(
+        "[Think] failed to record a continuation failure:",
+        recordError
+      );
+    });
+    this._broadcastChat({
+      type: MSG_CHAT_RESPONSE,
+      id: requestId,
+      body: errorMessage,
+      done: true,
+      error: true,
+      continuation: true
+    });
     const message = [...this.messages]
       .reverse()
       .find((candidate) => candidate.role === "assistant");
@@ -18765,17 +18785,7 @@ export class Think<
         status: "error",
         error: errorMessage
       });
-    } else {
-      await this._recordTerminalChatStatus("error", requestId, errorMessage);
     }
-    this._broadcastChat({
-      type: MSG_CHAT_RESPONSE,
-      id: requestId,
-      body: errorMessage,
-      done: true,
-      error: true,
-      continuation: true
-    });
     return true;
   }
 

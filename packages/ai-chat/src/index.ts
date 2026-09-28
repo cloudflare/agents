@@ -7614,27 +7614,34 @@ export class AIChatAgent<
         // Take the reader before the stream starts: an unreadable body must
         // fail while nothing has been sent, not leave a started stream behind.
         const reader = response.body.getReader();
+        let message: UIMessage;
+        let streamId: string;
+        try {
+          // Parsing state adapted from:
+          // https://github.com/vercel/ai/blob/main/packages/ai/src/ui-message-stream/ui-message-chunks.ts#L295
+          message = this._createStreamingAssistantMessage(continuation);
 
-        // Parsing state adapted from:
-        // https://github.com/vercel/ai/blob/main/packages/ai/src/ui-message-stream/ui-message-chunks.ts#L295
-        const message = this._createStreamingAssistantMessage(continuation);
-
-        // Start tracking this stream for resumability. The allocated message id
-        // is persisted in stream metadata so orphan recovery (#1691) can
-        // re-associate reconstructed chunks with the right assistant message —
-        // even when the provider stream carries no `start.messageId`. For a
-        // continuation this is the cloned last-assistant id, so recovery merges
-        // into it; for a new turn it is a fresh id, so recovery keeps it
-        // distinct.
-        // The continuation flag is persisted in stream metadata so replayed
-        // frames carry `continuation: true` exactly like the live broadcast
-        // frames below (#1733) — a reconnecting client needs it to append to
-        // the existing assistant message instead of rebuilding it from
-        // scratch and dropping the pre-continuation parts.
-        const streamId = this._startStream(id, {
-          messageId: message.id,
-          continuation
-        });
+          // Start tracking this stream for resumability. The allocated message id
+          // is persisted in stream metadata so orphan recovery (#1691) can
+          // re-associate reconstructed chunks with the right assistant message —
+          // even when the provider stream carries no `start.messageId`. For a
+          // continuation this is the cloned last-assistant id, so recovery merges
+          // into it; for a new turn it is a fresh id, so recovery keeps it
+          // distinct.
+          // The continuation flag is persisted in stream metadata so replayed
+          // frames carry `continuation: true` exactly like the live broadcast
+          // frames below (#1733) — a reconnecting client needs it to append to
+          // the existing assistant message instead of rebuilding it from
+          // scratch and dropping the pre-continuation parts.
+          streamId = this._startStream(id, {
+            messageId: message.id,
+            continuation
+          });
+        } catch (error) {
+          // The streaming `finally` that releases the reader is not entered yet.
+          reader.cancel(error).catch(() => {});
+          throw error;
+        }
 
         // Track the streaming message so tool results can be applied before persistence
         this._streamingMessage = message;

@@ -885,8 +885,24 @@ export class ThinkClientToolsAgent extends Think {
     return this._lastTurnToolNames;
   }
 
-  override onChatResponse(result: ChatResponseResult): void {
+  private _responseHookGate: Promise<void> | undefined;
+  private _releaseResponseHook: (() => void) | undefined;
+
+  /** While set, `onChatResponse` does not return until it is cleared. */
+  async setStallResponseHook(value: boolean): Promise<void> {
+    if (value) {
+      this._responseHookGate = new Promise((resolve) => {
+        this._releaseResponseHook = resolve;
+      });
+      return;
+    }
+    this._releaseResponseHook?.();
+    this._responseHookGate = undefined;
+  }
+
+  override async onChatResponse(result: ChatResponseResult): Promise<void> {
     this._responseLog.push(result);
+    await this._responseHookGate;
   }
 
   async getResponseLog(): Promise<ChatResponseResult[]> {

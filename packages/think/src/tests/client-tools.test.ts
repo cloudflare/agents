@@ -918,6 +918,42 @@ describe("Think — auto-continuation", () => {
     await closeWS(ws);
   });
 
+  it("sends a failed continuation's error frame before onChatResponse returns (#2381)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setServerApprovalToolMode(true);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const initialDone = waitForDone(ws, 15000);
+    sendChatRequest(ws, [makeUserMessage("update my trigger")]);
+    await initialDone;
+
+    await agent.setFailContinuationBeforeStream(true);
+    await agent.setStallResponseHook(true);
+    try {
+      const continuationDone = waitForDone(ws, 15000);
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_APPROVAL,
+          toolCallId: "tc-server-approval-1",
+          approved: true,
+          autoContinue: true
+        })
+      );
+      const frames = await continuationDone;
+      expect(
+        frames.find(
+          (frame) => frame.type === MSG_CHAT_RESPONSE && frame.done === true
+        )
+      ).toMatchObject({ error: true, continuation: true });
+    } finally {
+      await agent.setStallResponseHook(false);
+    }
+
+    await closeWS(ws);
+  });
+
   it("continues after approving a tool that shares its message with a settled tool (#2185)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
