@@ -505,6 +505,102 @@ describe("Sessions capability", () => {
     });
   });
 
+  describe("mirror", () => {
+    type Cached = SessionMessage & { cached: true };
+
+    it("reduces appends, updates, deletes, and clears onto a host array", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const session = instance.sessions.session();
+        const host = { messages: [] as Cached[] };
+        const applied: Array<[string, string, boolean]> = [];
+        session.mirror<Cached>({
+          get: () => host.messages,
+          set: (messages) => {
+            host.messages = messages;
+          },
+          transform: (message) => ({ ...message, cached: true }),
+          onApplied: (event, message, previous) => {
+            applied.push([event.type, message.id, previous !== undefined]);
+          }
+        });
+
+        await session.appendMessage(text("a", "one"));
+        await session.appendMessage(text("b", "two"));
+        await session.appendMessage(text("a", "duplicate"));
+        expect(host.messages.map((m) => [m.id, m.cached])).toEqual([
+          ["a", true],
+          ["b", true]
+        ]);
+
+        await session.updateMessage(text("b", "two, edited"));
+        expect(host.messages[1].parts).toEqual([
+          { type: "text", text: "two, edited" }
+        ]);
+
+        // A host that reassigns its array is followed, not shadowed.
+        host.messages = host.messages.filter((m) => m.id !== "a");
+        await session.updateMessage(text("a", "not cached"));
+        expect(host.messages.map((m) => m.id)).toEqual(["b"]);
+
+        await session.appendMessage(text("c", "three"));
+        await session.deleteMessages(["b"]);
+        expect(host.messages.map((m) => m.id)).toEqual(["c"]);
+
+        await session.clearMessages();
+        expect(host.messages).toEqual([]);
+
+        expect(applied).toEqual([
+          ["append", "a", false],
+          ["append", "b", false],
+          ["update", "b", true],
+          ["append", "c", false]
+        ]);
+      });
+    });
+
+    it("lets the host intercept events and ignores other sessions", async () => {
+      const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+        const session = instance.sessions.session("mine");
+        let cache: SessionMessage[] = [];
+        const intercepted: string[] = [];
+        const unsubscribe = session.mirror({
+          get: () => cache,
+          set: (messages) => {
+            cache = messages;
+          },
+          intercept: (event) => {
+            if (event.type === "append" && event.parentId !== undefined) {
+              intercepted.push(`branch:${event.message.id}`);
+              return true;
+            }
+            if (event.type === "import") {
+              intercepted.push(`import:${event.message.id}`);
+            }
+            return false;
+          }
+        });
+
+        await session.appendMessage(text("root", "hi"));
+        await session.appendMessage(text("alt", "branch"), {
+          parentId: "root"
+        });
+        await session.importMessage(text("moved", "in"), {
+          parentId: "root",
+          createdAt: 1
+        });
+        await instance.sessions.session("theirs").appendMessage(text("x", "!"));
+        expect(cache.map((m) => m.id)).toEqual(["root"]);
+        expect(intercepted).toEqual(["branch:alt", "import:moved"]);
+
+        unsubscribe();
+        await session.appendMessage(text("after", "gone"));
+        expect(cache.map((m) => m.id)).toEqual(["root"]);
+      });
+    });
+  });
+
   it("budgets recent history with a floor and honest truncation", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {

@@ -2564,37 +2564,12 @@ export class AIChatAgent<
    * cache.
    */
   #subscribeToSessionChanges(): void {
-    this.sessions.subscribe(async (event) => {
-      if (event.sessionId !== this.#session.sessionId) return;
-      switch (event.type) {
-        case "append": {
-          if (!event.inserted) return;
-          const message = this.#messageForCache(event.message);
-          const index = this.messages.findIndex((m) => m.id === message.id);
-          if (index === -1) this.messages.push(message);
-          else this.messages[index] = message;
-          return;
-        }
-        case "update": {
-          const index = this.messages.findIndex(
-            (m) => m.id === event.message.id
-          );
-          if (index === -1) return;
-          this.messages[index] = this.#messageForCache(event.message);
-          return;
-        }
-        case "delete": {
-          const removed = new Set(event.messageIds);
-          this.messages = this.messages.filter((m) => !removed.has(m.id));
-          return;
-        }
-        case "clear": {
-          this.messages = [];
-          return;
-        }
-        default:
-          return;
-      }
+    this.#session.mirror<UIMessage>({
+      get: () => this.messages,
+      set: (messages) => {
+        this.messages = messages;
+      },
+      transform: (message) => this.#messageForCache(message)
     });
   }
 
