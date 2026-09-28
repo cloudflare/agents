@@ -562,6 +562,59 @@ export class AgentClient<
     });
   }
 
+  /** Connect-sequence progress for the current socket. */
+  #connect: {
+    stateSeen: boolean;
+    pendingIdentity: { name: string; agent: string } | null;
+  } = { stateSeen: false, pendingIdentity: null };
+
+  #applyIdentity(newName: string, newAgent: string): void {
+    const oldName = this._previousName;
+    const oldAgent = this._previousAgent;
+
+    // Resolve ready/identified
+    this.identified = true;
+    this._resolveReady();
+
+    // Detect identity change on reconnect
+    if (
+      oldName !== null &&
+      oldAgent !== null &&
+      (oldName !== newName || oldAgent !== newAgent)
+    ) {
+      if (this.options.onIdentityChange) {
+        this.options.onIdentityChange(oldName, newName, oldAgent, newAgent);
+      } else {
+        const agentChanged = oldAgent !== newAgent;
+        const nameChanged = oldName !== newName;
+        let changeDescription = "";
+        if (agentChanged && nameChanged) {
+          changeDescription = `agent "${oldAgent}" → "${newAgent}", instance "${oldName}" → "${newName}"`;
+        } else if (agentChanged) {
+          changeDescription = `agent "${oldAgent}" → "${newAgent}"`;
+        } else {
+          changeDescription = `instance "${oldName}" → "${newName}"`;
+        }
+        console.warn(
+          `[agents] Identity changed on reconnect: ${changeDescription}. ` +
+            "This can happen with server-side routing (e.g., basePath with getAgentByName) " +
+            "where the instance is determined by auth/session. " +
+            "Provide onIdentityChange callback to handle this explicitly, " +
+            "or ignore if this is expected for your routing pattern."
+        );
+      }
+    }
+
+    // Always update from server identity (server is authoritative)
+    this._previousName = newName;
+    this._previousAgent = newAgent;
+    this.name = newName;
+    this.agent = newAgent;
+
+    // Call onIdentity callback
+    this.options.onIdentity?.(newName, newAgent);
+  }
+
   /**
    * The live Cap'n Web socket on the `"capnweb"` transport. PartySocket
    * constructs a new one on every reconnect; the bound class reports each
@@ -631,62 +684,28 @@ export class AgentClient<
           return;
         }
         if (parsedMessage.type === MessageType.CF_AGENT_IDENTITY) {
-          const oldName = this._previousName;
-          const oldAgent = this._previousAgent;
-          const newName = parsedMessage.name as string;
-          const newAgent = parsedMessage.agent as string;
-
-          // Resolve ready/identified
-          this.identified = true;
-          this._resolveReady();
-
-          // Detect identity change on reconnect
-          if (
-            oldName !== null &&
-            oldAgent !== null &&
-            (oldName !== newName || oldAgent !== newAgent)
-          ) {
-            if (this.options.onIdentityChange) {
-              this.options.onIdentityChange(
-                oldName,
-                newName,
-                oldAgent,
-                newAgent
-              );
-            } else {
-              const agentChanged = oldAgent !== newAgent;
-              const nameChanged = oldName !== newName;
-              let changeDescription = "";
-              if (agentChanged && nameChanged) {
-                changeDescription = `agent "${oldAgent}" → "${newAgent}", instance "${oldName}" → "${newName}"`;
-              } else if (agentChanged) {
-                changeDescription = `agent "${oldAgent}" → "${newAgent}"`;
-              } else {
-                changeDescription = `instance "${oldName}" → "${newName}"`;
-              }
-              console.warn(
-                `[agents] Identity changed on reconnect: ${changeDescription}. ` +
-                  "This can happen with server-side routing (e.g., basePath with getAgentByName) " +
-                  "where the instance is determined by auth/session. " +
-                  "Provide onIdentityChange callback to handle this explicitly, " +
-                  "or ignore if this is expected for your routing pattern."
-              );
-            }
+          const identity = {
+            name: parsedMessage.name as string,
+            agent: parsedMessage.agent as string
+          };
+          // The server flags an identity whose state frame is next, so
+          // `ready` never resolves with the stored state still missing.
+          if (parsedMessage.stateFollows === true && !this.#connect.stateSeen) {
+            this.#connect.pendingIdentity = identity;
+            return;
           }
-
-          // Always update from server identity (server is authoritative)
-          this._previousName = newName;
-          this._previousAgent = newAgent;
-          this.name = newName;
-          this.agent = newAgent;
-
-          // Call onIdentity callback
-          this.options.onIdentity?.(newName, newAgent);
+          this.#applyIdentity(identity.name, identity.agent);
           return;
         }
         if (parsedMessage.type === MessageType.CF_AGENT_STATE) {
           this.state = parsedMessage.state as State;
           this.options.onStateUpdate?.(parsedMessage.state as State, "server");
+          this.#connect.stateSeen = true;
+          const pending = this.#connect.pendingIdentity;
+          if (pending) {
+            this.#connect.pendingIdentity = null;
+            this.#applyIdentity(pending.name, pending.agent);
+          }
           return;
         }
         if (parsedMessage.type === MessageType.CF_AGENT_STATE_ERROR) {
@@ -746,6 +765,7 @@ export class AgentClient<
       // Reset ready state for next connection
       this.identified = false;
       this._resetReady();
+      this.#connect = { stateSeen: false, pendingIdentity: null };
 
       if (this.shouldReconnect && !finalClose) {
         // Transient disconnect: reject calls whose request was already

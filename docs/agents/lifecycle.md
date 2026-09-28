@@ -341,13 +341,17 @@ The capability speaks the Agent protocol on every connection, so a plain
 Durable Object is reachable from `useAgent` and `AgentClient` exactly like an
 `Agent`:
 
-- On connect it sends the identity frame, which resolves the client's
-  `ready` and `identified`, then the current state when `state` is set.
+- On connect it sends the identity frame, then the current state when
+  `state` is set. The identity frame says when a state frame follows it,
+  so the client's `ready` and `identified` wait for that state, and a
+  caller awaiting `ready` never reads the default value.
   `protocol` controls this: `true` (default) for every connection, a
   function to decide per connection — `false` marks it no-protocol, so it
   gets no protocol text frames on connect or by broadcast but still sends
   and receives ordinary messages and callables — or `false` to have the
-  host drive the sequence itself with `sendIdentity()` and `sendState()`.
+  host drive the sequence itself with `sendConnectFrames()`, or
+  `sendIdentity()` and `sendState()` separately (the client then resolves
+  `ready` on the identity alone).
   `Agent` passes `false`, because it must decide whether a connection
   belongs to a facet before any frame is sent.
 - `readonly` decides per connection whether state writes over the wire are

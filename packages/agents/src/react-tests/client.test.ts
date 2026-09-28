@@ -55,6 +55,25 @@ describe("AgentClient", () => {
       );
     });
 
+    it("resolves ready with the stored state already applied (#2268)", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const events: string[] = [];
+
+      client = new AgentClient({
+        agent: "TestStateAgent",
+        name: `client-ready-state-${crypto.randomUUID()}`,
+        host,
+        protocol,
+        onStateUpdate: () => events.push("state"),
+        onIdentity: () => events.push("identity")
+      });
+
+      await client.ready;
+
+      expect(client.state).toEqual({ count: 0, items: [], lastUpdated: null });
+      expect(events).toEqual(["state", "identity"]);
+    });
+
     it("should reset ready state on close", async () => {
       const { host, protocol } = getTestWorkerHost();
 
@@ -171,11 +190,11 @@ describe("AgentClient", () => {
       );
     });
 
-    it("should have state undefined before any state update", async () => {
+    it("should have state undefined for an agent with no state", async () => {
       const { host, protocol } = getTestWorkerHost();
 
       client = new AgentClient({
-        agent: "TestStateAgent",
+        agent: "TestStateAgentNoInitial",
         name: "client-test-state-initial",
         host,
         protocol

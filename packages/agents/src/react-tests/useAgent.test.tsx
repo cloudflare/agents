@@ -1214,3 +1214,77 @@ describe("useAgent hook", () => {
     });
   });
 });
+
+describe("useAgent ready and the initial state (#2268)", () => {
+  type Snapshot = { identified: boolean; state: unknown };
+
+  function ReadyProbe({
+    options,
+    onRender,
+    onReady
+  }: {
+    options: UseAgentOptions<unknown>;
+    onRender: (snapshot: Snapshot) => void;
+    onReady: (state: unknown) => void;
+  }) {
+    const agent = useAgent(options);
+    onRender({ identified: agent.identified, state: agent.state });
+    useEffect(() => {
+      void agent.ready.then(() => onReady(agent.state));
+      // oxlint-disable-next-line react-hooks/exhaustive-deps -- once per socket
+    }, [agent]);
+    return null;
+  }
+
+  it("never renders identified without the stored state, and ready resolves with it", async () => {
+    const { host, protocol } = getTestWorkerHost();
+    const renders: Snapshot[] = [];
+    const onReady = vi.fn();
+
+    await render(
+      <ReadyProbe
+        options={{
+          agent: "TestStateAgent",
+          name: `ready-state-${crypto.randomUUID()}`,
+          host,
+          protocol
+        }}
+        onRender={(snapshot) => renders.push(snapshot)}
+        onReady={onReady}
+      />
+    );
+
+    await vi.waitFor(() => expect(onReady).toHaveBeenCalled(), {
+      timeout: 10000
+    });
+    const initial = { count: 0, items: [], lastUpdated: null };
+    expect(onReady).toHaveBeenCalledWith(initial);
+    const identified = renders.filter((snapshot) => snapshot.identified);
+    expect(identified.length).toBeGreaterThan(0);
+    for (const snapshot of identified) {
+      expect(snapshot.state).toEqual(initial);
+    }
+  });
+
+  it("resolves ready for an agent with no state", async () => {
+    const { host, protocol } = getTestWorkerHost();
+    const onReady = vi.fn();
+
+    await render(
+      <ReadyProbe
+        options={{
+          agent: "TestStateAgentNoInitial",
+          name: `ready-no-state-${crypto.randomUUID()}`,
+          host,
+          protocol
+        }}
+        onRender={() => {}}
+        onReady={onReady}
+      />
+    );
+
+    await vi.waitFor(() => expect(onReady).toHaveBeenCalledWith(undefined), {
+      timeout: 10000
+    });
+  });
+});
