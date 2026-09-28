@@ -610,7 +610,8 @@ import {
   activeDeferredTools,
   createDiscoverTool,
   deferredCatalog,
-  DISCOVER_TOOLS_TOOL_NAME
+  DISCOVER_TOOLS_TOOL_NAME,
+  forcedToolName
 } from "./tool-discovery";
 import type { ToolDiscovery } from "./tool-discovery";
 import { truncatePausedExecutionOutput } from "./tools/execute";
@@ -7518,12 +7519,19 @@ export class Think<
     this._activeTurnAuthorization = this._normalizeActionAuthorization(
       await this.authorizeTurn(finalTurnContext)
     );
+    const toolsWithDiscovery: ToolSet = { ...mergedTools };
+    const discoveryActiveTools = this._prepareToolDiscovery(
+      mergedTools,
+      toolsWithDiscovery,
+      config.activeTools ?? Object.keys(mergedTools),
+      forcedToolName(config.toolChoice)
+    );
     // Wrap each tool's `execute` so `beforeToolCall` is consulted before
     // the tool actually runs. The wrapped `execute` honors the returned
     // `ToolCallDecision` — `block` short-circuits with `reason`,
     // `substitute` returns `output` directly, `allow` runs the original
     // (optionally with modified `input`).
-    const finalTools: ToolSet = this._wrapToolsWithDecision(mergedTools);
+    const finalTools: ToolSet = this._wrapToolsWithDecision(toolsWithDiscovery);
     // For a structured workflow turn, expose a final-answer tool alongside the
     // agent's real tools. The agent loops with its tools and terminates by
     // calling this one; its arguments are captured as the structured result.
@@ -7543,12 +7551,15 @@ export class Think<
         execute: async () => "Final answer recorded."
       });
     }
-    const discoveryActiveTools = this._prepareToolDiscovery(
-      mergedTools,
-      finalTools,
-      config.activeTools ?? Object.keys(mergedTools),
-      structuredOutputSchema ? [finalAnswerToolName] : []
-    );
+    const stepActiveTools =
+      discoveryActiveTools &&
+      ((messages: readonly ModelMessage[], forced?: string) => [
+        ...new Set([
+          ...discoveryActiveTools(messages),
+          ...(structuredOutputSchema ? [finalAnswerToolName] : []),
+          ...(forced !== undefined && forced in finalTools ? [forced] : [])
+        ])
+      ]);
 
     // Baseline for the proactive context guard: everything the AI SDK appends
     // to the model-message list after the assembled turn messages belongs to
@@ -7627,8 +7638,8 @@ export class Think<
       // Keep the synthetic final-answer tool callable even when a caller
       // restricts `activeTools` — otherwise a structured turn could never call
       // it and would fail to produce output.
-      activeTools: discoveryActiveTools
-        ? discoveryActiveTools(finalMessages)
+      activeTools: stepActiveTools
+        ? stepActiveTools(finalMessages)
         : wantsStructuredOutput && config.activeTools
           ? [...config.activeTools, finalAnswerToolName]
           : config.activeTools,
@@ -7695,15 +7706,19 @@ export class Think<
             ? { ...base, messages: guarded }
             : base;
         // Tools discovered in an earlier step join this one, unless the
-        // subclass chose this step's tools itself.
+        // subclass chose this step's tools itself. A tool this step forces
+        // must be active too, or the model cannot call it.
         const withMessages =
-          discoveryActiveTools &&
+          stepActiveTools &&
           (withGuard as { activeTools?: unknown }).activeTools === undefined
             ? {
                 ...withGuard,
-                activeTools: discoveryActiveTools(
+                activeTools: stepActiveTools(
                   (withGuard as { messages?: ModelMessage[] }).messages ??
-                    event.messages
+                    event.messages,
+                  forcedToolName(
+                    (withGuard as { toolChoice?: unknown }).toolChoice
+                  )
                 )
               }
             : withGuard;
@@ -8016,14 +8031,15 @@ export class Think<
   }
 
   /**
-   * Add this turn's discovery tool when `toolDiscovery` defers any tool in
-   * `visible`, and return the resolver for each step's `activeTools`.
+   * Add this turn's discovery tool to `target` when `toolDiscovery` defers
+   * any tool in `visible`, and return the resolver for each step's
+   * `activeTools`. A tool the turn's `toolChoice` forces is never deferred.
    */
   private _prepareToolDiscovery(
     tools: ToolSet,
-    finalTools: ToolSet,
+    target: ToolSet,
     visible: readonly string[],
-    alwaysActive: readonly string[]
+    forced: string | undefined
   ): ((messages: readonly ModelMessage[]) => string[]) | undefined {
     const discovery = this.toolDiscovery;
     if (!discovery) return undefined;
@@ -8031,35 +8047,42 @@ export class Think<
     const granted =
       authorization.grantedPermissions &&
       new Set(authorization.grantedPermissions);
-    const selected = deferredCatalog(tools, visible, discovery);
+    const selected = deferredCatalog(tools, visible, discovery).filter(
+      ({ name }) => name !== forced
+    );
     if (selected.length === 0) return undefined;
     const deferred = new Set(selected.map((entry) => entry.name));
     const eager = visible.filter((name) => !deferred.has(name));
-    // A deferred tool the turn may not run stays hidden, not eager.
+    // A deferred tool the turn may not run stays hidden, not eager. Only
+    // action tools carry action permissions: a tool of the same name that
+    // replaced the action does not.
     const catalog = selected.filter(({ name }) => {
+      const metadata = tools[name]?.metadata as
+        | Record<string, unknown>
+        | undefined;
       const required = this._activeTurnActionPermissions.get(name);
-      if (required === undefined) return true;
+      if (required === undefined || metadata?.cfThinkAction !== true) {
+        return true;
+      }
       if (!authorization.allowed) return false;
       return !granted || required.every((p) => granted.has(p));
     });
-    if (catalog.length === 0) return () => [...eager, ...alwaysActive];
+    if (catalog.length === 0) return () => eager;
 
     let discoverName = DISCOVER_TOOLS_TOOL_NAME;
-    for (let suffix = 1; discoverName in finalTools; suffix++) {
+    for (let suffix = 1; discoverName in target; suffix++) {
       discoverName = `${DISCOVER_TOOLS_TOOL_NAME}_${suffix}`;
     }
-    finalTools[discoverName] = createDiscoverTool(catalog, discovery);
+    target[discoverName] = createDiscoverTool(catalog, discovery);
     const fromTranscript = activeDeferredTools(
       { transcript: this.messages },
-      discoverName,
       catalog
     );
     return (messages) => [
       ...eager,
       ...fromTranscript,
-      ...activeDeferredTools({ messages }, discoverName, catalog),
-      discoverName,
-      ...alwaysActive
+      ...activeDeferredTools({ messages }, catalog),
+      discoverName
     ];
   }
 

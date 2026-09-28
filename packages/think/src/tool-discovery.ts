@@ -28,7 +28,11 @@ export interface ToolDiscovery {
     query: string,
     catalog: readonly DeferredTool[]
   ) => readonly string[] | Promise<readonly string[]>;
-  /** Most tools the default search activates for one query. @default 5 */
+  /**
+   * Most tools the default search activates for one query. Tools named
+   * exactly in the query are always activated and count toward the limit;
+   * keyword matches fill what remains. @default 5
+   */
   maxResults?: number;
   /**
    * List the deferred tool names in the discovery tool's description, so the
@@ -39,6 +43,15 @@ export interface ToolDiscovery {
 }
 
 export const DISCOVER_TOOLS_TOOL_NAME = "discover_tools";
+
+/**
+ * Whether `name` is a name a turn may have given its discovery tool. A turn
+ * suffixes the name when a tool already holds it, so earlier turns' results
+ * can sit under a different name than the current turn's.
+ */
+function isDiscoverToolName(name: string): boolean {
+  return /^discover_tools(?:_\d+)?$/.test(name);
+}
 
 /** Tools a turn exposes that `discovery.defer` selects, in tool-set order. */
 export function deferredCatalog(
@@ -149,6 +162,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+/** The tool a `toolChoice` of `{ type: "tool" }` forces, if any. */
+export function forcedToolName(toolChoice: unknown): string | undefined {
+  if (!isRecord(toolChoice) || toolChoice.type !== "tool") return undefined;
+  return typeof toolChoice.toolName === "string"
+    ? toolChoice.toolName
+    : undefined;
+}
+
 function activatedNames(output: unknown): string[] {
   const value =
     isRecord(output) && output.type === "json" ? output.value : output;
@@ -206,7 +227,6 @@ export function activeDeferredTools(
     transcript?: readonly UIMessage[];
     messages?: readonly ModelMessage[];
   },
-  discoverToolName: string,
   catalog: readonly DeferredTool[]
 ): Set<string> {
   const deferred = new Set(catalog.map((entry) => entry.name));
@@ -217,7 +237,7 @@ export function activeDeferredTools(
   ];
   for (const { toolName, output } of uses) {
     if (deferred.has(toolName)) active.add(toolName);
-    if (toolName !== discoverToolName) continue;
+    if (!isDiscoverToolName(toolName)) continue;
     for (const name of activatedNames(output)) {
       if (deferred.has(name)) active.add(name);
     }

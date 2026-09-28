@@ -5,6 +5,8 @@ import { action, Think } from "../../think";
 import type {
   Action,
   ActionAuthorizationDecision,
+  PrepareStepContext,
+  StepConfig,
   ToolCallContext,
   ToolDiscovery,
   TurnConfig
@@ -20,6 +22,12 @@ export type DiscoveryTurnOptions = {
   activeTools?: string[];
   /** Swap the default search for one that also names an unauthorized tool. */
   customSearch?: boolean;
+  /** Tool the turn's `toolChoice` forces, from `beforeTurn`. */
+  forceTool?: string;
+  /** Tool `beforeStep` forces on the first step. */
+  forceFirstStepTool?: string;
+  /** Plain tools `beforeTurn` adds, replacing any of the same name. */
+  extraTools?: string[];
 };
 
 export type DiscoveryOutput = { activated: string[]; note?: string };
@@ -52,7 +60,7 @@ export class ThinkToolDiscoveryAgent extends Think {
   private _requests: string[][] = [];
   private _beforeToolCalls: string[] = [];
   private _executed: string[] = [];
-  private _activeTools: string[] | undefined;
+  private _options: DiscoveryTurnOptions = {};
 
   override getModel(): LanguageModel {
     const next = () => this._script.shift() ?? { text: "done" };
@@ -146,7 +154,35 @@ export class ThinkToolDiscoveryAgent extends Think {
   }
 
   override beforeTurn(): TurnConfig | void {
-    if (this._activeTools) return { activeTools: this._activeTools };
+    const { activeTools, forceTool, extraTools } = this._options;
+    const config: TurnConfig = {};
+    if (activeTools) config.activeTools = activeTools;
+    if (forceTool) config.toolChoice = { type: "tool", toolName: forceTool };
+    if (extraTools) {
+      config.tools = Object.fromEntries(
+        extraTools.map((name) => [
+          name,
+          tool({
+            description: `Replacement ${name}`,
+            inputSchema: z.object({}),
+            execute: async () => {
+              this._executed.push(name);
+              return "replaced";
+            }
+          })
+        ])
+      );
+    }
+    return config;
+  }
+
+  override beforeStep(
+    ctx: PrepareStepContext
+  ): (StepConfig & { toolChoice: { type: "tool"; toolName: string } }) | void {
+    const forced = this._options.forceFirstStepTool;
+    if (forced && ctx.stepNumber === 0) {
+      return { toolChoice: { type: "tool", toolName: forced } };
+    }
   }
 
   override beforeToolCall(ctx: ToolCallContext): void {
@@ -161,7 +197,7 @@ export class ThinkToolDiscoveryAgent extends Think {
     this._requests.length = 0;
     this._beforeToolCalls = [];
     this._executed = [];
-    this._activeTools = options.activeTools;
+    this._options = options;
     if (options.customSearch && this.toolDiscovery) {
       this.toolDiscovery = {
         ...this.toolDiscovery,
@@ -180,7 +216,7 @@ export class ThinkToolDiscoveryAgent extends Think {
       .slice(before)
       .flatMap((message: UIMessage) => message.parts)
       .flatMap((part) =>
-        part.type === "tool-discover_tools" && "output" in part
+        /^tool-discover_tools(?:_\d+)?$/.test(part.type) && "output" in part
           ? [part.output as DiscoveryOutput]
           : []
       );

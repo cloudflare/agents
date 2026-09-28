@@ -192,15 +192,15 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-`defer` is a list of tool names or a predicate over every tool in the turn: your own tools, actions, MCP tools, client tools, and the built-in ones. Deferred tools are left out of the request, and Think adds a `discover_tools` tool whose description lists their names. The model calls it with keywords or exact names, and every tool it finds is sent, and callable, from the next step on. A deferred tool the model calls without discovering it first fails as an unknown tool and does not run.
+`defer` is a list of tool names or a predicate over every tool in the turn: your own tools, actions, MCP tools, client tools, and the built-in ones. Deferred tools are left out of the request, and Think adds a `discover_tools` tool whose description lists their names. The model calls it with keywords or exact names, and every tool it finds is sent, and callable, from the next step on. A deferred tool the model calls without discovering it first fails as an unknown tool and does not run; like naming it to `discover_tools`, that call brings the tool in from the next step. A tool that a `toolChoice` forces, from `beforeTurn` or from `beforeStep`, is always sent. If a tool of yours is already named `discover_tools`, the discovery tool takes a numbered name such as `discover_tools_1`.
 
-Discovered tools run through the normal lifecycle: input validation, `beforeToolCall` and `afterToolCall`, approvals, and action authorization. Discovery never widens what a turn may do:
+Discovered tools run through the normal lifecycle: input validation, `beforeToolCall` and `afterToolCall`, approvals, and action authorization. Calls to `discover_tools` itself pass through `beforeToolCall` and `afterToolCall` as well. Discovery never widens what a turn may do:
 
 - Only tools the turn already exposes are discoverable. `activeTools` from `beforeTurn` and channel tool filters narrow the catalog.
 - An action whose static `permissions` were not granted by `authorizeTurn` is left out of the catalog, and it is not sent eagerly either. Every call is still authorized when it runs.
 - Names that a custom `search` returns are only honored if they are in the catalog.
 
-The default search returns exact tool names from the query, then up to `maxResults` (default 5) tools ranked by how many query words appear in their names and descriptions. Supply `search` to rank with your own index, and set `listCatalog: false` when the catalog is large enough that listing its names is itself a cost:
+The default search returns every exact tool name in the query, then fills the rest of `maxResults` (default 5) with tools ranked by how many query words appear in their names and descriptions. Supply `search` to rank with your own index, and set `listCatalog: false` when the catalog is large enough that listing its names is itself a cost:
 
 ```typescript
 toolDiscovery = {
