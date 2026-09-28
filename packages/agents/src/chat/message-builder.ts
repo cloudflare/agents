@@ -105,8 +105,12 @@ export function normalizeToolInput(raw: unknown): {
  */
 const rawToolInputText = new WeakMap<MessagePart, string>();
 
-/** Approval parts whose `input` was parsed from delta text, not the tool call. */
-const inputFromRawText = new WeakSet<MessagePart>();
+/**
+ * Tool parts whose `input` came from deltas (parsed text or an emitter's
+ * partial `input`) rather than the tool call, so the canonical input may
+ * still replace it.
+ */
+const provisionalInput = new WeakSet<MessagePart>();
 
 const APPROVAL_STATES = new Set(["approval-requested", "approval-responded"]);
 
@@ -143,9 +147,9 @@ export function applyLateToolInput(
   if (!isLateToolInputChunk(parts, chunk)) return false;
   const part = findToolPartByCallId(parts, chunk.toolCallId)!;
   const p = part as Record<string, unknown>;
-  if (p.input !== undefined && !inputFromRawText.has(part)) return false;
+  if (p.input !== undefined && !provisionalInput.has(part)) return false;
   p.input = normalizeToolInput(chunk.input).input;
-  inputFromRawText.delete(part);
+  provisionalInput.delete(part);
   if (chunk.providerExecuted != null) {
     p.providerExecuted = chunk.providerExecuted;
   }
@@ -153,6 +157,43 @@ export function applyLateToolInput(
     p.callProviderMetadata = chunk.providerMetadata;
   }
   return true;
+}
+
+/**
+ * The chunks a stream builder forwards and stores for a late
+ * `tool-input-available` (see {@link isLateToolInputChunk}) so clients and
+ * stream replay see the input without losing the approval: the input chunk,
+ * then the part's approval request again. The AI SDK client moves the part
+ * to `input-available` on the first and back to `approval-requested` on the
+ * second.
+ *
+ * Returns `[]` unless the part is still awaiting approval: once the user has
+ * responded, re-sending the request would reopen it.
+ */
+export function lateToolInputForwardChunks(
+  parts: MessagePart[],
+  chunk: StreamChunkData,
+  approvalRequest?: StreamChunkData
+): StreamChunkData[] {
+  if (chunk.type !== "tool-input-available") return [];
+  const part = findToolPartByCallId(parts, chunk.toolCallId) as
+    | Record<string, unknown>
+    | undefined;
+  const approval = part?.approval as
+    | { id?: string; descriptor?: unknown }
+    | undefined;
+  if (part?.state !== "approval-requested" || !approval?.id) return [];
+  return [
+    { ...chunk, input: part.input },
+    approvalRequest ?? {
+      type: "tool-approval-request",
+      approvalId: approval.id,
+      toolCallId: chunk.toolCallId,
+      ...(approval.descriptor !== undefined && {
+        approvalDescriptor: approval.descriptor
+      })
+    }
+  ];
 }
 
 /**
@@ -333,6 +374,7 @@ export function applyChunkToParts(
         // Older and custom emitters put a parsed partial input on the delta.
         if (chunk.input !== undefined) {
           (toolPart as Record<string, unknown>).input = chunk.input;
+          provisionalInput.add(toolPart);
         }
       }
       return true;
@@ -363,6 +405,7 @@ export function applyChunkToParts(
             p.title = chunk.title;
           }
           rawToolInputText.delete(existing);
+          provisionalInput.delete(existing);
         } else {
           applyLateToolInput(parts, chunk);
         }
@@ -452,7 +495,7 @@ export function applyChunkToParts(
         const rawInput = rawToolInputText.get(toolPart);
         if (p.input === undefined && rawInput !== undefined) {
           p.input = normalizeToolInput(rawInput).input;
-          inputFromRawText.add(toolPart);
+          provisionalInput.add(toolPart);
         }
         rawToolInputText.delete(toolPart);
         p.state = "approval-requested";

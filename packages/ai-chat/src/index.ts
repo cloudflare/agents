@@ -43,6 +43,7 @@ import {
 import {
   applyChunkToParts,
   applyLateToolInput,
+  lateToolInputForwardChunks,
   AgentToolProgressEmitter,
   aiSdkRecoveryCodec,
   ResumeHandshake,
@@ -7046,8 +7047,9 @@ export class AIChatAgent<
             if (isReplayChunk(message.parts, data as StreamChunkData)) {
               // A `tool-input-available` that lands after its approval
               // request still carries the canonical input the approved
-              // call executes with. Keep it server-side only, and refresh
-              // the approval snapshot persisted without it.
+              // call executes with. Refresh the approval snapshot persisted
+              // without it, and forward it followed by the approval request
+              // again so clients show the input on the approval card.
               if (
                 applyLateToolInput(message.parts, data as StreamChunkData) &&
                 this._approvalPersistedMessageId !== null &&
@@ -7059,6 +7061,21 @@ export class AIChatAgent<
                     parts: [...this._streamingMessage.parts]
                   })
                 );
+              }
+              for (const forwarded of lateToolInputForwardChunks(
+                message.parts,
+                data as StreamChunkData
+              )) {
+                const chunkBody = JSON.stringify(forwarded);
+                const seq = await this._storeStreamChunk(streamId, chunkBody);
+                this._broadcastChatMessage({
+                  body: chunkBody,
+                  done: false,
+                  id,
+                  type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                  ...(seq !== undefined && { seq }),
+                  ...(continuation && { continuation: true })
+                });
               }
               continue;
             }

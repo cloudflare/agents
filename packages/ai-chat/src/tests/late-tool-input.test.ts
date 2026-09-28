@@ -1,16 +1,17 @@
 import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
+import { applyChunkToParts, type MessagePart } from "agents/chat";
 import { MessageType } from "../types";
 import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
 import { getAgentByName } from "agents";
 
 describe("tool-input-available after tool-approval-request (#1872)", () => {
-  it("persists the canonical input without forwarding the late chunk", async () => {
+  it("persists and streams the canonical input without losing the approval", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
-    const streamedTypes: string[] = [];
+    const streamed: Array<Record<string, unknown>> = [];
     const done = new Promise<boolean>((resolve) => {
       const timeout = setTimeout(() => resolve(false), 5000);
       ws.addEventListener("message", (e: MessageEvent) => {
@@ -18,7 +19,7 @@ describe("tool-input-available after tool-approval-request (#1872)", () => {
         if (!isUseChatResponseMessage(data)) return;
         if (typeof data.body === "string" && data.body.length > 0) {
           try {
-            streamedTypes.push(JSON.parse(data.body).type);
+            streamed.push(JSON.parse(data.body));
           } catch {
             // ignore non-JSON frames
           }
@@ -54,9 +55,23 @@ describe("tool-input-available after tool-approval-request (#1872)", () => {
     expect(await done).toBe(true);
     ws.close(1000);
 
-    // The client keeps its approval card: the late chunk never reaches it.
-    expect(streamedTypes).toContain("tool-approval-request");
-    expect(streamedTypes).not.toContain("tool-input-available");
+    // The late input is followed by the approval request again, so the
+    // client's approval card ends up carrying the input.
+    const toolChunks = streamed.filter(
+      (chunk) => chunk.toolCallId === "call-late-input"
+    );
+    expect(toolChunks.map((chunk) => chunk.type)).toEqual([
+      "tool-input-start",
+      "tool-approval-request",
+      "tool-input-available",
+      "tool-approval-request"
+    ]);
+    const clientParts: MessagePart[] = [];
+    for (const chunk of toolChunks) applyChunkToParts(clientParts, chunk);
+    expect(clientParts[0]).toMatchObject({
+      state: "approval-requested",
+      input: { path: "notes.txt" }
+    });
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
     const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];

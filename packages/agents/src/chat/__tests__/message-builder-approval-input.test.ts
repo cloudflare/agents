@@ -4,6 +4,7 @@ import {
   applyLateToolInput,
   isLateToolInputChunk,
   isReplayChunk,
+  lateToolInputForwardChunks,
   type MessagePart,
   type StreamChunkData
 } from "../message-builder";
@@ -140,5 +141,53 @@ describe("tool input around approval requests (#1872)", () => {
     }
     expect(toolPart(parts).state).toBe("approval-requested");
     expect(toolPart(parts).input).toEqual(INPUT);
+  });
+
+  it("lets the canonical input replace a partial input from an older emitter's delta", () => {
+    const part = toolPart(
+      applyStream([
+        start,
+        { type: "tool-input-delta", toolCallId: "tc1", input: { id: "res" } },
+        approvalRequest,
+        inputAvailable
+      ])
+    );
+    expect(part.state).toBe("approval-requested");
+    expect(part.input).toEqual(INPUT);
+  });
+
+  it("forwards the late input followed by the approval request again", () => {
+    const parts = applyStream([start, approvalRequest, inputAvailable]);
+    expect(lateToolInputForwardChunks(parts, inputAvailable)).toEqual([
+      { ...inputAvailable, input: INPUT },
+      { type: "tool-approval-request", approvalId: "ap1", toolCallId: "tc1" }
+    ]);
+    const annotated = { ...approvalRequest, approvalDescriptor: { a: 1 } };
+    expect(
+      lateToolInputForwardChunks(parts, inputAvailable, annotated)[1]
+    ).toBe(annotated);
+  });
+
+  it("rebuilds the approval with its input from the forwarded chunks", () => {
+    // What stream replay and orphan reconstruction see.
+    const live = applyStream([start, approvalRequest, inputAvailable]);
+    const stored = [
+      start,
+      approvalRequest,
+      ...lateToolInputForwardChunks(live, inputAvailable)
+    ];
+    const replayed: MessagePart[] = [];
+    for (const chunk of stored) applyChunkToParts(replayed, chunk);
+    expect(toolPart(replayed)).toMatchObject({
+      state: "approval-requested",
+      approval: { id: "ap1" },
+      input: INPUT
+    });
+  });
+
+  it("forwards nothing once the approval has been responded to", () => {
+    const parts = applyStream([start, approvalRequest]);
+    (parts[0] as Record<string, unknown>).state = "approval-responded";
+    expect(lateToolInputForwardChunks(parts, inputAvailable)).toEqual([]);
   });
 });

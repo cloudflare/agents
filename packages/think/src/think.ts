@@ -212,6 +212,7 @@ import {
   ResumeHandshake,
   normalizeToolInput,
   isLateToolInputChunk,
+  lateToolInputForwardChunks,
   repairInterruptedToolParts,
   toolPartHasSettledResult,
   persistReconstructedOrphan,
@@ -13995,7 +13996,7 @@ export class Think<
     chunk: StreamChunkData,
     pendingActionCalls: Map<
       string,
-      { toolName: string; input: unknown | undefined }
+      { toolName: string; input: unknown | undefined; inputText?: string }
     >,
     parts?: UIMessage["parts"]
   ): StreamChunkData {
@@ -14027,6 +14028,17 @@ export class Think<
           pendingActionCalls.set(toolCallId, {
             ...previous,
             input: normalizeToolInput(chunk.input).input
+          });
+        }
+      } else if (
+        chunk.type === "tool-input-delta" &&
+        typeof chunk.inputTextDelta === "string"
+      ) {
+        const previous = pendingActionCalls.get(toolCallId);
+        if (previous) {
+          pendingActionCalls.set(toolCallId, {
+            ...previous,
+            inputText: (previous.inputText ?? "") + chunk.inputTextDelta
           });
         }
       }
@@ -14079,7 +14091,11 @@ export class Think<
       toolCallId,
       action: metadata.actionName,
       summary: metadata.summary,
-      input: pending.input ?? {},
+      input:
+        pending.input ??
+        (pending.inputText !== undefined
+          ? normalizeToolInput(pending.inputText).input
+          : {}),
       permissions: metadata.permissions ?? [],
       ...(metadata.risk !== undefined && { risk: metadata.risk }),
       kind: metadata.kind
@@ -14250,8 +14266,9 @@ export class Think<
       const flushState = { chunksSinceFlush: 0, hasFlushedContent: false };
       const pendingActionCalls = new Map<
         string,
-        { toolName: string; input: unknown | undefined }
+        { toolName: string; input: unknown | undefined; inputText?: string }
       >();
+      const approvalRequests = new Map<string, StreamChunkData>();
       try {
         const guardedStream = iterateWithStallWatchdog(
           result.toUIMessageStream({
@@ -14291,14 +14308,38 @@ export class Think<
             accumulator.parts,
             streamChunk
           );
+          if (streamChunk.type === "tool-approval-request") {
+            approvalRequests.set(streamChunk.toolCallId ?? "", streamChunk);
+          }
           const { action } = accumulator.applyChunk(streamChunk);
           this._applyActionApprovalDescriptorToParts(
             streamChunk,
             accumulator.parts
           );
-          // Server-side only: the parent's stream consumer would move its
-          // approval part back to `input-available`.
-          if (lateToolInput) continue;
+          if (lateToolInput) {
+            for (const forwarded of lateToolInputForwardChunks(
+              accumulator.parts,
+              streamChunk,
+              approvalRequests.get(streamChunk.toolCallId ?? "")
+            )) {
+              const chunkBody = JSON.stringify(forwarded);
+              const seq = await this._storeChunkDurably(
+                streamId,
+                forwarded,
+                chunkBody,
+                flushState
+              );
+              this._broadcastChat({
+                type: MSG_CHAT_RESPONSE,
+                id: requestId,
+                body: chunkBody,
+                done: false,
+                ...(seq !== undefined && { seq })
+              });
+              await callback.onEvent(chunkBody);
+            }
+            continue;
+          }
 
           if (action?.type === "error") {
             streamError = action.error;
@@ -14756,8 +14797,9 @@ export class Think<
     const flushState = { chunksSinceFlush: 0, hasFlushedContent: false };
     const pendingActionCalls = new Map<
       string,
-      { toolName: string; input: unknown | undefined }
+      { toolName: string; input: unknown | undefined; inputText?: string }
     >();
+    const approvalRequests = new Map<string, StreamChunkData>();
 
     const stallTimeoutMs =
       this._activeStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
@@ -14808,14 +14850,38 @@ export class Think<
             accumulator.parts,
             streamChunk
           );
+          if (streamChunk.type === "tool-approval-request") {
+            approvalRequests.set(streamChunk.toolCallId ?? "", streamChunk);
+          }
           const { action } = accumulator.applyChunk(streamChunk);
           this._applyActionApprovalDescriptorToParts(
             streamChunk,
             accumulator.parts
           );
-          // Server-side only: forwarding it (live or on resume replay) would
-          // move the client's approval part back to `input-available`.
-          if (lateToolInput) continue;
+          if (lateToolInput) {
+            for (const forwarded of lateToolInputForwardChunks(
+              accumulator.parts,
+              streamChunk,
+              approvalRequests.get(streamChunk.toolCallId ?? "")
+            )) {
+              const chunkBody = JSON.stringify(forwarded);
+              const seq = await this._storeChunkDurably(
+                streamId,
+                forwarded,
+                chunkBody,
+                flushState
+              );
+              this._broadcastChat({
+                type: MSG_CHAT_RESPONSE,
+                id: requestId,
+                body: chunkBody,
+                done: false,
+                ...(seq !== undefined && { seq }),
+                ...(continuation && { continuation: true })
+              });
+            }
+            continue;
+          }
 
           // Approved server tools execute during a continuation stream, but
           // their original tool part lives in an earlier assistant message.
