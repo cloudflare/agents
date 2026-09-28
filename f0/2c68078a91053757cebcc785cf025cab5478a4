@@ -1,0 +1,21 @@
+packages/think/src/tests/tool-discovery.test.ts
+  s_efd49820c22d67::t_72d2e9af9f4a00 197-207
+packages/think/src/tool-discovery.ts
+  s_efd49820c22d67::t_799fc58b78a42c 107-108,113-115
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f02c68078a91053757cebcc785cf025cab5478a4",
+  "prompts": {},
+  "sessions": {
+    "s_efd49820c22d67": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "50161273-add8-4cb8-9ec3-a4d330172115",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
