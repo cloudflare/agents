@@ -84,23 +84,10 @@ interface AgentRouteOptions<
     | Promise<Response | Request | undefined | void>;
 }
 
-/**
- * Configuration options for {@link routeAgentRequest}.
- *
- * @template Env Worker environment containing Durable Object bindings.
- * @template Props Properties supplied before lifecycle startup.
- */
-export type AgentOptions<
-  Env,
-  Props extends object = object
-> = AgentRouteOptions<Env, Props>;
+/** Configuration options for {@link routeAgentRequest}. */
+export type AgentOptions<Env> = AgentRouteOptions<Env>;
 
-/**
- * Options for resolving and starting a named Agent.
- *
- * @template Env Worker environment containing the Agent binding.
- * @template Props Properties supplied before lifecycle startup.
- */
+/** Options for resolving and starting a named Agent. */
 export type AgentGetOptions<Env, Props extends object = object> = Pick<
   AgentRouteOptions<Env, Props>,
   "jurisdiction" | "locationHint" | "props" | "routingRetry"
@@ -272,17 +259,15 @@ function resolveCorsHeaders(
  * Durable Object. The target may extend `Agent` or compose `Lifecycle`
  * directly into a plain `DurableObject`.
  *
- * @template Env Worker environment containing Durable Object bindings.
- * @template Props Properties supplied before lifecycle startup.
  * @param request - Incoming Worker request.
  * @param env - Worker environment containing Durable Object bindings.
  * @param options - Routing options.
  * @returns The matched response, or `null` when the path does not match.
  */
-export async function routeAgentRequest<Env, Props extends object = object>(
+export async function routeAgentRequest<Env>(
   request: Request,
   env: Env,
-  options?: AgentOptions<Env, Props>
+  options?: AgentOptions<Env>
 ): Promise<Response | null> {
   // SAFETY: Worker environments are object records. The unconstrained Env
   // generic is retained for compatibility with the previously published API.
@@ -397,9 +382,6 @@ export async function routeAgentRequest<Env, Props extends object = object>(
 /**
  * Get a named Agent stub after its lifecycle startup has completed.
  *
- * @template Env Worker environment containing the Agent binding.
- * @template T Agent class exposed by the namespace.
- * @template Props Properties supplied before lifecycle startup.
  * @param namespace - Agent Durable Object namespace.
  * @param name - Agent instance name.
  * @param options - Placement, startup properties, and retry options.
@@ -407,7 +389,7 @@ export async function routeAgentRequest<Env, Props extends object = object>(
  */
 export async function getAgentByName<
   Env extends Cloudflare.Env = Cloudflare.Env,
-  T extends Agent<Env, unknown, object> = Agent<Env>,
+  T extends Agent<Env> = Agent<Env>,
   Props extends object = object
 >(
   namespace: DurableObjectNamespace<T>,
