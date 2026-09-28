@@ -1,0 +1,35 @@
+packages/ai-chat/src/index.ts
+  s_c818abc161b40d::t_8840f794d4ff0d 3464,3481,3500-3508,3539-3574
+packages/think/src/think.ts
+  s_c818abc161b40d::t_d93512b32e109e 3049-3054,18597,18636-18644,18655-18657,18662-18715,18747-18748,18778,18782-18793,18797-18799
+.changeset/continuation-prestream-errors.md
+  s_c818abc161b40d::t_bacf3e36d30b54 1-6
+packages/ai-chat/src/tests/on-stream-end.test.ts
+  s_c818abc161b40d::t_a099a1066f4f7d 385-448
+packages/ai-chat/src/tests/worker.ts
+  s_c818abc161b40d::t_3826c373763515 1874,1878,1880-1882,1896-1899
+packages/think/src/tests/actions-durable-pause.test.ts
+  s_c818abc161b40d::t_fdc65fb1e67014 347-369
+packages/think/src/tests/agents/client-tools.ts
+  s_c818abc161b40d::t_6189ebd88d30a3 13,827-841,845-847
+packages/think/src/tests/agents/think-session.ts
+  s_c818abc161b40d::t_cf1363a6672400 6414-6429,6806-6809
+packages/think/src/tests/client-tools.test.ts
+  s_c818abc161b40d::t_02ad986491d5d3 864-921
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2cf9cc88487fc79a127115a07a0a2b425a0efb01",
+  "prompts": {},
+  "sessions": {
+    "s_c818abc161b40d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "ba73f896-6b24-4739-897c-6e7c57b5e20b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "x <x@x>"
+    }
+  }
+}
