@@ -1,0 +1,19 @@
+packages/ai-chat/src/tests/late-tool-input.test.ts
+  s_c818abc161b40d::t_1091ff6c7ca8c6 4-8,18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f5cc126fd06e846011623095e227a901d3b8b257",
+  "prompts": {},
+  "sessions": {
+    "s_c818abc161b40d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "ba73f896-6b24-4739-897c-6e7c57b5e20b",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
