@@ -194,7 +194,17 @@ describe("tool discovery helpers", () => {
     expect(searchDeferredTools("zz", catalog)).toEqual([]);
   });
 
-  it("matches a two-letter keyword against name components only", () => {
+  it("keeps two-letter filler from outranking a relevant tool", () => {
+    const tools = [
+      { name: "navigate_to_page", description: "Navigate web pages" },
+      { name: "forecast", description: "Get weather forecasts" }
+    ];
+    expect(searchDeferredTools("weather to prepare", tools, 1)).toEqual([
+      "forecast"
+    ]);
+  });
+
+  it("matches a two-letter keyword against a leading name component", () => {
     const withShort = [
       ...catalog,
       { name: "db_read", description: "Read database rows" },
