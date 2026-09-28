@@ -11,13 +11,13 @@ helpers) rather than the `Think` class, so they pass either way. A failing
 test that reaches a Think feature the harness-backed class does not have yet
 fails with "Think.<name> is not supported by the harness-backed Think yet".
 
-**378 of 1192 tests pass (31%).**
+**378 of 1196 tests pass (31%).**
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
 | `action-pause-recovery.test.ts`        | 0 / 3    | 0%   |
 | `actions-attach-reply.test.ts`         | 0 / 12   | 0%   |
-| `actions-durable-pause.test.ts`        | 2 / 36   | 5%   |
+| `actions-durable-pause.test.ts`        | 2 / 37   | 5%   |
 | `agent-tool-reattach-recovery.test.ts` | 0 / 2    | 0%   |
 | `agent-tool-rebind-noop.test.ts`       | 0 / 6    | 0%   |
 | `agent-tools.test.ts`                  | 12 / 47  | 25%  |
@@ -31,7 +31,7 @@ fails with "Think.<name> is not supported by the harness-backed Think yet".
 | `channel-recovery.test.ts`             | 0 / 5    | 0%   |
 | `channel-threading.test.ts`            | 0 / 4    | 0%   |
 | `channels.test.ts`                     | 8 / 8    | 100% |
-| `client-tools.test.ts`                 | 14 / 91  | 15%  |
+| `client-tools.test.ts`                 | 14 / 94  | 14%  |
 | `connection-state.test.ts`             | 2 / 2    | 100% |
 | `deliver-notice.test.ts`               | 0 / 7    | 0%   |
 | `errored-stream-replay.test.ts`        | 0 / 1    | 0%   |

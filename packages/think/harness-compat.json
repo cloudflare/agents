@@ -1,5 +1,5 @@
 {
-  "total": 1192,
+  "total": 1196,
   "passed": 378,
   "files": {
     "action-pause-recovery.test.ts": {
@@ -11,7 +11,7 @@
       "passed": 0
     },
     "actions-durable-pause.test.ts": {
-      "total": 36,
+      "total": 37,
       "passed": 2
     },
     "agent-tool-reattach-recovery.test.ts": {
@@ -67,7 +67,7 @@
       "passed": 8
     },
     "client-tools.test.ts": {
-      "total": 91,
+      "total": 94,
       "passed": 14
     },
     "connection-state.test.ts": {
