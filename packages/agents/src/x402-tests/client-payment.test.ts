@@ -123,6 +123,30 @@ describe("x402 selected-payment cap", () => {
     expect(JSON.parse(atob(token)).accepted.amount).toBe("10000");
   });
 
+  it("ignores nested requirement mutations made through the confirmation callback", async () => {
+    const { client, callTool, signTypedData } = setup([
+      structuredClone(requirement)
+    ]);
+    const result = await client.callTool(
+      async (accepts) => {
+        queueMicrotask(() =>
+          queueMicrotask(() => {
+            (accepts[0].extra as { name: string }).name = "OtherToken";
+          })
+        );
+        return true;
+      },
+      { name: "test" }
+    );
+    expect(result.isError).toBeUndefined();
+    expect(signTypedData).toHaveBeenCalledOnce();
+    const token = callTool.mock.calls[1][0]._meta?.["x402/payment"] as string;
+    expect(JSON.parse(atob(token)).accepted.extra).toEqual({
+      name: "USDC",
+      version: "2"
+    });
+  });
+
   it("allows exactly the cap without number rounding", async () => {
     const cap = 9007199254740993n;
     const { client, signTypedData } = setup(
