@@ -9,6 +9,7 @@ import type {
 } from "ai";
 import { nanoid } from "nanoid";
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isSocketAddressPending } from "../socket-address";
 import { chatThrottleOptions } from "./chat-throttle";
 import type { ChatTurnOutcome, OutgoingMessage } from "./wire-types";
 import { STREAM_RESUME_NONE_REASONS } from "./protocol";
@@ -805,17 +806,61 @@ export function useAgentChat<
   const onDataRef = useRef(onData);
   onDataRef.current = onData;
 
-  const rawHttpUrl = agent.getHttpUrl();
-  const agentUrl = rawHttpUrl ? new URL(rawHttpUrl) : null;
-
-  if (agentUrl) {
-    agentUrl.searchParams.delete("_pk");
+  // `useAgent` addresses a new agent at least one render before its socket
+  // does. Until the socket catches up there is no URL for the new agent, and
+  // the previous socket's URL carries the previous agent's credentials. So
+  // while it is behind, key and load against the last address the socket
+  // did match, and switch once it catches up (#1864, #1874).
+  const socketAddressPending = isSocketAddressPending(agent);
+  const committedAddressRef = useRef<{
+    urlString: string | null;
+    addressKey: string;
+    agent: string;
+    name: string;
+  } | null>(null);
+  let address = committedAddressRef.current;
+  if (!socketAddressPending || address === null) {
+    const rawHttpUrl = agent.getHttpUrl();
+    const url = rawHttpUrl ? new URL(rawHttpUrl) : null;
+    url?.searchParams.delete("_pk");
+    // The socket's route (host, base path, extra path) is part of the address:
+    // the same agent name on another host or route has its own history. The
+    // socket options are set from the first render, and exclude the query.
+    const route = (
+      agent as {
+        partySocketOptions?: {
+          host?: string;
+          basePath?: string;
+          prefix?: string;
+          party?: string;
+          path?: string;
+        };
+      }
+    ).partySocketOptions;
+    address = {
+      urlString: url?.toString() ?? null,
+      addressKey: JSON.stringify([
+        Array.isArray(agent.path)
+          ? agent.path.map((step) => [step.agent, step.name])
+          : [[agent.agent ?? "", agent.name ?? ""]],
+        route
+          ? [
+              route.host ?? null,
+              route.basePath ?? null,
+              route.prefix ?? null,
+              route.party ?? null,
+              route.path ?? null
+            ]
+          : null
+      ]),
+      agent: agent.agent,
+      name: agent.name
+    };
+    if (!socketAddressPending) committedAddressRef.current = address;
   }
-  const agentUrlString = agentUrl?.toString() ?? null;
-
-  const agentAddressKey = Array.isArray(agent.path)
-    ? JSON.stringify(agent.path.map((step) => [step.agent, step.name]))
-    : JSON.stringify([[agent.agent ?? "", agent.name ?? ""]]);
+  const agentUrl = address.urlString ? new URL(address.urlString) : null;
+  const agentUrlString = address.urlString;
+  const agentAddressKey = address.addressKey;
 
   // Cache key for the request-dedup `requestCache` and the late-seed
   // effect. It uses the full root-first agent address when `useAgent`
@@ -953,7 +998,7 @@ export function useAgentChat<
   }
 
   const shouldFetchInitialMessages =
-    getInitialMessages === null
+    getInitialMessages === null || committedAddressRef.current === null
       ? false
       : getInitialMessages
         ? true
@@ -962,8 +1007,8 @@ export function useAgentChat<
     ? null
     : doGetInitialMessages(
         {
-          agent: agent.agent,
-          name: agent.name,
+          agent: address.agent,
+          name: address.name,
           url: agentUrlString ?? undefined
         },
         initialMessagesCacheKey
