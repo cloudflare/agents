@@ -210,7 +210,7 @@ toolDiscovery = {
 };
 ```
 
-A tool stays active for the rest of the conversation. Think derives that from the transcript: a discovery result that names the tool, or a call to it. Resumed and recovered turns, approval continuations, and later turns therefore rebuild the same tool set without extra state. A tool falls out again only once compaction removes that evidence. A step that returns its own `activeTools` from `beforeStep` replaces this selection for that step.
+A tool stays active for the rest of the conversation. Think derives that from the transcript: a discovery result that names the tool, or a call to it. Resumed and recovered turns, approval continuations, and later turns therefore rebuild the same tool set without extra state. A tool falls out again only once that evidence leaves the model's view: compaction removes it, or, on a transcript larger than `hydrationByteBudget`, it is older than the hydrated window. The model can then discover the tool again. A `messages` override from `beforeStep` does not drop a tool discovered earlier in the turn. A step that returns its own `activeTools` from `beforeStep` replaces this selection for that step.
 
 Each activation changes the list of tools in the request, and providers cache tools as part of the prompt prefix, so the step after a discovery reads less from the cache. Because activations persist, that happens once per discovered tool, not every turn.
 

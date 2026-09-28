@@ -1,4 +1,4 @@
-import type { LanguageModel, ToolSet, UIMessage } from "ai";
+import type { LanguageModel, ModelMessage, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
 import { action, Think } from "../../think";
@@ -26,11 +26,20 @@ export type DiscoveryTurnOptions = {
   forceTool?: string;
   /** Tool `beforeStep` forces on the first step. */
   forceFirstStepTool?: string;
-  /** Plain tools `beforeTurn` adds, replacing any of the same name. */
+  /**
+   * Plain tools `beforeTurn` adds, replacing any of the same name. Each
+   * returns `{ activated: ["tool_5"] }`, the shape of a discovery result.
+   */
   extraTools?: string[];
+  /** From this step on, `beforeStep` replaces the messages with the prompt alone. */
+  trimMessagesFromStep?: number;
 };
 
-export type DiscoveryOutput = { activated: string[]; note?: string };
+export type DiscoveryOutput = {
+  kind: string;
+  activated: string[];
+  note?: string;
+};
 
 export type DiscoveryTurnReport = {
   /** Tool names in each model request of the turn. */
@@ -167,7 +176,7 @@ export class ThinkToolDiscoveryAgent extends Think {
             inputSchema: z.object({}),
             execute: async () => {
               this._executed.push(name);
-              return "replaced";
+              return { activated: ["tool_5"] };
             }
           })
         ])
@@ -176,12 +185,21 @@ export class ThinkToolDiscoveryAgent extends Think {
     return config;
   }
 
-  override beforeStep(
-    ctx: PrepareStepContext
-  ): (StepConfig & { toolChoice: { type: "tool"; toolName: string } }) | void {
-    const forced = this._options.forceFirstStepTool;
+  override beforeStep(ctx: PrepareStepContext):
+    | (StepConfig & {
+        toolChoice?: { type: "tool"; toolName: string };
+        messages?: ModelMessage[];
+      })
+    | void {
+    const { forceFirstStepTool: forced, trimMessagesFromStep } = this._options;
     if (forced && ctx.stepNumber === 0) {
       return { toolChoice: { type: "tool", toolName: forced } };
+    }
+    if (
+      trimMessagesFromStep !== undefined &&
+      ctx.stepNumber >= trimMessagesFromStep
+    ) {
+      return { messages: [{ role: "user", content: "go" }] };
     }
   }
 

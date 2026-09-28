@@ -7553,9 +7553,9 @@ export class Think<
     }
     const stepActiveTools =
       discoveryActiveTools &&
-      ((messages: readonly ModelMessage[], forced?: string) => [
+      ((sources: readonly (readonly ModelMessage[])[], forced?: string) => [
         ...new Set([
-          ...discoveryActiveTools(messages),
+          ...discoveryActiveTools(...sources),
           ...(structuredOutputSchema ? [finalAnswerToolName] : []),
           ...(forced !== undefined && forced in finalTools ? [forced] : [])
         ])
@@ -7639,7 +7639,7 @@ export class Think<
       // restricts `activeTools` — otherwise a structured turn could never call
       // it and would fail to produce output.
       activeTools: stepActiveTools
-        ? stepActiveTools(finalMessages)
+        ? stepActiveTools([finalMessages])
         : wantsStructuredOutput && config.activeTools
           ? [...config.activeTools, finalAnswerToolName]
           : config.activeTools,
@@ -7706,21 +7706,21 @@ export class Think<
             ? { ...base, messages: guarded }
             : base;
         // Tools discovered in an earlier step join this one, unless the
-        // subclass chose this step's tools itself. A tool this step forces
-        // must be active too, or the model cannot call it.
+        // subclass chose this step's tools itself. The step's own history is
+        // read either way, before any `messages` override can hide it. A tool
+        // this step forces must be active too, or the model cannot call it.
+        const overrideMessages = (withGuard as { messages?: ModelMessage[] })
+          .messages;
+        const discovered = stepActiveTools?.(
+          overrideMessages
+            ? [event.messages, overrideMessages]
+            : [event.messages],
+          forcedToolName((withGuard as { toolChoice?: unknown }).toolChoice)
+        );
         const withMessages =
-          stepActiveTools &&
+          discovered &&
           (withGuard as { activeTools?: unknown }).activeTools === undefined
-            ? {
-                ...withGuard,
-                activeTools: stepActiveTools(
-                  (withGuard as { messages?: ModelMessage[] }).messages ??
-                    event.messages,
-                  forcedToolName(
-                    (withGuard as { toolChoice?: unknown }).toolChoice
-                  )
-                )
-              }
+            ? { ...withGuard, activeTools: discovered }
             : withGuard;
         // Safety net for structured workflow turns: on the final permitted step,
         // force the model to call `final_answer` so the turn always terminates
@@ -8040,7 +8040,7 @@ export class Think<
     target: ToolSet,
     visible: readonly string[],
     forced: string | undefined
-  ): ((messages: readonly ModelMessage[]) => string[]) | undefined {
+  ): ((...sources: (readonly ModelMessage[])[]) => string[]) | undefined {
     const discovery = this.toolDiscovery;
     if (!discovery) return undefined;
     const authorization = this._activeTurnAuthorization;
@@ -8074,16 +8074,17 @@ export class Think<
       discoverName = `${DISCOVER_TOOLS_TOOL_NAME}_${suffix}`;
     }
     target[discoverName] = createDiscoverTool(catalog, discovery);
-    const fromTranscript = activeDeferredTools(
-      { transcript: this.messages },
-      catalog
-    );
-    return (messages) => [
-      ...eager,
-      ...fromTranscript,
-      ...activeDeferredTools({ messages }, catalog),
-      discoverName
-    ];
+    // Accumulates over the turn: a step's `messages` override can drop a
+    // discovery result an earlier step already acted on.
+    const active = activeDeferredTools({ transcript: this.messages }, catalog);
+    return (...sources) => {
+      for (const messages of sources) {
+        for (const name of activeDeferredTools({ messages }, catalog)) {
+          active.add(name);
+        }
+      }
+      return [...eager, ...active, discoverName];
+    };
   }
 
   private async _compileActionTools(): Promise<ToolSet> {

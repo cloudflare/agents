@@ -29,7 +29,9 @@ describe("deferred tool discovery (#2277)", () => {
     expect(synthetic(first)).toEqual([]);
     expect(first).not.toContain("admin_action");
 
-    expect(report.discoveryOutputs).toEqual([{ activated: ["tool_42"] }]);
+    expect(report.discoveryOutputs).toEqual([
+      { kind: "tool-discovery", activated: ["tool_42"] }
+    ]);
     expect(synthetic(second)).toEqual(["tool_42"]);
     expect(synthetic(third)).toEqual(["tool_42"]);
     expect(report.beforeToolCalls).toEqual(["discover_tools", "tool_42"]);
@@ -70,6 +72,32 @@ describe("deferred tool discovery (#2277)", () => {
     expect(next.requests[0]).toContain("discover_tools_1");
   });
 
+  it("keeps a tool discovered earlier in the turn when beforeStep trims the messages", async () => {
+    const report = await (
+      await agent("discover-trimmed")
+    ).runTurnForTest(
+      [
+        { tool: "discover_tools", input: { query: "tool_42" } },
+        { tool: "tool_42" },
+        { text: "ok" }
+      ],
+      { trimMessagesFromStep: 1 }
+    );
+    expect(synthetic(report.requests[1])).toEqual(["tool_42"]);
+    expect(synthetic(report.requests[2])).toEqual(["tool_42"]);
+    expect(report.executed).toEqual(["tool_42"]);
+  });
+
+  it("does not read an application discover_tools result as a discovery", async () => {
+    const report = await (
+      await agent("discover-app-tool")
+    ).runTurnForTest([{ tool: "discover_tools" }, { text: "ok" }], {
+      extraTools: ["discover_tools"]
+    });
+    expect(report.executed).toEqual(["discover_tools"]);
+    expect(synthetic(report.requests[1])).toEqual([]);
+  });
+
   it("does not apply an action's permissions to a tool that replaced it", async () => {
     const report = await (
       await agent("discover-replaced-action")
@@ -81,7 +109,9 @@ describe("deferred tool discovery (#2277)", () => {
       ],
       { extraTools: ["admin_action"] }
     );
-    expect(report.discoveryOutputs).toEqual([{ activated: ["admin_action"] }]);
+    expect(report.discoveryOutputs).toEqual([
+      { kind: "tool-discovery", activated: ["admin_action"] }
+    ]);
     expect(report.executed).toEqual(["admin_action"]);
   });
 
@@ -103,7 +133,9 @@ describe("deferred tool discovery (#2277)", () => {
       { tool: "admin_action" },
       { text: "Could not." }
     ]);
-    expect(report.discoveryOutputs).toEqual([{ activated: ["tool_42"] }]);
+    expect(report.discoveryOutputs).toEqual([
+      { kind: "tool-discovery", activated: ["tool_42"] }
+    ]);
     expect(report.requests.flat()).not.toContain("admin_action");
     expect(report.executed).toEqual([]);
     expect(report.beforeToolCalls).not.toContain("admin_action");
@@ -119,7 +151,9 @@ describe("deferred tool discovery (#2277)", () => {
       ],
       { customSearch: true }
     );
-    expect(report.discoveryOutputs).toEqual([{ activated: ["tool_7"] }]);
+    expect(report.discoveryOutputs).toEqual([
+      { kind: "tool-discovery", activated: ["tool_7"] }
+    ]);
     expect(synthetic(report.requests[1])).toEqual(["tool_7"]);
     expect(report.requests[1]).not.toContain("admin_action");
   });
@@ -186,8 +220,18 @@ describe("tool discovery helpers", () => {
                 output: {
                   type: "json",
                   value: {
+                    kind: "tool-discovery",
                     activated: ["get_weather", "admin_action"]
                   }
+                }
+              },
+              {
+                type: "tool-result",
+                toolCallId: "d",
+                toolName: "discover_tools_1",
+                output: {
+                  type: "json",
+                  value: { activated: ["send_email"] }
                 }
               },
               {
@@ -196,7 +240,7 @@ describe("tool discovery helpers", () => {
                 toolName: "other_tool",
                 output: {
                   type: "json",
-                  value: { activated: ["send_email"] }
+                  value: { kind: "tool-discovery", activated: ["send_email"] }
                 }
               }
             ]
@@ -238,7 +282,7 @@ describe("tool discovery helpers", () => {
                 toolCallId: "d",
                 state: "output-available",
                 input: { query: "weather" },
-                output: { activated: ["get_weather"] }
+                output: { kind: "tool-discovery", activated: ["get_weather"] }
               },
               {
                 type: "dynamic-tool",

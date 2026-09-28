@@ -53,6 +53,13 @@ function isDiscoverToolName(name: string): boolean {
   return /^discover_tools(?:_\d+)?$/.test(name);
 }
 
+/**
+ * Marks a result as the discovery tool's, so an application tool that holds
+ * one of those names, and returns an `activated` list of its own, is not
+ * mistaken for it.
+ */
+const DISCOVERY_RESULT_KIND = "tool-discovery";
+
 /** Tools a turn exposes that `discovery.defer` selects, in tool-set order. */
 export function deferredCatalog(
   tools: ToolSet,
@@ -152,8 +159,12 @@ export function createDiscoverTool(
         .filter((entry) => found.has(entry.name))
         .map((entry) => entry.name);
       return activated.length > 0
-        ? { activated }
-        : { activated, note: "No matching tools. Try other keywords." };
+        ? { kind: DISCOVERY_RESULT_KIND, activated }
+        : {
+            kind: DISCOVERY_RESULT_KIND,
+            activated,
+            note: "No matching tools. Try other keywords."
+          };
     }
   });
 }
@@ -173,7 +184,13 @@ export function forcedToolName(toolChoice: unknown): string | undefined {
 function activatedNames(output: unknown): string[] {
   const value =
     isRecord(output) && output.type === "json" ? output.value : output;
-  if (!isRecord(value) || !Array.isArray(value.activated)) return [];
+  if (
+    !isRecord(value) ||
+    value.kind !== DISCOVERY_RESULT_KIND ||
+    !Array.isArray(value.activated)
+  ) {
+    return [];
+  }
   return value.activated.filter(
     (name): name is string => typeof name === "string"
   );
