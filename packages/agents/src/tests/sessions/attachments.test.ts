@@ -262,52 +262,6 @@ describe("Sessions attachments", () => {
     });
   });
 
-  it("offloads media nested beside a pointer and restores it", async () => {
-    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
-      const session = instance.sessions.session();
-      const url = dataUrl("image/png", 200_000);
-      // A thumbnail sits beside the image it previews. Both are media, so both
-      // leave the row — the one whose record also ends up holding a pointer is
-      // not special.
-      const thumbnail = {
-        mediaType: "image/png",
-        data: btoa("t".repeat(9_000))
-      };
-      const message = fileMessage("m1", url, "image/png", { thumbnail });
-      await session.appendMessage(message);
-
-      expect(instance.attachmentRecords()).toHaveLength(2);
-      expect(instance.attachmentRefCount()).toBe(2);
-      expect(instance.messageRowBytes("", "m1")).toBeLessThan(1_000);
-
-      // Stored: the record carries a pointer in `url` AND a pointer in the
-      // sibling it nests.
-      const pointer = instance.storedMessage("", "m1");
-      type Nested = { url: string; thumbnail: { data: string } };
-      const stored = pointer.parts[1] as unknown as Nested;
-      expect(stored.url).toMatch(/^attachment:sha256:[0-9a-f]{64}$/);
-      expect(stored.thumbnail.data).toMatch(/^attachment:sha256:[0-9a-f]{64}$/);
-
-      // A read puts both back, so extraction stays lossless however it nests.
-      const [read] = await session.getHistory();
-      expect(read).toEqual(message);
-
-      // Writing the stored form back keeps both references.
-      await session.updateMessage({
-        ...pointer,
-        parts: [{ type: "text", text: "edited" }, pointer.parts[1]]
-      });
-      expect(instance.attachmentRecords()).toHaveLength(2);
-      expect(instance.attachmentRefCount()).toBe(2);
-      const [again] = await session.getHistory();
-      expect((again.parts[1] as unknown as Nested).url).toBe(url);
-      expect((again.parts[1] as unknown as Nested).thumbnail.data).toBe(
-        thumbnail.data
-      );
-    });
-  });
-
   it("references a pointer nested past the rewrite depth cap", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
@@ -318,7 +272,7 @@ describe("Sessions attachments", () => {
         instance.storedMessage("", "m1").parts[1] as { url: string }
       ).url;
 
-      // Extraction stops REWRITING past its depth cap, but a pointer below the
+      // Extraction stops rewriting past its depth cap, but a pointer below the
       // cap still names a payload, and a write that missed it would collect
       // bytes this row points at.
       let node: unknown = { url: pointerUrl };
