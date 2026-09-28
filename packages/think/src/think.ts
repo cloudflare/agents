@@ -2384,6 +2384,7 @@ const WORKFLOW_NOTIFICATION_MAX_BACKOFF_SECONDS = 10 * 60;
 const WORKFLOW_NOTIFICATION_GIVE_UP_MS = 12 * 60 * 60 * 1000;
 /** Queue callback that runs one connection-less continuation turn. */
 const CONNECTIONLESS_CONTINUATION_CALLBACK = "_cfRunConnectionlessContinuation";
+const CONNECTIONLESS_CONTINUATION_QUEUE_ID = "connectionless-continuation";
 /** Queue callback that runs one media-eviction pass. */
 const MEDIA_EVICTION_CALLBACK = "_cfEvictAgedMedia";
 /** Queue callback that runs one pending submission. */
@@ -4086,6 +4087,10 @@ export class Think<
    * the next one. A returned tool part MUST carry a settled result
    * (`output-available` / `output-error` / `output-denied` or an
    * `output`/`result` field); returning a non-tool part (e.g. text) is fine.
+   *
+   * It also receives an approved call that never ran (state still
+   * `approval-responded`) once a later turn moves past it without a
+   * continuation executing it.
    */
   protected repairInterruptedToolPart(
     part: UIMessage["parts"][number]
@@ -4093,11 +4098,36 @@ export class Think<
     return {
       ...part,
       state: "output-error",
-      errorText: "The tool call was interrupted before a result was recorded."
+      errorText:
+        (part as { state?: string }).state === "approval-responded"
+          ? "The tool call was approved but did not run before the next turn started."
+          : "The tool call was interrupted before a result was recorded."
     } as UIMessage["parts"][number];
   }
 
-  private _repairToolTranscriptParts(messages: UIMessage[]): {
+  /**
+   * Whether the inference being prepared may repair `approval-responded`
+   * parts: it is not a continuation, and no continuation is waiting to run
+   * them.
+   */
+  private _repairApprovalRespondedThisTurn = false;
+
+  private async _mayRepairApprovalResponded(
+    continuation: boolean
+  ): Promise<boolean> {
+    if (continuation) return false;
+    if (this._continuation.pending || this._continuation.deferred) {
+      return false;
+    }
+    return (
+      (await this.getQueue(CONNECTIONLESS_CONTINUATION_QUEUE_ID)) === undefined
+    );
+  }
+
+  private _repairToolTranscriptParts(
+    messages: UIMessage[],
+    options: { repairApprovalResponded?: boolean } = {}
+  ): {
     messages: UIMessage[];
     removedToolCalls: number;
     normalizedInputs: number;
@@ -4111,14 +4141,17 @@ export class Think<
     return repairInterruptedToolParts(messages, {
       repairPart: (part) => this.repairInterruptedToolPart(part),
       isSettled: (record) => this._toolPartHasSettledResult(record),
-      normalizeInput: (input) => normalizeToolInput(input)
+      normalizeInput: (input) => normalizeToolInput(input),
+      repairApprovalResponded: options.repairApprovalResponded
     });
   }
 
   private async _repairTranscriptForProvider(
     messages: UIMessage[]
   ): Promise<UIMessage[]> {
-    const repair = this._repairToolTranscriptParts(messages);
+    const repair = this._repairToolTranscriptParts(messages, {
+      repairApprovalResponded: this._repairApprovalRespondedThisTurn
+    });
     if (repair.removedToolCalls === 0 && repair.normalizedInputs === 0) {
       return messages;
     }
@@ -7262,6 +7295,8 @@ export class Think<
       this._approvedActionInputsFromTranscript();
     // Reset the proactive-compaction cap for this streamText run.
     this._proactiveCompactionsThisRun = 0;
+    this._repairApprovalRespondedThisTurn =
+      await this._mayRepairApprovalResponded(input.continuation);
     if (this.waitForMcpConnections) {
       const timeout =
         typeof this.waitForMcpConnections === "object"
@@ -18689,7 +18724,7 @@ export class Think<
    */
   private async _queueConnectionlessContinuation(): Promise<void> {
     await this.queue(CONNECTIONLESS_CONTINUATION_CALLBACK, undefined, {
-      id: "connectionless-continuation"
+      id: CONNECTIONLESS_CONTINUATION_QUEUE_ID
     });
   }
 

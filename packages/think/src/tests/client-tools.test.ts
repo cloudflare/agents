@@ -1,5 +1,5 @@
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "agents";
 import { subscribe } from "agents/observability";
 import type { UIMessage } from "ai";
@@ -799,6 +799,63 @@ describe("Think — auto-continuation", () => {
     expect(toolPart).toMatchObject({
       state: "output-available",
       output: { enabled: true }
+    });
+
+    await closeWS(ws);
+  });
+
+  it("settles an approved tool that never ran once a new user turn moves past it (#2382)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setServerApprovalToolMode(true);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const initialDone = waitForDone(ws, 15000);
+    sendChatRequest(ws, [makeUserMessage("update my trigger")]);
+    await initialDone;
+
+    // Approve without a continuation, so nothing ever executes the call.
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc-server-approval-1",
+        approved: true,
+        autoContinue: false
+      })
+    );
+    await vi.waitFor(async () => {
+      const part = ((await agent.getMessages()) as UIMessage[])
+        .flatMap((message) => message.parts)
+        .find(
+          (p) => "toolCallId" in p && p.toolCallId === "tc-server-approval-1"
+        );
+      expect(part).toMatchObject({ state: "approval-responded" });
+    });
+
+    await agent.setServerApprovalToolMode(false);
+    await agent.setTextOnlyMode(true);
+    const followUpDone = waitForDone(ws, 15000);
+    const history = (await agent.getMessages()) as UIMessage[];
+    sendChatRequest(ws, [...history, makeUserMessage("thanks")]);
+    const followUpFrames = await followUpDone;
+    expect(
+      followUpFrames.some(
+        (frame) => frame.type === MSG_CHAT_RESPONSE && frame.error === true
+      )
+    ).toBe(false);
+
+    expect(await agent.getServerApprovalToolExecutions()).toBe(0);
+    const toolPart = ((await agent.getMessages()) as UIMessage[])
+      .flatMap((message) => message.parts)
+      .find(
+        (part) =>
+          "toolCallId" in part && part.toolCallId === "tc-server-approval-1"
+      );
+    expect(toolPart).toMatchObject({
+      state: "output-error",
+      errorText:
+        "The tool call was approved but did not run before the next turn started."
     });
 
     await closeWS(ws);
