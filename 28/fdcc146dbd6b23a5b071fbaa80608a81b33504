@@ -1,0 +1,23 @@
+packages/agents/src/react-tests/useAgent-address-change.test.tsx
+  s_c818abc161b40d::t_fb6a9fc0345559 77-117
+packages/agents/src/react.tsx
+  s_c818abc161b40d::t_1535999f1f2997 69-70,80-82,1058-1061
+packages/agents/src/react-tests/initial-messages-address-change.test.tsx
+  s_c818abc161b40d::t_8664d9d0493c69 2,18,26-27,44-52,67-76,84-86,102-107,126-138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "28fdcc146dbd6b23a5b071fbaa80608a81b33504",
+  "prompts": {},
+  "sessions": {
+    "s_c818abc161b40d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "ba73f896-6b24-4739-897c-6e7c57b5e20b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
