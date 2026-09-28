@@ -72,7 +72,10 @@ export class Think<
   /** Model steps per turn. */
   maxSteps = 10;
 
-  readonly sessions = new Sessions();
+  /** The same capability and options as Think, so the same rows. */
+  readonly sessions = new Sessions({
+    reservedMetadataKeys: ["channel", "turnMetadata"]
+  });
   readonly driver = new Driver();
   readonly harness: ThinkHarness = new ThinkHarness({
     driver: this.driver,
@@ -368,6 +371,15 @@ export class Think<
   async cancelAllChats(): Promise<void> {
     await this.harness.stopChat(CHAT);
   }
+
+  // ── Left over from Think's previous engine ────────────────────────
+
+  // Scheduler jobs that the previous engine queued call these by name. The
+  // turns and deliveries they would have recovered are gone after the move,
+  // so each completes without doing anything instead of failing on retry.
+  async _chatRecoveryRetry(): Promise<void> {}
+  async _chatRecoveryContinue(): Promise<void> {}
+  async _cfRetryMessengerRecoveryDelivery(): Promise<void> {}
 
   // ── Harness wiring ────────────────────────────────────────────────
 
