@@ -2650,6 +2650,21 @@ export class SlowReplySubAgent extends Agent {
     return "broadcast";
   }
 
+  /** Broadcasts and then sends directly, both during the current frame. */
+  @callable()
+  broadcastThenSendNow(broadcast: string, direct: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.broadcastThenSendNow requires an active connection"
+      );
+    }
+
+    this.broadcast(broadcast);
+    connection.send(direct);
+    return "sent";
+  }
+
   /** Broadcasts after the current frame completes, optionally skipping the caller. */
   @callable()
   broadcastMessagesAfterDelay(messages: string[], withoutSelf = false): string {

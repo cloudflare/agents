@@ -393,6 +393,24 @@ describe("facet connection operations after frame completion (issue #2055)", () 
     }
   });
 
+  it("keeps a live-frame broadcast ahead of a later direct send", async () => {
+    const ws = await connectWS(uniqueName(), uniqueName());
+    try {
+      const broadcast = `live-broadcast-${crypto.randomUUID()}`;
+      const direct = `live-direct-${crypto.randomUUID()}`;
+      const delivered = waitForTextMessages(ws, new Set([broadcast, direct]));
+
+      const response = await callRPC(ws, "broadcastThenSendNow", [
+        broadcast,
+        direct
+      ]);
+      expectSuccessfulResult(response, "sent");
+      await expect(delivered).resolves.toEqual([broadcast, direct]);
+    } finally {
+      ws.close();
+    }
+  });
+
   it("preserves consecutive message order after frame completion", async () => {
     const parentName = uniqueName();
     const ws = await connectWS(parentName, uniqueName());
