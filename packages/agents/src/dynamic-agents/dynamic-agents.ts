@@ -1256,7 +1256,14 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         uri: childUri.toString(),
         tags,
         state: this.getForwardedState(connection),
-        requestHeaders: forwardReq ? [...forwardReq.headers] : undefined
+        // The outer URL belongs to the root-owned socket. A child that saw
+        // it would resolve its own connection from the top of the chain,
+        // so a third hop routes back to the second one, recursively.
+        requestHeaders: forwardReq
+          ? [...forwardReq.headers].filter(
+              ([name]) => name !== SUB_AGENT_OUTER_URL_HEADER
+            )
+          : undefined
       }
     };
   }

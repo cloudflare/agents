@@ -61,6 +61,77 @@ describe("sub-agent routing — routeAgentRequest + /sub/... URLs", () => {
     });
   });
 
+  it.each([
+    ["three", ["OuterSubAgent", "InnerSubAgent"]],
+    ["four", ["OuterSubAgent", "InnerSubAgent", "LeafSubAgent"]]
+  ] as const)(
+    "connects a WebSocket through %s levels of sub-agents",
+    async (_depth, classes) => {
+      const chain = [
+        { className: "TestSubAgentParent", name: uniqueName() },
+        ...classes.map((className) => ({ className, name: uniqueName() }))
+      ];
+      const leaf = chain[chain.length - 1];
+
+      async function connect() {
+        const res = await exports.default.fetch(
+          `http://x${buildAgentPath(chain)}`,
+          { headers: { Upgrade: "websocket" } }
+        );
+        expect(res.status).toBe(101);
+        const ws = res.webSocket;
+        if (!ws) throw new Error("expected a WebSocket");
+        const frames: Record<string, unknown>[] = [];
+        const waiters: Array<() => void> = [];
+        let closed: string | null = null;
+        ws.addEventListener("message", (event) => {
+          frames.push(JSON.parse(String(event.data)));
+          for (const wake of waiters.splice(0)) wake();
+        });
+        ws.addEventListener("close", (event) => {
+          closed = `closed ${event.code}: ${event.reason}`;
+          for (const wake of waiters.splice(0)) wake();
+        });
+        ws.accept();
+        const next = async (
+          match: (frame: Record<string, unknown>) => boolean
+        ) => {
+          while (true) {
+            const found = frames.find(match);
+            if (found) return found;
+            if (closed) throw new Error(closed);
+            await new Promise<void>((resolve) => waiters.push(resolve));
+          }
+        };
+        return { ws, frames, next };
+      }
+
+      const a = await connect();
+      const b = await connect();
+      for (const client of [a, b]) {
+        await expect(
+          client.next((frame) => frame.type === "cf_agent_identity")
+        ).resolves.toMatchObject({ name: leaf.name });
+      }
+
+      a.ws.send(
+        JSON.stringify({ type: "cf_agent_state", state: { from: "a" } })
+      );
+      await expect(
+        b.next(
+          (frame) =>
+            frame.type === "cf_agent_state" &&
+            (frame.state as { from?: string } | null)?.from === "a"
+        )
+      ).resolves.toBeTruthy();
+
+      for (const client of [a, b]) {
+        expect(client.frames.filter((frame) => "error" in frame)).toEqual([]);
+        client.ws.close();
+      }
+    }
+  );
+
   it("routes a canonical nested path through a custom prefix", async () => {
     const child = "custom-prefix-child";
     const pathname = buildAgentPath(
