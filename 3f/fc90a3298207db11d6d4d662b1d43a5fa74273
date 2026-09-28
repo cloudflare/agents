@@ -1,0 +1,40 @@
+packages/agents/src/index.ts
+  s_efd49820c22d67::t_93868d1a22d0da 4777-4791
+  s_efd49820c22d67::t_c43ceae882778e 3172,3176,3199,3209,3212,3221-3223,3232,3236-3237,3244,3248-3249,4729,4732-4733,5082,5086,5089,5093,5097-5098,5101,5106-5107,5110,5114
+.changeset/facet-host-jobs.md
+  s_efd49820c22d67::t_5c518ded5dd749 1-5
+packages/agents/src/tests/agents/sub-agent.ts
+  s_efd49820c22d67::t_0aac3a0b5b3ffc 71-73,524-535,2061-2077
+  s_efd49820c22d67::t_d3e52734d92e8b 1233-1260,1266,2668-2685
+  s_efd49820c22d67::t_132490b9a87869 2653-2667
+packages/agents/src/tests/sub-agent.test.ts
+  s_efd49820c22d67::t_b9e31725c99dd6 1164-1207
+.changeset/facet-broadcast-root-calls.md
+  s_efd49820c22d67::t_93fa3ca26d08a0 1-5
+packages/agents/src/dynamic-agents/dynamic-agents.ts
+  s_efd49820c22d67::t_d6907a5ffd53e7 105-112,198,243-248,532,736,757,901,905-935,1497-1500,1502
+  s_efd49820c22d67::t_85924a24ce5fb9 1259-1266
+packages/agents/src/tests/sub-agent-rpc-bridge.test.ts
+  s_efd49820c22d67::t_7884086a868320 2,540-640
+  s_efd49820c22d67::t_afb2b9c731994d 396-413
+.changeset/nested-sub-agent-websockets.md
+  s_efd49820c22d67::t_fe9d13786fd21d 1-5
+packages/agents/src/tests/sub-agent-routing.test.ts
+  s_efd49820c22d67::t_dc2ae1c49078cf 64-134
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3ffc90a3298207db11d6d4d662b1d43a5fa74273",
+  "prompts": {},
+  "sessions": {
+    "s_efd49820c22d67": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "50161273-add8-4cb8-9ec3-a4d330172115",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
