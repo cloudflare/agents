@@ -74,6 +74,16 @@ export interface RepairInterruptedToolPartsOptions {
    * with an error. Skipped parts are not counted in `removedToolCalls`.
    */
   shouldRepair?: (part: UIMessage["parts"][number]) => boolean;
+  /**
+   * Also repair `approval-responded` parts in any message a later message
+   * follows. Pass `true` only when no continuation will execute them: a turn
+   * that is not itself a continuation, with no continuation waiting to run.
+   * Parts in the last message are always kept, because the AI SDK executes a
+   * trailing approval response when the transcript is submitted as-is. A
+   * denied approval settles as `output-denied`; an approved one is handed to
+   * `repairPart`. Defaults to `false`.
+   */
+  repairApprovalResponded?: boolean;
 }
 
 export interface RepairInterruptedToolPartsResult {
@@ -94,7 +104,7 @@ export interface RepairInterruptedToolPartsResult {
  *
  *   - a tool part with NO settled result and state `approval-responded` is kept
  *     verbatim (an approved server tool waiting for its continuation to run
- *     `execute()` — not abandoned);
+ *     `execute()` — not abandoned), unless `repairApprovalResponded` is set;
  *   - a tool part with NO settled result for which `shouldRepair` returns false
  *     is kept verbatim (a part still awaiting a CLIENT interaction; see option);
  *   - any other tool part with no settled result is normalized then handed to
@@ -118,7 +128,8 @@ export function repairInterruptedToolParts(
   const toolCallIds: string[] = [];
   const repaired: UIMessage[] = [];
 
-  for (const message of messages) {
+  for (const [messageIndex, message] of messages.entries()) {
+    const isLastMessage = messageIndex === messages.length - 1;
     const parts: UIMessage["parts"] = [];
     let messageChanged = false;
     for (const part of message.parts) {
@@ -140,10 +151,31 @@ export function repairInterruptedToolParts(
         // scheduled continuation runs `execute()`. It is not abandoned, so
         // preserve it verbatim — flipping it to an error (or removing it) would
         // strand the approval and prevent the real result from ever being
-        // produced by the continuation.
+        // produced by the continuation. Once no continuation will run it, the
+        // provider needs a result for it like any other interrupted call.
         if (state === "approval-responded") {
-          parts.push(part);
-          continue;
+          if (!options.repairApprovalResponded || isLastMessage) {
+            parts.push(part);
+            continue;
+          }
+          const approval = record.approval as
+            | { approved?: boolean }
+            | undefined;
+          if (approval?.approved === false) {
+            const normalized = normalizeInput(
+              "input" in record ? record.input : undefined
+            );
+            parts.push({
+              ...part,
+              input: normalized.input,
+              state: "output-denied"
+            } as UIMessage["parts"][number]);
+            if (normalized.changed) normalizedInputs++;
+            removedToolCalls++;
+            messageChanged = true;
+            toolCallIds.push(toolCallId);
+            continue;
+          }
         }
         // A part still legitimately awaiting a CLIENT interaction (the host's
         // `shouldRepair` returns false) is left verbatim — erroring it would

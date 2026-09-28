@@ -1493,7 +1493,10 @@ export class AIChatAgent<
                               "cloudflare.agents.turn.admission": "queue",
                               "cloudflare.agents.turn.generation": epoch
                             },
-                            () => this._repairInterruptedToolsBeforeTurn()
+                            () =>
+                              this._repairInterruptedToolsBeforeTurn({
+                                continuation: false
+                              })
                           );
                           const response = await this.onChatMessage(
                             async (_finishResult) => {
@@ -2191,7 +2194,10 @@ export class AIChatAgent<
     return {
       ...part,
       state: "output-error",
-      errorText: "The tool call was interrupted before a result was recorded."
+      errorText:
+        (part as { state?: string }).state === "approval-responded"
+          ? "The tool call was approved but did not run before the next turn started."
+          : "The tool call was interrupted before a result was recorded."
     } as UIMessage["parts"][number];
   }
 
@@ -2228,12 +2234,20 @@ export class AIChatAgent<
    * write, one broadcast), which also refreshes `this.messages`.
    * @internal
    */
-  private async _repairInterruptedToolsBeforeTurn(): Promise<void> {
+  private async _repairInterruptedToolsBeforeTurn(options: {
+    continuation: boolean;
+  }): Promise<void> {
     const clientResolvable = this._clientResolvableToolNames();
     const repaired = repairInterruptedToolParts(this.messages, {
       repairPart: (part) => this.repairInterruptedToolPart(part),
       shouldRepair: (part) =>
-        !this._partAwaitsClientInteraction(part, clientResolvable)
+        !this._partAwaitsClientInteraction(part, clientResolvable),
+      // An approval a continuation will still execute must survive; one the
+      // conversation moved past without running would 400 at the provider.
+      repairApprovalResponded:
+        !options.continuation &&
+        !this._continuation.pending &&
+        !this._continuation.deferred
     });
     if (repaired.removedToolCalls === 0 && repaired.normalizedInputs === 0) {
       return;
@@ -3449,7 +3463,9 @@ export class AIChatAgent<
               async () => {
                 const autoContinuationBody = async () => {
                   try {
-                    await this._repairInterruptedToolsBeforeTurn();
+                    await this._repairInterruptedToolsBeforeTurn({
+                      continuation: true
+                    });
                     const response = await this.onChatMessage(
                       async (_finishResult) => {},
                       {
@@ -3544,7 +3560,9 @@ export class AIChatAgent<
           );
           try {
             const programmaticBody = async () => {
-              await this._repairInterruptedToolsBeforeTurn();
+              await this._repairInterruptedToolsBeforeTurn({
+                continuation: false
+              });
               const response = await this.onChatMessage(() => {}, {
                 requestId,
                 abortSignal,
@@ -4857,7 +4875,9 @@ export class AIChatAgent<
                   options?.signal
                 );
                 try {
-                  await this._repairInterruptedToolsBeforeTurn();
+                  await this._repairInterruptedToolsBeforeTurn({
+                    continuation: true
+                  });
                   const response = await this.onChatMessage(() => {}, {
                     requestId,
                     abortSignal,
