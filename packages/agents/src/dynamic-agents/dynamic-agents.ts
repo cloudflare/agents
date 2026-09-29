@@ -20,7 +20,11 @@ import {
   type AgentPathStep
 } from "../sub-routing";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "../utils";
-import { agentPathKey, isValidParentPath } from "./identity";
+import {
+  agentPathKey,
+  isValidParentPath,
+  SUB_AGENT_IDENTITY_VERSION_PATH_V2
+} from "./identity";
 import { DynamicAgentRegistry } from "./registry";
 import {
   DynamicAgentConnectionBridge,
@@ -53,6 +57,12 @@ import type {
  */
 export const CF_SUB_AGENT_OUTER_URL_KEY = "_cf_subAgentOuterUrl";
 export const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
+/**
+ * Set on a socket closed because its sub-agent was deleted. Its late
+ * message/close events are dropped, so they can't reach a same-name
+ * replacement created after the delete. Storage-frozen — never rename.
+ */
+export const CF_SUB_AGENT_DELETED_KEY = "_cf_subAgentDeleted";
 
 /** Wire-frozen internal header carrying the outer URL on WS upgrades. */
 export const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
@@ -573,6 +583,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
             "Update to the latest `compatibility_date` in your wrangler.jsonc."
         );
       }
+      await this.#closeConnectionsForDeletedPath(targetPath);
       try {
         ctx.facets.delete(`${target.className}\0${target.name}`);
       } catch {
@@ -727,6 +738,60 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   }
 
   /**
+   * Non-creating counterpart to {@link resolve} for WebSocket message/close
+   * forwarding. Returns `null` when the child has no registry row, and never
+   * writes one. The connection's initial connect already went through
+   * {@link resolve} on this hop, so the runtime/export checks there hold.
+   */
+  async #resolveExisting(
+    className: string,
+    name: string
+  ): Promise<unknown | null> {
+    const row = this.registry.row(className, name);
+    if (!row) return null;
+
+    const ctx = this.#host.ctx as unknown as FacetCapableCtx;
+    const identityName =
+      row.identity_version === SUB_AGENT_IDENTITY_VERSION_PATH_V2 &&
+      typeof row.identity_name === "string"
+        ? row.identity_name
+        : name;
+    const rootClassName =
+      this.#host._parentPath[0]?.className ??
+      (this.#host as unknown as { constructor: { name: string } }).constructor
+        .name;
+    const rootNs = ctx.exports[rootClassName] as unknown as Pick<
+      DurableObjectNamespace,
+      "idFromName"
+    >;
+    const stub = ctx.facets.get(`${className}\0${name}`, () => ({
+      class: ctx.exports[className] as DurableObjectClass,
+      id: rootNs.idFromName(identityName)
+    }));
+
+    const childParentPath = this.#host.selfPath;
+    try {
+      await this.#host._runFacetInitInvocation(async () => {
+        await (
+          stub as unknown as {
+            _cf_initAsFacet(
+              name: string,
+              parentPath: ReadonlyArray<{ className: string; name: string }>,
+              identityName: string
+            ): Promise<void>;
+          }
+        )._cf_initAsFacet(name, childParentPath, identityName);
+      });
+    } catch (error) {
+      // A concurrent delete aborts the facet mid-init; treat that as a drop.
+      if (!this.registry.row(className, name)) return null;
+      throw error;
+    }
+
+    return stub;
+  }
+
+  /**
    * Forcefully abort a running facet. Transitively aborts the child's
    * own children; storage is preserved.
    */
@@ -758,13 +823,14 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     }
     const facetKey = `${className}\0${name}`;
     const childPath = [...this.#host.selfPath, { className, name }];
-    if (this.#host._isFacet) {
-      const root = await this.rootAlarmOwner();
-      await root._cf_cleanupFacetPrefix(childPath);
-    } else {
-      await this.cleanupPrefix(childPath);
-    }
+    const root = this.#host._isFacet ? await this.rootAlarmOwner() : undefined;
 
+    await this.#closeConnectionsForDeletedPath(childPath, root);
+
+    // Remove the facet and its registry row before the awaited root
+    // bookkeeping below, so a concurrent resolver observes "gone" as early
+    // as possible.
+    //
     // Idempotent: make `ctx.facets.delete` tolerant of missing keys.
     // workerd throws an opaque "internal error" when the key isn't
     // registered; swallow that so double-delete and
@@ -776,6 +842,54 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       // no-op — facet wasn't registered (already deleted / never spawned)
     }
     this.registry.forget(className, name);
+
+    if (root) {
+      await root._cf_cleanupFacetPrefix(childPath);
+    } else {
+      await this.cleanupPrefix(childPath);
+    }
+  }
+
+  /**
+   * Close every client socket targeting `path` or a descendant, so a client
+   * attached to a deleted facet gets an explicit close instead of a socket
+   * that goes nowhere (#2003). Only the root owns real sockets.
+   */
+  async #closeConnectionsForDeletedPath(
+    path: ReadonlyArray<AgentPathStep>,
+    root?: RootFacetRpcSurface
+  ): Promise<void> {
+    if (!this.#host._isFacet) {
+      this.closeConnectionsForPrefix(path, 1001, "Sub-agent deleted");
+      return;
+    }
+    await (
+      root ?? (await this.rootAlarmOwner())
+    )._cf_closeSubAgentConnectionsForPrefix(path, 1001, "Sub-agent deleted");
+  }
+
+  /** Root-side: close sockets whose `/sub/...` target is under `prefix`. */
+  closeConnectionsForPrefix(
+    prefix: ReadonlyArray<AgentPathStep>,
+    code: number,
+    reason: string
+  ): void {
+    for (const connection of this.#host._webSockets.getConnections()) {
+      const targetPath = this.connectionTargetPath(connection);
+      if (!targetPath) continue;
+      if (!this.#host._isSameAgentPathPrefix(prefix, targetPath)) continue;
+      this.#host._unsafe_setConnectionFlag(
+        connection,
+        CF_SUB_AGENT_DELETED_KEY,
+        true
+      );
+      try {
+        connection.close(code, reason);
+      } catch {
+        // A socket that is already closing can throw; it must not block
+        // closing the rest or the deletion that follows.
+      }
+    }
   }
 
   // ── WebSocket forwarding + virtual connections ────────────────────────
@@ -1142,8 +1256,12 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     request: Request,
     options: { gate: boolean }
   ): Promise<boolean> {
-    const routed = await this.#resolveConnection(connection, request, options);
-    if (!routed) return false;
+    const routed = await this.#resolveConnection(connection, {
+      create: true,
+      request,
+      gate: options.gate
+    });
+    if (routed.status !== "ok") return false;
 
     await routed.child._cf_handleSubAgentWebSocketConnect(
       this.#createConnectionBridge(connection),
@@ -1184,8 +1302,9 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     message: WSMessage,
     replyBridge?: DynamicAgentConnectionBridge
   ): Promise<boolean> {
-    const routed = await this.#resolveConnection(connection);
-    if (!routed) return false;
+    const routed = await this.#resolveConnection(connection, { create: false });
+    if (routed.status === "no-match") return false;
+    if (routed.status === "dropped") return true;
 
     const bridge = this.#createConnectionBridge(connection);
     await routed.child._cf_handleSubAgentWebSocketMessage(
@@ -1203,8 +1322,9 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     reason: string,
     wasClean: boolean
   ): Promise<boolean> {
-    const routed = await this.#resolveConnection(connection);
-    if (!routed) return false;
+    const routed = await this.#resolveConnection(connection, { create: false });
+    if (routed.status === "no-match") return false;
+    if (routed.status === "dropped") return true;
 
     await routed.child._cf_handleSubAgentWebSocketClose(
       code,
@@ -1216,27 +1336,45 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     return true;
   }
 
+  /**
+   * Resolve a connection's `/sub/{class}/{name}` target.
+   *
+   * `create: true` (the initial connect) may wake or create the child, like
+   * `subAgent()`. `create: false` (message/close on an already-forwarded
+   * connection) only attaches to a child that still has a registry row; a
+   * deleted child resolves to `"dropped"`, which the caller must treat as
+   * consumed so a stale frame can't recreate it (#2003).
+   */
   async #resolveConnection(
     connection: Connection,
-    request?: Request,
-    options: { gate: boolean } = { gate: false }
-  ): Promise<{
-    child: DynamicAgentWebSocketEndpoint;
-    meta: DynamicAgentConnectionMeta;
-  } | null> {
+    options: { create: boolean; request?: Request; gate?: boolean }
+  ): Promise<
+    | { status: "no-match" }
+    | { status: "dropped" }
+    | {
+        status: "ok";
+        child: DynamicAgentWebSocketEndpoint;
+        meta: DynamicAgentConnectionMeta;
+      }
+  > {
     ensureConnectionWrapped(connection);
     const outerUri = this.#host._unsafe_getConnectionFlag(
       connection,
       CF_SUB_AGENT_OUTER_URL_KEY
     );
     const uri = typeof outerUri === "string" ? outerUri : connection.uri;
-    if (!uri) return null;
+    if (!uri) return { status: "no-match" };
+    if (
+      this.#host._unsafe_getConnectionFlag(connection, CF_SUB_AGENT_DELETED_KEY)
+    ) {
+      return { status: "dropped" };
+    }
 
     const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
     let match = parseSubAgentPath(uri, {
       knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
     });
-    if (!match) return null;
+    if (!match) return { status: "no-match" };
     if (
       this.#host._ParentClass.name === match.childClass &&
       this.#host.name === match.childName
@@ -1246,9 +1384,10 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       match = parseSubAgentPath(tailUri.toString(), {
         knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
       });
-      if (!match) return null;
+      if (!match) return { status: "no-match" };
     }
 
+    const { request } = options;
     let forwardReq = request;
     if (request && options.gate) {
       const decision = await this.#host.onBeforeSubAgent(request, {
@@ -1258,15 +1397,17 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       if (decision instanceof Response) {
         const { code, reason } = subAgentRejectionClose(decision);
         connection.close(code, reason);
-        return null;
+        return { status: "dropped" };
       }
       forwardReq = decision instanceof Request ? decision : request;
     }
 
-    const child = (await this.resolve(
-      match.childClass,
-      match.childName
-    )) as DynamicAgentWebSocketEndpoint;
+    const child = (
+      options.create
+        ? await this.resolve(match.childClass, match.childName)
+        : await this.#resolveExisting(match.childClass, match.childName)
+    ) as DynamicAgentWebSocketEndpoint | null;
+    if (!child) return { status: "dropped" };
 
     const childUri = new URL(forwardReq?.url ?? uri);
     childUri.pathname = match.remainingPath;
@@ -1280,6 +1421,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       : [...connection.tags];
 
     return {
+      status: "ok",
       child,
       meta: {
         id: connection.id,

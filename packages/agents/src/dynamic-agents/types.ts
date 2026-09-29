@@ -184,4 +184,9 @@ export type RootFacetRpcSurface = {
     connectionId: string,
     state: unknown
   ): Promise<unknown>;
+  _cf_closeSubAgentConnectionsForPrefix(
+    prefix: ReadonlyArray<AgentPathStep>,
+    code: number,
+    reason: string
+  ): Promise<void>;
 };

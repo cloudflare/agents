@@ -5147,6 +5147,15 @@ export class Agent<
     await this._dynamicAgents.closeConnection(connectionId, code, reason);
   }
 
+  async _cf_closeSubAgentConnectionsForPrefix(
+    prefix: ReadonlyArray<AgentPathStep>,
+    code: number,
+    reason: string
+  ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
+    this._dynamicAgents.closeConnectionsForPrefix(prefix, code, reason);
+  }
+
   async _cf_setSubAgentConnectionState(
     connectionId: string,
     state: unknown
