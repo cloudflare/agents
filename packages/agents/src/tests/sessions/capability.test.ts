@@ -266,6 +266,289 @@ describe("Sessions capability", () => {
     });
   });
 
+  it("never stores a compaction overlay echoed back as a write (#1984)", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      for (let i = 1; i <= 4; i++) {
+        await session.appendMessage(
+          text(`m${i}`, `message ${i}`, i % 2 === 0 ? "assistant" : "user")
+        );
+      }
+      await session.addCompaction("summary", "m1", "m2");
+      const [overlay] = await session.getHistory();
+      expect(overlay.id).toMatch(/^compaction_/);
+
+      const events: SessionChangeEvent[] = [];
+      instance.sessions.subscribe((event) => {
+        events.push(event);
+      });
+
+      // A client posts its whole transcript back, overlay included. Every
+      // write aperture drops it without storing a row or announcing a change.
+      expect(await session.appendMessage(overlay)).toEqual({
+        inserted: false,
+        message: overlay
+      });
+      expect(
+        await session.upsertMessage(overlay, { source: "client" })
+      ).toEqual({ inserted: false, message: overlay });
+      expect(await session.updateMessage(overlay)).toBeNull();
+      const sync = session.__DO_NOT_USE_WILL_BREAK__sync().upsert(overlay);
+      expect(sync.result.inserted).toBe(false);
+      await sync.after();
+
+      expect(await session.getMessage(overlay.id)).toBeNull();
+      expect(instance.messageRows("").map((row) => row.id)).toEqual([
+        "m1",
+        "m2",
+        "m3",
+        "m4"
+      ]);
+      expect(events).toEqual([]);
+
+      // The next real message still attaches to the real leaf.
+      await session.appendMessage(text("m5", "next"));
+      expect((await session.getHistory()).map((m) => m.id)).toEqual([
+        overlay.id,
+        "m3",
+        "m4",
+        "m5"
+      ]);
+      expect(instance.messageRows("").at(-1)).toMatchObject({
+        id: "m5",
+        parent_id: "m4"
+      });
+    });
+  });
+
+  it("hides overlay rows stored before the write guard and re-parents their children (#1984)", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      for (let i = 1; i <= 4; i++) {
+        await session.appendMessage(
+          text(`m${i}`, `message ${i}`, i % 2 === 0 ? "assistant" : "user")
+        );
+      }
+      await session.addCompaction("summary", "m1", "m2");
+      const [overlay] = await session.getHistory();
+
+      // Reproduce an affected session: the echoed overlay was stored as a
+      // real row under the leaf. Import is verbatim and bypasses the guard.
+      await session.importMessage(overlay, { parentId: "m4", createdAt: 5 });
+
+      // The stray row is the newest row, but never the visible leaf.
+      expect((await session.getLatestLeaf())?.id).toBe("m4");
+      expect((await session.getHistory()).map((m) => m.id)).toEqual([
+        overlay.id,
+        "m3",
+        "m4"
+      ]);
+
+      // The next turn attaches beneath the stray row, which is exactly how
+      // affected sessions look in storage.
+      await session.appendMessage(text("m5", "after the echo"));
+      expect(instance.messageRows("").at(-1)).toMatchObject({
+        id: "m5",
+        parent_id: overlay.id
+      });
+
+      // Every read shows the overlay once, with the stray row's child in its
+      // place as a child of the stray row's parent.
+      const expected = [overlay.id, "m3", "m4", "m5"];
+      expect((await session.getHistory()).map((m) => m.id)).toEqual(expected);
+      expect(
+        (await collect(session.history({ newestFirst: true }))).map((m) => m.id)
+      ).toEqual([...expected].reverse());
+      expect(
+        (await session.getRecentHistory(1024 * 1024)).messages.map((m) => m.id)
+      ).toEqual(expected);
+      expect((await session.getHistoryRowStats()).map((row) => row.id)).toEqual(
+        ["m1", "m2", "m3", "m4", "m5"]
+      );
+      expect((await session.getBranches("m4")).map((m) => m.id)).toEqual([
+        "m5"
+      ]);
+      expect((await session.getLatestLeaf())?.id).toBe("m5");
+
+      // A branch off the child still walks through the hidden row.
+      await session.appendMessage(text("m6", "branch"), { parentId: "m5" });
+      expect(
+        (await session.getHistory({ leafId: "m6" })).map((m) => m.id)
+      ).toEqual([overlay.id, "m3", "m4", "m5", "m6"]);
+    });
+  });
+
+  it("keeps an imported compaction summary that this session has no overlay for", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const source = instance.sessions.session("source");
+      for (let i = 1; i <= 4; i++) {
+        await source.appendMessage(
+          text(`m${i}`, `message ${i}`, i % 2 === 0 ? "assistant" : "user")
+        );
+      }
+      await source.addCompaction("earlier discussion", "m1", "m2");
+
+      // A cross-object move imports what `history()` yields, summary
+      // included. The destination holds no compaction record for it, so the
+      // stored summary is the only copy of the compacted prefix.
+      const destination = instance.sessions.session("destination");
+      let parentId: string | null = null;
+      let createdAt = 1;
+      for await (const message of source.history()) {
+        await destination.importMessage(message, {
+          parentId,
+          createdAt: createdAt++
+        });
+        parentId = message.id;
+      }
+
+      const expected = (await source.getHistory()).map((m) => m.id);
+      expect(expected[0]).toMatch(/^compaction_/);
+      const imported = await destination.getHistory();
+      expect(imported.map((m) => m.id)).toEqual(expected);
+      expect(imported[0].parts[0].text).toBe("earlier discussion");
+      expect(
+        (await collect(destination.history({ newestFirst: true }))).map(
+          (m) => m.id
+        )
+      ).toEqual([...expected].reverse());
+      expect((await destination.getHistoryRowStats()).map((r) => r.id)).toEqual(
+        expected
+      );
+      expect(
+        (await destination.getBranches(expected[0])).map((m) => m.id)
+      ).toEqual(["m3"]);
+    });
+  });
+
+  it("lists a hidden overlay row's children among their siblings in seq order", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.appendMessage(text("m1", "question"));
+      await session.appendMessage(text("m2", "answer", "assistant"));
+      const compaction = await session.addCompaction("summary", "m1", "m2");
+      const overlayId = `compaction_${compaction.id}`;
+
+      // m2's children in insertion order: the stray overlay row, a sibling
+      // branch, then the stray row's own child.
+      await session.importMessage(
+        { id: overlayId, role: "assistant", parts: [] },
+        { parentId: "m2", createdAt: 3 }
+      );
+      await session.appendMessage(text("alt", "branch"), { parentId: "m2" });
+      await session.appendMessage(text("next", "follow-up"), {
+        parentId: overlayId
+      });
+
+      expect((await session.getBranches("m2")).map((m) => m.id)).toEqual([
+        "alt",
+        "next"
+      ]);
+    });
+  });
+
+  it("hides an overlay row before a later compaction on a newest-first read", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.appendMessage(text("m1", "question"));
+      await session.appendMessage(text("m2", "answer", "assistant"));
+      const first = await session.addCompaction("first summary", "m1", "m2");
+      const overlayId = `compaction_${first.id}`;
+      await session.importMessage(
+        text(overlayId, "first summary", "assistant"),
+        {
+          parentId: "m2",
+          createdAt: 3
+        }
+      );
+      await session.appendMessage(text("m3", "more"));
+      await session.appendMessage(text("m4", "reply", "assistant"));
+      await session.appendMessage(text("m5", "latest"));
+      await session.addCompaction("second summary", "m3", "m4");
+
+      // Reaching m4, a compaction's end, the newest-first walk replays the
+      // older prefix from path ids, where the stored echo sits between spans.
+      const forward = (await session.getHistory()).map((m) => m.id);
+      const backward = (
+        await collect(session.history({ newestFirst: true }))
+      ).map((m) => m.id);
+      expect(backward).toEqual([...forward].reverse());
+      expect(backward.filter((id) => id === overlayId)).toHaveLength(1);
+      expect(backward).toHaveLength(3);
+    });
+  });
+
+  it("re-derives the estimate at the walk cap when the path holds a hidden overlay row", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      let parentId: string | null = null;
+      let createdAt = 0;
+      const importNext = async (message: SessionMessage) => {
+        await session.importMessage(message, {
+          parentId,
+          createdAt: createdAt++
+        });
+        parentId = message.id;
+      };
+      for (let i = 0; i < 9_999; i++) await importNext(text(`cap-${i}`, "x"));
+      // A record spanning no stored rows: it hides the echo and nothing else.
+      const compaction = await session.addCompaction("s", "gone-a", "gone-b");
+      await importNext(text(`compaction_${compaction.id}`, "s", "assistant"));
+      await importNext(text("cap-9999", "x"));
+
+      const perRow = (await session.getHistoryRowStats())[0].tokenEstimate;
+      let compactions = 0;
+      session
+        .onCompaction(async () => {
+          compactions++;
+          return null;
+        })
+        .compactAfter(perRow * 10_000);
+
+      // The walk holds 10,001 stored rows, one hidden: 10,000 count, at the
+      // threshold. Each further append slides the window by a stored row,
+      // so a memo sized by visible rows would count one row too many.
+      await session.appendMessage(text("cap-10000", "x"));
+      expect(compactions).toBe(0);
+      await session.appendMessage(text("cap-10001", "x"));
+      expect(compactions).toBe(0);
+    });
+  }, 120_000);
+
+  it("reports a capped path as truncated when it holds a hidden overlay row", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      let parentId: string | null = null;
+      let createdAt = 0;
+      const importNext = async (message: SessionMessage) => {
+        await session.importMessage(message, {
+          parentId,
+          createdAt: createdAt++
+        });
+        parentId = message.id;
+      };
+      for (let i = 0; i < 10_000; i++) await importNext(text(`cap-${i}`, "x"));
+      const compaction = await session.addCompaction("s", "cap-0", "cap-1");
+      await importNext(text(`compaction_${compaction.id}`, "s", "assistant"));
+      await importNext(text("cap-10000", "x"));
+      await importNext(text("cap-10001", "x"));
+
+      // The walk cap counts stored rows: the newest 10,001 include the hidden
+      // one, so cap-0 and cap-1 are beyond it and the read is truncated.
+      const recent = await session.getRecentHistory(Number.MAX_SAFE_INTEGER);
+      expect(recent.messages).toHaveLength(10_000);
+      expect(recent.messages[0].id).toBe("cap-2");
+      expect(recent.truncated).toBe(true);
+    });
+  }, 120_000);
+
   it("auto-compacts past the threshold using the derived token estimate", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {

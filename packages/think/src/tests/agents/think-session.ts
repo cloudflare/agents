@@ -3675,6 +3675,14 @@ export class ThinkTestAgent extends Think {
     return (await this.session.getHistory()) as UIMessage[];
   }
 
+  /**
+   * Probe a stored row by id. Overlays exist only on history reads, so a
+   * `compaction_` id resolves here only if it was filed as a real row.
+   */
+  async getSessionMessageForTest(id: string): Promise<UIMessage | null> {
+    return (await this.session.getMessage(id)) as UIMessage | null;
+  }
+
   async deliverNoticeErrorForTest(
     text: string,
     channel?: string
