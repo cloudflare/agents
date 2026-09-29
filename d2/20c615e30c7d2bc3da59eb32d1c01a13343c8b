@@ -1,0 +1,31 @@
+packages/agents/src/chat/react.tsx
+  s_b2b9b60652ef3b::t_504777ab89e47f 654-655,2162-2167
+.changeset/reconnect-optimistic-send.md
+  s_b2b9b60652ef3b::t_1391522f14e3be 5
+.changeset/think-connect-transcript-marker.md
+  s_b2b9b60652ef3b::t_a8e88f48125a6d 1-5
+packages/agents/src/chat/wire-types.ts
+  s_b2b9b60652ef3b::t_a93c526e26c8f0 80-86
+packages/agents/src/react-tests/reconnect-optimistic-send.test.tsx
+  s_b2b9b60652ef3b::t_6b767dcddebcf0 4-6,114-124,209,250,296,342-381
+packages/think/src/tests/onconnect-broadcast.test.ts
+  s_b2b9b60652ef3b::t_21f31795beff09 137-141
+packages/think/src/think.ts
+  s_b2b9b60652ef3b::t_ab341e988f3215 19583
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d220c615e30c7d2bc3da59eb32d1c01a13343c8b",
+  "prompts": {},
+  "sessions": {
+    "s_b2b9b60652ef3b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "116a35e7-e84f-4df0-b25d-8bdcbff2fca7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
