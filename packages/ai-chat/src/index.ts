@@ -31,7 +31,6 @@ import { MessageType, type OutgoingMessage } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 import {
   reconcileMessages,
-  resolveToolMergeId,
   reconcileOrphanPartial,
   repairInterruptedToolParts,
   persistReconstructedOrphan,
@@ -6305,10 +6304,7 @@ export class AIChatAgent<
 
     const toWrite: UIMessage[] = [];
     for (const message of mergedMessages) {
-      const resolved = resolveToolMergeId(
-        this._sanitizeMessageForPersistence(message),
-        priorMessages
-      );
+      const resolved = this._sanitizeMessageForPersistence(message);
       // The live array mirrors storage, so a message serializing to what it
       // already holds is already stored. Comparing here is a string compare;
       // letting Sessions discover it would cost a row read and, for media, a
