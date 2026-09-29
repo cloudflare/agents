@@ -217,7 +217,6 @@ import {
   toolPartHasSettledResult,
   persistReconstructedOrphan,
   reconcileMessages,
-  resolveToolMergeId,
   CHAT_RECOVERY_TASK_NAME,
   chatRecoveryTaskRunOptions,
   createChatRecoveryTaskDefinition,
@@ -542,12 +541,18 @@ function executionToolCallIn(
  * and reconciliation protects server results only from pre-output client
  * states. Keep the server's resolved part, and drop the pending-state text
  * after it as the resolution did.
+ *
+ * Providers may reuse a toolCallId across turns, so the resolution is taken
+ * only from the server row the message reconciled to; a pause still pending
+ * there stays pending. A resolution on any other row can belong to another
+ * turn.
  */
 function keepResolvedPauses(
   incoming: UIMessage[],
   serverMessages: readonly UIMessage[]
 ): UIMessage[] {
-  const resolved = new Map<string, UIMessage["parts"][number]>();
+  type Part = UIMessage["parts"][number];
+  const resolvedByMessage = new Map<string, Map<string, Part>>();
   for (const message of serverMessages) {
     if (message.role !== "assistant") continue;
     for (const part of message.parts) {
@@ -559,30 +564,36 @@ function keepResolvedPauses(
           record.state === "output-denied") &&
         !isPausedToolPart(record)
       ) {
-        resolved.set(record.toolCallId, part);
+        let own = resolvedByMessage.get(message.id);
+        if (!own) {
+          own = new Map();
+          resolvedByMessage.set(message.id, own);
+        }
+        own.set(record.toolCallId, part);
       }
     }
   }
-  if (resolved.size === 0) return incoming;
+  if (resolvedByMessage.size === 0) return incoming;
 
   return incoming.map((message) => {
     if (message.role !== "assistant") return message;
-    const stale = message.parts.flatMap((part) => {
+    const own = resolvedByMessage.get(message.id);
+    if (!own) return message;
+    const stale = new Map<string, Part>();
+    for (const part of message.parts) {
       const record = part as Record<string, unknown>;
-      return typeof record.toolCallId === "string" &&
-        isPausedToolPart(record) &&
-        resolved.has(record.toolCallId)
-        ? [record.toolCallId]
-        : [];
-    });
-    if (stale.length === 0) return message;
+      if (typeof record.toolCallId !== "string" || !isPausedToolPart(record)) {
+        continue;
+      }
+      const server = own.get(record.toolCallId);
+      if (server) stale.set(record.toolCallId, server);
+    }
+    if (stale.size === 0) return message;
     let parts = message.parts;
-    for (const toolCallId of stale) {
+    for (const [toolCallId, server] of stale) {
       parts = dropGenerationAfterToolCall(
         parts.map((part) =>
-          "toolCallId" in part && part.toolCallId === toolCallId
-            ? resolved.get(toolCallId)!
-            : part
+          "toolCallId" in part && part.toolCallId === toolCallId ? server : part
         ),
         toolCallId
       );
@@ -8831,14 +8842,17 @@ export class Think<
   // ── Host bridge methods (called by HostBridgeLoopback via DO RPC) ──
 
   async _hostReadFile(path: string): Promise<string | null> {
+    await this.__unsafe_ensureInitialized();
     return (await this.workspace.readFile(path)) ?? null;
   }
 
   async _hostWriteFile(path: string, content: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     await this.workspace.writeFile(path, content);
   }
 
   async _hostDeleteFile(path: string): Promise<boolean> {
+    await this.__unsafe_ensureInitialized();
     try {
       await this.workspace.rm(path);
       return true;
@@ -8852,6 +8866,7 @@ export class Think<
   ): Promise<
     Array<{ name: string; type: string; size: number; path: string }>
   > {
+    await this.__unsafe_ensureInitialized();
     const entries = await this.workspace.readDir(dir);
     return entries.map((e) => ({
       name: e.name,
@@ -8862,17 +8877,20 @@ export class Think<
   }
 
   async _hostGetContext(label: string): Promise<string | null> {
+    await this.__unsafe_ensureInitialized();
     const block = this.context.getBlock(label);
     return block?.content ?? null;
   }
 
   async _hostSetContext(label: string, content: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     await this.context.setBlock(label, content);
   }
 
   async _hostGetMessages(
     limit?: number
   ): Promise<Array<{ id: string; role: string; content: string }>> {
+    await this.__unsafe_ensureInitialized();
     const history = this.messages;
     const sliced =
       limit !== undefined && limit !== null
@@ -8891,6 +8909,7 @@ export class Think<
   }
 
   async _hostSendMessage(content: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const msg = {
       id: crypto.randomUUID(),
       role: "user" as const,
@@ -8907,6 +8926,7 @@ export class Think<
   async _hostGetSessionInfo(): Promise<{
     messageCount: number;
   }> {
+    await this.__unsafe_ensureInitialized();
     return {
       messageCount: this.messages.length
     };
@@ -15603,7 +15623,6 @@ export class Think<
           if (!options.isCurrent()) return false;
           await this._persistIncomingMessage(
             msg,
-            serverMessages,
             serverMessagesById,
             options.channel
           );
@@ -15639,10 +15658,9 @@ export class Think<
   }
 
   /**
-   * Persist an incoming message after reconciliation. For assistant
-   * messages, also resolve their ID against any server-side row that
-   * already owns the same `toolCallId` so we update the existing row
-   * instead of inserting an orphan duplicate.
+   * Persist an incoming message after batch reconciliation has resolved
+   * assistant IDs (one-to-one against server rows) and merged any
+   * server-owned tool outputs.
    *
    * A message whose stored form is what the server already holds is skipped
    * outright. The client posts its whole transcript on every request, so
@@ -15656,14 +15674,11 @@ export class Think<
    */
   private async _persistIncomingMessage(
     msg: UIMessage,
-    serverMessages: readonly UIMessage[],
     serverMessagesById?: ReadonlyMap<string, UIMessage>,
     channel?: string
   ): Promise<void> {
-    const resolved =
-      msg.role === "assistant" ? resolveToolMergeId(msg, serverMessages) : msg;
-    const prior = serverMessagesById?.get(resolved.id);
-    const incoming = stripReservedMetadata(sanitizeMessage(resolved));
+    const prior = serverMessagesById?.get(msg.id);
+    const incoming = stripReservedMetadata(sanitizeMessage(msg));
     if (
       prior &&
       JSON.stringify(stripReservedMetadata(prior)) === JSON.stringify(incoming)
@@ -15676,7 +15691,7 @@ export class Think<
         ? { channel }
         : undefined;
     if (!reserved) {
-      await this._upsertMessageInHistory(resolved, undefined, "client");
+      await this._upsertMessageInHistory(msg, undefined, "client");
       return;
     }
     await this._upsertMessageInHistory(

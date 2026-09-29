@@ -1723,12 +1723,9 @@ export class ThinkTestAgent extends Think {
   async persistIncomingMessageForTest(msg: UIMessage): Promise<void> {
     await (
       this as unknown as {
-        _persistIncomingMessage(
-          m: UIMessage,
-          serverMessages: readonly UIMessage[]
-        ): Promise<void>;
+        _persistIncomingMessage(m: UIMessage): Promise<void>;
       }
-    )._persistIncomingMessage(msg, this.messages);
+    )._persistIncomingMessage(msg);
   }
 
   async runChannelTurnForTest(options: {
@@ -7114,6 +7111,11 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _failNextContinueTransient: string | null = null;
   private _useRecoveryToolModel = false;
   private _recoveryToolExecutions = 0;
+  private _coldRpcOnStartCount = 0;
+
+  override onStart(): void {
+    this._coldRpcOnStartCount++;
+  }
 
   /**
    * Arm a ONE-SHOT platform-transient fault on the next `continueLastTurn`
@@ -7189,6 +7191,16 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async getMessagesForTest(): Promise<UIMessage[]> {
     return this.getMessages();
+  }
+
+  async getSessionMessagesForColdRpcTest(): Promise<{
+    messages: UIMessage[];
+    onStartCount: number;
+  }> {
+    return {
+      messages: (await this.session.getHistory()) as UIMessage[],
+      onStartCount: this._coldRpcOnStartCount
+    };
   }
 
   override onChatResponse(result: ChatResponseResult): void {
