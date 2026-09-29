@@ -364,9 +364,9 @@ describe("Sessions capability", () => {
       expect(
         (await session.getRecentHistory(1024 * 1024)).messages.map((m) => m.id)
       ).toEqual(expected);
-      expect(
-        (await session.getHistoryRowStats()).map((row) => row.id)
-      ).toEqual(["m1", "m2", "m3", "m4", "m5"]);
+      expect((await session.getHistoryRowStats()).map((row) => row.id)).toEqual(
+        ["m1", "m2", "m3", "m4", "m5"]
+      );
       expect((await session.getBranches("m4")).map((m) => m.id)).toEqual([
         "m5"
       ]);

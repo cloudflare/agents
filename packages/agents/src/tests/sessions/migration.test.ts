@@ -185,9 +185,9 @@ describe("Sessions legacy migration", () => {
         "m4"
       ]);
       expect(await session.search("first branch summary")).toEqual([]);
-      expect((await session.search("after the echo")).map((hit) => hit.id)).toEqual(
-        ["m4"]
-      );
+      expect(
+        (await session.search("after the echo")).map((hit) => hit.id)
+      ).toEqual(["m4"]);
     });
   });
 
