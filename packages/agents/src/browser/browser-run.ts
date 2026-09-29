@@ -422,3 +422,96 @@ export async function connectBrowserSession(
     onActivity: normalized.onActivity
   });
 }
+
+/** One-shot session options for the default Chromium engine. */
+export interface OneShotChromiumSessionOptions {
+  /** Select the browser engine. Defaults to Chromium. */
+  browser?: "chromium";
+  timeoutMs?: number;
+  /** Platform `keep_alive` in milliseconds. */
+  keepAliveMs?: number;
+  /** Opt into Browser Run session recording (rrweb capture). */
+  recording?: boolean;
+  /** Hostname guardrails, fixed at launch. */
+  guardrails?: BrowserSessionGuardrails;
+}
+
+/**
+ * One-shot session options for Kitesurf. The Chromium-only options —
+ * `guardrails`, `keepAliveMs`, `recording` — do not exist on this arm:
+ * Kitesurf does not support them.
+ */
+export interface OneShotKitesurfSessionOptions {
+  browser: "kitesurf";
+  timeoutMs?: number;
+}
+
+/**
+ * Engine-discriminated {@link openOneShotBrowserSession} options: selecting
+ * `browser: "kitesurf"` removes the Chromium-only options at the type level.
+ */
+export type OneShotBrowserSessionOptions =
+  | OneShotChromiumSessionOptions
+  | OneShotKitesurfSessionOptions;
+
+/**
+ * Open a one-shot browser session: create, connect, and delete the platform
+ * session when the returned {@link CdpConnection} closes. No store involved —
+ * one-shot sessions have no name and no durability.
+ */
+export async function openOneShotBrowserSession(
+  browser: BrowserBinding,
+  options: OneShotBrowserSessionOptions = {}
+): Promise<CdpConnection> {
+  if (options.browser === "kitesurf") {
+    // The options union already rejects these at the type level for literal
+    // call sites; plain-JS callers and spreads can still smuggle them in, so
+    // fail loudly in one place with one message.
+    const smuggled = options as {
+      guardrails?: unknown;
+      keepAliveMs?: unknown;
+      recording?: unknown;
+    };
+    if (smuggled.guardrails || smuggled.keepAliveMs || smuggled.recording) {
+      throw new Error(
+        "Kitesurf does not support guardrails, keepAliveMs, or recording"
+      );
+    }
+    // Kitesurf browsers are scoped to their WebSocket — connectBrowser is
+    // already one-shot there.
+    return connectBrowser(browser, {
+      browser: "kitesurf",
+      timeoutMs: options.timeoutMs
+    });
+  }
+
+  const info = await createBrowserSession(browser, {
+    keepAliveMs: options.keepAliveMs,
+    recording: options.recording,
+    guardrails: options.guardrails
+  });
+  try {
+    return await connectBrowserSession(browser, info.sessionId, {
+      timeoutMs: options.timeoutMs,
+      onClose: () => {
+        deleteBrowserSession(browser, info.sessionId).catch(
+          (error: unknown) => {
+            console.warn(
+              `[agents/browser] Failed to delete one-shot Browser Run session ${info.sessionId}`,
+              error
+            );
+          }
+        );
+      }
+    });
+  } catch (error) {
+    // The session was allocated but never got its delete-on-close owner —
+    // reclaim it now instead of leaving it to expire.
+    try {
+      await deleteBrowserSession(browser, info.sessionId);
+    } catch {
+      // Best-effort: keep_alive expiry reclaims it.
+    }
+    throw error;
+  }
+}

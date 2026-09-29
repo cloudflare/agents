@@ -1,17 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
   BROWSER_SESSION_KEEP_ALIVE_MAX_MS,
-  DEFAULT_BROWSER_SESSION_NAME,
-  NamedBrowserSessions,
-  namedBrowserSessionKey,
-  openOneShotBrowserSession
-} from "../browser/session-core";
-import type { OneShotBrowserSessionOptions } from "../browser/session-core";
+  Browser,
+  type BrowserOptions,
+  type BrowserRunOptions,
+  browserRun,
+  DEFAULT_BROWSER_NAME,
+  namedBrowserSessionKey
+} from "../browser/browser";
+import {
+  type BrowserBinding,
+  openOneShotBrowserSession,
+  type OneShotBrowserSessionOptions
+} from "../browser/browser-run";
 import type {
   BrowserSessionLock,
   BrowserSessionStore,
   StoredBrowserSession
-} from "../browser/session-manager";
+} from "../browser/session-store";
 
 class MemorySessionStore implements BrowserSessionStore {
   sessions = new Map<string, StoredBrowserSession>();
@@ -167,15 +173,45 @@ async function waitUntil(condition: () => boolean): Promise<void> {
   expect(condition()).toBe(true);
 }
 
-describe("NamedBrowserSessions.resolve", () => {
+/** A standalone `Browser` over `binding` — a custom store needs no Lifecycle. */
+function createBrowser(
+  binding: BrowserBinding,
+  store: BrowserSessionStore,
+  options: Omit<BrowserOptions, "provider" | "store"> & {
+    run?: BrowserRunOptions;
+  } = {}
+): Browser {
+  const { run, ...rest } = options;
+  return new Browser({ provider: browserRun(binding, run), store, ...rest });
+}
+
+describe("new Browser", () => {
+  it("derives its Lifecycle capability id from its name", () => {
+    const { browser } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    expect(createBrowser(browser, store).capabilityId).toBe("browser:default");
+    expect(
+      createBrowser(browser, store, { name: "research" }).capabilityId
+    ).toBe("browser:research");
+  });
+
+  it("rejects an empty name", () => {
+    const { browser } = createFakeBrowser();
+    expect(() =>
+      createBrowser(browser, new MemorySessionStore(), { name: " " })
+    ).toThrow("Browser names must be non-empty");
+  });
+});
+
+describe("Browser.resolve", () => {
   it("creates on first use, pins keep_alive to the platform max, restarted: false", async () => {
     const { browser, requests } = createFakeBrowser();
     const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({ browser, store });
+    const named = createBrowser(browser, store);
 
-    const resolved = await sessions.resolve();
+    const resolved = await named.resolve();
 
-    expect(resolved.name).toBe(DEFAULT_BROWSER_SESSION_NAME);
+    expect(resolved.name).toBe(DEFAULT_BROWSER_NAME);
     expect(resolved.sessionId).toBe("session-1");
     // First use: nothing existed before, so nothing was lost.
     expect(resolved.restarted).toBe(false);
@@ -193,10 +229,10 @@ describe("NamedBrowserSessions.resolve", () => {
   it("reattaches to a live session without creating", async () => {
     const { browser, requests } = createFakeBrowser();
     const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({ browser, store });
+    const named = createBrowser(browser, store, { name: "checkout" });
 
-    const first = await sessions.resolve("checkout");
-    const second = await sessions.resolve("checkout");
+    const first = await named.resolve();
+    const second = await named.resolve();
 
     expect(second.sessionId).toBe(first.sessionId);
     expect(second.restarted).toBe(false);
@@ -209,10 +245,10 @@ describe("NamedBrowserSessions.resolve", () => {
     // First probe of the stored session fails: expired upstream (410).
     const { browser, requests } = createFakeBrowser({ listStatuses: [410] });
     const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({ browser, store });
+    const named = createBrowser(browser, store);
 
-    const first = await sessions.resolve();
-    const second = await sessions.resolve();
+    const first = await named.resolve();
+    const second = await named.resolve();
 
     expect(second.sessionId).not.toBe(first.sessionId);
     expect(second.restarted).toBe(true);
@@ -222,10 +258,12 @@ describe("NamedBrowserSessions.resolve", () => {
   it("keeps sessions separate per name", async () => {
     const { browser, requests } = createFakeBrowser();
     const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({ browser, store });
-
-    const a = await sessions.resolve("research");
-    const b = await sessions.resolve("checkout");
+    const a = await createBrowser(browser, store, {
+      name: "research"
+    }).resolve();
+    const b = await createBrowser(browser, store, {
+      name: "checkout"
+    }).resolve();
 
     expect(a.sessionId).not.toBe(b.sessionId);
     expect(creates(requests)).toHaveLength(2);
@@ -237,18 +275,16 @@ describe("NamedBrowserSessions.resolve", () => {
     // The stored session dies once, forcing a second create.
     const { browser, requests } = createFakeBrowser({ listStatuses: [404] });
     const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({
-      browser,
-      store,
-      create: {
+    const named = createBrowser(browser, store, {
+      run: {
         keepAliveMs: 30_000,
         recording: true,
         guardrails: { allowedDomains: ["example.com", "*.example.com"] }
       }
     });
 
-    await sessions.resolve();
-    await sessions.resolve(); // dead — recreated
+    await named.resolve();
+    await named.resolve(); // dead — recreated
 
     const all = creates(requests);
     expect(all).toHaveLength(2);
@@ -273,11 +309,11 @@ describe("NamedBrowserSessions.resolve", () => {
         }
       }
     });
-    const sessions = new NamedBrowserSessions({ browser, store });
+    const named = createBrowser(browser, store);
 
-    await sessions.resolve();
-    await sessions.resolve(); // probe + recreate path
-    await sessions.close("default");
+    await named.resolve();
+    await named.resolve(); // probe + recreate path
+    await named.close();
 
     expect(violations).toEqual([]);
   });
@@ -298,13 +334,13 @@ describe("NamedBrowserSessions.resolve", () => {
       }
     });
     const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({ browser, store });
+    const named = createBrowser(browser, store, { name: "checkout" });
 
-    await sessions.resolve("checkout"); // session-1, later found dead
+    await named.resolve(); // session-1, later found dead
 
-    const a = sessions.resolve("checkout");
+    const a = named.resolve();
     await waitUntil(() => createCalls === 2); // A detected death, is creating
-    const b = sessions.resolve("checkout");
+    const b = named.resolve();
     await waitUntil(() => createCalls === 3); // B joined the recovery
     releaseCreates();
 
@@ -330,15 +366,15 @@ describe("NamedBrowserSessions.resolve", () => {
       }
     });
     const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({ browser, store });
+    const named = createBrowser(browser, store, { name: "checkout" });
 
     // A finds the name unused and starts creating…
-    const a = sessions.resolve("checkout");
+    const a = named.resolve();
     await waitUntil(() => createCalls === 1);
     // …while B uses the name and closes it, emptying the key again.
-    const b = await sessions.resolve("checkout");
+    const b = await named.resolve();
     expect(b.restarted).toBe(false);
-    expect(await sessions.close("checkout")).toBe(true);
+    expect(await named.close()).toBe(true);
     releaseFirstCreate();
 
     // The name already lost B's browser, so A's commit is a restart.
@@ -348,74 +384,74 @@ describe("NamedBrowserSessions.resolve", () => {
   });
 });
 
-describe("NamedBrowserSessions.close", () => {
+describe("Browser.close", () => {
   it("retires the record and deletes the Browser Run session", async () => {
     const { browser, requests } = createFakeBrowser();
     const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({ browser, store });
+    const named = createBrowser(browser, store);
 
-    await sessions.resolve();
-    const closed = await sessions.close("default");
+    await named.resolve();
+    const closed = await named.close();
 
     expect(closed).toBe(true);
     expect(deletes(requests, "session-1")).toHaveLength(1);
     expect(store.sessions.has(namedBrowserSessionKey("default"))).toBe(false);
 
     // The next resolve is the loud-mortality path.
-    const resolved = await sessions.resolve();
+    const resolved = await named.resolve();
     expect(resolved.restarted).toBe(true);
   });
 
   it("keeps restart evidence out of the named-session keyspace", async () => {
     const { browser } = createFakeBrowser();
     const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({ browser, store });
+    const checkout = createBrowser(browser, store, { name: "checkout" });
 
-    await sessions.resolve("checkout");
-    await sessions.close("checkout");
+    await checkout.resolve();
+    await checkout.close();
 
     // Listing named sessions yields only names that own a browser…
     expect(await store.list(namedBrowserSessionKey(""))).toEqual(new Map());
     // …yet the closed name still remembers it once had one.
-    expect((await sessions.resolve("checkout")).restarted).toBe(true);
+    expect((await checkout.resolve()).restarted).toBe(true);
     // A never-used name is still first use.
-    expect((await sessions.resolve("fresh")).restarted).toBe(false);
+    const fresh = createBrowser(browser, store, { name: "fresh" });
+    expect((await fresh.resolve()).restarted).toBe(false);
   });
 
   it("retires the record even when the platform delete fails — keep-alive reclaims it", async () => {
     const { browser, requests } = createFakeBrowser({ deleteStatuses: [500] });
     const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({ browser, store });
+    const named = createBrowser(browser, store);
 
-    await sessions.resolve();
+    await named.resolve();
 
     // The delete is best-effort: the retired record is the durable outcome,
     // and the pinned keep_alive reclaims the unreachable browser within 600s.
-    expect(await sessions.close("default")).toBe(true);
+    expect(await named.close()).toBe(true);
     expect(store.sessions.has(namedBrowserSessionKey("default"))).toBe(false);
     expect(deletes(requests, "session-1")).toHaveLength(1);
 
     // Closing again is a no-op — the closure already happened.
-    expect(await sessions.close("default")).toBe(false);
+    expect(await named.close()).toBe(false);
   });
 
   it("returns false when there is nothing to close", async () => {
     const { browser } = createFakeBrowser();
-    const sessions = new NamedBrowserSessions({
-      browser,
-      store: new MemorySessionStore()
+    const named = createBrowser(browser, new MemorySessionStore(), {
+      name: "missing"
     });
-    expect(await sessions.close("missing")).toBe(false);
+    expect(await named.close()).toBe(false);
   });
 });
 
-describe("NamedBrowserSessions.connect", () => {
+describe("Browser.connect", () => {
   it("attaches a CDP socket to the resolved session by name", async () => {
     const { browser, requests, sockets } = createFakeBrowser();
     const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({ browser, store });
+    const named = createBrowser(browser, store);
 
-    const { cdp, sessionId, restarted } = await sessions.connect();
+    const { cdp, sessionId, restarted } = await named.connect();
 
     expect(sessionId).toBe("session-1");
     expect(restarted).toBe(false);
@@ -431,12 +467,11 @@ describe("NamedBrowserSessions.connect", () => {
   it("CDP activity refreshes the record's updatedAt", async () => {
     const { browser } = createFakeBrowser();
     const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({
-      browser,
-      store,
+    const named = createBrowser(browser, store, {
+      name: "work",
       touchIntervalMs: 0
     });
-    const { cdp } = await sessions.connect("work");
+    const { cdp } = await named.connect();
 
     // Pretend the last resolve happened ages ago — from here on, only CDP
     // traffic proves the browser is in use.
@@ -459,8 +494,8 @@ describe("NamedBrowserSessions.connect", () => {
     const { browser } = createFakeBrowser();
     const store = new MemorySessionStore();
     // Default 60s interval: a send right after connect must not write.
-    const sessions = new NamedBrowserSessions({ browser, store });
-    const { cdp } = await sessions.connect("work");
+    const named = createBrowser(browser, store, { name: "work" });
+    const { cdp } = await named.connect();
 
     const key = namedBrowserSessionKey("work");
     const before = store.sessions.get(key)!;
@@ -476,12 +511,11 @@ describe("NamedBrowserSessions.connect", () => {
     // Short keep-alive, default 60s touch interval: the touch cadence must
     // tighten itself, or a busy browser's record could look older than the
     // window the platform reclaims idle browsers after.
-    const sessions = new NamedBrowserSessions({
-      browser,
-      store,
-      create: { keepAliveMs: 200 }
+    const named = createBrowser(browser, store, {
+      name: "work",
+      run: { keepAliveMs: 200 }
     });
-    const { cdp } = await sessions.connect("work");
+    const { cdp } = await named.connect();
 
     const key = namedBrowserSessionKey("work");
     const stale = {
@@ -502,14 +536,13 @@ describe("NamedBrowserSessions.connect", () => {
   it("a late activity touch cannot resurrect a closed session", async () => {
     const { browser } = createFakeBrowser();
     const store = new MemorySessionStore();
-    const sessions = new NamedBrowserSessions({
-      browser,
-      store,
+    const named = createBrowser(browser, store, {
+      name: "work",
       touchIntervalMs: 0
     });
-    const { cdp } = await sessions.connect("work");
+    const { cdp } = await named.connect();
 
-    await sessions.close("work");
+    await named.close();
     const key = namedBrowserSessionKey("work");
     expect(store.sessions.has(key)).toBe(false);
 

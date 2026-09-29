@@ -31,8 +31,8 @@ import { loadCdpSpec, type SearchableCdpSpec } from "./spec";
 import type {
   BrowserSessionStore,
   StoredBrowserSession
-} from "./session-manager";
-import { DEFAULT_SWEEP_IDLE_MS } from "./session-manager";
+} from "./session-store";
+import { DEFAULT_SWEEP_IDLE_MS } from "./session-store";
 
 /** Browser session lifecycle for the connector (binding-backed only). */
 export interface BrowserConnectorSessionOptions {

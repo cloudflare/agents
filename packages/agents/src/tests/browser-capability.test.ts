@@ -7,15 +7,16 @@ import {
   createFakeBrowserBinding
 } from "./capabilities/browser";
 import { withCapabilityHarness } from "./shared/capability-harness";
-import { BrowserSessions } from "../browser/capability";
 import {
   BROWSER_SESSION_KEEP_ALIVE_MAX_MS,
+  Browser,
+  browserRun,
   namedBrowserSessionKey
-} from "../browser/session-core";
+} from "../browser/browser";
 import type {
   BrowserSessionStore,
   StoredBrowserSession
-} from "../browser/session-manager";
+} from "../browser/session-store";
 
 /** The Durable Object storage key the auto-supplied store writes `name` to. */
 function durableKey(name: string): string {
@@ -62,11 +63,13 @@ async function backdateStoredSession(
   await storage.put(durableKey(name), { ...stored, ...patch });
 }
 
-describe("BrowserSessions capability", () => {
+describe("Browser capability", () => {
   it("auto-supplies a Durable Object store over the host's storage", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { browser } = createFakeBrowserBinding();
-      const { capability } = install(new BrowserSessions({ browser }));
+      const { capability } = install(
+        new Browser({ provider: browserRun(browser) })
+      );
 
       const resolved = await capability.resolve();
       expect(resolved.name).toBe("default");
@@ -83,9 +86,11 @@ describe("BrowserSessions capability", () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { browser } = createFakeBrowserBinding();
       const store = createMemoryStore();
-      const { capability } = install(new BrowserSessions({ browser, store }));
+      const { capability } = install(
+        new Browser({ provider: browserRun(browser), name: "scraper", store })
+      );
 
-      const resolved = await capability.resolve("scraper");
+      const resolved = await capability.resolve();
       expect(store.sessions.get(namedBrowserSessionKey("scraper"))).toEqual(
         expect.objectContaining({ sessionId: resolved.sessionId })
       );
@@ -93,16 +98,15 @@ describe("BrowserSessions capability", () => {
     });
   });
 
-  it("reapplies durable creation options on every create", async () => {
+  it("reapplies Browser Run options on every create", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const binding = createFakeBrowserBinding();
       const { capability } = install(
-        new BrowserSessions({
-          browser: binding.browser,
-          create: {
+        new Browser({
+          provider: browserRun(binding.browser, {
             recording: true,
             guardrails: { allowedDomains: ["example.com", "*.example.com"] }
-          }
+          })
         })
       );
 
@@ -124,34 +128,28 @@ describe("BrowserSessions capability", () => {
     });
   });
 
-  it("lists named sessions with live/expired status and host-only ids", async () => {
+  it("runs several named browsers side by side on one object", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { browser } = createFakeBrowserBinding();
-      const { capability } = install(new BrowserSessions({ browser }));
+      const provider = browserRun(browser);
+      const research = new Browser({ provider, name: "research" });
+      const checkout = new Browser({ provider, name: "checkout" });
+      const { lifecycle } = install(research);
+      lifecycle.use(checkout);
 
-      await capability.resolve("checkout");
-      await capability.resolve("idle");
-      await capability.resolve("scraper");
-      await capability.close("scraper");
-      // Quiet for a full keep_alive window: the platform has likely
-      // reclaimed it, though the record stays until its next resolve.
-      const quietSince = Date.now() - BROWSER_SESSION_KEEP_ALIVE_MAX_MS;
-      await backdateStoredSession(storage, "idle", {
-        createdAt: quietSince,
-        updatedAt: quietSince
-      });
+      const a = await research.resolve();
+      const b = await checkout.resolve();
+      expect(a.sessionId).not.toBe(b.sessionId);
 
-      const views = await capability.sessions();
-      // Closed sessions are gone, not listed.
-      expect(views.map(({ name, status }) => ({ name, status }))).toEqual([
-        { name: "checkout", status: "live" },
-        { name: "idle", status: "expired" }
-      ]);
-      for (const view of views) {
-        expect(view.sessionId).toMatch(/^session-/);
-        expect(view.createdAt).toBeGreaterThan(0);
-        expect(view.updatedAt).toBeGreaterThanOrEqual(view.createdAt);
-      }
+      // Closing one leaves the other untouched.
+      expect(await checkout.close()).toBe(true);
+      expect(await storage.get(durableKey("checkout"))).toBeUndefined();
+      expect((await research.resolve()).sessionId).toBe(a.sessionId);
+
+      // Two Browsers with one name would share a record — Lifecycle refuses.
+      expect(() =>
+        lifecycle.use(new Browser({ provider, name: "research" }))
+      ).toThrow(/already installed/);
     });
   });
 
@@ -159,76 +157,79 @@ describe("BrowserSessions capability", () => {
     await withCapabilityHarness(async ({ install }) => {
       const binding = createFakeBrowserBinding();
       const { capability } = install(
-        new BrowserSessions({ browser: binding.browser })
+        new Browser({ provider: browserRun(binding.browser) })
       );
-      const resolved = await capability.resolve("checkout");
+      const resolved = await capability.resolve();
 
-      const first = await capability.liveView("checkout");
+      const first = await capability.liveView();
       expect(first?.sessionId).toBe(resolved.sessionId);
       expect(first?.expiresInMs).toBe(5 * 60 * 1000);
       expect(first?.targets).toHaveLength(1);
       expect(first?.targets[0].url).toContain("live.browser.run");
 
       // A second mint re-lists targets and gets a fresh URL — nothing cached.
-      const second = await capability.liveView("checkout");
+      const second = await capability.liveView();
       expect(second?.targets[0].url).not.toBe(first?.targets[0].url);
 
-      const devtools = await capability.liveView("checkout", {
-        mode: "devtools"
-      });
+      const devtools = await capability.liveView({ mode: "devtools" });
       expect(
         new URL(devtools?.targets[0].url ?? "").searchParams.get("mode")
       ).toBe("devtools");
     });
   });
 
-  it("returns undefined Live View for unknown, closed, or dead sessions", async () => {
+  it("returns undefined Live View for a never-created, closed, or dead browser", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const binding = createFakeBrowserBinding();
       const { capability } = install(
-        new BrowserSessions({ browser: binding.browser })
+        new Browser({ provider: browserRun(binding.browser) })
       );
 
-      expect(await capability.liveView("never-created")).toBeUndefined();
+      expect(await capability.liveView()).toBeUndefined();
 
-      const resolved = await capability.resolve("checkout");
+      const resolved = await capability.resolve();
       binding.kill(resolved.sessionId);
-      expect(await capability.liveView("checkout")).toBeUndefined();
+      expect(await capability.liveView()).toBeUndefined();
 
-      const replacement = await capability.resolve("checkout");
+      const replacement = await capability.resolve();
       expect(replacement.restarted).toBe(true);
-      await capability.close("checkout");
-      expect(await capability.liveView("checkout")).toBeUndefined();
+      await capability.close();
+      expect(await capability.liveView()).toBeUndefined();
     });
   });
 
   it("treats minting a live view as activity", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { browser } = createFakeBrowserBinding();
-      const { capability } = install(new BrowserSessions({ browser }));
-      await capability.resolve("checkout");
+      const { capability } = install(
+        new Browser({ provider: browserRun(browser) })
+      );
+      await capability.resolve();
       // Quiet past the keep-alive window on record, but still alive — e.g.
       // a human already driving it through an earlier Live View link.
-      await backdateStoredSession(storage, "checkout", {
-        updatedAt: Date.now() - BROWSER_SESSION_KEEP_ALIVE_MAX_MS
+      const quietSince = Date.now() - BROWSER_SESSION_KEEP_ALIVE_MAX_MS;
+      await backdateStoredSession(storage, "default", {
+        updatedAt: quietSince
       });
-      expect((await capability.sessions())[0].status).toBe("expired");
 
-      expect(await capability.liveView("checkout")).toBeDefined();
-      expect((await capability.sessions())[0].status).toBe("live");
+      expect(await capability.liveView()).toBeDefined();
+      const stored = await storage.get<StoredBrowserSession>(
+        durableKey("default")
+      );
+      expect(stored?.updatedAt).toBeGreaterThan(quietSince);
 
-      // Minting never resurrects a closed session.
-      await capability.close("checkout");
-      expect(await capability.liveView("checkout")).toBeUndefined();
-      expect(await storage.get(durableKey("checkout"))).toBeUndefined();
+      // Minting never resurrects a closed browser.
+      await capability.close();
+      expect(await capability.liveView()).toBeUndefined();
+      expect(await storage.get(durableKey("default"))).toBeUndefined();
     });
   });
 
-  it("reports the session gone when a close wins during live view minting", async () => {
+  it("reports the browser gone when a close wins during live view minting", async () => {
     await withCapabilityHarness(async ({ install }) => {
       const { browser } = createFakeBrowserBinding();
       const inner = createMemoryStore();
-      const key = namedBrowserSessionKey("checkout");
+      const key = namedBrowserSessionKey("default");
       // After liveView's initial read, a concurrent close retires the entry
       // — exactly the interleaving a network-yielding target listing allows.
       let closeWinsAfterNextRead = false;
@@ -243,19 +244,21 @@ describe("BrowserSessions capability", () => {
           return value;
         }
       };
-      const { capability } = install(new BrowserSessions({ browser, store }));
-      await capability.resolve("checkout");
+      const { capability } = install(
+        new Browser({ provider: browserRun(browser), store })
+      );
+      await capability.resolve();
 
       closeWinsAfterNextRead = true;
       // The listed targets predate the close — links minted from them could
-      // never connect. The lost touch must surface as "session gone".
-      expect(await capability.liveView("checkout")).toBeUndefined();
+      // never connect. The lost touch must surface as "browser gone".
+      expect(await capability.liveView()).toBeUndefined();
       expect(inner.sessions.has(key)).toBe(false);
     });
   });
 });
 
-describe("BrowserSessions on a Durable Object", () => {
+describe("Browser on a Durable Object", () => {
   it("schedules nothing — the platform's keep_alive reclaims idle browsers", async () => {
     const stub = env.BrowserHarnessObject.getByName(crypto.randomUUID());
 
@@ -263,10 +266,10 @@ describe("BrowserSessions on a Durable Object", () => {
       stub,
       async (instance: BrowserHarnessObject, state) => {
         await instance.lifecycle.start();
-        await instance.browser.resolve("checkout");
-        const { cdp } = await instance.browser.connect("research");
+        await instance.browser.resolve();
+        const { cdp } = await instance.browser.connect();
         cdp.close();
-        await instance.browser.close("checkout");
+        await instance.browser.close();
 
         expect(instance.lifecycle.jobs.list()).toEqual([]);
         expect(await state.storage.getAlarm()).toBeNull();
@@ -275,7 +278,7 @@ describe("BrowserSessions on a Durable Object", () => {
   });
 });
 
-describe("BrowserSessions on an Agent subclass", () => {
+describe("Browser on an Agent subclass", () => {
   it("installs through the Agent's Lifecycle with the auto-supplied store", async () => {
     const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
 
@@ -289,11 +292,6 @@ describe("BrowserSessions on an Agent subclass", () => {
           durableKey("default")
         );
         expect(stored?.sessionId).toBe(resolved.sessionId);
-
-        const views = await instance.browser.sessions();
-        expect(views).toEqual([
-          expect.objectContaining({ name: "default", status: "live" })
-        ]);
       }
     );
   });

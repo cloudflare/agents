@@ -5,7 +5,7 @@
  * guards alone.
  */
 import type { ConnectBrowserOptions } from "../browser/browser-run";
-import type { OneShotBrowserSessionOptions } from "../browser/session-core";
+import type { OneShotBrowserSessionOptions } from "../browser/browser-run";
 
 // ---------------------------------------------------------------------------
 // connectBrowser — Chromium (the default engine) accepts the full option set.

@@ -1,9 +1,8 @@
 /**
  * Live View vocabulary shared by every host-side surface that mints links:
- * the connector's `getLiveViewUrl` tool and the `BrowserSessions`
- * capability's `liveView()`. Live View URLs are bearer credentials — mint
- * them fresh from a target listing when a human is about to view, and never
- * persist them.
+ * the connector's `getLiveViewUrl` tool and `Browser.liveView()`. Live View
+ * URLs are bearer credentials — mint them fresh from a target listing when a
+ * human is about to view, and never persist them.
  */
 
 import type { BrowserTargetInfo } from "./browser-run";
