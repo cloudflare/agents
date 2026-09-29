@@ -417,9 +417,8 @@ export class Lifecycle<
     );
   }
 
-  async #readyForCapabilityOperation(): Promise<void> {
-    if (this.#status === "starting" || this.#status === "started") return;
-    await this.start();
+  #readyForCapabilityOperation(): Promise<void> {
+    return this.#ensureInitialized();
   }
 
   async #dispatchRoute(envelope: LifecycleRouteEnvelope): Promise<unknown> {
