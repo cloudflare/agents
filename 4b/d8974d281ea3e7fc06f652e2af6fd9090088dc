@@ -1,0 +1,2405 @@
+.changeset/agent-tool-error-survives-eviction.md
+  s_2569688183b285::t_885cf2af759ce0 1-9
+.changeset/agent-tool-replay-recovery-fixes.md
+  s_2569688183b285::t_2bb47d4d3920e5 1-18
+.changeset/agent-tool-terminal-delivery.md
+  s_2569688183b285::t_b43efd3bde41b7 1-9
+.changeset/ai-chat-persist-before-done.md
+  s_2569688183b285::t_0ed94e4aece92f 1-7
+.changeset/ai-chat-stale-post-stream-continuation.md
+  s_2569688183b285::t_0328ddfa3b19a5 2,5
+.changeset/ai-chat-transient-reader-recovery.md
+  s_2569688183b285::t_0fa926235115b3 1-5
+.changeset/approval-tool-input.md
+  s_2569688183b285::t_df7b1a53a5defa 1-14
+.changeset/browser-session-guardrails.md
+  s_2569688183b285::t_4a80092551b73b 1-23
+.changeset/calm-tools-think.md
+  s_2569688183b285::t_429e6a0885e333 1-5
+.changeset/cdp-spec-parameters.md
+  s_2569688183b285::t_805ef09ad6cdf8 1-5
+.changeset/chat-agents-peer-025.md
+  s_2569688183b285::t_1584bd5d39adcc 1-8
+.changeset/chat-follows-socket-address.md
+  s_2569688183b285::t_0d1215a480cc2b 1-5
+.changeset/chat-terminal-frame-fixes.md
+  s_2569688183b285::t_486e207d85123e 1-16
+.changeset/chat-turn-end-outcome.md
+  s_2569688183b285::t_118a62b66af4a0 2-4,7,9
+.changeset/config.json
+  s_2569688183b285::t_1930b4bdd42339 13
+.changeset/context-reminders.md
+  s_2569688183b285::t_406ef0058dc33e 1-6
+.changeset/continuation-prestream-errors.md
+  s_2569688183b285::t_40129d7731744c 1-6
+.changeset/facet-broadcast-root-calls.md
+  s_2569688183b285::t_d6117bd9e0cd1f 1-5
+.changeset/facet-host-jobs.md
+  s_2569688183b285::t_cd76844e25e6f3 1-5
+.changeset/messenger-attachment-arraybuffer.md
+  s_2569688183b285::t_a3a78e9e92beb8 1-5
+.changeset/messenger-burst-skipped.md
+  s_2569688183b285::t_f802c376b09083 1-5
+.changeset/messenger-no-placeholder-post.md
+  s_2569688183b285::t_d436e1a4be586a 1-5
+.changeset/messenger-recovered-delivery.md
+  s_2569688183b285::t_ea65c9e877995f 1-7
+.changeset/nested-sub-agent-websockets.md
+  s_2569688183b285::t_4fd6b6ddfb301d 1-5
+.changeset/observer-snapshot-heal.md
+  s_2569688183b285::t_22506f4929672a 5
+.changeset/on-tool-call-after-stream.md
+  s_2569688183b285::t_f509ca90518bc6 1-5
+.changeset/quiet-agents-pause.md
+  s_2569688183b285::t_fd92f268cc05d7 2,5
+.changeset/quiet-props-relax.md
+  s_2569688183b285::t_dd377c45f4cbe3 7
+.changeset/quiet-tools-reconcile.md
+  s_b2b9b60652ef3b::t_f16be34421b5f5 9-11
+.changeset/ready-after-state.md
+  s_2569688183b285::t_5bd15c7c5b6554 1-7
+.changeset/recovery-work-unit-docs.md
+  s_2569688183b285::t_c6bda7d9c04e9a 1-5
+.changeset/rejected-sub-agent-socket.md
+  s_2569688183b285::t_2adf74e7a49b0d 1-9
+.changeset/replay-chunk-seq.md
+  s_2569688183b285::t_863fdef69679a4 3,7
+.changeset/response-hook-after-reset.md
+  s_2569688183b285::t_d5fe601a5142c1 1-6
+.changeset/run-fiber-completed-cleanup.md
+  s_2569688183b285::t_53f80af77a67e5 1-5
+.changeset/session-mirror.md
+  s_2569688183b285::t_d86b4d249f5aa0 1-7
+.changeset/sessions-attachment-refs.md
+  s_2569688183b285::t_1be88d673bbbd6 1-7
+.changeset/stale-approval-repair.md
+  s_2569688183b285::t_c2d78ca83f80c7 1-13
+.changeset/stream-recovery-review-fixes.md
+  s_2569688183b285::t_b2008a9ef92d89 1-21
+.changeset/terminal-frame-message-ids.md
+  s_2569688183b285::t_50a95975fa3e4a 1-7
+.changeset/think-ai-v7-peer.md
+  s_2569688183b285::t_4388db2850d2af 1-5
+.changeset/think-assistant-message-metadata.md
+  s_2569688183b285::t_438cda84bf0942 1-7
+.changeset/think-continuation-accumulator.md
+  s_2569688183b285::t_ddfd63c7a13b5f 1-5
+.changeset/think-drop-pending-pause-text.md
+  s_2569688183b285::t_f73d073fdc5177 1-7
+.changeset/think-gateway-options.md
+  s_2569688183b285::t_88fe94328019c7 1-5
+.changeset/think-invalid-model-id.md
+  s_2569688183b285::t_04b3734a65944a 1-5
+.changeset/think-messenger-concurrency.md
+  s_2569688183b285::t_2896eea7667480 1-5
+.changeset/think-messenger-prompt-review.md
+  s_2569688183b285::t_669f740e4c218f 1-15
+.changeset/think-persist-before-done.md
+  s_2569688183b285::t_ec3d4602282291 1-5
+.changeset/think-recovering-stream-outcome.md
+  s_2569688183b285::t_e3113e52789dd1 1-7
+.changeset/think-recovery-metadata-typing.md
+  s_2569688183b285::t_68e089332d1ea6 1-5
+.changeset/think-stable-truncation-prefix.md
+  s_2569688183b285::t_ad87cce1111e13 1-5
+.changeset/think-stall-recovery-retry.md
+  s_2569688183b285::t_b9276c92f76638 1-10
+.changeset/think-structured-turn-recovery.md
+  s_2569688183b285::t_3f1747a8cb7ed9 1-5
+.changeset/think-submission-lifecycle-fixes.md
+  s_2569688183b285::t_30b71e9c22ddc6 1-13
+.changeset/think-submission-wait.md
+  s_2569688183b285::t_dfe59dda96581d 1-7
+.changeset/think-turn-identity.md
+  s_2569688183b285::t_52b6eef11f8f42 1-7
+.changeset/think-ws-web-channel.md
+  s_2569688183b285::t_d291a8b74618b3 1-11
+.changeset/tool-result-cleanup-updates.md
+  s_2569688183b285::t_09d0a37af7a58b 1-5
+.changeset/trace-tool-payload-redaction.md
+  s_2569688183b285::t_7ab6ea1542b0f9 1-7
+.changeset/transient-stream-recovery.md
+  s_2569688183b285::t_df7435ca487b89 1-8
+.changeset/truncate-model-tool-results.md
+  s_2569688183b285::t_1cd1ef3c3bc0fa 1-6
+.changeset/turn-owned-wait-results.md
+  s_2569688183b285::t_2fe96d6dcbd9fe 1-7
+.changeset/turn-result-output.md
+  s_2569688183b285::t_0175097819af10 1-5
+.changeset/x402-selected-payment-cap.md
+  s_2569688183b285::t_d4df1f7aab5ea4 5
+.github/actions/install/action.yml
+  s_2569688183b285::t_f6cdefeba224ea 21
+.github/workflows/import-sizes.yml
+  s_2569688183b285::t_b6977b79841548 1-92
+.github/workflows/nightly.yml
+  s_2569688183b285::t_e8636e6d6e50c8 40,75,217,252,298
+.github/workflows/pullrequest.yml
+  s_2569688183b285::t_569671b36ee640 20,37
+.github/workflows/release.yml
+  s_2569688183b285::t_dcc897485e7554 24
+.gitignore
+  s_2569688183b285::t_e7239c829082fe 143,169
+.oxfmtrc.json
+  s_2569688183b285::t_63838b57fc81b3 8
+NOTICE
+  s_2569688183b285::t_eb2db35d5ddcc9 31-36
+README.md
+  s_2569688183b285::t_afa4d47993d1dd 113,128-137,147,151,180
+THIRD_PARTY_LICENSES.md
+  s_2569688183b285::t_73995e5455fb24 7-14
+agent-think/AGENTS.md
+  s_2569688183b285::t_b6ab11ff179c99 40-42
+agent-think/CHANGELOG.md
+  s_2569688183b285::t_c7dfa511136c66 3-38
+agent-think/package.json
+  s_2569688183b285::t_e186aaedf42a69 3,32,35,44
+agent-think/skills/reproduce/SKILL.md
+  s_2569688183b285::t_2e2281bee3dc8a 66-68,87-89
+agent-think/src/agent.ts
+  s_2569688183b285::t_47fdac108fa8eb 23,25,28,60-72,74-75,78,80-87,89,172-175,199,234,246-268,500-501,762-769,793-795,797-798,811-813,815-816,860,862-863
+agent-think/src/index.ts
+  s_2569688183b285::t_c67c0fd5a19a4a 27-31,98-104,118-131
+agent-think/src/run-context.ts
+  s_2569688183b285::t_e4779e30e7aacd 2,26
+agent-think/test/prompt-context.test.ts
+  s_2569688183b285::t_607f00c91027ec 2,7
+agent-think/test/run-context.test.ts
+  s_2569688183b285::t_08cd15a44a9d9c 37-39,41-48
+agent-think/test/submission-status.test.ts
+  s_2569688183b285::t_27f91a0809546d 1-153
+agent-think/test/worker.ts
+  s_2569688183b285::t_21b3ac8b11add8 1-3,36-37,45,50
+design/AGENTS.md
+  s_2569688183b285::t_82874e81fb313c 72-113
+design/README.md
+  s_2569688183b285::t_52ea37ef4952c9 9-24
+design/alarm-coordination.md
+  s_2569688183b285::t_d5c03b7e4a17d4 1-96
+design/browser-sessions.md
+  s_2569688183b285::t_50a8d4cc3f89c0 1-26,28,30-32,34-61,64-82
+design/browser-tools.md
+  s_2569688183b285::t_3196e40e52374b 5-6,15,34-37
+design/channels.md
+  s_2569688183b285::t_397e41ad68b969 1-173
+design/chat-api.md
+  s_2569688183b285::t_f5a0f8f1a40c84 10,69,695,729,733
+design/chat-improvements.md
+  s_2569688183b285::t_fd3da775c22e4d 17
+design/chat-shared-layer.md
+  s_2569688183b285::t_dad9258a1b50d0 51,158-160,176,180-198,342-343,354
+design/context.md
+  s_2569688183b285::t_d6331bdb02b9f9 1-79
+design/durable-object-lifecycle.md
+  s_2569688183b285::t_726bcb7b6881e9 1-182
+design/lifecycle-work-queue.md
+  s_2569688183b285::t_eb66cfe2854acf 1-223
+design/mcp.md
+  s_2569688183b285::t_22a5600f48e41a 38-41,44-46,50-53,57
+design/readonly-connections.md
+  s_2569688183b285::t_6fa410f2507c71 96,109,118,122,136,182
+design/retries.md
+  s_2569688183b285::t_49ea444674bb9d 18
+design/rfc-chat-recovery-foundation.md
+  s_2569688183b285::t_346d14b79b9718 1803
+design/rfc-chat-recovery-work-budget.md
+  s_2569688183b285::t_bf3d7313cc149d 284-319
+design/rfc-codex-harness-capability.md
+  s_2569688183b285::t_8d33348372aa6e 1-29,31-40,42-46,48-52,54-56,58-62,64-68,70-72,74,76-77,79,81-85,87,89-97,99-101,103,105,107,109-111,113,115-117,119,121-122,124,126-127,129-131,133-134,136,138-140,142,144-146,148,150-152,154,156-158,160,162-164,166,168-170,172,174-198,201-203,205,207-210,212-216,218-222,224-227,229-231,233,235,237,239-243,245-248,250-259,261-267,269,271-280,282,284-286,288,290,292-302,305-308,310-313,315,317-318,320-325,327-330,332-335,337-340,342,344,346-349,351-356,358-361,363,365,367,369-370,372,375-377,379-380,383-387,389,391-394,396,398-400,402,404-405,407-409,411-412,414-419,421-423,425,427-441,444-462,464-467,469-471,473,475-476,478-481,483-553,555-570,573-575,577,579,581,583-589,591-593,595,597,599-600,602,605-607,609,611-614,616-618,620-635,639-642,644,646,648-653,655-657,659,661,663-664,666-702,705-708,710,712,714-718,720,722,724-728,730-733,735-738,740,742-744,746,748-757,760-761,763-778,781-784,786,788-790,792-797,800,802-807,811-812,814-819,821,824-874,876-897,899-938,940-941,943,945-946,948-953,956-959,961,963-972,975-978,980,982,984-985,987-992,994-995,997,999-1001,1003,1005-1014,1016,1018-1022,1024,1026-1029,1031,1033,1035-1037,1039-1056,1058-1065,1068-1074,1076,1078-1081,1083-1087,1089-1093,1095-1099,1101-1105,1107,1109,1111-1113,1115,1117,1119-1122,1124-1125,1127,1129-1131,1133,1135-1138,1140,1142-1144,1146-1150,1152-1154,1156-1174,1176-1199,1201-1399
+design/rfc-coding-agent.md
+  s_2569688183b285::t_9e04c1497456c4 115-116,145-152,263-268,272-286,314-315,340-342,367-393,400-406
+design/rfc-durable-object-lifecycle.md
+  s_2569688183b285::t_6dfbcd1eea4979 1,3,5,7-10,12-14,16,18-21,23-24,26-39,43-55,57,59,61,63-70,73,75-77,79-82,84,86-93,95-97,99,101-103,105-107,109,111-113,115-118,120,122-127,129,131-132,134-139,141,143,145-148
+design/rfc-fibers.md
+  s_2569688183b285::t_4a3807d96d6b90 1-204
+design/rfc-harness-model-provider-boundary.md
+  s_2569688183b285::t_e51a93f6d65d5a 1-328,330-331,333,335-338,340,342-348,350-351,353,355-356,358-361,363-366,368,370,372-381,383,385,387,389,391-400,402,404,406,408-412,414,416,418-535
+design/rfc-pi-harness-example.md
+  s_2569688183b285::t_082339c201cd8a 1-88
+design/rfc-self-modifying-harness.md
+  s_2569688183b285::t_04e6ae6ad301e2 1-372
+design/rfc-sessions.md
+  s_2569688183b285::t_3f530a21562fe1 1-140
+design/rfc-streams.md
+  s_2569688183b285::t_2ae89b9d21b357 1-36,38-204
+design/rfc-sub-agent-routing.md
+  s_2569688183b285::t_87b563a806a2ed 345,347-349,357
+design/rfc-sub-agents.md
+  s_2569688183b285::t_7b7bb70de4c8a5 69-72
+design/rfc-think-multi-session.md
+  s_2569688183b285::t_8bd9e0f260959b 3,5-14
+design/rfc-think-turns.md
+  s_2569688183b285::t_f5e8d9e6326e3b 10,548
+design/rfc-user-chat-durable-objects.md
+  s_2569688183b285::t_3d59aa35010356 1-600
+design/sessions.md
+  s_2569688183b285::t_4103f7589f567c 1-180
+design/skills.md
+  s_2569688183b285::t_f8a0f58f302ec5 3,64-88
+design/sub-agent-routing.md
+  s_2569688183b285::t_8b7f0371822d96 34-41,97
+design/test-coverage-matrix.md
+  s_2569688183b285::t_ae3cd841a4621b 53-75
+design/think-durable-submissions.md
+  s_2569688183b285::t_eebf8ff4a003c9 11
+design/think-roadmap.md
+  s_2569688183b285::t_5f5565908b8ceb 9,85,95,160-173,235,355,609
+design/think-vs-aichat.md
+  s_2569688183b285::t_bec20c6bf310f1 8,40-49,60,142-145,148-149,171,258,260,267-269
+design/think.md
+  s_2569688183b285::t_48268a3173b081 221-222,251,253,255,444-464,476,478,480,482,500,502,504
+design/voice.md
+  s_2569688183b285::t_23cb0e8358efc0 3,38,267
+docs/agents/adding-to-existing-project.md
+  s_2569688183b285::t_4910fdd96be671 35,44,50,376
+docs/agents/agent-class.md
+  s_2569688183b285::t_de432da59f26d5 9,11-17,81,83,85,110,112,115,117,120-121,124-125,130,132,134,136,138,142,146,197,229,244,281,366,442
+docs/agents/agent-tools.md
+  s_2569688183b285::t_d639429955b8e7 4-5,52-80,463-487,571-574
+docs/agents/browse-the-web.md
+  s_2569688183b285::t_7d5e4d0affcd03 108,282-296,422-439
+docs/agents/channels.md
+  s_2569688183b285::t_a5307a9a270e9e 1,3-6,8-10,12,14-15,18,20-21,24-49,51-54,57,59-60,63-67,69-72,75-79,81-83,85,88,90-92,94-104,106,108-125,129-131,133,135-136,139-149,152-155,157-160,163-168,171-173,175-177,180-188,191-193,195,197,200-204,207-210,212-214,217-220,222,224,226,228,230-249,252-253,255,257-291,293-323
+docs/agents/chat-agents.md
+  s_2569688183b285::t_297f4e3f509ee4 28,523,525,535-536,543-544,586,588,590,592,649-658,668-671,698,705-714,725-737,902,927-967,1009-1010,1048-1049,1734-1771
+docs/agents/client-sdk.md
+  s_2569688183b285::t_9a4da3f46f7502 123-151,296-297,300-307,309-310,383
+docs/agents/configuration.md
+  s_2569688183b285::t_e04fec922960f7 620-622,629-631,656
+docs/agents/context.md
+  s_2569688183b285::t_e7027c04b3a467 1-158
+docs/agents/cross-domain-authentication.md
+  s_2569688183b285::t_995fb46bedaaf5 27,82,86,88,92,95,97
+docs/agents/durable-execution.md
+  s_2569688183b285::t_3dcc68bad087e7 348,465,471
+docs/agents/email.md
+  s_2569688183b285::t_4c69b2f84061f5 422,425
+docs/agents/http-websockets.md
+  s_2569688183b285::t_0fffbe811f8909 411
+docs/agents/human-in-the-loop.md
+  s_2569688183b285::t_a60125d689ebf4 199,241,249-250,360,385,415,422-424,426,444-447,450
+docs/agents/index.md
+  s_2569688183b285::t_dfd0777a9eb76d 14-20,43-44,60-61,66,83-84,144-146
+docs/agents/lifecycle.md
+  s_2569688183b285::t_f3763f855b91cb 1-449
+docs/agents/long-running-agents.md
+  s_2569688183b285::t_4b3b7184fa2c94 89,118,166,226,271,310,357,425,508,511,540,574,587,626,635
+docs/agents/mcp-client.md
+  s_2569688183b285::t_91edecbed445ac 16-70
+docs/agents/mcp-servers.md
+  s_2569688183b285::t_2d30a3f60ab15f 17-22,81-85
+docs/agents/mcp-transports.md
+  s_2569688183b285::t_02a52e2f7ed6c1 5,9,11-16,52,58,68,302-308
+docs/agents/migration-to-ai-sdk-v5.md
+  s_2569688183b285::t_4faa1e02a68fd2 5,74
+docs/agents/migration-to-ai-sdk-v6.md
+  s_2569688183b285::t_bf1291e0f0a8ee 7-8,10,13-14
+docs/agents/observability.md
+  s_2569688183b285::t_3f64b75af1248a 161-171
+docs/agents/queue.md
+  s_2569688183b285::t_476602cbebe32d 1,3-6,8,10-12,14-15,18-20,22-32,34,36-38,43-46,48-51,53-55,57,59-63,65,67-69,71-75,77-79,81,83-85,87,90-96,99,101-102,106-108,110,113-116,118,123-154,163,173,177,183,187,195-196,198,200-205,207,215-217,221-223
+docs/agents/resumable-streaming.md
+  s_2569688183b285::t_78916956c08c26 5,73,87-88
+docs/agents/retries.md
+  s_2569688183b285::t_a02cf44478960c 191
+docs/agents/routing.md
+  s_2569688183b285::t_0c9683fd978290 99-125,604-691,780,782,801-810,824,828-844
+docs/agents/scheduling.md
+  s_2569688183b285::t_777cdc24158170 18-102,387,389,730,737,791,839-913,951,962-963,982,990,1002,1010,1022,1030,1040
+docs/agents/server-driven-messages.md
+  s_2569688183b285::t_569b7e4496a96d 460
+docs/agents/sessions.md
+  s_2569688183b285::t_53e0400f164477 1,3,5,7,9,11,13,15-18,20-24,27,29-31,33-35,37-41,44,46,48,50,52-57,59-60,63,65-68,71,73,75-78,80-82,85,87,89-94,96,98,100,102,104,106,108,110,112,114,116,118,120-123,126,128,130-136,139,141,143-149,152,154-155,157-159,162,164,166,168-169,172,174,176-180,183,185,187,189-191,194,196-204,207,209,213,215-216,218,221-222,225,228,230,232-234,237,239-240,243,245,247,249-254,256-259,263,265,267,269-271,274,276,278,280,282,284,286,288,290-293,295,297,299,301,303,305,307,309,311-312,315,317,319,321,323,325-331,333,335,337,339,341-357,359,362,364,366-378,381,383,385,387,389,391,393-395,398,400,402,404,406-407,409,411,413,415-421,423,425
+docs/agents/state.md
+  s_2569688183b285::t_c3914e7cb7ee60 304
+docs/agents/streams.md
+  s_2569688183b285::t_2d94557f037473 1-213
+docs/agents/sub-agents.md
+  s_2569688183b285::t_fb16a3d96a0d9c 1,3,5-7,11,14-20,26-35,37-39,43-45,49-54,63-64,66-68,70,74,80-81,83,87-90,93,95-103,107,111,114,116,119-120,125,127,129,133,135,137,139,143,147-157,159,162-163,175,178-179,184,186,189,192,194,197,200,205,210,212,215-216,232,234-236,249-257,263,265,268,275,278-279,307-308,310,316,321-337,339-368,380,386,390,395-396,398,407,421,425,429,431,433,435-437,439,443-458,460-479,481,483,485,487-489,494-497
+docs/agents/tasks.md
+  s_2569688183b285::t_21272dc3131b50 1-246
+docs/agents/voice.md
+  s_2569688183b285::t_4db11ffda8749d 1,3,5,7,9-15,17,19-24,26-48,53-55,57,65-77,83-85,87,89-93,95-102,105,108,112,114,118,121-130,133-138,140,142,144,146,148-151,153-154,156,158-161,164,166-168,170-172,176,178,180,182,184,186-189,192,194-196,198-212,214,218,220-224,226,228-233,235,237,239,241-245,247-253,255-257,262,264-270,272,274,276-285,288,290,292-294,296,298-299,301-305,307,309,311,313,315-318,320,322,324,326,328,330-331,333,337-340,342,344,348-350,352-356,360-362,364,367,369-371,375,377,379-384,386,388,390,392-408,410-422,424,426,428-429,431,433-435,437-439,441-443,445-446,448-449,451-453,456-510,513,515-521,523,525-526,528-532,536,538,540-541,543-550,552,554-555,557-562,566,568-569,571-577,579,581,583,585-589,591,594,596,598-599,601-602,605-614,616-617,620,622,624,626-634,639,641-642,644-645,647-653,655,657,659-665,667-668,671-674,676,679,681,683-685,687,689-691,693,695,697,699-702,704,707,709-714,716,718-720,722,724,726-732,734,736,738-739,741,743-745
+docs/agents/webhooks.md
+  s_2569688183b285::t_d2dd02147f287b 10-41,48,51,56-57,69-85,143,152,154-160,162-164,168,176,178,180,182,186,188,190,206,216-217,219-220,223-225,432,435-444,448-451,454-466
+docs/agents/workflows.md
+  s_2569688183b285::t_f8fccba9a1c5eb 249-253,265-268
+docs/codemode/runtime.md
+  s_2569688183b285::t_7c6a0b64b52cd1 235-237
+docs/index.md
+  s_2569688183b285::t_b1b730003397e9 5,9,11
+docs/think/actions.md
+  s_2569688183b285::t_1253b07cbf69b3 178-188,193-207,307-316
+docs/think/channels.md
+  s_2569688183b285::t_a52b40af656cbc 103-117
+docs/think/client-tools.md
+  s_2569688183b285::t_4647e190d39b8f 8
+docs/think/getting-started.md
+  s_2569688183b285::t_c02422757a8260 203,206-207,213-216,221-223,226-227,232,234,236,250,276,318-319
+docs/think/index.md
+  s_2569688183b285::t_abe68153bc328d 183,185-186,207,209-218,264-266,310-312,395-456,480-493,529-540,561-562,566-571,613-615,617,709,880,882-884,888,897-903,908-988,1008-1013
+docs/think/lifecycle-hooks.md
+  s_2569688183b285::t_cee63dac5cfdc3 10,27,58,66,81-82,85-124,129-131,145-172,178-204,260-282,325-343,514,601-614,765-766,773-780,867,873-879,949-955
+docs/think/messengers.md
+  s_2569688183b285::t_a72075c556c0cb 131-194,244-253,259-267,276-278,287-288
+docs/think/programmatic-submissions.md
+  s_2569688183b285::t_13521131faf8bc 103-107,111-150
+docs/think/sub-agents.md
+  s_2569688183b285::t_162e49887cd3de 30,34-42,307,314,333-334,361,363,367,444-446,453,470-479
+docs/think/tools.md
+  s_2569688183b285::t_2a44802c616397 12,279-281,319-322,536
+docs/think/workflows.md
+  s_2569688183b285::t_ad053f2518de3c 144-148
+docs/voice/index.md
+  s_2569688183b285::t_7a6b344a4d0c80 1,3-5,7-12,14-15,18,21
+examples/AGENTS.md
+  s_2569688183b285::t_f629b59a8bbea3 13-18,21-27
+examples/agents-as-tools/package.json
+  s_2569688183b285::t_f1ff3809bb5c54 25
+examples/ai-chat/README.md
+  s_2569688183b285::t_3d753e70cef6a8 10,16,35,39-42,47-48
+examples/ai-chat/package.json
+  s_2569688183b285::t_fbfdc52a3be7b0 25
+examples/ai-chat/src/client.tsx
+  s_2569688183b285::t_fbb7a062740ee0 105-110,114-121,125-126,128-151,154,159,695
+examples/ai-chat/src/server.ts
+  s_2569688183b285::t_6d6065f6af278c 33-35,70-72,76-78,82-148,156-159,161-163,165,169
+examples/ai-chat/wrangler.jsonc
+  s_2569688183b285::t_db7bc0238f4725 4
+examples/assistant/README.md
+  s_2569688183b285::t_16f947ea9fbff9 119-122,125-130,133-134,137-140,279-280
+examples/assistant/agents/assistant/agent.ts
+  s_2569688183b285::t_7a87b4bb8fa244 17,101-102,132
+examples/assistant/agents/assistant/agents/my-assistant/agent.ts
+  s_2569688183b285::t_3bf5a753c1807c 14-15,46,90,98,142-154,159-161,172-174,178-180,184-185
+examples/assistant/env.d.ts
+  s_2569688183b285::t_1c7f9ec6aa75fd 1-11,13-15,17,19-24,26-28
+examples/assistant/package.json
+  s_2569688183b285::t_c691104532369c 3,11,26
+examples/assistant/src/secrets.d.ts
+  s_2569688183b285::t_dd69c14c85c011 1-2,5-18
+examples/assistant/src/server.ts
+  s_2569688183b285::t_4036c05e91e506 9-16,25-26,38-39,48,92-102,117
+examples/assistant/src/tests/daily-summary.test.ts
+  s_2569688183b285::t_78f5c2e156493e 14
+examples/assistant/src/tests/env.d.ts
+  s_2569688183b285::t_54af6f3b75e11a 21
+examples/assistant/src/tests/routing.test.ts
+  s_2569688183b285::t_7454b1f6fb9d75 5-7,15,17-20,24-25,29-67
+examples/assistant/src/tests/shared-mcp.test.ts
+  s_2569688183b285::t_7425281798c223 8,22,46
+examples/assistant/src/tests/wrangler.jsonc
+  s_2569688183b285::t_0f3242c69f027a 37
+examples/assistant/src/use-chats.ts
+  s_2569688183b285::t_0591108b3ff691 24-26,41
+examples/assistant/vite.config.ts
+  s_2569688183b285::t_453936af65a607 4,8
+examples/assistant/wrangler.jsonc
+  s_2569688183b285::t_6b434f4cd2345f 26,32,35
+examples/channels/.dev.vars.example
+  s_2569688183b285::t_102e42b7cc028d 1-13
+examples/channels/README.md
+  s_2569688183b285::t_60a9b4223507aa 1,3-6,8,10-31,33-47,50-59,61,64-66,68-73,76-78,80-83,85-88,91-92,95-106,109-112,115-117,119-136
+examples/channels/env.d.ts
+  s_2569688183b285::t_7cd940bd9ef0ac 1-40
+examples/channels/index.html
+  s_2569688183b285::t_350fb9a81e26c7 7,10-11
+examples/channels/package.json
+  s_2569688183b285::t_1ef21a0849bf17 2-3,10,13-14,22,27-28
+examples/channels/src/api.ts
+  s_2569688183b285::t_bd0d70a7e3cfab 1-2,5-6,8-14,16-18,20-38,40,43-46,48-50,52-60,62-66
+examples/channels/src/client.tsx
+  s_2569688183b285::t_066b8df3492ac5 1,3-9,11-21
+examples/channels/src/conversation.ts
+  s_2569688183b285::t_965e49076ac6a9 1-305
+examples/channels/src/directory.ts
+  s_2569688183b285::t_95e1b865579a15 1-115
+examples/channels/src/server.ts
+  s_2569688183b285::t_c11ee4491b1c95 1-138
+examples/channels/src/styles.css
+  s_2569688183b285::t_40e29854cc77b3 1-11
+examples/channels/src/support-form-channel.ts
+  s_2569688183b285::t_1979dcd29fdba4 1-65
+examples/channels/src/types.ts
+  s_2569688183b285::t_e5e7b15bf48ec3 1-6,8-9,11,13-20,22,24-36,38,40-41,43-55,57-59,61-66,68-71,73-76
+examples/channels/src/ui/README.md
+  s_2569688183b285::t_9e4edb3edbcac0 1-14
+examples/channels/src/ui/api.ts
+  s_2569688183b285::t_544755a0f623df 1-77
+examples/channels/src/ui/app.tsx
+  s_2569688183b285::t_84c79caefc2e16 1,6-8,12-13,15-50,53-59,62-64,66,68-92,95-104,107-121,123-178,180-186,188-211,213-215,217-224,227-234,236-237
+examples/channels/src/ui/conversation.tsx
+  s_2569688183b285::t_42b610b22da70d 1-338
+examples/channels/src/ui/people.tsx
+  s_2569688183b285::t_135aabfacc546c 1,4-5,7-9,12-15,17-46,49-52,54-81,83,85-126,128-154,158-167,169-191,194,196-204,206-210,212-213,215-221,223-230,232-233,236-249,251
+examples/channels/src/ui/shared.tsx
+  s_2569688183b285::t_df1a21f0597e4e 1-19,21,23-44,46-53,56-72,75-77,80-81,84-87,91-92,95-96,99-100,103-113,116-134,137,139-147
+examples/channels/src/ui/support-form.tsx
+  s_2569688183b285::t_55135b2b71e966 1,3,5,7-8,11-24,27-28,30-36,40-50,53-58,60-73,75-80,82-126
+examples/channels/vite.config.ts
+  s_2569688183b285::t_e0009feb7a34cf 1-8
+examples/channels/wrangler.jsonc
+  s_2569688183b285::t_093feee4fb57bf 3,8,10,12,14-15,18-28,33-38,45-67
+examples/chat-sdk-messenger/src/index.ts
+  s_2569688183b285::t_6fc98b05fc6fc4 32,38,43,136-137,140,142,145-146,149-152,309,311,314-318,323,422,426,431,452,454,459,469,475,483,489-490,496-497,521-543
+examples/chat-sdk-messenger/src/intelligence/delivery.ts
+  s_2569688183b285::t_f4e93f3a808c07 1-2,10-13,21,75-76,83-84,90-93,96-124
+examples/chat-sdk-messenger/src/intelligence/messages.ts
+  s_2569688183b285::t_5bff41ed6d9344 42-97,102
+examples/chat-sdk-messenger/src/tests/intelligence.test.ts
+  s_2569688183b285::t_6dec26a91ee9d0 1-2,8-11,20,24,31-38,41-45,58,71-122,173-283,435-445
+examples/codemode-browser/package.json
+  s_2569688183b285::t_2caea1cb9bd03f 24
+examples/codemode-connectors/package.json
+  s_2569688183b285::t_e421fc22e513e5 25
+examples/codemode-mcp/package.json
+  s_2569688183b285::t_879e8882e46a81 16
+examples/codemode/package.json
+  s_2569688183b285::t_90e5d36de4e24f 24
+examples/deploy-churn/README.md
+  s_2569688183b285::t_9e66208647894c 35-36
+examples/deploy-churn/src/server.ts
+  s_2569688183b285::t_0ee122af56e94d 16-17
+examples/elevenlabs-starter/package.json
+  s_2569688183b285::t_26ef3ca35442c9 24
+examples/mcp-elicitation-mrtr/package.json
+  s_2569688183b285::t_5654cf1435beeb 16
+examples/mcp-elicitation/package.json
+  s_2569688183b285::t_d54b17598a1469 16
+examples/mcp-rpc-transport/package.json
+  s_2569688183b285::t_e9923a2f513e35 22
+examples/mcp-server/package.json
+  s_2569688183b285::t_1bcc8ba5816e16 14
+examples/mcp-worker-authenticated/package.json
+  s_2569688183b285::t_192d756cd750e8 18,21
+examples/mcp-worker/package.json
+  s_2569688183b285::t_be21e90d9b025d 19
+examples/mcp/package.json
+  s_2569688183b285::t_92cca1a7fc911c 17
+examples/multi-ai-chat/README.md
+  s_2569688183b285::t_47ef66f2f51984 3-10,115-116
+examples/multi-ai-chat/package.json
+  s_2569688183b285::t_d03e699351c592 24
+examples/next/README.md
+  s_2569688183b285::t_b9804a471c655d 1-26
+examples/next/dynamic-agents/README.md
+  s_2569688183b285::t_345a991eebe316 1,3-4,6-9,11-17,20-41,44-45,48,50-52
+examples/next/dynamic-agents/env.d.ts
+  s_2569688183b285::t_c26a79cde0d18b 2,4-5,10
+examples/next/dynamic-agents/index.html
+  s_2569688183b285::t_7a61261f59d68d 1-21
+examples/next/dynamic-agents/package.json
+  s_2569688183b285::t_cb8788db8ded02 2-3,11-12,17,19,23,32
+examples/next/dynamic-agents/src/client.tsx
+  s_2569688183b285::t_f00e1b621860bc 5,8-9,12,14-17,19,21-28,31-34,36,40,42,48,54,60-70,72-81,83-85,87-89,91-108,110-138,140-149,151,154-159,161,164-172,174-212,214-225,227-283,285,287-293,295-321,323-336,338-340,346
+examples/next/dynamic-agents/src/index.ts
+  s_2569688183b285::t_a1a4a2a1c3d5c3 1-2,4-5,7-18,21,23-44,47-52,54,57-67,71-79,81-100,102-103,105-126,128-132,135,137-138,141,143-149,152,154-155,159-162,165,167-170,177,181
+examples/next/dynamic-agents/src/shared.ts
+  s_2569688183b285::t_68cf388daa72ec 1-4,6,8-9,11-16,18-31,33-34
+examples/next/dynamic-agents/src/styles.css
+  s_2569688183b285::t_31c6383c286adb 1-2,9-10,13-16
+examples/next/dynamic-agents/src/tests/dynamic-agents.test.ts
+  s_2569688183b285::t_c0b1ba15531baf 1-117
+examples/next/dynamic-agents/src/tests/env.d.ts
+  s_2569688183b285::t_a401e4c8840446 1-16
+examples/next/dynamic-agents/src/tests/setup.ts
+  s_2569688183b285::t_9b2c9aa6d8b31b 1-12
+examples/next/dynamic-agents/src/tests/tsconfig.json
+  s_2569688183b285::t_1b875c97acba42 3
+examples/next/dynamic-agents/src/tests/vitest.config.ts
+  s_2569688183b285::t_a29a72caefec62 3,5,12,15,20-24
+examples/next/dynamic-agents/src/tests/worker.ts
+  s_2569688183b285::t_92897e737c839a 1-4
+examples/next/dynamic-agents/src/tests/wrangler.jsonc
+  s_2569688183b285::t_49184517991533 1-34
+examples/next/dynamic-agents/tsconfig.json
+  s_2569688183b285::t_e596f45db51cb5 3
+examples/next/dynamic-agents/vite.config.ts
+  s_2569688183b285::t_b904b8f645a830 3,5
+examples/next/dynamic-agents/wrangler.jsonc
+  s_2569688183b285::t_07cdb0c7479dfc 3-4,14-15,22,24-32
+examples/next/harnesses/codex/.gitignore
+  s_2569688183b285::t_3af6d42c69d4f1 1-2
+examples/next/harnesses/codex/LICENSE-CODEX-APACHE-2.0
+  s_2569688183b285::t_4731888ed44554 1-201
+examples/next/harnesses/codex/README.md
+  s_2569688183b285::t_cc05c2b5cfd4d1 1-134
+examples/next/harnesses/codex/THIRD_PARTY_NOTICES.md
+  s_2569688183b285::t_029955ea25b1dc 1-16
+examples/next/harnesses/codex/env.d.ts
+  s_2569688183b285::t_6bb424141ed82d 2,5-6,11
+examples/next/harnesses/codex/index.html
+  s_2569688183b285::t_21d1286b8bffd7 7
+examples/next/harnesses/codex/package.json
+  s_2569688183b285::t_d943629546a021 2-3,8-10,12-15,18,20,23,28,40-41
+examples/next/harnesses/codex/rust-toolchain.toml
+  s_2569688183b285::t_4318c73d380027 1-3
+examples/next/harnesses/codex/scripts/heap.mjs
+  s_2569688183b285::t_a0b0e1efb536ce 1-151
+examples/next/harnesses/codex/scripts/stress.mjs
+  s_2569688183b285::t_a3637c9d20f970 1-18,20-22,25-38,41-44,47-48,51-55,58-61,64-113,115-122,124-153,155-157,159-161
+examples/next/harnesses/codex/src/client.tsx
+  s_2569688183b285::t_1338f05d6c8aea 1,4,6-7,9,13-14,17-22,24-46,49-54,57-63,65-66,69-72,91-93,99-110,112-127,129-130,132-207,209-258,260-277,280-353,355-363,365-429,431-434,436-502,505-535,537-545,549-596,601-604,608-615,618-626,631-633
+examples/next/harnesses/codex/src/codex-harness.ts
+  s_2569688183b285::t_0f324e0b3abcbf 1-816
+examples/next/harnesses/codex/src/kernel-runtime.ts
+  s_2569688183b285::t_5aafdb4b3d7927 1-97
+examples/next/harnesses/codex/src/kernel-types.ts
+  s_2569688183b285::t_b3886568b3354f 1-74,76-81
+examples/next/harnesses/codex/src/language-model-v4.ts
+  s_2569688183b285::t_ed91918fc5df93 1-576
+examples/next/harnesses/codex/src/modules.d.ts
+  s_2569688183b285::t_a5ac0b15ff3b7d 1-3
+examples/next/harnesses/codex/src/protocol.ts
+  s_2569688183b285::t_9bf36bfd4813c5 1-94
+examples/next/harnesses/codex/src/server.ts
+  s_2569688183b285::t_dd3ac905c12a4c 1-8,10-42,44-50,56,60
+examples/next/harnesses/codex/src/stress/model.ts
+  s_2569688183b285::t_757ee96dc54d62 1-131
+examples/next/harnesses/codex/src/stress/worker.ts
+  s_2569688183b285::t_d4204b44559bf4 1-12,15-26,28-39,42-54,56-83,85-93,96-97,100-102,104-115,119-147,151-153,156,158-166,168-170,172-176,180
+examples/next/harnesses/codex/src/stress/wrangler.jsonc
+  s_2569688183b285::t_e1eb7d138849dc 1-15
+examples/next/harnesses/codex/src/styles.css
+  s_2569688183b285::t_6743884d074737 1-3,12,16-21,24,33,35-36,41,45,47,49,53-56,58,64-75
+examples/next/harnesses/codex/src/transport.ts
+  s_2569688183b285::t_773285c200b481 1-222
+examples/next/harnesses/codex/src/use-codex-session.ts
+  s_2569688183b285::t_8dcbf646367f43 1-244
+examples/next/harnesses/codex/tsconfig.json
+  s_2569688183b285::t_f5f9f8aeddd3aa 3
+examples/next/harnesses/codex/vite.config.ts
+  s_2569688183b285::t_945ba38479b871 1-9
+examples/next/harnesses/codex/wasm-kernel/Cargo.lock
+  s_2569688183b285::t_ab40365940088a 1-107
+examples/next/harnesses/codex/wasm-kernel/Cargo.toml
+  s_2569688183b285::t_4c50bbab1a2dce 1-5,7-8,10-12,14-19
+examples/next/harnesses/codex/wasm-kernel/src/lib.rs
+  s_2569688183b285::t_90e10ef9007659 1-759
+examples/next/harnesses/codex/wrangler.jsonc
+  s_2569688183b285::t_434f98ab6c1e7a 1-32
+examples/next/harnesses/pi/README.md
+  s_2569688183b285::t_128ab93f47d5ca 1-93
+examples/next/harnesses/pi/env.d.ts
+  s_2569688183b285::t_382ae58599ab72 1-6,10,12,14
+examples/next/harnesses/pi/index.html
+  s_2569688183b285::t_d774c651851495 7,10-11
+examples/next/harnesses/pi/licenses/mit-earendil-pi.txt
+  s_2569688183b285::t_e209933163ab0e 1,3-21
+examples/next/harnesses/pi/package.json
+  s_2569688183b285::t_d73266154c7c63 2-3,12-13,17-21,24,28,32,41
+examples/next/harnesses/pi/src/client.tsx
+  s_2569688183b285::t_a50363e5b5f150 11-12,14-16,20,22-23,26-66,71,85,91-97,99-101,103-104,107-127,129-161,163-170,172-174,176-179,181-185,187-242,244-274,276-290,296-319,321-367,369-386,388-390,392,394-405,407,410-429,431-441,443-458,463-493,495,497-499,501-504,506-511,513-526,528,530,532-534,536,538,540-545,548-550,552,554,557-561,568-570,577-581,585,587-593,598-600
+examples/next/harnesses/pi/src/harness/do-sqlite.ts
+  s_2569688183b285::t_cc1a34a457d57e 1-328
+examples/next/harnesses/pi/src/harness/events.ts
+  s_2569688183b285::t_648f95b70a0330 1-380
+examples/next/harnesses/pi/src/harness/intake.ts
+  s_2569688183b285::t_90dcab2f3a9d2c 1-141
+examples/next/harnesses/pi/src/harness/messages.ts
+  s_2569688183b285::t_c3fc3bc13ee570 1-227
+examples/next/harnesses/pi/src/harness/pi-harness.ts
+  s_2569688183b285::t_22e19ab663ee85 2-115,117,119-121,123-132,134-137,139-193,195,197,199-206,208,210-219,221-226,228-238,240-253,255-281,283-288,290-328,331-334,336-338,341,343-362,364-387,389,391-398,400,402-424,426-429,431-448,450-464,466,468,470-494,496,498-501,503-505,508-522,524,526-531,533-535,537-538,540-552,554-560,562-590,592,594-597,599,601-607,609-617,619-620,622,624-630,632-638,640-648,651-721,723-730,732-737,739-750,752-765,767-780,782-802,804,806-815,817-827,829,831-847,849-868,870-929,931-983,985-995,997-1006,1008-1026,1028-1033,1035-1036,1038-1079,1081-1088,1090-1124,1126-1145,1147,1149-1153,1155-1175,1179-1189
+examples/next/harnesses/pi/src/harness/skills.ts
+  s_2569688183b285::t_7346749fa3fed4 1-271
+examples/next/harnesses/pi/src/harness/transport.ts
+  s_2569688183b285::t_d9c7468d8b9dab 2-19,21-37,40-44,46-48,51-54,56,59-61,63,66-72,75-80,84-101,104-105,107-116,120-138,140-144,147-154,158-187,191-237,239-274,276-281,284-291,294-311
+examples/next/harnesses/pi/src/harness/types.ts
+  s_2569688183b285::t_72896b0cd417a5 1-752
+examples/next/harnesses/pi/src/protocol.ts
+  s_2569688183b285::t_0e073a2322569a 1-10
+examples/next/harnesses/pi/src/providers/models.ts
+  s_2569688183b285::t_60338ba08eecb6 1-100
+examples/next/harnesses/pi/src/providers/workers-ai.ts
+  s_2569688183b285::t_d70fc76b66d472 1-159
+examples/next/harnesses/pi/src/server.ts
+  s_2569688183b285::t_55a2a6c282914a 1-321
+examples/next/harnesses/pi/src/styles.css
+  s_2569688183b285::t_c070c070f3b27b 1-3,11-12,16-19,62-80
+examples/next/harnesses/pi/src/tests/cloudflare-test.d.ts
+  s_2569688183b285::t_d2a3417d1584c0 1,3-7,10-11
+examples/next/harnesses/pi/src/tests/harness.test.ts
+  s_2569688183b285::t_c0060eb86ee0dd 1-39
+examples/next/harnesses/pi/src/tests/vitest.config.ts
+  s_2569688183b285::t_f2a1a0e6400d41 1-19
+examples/next/harnesses/pi/src/tests/worker.ts
+  s_2569688183b285::t_82992e630b3766 1-129
+examples/next/harnesses/pi/src/tests/wrangler.jsonc
+  s_2569688183b285::t_3e59d4e77efb49 1-20
+examples/next/harnesses/pi/src/use-pi-session.ts
+  s_2569688183b285::t_1dbce97e2a47d1 1-245
+examples/next/harnesses/pi/tsconfig.json
+  s_2569688183b285::t_996dccba5fb0b3 4-40,42
+examples/next/harnesses/pi/vendor/pi-dev/README.md
+  s_2569688183b285::t_a1e28f7f44776f 1-18
+examples/next/harnesses/pi/vendor/pi-dev/SHA256SUMS
+  s_2569688183b285::t_24a68afebd4497 1-5
+examples/next/harnesses/pi/vite.config.ts
+  s_2569688183b285::t_4320bba53c504f 1-28
+examples/next/harnesses/pi/wrangler.jsonc
+  s_2569688183b285::t_c5b6cf1adc9944 3-4,10,15-16,21-28
+examples/next/harnesses/self-modifying/.gitignore
+  s_2569688183b285::t_fdf7d071328f87 1-2
+examples/next/harnesses/self-modifying/README.md
+  s_2569688183b285::t_ef6dbbd6613fc2 1-116
+examples/next/harnesses/self-modifying/env.d.ts
+  s_2569688183b285::t_532610c378d35a 1-17
+examples/next/harnesses/self-modifying/index.html
+  s_2569688183b285::t_f133dcf9e1921e 1-21
+examples/next/harnesses/self-modifying/package.json
+  s_2569688183b285::t_6320d3e3b11efc 2-3,12-13,16,18-19,22,27,31,40
+examples/next/harnesses/self-modifying/src/client.tsx
+  s_2569688183b285::t_2f5ed02a6b816e 11-13,17,19-20,22-27,30-38,40-61,64-105,110,112,118,124,130-135,138-181,184-193,195-216,218-225,227-233,235-243,245-250,252-260,262-266,268-276,278-292,294-315,317-362,364-378,380-396,399-400,402-419,421-446,448-503,505,507-514,516-604,611-612,616-624,627-636,641-647
+examples/next/harnesses/self-modifying/src/harness-runtime.ts
+  s_2569688183b285::t_a4b287ab2d6b75 1-7,9-12,14-26,28-32,34-38,40-48,51-53,55-61,63,65-70,73-80,84-87,90-93,95-97,100-111,113,116-127,129,132-145,147-153,155-159,161-178,180,183,185-187,189,192-201,204-221,224-239,241-253,255-256,258-259,263-265,267-279,281-288,290-301,304-334
+examples/next/harnesses/self-modifying/src/harness-source.ts
+  s_2569688183b285::t_219bbc4d3e9da0 1-143
+examples/next/harnesses/self-modifying/src/host-bridge.ts
+  s_2569688183b285::t_dce33374508a52 1-5,7-16,18-34,36-42,44-48,50-53,55-59,62-71,74-81,83,86-96,98-116,118-136,139-151,153-155,157-158,161-164,166-168,171,173-174,178-185,188-196,200-212,214-230,232-260,262-281,283-293,295-318,320-325,327-340,343-348,350-360,362-437
+examples/next/harnesses/self-modifying/src/json.ts
+  s_2569688183b285::t_45c96d53ee530a 1-20
+examples/next/harnesses/self-modifying/src/model-runner.ts
+  s_2569688183b285::t_1f8761ddd3da10 1-55
+examples/next/harnesses/self-modifying/src/protocol.ts
+  s_2569688183b285::t_bfb666e87bd0b1 1-46,48-84
+examples/next/harnesses/self-modifying/src/runtime-types.ts
+  s_2569688183b285::t_90ecafec1c171a 1-79
+examples/next/harnesses/self-modifying/src/seed.ts
+  s_2569688183b285::t_01d8ab2e6c7e3e 1-189
+examples/next/harnesses/self-modifying/src/self-modifying-harness.ts
+  s_2569688183b285::t_9ab2c20af6bb5a 1-631
+examples/next/harnesses/self-modifying/src/server.ts
+  s_2569688183b285::t_606e89d72eb905 1-42
+examples/next/harnesses/self-modifying/src/store.ts
+  s_2569688183b285::t_4956b296f530a1 1-583
+examples/next/harnesses/self-modifying/src/styles.css
+  s_2569688183b285::t_5372af8f1f839a 1-3,18,27,35,39,53
+examples/next/harnesses/self-modifying/src/system-tools.ts
+  s_2569688183b285::t_260447e86f8be3 1-115
+examples/next/harnesses/self-modifying/src/tests/cloudflare-test.d.ts
+  s_2569688183b285::t_b0cb49b469cc75 1,3-6,9-11
+examples/next/harnesses/self-modifying/src/tests/harness.test.ts
+  s_2569688183b285::t_8ad9b4bf785d86 1-217
+examples/next/harnesses/self-modifying/src/tests/system-tools.test.ts
+  s_2569688183b285::t_6383f8313ddf31 1-63
+examples/next/harnesses/self-modifying/src/tests/vitest.config.ts
+  s_2569688183b285::t_a56e437aa1db51 1-19
+examples/next/harnesses/self-modifying/src/tests/worker.ts
+  s_2569688183b285::t_6650bf447170a9 1-340
+examples/next/harnesses/self-modifying/src/tests/wrangler.jsonc
+  s_2569688183b285::t_c6fdadf3d645bb 1-25
+examples/next/harnesses/self-modifying/src/transport.ts
+  s_2569688183b285::t_d9737eda15da0b 1-237
+examples/next/harnesses/self-modifying/src/use-harness-session.ts
+  s_2569688183b285::t_59cd9c88c4c297 1-183
+examples/next/harnesses/self-modifying/vite.config.ts
+  s_2569688183b285::t_dc39a075b8f787 1-9
+examples/next/harnesses/self-modifying/wrangler.jsonc
+  s_2569688183b285::t_c6b8e2e64a401a 3,11-14,18-19,26-31
+examples/next/lifecycle/README.md
+  s_2569688183b285::t_b15889f3d0b465 1,3-6,8,10-11,14,16,18-25,27-29
+examples/next/lifecycle/env.d.ts
+  s_2569688183b285::t_b25a3f2151354c 1-13
+examples/next/lifecycle/package.json
+  s_2569688183b285::t_7be26c2a606758 2-3,6,8,10-11,14
+examples/next/lifecycle/src/index.ts
+  s_2569688183b285::t_8e3bb4a97f9c10 1-246
+examples/next/lifecycle/tsconfig.json
+  s_2569688183b285::t_1ddddfccea5dfd 1-4
+examples/next/lifecycle/wrangler.jsonc
+  s_2569688183b285::t_9d6a8ff100d93f 3-4,10-11,18,20-23
+examples/next/mcp-client/README.md
+  s_2569688183b285::t_33aee742683bcc 1,3-5,7-9,11-12,15-17,19,21-24,26-28,30-34,37-39,41-42
+examples/next/mcp-client/env.d.ts
+  s_2569688183b285::t_f4130a75953719 1-15
+examples/next/mcp-client/index.html
+  s_2569688183b285::t_d0180cf55c4c13 7,10-11
+examples/next/mcp-client/package.json
+  s_2569688183b285::t_e788800a1d7ad6 2-3,11,15,17,19
+examples/next/mcp-client/src/client.tsx
+  s_2569688183b285::t_2838ca63c28e84 3,5-6,9,12-13,15-16,18-19,21-25,27-34,36-39,41-42,47,61,67-75,77-168,170-189,191-197,199,201-207,209-213,215-247,249-250,252,255-257,259-267,269,271-277,282-326,328-360,362-370,372,375-384,386-391,393-395,397-410,412-425,428,430-433,435-445,448-449,451-452,455,460-462
+examples/next/mcp-client/src/demo-api.ts
+  s_2569688183b285::t_230e1603118387 1-208
+examples/next/mcp-client/src/server.ts
+  s_2569688183b285::t_b2b4ed06eda6e3 1-40
+examples/next/mcp-client/src/styles.css
+  s_2569688183b285::t_e3ab3b16261abf 1-2,9-10,13-16
+examples/next/mcp-client/tsconfig.json
+  s_2569688183b285::t_e9ca1770449fc0 1-4
+examples/next/mcp-client/vite.config.ts
+  s_2569688183b285::t_a70798ace952ea 1-8
+examples/next/mcp-client/wrangler.jsonc
+  s_2569688183b285::t_2515524e7cba62 3,14-15,22,24-27
+examples/next/queue/README.md
+  s_2569688183b285::t_fee2af8d93c2b7 1,3-5,7-21,23-30,33-46,49-50,53,55-59,61-62,64-65,68-69
+examples/next/queue/env.d.ts
+  s_2569688183b285::t_d27dbb0460f7fc 1-13
+examples/next/queue/package.json
+  s_2569688183b285::t_38195bc2f3d607 2-3,6,8-10,14,17-19
+examples/next/queue/src/index.ts
+  s_2569688183b285::t_8378944a23ae43 1-111
+examples/next/queue/tsconfig.json
+  s_2569688183b285::t_c306f6aa51da26 1-4
+examples/next/queue/wrangler.jsonc
+  s_2569688183b285::t_eb075097d4d005 3-4,10-11,18,20-23
+examples/next/routing/README.md
+  s_2569688183b285::t_a666f90e686800 1-127
+examples/next/routing/env.d.ts
+  s_2569688183b285::t_e4372ed6958132 1-14
+examples/next/routing/index.html
+  s_2569688183b285::t_f892862af01307 1-21
+examples/next/routing/package.json
+  s_2569688183b285::t_8f9615e816a9fb 2-3,11-12,17,19,23,29,33
+examples/next/routing/src/client.tsx
+  s_2569688183b285::t_f77f253d82dad5 5,11,14,16,18-23,26-29,31-59,63,65,71,77,83-95,97-99,101-103,106-107,109-139,142-154,156-188,190-203,205-210,212-215,217-221,223-230,232-239,241-242,244-251,253-269,271-304,307-328,334
+examples/next/routing/src/index.ts
+  s_2569688183b285::t_9b7b897c30f7e2 1-322
+examples/next/routing/src/shared.ts
+  s_2569688183b285::t_b8d82ae2636a32 1-11
+examples/next/routing/src/styles.css
+  s_2569688183b285::t_9456ce21a07e58 1-2,9-10,13-16
+examples/next/routing/src/tests/env.d.ts
+  s_2569688183b285::t_6b44fe122f1638 1-16
+examples/next/routing/src/tests/routing.test.ts
+  s_2569688183b285::t_b4841390df5f24 1-355
+examples/next/routing/src/tests/setup.ts
+  s_2569688183b285::t_8b5f2955ca2d28 1-12
+examples/next/routing/src/tests/tsconfig.json
+  s_2569688183b285::t_4dbc279139fcef 1-4
+examples/next/routing/src/tests/vitest.config.ts
+  s_2569688183b285::t_dd4efd61f9ff34 1-26
+examples/next/routing/src/tests/worker.ts
+  s_2569688183b285::t_f642718d68fa02 1-4
+examples/next/routing/src/tests/wrangler.jsonc
+  s_2569688183b285::t_bf65ef06d83f29 1-33
+examples/next/routing/tsconfig.json
+  s_2569688183b285::t_30d609a3ab8ec5 1-4
+examples/next/routing/vite.config.ts
+  s_2569688183b285::t_2b8c07bd44399b 3,5
+examples/next/routing/wrangler.jsonc
+  s_2569688183b285::t_b3490898c80403 3-4,13-16,26,28-31
+examples/next/schedules/README.md
+  s_2569688183b285::t_d9af05054e9f1c 1-73
+examples/next/schedules/env.d.ts
+  s_2569688183b285::t_44b5a9172dcd40 1-13
+examples/next/schedules/package.json
+  s_2569688183b285::t_d33a76e76167dc 1-21
+examples/next/schedules/src/index.ts
+  s_2569688183b285::t_cbeda00dcf2e32 1-4,6-8,10-15,17-44,46-54,56,59-60,62-78,80-84,86-95,103,107
+examples/next/schedules/tsconfig.json
+  s_2569688183b285::t_54c88dc0f454a5 1-4
+examples/next/schedules/wrangler.jsonc
+  s_2569688183b285::t_5eb9c3ec280fee 3,8-13,18,20-23
+examples/next/sessions/README.md
+  s_2569688183b285::t_e0168fd7c72065 1-66
+examples/next/sessions/env.d.ts
+  s_2569688183b285::t_de55680667e9d2 1-13
+examples/next/sessions/package.json
+  s_2569688183b285::t_bf8e5a4c3e2c42 2-3,6,10-14
+examples/next/sessions/src/index.ts
+  s_2569688183b285::t_e379a06814a5f5 1-148
+examples/next/sessions/tsconfig.json
+  s_2569688183b285::t_7b9a29cfe9b95d 1-4
+examples/next/sessions/wrangler.jsonc
+  s_2569688183b285::t_74daa15b9e7c5f 1-24
+examples/next/streams/README.md
+  s_2569688183b285::t_a307ed73ac1f7d 1-34,36-73
+examples/next/streams/env.d.ts
+  s_2569688183b285::t_a15f1f0cfae2b4 1-13
+examples/next/streams/package.json
+  s_2569688183b285::t_215dd9915097aa 1-21
+examples/next/streams/src/index.ts
+  s_2569688183b285::t_3c95ab79aeae41 2-5,7-10,13-16,18-36,38-42,44-61,64-72,74-79,84-87
+examples/next/streams/tsconfig.json
+  s_2569688183b285::t_6f214379c48bd2 1-4
+examples/next/streams/wrangler.jsonc
+  s_2569688183b285::t_53695a2ac6072e 1-24
+examples/next/tasks/README.md
+  s_2569688183b285::t_a16064107201f5 1-24,26-75
+examples/next/tasks/env.d.ts
+  s_2569688183b285::t_1a678dc08c6685 1-13
+examples/next/tasks/package.json
+  s_2569688183b285::t_a3e0a610c3d841 1-21
+examples/next/tasks/src/index.ts
+  s_2569688183b285::t_cea7d8c71a2ff3 1-149
+examples/next/tasks/tsconfig.json
+  s_2569688183b285::t_63a821773642eb 1-4
+examples/next/tasks/wrangler.jsonc
+  s_2569688183b285::t_eaac2f1ddd2234 3-4,10-11,18,20-23
+examples/next/websockets/README.md
+  s_2569688183b285::t_f4648f03ff40e9 1,3-6,8-28,31,33-44,47-80,83-84,87,89-96,99,101-104
+examples/next/websockets/env.d.ts
+  s_2569688183b285::t_d93d6a08945529 1-13
+examples/next/websockets/index.html
+  s_2569688183b285::t_3d851432dfa7b1 1-21
+examples/next/websockets/package.json
+  s_2569688183b285::t_e70bbe33829d9a 1-36
+examples/next/websockets/src/client.tsx
+  s_2569688183b285::t_c76b16983f1092 5,13-14,16-20,23-36,40,52,58-73,76-99,101,103-107,109-131,133-141,144-151,153-180,182-191,194-208,210-227,229-236,242
+examples/next/websockets/src/index.ts
+  s_2569688183b285::t_b1cc0fee4fef9c 1-365
+examples/next/websockets/src/styles.css
+  s_2569688183b285::t_eb57fc62c17830 1-16
+examples/next/websockets/src/tests/env.d.ts
+  s_2569688183b285::t_896d9702f44226 1-15
+examples/next/websockets/src/tests/setup.ts
+  s_2569688183b285::t_2c0a1f0255d80d 1-12
+examples/next/websockets/src/tests/tsconfig.json
+  s_2569688183b285::t_8318926b0732d7 1-4
+examples/next/websockets/src/tests/vitest.config.ts
+  s_2569688183b285::t_49982c1fe19f62 1-26
+examples/next/websockets/src/tests/websockets.test.ts
+  s_2569688183b285::t_5acf43d9e85592 1-320
+examples/next/websockets/src/tests/worker.ts
+  s_2569688183b285::t_44dd7c1e6dd946 1-4
+examples/next/websockets/src/tests/wrangler.jsonc
+  s_2569688183b285::t_947d0a78b222cd 2,4-13,17-18,22,25-26,28
+examples/next/websockets/tsconfig.json
+  s_2569688183b285::t_7c2ef552ec9ebc 1-4
+examples/next/websockets/vite.config.ts
+  s_2569688183b285::t_47eef5ec77fe6e 3,5
+examples/next/websockets/wrangler.jsonc
+  s_2569688183b285::t_6337b5033cea1e 1-28
+examples/playground/package.json
+  s_2569688183b285::t_4253a4822aca0a 30
+examples/playground/src/demos/core/ScheduleDemo.tsx
+  s_2569688183b285::t_2f668f99f2c0fc 48,51
+examples/playground/src/demos/core/schedule-agent.ts
+  s_2569688183b285::t_c69023c5b20821 26-30
+examples/playground/src/demos/voice/VoiceDemo.tsx
+  s_2569688183b285::t_f5748479f81c2f 1
+examples/playground/src/demos/voice/voice-agent.ts
+  s_2569688183b285::t_b8c6ed5e0de8cc 7
+examples/plivo-voice-agent/.env.example
+  s_2569688183b285::t_e3ea41a111dfda 1-7
+examples/plivo-voice-agent/README.md
+  s_2569688183b285::t_424f230debd757 1,3,5,7-20,23,25-27,29,31,33,36-37,40,42,44-46,49,51,53-55,57,59,61,63,65-67,69
+examples/plivo-voice-agent/env.d.ts
+  s_2569688183b285::t_f020e4a6fc1728 1-14
+examples/plivo-voice-agent/package.json
+  s_2569688183b285::t_06f6d3a0569ed5 2,7-9,12,15-16
+examples/plivo-voice-agent/scripts/deploy.ts
+  s_2569688183b285::t_70b11aefdb7eab 1-11,14-26,28-29,31,34-35
+examples/plivo-voice-agent/scripts/dev.ts
+  s_2569688183b285::t_efcca4d6381115 1-9,11-13,15-17,19-24,26-27,29-34,36-42,44-51,53-54,56,58-77,79-81
+examples/plivo-voice-agent/scripts/env.ts
+  s_2569688183b285::t_bebcf18e43bf55 1-34
+examples/plivo-voice-agent/src/index.ts
+  s_2569688183b285::t_f0061258865290 1,3-9,11,13,15-16,18,20-47,49-51,53,55-57,59-60,63-64,66-100,102,107-128,130,134
+examples/plivo-voice-agent/wrangler.jsonc
+  s_2569688183b285::t_5aaa78c9b98b2d 1-25
+examples/resumable-stream-chat/README.md
+  s_2569688183b285::t_890fc022a27eb0 5
+examples/sandbox-coding-agent/Dockerfile
+  s_2569688183b285::t_638c55984c07a6 2-3,6-8
+examples/sandbox-coding-agent/README.md
+  s_2569688183b285::t_160ca7df1658c4 10,13-21,63-65,91,118-119,133-150,155-158,169,176-177,180,186,199-200
+examples/sandbox-coding-agent/package.json
+  s_2569688183b285::t_4b55c5fc1c300e 24
+examples/sandbox-coding-agent/src/claude-code.ts
+  s_2569688183b285::t_e20576b8124ccd 37-53,69-74,96-99,120,132-151,154-158,162-190,192-195,202,218-220
+examples/sandbox-coding-agent/src/diff.ts
+  s_2569688183b285::t_d33eb331ab8351 16-31,40,42-43,45
+examples/sandbox-coding-agent/src/server.ts
+  s_2569688183b285::t_5e6eb05153d5d1 13-14,21-25,28-29,41-45,57-88,100,134-135,139,143-151,166,169-174,179-191,193,206,217-222,232-236,238-239,361-414,418-423,425-453,457-459
+examples/structured-input/package.json
+  s_2569688183b285::t_a523d8b7083434 23
+examples/telnyx-voice-agent/src/client.tsx
+  s_2569688183b285::t_516beb0ed09d58 3,8
+examples/telnyx-voice-agent/src/server.ts
+  s_2569688183b285::t_dfd5cc52cc2fc7 2
+examples/think-workflows/package.json
+  s_2569688183b285::t_c2c771f8745f7a 16
+examples/tictactoe/package.json
+  s_2569688183b285::t_37d0f08e27b830 23
+examples/voice-agent/package.json
+  s_2569688183b285::t_fbfa3f6cb210d8 22
+examples/voice-agent/src/client.tsx
+  s_2569688183b285::t_e5d3236eb08348 1-2
+examples/voice-agent/src/server.ts
+  s_2569688183b285::t_70d88d228e9b3b 12
+examples/voice-agent/src/sfu.ts
+  s_2569688183b285::t_6444bf3a69a07b 23-24
+examples/voice-agent/src/stt-providers.ts
+  s_2569688183b285::t_ae666950e64a7a 1
+examples/voice-agent/src/stt-providers/assemblyai.ts
+  s_2569688183b285::t_673a4ceaeffca2 7
+examples/voice-agent/src/stt-providers/elevenlabs.ts
+  s_2569688183b285::t_7ffe434e3fab3e 1
+examples/voice-agent/src/stt-providers/telnyx.ts
+  s_2569688183b285::t_d342657aa25057 1
+examples/voice-agent/src/stt-providers/workers-ai.ts
+  s_2569688183b285::t_965e80ad785d61 5
+examples/voice-agent/src/use-sfu-voice.ts
+  s_2569688183b285::t_1d001279723476 15,20
+examples/voice-input/README.md
+  s_2569688183b285::t_e6d29c881edc34 3,23,41,60
+examples/voice-input/package.json
+  s_2569688183b285::t_1425a563d97f3e 3
+examples/voice-input/src/client.tsx
+  s_2569688183b285::t_5f6e3f466a802b 3,116
+examples/voice-input/src/server.ts
+  s_2569688183b285::t_750de6a7e44f17 2
+examples/vue-chat/README.md
+  s_2569688183b285::t_cc81040be74908 1-50
+examples/vue-chat/index.html
+  s_2569688183b285::t_ae6758d25fefab 7,10-11
+examples/vue-chat/package.json
+  s_2569688183b285::t_f3ab1e87993599 2-3,10-11,14-15,17-20,25,28
+examples/vue-chat/src/App.vue
+  s_2569688183b285::t_c41ba5618d1a24 1-106
+examples/vue-chat/src/client.ts
+  s_2569688183b285::t_139329174761c3 1-2,5
+examples/vue-chat/src/server.ts
+  s_2569688183b285::t_cfcc2f48cbf60c 2-4,6-8,11-13,16,21,23,27
+examples/vue-chat/src/styles.css
+  s_2569688183b285::t_5a96094d9bd469 1-45,49-65,67-129,131-139,141-143,145-208
+examples/vue-chat/src/vite-env.d.ts
+  s_2569688183b285::t_aad3156a951fbb 3-4,6-7
+examples/vue-chat/tsconfig.json
+  s_2569688183b285::t_7f99a2f056113b 3
+examples/vue-chat/vite.config.ts
+  s_2569688183b285::t_22021b3fe9e877 1-7
+examples/vue-chat/wrangler.jsonc
+  s_2569688183b285::t_120bcf2c11ae21 3,8,12-15,18,20-25
+examples/webmcp-react/.mcp.json
+  s_2569688183b285::t_d20b07aee97276 1-20
+examples/webmcp-react/AGENTS.md
+  s_2569688183b285::t_51b9a1d1c7e71e 1,3,5,7-9
+examples/webmcp-react/LICENSE
+  s_2569688183b285::t_470b716c1499f2 1-21
+examples/webmcp-react/README.md
+  s_2569688183b285::t_75cfd69ccaa4ab 1-129
+examples/webmcp-react/docs/d1.md
+  s_2569688183b285::t_59313a83cef10f 1-135
+examples/webmcp-react/env.d.ts
+  s_2569688183b285::t_08effb545c5e6a 1-3,8,10
+examples/webmcp-react/index.html
+  s_2569688183b285::t_fc718c318f89cc 1-25
+examples/webmcp-react/package.json
+  s_2569688183b285::t_bc71ac55c5ab83 1-68
+examples/webmcp-react/src/App.test.tsx
+  s_2569688183b285::t_0440dcfa15ccbf 1-251
+examples/webmcp-react/src/App.tsx
+  s_2569688183b285::t_d482ff82d9ac7b 3,5-6,8,11-12,14-15,17-18,20-29,31-32,35-65,84,90-93,95-104,106-113,115-126,128-171,173-201,203-207,209-214,216-220,222-224,226-228,230-235,237-257,260-264,266,268,270-278,282-305,307-320,322-346,348-349,351-358,361-392,395-418,420-426,428-434,436
+examples/webmcp-react/src/client.tsx
+  s_2569688183b285::t_6183a7adb88a8c 1,3-4,6-10
+examples/webmcp-react/src/schemas.ts
+  s_2569688183b285::t_de51c78d626604 1-92
+examples/webmcp-react/src/server.ts
+  s_2569688183b285::t_c48b71b863f6d2 2-7
+examples/webmcp-react/src/styles.css
+  s_2569688183b285::t_b83524932d8f81 3,10-11
+examples/webmcp-react/src/test/setup.ts
+  s_2569688183b285::t_55c4bbb7b35968 1-40
+examples/webmcp-react/src/useTodos.ts
+  s_2569688183b285::t_4731e370e600ce 1-137
+examples/webmcp-react/src/useWebMCPTools.ts
+  s_2569688183b285::t_d6a004dd5ef51e 1-11,13-16,18-45,47-62,64-66,69-90,92-93,96-109,111-132,134-135,137,139-143
+examples/webmcp-react/src/webmcp.d.ts
+  s_2569688183b285::t_a16f2dcc7f1592 1-46
+examples/webmcp-react/vite.config.ts
+  s_2569688183b285::t_749024d4d58ce9 3,5
+examples/webmcp-react/vitest.config.ts
+  s_2569688183b285::t_0e0a03ac5ef319 1,5,7-8
+examples/webmcp-react/wrangler.jsonc
+  s_2569688183b285::t_dcaeaee1a84b4e 1-10
+examples/webmcp/package.json
+  s_2569688183b285::t_b0b8641a6f4c39 15
+examples/worker-bundler-playground/package.json
+  s_2569688183b285::t_6397d58f4f9779 25
+examples/workspace-chat/package.json
+  s_2569688183b285::t_ca589bb6253b19 25
+examples/x402-mcp/README.md
+  s_2569688183b285::t_25f5cb5e2c6d08 40-43
+examples/x402-mcp/package.json
+  s_2569688183b285::t_325bac4a5c5272 21
+examples/x402/package.json
+  s_2569688183b285::t_6a911f8fbcadac 19
+experimental/forever-chat/README.md
+  s_2569688183b285::t_ed75ea59f6bda4 3,9
+experimental/forever.md
+  s_2569688183b285::t_e920a69726eb8f 33,292
+experimental/gateway-resume-think/package.json
+  s_2569688183b285::t_aa40eb72f3ee7e 23
+experimental/gateway-resume/package.json
+  s_2569688183b285::t_257add7b8cf4be 16
+experimental/pi-recovery/package.json
+  s_2569688183b285::t_59b83716b3813e 22
+experimental/pi-recovery/src/pi-agent.ts
+  s_2569688183b285::t_1dd49a14b1ed2b 34,58,143-144,163,176-179,698
+experimental/tanstack-recovery/package.json
+  s_2569688183b285::t_70e5fabe31f534 33
+experimental/tanstack-recovery/src/tanstack-agent.ts
+  s_2569688183b285::t_9de425b2b49f0c 47,80,161-162,187,200-203,908
+licenses/README.md
+  s_2569688183b285::t_9be9fd18cb07d7 21
+licenses/isc-partyserver.txt
+  s_2569688183b285::t_99b51e821b1db5 1-7
+nx.json
+  s_2569688183b285::t_67cbfa5b09d727 16
+openai-sdk/chess-app/package.json
+  s_2569688183b285::t_38c5bd49104404 26-27
+package.json
+  s_2569688183b285::t_e403bc4ccc6c5b 41,52-54,60,73,77,79
+packages/agents/AGENTS.md
+  s_2569688183b285::t_f56d3fb65dda30 9-49,63-64,68-75,87-114,148-150,177,182-193,197,202-222,225,228-229,242,263,274,277,280-281,293,295,297-300,307,309-310
+packages/agents/CHANGELOG.md
+  s_2569688183b285::t_4a371a33453d2b 3-512,797,1331,1341,1388,1406,1437,1468,1493,1501,1555,1597,1611,1680,1742,1853,1967,2011,2026,2044,2065,2072,2078,2105,2115,2122,2209,2230,2249,2254,2388,2485,2490,2556,2568,2580,2619,2647,2688,2707,2775,2821,2830,2836,2864,2874,2894,2898,2907,2912,2945,3242,3276,3289,3295,3317,3429,3456,3524,3557,3646,3661,3676,3742,3844,3949,4041,4050,4062,4073,4116,4368,4825,4915,4978
+packages/agents/README.md
+  s_2569688183b285::t_df0bc35d85cdfc 19-23,52,75,80,118,124-142,148-153,294-316,349-351,449-450,453-457,459-460,469,585
+packages/agents/conformance/run-suite.mjs
+  s_2569688183b285::t_29f7df9d2a21e6 209-221
+packages/agents/conformance/worker.ts
+  s_2569688183b285::t_269f120f8725bc 7-8
+packages/agents/evals/README.md
+  s_2569688183b285::t_d92fe5464fb945 3-4,6-8
+packages/agents/package.json
+  s_2569688183b285::t_db4a5f9dbf29c9 12,27,33-34,38,46,54-56,99-101,123-152,169-171,174-176,179-181,198-207,213-227,239-241,248-252,303-377,428,430-433
+packages/agents/scripts/build.ts
+  s_2569688183b285::t_24644a59baa4be 12-13,15,19-22,25-33,38-53
+packages/agents/scripts/import-size-report.ts
+  s_2569688183b285::t_176ec080cf5992 1-801
+packages/agents/scripts/import-sizes.ts
+  s_2569688183b285::t_76e9df1ac0fb3d 1-247
+packages/agents/src/agent-routing.ts
+  s_2569688183b285::t_a1e637f0ba9d39 1-22,25-34,37-41,44-84,87-88,90-94,96-99,102-104,107-112,115-121,124-127,130-133,135-151,154-159,162-191,194-207,210-211,216-220,222-223,225-226,229-232,235-238,240-243,246-293,296-309,311-313,315-320,323-330,332-333,335-336,339-356,358-363,367-370,374-414,416
+packages/agents/src/agent-tool-types.ts
+  s_2569688183b285::t_84fb27012ac8b4 98-132,309-317,320-321,389-394,400-408,412-419,444-445
+packages/agents/src/agent-tools.ts
+  s_2569688183b285::t_98d412dd4a9c0e 1-7,17-18,21-25,27-28,34-43,56-82,119-127,130,184,223
+packages/agents/src/browser/ai.ts
+  s_2569688183b285::t_15e42fc512ded2 1,9,111-114,147-223,314,317-333,335-341,345,347,594-596
+packages/agents/src/browser/browser-run.ts
+  s_2569688183b285::t_acf1d89f894ffe 12-29,46-49,62-80,103-113,120,137-139,177,180-183,186-192,248,250-266,268-277,289-296,305-307,316,365-381,385-393,398-402,404-405,418-423
+packages/agents/src/browser/capability.ts
+  s_2569688183b285::t_73e8111e93a60f 1-211
+packages/agents/src/browser/cdp-session.ts
+  s_2569688183b285::t_635106c6884541 25-39,57-58,61-66,69-76,79-82,84-87,92,96,105,199-208,337
+packages/agents/src/browser/connector.ts
+  s_2569688183b285::t_bd6d4d96e0be81 1,4,12,22-29,60-65,122-127,130-135,161-178,242-255,267-270,272-283,300-323,328,402-404,421-423,441,444-451,482-483,485-488,521-522,574,577-590,604-635,678,720,725,741-744,750,791-804,815-818,886-888,941,993-1029,1037-1039
+packages/agents/src/browser/index.ts
+  s_2569688183b285::t_88d420f30864ca 5-6,19,22-25,61-62
+packages/agents/src/browser/live-view.ts
+  s_2569688183b285::t_40352531589446 1-98
+packages/agents/src/browser/session-core.ts
+  s_2569688183b285::t_7d2ae3db641134 1-477
+packages/agents/src/browser/spec.ts
+  s_2569688183b285::t_cff450075ccc4d 13-25,29-32,38-40,46-51,58-59,65-91,96-126,152-186,191-196,198-203,205,207-211,213,215-222
+packages/agents/src/browser/tanstack-ai.ts
+  s_2569688183b285::t_8c2df010094335 69-87
+packages/agents/src/callable-decorator.ts
+  s_2569688183b285::t_dae4fdddf24fed 1-7,9-17,19,21-32,34-35,38,40-53,55-59,62-64,67-73,76-102
+packages/agents/src/channels/__tests__/ai-sdk.test.ts
+  s_2569688183b285::t_32b5d574ac870c 1-188
+packages/agents/src/channels/__tests__/email.test.ts
+  s_2569688183b285::t_d9ef8697583ee4 1-383
+packages/agents/src/channels/__tests__/fallback.test.ts
+  s_2569688183b285::t_588b86909b1b5c 1-431
+packages/agents/src/channels/__tests__/fanout.test.ts
+  s_2569688183b285::t_83447d6df98371 1-11,13-23,25-38,40-58,61-71,73-90,92,94-103,106-115,120-127,130-134,137-166,168-184,187-211,213-233,236-251,254-273,278-305,308-318,321-329,333-340,342,344-349,352-364
+packages/agents/src/channels/__tests__/host.test.ts
+  s_2569688183b285::t_ea3cc99b2841f5 1,3-44,46-59,61-71,73-79,81-88,90,92-96,98,100-102,105-114,116-118,120-122,125-133,135-139,141-143,146-150,152-173,175-205,207-209,211-216,218,221-232,234-241,244-249,251-256,259-278,280-304,306,309-314,317-321,323-328,331-355,357,360-364,366-404,408-412,414-506,508-509,513-526,529-532,534-536,538,541-552,554-568,571-572,574,576-581,583-591,593,596-632,635-644,646-648,650-670,672-691,693-697,700-716,718-725,728-733,735,737-738,740-747,750-758,760-768,771-772,775-778
+packages/agents/src/channels/__tests__/identity.test.ts
+  s_2569688183b285::t_79c114b55f7cf2 1-241
+packages/agents/src/channels/__tests__/inbound-email.test.ts
+  s_2569688183b285::t_3923a0373bd33d 1-254
+packages/agents/src/channels/__tests__/routes.test.ts
+  s_2569688183b285::t_9cb2545e4f063b 1-105
+packages/agents/src/channels/__tests__/slack-stream.test.ts
+  s_2569688183b285::t_4f1e3df3eae51b 1-47,49-59,62-72,74-88,91-164,168,171-187,189,191-208,210-219,223-230,233,235-246,248-249,251-255,258-267,269-270,272-274,276-285,289-298,302-307,310-321,323-327,329-343,346-351,353-368,370,372-376,378,380-381,384-391,394-396,398,401-406,408-417,419-426,429-431,433-447,449-456,459-471,474-482
+packages/agents/src/channels/__tests__/slack.test.ts
+  s_2569688183b285::t_36aaa08cc9d8d1 1-36,39-63,66-73,75-80,83-87,89-93,96-101,103-108,111-137,139-148,150-290,292-324,326-345,348-405,407,409-418,420-422,424-427,430-434,436-437,439-442,446-450,453-454,456-459,461-468,470,473-475,477-596,598-602,605-608,611-613,615-677,680-699,701-705,708-712,714-724,727-742
+packages/agents/src/channels/__tests__/stream.test.ts
+  s_2569688183b285::t_6428cd0687cb3f 1-30,33-34,37-41,43-45,47-49,51-63,67-76,78,80-86,89-90,92-94,96-101,103-106,109-111,113-115,118-119,122-128,130-134,137-138,141-144,147-150,152-158,162-177,179,181-183,186-188,190-194,196-197,200-202,204,206,208-219,222-229,232-245,248-259,262-264,267-279,281-300,302-306,308,310-311,313-322,325-335
+packages/agents/src/channels/__tests__/surface.test.ts
+  s_2569688183b285::t_bb2bb5690f4b22 1-49
+packages/agents/src/channels/__tests__/tanstack-ai.test.ts
+  s_2569688183b285::t_e1550e8c3157ff 1-60
+packages/agents/src/channels/__tests__/telegram-stream.test.ts
+  s_2569688183b285::t_939ce509cc694a 1-362
+packages/agents/src/channels/__tests__/telegram.test.ts
+  s_2569688183b285::t_176df0569cd9d2 1-16,18-32,34-39,41-50,54-65,68-74,76-79,82-87,90-94,97-111,114-128,131,134-142,145-156,159-174,176-185,187,191-195,198-201,203-211,214-224,228-245,248-259,262-263,265-271,273-284,286-304,307-314,317,319-328,331-338,341,343-348,350-372,375-379,382,384-388,391-392,394-397,399-407,410-428,431-439,441-455,457,459,461-470,472-476,479-480,482-496,498-503,506-513,515,517-539,542-546,549-569,571-604,606,608-638,641-647,650,652-682,684,686-692,695-710,712-713,716-728,731-746,748-754,757-789,792,794-815,817,819-855,858,860-868,870,872-875,877-906,908-909
+packages/agents/src/channels/__tests__/voice.test.ts
+  s_2569688183b285::t_53f1d56ca5c3e1 1-218
+packages/agents/src/channels/adapters/email/email-surface.ts
+  s_2569688183b285::t_32c5b0c96d213f 1-29
+packages/agents/src/channels/adapters/email/email.ts
+  s_2569688183b285::t_a846f7792816fe 1-290
+packages/agents/src/channels/adapters/email/inbound-email.ts
+  s_2569688183b285::t_3fb520223e5312 1-233
+packages/agents/src/channels/adapters/email/index.ts
+  s_2569688183b285::t_d5cd36946cb366 1-3
+packages/agents/src/channels/adapters/index.ts
+  s_2569688183b285::t_74c9ad0ada473b 1-4
+packages/agents/src/channels/adapters/slack.ts
+  s_2569688183b285::t_f937be72f5960f 1-1223
+packages/agents/src/channels/adapters/telegram.ts
+  s_2569688183b285::t_fe84e84ac49312 1-830
+packages/agents/src/channels/adapters/voice.ts
+  s_2569688183b285::t_0001d94c2d1719 1-189
+packages/agents/src/channels/ai-sdk.ts
+  s_2569688183b285::t_348273d50ecdf7 1-161
+packages/agents/src/channels/channel.ts
+  s_2569688183b285::t_45ea5196873955 1-202
+packages/agents/src/channels/email.ts
+  s_2569688183b285::t_af3a417a24e3e7 1
+packages/agents/src/channels/fallback.ts
+  s_2569688183b285::t_ef9c18bc425e01 1-184
+packages/agents/src/channels/fanout.ts
+  s_2569688183b285::t_de1ace6392cd9d 1-156
+packages/agents/src/channels/host/index.ts
+  s_2569688183b285::t_3a96130e5c9e3a 1-433
+packages/agents/src/channels/identity.ts
+  s_2569688183b285::t_786cd44810a2f3 1-336
+packages/agents/src/channels/index.ts
+  s_2569688183b285::t_190fb10af1b5e0 1-15
+packages/agents/src/channels/ingress.ts
+  s_2569688183b285::t_70e6bc2aabb131 1-155
+packages/agents/src/channels/internal.ts
+  s_2569688183b285::t_8afc6afe9316c4 1-82
+packages/agents/src/channels/live-tests/README.md
+  s_2569688183b285::t_86b871069ff4da 1,3-6,8-11,13,15,17-25,27-30,32-35,37-40,42,45,48,50-52
+packages/agents/src/channels/live-tests/binding.ts
+  s_2569688183b285::t_b5d4f218ac1628 1-32
+packages/agents/src/channels/live-tests/bindings/email.ts
+  s_2569688183b285::t_b2da8e0cd25e51 1,3-13,15-16,18,20-30,32-34,38-43,45-57,60-83,85,88-106,108-109,111-139,141-146,149,151-163,165-167,169-183,185-186
+packages/agents/src/channels/live-tests/bindings/slack.ts
+  s_2569688183b285::t_0d4acbdf6a612e 1-160
+packages/agents/src/channels/live-tests/bindings/telegram.ts
+  s_2569688183b285::t_2a0aa350e16350 1-139
+packages/agents/src/channels/live-tests/delivery.test.ts
+  s_2569688183b285::t_0991998fa9c314 1-35
+packages/agents/src/channels/live-tests/helpers.ts
+  s_2569688183b285::t_5781fc4311d7ca 1-7,9-11,13-15,18-23,26-29,31-36,38-41,44,46-56,58-69,71-79,82-109
+packages/agents/src/channels/live-tests/providers.ts
+  s_2569688183b285::t_1e9f2552813379 1-12
+packages/agents/src/channels/live-tests/snapshots/email-rich.json
+  s_2569688183b285::t_436d8c33bb5955 1-3,5
+packages/agents/src/channels/live-tests/snapshots/email-stream-interrupted.json
+  s_2569688183b285::t_615faa254b9b40 1-5
+packages/agents/src/channels/live-tests/snapshots/email-stream-rich.json
+  s_2569688183b285::t_1a87e9d8d31b3d 1-5
+packages/agents/src/channels/live-tests/snapshots/email-stream.json
+  s_2569688183b285::t_3d72137a0b3132 1-8
+packages/agents/src/channels/live-tests/snapshots/email.json
+  s_2569688183b285::t_059fcda9ce41fe 1-5
+packages/agents/src/channels/live-tests/snapshots/slack-rich.json
+  s_2569688183b285::t_528bcdd333ecd2 1-5
+packages/agents/src/channels/live-tests/snapshots/slack-stream-interrupted.json
+  s_2569688183b285::t_0d779ad3a34124 1-5
+packages/agents/src/channels/live-tests/snapshots/slack-stream-rich.json
+  s_2569688183b285::t_e9cee69fbf0849 1-5
+packages/agents/src/channels/live-tests/snapshots/slack-stream.json
+  s_2569688183b285::t_f58739815f4248 1-8
+packages/agents/src/channels/live-tests/snapshots/slack-thread-rich.json
+  s_2569688183b285::t_41cd33193f5ff8 1-5
+packages/agents/src/channels/live-tests/snapshots/slack-thread-stream-interrupted.json
+  s_2569688183b285::t_7ceed2895da670 1-5
+packages/agents/src/channels/live-tests/snapshots/slack-thread-stream-rich.json
+  s_2569688183b285::t_1515162c4a16bd 1-5
+packages/agents/src/channels/live-tests/snapshots/slack-thread-stream.json
+  s_2569688183b285::t_04e07fa055a26d 1-24
+packages/agents/src/channels/live-tests/snapshots/slack-thread.json
+  s_2569688183b285::t_f7f9126dd7ff20 1-5
+packages/agents/src/channels/live-tests/snapshots/slack.json
+  s_2569688183b285::t_f7755ed425bb77 1-5
+packages/agents/src/channels/live-tests/snapshots/telegram-rich.json
+  s_2569688183b285::t_390e6ff507f4c5 1-5
+packages/agents/src/channels/live-tests/snapshots/telegram-stream-interrupted.json
+  s_2569688183b285::t_f78ee3c31020d8 1-5
+packages/agents/src/channels/live-tests/snapshots/telegram-stream-rich.json
+  s_2569688183b285::t_940a4fbcf6ced4 1-5
+packages/agents/src/channels/live-tests/snapshots/telegram-stream.json
+  s_2569688183b285::t_71a50e7b747148 1-9
+packages/agents/src/channels/live-tests/snapshots/telegram.json
+  s_2569688183b285::t_9f558dc9178a32 1-5
+packages/agents/src/channels/live-tests/streaming.test.ts
+  s_2569688183b285::t_9026fbd11a877b 1-118
+packages/agents/src/channels/live-tests/tsconfig.json
+  s_2569688183b285::t_aef71fbd0be1dd 2,4-5,7-8
+packages/agents/src/channels/routes.ts
+  s_2569688183b285::t_70a9b8c2aa2179 1-50
+packages/agents/src/channels/slack.ts
+  s_2569688183b285::t_519e993a21ee39 1
+packages/agents/src/channels/stream.ts
+  s_2569688183b285::t_2e41d72fd5336b 1-97
+packages/agents/src/channels/surface.ts
+  s_2569688183b285::t_72109c9d37da97 1-16,18,20-21,24-33,35,39-49,51-58,60-74
+packages/agents/src/channels/tanstack-ai.ts
+  s_2569688183b285::t_e6cf22d076ddac 1-4,6-12,14-26,28-31
+packages/agents/src/channels/telegram.ts
+  s_2569688183b285::t_15086e60753dbb 1
+packages/agents/src/channels/tool-schema.ts
+  s_2569688183b285::t_fa376d6cd19af1 1-48
+packages/agents/src/channels/vitest.config.ts
+  s_2569688183b285::t_16c95c02719f99 5-6
+packages/agents/src/channels/vitest.live.config.ts
+  s_2569688183b285::t_0f6d07cb57629e 5-9
+packages/agents/src/channels/voice.ts
+  s_2569688183b285::t_b90cce4475cd50 1
+packages/agents/src/chat-sdk/adapter.ts
+  s_2569688183b285::t_e96224885dd053 57-61,77,86-87,106-110,114,132-159
+packages/agents/src/chat-sdk/types.ts
+  s_2569688183b285::t_fe56b77bac3dc4 17-26
+packages/agents/src/chat/__tests__/agent-tools.test.ts
+  s_2569688183b285::t_76c2cac3e2e607 3,29-176,507-555,582-597
+packages/agents/src/chat/__tests__/broadcast-state.test.ts
+  s_2569688183b285::t_974225cac66c67 2,246-248,254,256,260-265,274,560,577,590-694
+packages/agents/src/chat/__tests__/chat-throttle.test.ts
+  s_2569688183b285::t_b1c42a0877728b 1-55
+packages/agents/src/chat/__tests__/message-builder-approval-input.test.ts
+  s_2569688183b285::t_f33e7fd67499f7 1-205
+packages/agents/src/chat/__tests__/message-reconciler.test.ts
+  s_b2b9b60652ef3b::t_52c65de14a657c 401-514
+packages/agents/src/chat/__tests__/origin-message-ids.test.ts
+  s_2569688183b285::t_77f4473ff1c47e 1-46
+packages/agents/src/chat/__tests__/recovery-engine.test.ts
+  s_2569688183b285::t_923feecc15ff60 5-6,1954-1991
+packages/agents/src/chat/__tests__/recovery-incident.test.ts
+  s_2569688183b285::t_36c1a9539acd1e 127-132,135-136,831-859
+packages/agents/src/chat/__tests__/recovery-task.test.ts
+  s_2569688183b285::t_0b17d7e5d0a0e0 1-114
+packages/agents/src/chat/__tests__/repair-transcript.test.ts
+  s_2569688183b285::t_4634c2cc5d429d 108-173
+packages/agents/src/chat/__tests__/replay-batch.test.ts
+  s_2569688183b285::t_ffd28ff3384950 1-365
+packages/agents/src/chat/__tests__/replay-dedupe.test.ts
+  s_2569688183b285::t_ab718cbd5b2b12 1-116
+packages/agents/src/chat/__tests__/resume-handshake.test.ts
+  s_2569688183b285::t_66cfdbb5ea8062 12,57-63,77,93-94,98-101,115,118-120,426-477,541-578
+packages/agents/src/chat/__tests__/stream-accumulator.test.ts
+  s_2569688183b285::t_726bd40300abbd 720,730-733,820-823
+packages/agents/src/chat/__tests__/text-segment-joiner.test.ts
+  s_2569688183b285::t_845dc51ddbbdf4 1-80
+packages/agents/src/chat/agent-tools.ts
+  s_2569688183b285::t_d85f98f1cccb40 2,5-7,198-200,205,409-456,472-473,490-491,493-501,506-511,516-521,536-538,543,545-547,562,568-570,572-582,587,595
+packages/agents/src/chat/broadcast-state.ts
+  s_2569688183b285::t_b58bc70443d760 43,61-85,132-133,145-149,153,159
+packages/agents/src/chat/chat-throttle.ts
+  s_2569688183b285::t_bd068ac85382ff 1-84
+packages/agents/src/chat/chunk-size.ts
+  s_2569688183b285::t_60320bfd009220 1,3-4,6-9,11-16
+packages/agents/src/chat/index.ts
+  s_2569688183b285::t_44dd2449d52b31 3-4,6,30-40,56,59-73,77-82,96-100,106,225,279-281,315-320
+packages/agents/src/chat/lifecycle.ts
+  s_2569688183b285::t_ea6738677c773e 44-48,218-222,230-234,246,260-262,272-279,316
+packages/agents/src/chat/message-builder.ts
+  s_2569688183b285::t_cb1f3f50d8fd67 101-201,371-381,396-397,410-413,495-503
+packages/agents/src/chat/origin-message-ids.ts
+  s_2569688183b285::t_ed2ac087d649b3 1-39
+packages/agents/src/chat/orphan-store.ts
+  s_2569688183b285::t_f7b56ccd7779b4 5-7,9-13
+packages/agents/src/chat/react.tsx
+  s_2569688183b285::t_d29ba1e359126a 12-14,18,367-392,415-420,437-447,451-453,474-488,745,757-758,801-805,809-859,861-863,1001,1010-1011,1135,1356-1357,1411-1414,1443,1463-1467,1469-1476,1479,1627-1635,1885-1921,1930-1942,2010-2019,2031-2088,2111-2112,2124-2125,2129-2132,2134-2166,2168-2169,2236-2238,2240,2249-2250,2268-2275,2280-2295,2340-2345,2362-2381,2393-2394,2407-2422,2439,2478-2494,2497,2518-2521,2555,2580,2586-2596,2601,2606,2634-2636,2657-2666,2696,2699-2703,2709-2713,2742,2763-2764,2853-2863,2866-2867,2922-2931,2933-2935,3054-3072
+packages/agents/src/chat/recovery-codec.ts
+  s_2569688183b285::t_55f52dcb873644 90-95
+packages/agents/src/chat/recovery-engine.ts
+  s_2569688183b285::t_dcc8691b337ef6 37-38,47-55,57-60,144-149,161-165,202-207,478-479,616-617,632,648,654-656,658-661,701-756,765-767,837-839,1007-1083
+packages/agents/src/chat/recovery-incident.ts
+  s_2569688183b285::t_281faeb22d1e88 102-109,116-123,150,170-178,180,233-234,408-414,485-490,501-502,504-506,746-751,775,802,821
+packages/agents/src/chat/recovery-task.ts
+  s_2569688183b285::t_a196867d4edc01 1-204
+packages/agents/src/chat/recovery.ts
+  s_2569688183b285::t_e5eb4e2f181a3f 29-30,40-41,50,74-75
+packages/agents/src/chat/repair-transcript.ts
+  s_2569688183b285::t_01725192d10970 77-86,107,131-132,154-155,157-178
+packages/agents/src/chat/replay-batch.ts
+  s_2569688183b285::t_13b44ce51f7ce6 1-197
+packages/agents/src/chat/replay-dedupe.ts
+  s_2569688183b285::t_c86d4778435d41 1-120
+packages/agents/src/chat/replay-frames.ts
+  s_2569688183b285::t_e70242593780d4 1-77
+packages/agents/src/chat/resumable-stream.ts
+  s_2569688183b285::t_03a862433e6f27 2-6,9-13,15-22,27-31,33,38-43,47-48,50,54-63,66-67,70-72,74,77-79,81-82,86-89,91-92,97,99,105-117,119-126,129-157,159-160,169-189,203-204,208-214,218-254,259-274,276-279,281-494,496-498,527,533-537,541-546,553-560,562,567-579,584,587-635,637-644,650-651,653,655-664,666-679,681-683,687-693,695-699,701-717,719-732,739-749,751,754,760-762,764-769,774,776-779,805,809,812-816,832,835,837-842,850-868,880-882,896-897,899-906,913-924,932-936,940-954,959-961,963-964,966-972,976-982,984-1017,1026,1038-1042,1045-1047,1051-1064,1068,1070-1075,1080-1089,1096-1099,1102-1104,1109-1110,1115-1117,1124-1130,1133,1137-1145,1147-1158,1167-1169,1174-1177,1184-1189,1198,1200-1206,1212-1221,1225-1228,1232
+packages/agents/src/chat/resume-handshake.ts
+  s_2569688183b285::t_5b2eeebfa887ac 36,75-82,253-257,264-265,273-275,333-335,343-344
+packages/agents/src/chat/sanitize.ts
+  s_2569688183b285::t_1c88d35a0af946 2,4-7,10-11,14
+packages/agents/src/chat/stream-accumulator.ts
+  s_2569688183b285::t_a2f00d11566377 26,28,66-67,76-81,85,212-213,227-247
+packages/agents/src/chat/text-segment-joiner.ts
+  s_2569688183b285::t_3fc045cda3d078 1-61
+packages/agents/src/chat/transport.ts
+  s_2569688183b285::t_50c43f1dc0dd11 1-5
+packages/agents/src/chat/truncate-older-messages.ts
+  s_2569688183b285::t_9c5e97eb559f34 6-11,14-16,25-30,40-41,59,78-81,118-305
+packages/agents/src/chat/turn-task.ts
+  s_2569688183b285::t_9b4b3dbb71a0c8 1-132
+packages/agents/src/chat/wire-types.ts
+  s_2569688183b285::t_55cf0b1dec98ab 4-21,98-117
+packages/agents/src/chat/ws-chat-transport.ts
+  s_2569688183b285::t_826b1b6c7bbbf9 2,4-5,10-15,37-38,56,59,84-88,101-105,173-181,628-630,708-711,719-725,799-800,804-809,813,821-825,890-892,903-906,914-920,932-933,937-938,942,951-958
+packages/agents/src/client.ts
+  s_2569688183b285::t_915e01398f744e 16-22,43-90,103-112,167-171,206-363,517-518,524-525,531-533,569-629,631-639,641-649,657,666,671-672,691-699,701,706-718,768-769,774,778,780,788,791-792,856-872,881
+packages/agents/src/context/blocks.ts
+  s_2569688183b285::t_3e778f73647b49 10-11,21,51-91,139-155,182,185-189,191-198,201-204,208-209,212-214,216,221-241,250,253-254,257,259,308,310,343-344,370-374,402-405,408-410,416-419,426,429-431,435-436,438-443,447-455,457-462,464-471,473-474,487-491,498,501,524,526-527,547-549,574-576,597
+packages/agents/src/context/index.ts
+  s_2569688183b285::t_f69d716287cb7a 2-4,6-10,14,16-21
+packages/agents/src/context/search.ts
+  s_2569688183b285::t_cfb8ba66281843 10-11,48-49,53-55,73-75,85,92,133-134
+packages/agents/src/context/sqlite-provider.ts
+  s_2569688183b285::t_064d62524f6944 8,10-18
+packages/agents/src/core/base64-redaction.ts
+  s_2569688183b285::t_dd8ef7894080f1 1-111
+packages/agents/src/dynamic-agents/api.ts
+  s_2569688183b285::t_43fed5c965d6d3 1-100
+packages/agents/src/dynamic-agents/bridges.ts
+  s_2569688183b285::t_12863a81811555 1-4,6-22,26-28,30-37,39-60,63-72,74-76,78-84,86,88-105,108-113,115-117,122-124,126-168,172-173,175-192,196-198,200-206
+packages/agents/src/dynamic-agents/dynamic-agents.ts
+  s_2569688183b285::t_0e392f9f07670d 1-1726
+packages/agents/src/dynamic-agents/host.ts
+  s_2569688183b285::t_a5b73e35870bf8 1-124
+packages/agents/src/dynamic-agents/identity.ts
+  s_2569688183b285::t_2a5e1724fc5ab8 1-75
+packages/agents/src/dynamic-agents/registry.ts
+  s_2569688183b285::t_702da53f13f825 1-185
+packages/agents/src/dynamic-agents/types.ts
+  s_2569688183b285::t_9b5bf33f0eb25c 1-187
+packages/agents/src/e2e-tests/fiber-eviction.test.ts
+  s_2569688183b285::t_4c4c01ad688be3 103-105,162-175
+packages/agents/src/e2e-tests/recovery-helpers.ts
+  s_2569688183b285::t_4665ec78ed30c5 92-94,161-174
+packages/agents/src/e2e-tests/stream-cutover-crash.test.ts
+  s_2569688183b285::t_226982b5068686 1-134
+packages/agents/src/e2e-tests/streams-capability-eviction.test.ts
+  s_2569688183b285::t_ffa96fddc1e971 1-15,18-28,31-49,53-57,59,61,63,65-68,70,72,74,78-92,94-124,126,128-153
+packages/agents/src/e2e-tests/tasks-capability-eviction.test.ts
+  s_2569688183b285::t_0ef72db94592af 2,4-5,7-13,15-17,19-20,23-33,36-40,43-54,57-73,75,78-79,81-82,84,86,90-100,103-106,109-118,121-173,175
+packages/agents/src/e2e-tests/worker.ts
+  s_2569688183b285::t_add5ef2278fb2a 9-11,23-25,787-1016,1025-1168
+packages/agents/src/e2e-tests/wrangler.jsonc
+  s_2569688183b285::t_6aa4772309a913 47-58,78-89
+packages/agents/src/email-send.ts
+  s_2569688183b285::t_397479874417be 1,3-6,8-18,20-24,26-28,30-38,40-52
+packages/agents/src/email.ts
+  s_2569688183b285::t_544b854b87c6b4 8-26
+packages/agents/src/index.ts
+  s_2569688183b285::t_288b2ed924405f 22-23,26-27,33-73,77-83,86-117,120,133,145,149,156,167,169-189,196-197,224,251,343-354,356,540,646,653-657,690-692,752-754,756-757,759-762,764-766,775-778,782,868-870,959-961,1007-1009,1011-1014,1017-1019,1070,1074-1171,1208,1214,1222-1235,1237-1253,1255-1258,1284,1287-1330,1337,1361-1364,1366-1374,1386,1499-1503,1562-1564,1567,1569-1570,1574-1576,1578,1617-1620,1768-1784,1787,1797-1832,1836-1959,1990,1992,1999-2015,2017-2018,2071-2082,2087,2093-2104,2107,2123-2126,2144,2149-2151,2170,2186-2191,2200-2206,2223,2234-2235,2237-2238,2240,2260-2271,2302-2309,2319,2336-2337,2339-2345,2376,2379-2380,2389-2391,2411-2416,2420-2422,2424,2426,2446-2450,2462-2467,2535-2544,2588,2594,2603,2615,2631,2639-2640,2649,2699,2709,2722,2738,2747,2925-2927,2951-2952,2955-2956,2997-2999,3012-3014,3075-3079,3084,3090,3098-3099,3106-3107,3113-3114,3121-3122,3130-3131,3135,3140-3150,3153-3154,3157-3160,3163-3167,3170-3176,3179-3180,3183,3185-3199,3203-3205,3208-3213,3215-3223,3225-3237,3239-3249,3273,3277,3279-3286,3315,3321-3326,3338,3350-3351,3363,3375-3376,3393-3394,3438,3453,4033,4283-4285,4304-4316,4338-4370,4372-4374,4402-4418,4459,4468-4475,4489-4520,4650,4679-4687,4689-4699,4701-4713,4715-4732,4741,4764-4788,4791-4812,4814-4822,4824-4835,4837-4841,4854,4868,4871,4875-4877,4879-4882,4886-4887,4889-4901,4903-4914,4919-4928,4930-4936,4938-4939,4943-4948,4950-4951,4953-4963,4966,4979-4981,4985,4992,5000-5006,5009,5014-5016,5022,5027,5031,5033,5038,5040-5046,5049-5053,5059,5065,5070-5072,5076-5077,5087-5088,5094-5095,5102-5103,5111-5112,5119-5120,5124,5136,5139,5144,5151,5153-5154,5156-5157,5159,5163,5169-5170,5173,5177,5181,5184,5187-5188,5190-5194,5198,5205-5208,5210-5211,5214-5215,5253,5275,5283,5293,5299,5310,5315,5344,5349,5352-5353,5355,5375,5384,5480,5526,5595-5596,5602,5662-5672,5824,5830-5831,5861-5862,6422-6425,6922,6925-6929,6932,6941-6947,6955-6956,6958-6964,6971-6972,6976-6988,6997,7001,7003-7016,7018-7041,7043-7065,7075-7079,7081-7082,7130,7133-7150,7257,7591-7593,7705-7707,7712,7716,7721,7745,7767,7819-7820,7825-7826,8191-8203,8209,8223,8227-8228,8230-8245,8259-8260,8263,8274-8275,8277-8278,8301-8302,8307-8309,8318-8319,8330-8333,8369,8371,8373,8375,8380-8383,8385,8416,8432-8441,8449-8454,8457-8458,8467,8475,8560-8561,9584,9586,9590,10278-10283,10310,10330,10349
+packages/agents/src/internal_context.ts
+  s_2569688183b285::t_eeacac054b150b 1-5
+packages/agents/src/lifecycle/UPSTREAM.md
+  s_2569688183b285::t_b5fe9a17305ce2 1-31
+packages/agents/src/lifecycle/abort.ts
+  s_2569688183b285::t_c9d7d52c057a06 1-25
+packages/agents/src/lifecycle/capability-runner.ts
+  s_2569688183b285::t_2e931ea99b9682 1-429
+packages/agents/src/lifecycle/capability.ts
+  s_2569688183b285::t_872db280a1e07d 1-176
+packages/agents/src/lifecycle/current-agent.ts
+  s_2569688183b285::t_40e95fee9de328 1-131
+packages/agents/src/lifecycle/durable-object-lifecycle.ts
+  s_2569688183b285::t_0b7b23e5b87e4e 1-849
+packages/agents/src/lifecycle/index.ts
+  s_2569688183b285::t_69e445991312d8 1-5,7-16,18-21,23-41
+packages/agents/src/lifecycle/job-driver.ts
+  s_2569688183b285::t_11c4d01c02c5d4 1-626
+packages/agents/src/lifecycle/job-queue.ts
+  s_2569688183b285::t_589371175ff105 1-506
+packages/agents/src/lifecycle/transport-errors.ts
+  s_2569688183b285::t_7740a05328e56b 1-34
+packages/agents/src/lifecycle/types.ts
+  s_2569688183b285::t_27d0a2d03e28db 1-77
+packages/agents/src/mcp/client/connection.ts
+  s_2569688183b285::t_f540590fc59bd6 20-22,28,30-31,37,43
+packages/agents/src/mcp/client/index.ts
+  s_2569688183b285::t_96ea6c36bab1fc 19,22-23,31,36,38-40,44,48-50,357-360,362-369,386-388,390,400-403,423-427,430-432,434-447,450-501,534,625,634-635,947,958,967-968,993,995,1447-1463,1468,2287
+packages/agents/src/mcp/client/rpc.ts
+  s_2569688183b285::t_b7cec2f8591b25 1-4,6-21,24-37,39-51,53-62,65
+packages/agents/src/mcp/client/runtime.ts
+  s_2569688183b285::t_bb91f7a1d7b292 12
+packages/agents/src/mcp/client/storage.ts
+  s_2569688183b285::t_c58856e6ab691c 6-7,22-36
+packages/agents/src/mcp/client/x402.ts
+  s_2569688183b285::t_1b87dd566d9185 28,349-353,367-395,453-457,461-468,495-503,506-514
+packages/agents/src/mcp/index.ts
+  s_2569688183b285::t_9087ca98df1d94 9
+packages/agents/src/mcp/rpc.ts
+  s_2569688183b285::t_5c690331f4acc9 23,29-42,99
+packages/agents/src/mcp/server/handler-stateless.ts
+  s_2569688183b285::t_deb156ec17d094 21
+packages/agents/src/mcp/server/legacy-agent.ts
+  s_2569688183b285::t_c499c373a6a0e3 19-21,33-37,646,653,666,671,673,675
+packages/agents/src/mcp/server/transport.ts
+  s_2569688183b285::t_8d8f3020a9ab73 18-20
+packages/agents/src/mcp/server/utils.ts
+  s_2569688183b285::t_2cbbd4d3f87525 10-13
+packages/agents/src/mcp/server/worker-transport.ts
+  s_2569688183b285::t_16ba08074d6ac3 40
+packages/agents/src/node-tests/chat-transport-bundle.test.ts
+  s_2569688183b285::t_2c8b9094f0a79b 1-44
+packages/agents/src/node-tests/mcp-server-bundle.test.ts
+  s_2569688183b285::t_e10b026c452952 8,25-26
+packages/agents/src/node-tests/vitest.config.ts
+  s_2569688183b285::t_1c617bb4bf5378 5
+packages/agents/src/node-tests/voice-channels-bundle.test.ts
+  s_2569688183b285::t_252049a672f854 1-65
+packages/agents/src/observability/agent-span-attributes.ts
+  s_2569688183b285::t_8bae755fd4c63a 1,3-7,9-17
+packages/agents/src/observability/ai/content.ts
+  s_2569688183b285::t_ae234c4275c309 1,67,76,336-344,346-359
+packages/agents/src/observability/ai/wrapper/model.ts
+  s_2569688183b285::t_6a1947f07fa422 2,25,49-50,82-83,133-134,141
+packages/agents/src/observability/ai/wrapper/tools.ts
+  s_2569688183b285::t_d561bce1d2a862 3,15,32,45,76,94,125,158,177,195,208,226,240,257,271-272,280-281,292,296,310,323,326-331
+packages/agents/src/observability/ai/wrapper/wrap.ts
+  s_2569688183b285::t_178dfe83965e6d 160,170-171,182,209,217-221,230,272,284,296,309
+packages/agents/src/observability/diagnostics.ts
+  s_2569688183b285::t_3fcbea2577d755 1-61
+packages/agents/src/observability/genai/telemetry.ts
+  s_2569688183b285::t_814cfe7511a7a1 195-205,220,238,249,283,292,308,318
+packages/agents/src/observability/index.ts
+  s_2569688183b285::t_de852529b3655c 3,7-8,42
+packages/agents/src/observability/tracing/cloudflare.ts
+  s_2569688183b285::t_3782d53769d5d9 17-30
+packages/agents/src/queue/index.ts
+  s_2569688183b285::t_20cf0ae7b921d8 1-17
+packages/agents/src/queue/options.ts
+  s_2569688183b285::t_ace3ed1ad17a37 1-27
+packages/agents/src/queue/queue.ts
+  s_2569688183b285::t_da2c7457bd7140 1-647
+packages/agents/src/queue/types.ts
+  s_2569688183b285::t_cb8b00d05c7785 1,4-6,8-19,22-25,27-33,36-42,44-47,50-52,54-59,61-71,73-77,79-86
+packages/agents/src/react-tests/client.test.ts
+  s_2569688183b285::t_9a68a9602496cd 58-110,227,231,579-709
+packages/agents/src/react-tests/default-throttle.test.tsx
+  s_2569688183b285::t_6d031ad3e079f6 1-12,14-17,19-26,28-33,36,39,44-45,49-50,54-55,65-72,74-92,94-120,122,124-127,129-136,138-155,157-170,172-178,180-186,188-193,195-196,198-200,202-205,207-211,213-215,217-224,226,228-229,231-242,244-245,248-254,256-265,267-268,270-283,285-287,289-290,293
+packages/agents/src/react-tests/initial-messages-address-change.test.tsx
+  s_2569688183b285::t_e69882eff347d2 1-244
+packages/agents/src/react-tests/resume-replay-burst.test.tsx
+  s_2569688183b285::t_45957b1791cc62 1-333
+packages/agents/src/react-tests/rpc-robustness.test.tsx
+  s_2569688183b285::t_51d77f0e86f079 17,563-664
+packages/agents/src/react-tests/tool-result-prune-updates.test.tsx
+  s_2569688183b285::t_7734c2e5be2b05 1-290
+packages/agents/src/react-tests/useAgent-address-change.test.tsx
+  s_2569688183b285::t_074c4be78e1073 1-118
+packages/agents/src/react-tests/useAgent-capnweb.test.tsx
+  s_2569688183b285::t_50fc648336ed74 1-194
+packages/agents/src/react-tests/useAgent.test.tsx
+  s_2569688183b285::t_19466d7d15f8b8 1088-1114,1158-1186,1217-1370
+packages/agents/src/react-tests/useAgentToolEvents.test.tsx
+  s_2569688183b285::t_b26f3b98609757 22,307-368
+packages/agents/src/react.tsx
+  s_2569688183b285::t_b7df537ab906f6 20-23,25-35,38-39,41,62-113,156-159,224-234,419,422-442,538-540,545,678-685,687,692-695,698-700,709-725,732,744-750,755,757,765,767,780-782,788-789,791-797,804-888,913-914,917-922,924,929-946,1007-1009,1017,1024-1026,1032,1043,1069-1076,1087,1093-1101,1115-1120,1123,1133,1144-1175,1190,1250,1256-1266,1275-1276,1284-1285,1287-1289,1346
+packages/agents/src/retries.ts
+  s_2569688183b285::t_56dc7ec94732ec 32-43,298-310,347-361
+packages/agents/src/routing/index.ts
+  s_2569688183b285::t_c0281240974190 1-17
+packages/agents/src/routing/routed-agents.ts
+  s_2569688183b285::t_4fe8a1126cf35d 1-368
+packages/agents/src/schedule.ts
+  s_2569688183b285::t_4786bc22938b70 2-3,5-9,11
+packages/agents/src/schedules/index.ts
+  s_2569688183b285::t_3e0aeb0be297da 1-18
+packages/agents/src/schedules/options.ts
+  s_2569688183b285::t_91ff23500edaf2 1-38
+packages/agents/src/schedules/parser.ts
+  s_2569688183b285::t_81d052bd508577 1-117
+packages/agents/src/schedules/schedule-timing.ts
+  s_2569688183b285::t_ef7437b695e773 2-6,9,11-12,14-20,22-36,38-49,53-58,60-61,65-74,76-82,84-89,91-96,98-100,103-116,120-137
+packages/agents/src/schedules/scheduler.ts
+  s_2569688183b285::t_c6d7ce6ded7a31 2-7,10-14,16-36,38-45,48-54,56-59,61-72,75-77,79-90,92-96,98-140,142-145,147-153,155-173,176,178-184,186-213,217-219,221-248,250-290,293-294,296-302,305-326,328-345,347-348,350-384,386-387,389-438,443-447,449-476,478-486,488-501,503-506,511-571,573-581,584-593,596,598-599,601-613,615,618-619,621-623,625-633,635,638-651,653,656-663,665-667,671,673-687,690-692,694-696,698,701-715,719-722,724-740,743-752,755-757,760,762-770,774-778,780-802,804-829,832-851,854-865,868-886,888,890-902,905-937,940-990,993,995-996,999-1004
+packages/agents/src/schedules/types.ts
+  s_2569688183b285::t_9e6fcf6e7c08f3 1-138
+packages/agents/src/sessions/attachment-ingest.ts
+  s_2569688183b285::t_f3f9c4b5908f92 1-302
+packages/agents/src/sessions/attachment-store.ts
+  s_2569688183b285::t_ae4c7c61ccba3b 1-255
+packages/agents/src/sessions/chunking.ts
+  s_2569688183b285::t_e0dabdbf5ad679 1-77
+packages/agents/src/sessions/compaction-helpers.ts
+  s_2569688183b285::t_8a210a2bbc1fc2 9,17-21,207,279,282-283,285,296,300,302-306,308-309,313,315-316,319-325
+packages/agents/src/sessions/core.ts
+  s_2569688183b285::t_498b363e4f4b37 2-4,6-11,14-24,26-27,29-35,38-41,45-51,53-58,60-61,63-98,101,103-109,111,114-135,139-145,150-156,158-164,167-181,183-202,205-253,255-297,299,301-303,306-323,325,327,329-346,348-349,351-360,363-368,371-377,380-383,386-404,406-471,473,475,477-496,498-521,523-546,549-581,584-621,623-646,650-661,663-665,668-725,727-754,757-763,765,768-795,798-810,813-869,873-874,876-887,891-914,916-952,954-973,975-989,992-998,1000-1070,1072-1147,1150-1258,1260-1261,1263-1275,1277-1280,1284,1286-1306,1308-1335,1338-1345,1347,1349-1351,1353,1356
+packages/agents/src/sessions/handle.ts
+  s_2569688183b285::t_6f127c1d1fcb46 2-4,6-8,11-15,17-21,23-59,62-64,66-68,71,73-83,87-113,115-137,139-180,184-185,189-190,193-202,205,207-210,213-256,258-259,261-324,326-337,340-359,363-369,373-375,378,380-383,389-391,394-401,405-406,409-424,426-457,459-460,463,465-477,479-482,485-489,491-498
+packages/agents/src/sessions/index.ts
+  s_2569688183b285::t_7a36944210b221 1-6,8-10,12,16,18-33
+packages/agents/src/sessions/io.ts
+  s_2569688183b285::t_0cae615cf06e10 1-14
+packages/agents/src/sessions/mirror.ts
+  s_2569688183b285::t_3e0aa761c1088b 1-85
+packages/agents/src/sessions/overlays.ts
+  s_2569688183b285::t_ea3a5f4456c6a6 1-59
+packages/agents/src/sessions/sanitize.ts
+  s_2569688183b285::t_9cb48ca9e708c0 1-111
+packages/agents/src/sessions/sessions.ts
+  s_2569688183b285::t_bec6e36a9d3e36 2-7,9-13,16-21,23-24,26-58,60,62-80,85-100,103-109
+packages/agents/src/sessions/tokens.ts
+  s_2569688183b285::t_ab720f9d45712b 2,4-8,11,22-27,46,69-88
+packages/agents/src/sessions/types.ts
+  s_2569688183b285::t_78d5173876d773 2,4-5,8-41,60,64-67,69-70,76-79,84,88-94,96-108,110-113,115-133,135-137,139-140,142-145,147-148,150-151,153-154,156-157,159-160,162-169,171-179
+packages/agents/src/skills/index.ts
+  s_2569688183b285::t_5fa6189cfbe949 6-12
+packages/agents/src/skills/registry.ts
+  s_2569688183b285::t_863f9474a30f9b 13,15-21,31-50,110-115,189-291,306-310,326-349,392-416,524-525
+packages/agents/src/skills/workspace.ts
+  s_2569688183b285::t_edacec73e52c14 1-261
+packages/agents/src/socket-address.ts
+  s_2569688183b285::t_44d7eb398871bf 1-13,15,17-19
+packages/agents/src/sql-error.ts
+  s_2569688183b285::t_12eda807ed70a1 1-14
+packages/agents/src/state/index.ts
+  s_2569688183b285::t_421f48ba9c09d5 1-229
+packages/agents/src/streams/errors.ts
+  s_2569688183b285::t_d56e868c184b36 2-3,6-14,16-19,21,23-35,37-38,40,42-51
+packages/agents/src/streams/index.ts
+  s_2569688183b285::t_ef822214651067 2,4-5,8-11,13-17,19-28
+packages/agents/src/streams/sse.ts
+  s_2569688183b285::t_dd91c5c3704702 1-181
+packages/agents/src/streams/streams.ts
+  s_2569688183b285::t_9e82ad176847ca 1-1074
+packages/agents/src/streams/types.ts
+  s_2569688183b285::t_e400caf9ec1b08 1-181
+packages/agents/src/sub-routing.ts
+  s_2569688183b285::t_9453e23c2ef51a 32-244,427-430,432
+packages/agents/src/tasks/duration.ts
+  s_2569688183b285::t_da852f0ecb12f1 1-7,10,12,14,16-22,24,26-50,52-54
+packages/agents/src/tasks/engine-port.ts
+  s_2569688183b285::t_f089d232c49817 1-179
+packages/agents/src/tasks/errors.ts
+  s_2569688183b285::t_0b48acf2bacb33 2-3,7-8,10-13,15-19,22-23,25-26,31-32,34,36-38,40-47,49,51-61,63-70,72-83,85-93,95,97-106
+packages/agents/src/tasks/index.ts
+  s_2569688183b285::t_f6018c090f545c 1-10,12-18,20-36
+packages/agents/src/tasks/options.ts
+  s_2569688183b285::t_73815923b688f4 1-41
+packages/agents/src/tasks/replay.ts
+  s_2569688183b285::t_6dea5c1ffec53f 1-498
+packages/agents/src/tasks/serialization.ts
+  s_2569688183b285::t_e9aaa6f29e00f7 2,4-7,10,12-13,15,17-31,33-39,42-45,49-53,56-67
+packages/agents/src/tasks/store.ts
+  s_2569688183b285::t_1836c870aa8ee9 1-216
+packages/agents/src/tasks/tasks.ts
+  s_2569688183b285::t_0db71b182f874c 1-1483
+packages/agents/src/tasks/types.ts
+  s_2569688183b285::t_5e3c32d651bad5 1-352
+packages/agents/src/tests-d/agent-path.test-d.ts
+  s_2569688183b285::t_365a8f4f228fbe 1-23
+packages/agents/src/tests-d/agent-props.test-d.ts
+  s_2569688183b285::t_fce249decf1a66 1-109
+packages/agents/src/tests-d/agent-routing-export.test-d.ts
+  s_2569688183b285::t_81df83e5474c22 1-28
+packages/agents/src/tests-d/agent-tool-interrupted.test-d.ts
+  s_2569688183b285::t_ab8c06a8410d9a 122
+packages/agents/src/tests-d/agent-tool-schema.test-d.ts
+  s_2569688183b285::t_973d732eb2dd99 1-95
+packages/agents/src/tests-d/browser-engine-options.test-d.ts
+  s_2569688183b285::t_8b01ccac0b4c9b 1-97
+packages/agents/src/tests-d/channels-exports.test-d.ts
+  s_2569688183b285::t_701e57437237c6 1-48
+packages/agents/src/tests-d/chat-transport.test-d.ts
+  s_2569688183b285::t_83f3f82ec217a3 1-5
+packages/agents/src/tests-d/lifecycle-export.test-d.ts
+  s_2569688183b285::t_034bdbea4ca126 1-146
+packages/agents/src/tests-d/mcp-client-capability.test-d.ts
+  s_2569688183b285::t_71c80478aa860d 1-17
+packages/agents/src/tests-d/orphan-store.test-d.ts
+  s_2569688183b285::t_21e24c943d9dfa 6-7,12
+packages/agents/src/tests-d/routing-export.test-d.ts
+  s_2569688183b285::t_1bc97f4af0b89f 1-32
+packages/agents/src/tests-d/schedules-export.test-d.ts
+  s_2569688183b285::t_94beb66b9b114f 1-76
+packages/agents/src/tests-d/sessions-export.test-d.ts
+  s_2569688183b285::t_8159114a8ffe48 1-84
+packages/agents/src/tests-d/state-export.test-d.ts
+  s_2569688183b285::t_0ab8f9617309b7 1-37
+packages/agents/src/tests-d/streams-export.test-d.ts
+  s_2569688183b285::t_8c3acb2ce4029f 1-14,16-47,49,51-57,60-62
+packages/agents/src/tests-d/sub-agent-stub.test-d.ts
+  s_2569688183b285::t_418cb10213443e 2-6,35-39,135-155
+packages/agents/src/tests-d/tasks-export.test-d.ts
+  s_2569688183b285::t_8563232e28bda8 1-108
+packages/agents/src/tests-d/voice-exports.test-d.ts
+  s_2569688183b285::t_2b4cc5abacfa14 2-17,19-39
+packages/agents/src/tests-d/workflow-retention.test-d.ts
+  s_2569688183b285::t_357260e13538e1 1-24
+packages/agents/src/tests/agent-tool-replay.test.ts
+  s_2569688183b285::t_b5572992181de8 4-162
+packages/agents/src/tests/agent-tools-failure.test.ts
+  s_2569688183b285::t_a27f276093fe2e 1,3,14-15,116-180
+packages/agents/src/tests/agents/agent-tool-replay.ts
+  s_2569688183b285::t_658ac4cff5bc73 22-39,57,432-630,657-661,666-688,696-699,701-707,710-711,713-715,719,722,736-737,740,747,749,754-762,769-770,801-814,816-843,851-852
+packages/agents/src/tests/agents/browser.ts
+  s_2569688183b285::t_cf1a281215aa69 1-24
+packages/agents/src/tests/agents/callable.ts
+  s_2569688183b285::t_d95c07fe788008 11-26,32-37
+packages/agents/src/tests/agents/chat-sdk.ts
+  s_2569688183b285::t_b80d7544d38f20 103-171
+packages/agents/src/tests/agents/index.ts
+  s_2569688183b285::t_da12c71956d449 32,52,54-55,66,68,74-76
+packages/agents/src/tests/agents/keep-alive.ts
+  s_2569688183b285::t_c3a866ef6eb573 43
+packages/agents/src/tests/agents/mcp.ts
+  s_2569688183b285::t_704c991bb79eb5 24,609,611,619-631,633-636,647-648
+packages/agents/src/tests/agents/migration.ts
+  s_2569688183b285::t_631dc8fe4ae3d1 3-4,6-7,11-13,17-19,35,37,41-43,45,47-49,56,62,64-66,71,74-75,78-79,82-86,89-90,92,95-97,100-108,111-112,114-119,123-133,137-158,161,166
+packages/agents/src/tests/agents/oauth.ts
+  s_2569688183b285::t_9bb808c338f1ea 2-3,7,11
+packages/agents/src/tests/agents/protocol-messages.ts
+  s_2569688183b285::t_fd5556d17b1257 51
+packages/agents/src/tests/agents/queue.ts
+  s_2569688183b285::t_992f4601afe590 36-37,41,45
+packages/agents/src/tests/agents/retry.ts
+  s_2569688183b285::t_2f9415f6303001 118-120,122,146,170-175,182,189-190
+packages/agents/src/tests/agents/routed-agents.ts
+  s_2569688183b285::t_e8846a41e532aa 1-16,18-20,22-28,30-35,37-43,45-47,49-66,68-70,72-75,77-79,81-83,85-88,90-95,97-98,100
+packages/agents/src/tests/agents/run-fiber.ts
+  s_2569688183b285::t_603b4320ca78c9 60-108,706-769,789,796,799
+packages/agents/src/tests/agents/schedule.ts
+  s_2569688183b285::t_463e7d0820f37a 1-8,12-13,21-31,37-42,58-71,97-104,108-111,118-119,125-127,132-134,140,150-151,157-160,166-168,174,185-186,192-195,201-203,208-237,297-298,307-323,379,381,404,485,496-499,535-536,547,628-629,640,647,653-658,661-662
+packages/agents/src/tests/agents/session.ts
+  s_2569688183b285::t_1323cbe1d6c1c5 2,4,6,8-10,34-95,105-109,113-117,119,123-124,126,133-149,151-152,171-175,177
+packages/agents/src/tests/agents/spike-sub-agent-routing.ts
+  s_2569688183b285::t_68432dff5ed30e 123,125
+packages/agents/src/tests/agents/state.ts
+  s_2569688183b285::t_a46d4812b6eef6 2,46,83,85,110-111,120,123,128,131,145-151,153-154,158-163,205,210,217,262-268,270-271,275-280,309,311
+packages/agents/src/tests/agents/sub-agent.ts
+  s_2569688183b285::t_c237e7f25fe673 1,5-6,9,71-73,118-129,409-431,524-535,1067-1071,1141-1160,1162-1293,1378-1413,1432-1475,1608-1609,1637-1644,1980-1988,2061-2077,2139-2146,2446,2448-2454,2498-2501,2534-2543,2564-2849,2862-2958
+packages/agents/src/tests/agents/tasks.ts
+  s_2569688183b285::t_827c9841f2045f 1-43
+packages/agents/src/tests/agents/wait-connections.ts
+  s_2569688183b285::t_669a4b499d5586 3,149-150,153,156-161
+packages/agents/src/tests/agents/workflow.ts
+  s_2569688183b285::t_3de44b60b3a4be 2-6,708-718
+packages/agents/src/tests/alarms.test.ts
+  s_2569688183b285::t_1e8743562bb952 2-6,23-25,68-133
+packages/agents/src/tests/browser-capability.test.ts
+  s_2569688183b285::t_001dbe79ff73df 1-300
+packages/agents/src/tests/browser-connector.test.ts
+  s_2569688183b285::t_41ec9c1af52adc 2,4-6,213-231,238-444,507-609,620-659,1384-1458
+packages/agents/src/tests/browser-quick-actions.test.ts
+  s_2569688183b285::t_7b097c43b6bc1f 1,230-256
+packages/agents/src/tests/browser-session-core.test.ts
+  s_2569688183b285::t_0b6a7a66d77b22 1-604
+packages/agents/src/tests/browser-spec-normalize.test.ts
+  s_2569688183b285::t_d55193f744eeb9 1-162
+packages/agents/src/tests/capabilities/AGENTS.md
+  s_2569688183b285::t_e8433d7f8e1624 1-70
+packages/agents/src/tests/capabilities/browser.ts
+  s_2569688183b285::t_365365df00b602 1-110
+packages/agents/src/tests/capabilities/console-capture.ts
+  s_2569688183b285::t_5dd831fa9e12ea 2-5,7-8,10-22
+packages/agents/src/tests/capabilities/harness.ts
+  s_2569688183b285::t_a0681052119660 1-9
+packages/agents/src/tests/capabilities/lifecycle.ts
+  s_2569688183b285::t_8bc507a0195f45 1-763
+packages/agents/src/tests/capabilities/mcp-client.ts
+  s_2569688183b285::t_897261423ce8c0 1-4,7-11,13-28,31-42,46-64,67-123,125-133
+packages/agents/src/tests/capabilities/queue.ts
+  s_2569688183b285::t_53952a183e7a91 1-97
+packages/agents/src/tests/capabilities/scheduler.ts
+  s_2569688183b285::t_a7c249fd4542fb 1-208
+packages/agents/src/tests/capabilities/sessions.ts
+  s_2569688183b285::t_08be2eeb320138 1-567
+packages/agents/src/tests/capabilities/sqlite-strategies-bench.ts
+  s_2569688183b285::t_b0d724a5ac9466 1-456
+packages/agents/src/tests/capabilities/streams-bench.ts
+  s_2569688183b285::t_cf0089699308cf 1-429
+packages/agents/src/tests/capabilities/streams.ts
+  s_2569688183b285::t_9f1f93020dd8ac 1-75
+packages/agents/src/tests/capabilities/tasks.ts
+  s_2569688183b285::t_003d24c6b00b5b 1-566
+packages/agents/src/tests/capnweb-transport.test.ts
+  s_2569688183b285::t_5ff79b7bdb2591 1-10,12-13,15-17,20-21,24,26-32,34-36,38,42-48,51-68,70,73-79,82-99,102-103,105-117,119-122,124-126,128,130,136-154,156,158,160-165,167-181,183-184,186-189,191-196,198-201,203-204,206-207,209,211-213,215-223,225-226,228,230-248,250-256,258-261,263-265,267,269-271,273-291,293-307,309
+packages/agents/src/tests/chat-sdk.test.ts
+  s_2569688183b285::t_9a2ecdeabd12a9 54-76
+packages/agents/src/tests/chat/truncate-older-messages.test.ts
+  s_2569688183b285::t_2233c854955730 1-571
+packages/agents/src/tests/context/context-init.test.ts
+  s_2569688183b285::t_b5ac4adffb17e6 5,7
+packages/agents/src/tests/context/context-search.test.ts
+  s_2569688183b285::t_4d588c731d7211 4-6,117,131
+packages/agents/src/tests/context/context.test.ts
+  s_2569688183b285::t_90bc66b2604726 6,9,11,16-17,20,23-24,28-30,33-35,37-40,45-46,48-52,54-56,59-61,63-64,66-70,73,75,77-79,84-89,93-95,97-99,101-104,106-130,132-135,138-140,142-144,146-184,187-192,194-196,199,202-205,207-208,211-212
+packages/agents/src/tests/context/providers.test.ts
+  s_2569688183b285::t_585776bd5b70d8 1-120
+packages/agents/src/tests/core/base64-redaction.test.ts
+  s_2569688183b285::t_42c958743da69e 1-201
+packages/agents/src/tests/deferred-destroy.test.ts
+  s_2569688183b285::t_9b022365507d91 85,103,109,115-116,125,130,138,145
+packages/agents/src/tests/dynamic-agents-api.test.ts
+  s_2569688183b285::t_8a19f727ff1765 1-68
+packages/agents/src/tests/lifecycle/alarm-arbitration.test.ts
+  s_2569688183b285::t_2a7a2a1e75ccea 1-159
+packages/agents/src/tests/lifecycle/capability-events.test.ts
+  s_2569688183b285::t_e52181b4c8c5eb 1-103
+packages/agents/src/tests/lifecycle/capability-routing.test.ts
+  s_2569688183b285::t_af892e736816cf 3,5-7,9-14
+packages/agents/src/tests/lifecycle/disposal.test.ts
+  s_2569688183b285::t_e21eb5b170d9b6 1,3-12,14
+packages/agents/src/tests/lifecycle/host-context.test.ts
+  s_2569688183b285::t_e56fedf449fae7 1-60
+packages/agents/src/tests/lifecycle/identity.test.ts
+  s_2569688183b285::t_e35fd10e478918 1-29
+packages/agents/src/tests/lifecycle/runtime-handlers.test.ts
+  s_2569688183b285::t_31de2d355a2f1b 1-55
+packages/agents/src/tests/lifecycle/startup.test.ts
+  s_2569688183b285::t_1ccc74327e7b0f 1-149
+packages/agents/src/tests/lifecycle/websockets-capability.test.ts
+  s_2569688183b285::t_b5e7f02b86b810 1-5,7-11,14-16,18-25,27-50,52-63,65-74,77-89,92-111,113-125,127-152,155-159,161-176,178-201,203-217,219-242,244-245,247,249-251,253-263,265-275,277-321,323-329,331-351,353-368,370-371,373-385,387-391,393-395,397-398,400-411,413-419,421-424,426-433,435-446,448-455,457-460,462-463,465-481,483-488,490-525,527-532,534-545,547-548,550-561,563-566,568-582,584-598,600-601
+packages/agents/src/tests/lifecycle/websockets.test.ts
+  s_2569688183b285::t_dc5b1f7ba77614 1-66,68-71,74-77,80-83,85-88
+packages/agents/src/tests/mcp/add-rpc-mcp-server.test.ts
+  s_2569688183b285::t_74d901c833a2e3 2,199,204-205,207-209,213-214,217-245
+packages/agents/src/tests/mcp/client-capability.test.ts
+  s_2569688183b285::t_68b095b7b15bb4 1-53
+packages/agents/src/tests/mcp/client-connection.test.ts
+  s_2569688183b285::t_8448ae4029c295 9
+packages/agents/src/tests/mcp/client-elicitation.test.ts
+  s_2569688183b285::t_20adaad5ee7190 7-8,260-262,266-276,278-282,284,286-290,295-306,308,310-316,321-333,335-338,340,342-346,350-360,362-363,365-367,371-382,384-385,387-388,392-398,400-409,411-423,425-426,428-431,433-436,438,440-457,459-463,465-478,483-495,497-503,505-528,530-537,545-546,548-552,554-578,583-584,586-600,605-606,608-612,615-631,633-639,643-654,656-660,663-667,669-672,677-678,681-690,692-714,716-738,740-743,747-749,751-755,757-760,762-764,768-772,774-778,780-784,788-789,791-796,798-804,806-807,809-813,815-821,826-836,838-841,843-851
+packages/agents/src/tests/mcp/client-manager.test.ts
+  s_2569688183b285::t_3ace406732ac32 1,3-6,10-11,17,131-139,141-158,160-169,171-190,192-193,195,197,199-202,204-209,211-213,215-216,218-275,277-284,286-293,295-297,300-308,311-313,315-410,413-437,439-440,442-456,458,460-465,467-493,495-497,499-506,508-510,512,514-518,520-523,525,527-557,559-563,565-570,572-580,582,584-593,595-598,600,602-613,615-622,625-665,667-671,673-678,680-688,690-759,761-819,821-826,832,838,845-846,849-850,852-860,862-865,867-887,889,891-895,897-899,901-911,913-930,932-935,937,939-946,948-951,953,955-959,961,963-968,970-975,977-985,987-998,1000,1002-1006,1008-1034,1037-1048,1050-1051,1053-1078,1080,1082-1086,1088-1094,1096-1100,1102-1106,1108-1113,1115-1123,1125,1127-1141,1143-1170,1173-1175,1177-1184,1186-1188,1190,1192-1193,1195-1227,1229-1239,1241-1272,1274-1284,1286-1291,1293-1296,1298-1303,1305-1313,1315-1357,1359-1369,1371-1399,1401-1415,1417-1421,1423-1426,1428-1433,1435-1442,1445-1451,1453-1456,1458-1460,1462-1466,1468-1469,1471-1493,1496-1511,1513-1517,1520-1524,1526-1551,1554-1558,1561-1590,1592-1595,1597-1629,1631-1646,1648-1652,1655-1659,1661-1665,1667-1690,1692-1706,1708-1712,1714-1736,1738-1744,1746-1773,1775-1779,1781-1816,1818-1840,1842-1846,1848-1877,1879-1902,1904-1906,1908-1912,1915-1936,1938-1939,1941,1943-1948,1950-1959,1961-1965,1967-1979,1981-1984,1986-2019,2021-2030,2032-2047,2049,2051-2055,2057-2061,2063-2078,2080-2109,2111-2144,2146-2194,2196-2206,2208-2212,2214-2215,2217-2222,2224-2229,2231-2234,2236-2242,2244-2257,2259-2260,2262-2276,2279-2280,2299-2301,2309,2311-2313,2315,2320,2324,2326,2329-2332,2334-2336,2338-2348,2350-2357,2359-2389,2391-2401,2403,2405-2407,2409-2416,2418-2421,2424-2425,2432-2434,2436,2441,2445,2447-2449,2452-2471,2473-2478,2480-2490,2492-2494,2496-2501,2503-2504,2506-2511,2513-2519,2521-2523,2525-2530,2532-2538,2540-2544,2546-2582,2584-2593,2595-2599,2601-2638,2640-2649,2651-2655,2657-2662,2664-2690,2693-2694,2696-2703,2705-2712,2714,2716-2717,2719-2748,2750-2751,2753-2760,2762-2767,2769,2771-2772,2774-2778,2780-2783,2785-2790,2792-2798,2800-2808,2810-2811,2813,2815-2818,2820-2825,2827-2833,2835-2843,2845-2846,2848,2850-2853,2855-2858,2860-2867,2869-2876,2878-2879,2881-2885,2887,2889-2891,2893-2897,2899-2904,2906-2912,2914-2915,2917,2919-2922,2926-2941,2943-2944,2946-2964,2966-2967,2969-2972,2974-2975,2977-2979,2981-2982,2984-2985,2987-2989,2991-2995,2997-3003,3005-3026,3028-3041,3043,3045-3052,3054-3067,3069,3071-3072,3074-3076,3078-3081,3083-3102,3140-3147,3149-3150,3152-3153,3155-3156,3158-3165,3167-3176,3178-3179,3181-3184,3186-3239,3241-3247,3249-3250,3252-3275,3277-3316,3318-3342,3344-3367,3369-3374,3376-3377,3379-3392,3394-3400,3411-3414,3490-3500,3502-3516,3518-3521,3523-3526,3530-3540,3542-3545,3547-3553,3555-3558,3560-3565,3567-3570,3572-3575,3579-3591,3593-3596,3598-3603,3605-3608,3610-3613,3617-3630,3632-3646,3648-3662,3664-3678,3680-3692,3696-3699,3701-3704,3706-3709,3711-3714,3718-3741,3745-3758,3760-3763,3765-3769,3773-3786,3788-3791,3793-3796,3800-3815,3817-3820,3822-3826,3830-3845,3847-3859,3865-3881,3883-3912,3914-3926,3930-3933,3935-3944,3946-3954,3956,3958-3959,3961-3962,3964-3968,3970-3973,3975-3983,3985-3993,3995,3997,3999,4001-4005,4007-4010,4012-4020,4022-4030,4032,4034,4036,4038-4042,4044-4047,4049-4057,4059-4066,4068,4070,4072,4074-4077,4079-4082,4084-4092,4094-4101,4103,4105-4106,4108-4111,4113,4115-4120,4122-4125,4127-4135,4137-4140,4142-4144,4146-4148,4150-4154,4156-4172,4174-4179,4181-4184,4186,4188-4193,4195-4199,4201-4210,4212-4213,4215,4217-4218,4220-4226,4228-4233,4235-4243,4245-4246,4248-4250,4252-4254,4256,4258-4263,4265-4270,4272-4280,4282-4283,4285-4287,4289-4291,4293,4295-4298,4300-4304,4306-4314,4316-4318,4320,4322-4327,4329-4334,4336-4344,4346-4347,4349-4351,4353,4355-4362,4364-4368,4370-4378,4380-4381,4383-4385,4387-4395,4397-4399,4401,4403-4408,4410-4414,4416-4424,4426-4434,4436-4441,4443-4445,4447-4449,4451,4453-4458,4460-4472,4474,4476-4480,4482-4514,4516-4522,4524,4526-4529,4531,4533-4536,4539-4557,4559,4561-4564,4566,4568-4573,4575-4579,4581-4590,4592-4623,4625-4626,4628-4629,4631-4632,4634-4636,4638-4644,4646-4661,4663-4680,4682,4684-4699,4701-4708,4710-4719,4721,4723-4726,4728-4729,4731,4733-4739,4741,4743-4746,4748-4757,4759-4764,4766,4768-4771,4773-4774,4776-4777,4779,4781-4782,4784-4785,4787-4800,4802-4810,4813-4818,4820,4822,4824-4828,4830-4839,4841-4847,4849,4851-4857,4859-4862,4864-4873,4875-4879,4881,4883-4886,4888-4891,4893,4895-4898,4900-4912,4914-4922,4924,4926,4928-4933,4935-5078,5084-5094,5100-5110,5115-5161,5168-5266,5270-5284,5286,5288-5291,5293-5294,5296-5298,5300-5302,5304-5308,5310-5315,5317-5318,5320-5321,5323-5326,5328-5334,5336-5398,5400,5402-5403,5405-5407,5409-5412,5414-5420,5422,5424-5432,5434-5454,5456-5459,5461-5463,5465-5467,5469-5473,5475-5477,5479-5484,5488-5493,5507,5512-5553,5555,5557-5559,5561-5601,5603-5660,5662-5664,5666-5673,5677-5690,5692-5695,5697-5724,5726,5728-5732,5734-5739
+packages/agents/src/tests/mcp/client-rpc.test.ts
+  s_2569688183b285::t_a02fd27c227c05 1-4,6-14,16-24,27-29,32,34-42
+packages/agents/src/tests/mcp/client-storage.test.ts
+  s_2569688183b285::t_29968c0b62f131 7
+packages/agents/src/tests/mcp/client-v2-mrtr.test.ts
+  s_2569688183b285::t_ea6df23c5b3787 15
+packages/agents/src/tests/mcp/errors.test.ts
+  s_2569688183b285::t_9fd179963790d0 6
+packages/agents/src/tests/mcp/event-store.test.ts
+  s_2569688183b285::t_44437245065c4b 3
+packages/agents/src/tests/mcp/handler-warning.test.ts
+  s_2569688183b285::t_878f3e99236639 26-27,63-64
+packages/agents/src/tests/mcp/handler.test.ts
+  s_2569688183b285::t_602f9923f3a831 6,139-140,165-166,464-465,511-512
+packages/agents/src/tests/mcp/oauth2-mcp-client.test.ts
+  s_2569688183b285::t_8dda21a7100536 79,119,148,190,196,416,421,446,452,480,485,503,508,524,529,560,565,596,601,622,627,655,660,694,699,733,738,770,775,806,811,845,848,865,872,924,931,965,970,1005,1011,1059,1064,1102,1107
+packages/agents/src/tests/mcp/session-lifecycle.integration.test.ts
+  s_2569688183b285::t_cb766064eb757f 5-7,17-21,58-61,65,77,80-94,96,101-102,106-112,115-135,137-142,145,147-154,156-163,165-229,231,235-286
+packages/agents/src/tests/mcp/transports/post-keepalive.test.ts
+  s_2569688183b285::t_ef4656da1b0c01 16
+packages/agents/src/tests/mcp/transports/rpc.test.ts
+  s_2569688183b285::t_27461f6a28cfed 689-690,741-742
+packages/agents/src/tests/mcp/transports/streamable-http.test.ts
+  s_2569688183b285::t_f94a36678975f1 10,13
+packages/agents/src/tests/mcp/transports/worker-transport.test.ts
+  s_2569688183b285::t_7bb37b5d2e33fa 9
+packages/agents/src/tests/mcp/v2-lifecycle.test.ts
+  s_2569688183b285::t_c562e107039f53 4
+packages/agents/src/tests/mcp/wait-connections-e2e.test.ts
+  s_2569688183b285::t_aef78b6e5f1a60 143,145-146,148,157-161,170-171,181-183,192-193,210-212
+packages/agents/src/tests/migration.test.ts
+  s_2569688183b285::t_91e112c8c18d1a 1,6-7,10,14,17,20-36,39,42,45-46,49-76,79,82,86,88,91-92
+packages/agents/src/tests/name-resolution.test.ts
+  s_2569688183b285::t_80c259fbfc666b 13-15,17,37
+packages/agents/src/tests/observability/agent-span-attributes.test.ts
+  s_2569688183b285::t_a2bea9f5df7fd4 1-30
+packages/agents/src/tests/observability/ai-sdk-wrap.test.ts
+  s_2569688183b285::t_aedbd89ec1de69 96-97,684-687,696-697,1395-1398,1412-1415,1716-1947
+packages/agents/src/tests/observability/cloudflare-tracer.test.ts
+  s_2569688183b285::t_30448dc1b76790 1-22
+packages/agents/src/tests/protocol-messages.test.ts
+  s_2569688183b285::t_009c48d18d9ea5 1-2,4,168-196,220,222-223
+packages/agents/src/tests/queue/capability.test.ts
+  s_2569688183b285::t_2a448a358a4b7a 1-300
+packages/agents/src/tests/resumable-stream-migration.test.ts
+  s_2569688183b285::t_314e4f1bebb4e5 6,8-15,22-26,28,41,47,53-54,58-79,82-83,85-86,89-109
+packages/agents/src/tests/retry-integration.test.ts
+  s_2569688183b285::t_26a4efd91c4634 149-150
+packages/agents/src/tests/routed-agents.test.ts
+  s_2569688183b285::t_6fe8062b371087 1-271
+packages/agents/src/tests/routing.test.ts
+  s_2569688183b285::t_334a25eb95f6be 179,181,183-187,250,252-253,255-261
+packages/agents/src/tests/run-fiber.test.ts
+  s_2569688183b285::t_7dd12fc523f84e 1,51-98,267-268,270-271,274-275,456,470,1042-1111
+packages/agents/src/tests/schedule.test.ts
+  s_2569688183b285::t_29aeccec9ee28d 2-6,9,201-202,217,261-263,310-311,317,372,407-418,752-754,857-859,890-892,944-946,987-988,1022-1024,1094-1112,1116-1125,1129-1130,1133,1137,1142-1157,1160-1199,1201-1239,1243,1247-1248,1250-1251,1254,1258-1259,1280-1414
+packages/agents/src/tests/schedules/capability.test.ts
+  s_2569688183b285::t_719ae31fa22c4e 1-436
+packages/agents/src/tests/schedules/timing.test.ts
+  s_2569688183b285::t_dd357a5832dc6e 1-86
+packages/agents/src/tests/schema-and-state-optimization.test.ts
+  s_2569688183b285::t_ce22581e1301b4 4,17,51-65,67-74,79-82,88-134,153,186,247-248,255-277,487,506,519-520,522,575-576,637-638
+packages/agents/src/tests/sessions/attachments.test.ts
+  s_2569688183b285::t_62d3f79ae7f77c 1-391
+packages/agents/src/tests/sessions/capability.test.ts
+  s_2569688183b285::t_837d478dc45056 2-23,26-32,35-41,43-46,48-50,52-58,60-80,83-96,99-107,109-110,112-114,116-118,122-128,130-133,137-144,146-148,152-167,171-189,193-203,205-215,217-221,224-234,238-265,269-284,286-287,289-293,296-331,335-365,369-379,381-399,401-409,411-427,431-471,474-480,482-486,488-504,508-558,560,562-599,604-609,611-629,633-645,647-656,658-661,663-692,696-700,702-710,712,714-720,723,725-731,736-742,744-748,752-768,770,774-786,789-795,799-800,802-803,807,809-811,814-829,832-846,849-872,875-898,900-906,908-910,912-914,917-929,932-958,962-976,979-982,984,986-996,999-1001,1005-1024,1028-1078,1081-1093,1096-1100,1102-1109,1111-1136,1139-1161,1164-1181
+packages/agents/src/tests/sessions/compaction-utils.test.ts
+  s_2569688183b285::t_0b9f940e2709b8 7-13,15-16,19-27,30-35,37,40-47,49-59,62-69,71-78,80-83,86-89,91,162-188
+packages/agents/src/tests/sessions/migration.test.ts
+  s_2569688183b285::t_220f31e46177b5 1-213
+packages/agents/src/tests/sessions/storage-ops-bench.test.ts
+  s_2569688183b285::t_191173521fc0bc 1-149
+packages/agents/src/tests/shared/capability-harness.ts
+  s_2569688183b285::t_efc0d9cc0bf4e5 1-42
+packages/agents/src/tests/shared/diagnostics-capture.ts
+  s_2569688183b285::t_2268f083930cb3 1-42
+packages/agents/src/tests/shared/mcp-harness.ts
+  s_2569688183b285::t_59dbb78f9a390b 1-60
+packages/agents/src/tests/shared/test-utils.ts
+  s_2569688183b285::t_700acc1f9dd249 5
+packages/agents/src/tests/skills.test.ts
+  s_2569688183b285::t_62c4c95010e717 4-8,18-51,222-281
+packages/agents/src/tests/spike-sub-agent-routing.test.ts
+  s_2569688183b285::t_1c1d4d0f72e54b 17,91-137
+packages/agents/src/tests/state.test.ts
+  s_2569688183b285::t_1e611cc0269dbe 410
+packages/agents/src/tests/state/capability.test.ts
+  s_2569688183b285::t_67803acd09ef21 1-252
+packages/agents/src/tests/streams/capability.test.ts
+  s_2569688183b285::t_efc290ae0315ad 1-635
+packages/agents/src/tests/streams/cutover.test.ts
+  s_2569688183b285::t_3ebe8bde843373 1-194
+packages/agents/src/tests/streams/legacy-fold.test.ts
+  s_2569688183b285::t_4bb3c1130199bf 1-193
+packages/agents/src/tests/streams/progress-marker.test.ts
+  s_2569688183b285::t_fbb00139e95ccd 1-100
+packages/agents/src/tests/streams/resumable-stream-settlement.test.ts
+  s_2569688183b285::t_df9af835232cc5 1-316
+packages/agents/src/tests/streams/sqlite-strategies-bench.test.ts
+  s_2569688183b285::t_6b4a67b1dc882f 1-96
+packages/agents/src/tests/streams/storage-ops-bench.test.ts
+  s_2569688183b285::t_312d5e9e9e112f 1-54
+packages/agents/src/tests/streams/write-accounting-probe.test.ts
+  s_2569688183b285::t_a841e4a82b0e40 1-44
+packages/agents/src/tests/sub-agent-body-forwarding.test.ts
+  s_2569688183b285::t_5c9e220507c72a 1-306
+packages/agents/src/tests/sub-agent-routing.test.ts
+  s_2569688183b285::t_90b10246602da6 19-25,32-155,299,341-402,422,448-623,723-747
+packages/agents/src/tests/sub-agent-rpc-bridge.test.ts
+  s_2569688183b285::t_6314e6b02131db 1-640
+packages/agents/src/tests/sub-agent.test.ts
+  s_2569688183b285::t_45aca5dfac7c5b 431-473,1075-1101,1164-1207,1634-1666
+packages/agents/src/tests/tasks/agent.test.ts
+  s_2569688183b285::t_a8f1416df982e8 1-131
+packages/agents/src/tests/tasks/capability.test.ts
+  s_2569688183b285::t_c61ef1cbcf0ac9 1-1057
+packages/agents/src/tests/tasks/memory-limit.test.ts
+  s_2569688183b285::t_004ab126b4ffeb 1-654
+packages/agents/src/tests/vitest.config.ts
+  s_2569688183b285::t_9f6ec8124a9523 10-12
+packages/agents/src/tests/worker.ts
+  s_2569688183b285::t_462df7fe8055e0 8-72,97,119-120,126,130,140-142,184,205-206,214-215,220-241,258,281-282,291,349-355
+packages/agents/src/tests/workflow.test.ts
+  s_2569688183b285::t_773e6a5bbda615 2-3,28-86
+packages/agents/src/tests/wrangler.jsonc
+  s_2569688183b285::t_a40aa4f59905f1 15-98,152-155,262-263,266-267,270-271,291-294,311-325,426-446,461,486-487,498-499
+packages/agents/src/voice/audio-pipeline.ts
+  s_2569688183b285::t_cae434d5c976fa 6,54-61
+packages/agents/src/voice/client.ts
+  s_2569688183b285::t_142cf9885a23f1 1-1394
+packages/agents/src/voice/diagnostics.ts
+  s_2569688183b285::t_c279f6018c6586 1-469
+packages/agents/src/voice/errors.ts
+  s_2569688183b285::t_9d971e514e38c0 1-64
+packages/agents/src/voice/index.ts
+  s_2569688183b285::t_d20e8f4543531f 1-1950
+packages/agents/src/voice/react-tests/useVoiceAgent.test.tsx
+  s_2569688183b285::t_bcfa84d5075f5d 68-69,212,745-773,990-1014
+packages/agents/src/voice/react-tests/useVoiceInput.test.tsx
+  s_2569688183b285::t_dd582ff5129b2b 62,174,320-346,479-500
+packages/agents/src/voice/react.tsx
+  s_2569688183b285::t_183ea933e65946 1,3-46,49-72,75-91,94-119,122-245,248-287,289-316,318-400,402-421,423-445
+packages/agents/src/voice/tests/agents/voice-input.ts
+  s_2569688183b285::t_96a2a3f810d9b4 2,21-23,29,46-49,55-93,96,103-108,115-117,135-145,229-253,263-268
+packages/agents/src/voice/tests/agents/voice.ts
+  s_2569688183b285::t_241bfd0c7c1aae 10-11,19-29,32-45,47-55,73-76,78,87,94-97,105,114-117,148,158,166,191,196,205-216,230-235,277,297-299,301-302,327-330,399-418,451-453,473,518-523,533,537-544,594-615,639-649,658-670,721-839,917-931,933,958-963
+packages/agents/src/voice/tests/diagnostics.test.ts
+  s_2569688183b285::t_bf42447e29e509 1-325
+packages/agents/src/voice/tests/sfu-integration.test.ts
+  s_2569688183b285::t_692002e0cd5cf4 18
+packages/agents/src/voice/tests/sfu-utils.test.ts
+  s_2569688183b285::t_78689bb8587f1b 15
+packages/agents/src/voice/tests/text-stream.test.ts
+  s_2569688183b285::t_0e7f71b11db38a 135,151-219
+packages/agents/src/voice/tests/vitest.config.ts
+  s_2569688183b285::t_507cc58968bbcb 3
+packages/agents/src/voice/tests/voice-client.test.ts
+  s_2569688183b285::t_05d58b1ef73665 2-8,41-44,294-600,1007-1094
+packages/agents/src/voice/tests/voice-input.test.ts
+  s_2569688183b285::t_cc46ea83c13acf 175-218,253,271-284,338-490
+packages/agents/src/voice/tests/voice.test.ts
+  s_2569688183b285::t_1d3b810547cd00 59-66,115,190-215,306-727,782-785,821-982,999-1002,1492-1540,1546-1547,1549-1551,1556-1567,1569,1573-1574,1577-1753,1787-1985,2062-2066,2071-2074,2076-2105,2107-2132,2135-2171,2173,2175-2255,2311-2370,2491,2500-2503,2558,2562-2566,2569,2583-2591,2618-2744,2752,2772-2781,2955,2969-2972,2977-2980,3103-3106
+packages/agents/src/voice/tests/websocket-voice-transport.test.ts
+  s_2569688183b285::t_a7aa231899beee 1-90
+packages/agents/src/voice/tests/worker.ts
+  s_2569688183b285::t_eac0d057cb5b4c 5,7,15,21,23,28
+packages/agents/src/voice/tests/workers-ai-providers.test.ts
+  s_2569688183b285::t_9e6720a4bd12c6 6,112-115,119-120,131-134,140-143,152-155,168,289-313,328-350,413-437,495,497-502,504,506,508-519
+packages/agents/src/voice/tests/wrangler.jsonc
+  s_2569688183b285::t_eaa14c1dcb8932 18-21,26-29,46-49,61,63,68
+packages/agents/src/voice/text-stream.ts
+  s_2569688183b285::t_37a893c6b0090b 1-4,22,26-28,47-52,184,186-187,189,193-194,196-197,200-212,234
+packages/agents/src/voice/text.ts
+  s_2569688183b285::t_c70fcd1b3803a1 1-2
+packages/agents/src/voice/types.ts
+  s_2569688183b285::t_181482a5dcd657 4,22-95,105-146,161-166,182-184,188-193,195-199,201-206,208-212,214-218,286-291,391-397,419
+packages/agents/src/voice/voice-input.ts
+  s_2569688183b285::t_0a57f1660605b5 10-11,26-32,34-38,52-57,89-90,104-105,107-110,120-127,158-161,165,176-180,182,267-274,278-283,285-286,289,293,312-318,336-369,371-373,375-377,381-390,398,405,419,421-426,432-440,442-449,452,457-460,469-588,598,600-602,605,617-622,634-642,644,646-656,671-685,690-693,697-711
+packages/agents/src/voice/workers-ai.ts
+  s_2569688183b285::t_12131919a91b0b 9,71-78,117,176,189-192,197,214,260-266,281-291,295-303,305,313-322,368-373,462,542,547,550-552,563-568,572-575,601,607-617,631-641,645-653,655,662-672,699-721,741,748-749
+packages/agents/src/websockets/callables-target.ts
+  s_2569688183b285::t_f24c27883805aa 1-2,4-5,7-29,31-67,69-90
+packages/agents/src/websockets/capnweb-socket.ts
+  s_2569688183b285::t_f64d161654b759 1-20,22-29,31,33-41,43-84,87-91,94-96,98-100,102-110,113-120,122-124,126,128,130,132,134-147
+packages/agents/src/websockets/connection-flags.ts
+  s_2569688183b285::t_e2210642638948 1-221
+packages/agents/src/websockets/connection.ts
+  s_2569688183b285::t_d66881bf9b9813 1-291
+packages/agents/src/websockets/index.ts
+  s_2569688183b285::t_a98ef13de95ab1 1-26
+packages/agents/src/websockets/options.ts
+  s_2569688183b285::t_80fe044843fed1 1-125
+packages/agents/src/websockets/transport-protocol.ts
+  s_2569688183b285::t_da6c62ecd1407e 1-48
+packages/agents/src/websockets/transport.ts
+  s_2569688183b285::t_241bad4696141a 1-232
+packages/agents/src/websockets/websockets.ts
+  s_2569688183b285::t_66995733106559 1-745
+packages/agents/src/workflow-types.ts
+  s_2569688183b285::t_6b1db28a98620c 16,18,234-235
+packages/agents/src/x402-tests/client-payment.test.ts
+  s_2569688183b285::t_1247367fa4f867 1-198
+packages/agents/src/x402-tests/x402.test.ts
+  s_2569688183b285::t_1152d0484fddbb 18,50,814-815,817,819-830,930-941,950-981
+packages/agents/tsconfig.json
+  s_2569688183b285::t_aebb561fa25d60 6-11
+packages/agents/vitest.config.ts
+  s_2569688183b285::t_ed649bec1c7780 8-11
+packages/ai-chat/CHANGELOG.md
+  s_2569688183b285::t_a3ded00924bf0d 3-100,283,552,560,598,627,634,651,670,701,739,758,785,891,907,981,1015,1030,1043,1078,1098,1113,1134,1192,1203,1222,1227,1360,1371,1380,1385,1429,1437,1477,1509,1516,1608,1623,1633,1639,1663
+packages/ai-chat/README.md
+  s_2569688183b285::t_0fd91c5c3685cc 11-16,257,261,284-286,471,475
+packages/ai-chat/package.json
+  s_2569688183b285::t_80ba38f2b84592 3,27,30,34,36-44
+packages/ai-chat/src/e2e-tests/agent-tool-recovery.test.ts
+  s_2569688183b285::t_92f55cdf57e30a 8-13,83
+packages/ai-chat/src/e2e-tests/stream-buffer-cleanup.test.ts
+  s_2569688183b285::t_c6a5cd0e19099f 9,71,75-77,80,82,84-85,87,92,95,97-100
+packages/ai-chat/src/e2e-tests/worker.ts
+  s_2569688183b285::t_0e6a030eca7c5b 5,94-96,98-99,157-159,173-177,180-185,327-329,331-332,379-382,406,410-411,416,420-424,437-438,449-450,491,514-518,521-523
+packages/ai-chat/src/index.ts
+  s_2569688183b285::t_bca5d0464b878d 1,12,15,44-45,62-63,65-67,69-74,76,86,99,103-104,108-110,195,204,223-228,251,257,275-296,328,336-337,416-419,423,426-438,446-476,536-538,546,551-553,616-617,736-852,865-866,868-883,885-935,956-957,959,963,965-966,968-973,978-994,1009-1010,1015-1017,1052,1054-1055,1061,1067,1078-1081,1094-1096,1125-1138,1149-1170,1285-1288,1295,1495-1498,1540-1546,1559-1563,1580,1588,1600-1601,1620,1743-1745,1792-1794,1902-1904,1938-1944,1956-1959,1964,1966-1981,1983,1990-1992,1995-1996,2000-2010,2012-2016,2021-2022,2024-2026,2028,2030,2066-2067,2146-2148,2196-2199,2215-2216,2236-2238,2243-2249,2308-2332,2334-2344,2355-2393,2411,2417,2422-2454,2456-2479,2481-2486,2488-2490,2492,2495-2496,2498-2507,2509-2510,2512-2619,2862-2871,3086-3101,3348,3350-3367,3439,3441-3443,3462-3465,3477-3485,3491-3495,3516-3551,3586-3588,3604-3608,4081-4085,4100-4101,4109-4111,4220,4305-4320,4409-4410,4420,4517-4519,4526-4529,4590-4593,4619-4621,4665-4686,4723-4727,4901-4903,4935,5023-5032,5035-5048,5051,5061-5063,5070,5089-5092,5110-5111,5119-5126,5132-5133,5193-5194,5228-5229,5235-5236,5241-5245,5263-5264,5266,5277,5395-5396,5455-5456,5484-5485,5501-5502,5519-5520,5554-5572,5647-5648,5650-5656,5668-5670,5712-5715,5717-5719,5722,5725-5736,5742,5744-5750,5765-5855,5858-5859,5869-5870,5873,5877-5905,5990-5992,5998-6004,6006-6008,6012-6016,6018,6134-6152,6223-6224,6229-6235,6277-6290,6297-6301,6305,6307-6343,6345-6348,6350-6352,6354-6357,6359-6364,6368-6369,6371-6377,6436,6438-6440,6442,6444,6449,6453,6457,6463,6565-6566,6568-6570,6691-6702,6908,6981,6990,7088-7119,7149,7152,7295,7340,7344,7348,7354,7360,7372,7379,7385,7466,7500,7507,7550-7558,7560,7585-7586,7588-7615,7634-7636,7645-7647,7673-7674,7677,7679-7681,7691,7695-7711,7717,7723,7784-7797,7842-7848,7861-7866,7875
+packages/ai-chat/src/react-tests/use-agent-chat.test.tsx
+  s_2569688183b285::t_0918c6c4c25f91 1,9-10,1821-1823,1825-1827,1829-1843,1845-1846,1851-1855,1857-1858,1872-1880,1882-1897,1899-1910,1913-1914,1916-1917,1919-1960,1962,1967-1971,1973,1988-1998,2000,2002-2008,2010-2016,2018-2023,2026,2029-2030,2036-2046,2048,2050,2053-2057,2059,2074-2107,2110-2150,2153-2154,2157-2158,2161-2175,2177-2178,2183-2187,2189-2190,2204-2257,2260-2261,2264-2265,2268-2282,2284-2285,2290-2293,2296-2297,2311-2350,2352,2354-2355,2357-2358,2361,2364,2368,2384-2385,2387-2388,2390-2393,2395-2398,2401-2402,2405,2408-2409,2411-2412,2415-2416,2423,2426,2428,2430-2436,2440,2442-2443,2445-2448,2450-2451,2454-2458,2460-2466,2469,2472-2473,2475,2478-2479,2486,2489,2491,2493-2506,2510,2512-2513,2515-2532,2538-2539,2541,2555-2567,2570-2581,2584-2589,2591,2594-2596,2598-2603,2606-2608,2610-2616,2618-2627,2632-2633,2635,2637-2644,2647-2650,2652-2680,2685,2694-2695,2706,2710-2712,2714-2719,2723-2724,2726,2731-2735,2739-2742,2744,2747-2749,2754,2763-2764,2767-2770,2776,2779,2794-2798,2800-2803,2807-2809,2811-2819,2821-2823,2825-2849,2852-2857,2862-2871,2875-2881,2884-2896,2899-2901,2903-2904,2907,2910-2914,2917,2925-2926,2929-2935,2938-2939,2941-3194,6653-6656,6659-6830,7546-8135
+packages/ai-chat/src/react.tsx
+  s_2569688183b285::t_708307beddd4e2 20-22
+packages/ai-chat/src/tests-d/agent-props.test-d.ts
+  s_2569688183b285::t_2ea77e0af5863d 1-28
+packages/ai-chat/src/tests/agent-tool-rebind-noop.test.ts
+  s_2569688183b285::t_8a5fbaa3da8e43 2,7
+packages/ai-chat/src/tests/agent-tools.test.ts
+  s_2569688183b285::t_d94315f3d4522c 18,170,175-195,266-295,306-443,600-694,1298-1326
+packages/ai-chat/src/tests/cancel-request.test.ts
+  s_2569688183b285::t_0dc3167b2752ff 117,161,259
+packages/ai-chat/src/tests/chat-recovery.test.ts
+  s_2569688183b285::t_f3e28b2612906c 12,61,71,179,212-213,235,247-248,305-306,371,444,641-646,828-833,852,881
+packages/ai-chat/src/tests/client-tools-continuation.test.ts
+  s_2569688183b285::t_6d8ecaae1e4b43 149-400,764-821
+packages/ai-chat/src/tests/durable-chat-recovery.test.ts
+  s_2569688183b285::t_83f98cbf62996c 45-51,198-210,510,791-807,823-827,875-877,879,882-883,2663-2690,2724-3046
+packages/ai-chat/src/tests/get-messages-endpoint.test.ts
+  s_2569688183b285::t_af0a5e7881d281 67-126
+packages/ai-chat/src/tests/late-tool-input.test.ts
+  s_2569688183b285::t_8ae7e882cfe793 1-89
+packages/ai-chat/src/tests/message-concurrency.test.ts
+  s_2569688183b285::t_5fab507ffbf014 267-277,305,635-639,647
+packages/ai-chat/src/tests/on-stream-end.test.ts
+  s_2569688183b285::t_fef36404df86ca 385-461
+packages/ai-chat/src/tests/origin-message-ids.test.ts
+  s_2569688183b285::t_e673b9c79a49cb 1-302
+packages/ai-chat/src/tests/resumable-streaming.test.ts
+  s_2569688183b285::t_9fdba64e4a4d0b 82,131-134,136-138,1169-1302,1927-1928,1956-1957,1970-1971,1978-2015,2019,2021-2023,2025,2027-2054,2056-2060,2062-2066,2070,2076,2078-2080,2082-2085,2088-2093,2097,2105,2111,2119-2120,2123
+packages/ai-chat/src/tests/row-size-guard.test.ts
+  s_2569688183b285::t_4d4e7d57f33ff1 1-2,9,84-127,172,209,216-217,235-240,242-243,248,264-267,269-271,278,286,305-310,376-430
+packages/ai-chat/src/tests/sessions-migration.test.ts
+  s_2569688183b285::t_ca051c76963cbd 2-4,7-21,23-27,29,31-36
+packages/ai-chat/src/tests/stale-approval-repair.test.ts
+  s_2569688183b285::t_ad20daab910b8c 1-90
+packages/ai-chat/src/tests/terminal-frame-order.test.ts
+  s_2569688183b285::t_da43be52400d52 1-374
+packages/ai-chat/src/tests/vitest.config.ts
+  s_2569688183b285::t_2eb6d7c6748f99 9-11
+packages/ai-chat/src/tests/worker.ts
+  s_2569688183b285::t_d1555b5c928bc1 12-17,34-38,46-72,121-174,178,205-232,314-338,397-499,751,754-755,758-761,765-823,994-998,1051-1056,1058-1059,1076-1079,1081,1083-1086,1088,1094-1122,1132,1140,1156-1159,1167-1169,1172,1186-1189,1196-1198,1200-1208,1216-1217,1238-1259,1288-1289,1425-1426,1622-1623,1692-1693,1715,1717,1721-1722,1728,1735,1771-1777,1802-1849,1863-1864,1874,1878,1880-1889,1903-1908,1951-1952,2001-2002,2142-2149,2213,2227,2329,2756,2764,2769-2835,2839-2849,2855-2864,2921-2960,2984-3042,3149-3156,3180,3203-3204,3231-3291,3295,3297-3298,3302-3306,3316-3318,3320-3321,3325-3329,3371-3431,3433-3435,3437-3443,3485,3552-3555,3557-3560,3562-3563,3565-3568,3649,3652-3654,3657,3661-3662,3682-3683,3690-3693,3716,3741-3742,3769,3835-3848,3866,3933-3934,3937-3939,3941-4081,4137-4146,4294,4320,4349,4387-4767,4970-4973,4978,4984,5059-5233,5329,5338-5401
+packages/ai-chat/src/tests/wrangler.jsonc
+  s_2569688183b285::t_e8261bbb425761 116-119,196-202
+packages/ai-chat/src/tests/ws-transport-resume.test.ts
+  s_2569688183b285::t_5c1dfba523f585 181-224
+packages/ai-chat/src/ws-chat-transport.ts
+  s_2569688183b285::t_1c2611cd5e4a9d 1,5
+packages/codemode/CHANGELOG.md
+  s_2569688183b285::t_ebd385b391e32d 3-16,151,158,188,289,308,331,364
+packages/codemode/package.json
+  s_2569688183b285::t_1df1dd86b59ae1 3,22
+packages/codemode/src/mcp.ts
+  s_2569688183b285::t_dc939337b99ff0 18,24-25,27-39,219,408,489,548
+packages/codemode/src/proxy-tool.ts
+  s_2569688183b285::t_3024db1c1c18c6 24,756-766,769-815,863-864
+packages/codemode/src/tests/mcp.test.ts
+  s_2569688183b285::t_d06f0e113367a0 844-902,928
+packages/codemode/src/tests/runtime-handle.test.ts
+  s_2569688183b285::t_10be13d26e6906 106-152
+packages/codemode/src/tests/truncate.test.ts
+  s_2569688183b285::t_bbca1d192695e0 37,39-233
+packages/codemode/src/truncate.ts
+  s_2569688183b285::t_6a1ee417524349 9-15,22-27,70-73,86,94-281
+packages/hono-agents/CHANGELOG.md
+  s_2569688183b285::t_0eaf1d3c881225 3-10,99
+packages/hono-agents/README.md
+  s_2569688183b285::t_0c2c046c12b60a 22,28,37-51,56-57,61-63,65-67,69-73,75,116-121
+packages/hono-agents/package.json
+  s_2569688183b285::t_5f4ef36bd86306 8-9,43-44,48
+packages/hono-agents/src/index.ts
+  s_2569688183b285::t_6e1c4b6820a0cc 55,67,71-74
+packages/hono-agents/src/tests/agents-middleware.test.ts
+  s_2569688183b285::t_67a512bbcbb686 1,3-46,49-51,54-57,60-61,64-67,71
+packages/hono-agents/src/tests/env.d.ts
+  s_2569688183b285::t_84001cb484b6f6 1-13
+packages/hono-agents/src/tests/vitest.config.ts
+  s_2569688183b285::t_e633697c9bc5bb 1-21
+packages/hono-agents/src/tests/worker.ts
+  s_2569688183b285::t_92f2d72ef8ca98 3-11
+packages/hono-agents/src/tests/wrangler.jsonc
+  s_2569688183b285::t_6802ecfceb8c53 1-27
+packages/hono-agents/tsconfig.json
+  s_2569688183b285::t_7943ad914cadaa 2-3
+packages/hono-agents/vitest.config.ts
+  s_2569688183b285::t_4f81b92086f54c 5
+packages/shell/package.json
+  s_2569688183b285::t_17102504d95d27 18-19
+packages/think/CHANGELOG.md
+  s_2569688183b285::t_3740c79e4773e3 3-239,506,793,805,852,884,968,975,992,1015,1027,1035,1072,1086,1097,1139,1158,1270,1406,1442,1468,1611,1624,1639,1645,1743,1753,1760,1826,1845,1850,1865
+packages/think/README.md
+  s_2569688183b285::t_fad221ac6f9e44 11-12,15,19,27-34,37,39-50,52,80-81,231-246,264-280,297-300,346-347,370-374,376,384-385,390,392,583-584,605-606,611-612,732,745,760-764,766-767,770-771,777-798,803-824,827,830-831,833-834,837,839-859,862-884,975-976,979-983,987
+packages/think/package.json
+  s_2569688183b285::t_042889cb1cfc42 12,30,46,49,51-52,124
+packages/think/scripts/build.ts
+  s_2569688183b285::t_c50c73f125a8c2 22
+packages/think/src/e2e-tests/action-ledger-recovery.test.ts
+  s_2569688183b285::t_bfb2d0487847f7 14-15,56-58
+packages/think/src/e2e-tests/action-pause-recovery.test.ts
+  s_2569688183b285::t_b7be97bc3bbac8 14-15,56-58
+packages/think/src/e2e-tests/assistant-e2e.test.ts
+  s_2569688183b285::t_d09e57a9df5e69 9-10,59-61
+packages/think/src/e2e-tests/chat-recovery.test.ts
+  s_2569688183b285::t_4c9aae92d8e3bb 11-12,77-79,506-515
+packages/think/src/e2e-tests/context-overflow-recovery.test.ts
+  s_2569688183b285::t_6aac18a0389fae 17-18,67-69
+packages/think/src/e2e-tests/messenger-recovery.test.ts
+  s_2569688183b285::t_f331d5a813a2ec 17-18,57-59
+packages/think/src/e2e-tests/persist-false-preserves.test.ts
+  s_2569688183b285::t_70fe3f3b9a7cc8 17-18,68-70
+packages/think/src/e2e-tests/reattach-budget.test.ts
+  s_2569688183b285::t_ede77ae8b782f9 38-39,95-97
+packages/think/src/e2e-tests/stall-recovery.test.ts
+  s_2569688183b285::t_bb548d2a8c5028 17-18,63-65
+packages/think/src/e2e-tests/step-prompt-structured.test.ts
+  s_2569688183b285::t_e26331880c26d2 20-21,82-84
+packages/think/src/e2e-tests/submission-recovery.test.ts
+  s_2569688183b285::t_9727cbbf7125e9 17-18,37-41,66-68,280-444
+packages/think/src/e2e-tests/task-amplification.test.ts
+  s_2569688183b285::t_1f499ae1c3be55 17-18,87-89
+packages/think/src/e2e-tests/tool-rollback.test.ts
+  s_2569688183b285::t_64201c29ff83e4 19-20,71-73
+packages/think/src/e2e-tests/worker.ts
+  s_2569688183b285::t_1c0826290f4383 11-16,31,46,240-241,331-332,550-552,554-555,646-647,798-799,905-906,1024-1025,1097-1098,1687-1689,1693-1695,1698-1700,1712-1723,1735-1862,1915-2076,2097-2115,2118,2120-2121,2297,2299-2300,2323-2331,2351,2359,2362,2389-2397,2404-2422,2447-2458,2462-2463,2465-2466,2468,2473,2475-2476,2658,2660-2661
+packages/think/src/e2e-tests/workflow-recovery.test.ts
+  s_2569688183b285::t_3da6b5a47bc68e 11-12,15-16,57-59,238,246-255,257,262-264,275-277
+packages/think/src/e2e-tests/wrangler-process.ts
+  s_2569688183b285::t_2eee8c79793635 1,3-7,18,22,26-41,47-49,61
+packages/think/src/extensions/bridge-provider.ts
+  s_2569688183b285::t_d9a12c319e8a9c 3
+packages/think/src/extensions/hook-proxy.ts
+  s_2569688183b285::t_e97b62a6a66207 10,57-58,63-65,68-69,78-83
+packages/think/src/media-eviction.ts
+  s_2569688183b285::t_9d623ffe553339 2,4-5,7-15,17-19,21-28,33-35,39-41,46,51-52,56-61,82-107,111,114,116,120-124,128-130,132,135-136,138-140,142-147,149-150,152-153,163,166-167,172-173,179,183-219,221,225,227,236-238,240-241,248,255-295,298-323,326-327,332-340
+packages/think/src/messengers/chat-sdk.ts
+  s_2569688183b285::t_0a2f41fb110c61 8-10,12,15,46-47,52,60-92,144-193,216-223,253-262,267-268,289-303,314-315,318-319,321-323,377-397,414-446,457-460,474,476-478,482-484,488-550,560-561,565-567,574,583,591,603,611-634,637-640,643,648,650,680-717,725-740,748-750,799-829,854,857-865,928-936,942-958,1054-1055,1061-1065,1070,1074,1107-1127,1179-1184,1186,1189-1190,1192-1196,1207-1229
+packages/think/src/messengers/delivery.ts
+  s_2569688183b285::t_72637296fffdcc 3,5-9,25-29,35,37,44,54,64-72,74,78,85,87-89,91,99-111,129-142,234-236,238-240,394-400,404-419,450,462-499,516-519,540-544,546-551,559-572,576,605-607,620-621
+packages/think/src/messengers/events.ts
+  s_2569688183b285::t_152cbcd2dd85a0 83-90,98-102,106,108-116,138-164,237-255,257,269-282
+packages/think/src/messengers/index.ts
+  s_2569688183b285::t_b13a2a7029a656 3,20,43
+packages/think/src/react-tests/stream-resume.test.tsx
+  s_2569688183b285::t_46f34a48461c11 7,10
+packages/think/src/react.tsx
+  s_2569688183b285::t_8c70daf7d81f1c 21-23
+packages/think/src/session.ts
+  s_2569688183b285::t_f6674ecfe90f11 2,4-21,26-34,36-45,47-59,62-73,76-93,95,97-99,101-108,112-117,119,123-134,139-140,142-143,148-150,153,157-162,165-168,171-179,181-194,197-199,201-203,206-207,210-211,214-215,218-219,222,224-228,230-235,238,240-242,245-252,255-259,262-263,266-267,270,272-277,280-282,284-285,288-291,293-298,301-303,306-309,311-314,316-318,321-333,336-350,352-357,359
+packages/think/src/tests-d/agent-props.test-d.ts
+  s_2569688183b285::t_71bde339425940 1-28
+packages/think/src/tests/action-pause-recovery.test.ts
+  s_2569688183b285::t_d5264da289f5d8 79-83,159-160
+packages/think/src/tests/actions-durable-pause.test.ts
+  s_b2b9b60652ef3b::t_5f4570d49b7213 2,8-10,15-39,318,322-323,339-414,418-437,439-441,443-1049
+packages/think/src/tests/agent-tool-reattach-recovery.test.ts
+  s_2569688183b285::t_1a40e90e102749 2,7,80-84,128-129
+packages/think/src/tests/agent-tool-rebind-noop.test.ts
+  s_2569688183b285::t_a16eeea7a7969f 2,7,83-127
+packages/think/src/tests/agent-tools.test.ts
+  s_2569688183b285::t_d7e432d8a460d3 1,7,22-24,29-31,35,53-73,108-109,111-118,124-127,233-240,242-244,311-314,316-321,323-325,340-343,345-350,360-372,477-712,783-873
+packages/think/src/tests/agents/assistant-agent-loop.ts
+  s_2569688183b285::t_231a720a95ca37 8,11,13,23-24,118-121,132,141-146,152,305-315,333,345-379,384-448,466,474,559,582,827,829,843,857-872,913,962,1146,1162-1166,1270-1275
+packages/think/src/tests/agents/client-tools.ts
+  s_2569688183b285::t_e9465dfc085663 13,16-18,97-99,113,165,398-484,759-801,803,809-810,816,826-837,839-843,845-881,888-903,905,930-935,944-945,951-960,962-965,994-997,1019-1020,1025-1032,1244-1350,1525-1556
+packages/think/src/tests/agents/connection-state.ts
+  s_2569688183b285::t_e2b544bf908a74 2-3,5-19,22-31
+packages/think/src/tests/agents/execute-hitl.ts
+  s_2569688183b285::t_584baa0c87251a 10-12,20-27,30-31,33,40-54,86,108-110,211-214,266-274,276-313
+packages/think/src/tests/agents/extension-hooks.ts
+  s_2569688183b285::t_b21e9ede11e730 13,206-258
+packages/think/src/tests/agents/index.ts
+  s_2569688183b285::t_da97a7d985c168 15-21,27,39-41,48-55,57
+packages/think/src/tests/agents/messengers.ts
+  s_2569688183b285::t_75c6b97eb44141 1-3,5-12,59-628
+packages/think/src/tests/agents/prompt-cache.ts
+  s_2569688183b285::t_e8fcc31ffc6ac0 1-32,35-48,50-53,55-70,72-105,107-116,118-121,123-131,133-161,163-174,176-192,194-198,200-211,213-214,216-244,246-247,252-254
+packages/think/src/tests/agents/think-session.ts
+  s_2569688183b285::t_2e943316396520 3,6,21,47-50,52,54-56,61,63-64,87-179,236-246,257,259-260,270,615-631,634,639-643,645-647,654-656,660-686,702-718,752-769,795-800,805-808,908-1339,1349,1353-1357,1379-1381,1404-1406,1414-1424,1427-1440,1444-1447,1449-1456,1459-1460,1463-1464,1467-1468,1471-1472,1475-1476,1479-1481,1483-1485,1488-1492,1495-1497,1499-1816,1823-1857,1893-1896,1912-1936,2018-2025,2038-2048,2050,2053-2056,2065,2071-2074,2086-2088,2092-2107,2160-2225,2248-2277,2292,2345-2347,2351,2514-2518,2520-2525,2527,2530,2532,2534-2537,2539-2543,2546,2566-2570,2572-2573,2601-3225,3245-3250,3336-3339,3638-3639,3851-3869,4242-4243,4254-4255,4260-4315,4494-4512,5086-5089,5092-5093,5120,5125,5129,5133,5138,5142,5146,5150,5154,5160-5161,5163,5216-5282,5287,5289-5291,5294-5295,5318,5323,5327,5406,5409-5411,5413-5414,5449-5453,5466,5485,5494,5592-5597,5610-5611,5617-5620,5622-5624,5628-5632,5634-5643,5672-5681,5686-5688,5793-5922,5937-5949,6030-6054,6276-6278,6318,6342,6347-6351,6411-6426,6588-6595,6600-6626,6676-6677,6679,6796-6801,6803-6815,6960-6963,6967-6975,6981,6985,6995-6996,6998-7001,7003-7004,7006-7009,7015,7028-7034,7036-7076,7078,7080-7081,7094,7129-7134,7185-7222,7246-7269,7276,7279-7280,7328-7334,7562-7575,7624-7632,7786-7788,7790-7791,7794-7802,7809-7813,7817-7821,7846,7896-7897,7978-7986,7993-8011,8020-8023,8025-8044,8053-8089,8104-8127,8129-8131,8144-8146,8157,8174-8275,8326,8328,8338,8340-8358,8367,8370-8390,8445-8458,8590-8629,8643,9053-9060,9062-9068,9071-9194,9391-9398,9436,9474,9526,9605-9606,9847,9853-9854,9905,9913,9953-9961,10040-10049,10191,10220,10256,10260-10287,10291,10341-10342,10344-10347,10349-10350,10352-10355,10363,10375,10377-10380,10384,10386,10412-10414,10435-10455,10459,10520-10607,10677-10741,10749-10751,10755-10771,10773-10819,10821-10881,10883-10887,10889-11200,11207-11216,11238,11242-11251,11262-11273,11277-11279,11288,11291-11293,11295,11303-11304,11331-11334,11399,11401,11406,11409,11519-11624,11639-11650,11658-11660,11673,11678-11681,11690,11705-11707,11727-11767,11772,11777-11789,11794-11824,11828-11832,11834-12125
+packages/think/src/tests/assistant-agent-loop.test.ts
+  s_2569688183b285::t_7f7285104c85e4 645-694,761-800
+packages/think/src/tests/assistant-agent.test.ts
+  s_2569688183b285::t_690a7b73e38111 2,204-205,208,234-235,238,240,244-254,295-296,299
+packages/think/src/tests/assistant-message-metadata.test.ts
+  s_2569688183b285::t_e4ea74ba7c4fb6 1-359
+packages/think/src/tests/assistant-tools.test.ts
+  s_2569688183b285::t_f1395682d04270 65,99,101,103-105
+packages/think/src/tests/attachment-consumption.test.ts
+  s_2569688183b285::t_20b962b06df451 2,8
+packages/think/src/tests/channel-policy.test.ts
+  s_2569688183b285::t_45d3be13ef054b 2,7
+packages/think/src/tests/channel-recovery.test.ts
+  s_2569688183b285::t_fbd80f8d4dee7b 2,8,77-81,121-122
+packages/think/src/tests/channel-threading.test.ts
+  s_2569688183b285::t_4340ff6427e412 2,8
+packages/think/src/tests/client-tools.test.ts
+  s_2569688183b285::t_d84de880184ca1 2,807-999,1260-1299,1406-1452,3531,3533,3544-3561
+packages/think/src/tests/connection-state.test.ts
+  s_2569688183b285::t_839d991d4d809c 1-2,5-10,12-25,27-35,37-56,58
+packages/think/src/tests/deliver-notice.test.ts
+  s_2569688183b285::t_9b9b933fd24d41 2,8
+packages/think/src/tests/errored-stream-replay.test.ts
+  s_2569688183b285::t_a90f9c37cecf56 2,24
+packages/think/src/tests/eviction-recovery.test.ts
+  s_2569688183b285::t_f697cddd640e3b 11,16
+packages/think/src/tests/execute-hitl.test.ts
+  s_2569688183b285::t_d681e6dee5607a 34-38,43-44,133-136,139,214-245,379,381-383,396-397,399-401,404-442
+packages/think/src/tests/fetch-tools.test.ts
+  s_2569688183b285::t_406e68de6e9ea7 2,587
+packages/think/src/tests/fiber.test.ts
+  s_2569688183b285::t_17b72240da860c 2,7
+packages/think/src/tests/hooks.test.ts
+  s_2569688183b285::t_2579e7cdbe8e5c 150-333,461-511,1443-1468,1731-1743,2126-2243,2265-2284
+packages/think/src/tests/hydration-budget.test.ts
+  s_2569688183b285::t_4ee430bda12bab 2,4,17,32-41,45-52,54-57,66,79-84,101-131,149,175,186,198,215-217,219,222,225-238,240-247,249-253,256-260
+packages/think/src/tests/media-eviction.test.ts
+  s_2569688183b285::t_3cf7e650c2a7ae 1-3,5-6,9-14,17-62,65-66,69-87,89-144,147-175,177-187,189-196,199-209,213-229,232-243,246-260,262-265,267-275,277-288,291-372,375-376,378-379,382,388-389,391,395,398,403-405,407-408,410,414
+packages/think/src/tests/messengers.test.ts
+  s_2569688183b285::t_f5bbe177096ccc 8,33,36,296-491,828-1002,1122-1737,1841-2167,2445-2447
+packages/think/src/tests/onconnect-broadcast.test.ts
+  s_2569688183b285::t_1f6f3591d9234b 3-4,69-111,278-336
+packages/think/src/tests/onstart-degraded.test.ts
+  s_2569688183b285::t_234de144c07402 2,41,73,92,109,126
+packages/think/src/tests/origin-message-ids.test.ts
+  s_2569688183b285::t_96cddbd8d03484 1-323
+packages/think/src/tests/prompt-cache.test.ts
+  s_2569688183b285::t_fa149ea62c3497 1-159
+packages/think/src/tests/run-turn-recovery.test.ts
+  s_2569688183b285::t_3ecd1c6314b899 2,8,89-94,113-370
+packages/think/src/tests/run-turn.test.ts
+  s_2569688183b285::t_e29f08a28e4d1c 2-3,5,7-20,27,33-86,377-380,418,451-465,477-734,1014-1050
+packages/think/src/tests/scheduled-tasks.test.ts
+  s_2569688183b285::t_80e6bdaa39c72a 2,107
+packages/think/src/tests/stream-cleanup.test.ts
+  s_2569688183b285::t_5581c68d98581c 6-10,21-22,24,28,32,35,37-42,45,50-51,53,56-57,59,62-67,71,75,82,93,109-118
+packages/think/src/tests/streaming-message-id.test.ts
+  s_2569688183b285::t_b5820519829dec 17,98-107,109,111-113,115-117,119-132,134-136
+packages/think/src/tests/submissions.test.ts
+  s_2569688183b285::t_623bf3f451db8a 2,7,35-37,42-50,66,91,119-126,128-132,140-150,153-156,167-181,209,217,225-231,237,373-376,724-785,904-1299,1318,1321,1326,1328,1336-1337,1339,1343,1345,1347-1349,1421-1637,1732,1763,1766,1768,1779-1801,1803-1807,1809-1811,1892-1991,2074-2091,2134-2225,2502
+packages/think/src/tests/terminal-frame-order.test.ts
+  s_2569688183b285::t_a5f2b612e75cdf 1-151
+packages/think/src/tests/think-eviction.test.ts
+  s_2569688183b285::t_585d6d9139ffd0 11,20,27,34
+packages/think/src/tests/think-session.test.ts
+  s_2569688183b285::t_4f070925b02eed 2,11-17,26,36,43,106,113,120,127,134,141,148,155,162,619-620,622-1024,1360-1413,1472-1509,1512,1514-1516,1523-1572,1575,1582-1642,2315,2317,2674-2699,2925-3229,3246-3247,3253,3259,3305,3311-3314,3316-3318,3678,4328-4332,4352-4396,4440-4441,4532-4533,4619-4621,4624,4629-4634,4636-4647,4649-4672,4674,4676-4684,5310,5313-5316,5469-5474,5671-5676,5759-5773
+packages/think/src/tests/turn-metadata.test.ts
+  s_2569688183b285::t_0c9f601eded6af 2,8
+packages/think/src/tests/vitest.config.ts
+  s_2569688183b285::t_e43b823c720dff 32
+packages/think/src/tests/worker.ts
+  s_2569688183b285::t_cfe254b030562c 6-9,13-14,24,31-37,51,55,62-65,76,83-89,103,107,114-117,232,239-245,259-260,270,272-273
+packages/think/src/tests/wrangler.jsonc
+  s_2569688183b285::t_c33ab8fb222833 14-21,50-53,78-105,158-165,202-205,210-217,228-231,240-241,249,256-262,276-277,287,289-290
+packages/think/src/tests/ws-web-channel.test.ts
+  s_2569688183b285::t_08ab06c19e785b 1-229
+packages/think/src/think.ts
+  s_b2b9b60652ef3b::t_08b976ee937e9c 18-19,67,72-75,77-79,82-83,102,131-135,149-153,158,179,189,197,214-215,220-224,233-235,241,245-246,257-258,262-263,271,274,276-286,289-290,293-298,301-387,389-396,401-617,624-630,637-640,643,669-675,680,814-825,1395,1405,1424-1429,1461,1488-1516,1586-1589,1591-1595,1598-1625,1696-1698,1732,1734-1739,1850-1858,1937-1938,1963-1968,1993-2043,2422-2456,2465-2574,2629-2630,2637-2676,2688-2692,2706-2708,2711-2719,2781-2785,2789-2793,2799-2829,2867-2877,2933-2945,2968-2971,3108-3113,3202-3206,3303-3304,3424-3475,3481-3493,3530-3539,3552-3562,3584-3590,3592-3597,3599,3602,3604-3610,3612-3614,3616-3617,3619-3625,3632-3634,3646-3650,3652-3654,3656-3671,3673-3682,3684,3715-3723,3808,3811-3816,3836-3893,3895-3914,3967-3980,4024-4026,4074-4079,4156-4159,4167-4170,4174-4196,4210-4211,4218-4220,4232,4283-4308,4311-4314,4316-4322,4325-4340,4343-4353,4355-4378,4380-4384,4387-4392,4396-4397,4399-4404,4406-4409,4411-4414,4420,4426-4432,4434-4440,4444-4446,4451-4458,4463-4465,4468,4478,4480-4488,4492-4494,4501-4512,4523-4534,4557-4596,4613-4616,4619-4621,4626-4631,4634,4669-4674,4680-4683,4686-4697,4704-4705,4711-4714,4719-4720,4722-4726,4729,4734-4739,4745-4747,4774-4780,4833-4839,4853-4854,4869,4881-4882,4884,4888,4890-4891,4893-4898,4903-4919,4935-4936,4941-4943,4966,4979-4995,4997,5054,5056-5058,5060-5069,5072-5082,5090-5092,5108-5115,5118,5123,5132-5134,5139-5141,5146,5224-5242,5254-5279,5284,5286-5293,5298-5299,5339-5341,5350-5354,5361-5363,5365-5370,5372,5376-5401,5419-5420,5423-5425,5564-5569,5645-5668,5676-5677,5712-5713,5740-5959,5972-5973,5975-5994,5996-6062,6141-6155,6199-6209,6295-6296,6339-6345,6351-6352,6356-6358,6362-6382,6406,6408,6420-6423,6430-6431,6433,6435,6444-6482,6506-6511,6520-6522,6524,6526,6793-6802,6830-6832,6834,6836-6858,6863,6875-6906,7025-7026,7036,7038,7055-7065,7086,7090,7145-7150,7321,7341-7346,7352,7364-7365,7395,7433,7440-7444,7453-7459,7464-7466,7468-7471,7487-7489,7504,7554-7559,7643-7646,7671-7673,7747,7753-7754,7820-7822,7845-7847,7850-7854,8423-8426,8745,8750-8751,8890,8895,8999,9004,9006-9008,9258,9283-9286,9412,9415-9426,9432-9462,9464-9487,9491-9496,9499-9500,9561-9562,9564-9567,9594-9596,9609,9700-9704,9992,9998-9999,10001-10003,10009-10011,10094,10167-10168,10176,10208-10222,10266-10270,10323-10343,10392-10394,10397-10401,10440-10443,10467-10469,11432-11437,11440-11453,11474-11475,11490-11491,11526-11527,11542-11543,11564-11565,11597-11603,11666,11668-11669,11689-11775,11777-11801,11810-11818,11821,11828,11835-11851,11855-11863,11867-11879,11881-11899,11901-11914,11918-11942,11947-11965,11967,11993,11997-12014,12042-12045,12059,12072-12073,12084-12085,12107,12109-12123,12141-12143,12149-12167,12170-12176,12234,12272,12282-12292,12295-12296,12302,12304-12305,12309-12319,12342-12343,12347-12349,12351,12374-12376,12389,12403-12404,12411-12413,12430-12431,12436-12438,12452,12454-12459,12476-12477,12488-12504,12511-12532,12543-12544,12550-12564,12580,12596,12619,12624-12651,12659,12663-12666,12684-12699,12701,12705,12709-12711,12713-12715,12726,12731-12741,12744-12783,12910-12911,12930,12997,13096,13131-13132,13144-13163,13178-13180,13184,13192-13195,13222,13233-13235,13240,13244,13262-13267,13293,13330,13339-13340,13347,13534,13610-13613,13622,13703,13706-13709,13712,13716,13732,13879,13890-13891,13924,13958,13994-14032,14104,14138-14148,14199-14203,14341-14345,14349,14351,14374,14376,14379-14384,14412-14418,14424-14447,14455-14458,14461,14466-14475,14502,14512-14513,14547,14552,14554,14556-14559,14562-14583,14588-14589,14592-14595,14602,14608-14616,14619-14636,14640,14648-14649,14658-14662,14665,14667-14670,14672,14685-14690,14693-14711,14721,14730,14737-14738,14761-14763,14811-14812,14825-14830,14850-14856,14861,14871-14876,14878-14884,14892-14894,14897,14905,14907,14919-14924,14945-14956,14958-14960,14966-14989,15017-15020,15023,15028-15037,15073,15084,15121,15130,15132-15135,15138,15143-15147,15149,15156-15163,15165,15168-15172,15174-15186,15192,15200,15214,15216-15220,15231,15234,15241,15246,15248,15254,15258-15282,15286-15302,15304-15347,15350-15352,15389,15393,15395,15397-15539,15574-15658,15660-15662,15666-15678,15680-15686,15688-15689,15691,15693-15700,15702-15712,15715-15733,15735,15737-15741,15746,15757,15762,16117-16118,16124-16125,16128,16170,16182-16183,16203,16208-16210,16215-16218,16222-16223,16225-16228,16232-16234,16241-16243,16245,16251,16258-16262,16264-16283,16301,16307-16309,16321-16326,16330-16335,16340-16360,16362-16475,16477,16483-16491,16498-16513,16515,16522-16528,16541-16601,16785-16794,16797-16810,16813,16823-16825,16832,16900-16903,16908,16916-16925,16927-16928,16936-16943,16949-16950,16994-16995,17012-17015,17030-17031,17037-17038,17047-17048,17050-17051,17067-17081,17084,17089-17096,17098-17100,17103,17106-17110,17116,17118-17124,17130,17140-17181,17183-17232,17234-17259,17262-17263,17267,17272,17276-17277,17281-17336,17348-17383,17446-17449,17465-17474,17515-17516,17531-17534,17538,17550-17551,17565,17584,17594-17597,17600,17603-17604,17608,17613,17630-17631,17637-17642,17789-17792,17810-17812,17820-17826,17828-17830,17834-17839,17841,17949-17951,17957,17962-17966,17982-17983,17985,17994-17995,18001,18012-18058,18060-18074,18076,18175-18186,18188-18195,18207,18238-18246,18252-18253,18255-18257,18260,18264,18267,18273-18275,18280-18283,18287,18292-18326,18329-18330,18332-18350,18363-18377,18379,18476-18486,18488-18495,18507,18577-18585,18669-18676,18680-18686,18722,18728,18760-18767,18769,18780-18782,18787-18850,18856,18861-18864,18866-18905,18907-18915,18917-18921,18923-18924,18927,18929-18932,18935-18937,19042-19403,19418-19419,19422,19440-19441,19443,19454,19566,19568-19574,19583-19589,19593-19594,19596-19597,19601-19603,19605-19625,19629-19631,19634,19652,19656-19660,19663-19669,19677-19708
+packages/think/src/tools/workspace.ts
+  s_2569688183b285::t_016b797493dcb3 35-41,421-433
+packages/voice/CHANGELOG.md
+  s_2569688183b285::t_2ac8a886c95457 3-49,150,160
+packages/voice/README.md
+  s_2569688183b285::t_fe36810cd009c4 1,3-4,6,8-13,15,17-18,22-24,27-29,31
+packages/voice/package.json
+  s_2569688183b285::t_4747f48050b494 3-4,14,33-37,51,69,85-87
+packages/voice/scripts/build.ts
+  s_2569688183b285::t_00e51e68cd8a8e 9-14
+packages/voice/src/compatibility.test.ts
+  s_2569688183b285::t_8f7b94fd94fc13 1-23
+packages/voice/src/errors.ts
+  s_2569688183b285::t_ce1404b5d7fc06 1-2
+packages/voice/src/voice-client.ts
+  s_2569688183b285::t_26b25fb54c71ca 1-2
+packages/voice/src/voice-react.tsx
+  s_2569688183b285::t_68d9ce79083464 1-2
+packages/voice/src/voice.ts
+  s_2569688183b285::t_42981d23b325d6 1-2
+packages/voice/vitest.config.ts
+  s_2569688183b285::t_3333a159e19a25 5-6
+packages/worker-bundler/CHANGELOG.md
+  s_2569688183b285::t_a6f1dd5db355f3 3-24,84,117,126,153
+packages/worker-bundler/package.json
+  s_2569688183b285::t_597e4e73391227 4,39,42
+packages/worker-bundler/src/app.ts
+  s_2569688183b285::t_5930b12882156a 229-231
+packages/worker-bundler/src/common.ts
+  s_2569688183b285::t_b0069ef7b11ceb 1-96
+packages/worker-bundler/src/file-system.ts
+  s_2569688183b285::t_db3b9fb5ae9352 14,297-300
+packages/worker-bundler/src/index.ts
+  s_2569688183b285::t_f49578398a5c37 11,66-67,117,120-122,142-164
+packages/worker-bundler/src/installer-python.ts
+  s_2569688183b285::t_ee87d2f7b51d1a 1-47,50-62,65-68,71-73,76,78-92,95-128,131-157,159-161,165-166,169-171,173-174,176-179,182-202,204-206,208,210-213,215-229,231,233,235-239,242-255,257-258,261,264-270,272-276,278-280,282-284,287-298,300,303-321,324-342,345-352,354-361,363-365,367-370,372-381,383-401,403-412,414-419,421-426,428-429,431-448,450,452-454,456-458,460-468,470-471,473-491,493-494,496-500,502-505,507-522,524-538,540-552,554,557-572,574-591,593
+packages/worker-bundler/src/installer.ts
+  s_2569688183b285::t_4775657fc2f02c 6-7,10-13,16,76,78-79,83-90,92-96,98-100,102-123,135,151,184,517,520,522,524-541,543
+packages/worker-bundler/src/tests/e2e.test.ts
+  s_2569688183b285::t_aa0042827f88c5 11,988-1489
+packages/worker-bundler/src/utils.ts
+  s_2569688183b285::t_69992283899b95 24
+pnpm-lock.yaml
+  s_2569688183b285::t_4e3fad28554fa5 17,20,23,26,35,40-41,47,50,53,73-74,76-77,79-80,86,97-98,125,136-137,140,143,148-149,155,158,176,191,193-194,197-198,213,224-225,237,246,255,277,295,307,335,353,368,379-380,405,429,441,456,458-459,481,502,520,534-535,557,578,587,596,618,639,654,685,706,715,724,746,760-811,816,819,831,834,862,886,898,910,912-913,935,959,971,983,985-986,1008,1032,1035,1047,1062,1064-1065,1087,1108,1116-1117,1139,1164,1176,1204,1244,1262,1265,1277,1286,1308,1335,1347,1359,1381,1399,1430,1448,1485,1506,1521,1533,1535-1536,1558,1576,1613,1656,1671,1674,1688-1689,1711,1729,1766,1784,1789-1790,1801-1802,1821,1824,1833,1845,1847-1848,1870,1890-1891,1907,1910,1927-1928,1950,1968,1974,1985-1986,1994-1995,2017,2038,2050,2065,2067-2068,2090,2104,2108,2111,2114,2117,2120,2124-2127,2130,2133,2142,2151-2154,2157,2159,2161-2163,2166-2169,2172-2175,2178-2181,2184,2187-2193,2197,2200,2203,2212,2215,2221,2224-2227,2229,2233-2248,2251-2254,2257,2260,2263-2269,2273-2276,2279,2282,2291,2294,2300-2303,2306,2308,2310-2312,2315-2316,2318-2321,2324,2327,2330,2333,2336,2339,2342-2345,2349-2352,2355,2358,2367,2370,2374-2379,2382,2384,2386,2388-2401,2404-2407,2410,2413,2416,2419,2423,2426,2429,2438,2447,2450,2452,2456,2460,2466,2468,2472,2475,2478,2481,2484,2488-2491,2494,2497,2506-2509,2512,2518-2521,2524,2526,2528,2530-2543,2546,2550,2556,2558-2590,2594,2597,2600,2603,2606,2610-2613,2616,2619,2628-2631,2634,2640-2643,2646,2648,2650,2652-2670,2674-2685,2692-2706,2714-2716,2728-2731,2742,2744,2746,2752-2755,2757-2758,2763-2765,2773,2777,2790-2792,2812-2814,2817,2831,2833-2835,2838-2842,2847,2856,2878,2892,2894-2896,2899-2903,2905,2909-2911,2915-2917,2924-2929,2933,2939,2951,2962,2969,2981,2993,2995-2996,3018,3032,3036-3042,3046-3048,3055-3057,3079,3090,3092-3094,3097-3098,3100,3109,3137,3151,3155-3158,3165-3167,3195,3209-3234,3236-3238,3241,3248-3250,3258-3259,3281,3295,3297-3300,3302-3311,3317-3329,3331-3333,3337-3354,3358-3360,3365,3369,3376-3381,3383-3388,3392-3475,3477-3479,3483,3488,3492,3495,3499-3507,3509-3514,3517-3538,3542-3553,3555,3562-3568,3578-3586,3590-3595,3597-3602,3606-3617,3621-3629,3631,3635,3639-3644,3646-3651,3655-3666,3670-3678,3680,3685-3687,3690-3693,3703-3711,3715-3720,3722-3727,3731-3742,3746-3754,3756,3758-3775,3779-3793,3795-3797,3801-3818,3822-3824,3829,3831-3842,3846-3860,3862-3864,3868-3885,3889-3891,3896,3898-3903,3907-3909,3921,3923-3931,3937,3940,3947-3963,3968,3972,3975-3978,3982-3984,3988,3993,4000,4003-4006,4010-4012,4016,4021,4028,4031-4034,4038-4040,4044,4049,4051-4053,4056,4059-4062,4066-4068,4072,4077,4079-4188,4216,4224-4225,4258,4261,4267,4296-4298,4324-4327,4343-4345,4348,4355-4358,4370,4380-4382,4391,4394,4404-4409,4411-4412,4418,4429-4431,4434,4439-4440,4453,4462,4464-4465,4470,4473-4474,4486-4487,4489-4490,4496,4499,4508,4514,4518,4521,4536,4542,4556-4557,4564-4567,4573,4580-4582,4590-4591,4610,4616,4628,4642-4643,4659-4670,4672-4674,4677-4680,4690-4696,4699-4702,4705-4708,4711-4720,4727,4729,4732,4735,4755-4757,4776-4781,4818-4823,4838-4841,4852-4864,4920-4927,4932-4933,4938-4939,4945-4946,4952-4953,4959-4960,4966-4967,4971-4972,4977-4978,4983-4984,4987-4989,4994-4995,4997-4998,5013-5014,5045-5050,5053-5054,5057-5058,5061-5062,5069-5070,5073-5074,5077-5078,5097-5100,5105-5108,5113-5114,5121-5124,5133-5136,5141-5143,5161-5162,5258-5262,5308-5309,5316-5317,5364-5365,5369-5370,5374-5375,5380-5381,5386-5387,5392-5393,5398-5399,5403-5404,5408-5409,5563-5564,5570-5571,5576-5577,5582-5583,5585,5594-5595,5597-5604,5612-5613,5615-5621,5630-5631,5633-5640,5648-5659,5666-5668,5688-5689,5692-5693,5699-5700,5712-5713,5749-5753,5758-5762,5768-5783,5797-5799,6065-6068,6077-6082,6088-6091,6098-6100,6108-6111,6119-6121,6131-6133,6143-6145,6155-6157,6167-6169,6179-6181,6183,6191-6193,6203-6205,6207,6216-6219,6230-6233,6244-6247,6258-6261,6272-6275,6286-6289,6291,6300-6303,6314-6319,6325-6328,6334-6337,6345-6348,6357-6360,6369-6374,6379-6380,6388-6389,6406-6407,6410-6411,6455-6457,6567-6576,6578-6579,6612-6613,6617-6618,6622-6623,6627-6628,6632-6633,6638-6639,6644-6645,6650-6651,6656-6657,6661-6662,6819-6821,7131-7135,7143-7148,7155-7160,7167-7172,7179-7184,7191-7196,7204-7210,7218-7224,7232-7238,7246-7252,7260-7266,7274-7280,7287-7292,7304-7309,7316-7321,7566-7575,7582-7585,7590-7593,7606-7609,7614-7621,7658-7660,7667-7672,7679-7684,7691-7696,7703-7708,7715-7720,7728-7734,7742-7748,7756-7762,7770-7776,7789-7800,7807-7812,7819-7824,7829-7832,7841-7845,7921-7930,8092-8094,8116-8120,8221-8225,8249-8257,8260,8262-8263,8265,8267-8268,8270-8271,8281-8286,8290-8300,8302-8303,8305-8306,8311-8358,8428-8433,8451-8453,8531-8532,8536,8561-8562,8578-8579,8596-8599,8628-8630,8636-8637,8650-8653,8674-8678,8839-8842,8861-8864,8913-8915,9122-9129,9137-9139,9194-9196,9259-9260,9283-9286,9303-9306,9500-9501,9530-9533,9769-9772,9804-9805,9824-9827,9846-9852,9976-9977,10027-10030,10114-10119,10126-10131,10138-10143,10150-10155,10162-10167,10175-10181,10189-10195,10203-10209,10217-10223,10230-10235,10242-10247,10252-10255,10290-10291,10304-10306,10378-10379,10513-10515,10522-10530,10541-10542,10596-10598,10606-10607,10619-10621,10623-10624,10668-10671,10675-10676,10690-10691,10741-10743,10896-10898,10949-10956,10988-10992,10998-11002,11024-11026,11086-11087,11112-11113,11145-11149,11183-11186,11210-11213,11321-11325,11338-11341,11365-11366,11390-11391,11411-11412,11430-11438,11549-11555,11564-11571,11611-11613,11652-11655,11703-11707,11728-11730,11742-11744,11791-11796,11798-11799,11830-11831,11917-11918,11928-11930,11963-11970,11977-11978,12071-12072,12103-12104,12185-12227,12250-12251,12258-12263,12291-12307,12364-12365,12369-12375,12405-12424,12436-12438,12463-12474,12513-12516,12539-12540,12553-12554,12561,12564-12565,12567,12570-12578,12580,12583,12585,12587,12590-12591,12593,12596,12598,12600,12603-12604,12606,12609-12610,12612,12617-12625,12627,12633,12643-12646,12651,12653,12655-12656,12663-12679,12687,12692,12695,12699,12701,12706,12712-12713,12729,12733-12734,12736,12754-12757,12760,12763,12766,12769,12772,12775,12777,12783,12786,12789,12791-12800,12805,12807,12817,12823-12831,12834,12836,12839,12850,12855,12871,12876,12940,12942-12948,12951,12953-12956,12959,12961-12982,12985,12987-12991,12996-13005,13008,13010-13013,13016,13018-13023,13026,13028-13032,13072-13082,13090-13096,13106,13108-13112,13120-13124,13135-13139,13142,13160,13164,13166-13167,13170,13177,13179-13180,13202,13228-13229,13238,13277,13281-13285,13322-13323,13331,13334,13336,13338-13339,13353,13377-13404,13416-13437,13448,13451,13454,13457,13460,13463,13466,13470,13473,13476,13643,13645,13651,13653-13654,13684,13698-13761,13770-13834,13836-13845,13847,13849-13855,13860,13862-13863,13865,13867-13871,13873,13876,13878-13879,13886,13891,13893,13899,13901-13902,13905-13907,13914-13927,13932-13935,13941-13944,13950-13953,13959-13962,13968-13973,13978-13979,13995,13997,14002,14004-14005,14013,14046-14048,14050,14062-14069,14071,14073,14078-14079,14090-14097,14102,14122-14126,14267,14287-14298,14301,14306,14308,14314,14319,14321,14352,14354,14362-14366,14372-14374,14380,14386,14392,14398,14404,14410,14416,14422,14428,14434,14442,14444,14452,14454,14462,14464,14472,14474,14482,14484,14492,14494,14502,14504,14512-14514,14522-14526,14532-14534,14540,14546,14552-14554,14557,14559-14560,14564-14580,14583-14584,14592-14617,14625,14627,14631-14640,14677-14678,14682,14687,14742-14744,14761,14765,14773,14780,14782,14799-14800,14809,14832-14839,14846-14852,14879,14882,14885,14888,14891,14894,14897,14900,14903,14906,14983,14985-14986,14988-14989,14998,15000-15001,15003-15005,15007,15015,15017-15020,15029,15031,15033-15035,15045,15047-15052,15065,15070,15086-15087,15212-15221,15268-15269,15274-15276,15280-15282,15286-15288,15292-15294,15298-15300,15304-15306,15310-15312,15316-15318,15322-15324,15328-15330,15334-15336,15340-15342,15347,15353-15408,15411,15414-15415,15418-15419,15519,15564,15577,15591,15595,15605,15607-15618,15627-15632,15637-15642,15657-15664,15671-15678,15701-15705,15724-15733,15737-15739,15743-15745,15749-15751,15755-15757,15761-15763,15767-15769,15773-15775,15779-15781,15785-15787,15791-15793,15797-15799,15803-15805,15821-15835,15851-15879,15881,15884,15899,15901,15912,15916-15918,15926,15930-15932,15970,15974,16000-16011,16022-16031,16034,16054-16055,16062,16066-16067,16071,16203,16217-16220,16241,16243-16247,16263,16276,16280,16313,16315,16329-16401,16403-16415,16417,16419-16423,16425-16429,16431,16433-16446,16448,16450-16458,16464,16466,16469-16470,16474-16476,16482,16484,16488-16489,16491,16493,16495,16502-16527,16530,16532,16534,16537,16539-16545,16549-16561,16567-16658,16682,16699,16703,16721,16724,16735,16739,16741,16747-16754,16756,16758-16759,16772-16773,16836,16838-16841,16851,16853,16857,16864,16866,16869,16875,16884,16886-16887,16890,16892,16944,16946,16948,16952,16962,16979-16980,17002-17003,17005,17007,17017,17025,17027-17031,17045-17048,17070-17072,17097,17107-17108,17197-17198,17209-17210,17262-17263,17471,17474-17475,17489-17495,17506,17544-17545,17606,17625-17629,17643-17644,17726,17771,17785-17786,17889,17891,17898,17928,17943-17944,17954-17956,17998-18015,18043,18178,18189,18193,18209,18215,18230,18249,18259,18263,18272,18276-18277,18305,18311,18313-18314,18318,18321,18335-18338,18349-18351,18430,18481-18484,18490,18497,18501-18502,18597-18599,18603-18605,18609-18611,18615-18617,18621-18623,18627-18629,18633-18635,18639-18641,18645-18647,18651-18653,18657-18659,18676-18691,18717,18727-18731,18735-18736,18831,18842,18859,18874,18904,19106,19155-19157,19160,19162,19169,19174-19186,19197,19225-19239,19249,19263-19264,19266-19317,19322-19324,19334,19340-19342,19344,19380-19383,19386,19398,19408,19414,19418,19420,19430-19432,19434,19451,19463,19467,19469,19472,19484,19488,19497,19499,19521-19530,19568,19570-19573,19575,19577-19578,19580,19583-19585,19618,19626,19751-19752,19763,19784-19787,19818-19820,19827-19833,19849,19853,19855-19857,19905,19924,19926,19951,19984-19991,19997-20001,20026-20027,20055-20059,20076,20082,20107,20156,20170,20195-20215,20257,20265-20266,20287,20290,20294-20302,20320,20326,20335,20351,20366-20368,20402-20435,20488,20559-20562,20567-20573,20607-20608,20634-20679,20713-20716,20774-20777,20796-20797,20815,20817-20821,20849-20850,20856,20858-20860,20862,20888,20890,20916,20927,20960,20966-20967,20972-20973,20999-21002,21017,21021,21058,21067,21069,21077-21080,21091,21129,21135,21137,21155-21157,21168-21189,21191-21215,21217,21221,21226,21228-21234,21240,21245-21246,21250-21251,21256,21258-21264,21270,21275,21281-21341,21346-21363,21374,21378,21436-21452,21455,21457-21459,21478-21528,21543-21548,21553-21554,21583-21592,21617,21619,21623
+pnpm-workspace.yaml
+  s_2569688183b285::t_d612f7715fcb7a 4-7,37
+scripts/use-ai-sdk-major.mjs
+  s_2569688183b285::t_1999ebaee4abde 21-26,30
+site/agents/package.json
+  s_2569688183b285::t_95c251c137f404 21
+voice-providers/assemblyai/CHANGELOG.md
+  s_2569688183b285::t_d0887e6cee81c5 3-24
+voice-providers/assemblyai/README.md
+  s_2569688183b285::t_31c6082bd4f6be 10,19
+voice-providers/assemblyai/package.json
+  s_2569688183b285::t_cf8326ae93ce01 3,14,45-47
+voice-providers/assemblyai/src/index.ts
+  s_2569688183b285::t_95fc7b20bb901e 11-16,300,337,390-403,431-438,440-446,450-455,457-459,461-462,475-483,485,503-508,518-523,567,569-574,691-692,694-706,711
+voice-providers/assemblyai/tests/index.test.ts
+  s_2569688183b285::t_750cefec087adb 407-452,918-921,931-946,954-957,966,972,990-998,1026,1028,1036,1042-1045,1049,1052-1070,1086-1087,1093-1101,1147-1151
+voice-providers/assemblyai/vitest.config.ts
+  s_2569688183b285::t_1698f708304e7c 1,5-11
+voice-providers/deepgram/CHANGELOG.md
+  s_2569688183b285::t_567044593afab8 1-23
+voice-providers/deepgram/README.md
+  s_2569688183b285::t_37d06be40dfa5b 10,19,63
+voice-providers/deepgram/package.json
+  s_2569688183b285::t_ba5891015ab2ac 3,14,44-46
+voice-providers/deepgram/src/index.ts
+  s_2569688183b285::t_ed86be29f9975f 5-10,51,120,125,128-130,140-145,149-152,168,174-185,197,199-214,218-224,226,233-243,279-301,337-349
+voice-providers/deepgram/tests/index.test.ts
+  s_2569688183b285::t_2d53e9582991d5 1-64
+voice-providers/deepgram/vitest.config.ts
+  s_2569688183b285::t_5f1b509a92c752 1-16
+voice-providers/elevenlabs/CHANGELOG.md
+  s_2569688183b285::t_6b428bcf9f694b 3-24
+voice-providers/elevenlabs/README.md
+  s_2569688183b285::t_44e77f91bf983d 8,17,43
+voice-providers/elevenlabs/package.json
+  s_2569688183b285::t_c7de09bf182d3a 3,14,46-48
+voice-providers/elevenlabs/src/index.ts
+  s_2569688183b285::t_8b5d4538a1df61 7-12,84,135-142,148-153,188-196,213-218,245,279-284,318-320,327-332,335-343,345-346,364-375,392-397,475-480,527-536
+voice-providers/elevenlabs/tests/index.test.ts
+  s_2569688183b285::t_965e3fc8880b63 30-33,41,46-49,58-114,153-154,164-172,226-230
+voice-providers/elevenlabs/vitest.config.ts
+  s_2569688183b285::t_e7e1b92e73ab24 1,5-11
+voice-providers/plivo/CHANGELOG.md
+  s_2569688183b285::t_af8a0e5a0d9ee6 1,3,7-8,10,14,16-23,25,27,29,31
+voice-providers/plivo/README.md
+  s_2569688183b285::t_6c40210e52dd0e 1,3,5,8-12,15,17,19-20,23,25,27,30-32,34,36-38,46-54,56-58,62,69,71,74-81,84,86,88,90,93-96,99,101,103,105-106,108-109,111-132,136-138,140,142,144,146,148,150,152-154,156-160,162,164,166-169,171
+voice-providers/plivo/package.json
+  s_2569688183b285::t_d9fcd908a96849 2-4,6,13-14,18-20,27-42,47
+voice-providers/plivo/scripts/build.ts
+  s_2569688183b285::t_2b0f3e63fdc61e 8-10
+voice-providers/plivo/src/audio/utils.ts
+  s_2569688183b285::t_886f45de5d9d83 1-123
+voice-providers/plivo/src/index.ts
+  s_2569688183b285::t_685e2242386d4f 1-318
+voice-providers/plivo/src/setup.ts
+  s_2569688183b285::t_2c330d4c272f25 1-127
+voice-providers/plivo/src/types.ts
+  s_2569688183b285::t_529c52a58568a2 1-40
+voice-providers/plivo/tests/audio/utils.test.ts
+  s_2569688183b285::t_9760763711e89f 2-29,31-35,38-42,44,46-49,52-58,61-66,69-72,75-77,81-84,87-88,91-92,95-97,100-103,105,107-116,119-121,124-128,132-139
+voice-providers/plivo/tests/index.test.ts
+  s_2569688183b285::t_2bffc1b9df0b0b 1-525
+voice-providers/plivo/tests/setup.test.ts
+  s_2569688183b285::t_e412a6d7bedd73 1-2,4-6,8-11,13-22,24-27,29-34,36-48,50-53,55,57-59,61-66,70-91,93,95-98,100,102-106,108-110,112,115-131,133-144,146,148-149,151-152,155-157,159,161-173,175-178,180-187,190-194,196-201,204-209,211-214,216,218-231,234-239,241-242,244-251,254-257,259,261-265,268-278
+voice-providers/plivo/vitest.config.ts
+  s_2569688183b285::t_85b58552ec79b2 1-17
+voice-providers/telnyx/CHANGELOG.md
+  s_2569688183b285::t_f63edcf6e88ae3 3-24
+voice-providers/telnyx/README.md
+  s_2569688183b285::t_d802f61d99c117 9,14,33,65,81,105
+voice-providers/telnyx/package.json
+  s_2569688183b285::t_57c92b6dcdc0df 3,14,65-67
+voice-providers/telnyx/src/helpers/transport-config.ts
+  s_2569688183b285::t_26082b7b066842 8
+voice-providers/telnyx/src/phone-client.ts
+  s_2569688183b285::t_21bbd3dfa26120 7,20,48,509
+voice-providers/telnyx/src/providers/call-bridge.ts
+  s_2569688183b285::t_d42867059b5a98 1,83
+voice-providers/telnyx/src/providers/stt.ts
+  s_2569688183b285::t_c1cb6dcbdd290c 4,8-13,81,114-115,130,137,142-145,150,152-156,171-174,187,189-190,201,212-222,226-243,266,268-279,299-321
+voice-providers/telnyx/src/providers/tts.ts
+  s_2569688183b285::t_9dd8ca5202ea89 4,20-25,100-105,134-139,163-170,229-234,341-348
+voice-providers/telnyx/src/transport/phone-transport.ts
+  s_2569688183b285::t_8d50012e92099e 5,18,45,51
+voice-providers/telnyx/tests/phone-client.test.ts
+  s_2569688183b285::t_2be94eeba7eb90 3
+voice-providers/telnyx/tests/providers/stt.test.ts
+  s_2569688183b285::t_8bfe711b7d2ade 251-258,262,267-271,299,301-307,311-314,423-427,430,433
+voice-providers/telnyx/tests/providers/tts.test.ts
+  s_2569688183b285::t_8de02293404b94 266-272,289-296
+voice-providers/telnyx/tests/transport/phone-transport.test.ts
+  s_2569688183b285::t_85212b33b3f3d9 3
+voice-providers/telnyx/vitest.config.ts
+  s_2569688183b285::t_3909dfbd75aace 1,5-11
+voice-providers/twilio/CHANGELOG.md
+  s_2569688183b285::t_18f1152e83aa8c 3-30
+voice-providers/twilio/README.md
+  s_2569688183b285::t_a337758263e34b 20,29
+voice-providers/twilio/package.json
+  s_2569688183b285::t_c1c2f195bfae51 3,14,28-29,45-47
+voice-providers/twilio/src/index.ts
+  s_2569688183b285::t_ae9b2c8fe9caae 18,37-38,131-138,171-175,230-239,245-250,269-274,278,282-286,289,293-310,328-332,342,355-359,369-386,432-450
+voice-providers/twilio/tests/index.test.ts
+  s_2569688183b285::t_b13a71ddf56b22 1-262
+voice-providers/twilio/vitest.config.ts
+  s_2569688183b285::t_eb24192c8b7c81 1-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4bd8974d281ea3e7fc06f652e2af6fd9090088dc",
+  "prompts": {},
+  "sessions": {
+    "s_2569688183b285": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "b40acb03-72f6-402b-bbba-e37b905e09f9",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    },
+    "s_b2b9b60652ef3b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "116a35e7-e84f-4df0-b25d-8bdcbff2fca7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
