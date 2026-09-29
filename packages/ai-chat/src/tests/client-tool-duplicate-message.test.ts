@@ -404,6 +404,88 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.close(1000);
   });
 
+  it.each([
+    {
+      name: "tool result",
+      pendingState: "input-available",
+      frame: { type: "cf_agent_tool_result", output: "first" },
+      expectedState: "output-available"
+    },
+    {
+      name: "approval",
+      pendingState: "approval-requested",
+      frame: { type: "cf_agent_tool_approval", approved: true },
+      expectedState: "approval-responded"
+    }
+  ])(
+    "applies a late $name to an older pending call when a newer call reusing the toolCallId has settled",
+    async ({ pendingState, frame, expectedState }) => {
+      const room = crypto.randomUUID();
+      const res = await exports.default.fetch(
+        `http://example.com/agents/test-chat-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      expect(res.status).toBe(101);
+      const ws = res.webSocket as WebSocket;
+      ws.accept();
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      const toolCallId = "call_reused_late";
+      await agentStub.persistMessages([
+        { id: "user-1", role: "user", parts: [{ type: "text", text: "One" }] },
+        {
+          id: "assistant-1",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-testTool",
+              toolCallId,
+              state: pendingState,
+              input: { turn: 1 },
+              ...(pendingState === "approval-requested"
+                ? { approval: { id: "approval-1" } }
+                : {})
+            }
+          ] as ChatMessage["parts"]
+        },
+        { id: "user-2", role: "user", parts: [{ type: "text", text: "Two" }] },
+        {
+          id: "assistant-2",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-testTool",
+              toolCallId,
+              state: "output-available",
+              input: { turn: 2 },
+              output: "second"
+            }
+          ] as ChatMessage["parts"]
+        }
+      ]);
+
+      ws.send(JSON.stringify({ ...frame, toolCallId, toolName: "testTool" }));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await agentStub.waitForIdleForTest();
+
+      const messages =
+        (await agentStub.getPersistedMessages()) as ChatMessage[];
+      const byId = new Map(messages.map((message) => [message.id, message]));
+      const older = byId.get("assistant-1")?.parts[0] as { state: string };
+      const newer = byId.get("assistant-2")?.parts[0] as {
+        state: string;
+        output?: unknown;
+      };
+      expect(older.state).toBe(expectedState);
+      expect(newer).toMatchObject({
+        state: "output-available",
+        output: "second"
+      });
+
+      ws.close(1000);
+    }
+  );
+
   it("CF_AGENT_TOOL_RESULT applies tool result without auto-continuation by default", async () => {
     const room = crypto.randomUUID();
     const res = await exports.default.fetch(
