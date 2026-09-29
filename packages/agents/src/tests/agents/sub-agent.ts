@@ -1,5 +1,7 @@
 import { Agent, callable, getCurrentAgent } from "../../index.ts";
 import type {
+  Connection,
+  WSMessage,
   FiberInspection,
   FiberRecoveryContext,
   FiberRecoveryResult,
@@ -7,6 +9,8 @@ import type {
 } from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
 import { MessageType } from "../../types.ts";
+
+const STALE_FRAME_PROBE = "stale-frame-probe";
 
 // ── SubAgent: Counter ───────────────────────────────────────────────
 // A SubAgent with its own SQLite counter table.
@@ -96,6 +100,10 @@ export class CounterSubAgent extends Agent {
       SELECT value FROM counter WHERE id = ${id}
     `;
     return rows.length > 0 ? rows[0].value : 0;
+  }
+
+  onMessage(_connection: Connection, message: WSMessage) {
+    if (message === STALE_FRAME_PROBE) this.increment(STALE_FRAME_PROBE);
   }
 
   ping(): string {
@@ -936,6 +944,14 @@ export class OuterSubAgent extends Agent {
     await this.subAgent(InnerSubAgent, innerName);
   }
 
+  async deleteInner(innerName: string): Promise<void> {
+    await this.deleteSubAgent(InnerSubAgent, innerName);
+  }
+
+  hasInner(innerName: string): boolean {
+    return this.hasSubAgent(InnerSubAgent, innerName);
+  }
+
   ping(): string {
     return "outer-pong";
   }
@@ -1419,6 +1435,44 @@ export class TestSubAgentParent extends Agent {
     await this.deleteSubAgent(CounterSubAgent, subAgentName);
   }
 
+  /**
+   * Deletes the child, recreates it under the same name, then forwards a
+   * frame from the socket the delete closed, as a late event would. Returns
+   * how many of those frames the replacement received.
+   */
+  async subAgentForwardStaleFrameToReplacement(
+    subAgentName: string
+  ): Promise<number> {
+    const sockets = (
+      this as unknown as {
+        _webSockets: { getConnections(): Iterable<Connection> };
+      }
+    )._webSockets.getConnections();
+    const connection = [...sockets].find((candidate) => {
+      const outerUrl = this._unsafe_getConnectionFlag(
+        candidate,
+        "_cf_subAgentOuterUrl"
+      );
+      return (
+        typeof outerUrl === "string" &&
+        outerUrl.includes(`/sub/counter-sub-agent/${subAgentName}`)
+      );
+    });
+    if (!connection) throw new Error("no socket for the sub-agent");
+
+    await this.deleteSubAgent(CounterSubAgent, subAgentName);
+    const replacement = await this.subAgent(CounterSubAgent, subAgentName);
+    await (
+      this as unknown as {
+        _cf_forwardSubAgentWebSocketMessage(
+          connection: Connection,
+          message: WSMessage
+        ): Promise<boolean>;
+      }
+    )._cf_forwardSubAgentWebSocketMessage(connection, STALE_FRAME_PROBE);
+    return replacement.get(STALE_FRAME_PROBE);
+  }
+
   async subAgentScheduleDelayed(
     subAgentName: string,
     delaySeconds: number,
@@ -1870,6 +1924,16 @@ export class TestSubAgentParent extends Agent {
   async ensureNested(outerName: string, innerName: string): Promise<void> {
     const outer = await this.subAgent(OuterSubAgent, outerName);
     await outer.spawnInner(innerName);
+  }
+
+  async nestedDeleteInner(outerName: string, innerName: string): Promise<void> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    await outer.deleteInner(innerName);
+  }
+
+  async nestedHasInner(outerName: string, innerName: string): Promise<boolean> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.hasInner(innerName);
   }
 
   async nestedSpawnWithFacetParentNamespaceHidden(

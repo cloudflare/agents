@@ -29,6 +29,10 @@
         "name": "RetryableStartObject"
       },
       {
+        "class_name": "ConcurrentStartObject",
+        "name": "ConcurrentStartObject"
+      },
+      {
         "class_name": "ScheduledLifecycleObject",
         "name": "ScheduledLifecycleObject"
       },
@@ -263,6 +267,10 @@
         "name": "TestWaitConnectionsAgent"
       },
       {
+        "class_name": "TestNativeRpcAgent",
+        "name": "TestNativeRpcAgent"
+      },
+      {
         "class_name": "RoutingOwnerAgent",
         "name": "RoutingOwnerAgent"
       },
@@ -427,6 +435,7 @@
         "PlainLifecycleObject",
         "StatefulPlainObject",
         "RetryableStartObject",
+        "ConcurrentStartObject",
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",
         "SchedulerStartupWarnObject",
@@ -483,6 +492,7 @@
         "TestKeepAliveAgent",
         "TestSessionAgent",
         "TestWaitConnectionsAgent",
+        "TestNativeRpcAgent",
         "RoutingOwnerAgent",
         "RoutedChatAgent",
         "TestSubAgentParent",

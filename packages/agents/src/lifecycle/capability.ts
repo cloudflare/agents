@@ -79,6 +79,11 @@ export type LifecycleServices = {
   readonly className: string;
   readonly storage: DurableObjectStorage;
   readonly sockets: LifecycleSockets;
+  /**
+   * Resolve once Lifecycle startup has finished, starting it if needed, and
+   * reject if that startup fails. Calls made from inside startup resolve
+   * immediately.
+   */
   readonly ready: () => Promise<void>;
   /**
    * Startup state: `"zero"` before startup, `"starting"` while capability
