@@ -2030,6 +2030,20 @@ describe("SubAgent", () => {
       expect(await parent.nestedHasInner(outerName, innerName)).toBe(false);
     });
 
+    it("a late frame from a deleted sub-agent's socket does not reach a same-name replacement", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      await connectWS(
+        `/agents/test-sub-agent-parent/${parentName}/sub/counter-sub-agent/${childName}`
+      );
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+      expect(await parent.has("CounterSubAgent", childName)).toBe(true);
+
+      expect(
+        await parent.subAgentForwardStaleFrameToReplacement(childName)
+      ).toBe(0);
+    });
+
     it("listSubAgents enumerates every spawned child", async () => {
       const parentName = uniqueName();
       const a = uniqueName();

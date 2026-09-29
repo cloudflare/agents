@@ -57,6 +57,12 @@ import type {
  */
 export const CF_SUB_AGENT_OUTER_URL_KEY = "_cf_subAgentOuterUrl";
 export const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
+/**
+ * Set on a socket closed because its sub-agent was deleted. Its late
+ * message/close events are dropped, so they can't reach a same-name
+ * replacement created after the delete. Storage-frozen — never rename.
+ */
+export const CF_SUB_AGENT_DELETED_KEY = "_cf_subAgentDeleted";
 
 /** Wire-frozen internal header carrying the outer URL on WS upgrades. */
 export const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
@@ -872,6 +878,11 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       const targetPath = this.connectionTargetPath(connection);
       if (!targetPath) continue;
       if (!this.#host._isSameAgentPathPrefix(prefix, targetPath)) continue;
+      this.#host._unsafe_setConnectionFlag(
+        connection,
+        CF_SUB_AGENT_DELETED_KEY,
+        true
+      );
       try {
         connection.close(code, reason);
       } catch {
@@ -1353,6 +1364,11 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     );
     const uri = typeof outerUri === "string" ? outerUri : connection.uri;
     if (!uri) return { status: "no-match" };
+    if (
+      this.#host._unsafe_getConnectionFlag(connection, CF_SUB_AGENT_DELETED_KEY)
+    ) {
+      return { status: "dropped" };
+    }
 
     const ctx = this.#host.ctx as unknown as Partial<FacetCapableCtx>;
     let match = parseSubAgentPath(uri, {
