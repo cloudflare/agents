@@ -35,6 +35,17 @@ export {
 } from "./session-store";
 
 export {
+  Browser,
+  browserRun,
+  type BrowserConnection,
+  type BrowserOptions,
+  type BrowserProvider,
+  type BrowserRunOptions,
+  type BrowserRunProvider,
+  type ResolvedBrowser
+} from "./browser";
+
+export {
   browserContent,
   browserExtract,
   browserLinks,

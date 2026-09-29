@@ -2,8 +2,6 @@
 
 **Status:** experimental (`agents/browser`)
 
-> A persistent named `Browser` (reattach-or-create, restart signaling, a Lifecycle capability) is being built beneath this connector — see [browser-sessions.md](./browser-sessions.md). It is internal and not yet exported. Everything below is the shipping surface.
-
 ## Problem
 
 Agents need full Chrome DevTools Protocol access — navigation, DOM reads, screenshots, network inspection — without shipping a generated protocol bundle, without handing LLM-generated code a raw network capability, and with browser sessions that survive the pauses a durable agent naturally takes (approvals, hibernation, long waits).
@@ -48,6 +46,21 @@ If Browser Rendering expires a session while a pause waits for a human, the resu
 - `runtime.expirePaused()` (codemode) handles the orderly case: stale never-approved pauses (and runs stuck `running` after a host crash) are expired and `disposeExecution` reclaims their sessions.
 - `connector.sweep()` is the crash backstop — call it from a scheduled task. Shared `cdp:reuse:*` entries are swept after `maxIdleMs` (default 10 min). Per-execution `cdp:exec:*` entries use a much longer window (`maxExecIdleMs`, default 24h — at least the runtime's paused TTL) and are touched on use, so an active or paused-awaiting-approval run is never swept out from under the runtime. A swept exec entry leaves a `closedAt` tombstone so a later resume fails with a clear "expired or was swept" error instead of silently continuing in a fresh browser.
 
+## Persistent browser tool
+
+`browserTool({ browser, loader })` gives the model one browser that stays open between runs. Tabs, cookies, and logins carry over. It runs on the same codemode runtime as `createBrowserTools`, but the host owns the browser: it creates one `Browser` ([browser-sessions.md](./browser-sessions.md)) and passes it in, so a tool rebuilt every turn still reaches the same browser. It returns a single AI SDK tool; the host picks its name, e.g. `tools: { browser: browserTool(...) }`.
+
+The model gets the same `cdp` global (`send`, `attachToTarget`, `spec`, `getDebugLog`, `clearDebugLog`), minus anything for starting, closing, or resetting browsers.
+
+- **`sessionId: "active"`** points at the tab the agent is working in, and it stays the same across runs. Opening a tab with `Target.createTarget` or switching with `attachToTarget` changes it. If the tab was closed, the tool picks another open tab or opens a blank one.
+- **Popups don't take over.** Tabs the page opens itself come back as `newTabs` in the result, and the model decides whether to switch.
+- **A lost browser doesn't stop the run.** If the browser had to be replaced, the code still runs in the new one, and the result includes `restarted: true` and a `notice` that earlier tabs and logins are gone.
+- **The model can't close the browser.** `Browser.close` and `Browser.crash*` are refused; the host decides when the browser ends.
+- **Helpful errors.** A page command sent without `sessionId` explains how to fix it.
+- **Live View is for the host.** The host calls `browser.liveView()` to give a person a link into the same browser. The agent can end its turn and pick up after they're done.
+
+The connector (`browser/session-connector.ts`) opens a CDP connection on the first call of a run and closes it when the run pauses or ends. Each `Browser` gets its own codemode runtime, so its run history stays separate from `createBrowserTools`.
+
 ## Key Decisions
 
 - **Connector, not bespoke tools.** Riding the codemode runtime buys durability (abort-and-replay, approvals pausing _inside_ a run with the session intact), the discovery surface (`codemode.search`/`describe`), and snippets — none of which the old provider-injection path had.
@@ -64,5 +77,7 @@ If Browser Rendering expires a session while a pause waits for a human, the resu
 - The local `wrangler dev` Browser Rendering simulator differs from production (DELETE is a no-op, lifecycle events are unreliable), so e2e assertions validate store-level state and simulate expiry at the storage layer.
 
 ## Verification
+
+`browser-session-connector.test.ts` covers the persistent tool's tab handling, popups, restarts, and errors. `browser-capability.test.ts` runs `browserTool` end to end on an Agent. The real-Chrome suite (`src/browser-tests/`) covers the active tab across runs and approval pauses, popups, detach and reattach, the refused `Browser.close`, and restarts.
 
 Unit tests (`browser-connector.test.ts`) cover executionId keying, `disposeExecution` idempotency, `onPassEnd` socket release, sweep over both keyspaces (including exec tombstones, touch-on-use, and the loud resume failure after a sweep), concurrent connect dedupe, and the expired-session error. End-to-end tests (`src/browser-tests/`, run via `pnpm run test:browser` — spawns real `wrangler dev` with `browser` + `LOADER` bindings and Chromium) cover one-shot dispose-on-terminal, dynamic promotion surviving terminal, reuse + sweep, survive-a-pause (session intact across approve), the sequential-calls divergence guard, and a concurrent-socket probe.

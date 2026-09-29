@@ -205,6 +205,39 @@ await connector.sweep(); // reclaim expired/stale sessions — call from a sched
 await runtime.expirePaused(); // reject stale never-approved pauses, freeing their sessions
 ```
 
+## Persistent browser
+
+`browserTool` gives the model one browser that stays open between turns, so tabs, cookies, and logins carry over. You create the browser once on your agent and pass it in; the model never starts or closes it.
+
+```ts
+import { Agent, type AgentContext } from "agents";
+import { Browser, browserRun } from "agents/browser";
+import { browserTool } from "agents/browser/ai";
+
+export class MyAgent extends Agent<Env> {
+  browser = new Browser({ provider: browserRun(this.env.BROWSER) });
+
+  constructor(ctx: AgentContext, env: Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.browser);
+  }
+
+  getTools() {
+    return {
+      browser: browserTool({ browser: this.browser, loader: this.env.LOADER })
+    };
+  }
+}
+```
+
+- The model writes CDP code as with `createBrowserTools`. `sessionId: "active"` points at the tab it's working in, and that tab is remembered across turns.
+- Tabs the page opens itself come back as `newTabs` in the result.
+- If the browser was lost (idle past `keepAliveMs`, closed, or crashed), the code still runs in a new browser and the result includes `restarted: true`.
+- Call `this.browser.liveView()` to give a person a Live View link into the same browser, and `this.browser.close()` to shut it down.
+- Set `keepAliveMs`, `recording`, and `guardrails` on `browserRun(binding, options)`. Use a different `name` for each extra browser on the same agent.
+
+Only Chromium on a Browser Run binding is supported. It needs the same `LOADER` binding and `CodemodeRuntime` export as `createBrowserTools`.
+
 ## Quick Actions (stateless browsing)
 
 `browser_execute` drives a full, stateful CDP session — the right tool for interactive, multi-step automation. But a lot of agent browsing is really one-shot: _read this page as Markdown_, _extract these fields_, _list the links_. For those, [Quick Actions](https://developers.cloudflare.com/browser-run/quick-actions/) are simpler, faster, and cheaper. They need only the `browser` binding — no Durable Object, Worker Loader, or sandbox — so they work from any Worker.
