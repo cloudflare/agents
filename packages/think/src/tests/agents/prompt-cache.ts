@@ -1,0 +1,255 @@
+import type { LanguageModel, ToolSet, UIMessage } from "ai";
+import { tool } from "ai";
+import type { ContextConfig } from "agents/context";
+import { z } from "zod";
+import { Think } from "../../think";
+import type { MediaEvictionConfig } from "../../think";
+
+/**
+ * Prompt-cache prefix measurement (#2200). Providers cache on a byte-identical
+ * prompt prefix, so for each turn this records how much of the first model
+ * request is a prefix of the request sent before it.
+ */
+export type PromptCacheScenario = {
+  turns: number;
+  /** Size of the `lookup` tool output called once per turn. 0 skips the tool. */
+  toolOutputChars?: number;
+  /** Size of each user message. */
+  userTextChars?: number;
+  /** Attach a data-URL image of this size to the first user message. */
+  firstTurnMediaChars?: number;
+  /** Attach a data-URL image of this size to every user message. */
+  everyTurnMediaChars?: number;
+  /** Run a Think media eviction pass after each turn. */
+  mediaEviction?: MediaEvictionConfig;
+  /** Compact every older message into one summary past this token estimate. */
+  compactAfterTokens?: number;
+  /** Override `truncationStep`. */
+  truncationStep?: number;
+  /** Value of the `whenChanged: "remind"` environment block at each turn. */
+  environmentByTurn?: (string | null)[];
+  /** Call `refreshSystemPrompt()` before these turns. */
+  refreshSystemPromptAtTurns?: number[];
+};
+
+export type PromptCacheTurn = {
+  turn: number;
+  messages: number;
+  requestChars: number;
+  /** Chars of this turn's first request shared with the previous request. */
+  sharedPrefixChars: number;
+  /** Index of the first model message that differs, or null if none did. */
+  firstChangedMessage: number | null;
+  compactionCalls?: number[];
+  /** The system message of this turn's first request. */
+  system?: string;
+  /** Whether this turn's first request carried a context reminder. */
+  reminded?: boolean;
+};
+
+const v3Usage = {
+  inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+  outputTokens: { total: 5, text: 5, reasoning: 0 }
+};
+
+export class ThinkPromptCacheTestAgent extends Think {
+  override mediaEviction: MediaEvictionConfig | boolean = false;
+  private _requests: unknown[][] = [];
+  private _toolOutputChars = 0;
+  private _compactionCalls: number[] = [];
+  private _environment: string | null = null;
+
+  override configureContext(): ContextConfig[] {
+    return [
+      {
+        label: "environment",
+        provider: { get: async () => this._environment },
+        whenChanged: "remind"
+      }
+    ];
+  }
+
+  override getModel(): LanguageModel {
+    const requests = this._requests;
+    const useTool = () => this._toolOutputChars > 0;
+    return {
+      specificationVersion: "v3",
+      provider: "test",
+      modelId: "prompt-cache-mock",
+      supportedUrls: {},
+      doGenerate() {
+        throw new Error("doGenerate not implemented in mock");
+      },
+      doStream(options: { prompt: unknown[] }) {
+        requests.push(options.prompt);
+        const call = requests.length;
+        const last = options.prompt.at(-1) as { role?: string } | undefined;
+        const callTool = useTool() && last?.role === "user";
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            if (callTool) {
+              controller.enqueue({
+                type: "tool-call",
+                toolCallId: `lookup-${call}`,
+                toolName: "lookup",
+                input: "{}"
+              });
+            } else {
+              controller.enqueue({ type: "text-start", id: `t${call}` });
+              controller.enqueue({
+                type: "text-delta",
+                id: `t${call}`,
+                delta: "Here is the answer."
+              });
+              controller.enqueue({ type: "text-end", id: `t${call}` });
+            }
+            controller.enqueue({
+              type: "finish",
+              finishReason: {
+                unified: callTool ? "tool-calls" : "stop",
+                raw: undefined
+              },
+              usage: v3Usage
+            });
+            controller.close();
+          }
+        });
+        return Promise.resolve({ stream });
+      }
+    } as LanguageModel;
+  }
+
+  override getTools(): ToolSet {
+    return {
+      lookup: tool({
+        description: "Look something up",
+        inputSchema: z.object({}),
+        execute: async () => "r".repeat(this._toolOutputChars)
+      })
+    };
+  }
+
+  async measurePromptCacheForTest(
+    scenario: PromptCacheScenario
+  ): Promise<PromptCacheTurn[]> {
+    this._toolOutputChars = scenario.toolOutputChars ?? 0;
+    if (scenario.mediaEviction) this.mediaEviction = scenario.mediaEviction;
+    if (scenario.truncationStep !== undefined) {
+      this.truncationStep = scenario.truncationStep;
+    }
+    if (scenario.compactAfterTokens !== undefined) {
+      this.session
+        .onCompaction(async (messages) => {
+          this._compactionCalls.push(messages.length);
+          const older = messages.slice(0, -4);
+          if (older.length < 2) return null;
+          return {
+            summary: `summary of ${older.length} messages`,
+            fromMessageId: older[0].id,
+            toMessageId: older[older.length - 1].id
+          };
+        })
+        .compactAfter(scenario.compactAfterTokens);
+    }
+
+    const report: PromptCacheTurn[] = [];
+    for (let turn = 0; turn < scenario.turns; turn++) {
+      const environment = scenario.environmentByTurn?.[turn];
+      if (environment !== undefined) this._environment = environment;
+      if (scenario.refreshSystemPromptAtTurns?.includes(turn)) {
+        await this.context.refreshSystemPrompt();
+      }
+      const before = this._requests.length;
+      const text = `question ${turn} ${"q".repeat(scenario.userTextChars ?? 0)}`;
+      const parts: UIMessage["parts"] = [{ type: "text", text }];
+      const mediaChars =
+        scenario.everyTurnMediaChars ??
+        (turn === 0 ? scenario.firstTurnMediaChars : undefined);
+      if (mediaChars) {
+        parts.push({
+          type: "file",
+          mediaType: "image/png",
+          url: `data:image/png;base64,${"A".repeat(mediaChars)}`
+        });
+      }
+      await this.saveMessages([{ id: `u${turn}`, role: "user", parts }]);
+      if (scenario.mediaEviction) await this._evictAgedMediaBestEffort();
+
+      const current = this._requests[before];
+      const previous = this._requests[before - 1];
+      const currentJson = current.map((message) => JSON.stringify(message));
+      const serialized = JSON.stringify(current);
+      let sharedPrefixChars = 0;
+      let firstChangedMessage: number | null = null;
+      if (previous) {
+        const previousSerialized = JSON.stringify(previous);
+        while (
+          sharedPrefixChars < serialized.length &&
+          serialized[sharedPrefixChars] ===
+            previousSerialized[sharedPrefixChars]
+        ) {
+          sharedPrefixChars++;
+        }
+        const previousJson = previous.map((message) => JSON.stringify(message));
+        const index = previousJson.findIndex(
+          (message, i) => message !== currentJson[i]
+        );
+        firstChangedMessage = index === -1 ? null : index;
+      }
+      report.push({
+        turn,
+        messages: current.length,
+        requestChars: serialized.length,
+        sharedPrefixChars,
+        firstChangedMessage,
+        compactionCalls: [...this._compactionCalls],
+        system: systemOf(current),
+        reminded: JSON.stringify(current.at(-1)).includes(
+          "replace the ones in the system prompt"
+        )
+      });
+    }
+    return report;
+  }
+
+  /**
+   * Continue a partial assistant reply after the remind block changed, and
+   * return the roles and final message of the request the model received.
+   */
+  async continuePartialTurnWithReminderForTest(): Promise<{
+    roles: string[];
+    last: string;
+  }> {
+    this._environment = "Monday";
+    await this.context.freezeSystemPrompt();
+    const self = this as unknown as {
+      _upsertMessageInHistory(msg: UIMessage, parentId?: string): Promise<void>;
+    };
+    await self._upsertMessageInHistory({
+      id: "u1",
+      role: "user",
+      parts: [{ type: "text", text: "Say hello." }]
+    });
+    await self._upsertMessageInHistory(
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Sure, here is" }]
+      },
+      "u1"
+    );
+    this._environment = "Tuesday";
+    await this.continueLastTurn();
+    const request = (this._requests.at(-1) ?? []) as Array<{ role: string }>;
+    return {
+      roles: request.map((message) => message.role),
+      last: JSON.stringify(request.at(-1))
+    };
+  }
+}
+
+function systemOf(prompt: unknown[]): string | undefined {
+  const first = prompt[0] as { role?: string; content?: unknown } | undefined;
+  return first?.role === "system" ? String(first.content) : undefined;
+}

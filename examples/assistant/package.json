@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agents-assistant-example",
-  "description": "Think-based assistant showcasing all Project Think features",
+  "description": "Assistant showcasing the @cloudflare/think runtime",
   "private": true,
   "type": "module",
   "version": "0.0.0",
@@ -8,7 +8,7 @@
     "start": "vite dev",
     "deploy": "vite build && wrangler deploy",
     "test": "vitest --run --config src/tests/vitest.config.ts",
-    "types": "think types"
+    "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
     "@cloudflare/codemode": "*",
@@ -23,7 +23,7 @@
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "streamdown": "^2.5.0",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.48.0",

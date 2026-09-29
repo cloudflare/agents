@@ -404,6 +404,52 @@ describe("AssemblyAISession — connect", () => {
   });
 });
 
+describe("AssemblyAISession — connection errors", () => {
+  it("wraps a non-Error connection failure without logging its payload", async () => {
+    const providerError: Record<string, unknown> = {
+      code: "rate_limited",
+      error: {
+        message: "quota exceeded",
+        token: "must-not-leak"
+      },
+      extra: "x".repeat(20_000)
+    };
+    providerError.cause = providerError;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Promise.reject(providerError))
+    );
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const fatalErrors: unknown[] = [];
+    const session = new AssemblyAISTT({ apiKey: "k" }).createSession({
+      onFatalError: (error) => fatalErrors.push(error)
+    });
+
+    await expect(session.waitUntilReady?.()).rejects.toThrow(
+      "AssemblyAISTT: connection failed: AssemblyAI connection failed"
+    );
+    expect(fatalErrors).toEqual([
+      expect.objectContaining({
+        name: "Error",
+        message: "AssemblyAI connection failed"
+      })
+    ]);
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    const logRecord = errSpy.mock.calls[0][0];
+    expect(logRecord).toMatchObject({
+      component: "AssemblyAISTT",
+      stage: "connection",
+      message: "AssemblyAI connection failed"
+    });
+    expect((logRecord as { error: Error }).error).toBe(fatalErrors[0]);
+    const serializedLog = JSON.stringify(logRecord);
+    expect(serializedLog).not.toContain("must-not-leak");
+    expect(serializedLog).not.toContain("quota exceeded");
+    errSpy.mockRestore();
+  });
+});
+
 describe("AssemblyAISession — Turn routing", () => {
   it("routes Turn{end_of_turn:false} to onInterim", async () => {
     const { ws } = setupMockFetch();
@@ -869,7 +915,10 @@ describe("AssemblyAISession — close diagnostics", () => {
     const { ws } = setupMockFetch();
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const provider = new AssemblyAISTT({ apiKey: "k" });
-    provider.createSession();
+    const fatalErrors: unknown[] = [];
+    provider.createSession({
+      onFatalError: (error) => fatalErrors.push(error)
+    });
     await flush();
 
     ws.dispatchEvent(
@@ -879,7 +928,22 @@ describe("AssemblyAISession — close diagnostics", () => {
       })
     );
 
-    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("1008"));
+    expect(fatalErrors).toEqual([
+      expect.objectContaining({
+        closeCode: 1008,
+        closeReason: "Not authorized"
+      })
+    ]);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        component: "AssemblyAISTT",
+        stage: "websocket_close",
+        error: expect.objectContaining({
+          closeCode: 1008,
+          closeReason: "Not authorized"
+        })
+      })
+    );
     errSpy.mockRestore();
   });
 
@@ -887,7 +951,10 @@ describe("AssemblyAISession — close diagnostics", () => {
     const { ws } = setupMockFetch();
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const provider = new AssemblyAISTT({ apiKey: "k" });
-    const session = provider.createSession();
+    const fatalErrors: unknown[] = [];
+    const session = provider.createSession({
+      onFatalError: (error) => fatalErrors.push(error)
+    });
     await flush();
 
     session.close();
@@ -896,12 +963,13 @@ describe("AssemblyAISession — close diagnostics", () => {
     );
 
     expect(errSpy).not.toHaveBeenCalled();
+    expect(fatalErrors).toEqual([]);
     errSpy.mockRestore();
   });
 });
 
 describe("AssemblyAISession — server Error/Warning messages", () => {
-  it("logs server Error messages with code and text", async () => {
+  it("logs server Error messages with their code", async () => {
     const { ws } = setupMockFetch();
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const provider = new AssemblyAISTT({ apiKey: "k" });
@@ -919,9 +987,16 @@ describe("AssemblyAISession — server Error/Warning messages", () => {
     );
 
     expect(errSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Input Validation Error")
+      expect.objectContaining({
+        component: "AssemblyAISTT",
+        stage: "provider_message",
+        error: expect.objectContaining({
+          name: "VoiceProviderError",
+          message: "AssemblyAI server error",
+          code: 3006
+        })
+      })
     );
-    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("3006"));
     errSpy.mockRestore();
   });
 
@@ -948,8 +1023,9 @@ describe("AssemblyAISession — server Error/Warning messages", () => {
     warnSpy.mockRestore();
   });
 
-  it("logs the HTTP status and body when the upgrade yields no WebSocket", async () => {
+  it("logs the HTTP status without reading an arbitrary response body", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const readBody = vi.fn(async () => "Unauthorized: secret provider body");
     vi.stubGlobal(
       "fetch",
       vi.fn(
@@ -957,22 +1033,41 @@ describe("AssemblyAISession — server Error/Warning messages", () => {
           ({
             webSocket: undefined,
             status: 401,
-            text: async () => "Unauthorized"
+            text: readBody
           }) as unknown as Response
       )
     );
 
     const provider = new AssemblyAISTT({ apiKey: "bad-key" });
-    const session = provider.createSession();
+    const fatalErrors: unknown[] = [];
+    const session = provider.createSession({
+      onFatalError: (error) => fatalErrors.push(error)
+    });
     await flush();
 
     await expect(session.waitUntilReady?.()).rejects.toThrow(
-      "AssemblyAISTT: failed to establish WebSocket connection (HTTP 401): Unauthorized"
+      "AssemblyAISTT: failed to establish WebSocket connection (HTTP 401)."
     );
 
-    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("401"));
-    expect(errSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Unauthorized")
+    expect(readBody).not.toHaveBeenCalled();
+    expect(fatalErrors).toEqual([
+      expect.objectContaining({
+        message: "AssemblyAI WebSocket upgrade failed",
+        status: 401
+      })
+    ]);
+    expect(errSpy).toHaveBeenCalledWith({
+      component: "AssemblyAISTT",
+      stage: "connection",
+      message: "AssemblyAI WebSocket upgrade failed",
+      error: expect.objectContaining({
+        name: "VoiceProviderError",
+        message: "AssemblyAI WebSocket upgrade failed",
+        status: 401
+      })
+    });
+    expect(JSON.stringify(errSpy.mock.calls)).not.toContain(
+      "secret provider body"
     );
     errSpy.mockRestore();
   });
@@ -988,12 +1083,22 @@ describe("AssemblyAISession — pre-connect buffer cap", () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const provider = new AssemblyAISTT({ apiKey: "k" });
     const session = provider.createSession();
+    await flush();
+    errSpy.mockClear();
 
     // Cap is 960000 bytes = exactly 300 chunks of 3200 bytes.
     for (let i = 0; i < 310; i++) session.feed(pcm(3200));
 
     expect(errSpy).toHaveBeenCalledTimes(1);
-    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("dropping"));
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        component: "AssemblyAISTT",
+        stage: "audio_buffer",
+        error: expect.objectContaining({
+          message: "Dropping audio until the socket connects"
+        })
+      })
+    );
     errSpy.mockRestore();
   });
 
@@ -1039,8 +1144,11 @@ describe("AssemblyAISession — send failure isolation", () => {
       session.updateAgentContext!("What date would you like?")
     ).not.toThrow();
     expect(errSpy).toHaveBeenCalledWith(
-      expect.stringContaining("send failed"),
-      expect.anything()
+      expect.objectContaining({
+        component: "AssemblyAISTT",
+        stage: "websocket_send",
+        error: expect.objectContaining({ message: "socket is closing" })
+      })
     );
     errSpy.mockRestore();
   });

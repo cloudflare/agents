@@ -8,7 +8,7 @@ import { bundleWithEsbuild, bundlerOnlyOptionsWarning } from "./bundler";
 import { hasNodejsCompat, parseWranglerConfig } from "./config";
 import { hasDependencies, installDependencies } from "./installer";
 import { transformAndResolve } from "./transformer";
-import type { CreateWorkerOptions, CreateWorkerResult } from "./types";
+import type { CreateWorkerOptions, CreateWorkerResult, Modules } from "./types";
 import {
   DEFAULT_ENTRY_POINTS,
   detectEntryPoint,
@@ -63,11 +63,8 @@ export {
 } from "./file-system";
 
 // Re-export installer utilities
-export {
-  installDependencies,
-  hasDependencies,
-  type InstallResult
-} from "./installer";
+export { installDependencies, hasDependencies } from "./installer";
+export type { InstallResult } from "./common";
 
 /**
  * Creates a worker bundle from source files.
@@ -117,13 +114,12 @@ export async function createWorker(
   const wranglerConfig = parseWranglerConfig(fileSystem);
   const nodejsCompat = hasNodejsCompat(wranglerConfig);
 
-  // Auto-install dependencies if package.json has dependencies
+  // Auto-install dependencies if package.json or pyproject.toml has dependencies
   const installWarnings: string[] = [];
   if (hasDependencies(fileSystem)) {
-    const installResult = await installDependencies(
-      fileSystem,
-      registry ? { registry } : {}
-    );
+    const installResult = await installDependencies(fileSystem, {
+      ...(registry ? { registry } : {})
+    });
     installWarnings.push(...installResult.warnings);
   }
 
@@ -141,6 +137,29 @@ export async function createWorker(
     throw new Error(
       `Entry point "${entryPoint}" was not found in \`files\`. Available files: ${formatFileListForError(fileSystem)}.`
     );
+  }
+
+  if (entryPoint.endsWith(".py")) {
+    const modules: Modules = {};
+    for (const path of fileSystem.list()) {
+      if (path === "pyproject.toml") {
+        continue;
+      }
+      const content = fileSystem.read(path);
+      if (content !== null) {
+        modules[path] = content;
+      }
+    }
+
+    return {
+      mainModule: entryPoint,
+      modules,
+      wranglerConfig: {
+        compatibilityDate: wranglerConfig?.compatibilityDate ?? "2026-07-02",
+        compatibilityFlags: wranglerConfig?.compatibilityFlags ?? []
+      },
+      warnings: installWarnings
+    };
   }
 
   if (bundle) {
@@ -171,7 +190,6 @@ export async function createWorker(
     if (installWarnings.length > 0) {
       result.warnings = [...(result.warnings ?? []), ...installWarnings];
     }
-
     return result;
   } else {
     // No bundling - transform files and resolve dependencies.

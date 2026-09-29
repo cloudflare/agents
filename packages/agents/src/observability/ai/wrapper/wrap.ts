@@ -157,6 +157,7 @@ function createOperationWrapper(
             return operation(params, ...args);
           }
 
+          const context = semanticContext(params);
           const span = operationSpanForCall(
             operationName,
             extractModelInfo(params.model),
@@ -166,7 +167,8 @@ function createOperationWrapper(
           writeSpanAttributes(operationSpan, span.attributes);
           recordDeniedApprovalResponses(
             instrumentation.tracer,
-            params.messages
+            params.messages,
+            context
           );
 
           const startedAtMs = Date.now();
@@ -177,6 +179,7 @@ function createOperationWrapper(
               wrapLanguageModel,
               instrumentation.tracer,
               storage,
+              context,
               boundToInvocation
             ),
             ...args
@@ -203,6 +206,7 @@ function createOperationWrapper(
           return operation(params, ...args);
         }
 
+        const context = semanticContext(params);
         const span = operationSpanForCall(
           operationName,
           extractModelInfo(params.model),
@@ -210,7 +214,11 @@ function createOperationWrapper(
           instrumentation.options
         );
         writeSpanAttributes(operationSpan, span.attributes);
-        recordDeniedApprovalResponses(instrumentation.tracer, params.messages);
+        recordDeniedApprovalResponses(
+          instrumentation.tracer,
+          params.messages,
+          context
+        );
 
         const result = await operation(
           operationParamsForCall(
@@ -219,6 +227,7 @@ function createOperationWrapper(
             wrapLanguageModel,
             instrumentation.tracer,
             storage,
+            context,
             boundToInvocation
           ),
           ...args
@@ -260,6 +269,7 @@ function operationParamsForCall(
   wrapLanguageModel: AISDKWrapLanguageModel | undefined,
   tracer: AgentTracer,
   storage: ResolvedAISDKStorageOptions,
+  context: SemanticContext,
   boundToInvocation = false
 ): AISDKCallParams {
   const approvedToolCalls = new Map<string, string>();
@@ -271,6 +281,7 @@ function operationParamsForCall(
             tracer,
             params.tools,
             storage.storeTools,
+            context,
             boundToInvocation,
             approvedToolCalls
           )
@@ -282,6 +293,7 @@ function operationParamsForCall(
             tracer,
             params.toolApproval,
             approvedToolCalls,
+            context,
             boundToInvocation
           )
         }
@@ -294,6 +306,7 @@ function operationParamsForCall(
             params.model,
             operationName,
             storage.storeMessages,
+            context,
             boundToInvocation
           )
         }

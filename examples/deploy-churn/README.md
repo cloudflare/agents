@@ -32,8 +32,8 @@ and records what actually happens.
 - `src/server.ts` — `DeployChurnAgent` (`@cloudflare/think`, matching the
   runtime the report describes). LLM-free and deterministic: `getModel()`
   returns a mock model that streams one chunk per second for a configurable
-  duration, so a deploy reliably lands mid-turn. `chatRecovery` is enabled, so an
-  interrupted turn is wrapped in a durable fiber and continued via the
+  duration, so a deploy reliably lands mid-turn. Every turn runs in a durable
+  recovery fiber and an interrupted turn is continued via the
   alarm-scheduled `_chatRecoveryContinue`. It captures **both** error hooks —
   `onChatError(error, ctx)` (per-turn, tagged with `stage`, including
   `stage: "recovery"` when a recovery continuation fails) and `onError(error)`

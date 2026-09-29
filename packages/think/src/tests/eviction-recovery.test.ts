@@ -8,12 +8,12 @@
 import type { UIMessage } from "ai";
 import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
-import { getServerByName } from "partyserver";
+import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { ThinkRecoveryTestAgent } from "./agents/think-session";
 
 async function recoveryAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkRecoveryTestAgent>,
     name
   );

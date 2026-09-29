@@ -8,7 +8,7 @@
 import type { UIMessage } from "ai";
 import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
-import { getServerByName } from "partyserver";
+import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type {
   ThinkOnStartHydrationFailureAgent,
@@ -17,21 +17,21 @@ import type {
 } from "./agents/think-session";
 
 function recoveryAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkRecoveryTestAgent>,
     name
   );
 }
 
 function scheduledAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkScheduledTasksTestAgent as unknown as DurableObjectNamespace<ThinkScheduledTasksTestAgent>,
     name
   );
 }
 
 function hydrationAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkOnStartHydrationFailureAgent as unknown as DurableObjectNamespace<ThinkOnStartHydrationFailureAgent>,
     name
   );

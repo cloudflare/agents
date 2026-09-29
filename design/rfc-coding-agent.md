@@ -112,7 +112,8 @@ getTools() {
 }
 ```
 
-> Deferred out of v1 (see §10): `commit()` / `openPR()` (need git/GitHub creds —
+> Deferred out of v1 (see [Directions](#directions-explicitly-out-of-v1)):
+> `commit()` / `openPR()` (need git/GitHub creds —
 > fights the zero-secret story, needs its own auth design) and per-tool HITL /
 > `permissionPolicy` (brokering in-container tool calls for approval is a project
 > on its own, not a config flag).
@@ -140,6 +141,14 @@ prior draft did; review flagged it as designing an abstraction from a single
 example). `CliEngine` ships claude-code concretely; the per-CLI adapter
 interface gets _extracted_ only once a second CLI (codex) actually lands and we
 can see the real shape.
+
+Codex also has a container-free path:
+[`rfc-codex-harness-capability.md`](./rfc-codex-harness-capability.md) proposes
+running a Codex-derived Rust/Wasm turn engine inside a plain Durable Object as a
+Lifecycle capability, over a `Workspace` filesystem. That is the "Workers-native
+coding runtime" direction below, not a `CliEngine` adapter. If it lands first,
+a Codex engine for `CodingAgent` should wrap that capability instead of the
+Codex CLI, and the two RFCs must agree on the session/turn contract.
 
 Independent package ⇒ independent deps: `@cloudflare/coding-agent` can pin
 whatever AI-SDK major `@ai-sdk/harness` needs **without gating `@cloudflare/think`
@@ -251,18 +260,30 @@ a standalone one via `@callable() configure({ repo })` before the first turn.
 **Topology.** Three shapes, all from existing primitives:
 
 1. **Standalone** — one DO, one repo.
-2. **Threads (userland directory, not a shipped class).** A plain `Agent` owns a
-   session table with domain-specific columns (`repo`/`branch`/`status`/`lastDiff`)
-   and spawns one `CodingAgent` child per session. Gives the Codex-cloud /
-   background-agents shape (dashboard, per-thread containers, cross-session memory
-   via `RemoteContextProvider`) **without** a generic `Chats` base class (whose
-   fixed schema is outgrown immediately — see the note in
-   [`rfc-think-multi-session.md`](./rfc-think-multi-session.md)).
+2. **Threads (userland directory, not a shipped class).** A per-user hub `Agent`
+   owns a session table with domain-specific columns
+   (`repo`/`branch`/`status`/`lastDiff`) and one `CodingAgent` per session. Gives
+   the Codex-cloud / background-agents shape (dashboard, per-thread containers,
+   cross-session memory via `RemoteContextProvider`) **without** a generic
+   `Chats` base class, whose fixed schema is outgrown immediately.
 3. **Orchestrated** — a `Think` (or any agent) delegates via `codingAgentTool`,
    incl. `delegate_parallel` fan-out (the shipped example).
 
-Requirement: **nothing in `CodingAgent` may assume a top-level binding** — it
-must work as a directory child and as an agent-tool facet.
+> **Topology reconciliation.** An earlier draft of the threads shape leaned on
+> [`rfc-think-multi-session.md`](./rfc-think-multi-session.md), which put each
+> chat in a facet of a `Chats` parent. That RFC is **rejected**. It was replaced
+> by the accepted
+> [`rfc-user-chat-durable-objects.md`](./rfc-user-chat-durable-objects.md): one
+> User hub Durable Object plus one **top-level** Durable Object per user-visible
+> chat. A coding thread is a user-visible chat, so in the threads topology each
+> `CodingAgent` is a top-level Durable Object addressed by thread id, and the
+> hub is the catalog (it does not spawn facets). The "no `Chats` base class"
+> conclusion carries over unchanged. Only the orchestrated topology uses facets,
+> because agent-tool runs are facets of the orchestrator.
+
+Requirement: **`CodingAgent` may assume neither placement.** It must work as a
+top-level per-thread Durable Object (the accepted user-chat topology) and as an
+agent-tool facet (the orchestrated topology).
 
 ### 8. Testing & CI
 
@@ -290,7 +311,8 @@ Owning a _package_ (vs an example) raises the testing bar, so name it up front:
   We still ship `CliEngine` first (works today), but converge on `HarnessEngine`.
 - **A subpath of `@cloudflare/think`.** Rejected: puts containers in the chat
   base, against the `AGENTS.md` layering preference; blocks independent deps.
-- **Adopt `cloudflare/workspace` as the filesystem now.** Deferred (§10):
+- **Adopt `cloudflare/workspace` as the filesystem now.** Deferred (see
+  [Directions](#directions-explicitly-out-of-v1)):
   preview-only / unstable with a large-file I/O penalty; spike behind a seam, do
   not couple v1.
 - **Keep it an example, not a package.** Status quo — re-pays the integration
@@ -315,7 +337,9 @@ exists):
 - **A Workers-native coding runtime** ("Runtime B"): a model-driven loop with
   coding tools on Workers, container only when needed, preview via `env.LOADER`.
   Could be a third engine behind the same `CodingAgent`. Enables a
-  `delegate_parallel` "race CLI vs native" eval harness. Its own RFC.
+  `delegate_parallel` "race CLI vs native" eval harness. Its own RFC; the Codex
+  instance of it is
+  [`rfc-codex-harness-capability.md`](./rfc-codex-harness-capability.md).
 
 ## The decision
 
@@ -340,11 +364,43 @@ Open questions still to settle (deliberately left open for now):
    mapper) + tokenless egress + §6 durability + dynamic config + rewrite the
    example onto the package. Codex, `HarnessEngine`, preview, git ops, HITL, VFS
    deferred.
+4. **Container quotas and cleanup.** Containers bill while awake and count
+   against `max_instances`. When is a sandbox destroyed — at the end of every
+   turn, when an agent-tool run reaches a terminal state (what the example now
+   does in `onAgentToolFinish`), on thread delete, or only after `sleepAfter`?
+   Who reaps sandboxes orphaned by a crashed or evicted owner, and what happens
+   when `max_instances` is exhausted (queue, fail fast, or evict the oldest)?
+5. **Egress cost and abuse controls.** The tokenless proxy spends the account's
+   gateway budget on behalf of a process running model-directed commands with
+   internet access. What does the package enforce by default: an endpoint
+   allowlist (the example forwards only `v1/messages` and
+   `v1/messages/count_tokens`), `max_tokens` caps, model allowlists, per-thread
+   budgets, gateway rate limits? Is general internet egress on by default?
+6. **Auth and multi-tenancy.** The example's `/agents/*` routes have no auth.
+   Where does the package put the authorization hook (the User hub,
+   `onBeforeConnect`, `onBeforeSubAgent`), how is a sandbox id bound to its
+   owner (the example hashes orchestrator name + run id so two owners never
+   share a container), and can tenants share a gateway or container image?
+7. **Concurrent turns in the same container.** Can two turns (a drill-in chat
+   plus an orchestrator delegation, or two browser tabs) run against one
+   sandbox and working tree at once? If not, is the turn queue per
+   `CodingAgent` enough, or does the sandbox need its own lock?
+8. **Failure contract when the container dies.** What does a turn report when
+   the container OOMs, crashes, or is destroyed mid-turn? The example now treats
+   a log stream with no exit event, a non-zero exit, or a failed `git` command
+   as a failed turn and marks the agent-tool run as an error. The package needs
+   to define this for both engines, including whether recovery re-runs the turn
+   (see the double-apply note in §6) or surfaces the error.
 
 ## History
 
 - `examples/sandbox-coding-agent` (PR #1830) — the prototype this extracts.
 - cloudflare/agents#1829 — `@ai-sdk/sandbox-cloudflare` provider (gates
   `HarnessEngine`).
-- [`rfc-think-multi-session.md`](./rfc-think-multi-session.md) — the "don't ship
-  a `Chats` base class" decision the threads topology relies on.
+- [`rfc-think-multi-session.md`](./rfc-think-multi-session.md) (rejected) — where
+  the "don't ship a `Chats` base class" conclusion was first recorded.
+- [`rfc-user-chat-durable-objects.md`](./rfc-user-chat-durable-objects.md)
+  (accepted) — the User hub + top-level-Durable-Object-per-chat topology the
+  threads shape follows.
+- [`rfc-codex-harness-capability.md`](./rfc-codex-harness-capability.md) — a
+  container-free Codex engine as a Lifecycle capability.

@@ -3,7 +3,7 @@ import {
   isTransportNotImplemented,
   isUnauthorized,
   toErrorMessage
-} from "../../mcp/errors";
+} from "../../mcp/client/errors";
 
 // Helper to create error-like objects with code property (like StreamableHTTPError/SseError)
 function createErrorWithCode(code: number, message: string) {

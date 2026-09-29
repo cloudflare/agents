@@ -22,6 +22,21 @@ export interface CdpAttachOptions {
   timeoutMs?: number;
 }
 
+/** Construction options for {@link CdpSession}. */
+export interface CdpSessionOptions {
+  /** Default per-command timeout. Defaults to 10 seconds. */
+  timeoutMs?: number;
+  /**
+   * Invoked exactly once when the session reaches a terminal state — an
+   * explicit `close()`, peer closure, or a socket error.
+   */
+  onClose?: () => void;
+  /** Browser Run session id, when connected to a session-scoped browser. */
+  sessionId?: string;
+  /** Invoked on every CDP command sent — an activity signal for idle tracking. */
+  onActivity?: () => void;
+}
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_DEBUG_ENTRIES = 400;
 
@@ -39,25 +54,46 @@ export class CdpSession {
   #debugLog: DebugEntry[] = [];
   #defaultTimeoutMs: number;
   #dispose?: () => void;
+  #disposed = false;
+  #onActivity?: () => void;
   readonly sessionId?: string;
 
+  constructor(socket: WebSocket, options?: CdpSessionOptions);
+  /**
+   * @deprecated Pass a {@link CdpSessionOptions} object instead —
+   * `new CdpSession(socket, { timeoutMs, onClose, sessionId })`. The
+   * positional form will be removed.
+   */
   constructor(
     socket: WebSocket,
-    defaultTimeoutMs = DEFAULT_TIMEOUT_MS,
-    dispose?: () => void,
+    timeoutMs?: number,
+    onClose?: () => void,
+    sessionId?: string
+  );
+  constructor(
+    socket: WebSocket,
+    optionsOrTimeoutMs?: CdpSessionOptions | number,
+    onClose?: () => void,
     sessionId?: string
   ) {
+    const options: CdpSessionOptions =
+      typeof optionsOrTimeoutMs === "object"
+        ? optionsOrTimeoutMs
+        : { timeoutMs: optionsOrTimeoutMs, onClose, sessionId };
     this.#socket = socket;
-    this.#defaultTimeoutMs = defaultTimeoutMs;
-    this.#dispose = dispose;
-    this.sessionId = sessionId;
+    this.#defaultTimeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.#dispose = options.onClose;
+    this.sessionId = options.sessionId;
+    this.#onActivity = options.onActivity;
 
     socket.addEventListener("message", (event) => this.#handleMessage(event));
     socket.addEventListener("error", () => {
       this.#rejectAll(new Error("CDP socket error"));
+      this.#runDispose();
     });
     socket.addEventListener("close", () => {
       this.#rejectAll(new Error("CDP connection closed"));
+      this.#runDispose();
     });
   }
 
@@ -66,6 +102,7 @@ export class CdpSession {
     params?: unknown,
     options: CdpSendOptions = {}
   ): Promise<unknown> {
+    this.#onActivity?.();
     const id = this.#nextId++;
     const timeoutMs = options.timeoutMs ?? this.#defaultTimeoutMs;
     const sessionId =
@@ -159,6 +196,16 @@ export class CdpSession {
 
   close(): void {
     this.disconnect();
+    this.#runDispose();
+  }
+
+  /**
+   * Run the dispose callback exactly once, on the first terminal event —
+   * an explicit {@link close}, peer closure, or a socket error.
+   */
+  #runDispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
     this.#dispose?.();
   }
 
@@ -287,5 +334,5 @@ export async function connectUrl(
   }
   ws.accept();
 
-  return new CdpSession(ws, options?.timeoutMs);
+  return new CdpSession(ws, { timeoutMs: options?.timeoutMs });
 }

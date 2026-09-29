@@ -37,8 +37,9 @@ gh-app  (GitLab: cloudflare/ai-agents/team-apps, apps/gh-app — PRIVATE)
    │  RPC: env.AGENT_THINK.dispatch({repo, issueNumber, instruction, installationToken})
    ▼
 agent-think  (this dir — PUBLIC-safe, holds no App creds)
-   ├─ AgentThink WorkerEntrypoint.dispatch  (src/index.ts)
-   │     getAgentByName(env.ThinkAgent, session) → setContext → start()
+   ├─ AgentThink WorkerEntrypoint  (src/index.ts)
+   │     dispatch: getAgentByName(env.ThinkAgent, session) → setContext → start()
+   │     getSubmissionStatus: read one durable submission's state over private RPC
    │     start() ONLY submits the durable turn — returns in ~1s
    │     failed-run continuation refreshes GitHub auth through gh-app's private
    │     AgentThinkTokenBroker binding before submitting into the same session

@@ -232,7 +232,9 @@ const runtime = createCodemodeRuntime({
 });
 ```
 
-`truncateResult(value, options?)` returns the value unchanged when its serialized size is within budget, and a truncated string (with a marker noting the original size) when it isn't. `truncateResponse(text, options?)` is the string-only variant. Both take `{ maxChars?, maxTokens? }` (default ~6000 tokens).
+`truncateResult(value, options?)` returns the value unchanged when its serialized size is within budget. When it isn't, the value is shrunk structurally — largest values first — so the model still receives valid JSON of the original shape: a clipped string ends with `--- TRUNCATED --- <n> chars`, a clipped array ends with a `--- TRUNCATED --- <n> more items` element, and an object that had to lose entries gains a `"--- TRUNCATED ---"` entry naming the omitted keys. `truncateResponse(text, options?)` is the string-only variant. Both take `{ maxChars?, maxTokens? }` (default ~6000 tokens).
+
+The tool's `toModelOutput` sends the model everything but `calls`, with `logs` bounded the same way: the durable call log (every connector call's args and result) stays on the persisted tool part for UIs and audit, and is never part of the model's context.
 
 `transformResult` shapes only the final returned value — individual connector results inside the run are unaffected, so the model's own code still sees full data to reason over.
 

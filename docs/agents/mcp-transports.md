@@ -2,13 +2,18 @@
 
 This guide explains the different transport options for connecting to MCP servers with the Agents SDK.
 
-For a primer on MCP servers and how they are implemented in the Agents SDK with `McpAgent`, see [Creating MCP Servers](./mcp-servers.md).
+For a primer on MCP servers, see [Creating MCP Servers](./mcp-servers.md).
 
 ## Streamable HTTP Transport (Recommended)
 
-The **Streamable HTTP** transport is the recommended way to connect to MCP servers.
+The Agents SDK has two server paths:
 
-### How it works
+- Current SDK v2 servers use `createMcpHandler`, a per-request stateless Worker handler with no Durable Object or WebSocket bridge.
+- Retained SDK v1 servers use the deprecated, feature-frozen `McpAgent`, which provides sessionful transports through a Durable Object and internal WebSocket bridge.
+
+The current stateless handler also accepts stateless 2025-era Streamable HTTP requests by default. It does not expose standalone legacy SSE.
+
+### Legacy `McpAgent` architecture
 
 When a client connects to your MCP server:
 
@@ -44,13 +49,13 @@ The `serve()` method returns a Worker with a `fetch` handler that:
 
 ### Connection from clients
 
-Clients connect using the `streamable-http` transport:
+The Agents MCP client uses `"auto"` by default. It tries Streamable HTTP first and falls back to legacy SSE only when the endpoint reports that Streamable HTTP is unsupported:
 
 ```typescript
 await agent.addMcpServer("my-server", "https://your-worker.workers.dev/mcp");
 ```
 
-## Auto Transport
+## Legacy `McpAgent` Server Auto Transport
 
 The **auto** transport serves both Streamable HTTP and legacy SSE on the same endpoint. Capable clients use Streamable HTTP automatically, while older SSE-only clients continue to work.
 
@@ -60,7 +65,7 @@ export default MyMCP.serve("/mcp", { transport: "auto" });
 
 The handler distinguishes between the two protocols based on the request shape — no configuration or content negotiation is required from clients. This is useful when migrating from SSE to Streamable HTTP without breaking existing clients.
 
-## SSE Transport (Deprecated)
+## Legacy `McpAgent` SSE Transport (Deprecated)
 
 We also support the legacy **SSE (Server-Sent Events)** transport, but it is deprecated in favor of Streamable HTTP.
 
@@ -294,12 +299,13 @@ export class MyMCP extends McpAgent<Env, State> {
 
 ## Choosing a transport
 
-| Transport           | Use when                                 | Pros                                     | Cons                            |
-| ------------------- | ---------------------------------------- | ---------------------------------------- | ------------------------------- |
-| **Streamable HTTP** | External MCP servers, production apps    | Standard protocol, secure, supports auth | Slight network overhead         |
-| **Auto**            | Migrating from SSE, mixed client support | Serves both protocols on one endpoint    | Reserves `{path}/message` route |
-| **RPC**             | Internal agents                          | Fastest, simplest setup                  | No auth, Service Bindings only  |
-| **SSE**             | Legacy compatibility                     | Backwards compatible                     | Deprecated, use Streamable HTTP |
+| Transport                         | Use when                                            | Pros                                       | Cons                                   |
+| --------------------------------- | --------------------------------------------------- | ------------------------------------------ | -------------------------------------- |
+| **Streamable HTTP**               | New servers and external MCP connections            | Current standard transport; supports OAuth | Slight network overhead                |
+| **Client `auto`**                 | The remote server's HTTP transport is not known     | Tries Streamable HTTP, then legacy SSE     | May make a fallback connection attempt |
+| **Legacy `McpAgent` server auto** | An existing server must accept both HTTP transports | Serves both protocols on one endpoint      | Uses the deprecated server path        |
+| **RPC**                           | Internal agents                                     | Fastest, simplest setup                    | No auth, Service Bindings only         |
+| **SSE**                           | Legacy compatibility                                | Backwards compatible                       | Deprecated, use Streamable HTTP        |
 
 ## Examples
 

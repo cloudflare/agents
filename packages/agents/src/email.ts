@@ -5,6 +5,25 @@
 // Re-export AgentEmail type
 export type { AgentEmail } from "./internal_context";
 
+/** Cloudflare Email Service binding. */
+export type EmailSendBinding = SendEmail;
+
+/** Options for sending an outbound email from an Agent. */
+export type SendEmailOptions = {
+  binding: EmailSendBinding;
+  to: string | string[];
+  from: string | { email: string; name?: string };
+  subject: string;
+  text?: string;
+  html?: string;
+  replyTo?: string | { email: string; name?: string };
+  cc?: string | string[];
+  bcc?: string | string[];
+  inReplyTo?: string;
+  headers?: Record<string, string>;
+  secret?: string;
+};
+
 // ============================================================================
 // Email header utilities
 // ============================================================================

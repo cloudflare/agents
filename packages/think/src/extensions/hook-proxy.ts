@@ -7,7 +7,7 @@
  * are plain JSON-safe data objects that survive Workers RPC serialization.
  */
 
-import type { TurnContext, TurnConfig } from "../think";
+import type { ThinkModel, TurnContext, TurnConfig } from "../think";
 
 /**
  * Best-effort JSON-safe normalization. Strips functions, AbortSignals,
@@ -54,13 +54,19 @@ export interface TurnContextSnapshot {
   continuation: boolean;
   body?: Record<string, unknown>;
   modelId: string;
+  requestId?: string;
+  trigger?: string;
 }
 
 /**
  * Create a serializable snapshot from a TurnContext.
+ *
+ * Pass `model` when `beforeTurn` already overrode it: `ctx.model` lazily
+ * resolves the default model, which may need an AI binding the turn never uses.
  */
 export function createTurnContextSnapshot(
-  ctx: TurnContext
+  ctx: TurnContext,
+  model: ThinkModel = ctx.model
 ): TurnContextSnapshot {
   return {
     system: ctx.system,
@@ -69,7 +75,12 @@ export function createTurnContextSnapshot(
     continuation: ctx.continuation,
     body: ctx.body,
     modelId:
-      ((ctx.model as Record<string, unknown>).modelId as string) ?? "unknown"
+      typeof model === "string"
+        ? model
+        : (((model as unknown as Record<string, unknown>).modelId as string) ??
+          "unknown"),
+    ...(ctx.requestId !== undefined && { requestId: ctx.requestId }),
+    ...(ctx.trigger !== undefined && { trigger: ctx.trigger })
   };
 }
 

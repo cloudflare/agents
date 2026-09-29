@@ -23,16 +23,16 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "ThinkAgent_Assistant",
+        "class_name": "AssistantDirectory",
         "name": "AssistantDirectory"
       }
     ]
   },
   "worker_loaders": [{ "binding": "LOADER" }],
-  "main": "virtual:think/entry",
+  "main": "src/server.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["ThinkAgent_Assistant"],
+      "new_sqlite_classes": ["AssistantDirectory"],
       "tag": "v1"
     }
   ],
