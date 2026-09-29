@@ -25,9 +25,15 @@ first `Response` wins; otherwise the host's `onRequest` handles the request. For
 an alarm, capability `onAlarm` hooks run in registration order before the
 host's `onAlarm`.
 
-Failures stop the phase and propagate. Failed startup remains retryable. Native
-RPC methods explicitly call `lifecycle.start()` because native Durable Object
-RPC bypasses Lifecycle handlers.
+Failures stop the phase and propagate. Failed startup remains retryable.
+
+Native Durable Object RPC bypasses Lifecycle handlers, so a plain Lifecycle host
+calls `lifecycle.start()` from any RPC method that needs startup. Concurrent
+`start()` callers share one in-flight startup and all see its result. A call
+made from inside that startup (a capability or `onStart` calling back into the
+host) returns immediately instead of waiting on itself; an async-context marker
+tells those nested calls apart from independent ones. `lifecycle.isStarted()`
+reports whether startup has finished.
 
 ## Alarm ownership and scheduling
 
@@ -157,6 +163,20 @@ detached work. Its existing invocation wrappers continue to own those surfaces.
 In particular, the automatic public-method wrapper is not made redundant by
 Lifecycle because native Durable Object RPC does not pass through a Lifecycle
 handler.
+
+That wrapper also starts the Lifecycle. When an `async` method defined below
+`Agent` (a user subclass method, or Think's and AIChatAgent's public API) is
+entered from outside this Agent's context on an unstarted instance, it awaits
+`lifecycle.start()` before running. Framework `_cf_*` RPCs and Think's `_host*`
+bridge methods call `__unsafe_ensureInitialized()` themselves. These still run
+without startup unless they call `await this.lifecycle.start()`:
+
+- synchronous methods, which are never deferred so they keep their return type;
+- non-`async` methods that return a Promise;
+- methods defined on `Agent` itself, such as `getMcpServers()` and
+  `schedule()`, which are not wrapped.
+
+See [rfc-cold-rpc-initialization.md](./rfc-cold-rpc-initialization.md).
 
 Tracing remains in Agent's existing invocation boundaries. Moving or
 consolidating tracing in Lifecycle is separate work.

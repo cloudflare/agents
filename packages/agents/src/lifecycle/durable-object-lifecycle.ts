@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { DurableObject } from "cloudflare:workers";
 
 import { publishDiagnosticsEvent } from "../observability/diagnostics";
@@ -116,6 +117,9 @@ export type LifecycleHostInvoker = <T>(
 const lifecycleEventSinks = new WeakMap<object, LifecycleEventSink>();
 const lifecycleRouteTransports = new WeakMap<object, LifecycleRouteTransport>();
 const lifecycleHostInvokers = new WeakMap<object, LifecycleHostInvoker>();
+
+/** Lifecycles whose startup the current async context is running inside. */
+const lifecycleStartupScope = new AsyncLocalStorage<ReadonlySet<object>>();
 
 /** @internal Adapt the host invocation boundary at a composition root. */
 export function setLifecycleHostInvoker<
@@ -413,9 +417,8 @@ export class Lifecycle<
     );
   }
 
-  async #readyForCapabilityOperation(): Promise<void> {
-    if (this.#status === "starting" || this.#status === "started") return;
-    await this.start();
+  #readyForCapabilityOperation(): Promise<void> {
+    return this.#ensureInitialized();
   }
 
   async #dispatchRoute(envelope: LifecycleRouteEnvelope): Promise<unknown> {
@@ -648,16 +651,49 @@ export class Lifecycle<
    * Runtime fetch, alarm, and WebSocket entry points call this automatically.
    * RPC methods may call it explicitly because native RPC bypasses fetch.
    *
+   * Concurrent callers share one startup and all observe its outcome. A call
+   * made from inside that startup, such as a capability or `onStart` calling
+   * back into the host, returns immediately instead of waiting on itself.
+   *
    * @param props - Optional properties supplied to capability and host startup.
+   *   Ignored while a startup is already in flight.
    */
   async start(props?: Props): Promise<void> {
-    if (props !== undefined) this.#props = props;
+    if (props !== undefined && this.#startup === undefined) {
+      this.#props = props;
+    }
     await this.#ensureInitialized();
   }
 
-  async #ensureInitialized(): Promise<void> {
-    if (this.#status === "started") return;
+  /**
+   * Whether lifecycle startup has completed for this instance.
+   *
+   * @returns `true` after capabilities and the host `onStart` have finished.
+   */
+  isStarted(): boolean {
+    return this.#status === "started";
+  }
 
+  #startup: Promise<void> | undefined;
+
+  #ensureInitialized(): Promise<void> {
+    if (this.#status === "started") return Promise.resolve();
+    if (this.#startup === undefined) {
+      // Deferred a tick so `#startup` is assigned before startup can call
+      // back into this method synchronously.
+      const startup = Promise.resolve()
+        .then(() => this.#runStartup())
+        .finally(() => {
+          if (this.#startup === startup) this.#startup = undefined;
+        });
+      this.#startup = startup;
+      return startup;
+    }
+    if (lifecycleStartupScope.getStore()?.has(this)) return Promise.resolve();
+    return this.#startup;
+  }
+
+  async #runStartup(): Promise<void> {
     if (this.#ctx.id.name === undefined && this.#legacyName === undefined) {
       this.#legacyName = await this.#ctx.storage.get<string>(
         LEGACY_NAME_STORAGE_KEY
@@ -667,22 +703,26 @@ export class Lifecycle<
     void this.name;
 
     this.#capabilitiesLocked = true;
+    const scope = new Set(lifecycleStartupScope.getStore());
+    scope.add(this);
     let error: unknown;
-    await this.#ctx.blockConcurrencyWhile(async () => {
-      this.#status = "starting";
-      try {
-        await runWithoutCurrentAgent(() =>
-          this.#capabilityRunner.start({ props: this.#props })
-        );
-        await runInLifecycleHostContext({ host: this.#host }, () =>
-          this.#host.onStart?.(this.#props)
-        );
-        this.#status = "started";
-      } catch (cause) {
-        this.#status = "zero";
-        error = cause;
-      }
-    });
+    await this.#ctx.blockConcurrencyWhile(() =>
+      lifecycleStartupScope.run(scope, async () => {
+        this.#status = "starting";
+        try {
+          await runWithoutCurrentAgent(() =>
+            this.#capabilityRunner.start({ props: this.#props })
+          );
+          await runInLifecycleHostContext({ host: this.#host }, () =>
+            this.#host.onStart?.(this.#props)
+          );
+          this.#status = "started";
+        } catch (cause) {
+          this.#status = "zero";
+          error = cause;
+        }
+      })
+    );
     // Re-throw outside blockConcurrencyWhile so the input gate is not
     // permanently broken and a later invocation can retry startup.
     if (error) {

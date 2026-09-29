@@ -693,6 +693,123 @@ export class RetryableStartObject extends DurableObject<Cloudflare.Env> {
   }
 }
 
+export type ConcurrentStartOptions = {
+  /** Make the capability's start throw after yielding. */
+  readonly failCapability?: boolean;
+  /** Have the capability call `lifecycle.start()` with replacement props. */
+  readonly nestFromCapability?: boolean;
+  /** Have the host `onStart` call `lifecycle.start()`. */
+  readonly nestFromHost?: boolean;
+  /** Have the capability wait for capability-operation readiness. */
+  readonly nestReadyFromCapability?: boolean;
+};
+
+/** Performs a capability operation gated on Lifecycle readiness. */
+class ReadyGatedProbe extends LifecycleCapability {
+  constructor(private readonly isHostReady: () => boolean) {
+    super("ready-gated-probe");
+  }
+
+  waitUntilReady(): Promise<void> {
+    return this.lifecycle.ready();
+  }
+
+  async operation(): Promise<string> {
+    try {
+      await this.lifecycle.ready();
+      return this.isHostReady() ? "ready" : "not-ready";
+    } catch (error) {
+      return `rejected:${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+}
+
+/**
+ * Proves concurrent and nested `lifecycle.start()` calls: independent callers
+ * share one startup and observe its outcome, while calls made from inside
+ * startup return without waiting on it.
+ */
+export class ConcurrentStartObject extends DurableObject<Cloudflare.Env> {
+  readonly events: string[] = [];
+  #options: ConcurrentStartOptions = {};
+  #markStartBegan: () => void = () => {};
+  readonly #startBegan = new Promise<void>((resolve) => {
+    this.#markStartBegan = resolve;
+  });
+  readonly #readyProbe = new ReadyGatedProbe(() => this.ready);
+  ready = false;
+
+  readonly lifecycle = Lifecycle.install<Cloudflare.Env, StartupProps>(this)
+    .use(this.#readyProbe)
+    .use({
+      onStart: async ({ props }) => {
+        this.events.push(`capability:start:${props?.label ?? "none"}`);
+        this.#markStartBegan();
+        if (this.#options.nestReadyFromCapability) {
+          await this.#readyProbe.waitUntilReady();
+          this.events.push("capability:nested-ready-returned");
+        }
+        if (this.#options.nestFromCapability) {
+          await this.lifecycle.start({ label: "replacement" });
+          this.events.push("capability:nested-returned");
+        }
+        await this.ctx.storage.get("yield");
+        if (this.#options.failCapability) {
+          throw new Error("intentional concurrent startup failure");
+        }
+      }
+    });
+
+  async onStart(props?: StartupProps): Promise<void> {
+    this.events.push(`host:start:${props?.label ?? "none"}`);
+    if (this.#options.nestFromHost) {
+      await this.lifecycle.start();
+      this.events.push("host:nested-returned");
+    }
+    await this.ctx.storage.get("yield");
+    this.ready = true;
+  }
+
+  async startConcurrently(
+    options: ConcurrentStartOptions = {}
+  ): Promise<{ observed: string[]; events: string[] }> {
+    this.#options = options;
+    const observe = (caller: string) =>
+      this.lifecycle.start({ label: caller }).then(
+        () => `${caller}:${this.ready ? "ready" : "not-ready"}`,
+        (error: unknown) =>
+          `${caller}:rejected:${error instanceof Error ? error.message : String(error)}`
+      );
+    const observed = await Promise.all([observe("first"), observe("second")]);
+    return { observed, events: this.events };
+  }
+
+  /**
+   * Start, then run an independent capability operation once startup is
+   * mid-flight, and report what each observed.
+   */
+  async operateDuringStartup(
+    options: ConcurrentStartOptions = {}
+  ): Promise<{ start: string; operation: string; events: string[] }> {
+    this.#options = options;
+    const start = this.lifecycle.start({ label: "first" }).then(
+      () => (this.ready ? "ready" : "not-ready"),
+      (error: unknown) =>
+        `rejected:${error instanceof Error ? error.message : String(error)}`
+    );
+    const operation = this.#startBegan.then(() => this.#readyProbe.operation());
+    const [startResult, operationResult] = await Promise.all([
+      start,
+      operation
+    ]);
+    return {
+      start: startResult,
+      operation: operationResult,
+      events: this.events
+    };
+  }
+}
+
 /**
  * A plain Durable Object composed with `State` and `WebSockets`, wired so
  * the capability syncs state over connections. Used to prove `useAgent`'s

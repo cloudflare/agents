@@ -51,6 +51,7 @@ export { TestKeepAliveAgent } from "./keep-alive";
 export { TestMigrationAgent } from "./migration";
 export { TestSessionAgent } from "./session";
 export { TestWaitConnectionsAgent } from "./wait-connections";
+export { TestNativeRpcAgent } from "./native-rpc";
 export { RoutingOwnerAgent, RoutedChatAgent } from "./routed-agents";
 export type { RoutedChatMetadata } from "./routed-agents";
 export { SpikeSubParent, SpikeSubChild } from "./spike-sub-agent-routing";
