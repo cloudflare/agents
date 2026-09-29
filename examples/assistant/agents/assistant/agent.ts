@@ -14,7 +14,7 @@ import type { ChatSummary, DirectoryState, McpToolDescriptor } from "./types";
 //   - access control for its child chats (strict-registry gate)
 //   - cross-chat scheduled work (daily summary)
 //
-// **Existence is framework-owned.** The authoritative set of chats is
+// **Existence is registry-owned.** The authoritative set of chats is
 // `listSubAgents(MyAssistant)` — the registry `subAgent()` /
 // `deleteSubAgent()` maintain in lockstep with the actual facets. We
 // keep a separate `chat_meta` table for metadata (title, preview) keyed
@@ -98,8 +98,8 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
 
     // OAuth popup handler for MCP servers. The directory owns the MCP
     // state, so the OAuth redirect (`/chat/mcp-callback`) lands here
-    // and the framework dispatches into `this.mcp` via
-    // `handleMcpOAuthCallback` on the base `Agent` class.
+    // and the lifecycle dispatches the callback through the installed
+    // `this.mcp` capability.
     this.mcp.configureOAuthCallback({
       customHandler: (result) => {
         if (result.authSuccess) {
@@ -129,7 +129,7 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
     if (!this.hasSubAgent(className, name)) {
       return new Response(`${className} "${name}" not found`, { status: 404 });
     }
-    // Fall through — framework forwards the request to the facet.
+    // Fall through — Agent routing forwards the request to the facet.
   }
 
   // ── Sidebar state ──────────────────────────────────────────────────

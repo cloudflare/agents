@@ -6,7 +6,7 @@ import {
   WorkerTransport,
   type TransportState,
   type WorkerTransportOptions
-} from "../../../mcp/worker-transport";
+} from "../../../mcp/server/worker-transport";
 import { z } from "zod";
 
 /**

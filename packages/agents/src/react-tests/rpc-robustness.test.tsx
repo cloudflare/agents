@@ -14,6 +14,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render as _render, cleanup } from "vitest-browser-react";
 import { Suspense, useEffect, useRef, useState } from "react";
+import { AgentClient } from "../client";
 import { useAgent, type UseAgentOptions } from "../react";
 import { getTestWorkerHost } from "./test-config";
 
@@ -559,6 +560,108 @@ describe("useAgent RPC robustness", () => {
       expect(initialPredicate).not.toHaveBeenCalled();
       const terminalAgent = latestAgent as unknown as TestAgent;
       expect(terminalAgent.shouldReconnect).toBe(false);
+      await vi.waitFor(() => {
+        expect(latestAgent?.connectionError).toMatchObject({
+          code: 1011,
+          reason: "user-stop"
+        });
+      });
+    });
+
+    it("surfaces a sub-agent rejected by onBeforeSubAgent instead of retrying forever (#2118)", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const parent = `rejected-sub-${crypto.randomUUID()}`;
+      const gate = new AgentClient({
+        agent: "HookingSubAgentParent",
+        name: parent,
+        host,
+        protocol
+      });
+      try {
+        await gate.ready;
+        await gate.call("setHookMode", ["deny-401"]);
+      } finally {
+        gate.close();
+      }
+
+      let latestAgent: TestAgent | null = null;
+      const onConnectionError = vi.fn();
+      const onOpen = vi.fn();
+      render(
+        <ControlledAgentComponent
+          initialOptions={{
+            agent: "HookingSubAgentParent",
+            name: parent,
+            sub: [{ agent: "CounterSubAgent", name: "denied-child" }],
+            host,
+            protocol,
+            minReconnectionDelay: 10,
+            maxReconnectionDelay: 10,
+            onOpen,
+            onConnectionError
+          }}
+          onAgent={(agent) => {
+            latestAgent = agent;
+          }}
+          exposeSetOptions={() => {}}
+        />
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(onConnectionError).toHaveBeenCalledOnce();
+          expect(latestAgent?.connectionError).toMatchObject({
+            code: 4401,
+            reason: "Sub-agent connection rejected (401)"
+          });
+        },
+        { timeout: 10000 }
+      );
+      const rejectedAgent = latestAgent as unknown as TestAgent;
+      expect(rejectedAgent.shouldReconnect).toBe(false);
+      await expect(rejectedAgent.call("add", [1, 2])).rejects.toThrow(
+        "Connection closed"
+      );
+
+      const opens = onOpen.mock.calls.length;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(onOpen).toHaveBeenCalledTimes(opens);
+    });
+
+    it("surfaces connectionError once maxRetries is spent", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let latestAgent: TestAgent | null = null;
+      const onConnectionError = vi.fn();
+
+      render(
+        <ControlledAgentComponent
+          initialOptions={{
+            agent: "NoSuchAgentForRetries",
+            name: `max-retries-${crypto.randomUUID()}`,
+            host,
+            protocol,
+            maxRetries: 2,
+            minReconnectionDelay: 10,
+            maxReconnectionDelay: 10,
+            onConnectionError
+          }}
+          onAgent={(agent) => {
+            latestAgent = agent;
+          }}
+          exposeSetOptions={() => {}}
+        />
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(onConnectionError).toHaveBeenCalledOnce();
+          expect(latestAgent?.connectionError).toBeInstanceOf(Error);
+        },
+        { timeout: 10000 }
+      );
+      await expect(latestAgent!.call("add", [1, 2])).rejects.toThrow(
+        "Connection closed"
+      );
     });
 
     it("rejects queued calls when the agent address changes (destination guard)", async () => {

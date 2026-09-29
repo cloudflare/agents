@@ -13,7 +13,7 @@
  */
 
 import { exports, env } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { buildAgentPath, getAgentByName, getSubAgentByName } from "../index";
 import { SpikeSubChild } from "./agents/spike-sub-agent-routing";
 
@@ -113,6 +113,28 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     ws.close();
   });
 
+  it("a facet's identity frame carries its logical name, not the routed DO name", async () => {
+    // The identity frame is built by the WebSockets capability from what
+    // Agent hands it: `this.name` decodes a path-scoped facet's internal
+    // `cf-agents:v2:` routed name back to the child name the client used.
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(parent, "spike-sub-child", child);
+    const [identity] = await collectMessages(
+      ws,
+      1,
+      (data) => typeof data === "string" && data.includes("cf_agent_identity")
+    );
+    expect(JSON.parse(identity)).toEqual({
+      type: "cf_agent_identity",
+      name: child,
+      agent: "spike-sub-child"
+    });
+
+    ws.close();
+  });
+
   it("establishes a WebSocket through the parent → facet chain", async () => {
     const parent = uniqueName();
     const child = uniqueName();
@@ -134,11 +156,8 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     // first hop as one of its own children — creating facets
     // recursively until workerd rejected the chain with "Facet nesting
     // depth limit exceeded". The upgrade returned 101 and the socket
-    // then died with 1011 during session setup.
-    //
-    // One hop passed only by accident: the single-hop self-strip in
-    // `_cf_resolveSubAgentConnection` happened to consume the leaf's
-    // own segment, leaving nothing to route.
+    // then died with 1011 during session setup. One hop passed only
+    // because the leaf's self-strip happened to consume its own segment.
     const parent = uniqueName();
     const middle = uniqueName();
     const leaf = uniqueName();
@@ -160,13 +179,9 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
   });
 
   it("delivers a leaf broadcast to the root-owned socket across two hops", async () => {
-    // The reply travels leaf → middle → root, and each hop is a fresh
-    // RpcTarget stub disposed as soon as its inbound call returns. Every
-    // hop used to be fire-and-forget, so with two hops the inner send
-    // was still in flight when its stub went away ("RPC stub used after
-    // being disposed") and the client got nothing. One hop was short
-    // enough to win the race. Covers `broadcast()`, which is sync by
-    // contract and so cannot be awaited by its caller.
+    // The reply travels leaf → middle → root over per-hop RPC bridges.
+    // Covers `broadcast()`, which is sync by contract and so cannot be
+    // awaited by its caller, across more than one hop (#2026).
     const parent = uniqueName();
     const middle = uniqueName();
     const leaf = uniqueName();
@@ -185,41 +200,6 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     expect(ws.readyState).toBe(WebSocket.OPEN);
 
     ws.close();
-  });
-
-  it("completes a frame without waiting on a background delivery", async () => {
-    // The #2026 fix makes a frame wait for its own deliveries so the
-    // borrowed bridge stub outlives them. That wait has to stay scoped
-    // to the frame. Tracking deliveries in one agent-wide set instead
-    // would mean every frame also waited on background work and on
-    // other connections' frames — a streaming agent could hold a frame
-    // open for the length of an unrelated stream, and one client could
-    // stall another.
-    //
-    // Observed via close, because the message content is delivered
-    // before the drain and so arrives either way. It is frame
-    // *completion* that stalls: `_cf_handleSubAgentWebSocketClose` only
-    // drops the connection once its frame finishes, so an unscoped
-    // drain leaves the facet holding a closed connection forever.
-    const parent = uniqueName();
-    const child = uniqueName();
-
-    const ws = await openWS(parent, "spike-sub-child", child);
-    ws.send("warmup");
-    expect(await collectMessages(ws, 1)).toEqual([`pong:${child}:warmup`]);
-
-    const parentStub = await getAgentByName(env.SpikeSubParent, parent);
-    const childStub = await getSubAgentByName(parentStub, SpikeSubChild, child);
-    await childStub.stallBackgroundDeliveryForTest();
-
-    ws.close();
-
-    await vi.waitFor(
-      async () => {
-        expect((await childStub.connectionSnapshot()).all).toHaveLength(0);
-      },
-      { timeout: 3000, interval: 50 }
-    );
   });
 
   it("this.broadcast(...) inside a facet reaches the facet's own WS clients", async () => {

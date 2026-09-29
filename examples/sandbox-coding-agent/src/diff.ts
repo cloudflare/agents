@@ -13,6 +13,22 @@ export function parseStatus(porcelain: string): WorkspaceFile[] {
     }));
 }
 
+/** Run a git command in the checkout; throw (with stderr) if it fails. */
+async function git(
+  sandbox: Sandbox,
+  workDir: string,
+  command: string
+): Promise<string> {
+  const result = await sandbox.exec(command, { cwd: workDir });
+  if (!result.success) {
+    throw new Error(
+      `\`${command}\` exited with code ${result.exitCode}: ` +
+        (result.stderr.trim() || "no stderr")
+    );
+  }
+  return result.stdout;
+}
+
 /**
  * Snapshot a container's working tree as a unified diff. `-N` marks untracked
  * files as intent-to-add so brand-new files also show up in `git diff`.
@@ -21,10 +37,10 @@ export async function snapshotDiff(
   sandbox: Sandbox,
   workDir: string
 ): Promise<WorkspaceDiff> {
-  await sandbox.exec("git add -A -N", { cwd: workDir });
+  await git(sandbox, workDir, "git add -A -N");
   const [status, diff] = await Promise.all([
-    sandbox.exec("git status --porcelain", { cwd: workDir }),
-    sandbox.exec("git diff", { cwd: workDir })
+    git(sandbox, workDir, "git status --porcelain"),
+    git(sandbox, workDir, "git diff")
   ]);
-  return { files: parseStatus(status.stdout), diff: diff.stdout };
+  return { files: parseStatus(status), diff };
 }

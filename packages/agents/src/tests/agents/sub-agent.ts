@@ -1,10 +1,16 @@
-import { Agent, getCurrentAgent } from "../../index.ts";
+import { Agent, callable, getCurrentAgent } from "../../index.ts";
 import type {
+  Connection,
+  WSMessage,
   FiberInspection,
   FiberRecoveryContext,
-  FiberRecoveryResult
+  FiberRecoveryResult,
+  StreamingResponse
 } from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
+import { MessageType } from "../../types.ts";
+
+const STALE_FRAME_PROBE = "stale-frame-probe";
 
 // ── SubAgent: Counter ───────────────────────────────────────────────
 // A SubAgent with its own SQLite counter table.
@@ -66,6 +72,9 @@ export class CounterSubAgent extends Agent {
       VALUES
         (${ctx.id}, ${ctx.name}, ${JSON.stringify(ctx.snapshot)}, ${ctx.createdAt})
     `;
+    if (ctx.name === "recovery-throws") {
+      throw new Error("recovery hook failed");
+    }
     if (ctx.name === "managed-recovery-complete") {
       return { status: "completed", snapshot: { recovered: true } };
     }
@@ -93,6 +102,10 @@ export class CounterSubAgent extends Agent {
     return rows.length > 0 ? rows[0].value : 0;
   }
 
+  onMessage(_connection: Connection, message: WSMessage) {
+    if (message === STALE_FRAME_PROBE) this.increment(STALE_FRAME_PROBE);
+  }
+
   ping(): string {
     return "pong";
   }
@@ -108,6 +121,18 @@ export class CounterSubAgent extends Agent {
       VALUES
         (${payload.value}, ${this.name}, ${agent?.name ?? null}, ${this.parentPath.at(-1)?.className ?? ""}, ${schedule.id}, ${schedule.callback})
     `;
+  }
+
+  /** Queue callback: logs like scheduledCallback so the same reader works. */
+  queuedCallback(
+    payload: { value: string },
+    item: { id: string; callback: string }
+  ): void {
+    this.scheduledCallback(payload, item);
+  }
+
+  async queueCallback(value: string): Promise<string> {
+    return this.queue("queuedCallback", { value });
   }
 
   async scheduleDelayedCallback(
@@ -389,6 +414,29 @@ export class CounterSubAgent extends Agent {
     return id;
   }
 
+  async runFiberWithFailingCleanup(
+    value: string,
+    failBody = false
+  ): Promise<string> {
+    this.sql`
+      CREATE TRIGGER fail_run_fiber_cleanup
+      BEFORE DELETE ON cf_agents_runs
+      BEGIN
+        SELECT RAISE(FAIL, 'simulated fiber cleanup failure');
+      END
+    `;
+    try {
+      return await this.runFiber("cleanup-failure", async () => {
+        if (failBody) throw new Error(value);
+        return value;
+      });
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      this.sql`DROP TRIGGER fail_run_fiber_cleanup`;
+    }
+  }
+
   async holdManagedFiber(value: string, key: string): Promise<string> {
     const result = await this.startFiber(
       "managed-held",
@@ -479,6 +527,18 @@ export class CounterSubAgent extends Agent {
       SELECT COUNT(*) as count FROM cf_agents_runs
     `;
     return rows[0]?.count ?? 0;
+  }
+
+  getLocalJobIds(): string[] {
+    return this.lifecycle.jobs.list().map((job) => job.id);
+  }
+
+  /** Persist a host job row the way a failed pre-#2299 facet push left it. */
+  insertStaleHostJob(id: string, fn: string): void {
+    this.sql`
+      INSERT INTO cf_agents_jobs (id, capability, fn, time)
+      VALUES (${id}, 'host', ${fn}, ${Date.now()})
+    `;
   }
 
   async inspectManagedFiber(fiberId: string): Promise<FiberInspection | null> {
@@ -884,6 +944,14 @@ export class OuterSubAgent extends Agent {
     await this.subAgent(InnerSubAgent, innerName);
   }
 
+  async deleteInner(innerName: string): Promise<void> {
+    await this.deleteSubAgent(InnerSubAgent, innerName);
+  }
+
+  hasInner(innerName: string): boolean {
+    return this.hasSubAgent(InnerSubAgent, innerName);
+  }
+
   ping(): string {
     return "outer-pong";
   }
@@ -1012,6 +1080,11 @@ export class BroadcastSubAgent extends Agent<Cloudflare.Env, BroadcastState> {
     }
   }
 
+  /** Relays a child broadcast from a fresh RPC context with no frame bridge. */
+  async relayBroadcastFromFreshContext(message: string): Promise<void> {
+    await this._cf_broadcastToSubAgent(this.selfPath, message);
+  }
+
   /**
    * Calls `this.setState(...)` from a facet RPC. `setState` drives
    * `_broadcastProtocol()` internally, so this exercises facet state
@@ -1081,7 +1154,159 @@ export class CustomBoundSubAgentParent extends Agent {
 
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
+class DelayedForwardingSubAgentBridge extends RpcTarget {
+  constructor(
+    private readonly connectionId: string,
+    private readonly delayedMessage: string | undefined,
+    private readonly sendToConnection: (
+      connectionId: string,
+      message: string | ArrayBuffer | ArrayBufferView
+    ) => Promise<void>
+  ) {
+    super();
+  }
+
+  async send(message: string | ArrayBuffer | ArrayBufferView): Promise<void> {
+    if (message === this.delayedMessage) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    await this.sendToConnection(this.connectionId, message);
+  }
+}
+
 export class TestSubAgentParent extends Agent {
+  private _rootResolutionFailuresRemaining = 0;
+  private _nextRootResolutionDelayMs = 0;
+  private _subAgentBroadcastFailuresRemaining = 0;
+
+  failNextRootResolution(): void {
+    this._rootResolutionFailuresRemaining += 1;
+  }
+
+  delayNextRootResolution(delayMs: number): void {
+    this._nextRootResolutionDelayMs = delayMs;
+  }
+
+  /** Forwards one frame through a deliberately slow live bridge. */
+  async forwardLiveThenDetachedMessages(
+    childName: string,
+    liveMessage: string,
+    detachedMessage: string
+  ): Promise<void> {
+    const [meta] = await this._cf_subAgentConnectionMetas([
+      ...this.selfPath,
+      { className: SlowReplySubAgent.name, name: childName }
+    ]);
+    if (!meta) {
+      throw new Error(
+        "TestSubAgentParent.forwardLiveThenDetachedMessages requires a child WebSocket"
+      );
+    }
+
+    const sendToConnection = (
+      connectionId: string,
+      message: string | ArrayBuffer | ArrayBufferView
+    ) => this._cf_sendToSubAgentConnection(connectionId, message);
+    const operationBridge = new DelayedForwardingSubAgentBridge(
+      meta.id,
+      liveMessage,
+      sendToConnection
+    );
+    const replyBridge = new DelayedForwardingSubAgentBridge(
+      meta.id,
+      undefined,
+      sendToConnection
+    );
+    const child = await this.subAgent(SlowReplySubAgent, childName);
+    // SAFETY: SubAgentStub omits Agent's internal forwarding method, while this
+    // fixture supplies the same message, metadata, and RpcTarget bridge shape.
+    await (
+      child as unknown as {
+        _cf_handleSubAgentWebSocketMessage(
+          message: string,
+          bridge: DelayedForwardingSubAgentBridge,
+          connectionMeta: typeof meta,
+          reply: DelayedForwardingSubAgentBridge
+        ): Promise<void>;
+      }
+    )._cf_handleSubAgentWebSocketMessage(
+      JSON.stringify({
+        args: [liveMessage, detachedMessage],
+        id: crypto.randomUUID(),
+        method: "sendLiveThenDetachedMessages",
+        type: MessageType.RPC
+      }),
+      operationBridge,
+      meta,
+      replyBridge
+    );
+  }
+
+  failNextSubAgentBroadcast(): void {
+    this._subAgentBroadcastFailuresRemaining += 1;
+  }
+
+  private _subAgentBroadcastCalls = 0;
+  private _startsInThisInstance = 0;
+
+  onStart(): void {
+    this._startsInThisInstance += 1;
+  }
+
+  /** Read without an RPC so the probe itself cannot start the agent. */
+  get startsInThisInstance(): number {
+    return this._startsInThisInstance;
+  }
+
+  subAgentBroadcastCallCount(): number {
+    return this._subAgentBroadcastCalls;
+  }
+
+  async broadcastFromSubAgentDetached(
+    childName: string,
+    messages: string[]
+  ): Promise<void> {
+    const child = await this.subAgent(SlowReplySubAgent, childName);
+    await child.broadcastDetached(messages);
+  }
+
+  abortSlowReplySubAgent(childName: string): void {
+    this.abortSubAgent(SlowReplySubAgent, childName);
+  }
+
+  override async _cf_broadcastToSubAgent(
+    ownerPath: ReadonlyArray<{ className: string; name: string }>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): Promise<void> {
+    this._subAgentBroadcastCalls += 1;
+    if (this._subAgentBroadcastFailuresRemaining > 0) {
+      this._subAgentBroadcastFailuresRemaining -= 1;
+      throw new Error("TestSubAgentParent broadcast forwarding failed");
+    }
+    await super._cf_broadcastToSubAgent(ownerPath, message, without);
+  }
+
+  override async __unsafe_ensureInitialized(
+    props?: Record<string, unknown>
+  ): Promise<void> {
+    if (this._rootResolutionFailuresRemaining > 0) {
+      this._rootResolutionFailuresRemaining -= 1;
+      throw new Error("TestSubAgentParent root resolution failed");
+    }
+    if (this._nextRootResolutionDelayMs > 0) {
+      const delayMs = this._nextRootResolutionDelayMs;
+      this._nextRootResolutionDelayMs = 0;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    await super.__unsafe_ensureInitialized(props);
+  }
+
+  async delayedEchoFromParent(value: string): Promise<string> {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return `parent:${value}`;
+  }
+
   async onMessage(
     connection: { send(message: string): void },
     message: string | ArrayBuffer
@@ -1166,12 +1391,86 @@ export class TestSubAgentParent extends Agent {
     return child.get(counterId);
   }
 
+  // ── this.dynamicAgents facade (the new public capability surface) ──
+
+  async dynamicAgentsIncrement(
+    subAgentName: string,
+    counterId: string
+  ): Promise<number> {
+    const child = await this.dynamicAgents.get(CounterSubAgent, subAgentName);
+    return child.increment(counterId);
+  }
+
+  dynamicAgentsHas(subAgentName: string): { facade: boolean; legacy: boolean } {
+    return {
+      facade: this.dynamicAgents.has(CounterSubAgent, subAgentName),
+      legacy: this.hasSubAgent(CounterSubAgent, subAgentName)
+    };
+  }
+
+  dynamicAgentsListNames(): { facade: string[]; legacy: string[] } {
+    return {
+      facade: this.dynamicAgents.list(CounterSubAgent).map((e) => e.name),
+      legacy: this.listSubAgents(CounterSubAgent).map((e) => e.name)
+    };
+  }
+
+  dynamicAgentsAbort(subAgentName: string): void {
+    this.dynamicAgents.abort(
+      CounterSubAgent,
+      subAgentName,
+      new Error("test abort")
+    );
+  }
+
+  async dynamicAgentsDelete(subAgentName: string): Promise<void> {
+    await this.dynamicAgents.delete(CounterSubAgent, subAgentName);
+  }
+
   async subAgentAbort(subAgentName: string): Promise<void> {
     this.abortSubAgent(CounterSubAgent, subAgentName, new Error("test abort"));
   }
 
   async subAgentDelete(subAgentName: string): Promise<void> {
     await this.deleteSubAgent(CounterSubAgent, subAgentName);
+  }
+
+  /**
+   * Deletes the child, recreates it under the same name, then forwards a
+   * frame from the socket the delete closed, as a late event would. Returns
+   * how many of those frames the replacement received.
+   */
+  async subAgentForwardStaleFrameToReplacement(
+    subAgentName: string
+  ): Promise<number> {
+    const sockets = (
+      this as unknown as {
+        _webSockets: { getConnections(): Iterable<Connection> };
+      }
+    )._webSockets.getConnections();
+    const connection = [...sockets].find((candidate) => {
+      const outerUrl = this._unsafe_getConnectionFlag(
+        candidate,
+        "_cf_subAgentOuterUrl"
+      );
+      return (
+        typeof outerUrl === "string" &&
+        outerUrl.includes(`/sub/counter-sub-agent/${subAgentName}`)
+      );
+    });
+    if (!connection) throw new Error("no socket for the sub-agent");
+
+    await this.deleteSubAgent(CounterSubAgent, subAgentName);
+    const replacement = await this.subAgent(CounterSubAgent, subAgentName);
+    await (
+      this as unknown as {
+        _cf_forwardSubAgentWebSocketMessage(
+          connection: Connection,
+          message: WSMessage
+        ): Promise<boolean>;
+      }
+    )._cf_forwardSubAgentWebSocketMessage(connection, STALE_FRAME_PROBE);
+    return replacement.get(STALE_FRAME_PROBE);
   }
 
   async subAgentScheduleDelayed(
@@ -1182,6 +1481,50 @@ export class TestSubAgentParent extends Agent {
   ): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.scheduleDelayedCallback(delaySeconds, value, options);
+  }
+
+  async subAgentQueue(subAgentName: string, value: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.queueCallback(value);
+  }
+
+  /**
+   * Queue from a facet, park the item in the far future so the alarm cannot
+   * run it, then delete the facet. Returns the root queue rows after each
+   * step so a test can assert the deletion cleaned the routed item up.
+   */
+  async subAgentQueueThenDelete(subAgentName: string): Promise<{
+    beforeDelete: string[];
+    afterDelete: string[];
+  }> {
+    const itemId = await this.subAgentQueue(subAgentName, "orphan");
+    this
+      .sql`UPDATE cf_agents_jobs SET time = ${Date.now() + 86_400_000} WHERE id = ${itemId}`;
+    const beforeDelete = (await this.rootQueueRows()).map((row) => row.id);
+    await this.deleteSubAgent(CounterSubAgent, subAgentName);
+    const afterDelete = (await this.rootQueueRows()).map((row) => row.id);
+    return { beforeDelete, afterDelete };
+  }
+
+  async rootQueueRows(): Promise<
+    Array<{ id: string; callback: string; ownerPath: string | null }>
+  > {
+    return this.sql<{
+      id: string;
+      callback: string;
+      owner_path: string | null;
+    }>`
+      SELECT id,
+             fn AS callback,
+             json_extract(payload, '$.owner_path') AS owner_path
+      FROM cf_agents_jobs
+      WHERE capability = 'queue'
+      ORDER BY time
+    `.map((row) => ({
+      id: row.id,
+      callback: row.callback,
+      ownerPath: row.owner_path
+    }));
   }
 
   async subAgentScheduleInterval(
@@ -1316,8 +1659,8 @@ export class TestSubAgentParent extends Agent {
   }
 
   async backdateSchedule(id: string): Promise<void> {
-    const past = Math.floor(Date.now() / 1000) - 1;
-    this.sql`UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${id}`;
+    const past = Date.now() - 1_000;
+    this.sql`UPDATE cf_agents_jobs SET time = ${past} WHERE id = ${id}`;
   }
 
   async forgetCounterSubAgentRegistry(subAgentName: string): Promise<void> {
@@ -1345,8 +1688,14 @@ export class TestSubAgentParent extends Agent {
       type: string;
       running: number | null;
     }>`
-      SELECT id, callback, owner_path, owner_path_key, type, COALESCE(running, 0) AS running
-      FROM cf_agents_schedules
+      SELECT id,
+             fn AS callback,
+             json_extract(payload, '$.owner_path') AS owner_path,
+             json_extract(payload, '$.owner_path_key') AS owner_path_key,
+             json_extract(payload, '$.type') AS type,
+             COALESCE(running, 0) AS running
+      FROM cf_agents_jobs
+      WHERE capability = 'scheduler'
       ORDER BY id
     `.map((row) => ({
       id: row.id,
@@ -1577,6 +1926,16 @@ export class TestSubAgentParent extends Agent {
     await outer.spawnInner(innerName);
   }
 
+  async nestedDeleteInner(outerName: string, innerName: string): Promise<void> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    await outer.deleteInner(innerName);
+  }
+
+  async nestedHasInner(outerName: string, innerName: string): Promise<boolean> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.hasInner(innerName);
+  }
+
   async nestedSpawnWithFacetParentNamespaceHidden(
     outerName: string,
     innerName: string
@@ -1682,6 +2041,15 @@ export class TestSubAgentParent extends Agent {
     return child.inspectManagedFiber(fiberId);
   }
 
+  async subAgentRunFiberWithFailingCleanup(
+    subAgentName: string,
+    value: string,
+    failBody = false
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.runFiberWithFailingCleanup(value, failBody);
+  }
+
   async subAgentRunningFiberCount(subAgentName: string): Promise<number> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.getRunningFiberCount();
@@ -1754,6 +2122,23 @@ export class TestSubAgentParent extends Agent {
     return child.tryCancelSchedule();
   }
 
+  async subAgentInsertStaleHostJob(
+    subAgentName: string,
+    id: string,
+    fn: string
+  ): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.insertStaleHostJob(id, fn);
+  }
+
+  async subAgentLocalJobIdsAfterRestart(
+    subAgentName: string
+  ): Promise<string[]> {
+    this.abortSubAgent(CounterSubAgent, subAgentName);
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.getLocalJobIds();
+  }
+
   async subAgentTryScheduleAfterAbort(subAgentName: string): Promise<string> {
     // Create the sub-agent and let it be marked as a facet
     await this.subAgent(CounterSubAgent, subAgentName);
@@ -1813,6 +2198,14 @@ export class TestSubAgentParent extends Agent {
   ): Promise<string> {
     const child = await this.subAgent(BroadcastSubAgent, subAgentName);
     return child.tryBroadcast(msg);
+  }
+
+  async subAgentRelayBroadcastFromFreshContext(
+    subAgentName: string,
+    message: string
+  ): Promise<void> {
+    const child = await this.subAgent(BroadcastSubAgent, subAgentName);
+    await child.relayBroadcastFromFreshContext(message);
   }
 
   async subAgentTrySetState(
@@ -2114,8 +2507,15 @@ export class HookingSubAgentParent extends Agent {
     `;
   }
 
+  @callable()
   async setHookMode(
-    mode: "allow" | "deny-404" | "deny-401" | "mutate" | "strict-registry"
+    mode:
+      | "allow"
+      | "deny-404"
+      | "deny-401"
+      | "deny-503"
+      | "mutate"
+      | "strict-registry"
   ): Promise<void> {
     this.sql`UPDATE hook_mode SET value = ${mode} WHERE id = 1`;
   }
@@ -2159,6 +2559,10 @@ export class HookingSubAgentParent extends Agent {
       });
     }
 
+    if (mode === "deny-503") {
+      return new Response("unavailable", { status: 503 });
+    }
+
     if (mode === "mutate") {
       // Inject a header and pass through.
       const headers = new Headers(req.headers);
@@ -2191,6 +2595,16 @@ export class HookingSubAgentParent extends Agent {
   }
 }
 
+// ── Facet that rejects every child request ──────────────────────────
+// Pins how a gate at a nested hop rejects a WebSocket the root already
+// accepted.
+
+export class DenyingSubAgent extends Agent {
+  override async onBeforeSubAgent(): Promise<Response> {
+    return new Response("forbidden", { status: 403 });
+  }
+}
+
 // ── Root export-name fixtures ───────────────────────────────────────
 //
 // These root agents deliberately have class identifiers that differ
@@ -2211,6 +2625,292 @@ class _UnboundParent extends Agent {
 }
 export { _UnboundParent as TestUnboundParentAgent };
 
+// Regression fixture for issues #1991 and #2055. The onMessage wrapper is
+// intentional: frame-bound RPC replies must retain their originating bridge
+// through middleware, while later connection operations route through the root.
+export class SlowReplySubAgent extends Agent {
+  onStart(): void {
+    const handleMessage = this.onMessage.bind(this);
+    this.onMessage = async (connection, message) => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      if (message === "close-connection-during-live-frame") {
+        connection.close(4001, "live-frame-close");
+        return;
+      }
+      await handleMessage(connection, message);
+    };
+  }
+
+  @callable()
+  async slowEcho(value: string): Promise<string> {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return `slow:${value}`;
+  }
+
+  @callable()
+  fastEcho(value: string): string {
+    return `fast:${value}`;
+  }
+
+  @callable()
+  async parentEcho(value: string): Promise<string> {
+    const parent = await this.parentAgent(TestSubAgentParent);
+    return await parent.delayedEchoFromParent(value);
+  }
+
+  /** Schedules a direct connection message after the current frame completes. */
+  @callable()
+  sendConnectionMessageAfterDelay(message: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendConnectionMessageAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.send(message);
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Sends a direct connection message during the current frame. */
+  @callable()
+  sendConnectionMessageNow(message: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendConnectionMessageNow requires an active connection"
+      );
+    }
+
+    connection.send(message);
+    return "sent";
+  }
+
+  /** Sends once in the live frame and once after that frame completes. */
+  @callable()
+  sendLiveThenDetachedMessages(
+    liveMessage: string,
+    detachedMessage: string
+  ): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendLiveThenDetachedMessages requires an active connection"
+      );
+    }
+
+    connection.send(liveMessage);
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.send(detachedMessage);
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Sends a detached buffer to exercise live bridge failure reporting. */
+  @callable()
+  sendDetachedConnectionMessageNow(): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendDetachedConnectionMessageNow requires an active connection"
+      );
+    }
+
+    const message = new ArrayBuffer(1);
+    structuredClone(message, { transfer: [message] });
+    connection.send(message);
+    return "sent";
+  }
+
+  /** Broadcasts during the current frame. */
+  @callable()
+  broadcastMessageNow(message: string): string {
+    this.broadcast(message);
+    return "broadcast";
+  }
+
+  /** Broadcasts and then sends directly, both during the current frame. */
+  @callable()
+  broadcastThenSendNow(broadcast: string, direct: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.broadcastThenSendNow requires an active connection"
+      );
+    }
+
+    this.broadcast(broadcast);
+    connection.send(direct);
+    return "sent";
+  }
+
+  /** Broadcasts after the current frame completes, optionally skipping the caller. */
+  @callable()
+  broadcastMessagesAfterDelay(messages: string[], withoutSelf = false): string {
+    const { connection } = getCurrentAgent();
+    const without = withoutSelf && connection ? [connection.id] : undefined;
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        for (const message of messages) this.broadcast(message, without);
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Broadcasts from a parent RPC, outside any client frame. */
+  broadcastDetached(messages: string[]): void {
+    for (const message of messages) this.broadcast(message);
+  }
+
+  /** Schedules consecutive messages after the current frame completes. */
+  @callable()
+  sendConnectionMessagesAfterDelay(messages: string[]): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendConnectionMessagesAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        for (const message of messages) connection.send(message);
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Schedules a connection state update after the current frame completes. */
+  @callable()
+  setConnectionMarkerAfterDelay(marker: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.setConnectionMarkerAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.setState({ delayedMarker: marker });
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Updates connection state during the current frame. */
+  @callable()
+  setConnectionMarkerNow(marker: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.setConnectionMarkerNow requires an active connection"
+      );
+    }
+
+    connection.setState({ delayedMarker: marker });
+    return "set";
+  }
+
+  /** Schedules consecutive state updates after the current frame completes. */
+  @callable()
+  setConnectionMarkersAfterDelay(markers: string[]): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.setConnectionMarkersAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        for (const marker of markers) {
+          connection.setState({ delayedMarker: marker });
+        }
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Returns the marker persisted in the current connection state. */
+  @callable()
+  getConnectionMarker(): string | null {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.getConnectionMarker requires an active connection"
+      );
+    }
+
+    const state = connection.state;
+    if (
+      typeof state !== "object" ||
+      state === null ||
+      !("delayedMarker" in state)
+    ) {
+      return null;
+    }
+    return typeof state.delayedMarker === "string" ? state.delayedMarker : null;
+  }
+
+  /** Schedules a message followed by close after the current frame completes. */
+  @callable()
+  sendThenCloseConnectionAfterDelay(
+    message: string,
+    code: number,
+    reason: string
+  ): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.sendThenCloseConnectionAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.send(message);
+        connection.close(code, reason);
+      })
+    );
+    return "scheduled";
+  }
+
+  /** Schedules a connection close after the current frame completes. */
+  @callable()
+  closeConnectionAfterDelay(code: number, reason: string): string {
+    const { connection } = getCurrentAgent();
+    if (!connection) {
+      throw new Error(
+        "SlowReplySubAgent.closeConnectionAfterDelay requires an active connection"
+      );
+    }
+
+    this.ctx.waitUntil(
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+        connection.close(code, reason);
+      })
+    );
+    return "scheduled";
+  }
+
+  @callable({ streaming: true })
+  async slowStreamingEcho(
+    stream: StreamingResponse,
+    value: string
+  ): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    stream.send(`slow-stream:${value}:chunk`);
+    stream.end(`slow-stream:${value}:done`);
+  }
+}
+
 /** Class identifier `_a`, exported as `TestMinifiedNameParentAgent`. */
 class _a extends Agent {
   async tryToSpawn(name: string): Promise<string> {
@@ -2223,3 +2923,100 @@ class _a extends Agent {
   }
 }
 export { _a as TestMinifiedNameParentAgent };
+
+// ── Request-body forwarding probes (issue #2015) ─────────────────────
+//
+// `_cf_forwardToFacet` and `routeSubAgentRequest` used to materialise
+// the whole forwarded body via `await req.arrayBuffer()` before
+// dispatching. These fixtures let a test observe *when* the child sees
+// the request relative to the client finishing its upload, which is
+// what distinguishes streaming from buffering.
+//
+// The same handler backs a facet child (`BodyProbeSubAgent`) and a
+// root Agent (`BodyProbeRootAgent`). The root is the control: it
+// proves the *test harness* can stream a request body, so a hang on
+// the facet path can be attributed to the forwarder rather than to
+// vitest-pool-workers.
+
+function toHex(buf: ArrayBuffer): string {
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * Probe endpoints:
+ *   - `/probe/ignore`      — reply immediately, never touch the body.
+ *   - `/probe/first-chunk` — read exactly one chunk, then reply.
+ *   - `/probe/drain`       — read to completion, reply with size + digest.
+ */
+async function handleBodyProbe(
+  agentName: string,
+  request: Request
+): Promise<Response> {
+  const { pathname } = new URL(request.url);
+
+  // Matched by suffix, not equality: a facet child sees the tail after
+  // `/sub/{class}/{name}` (the forwarder rewrites the pathname), while a
+  // root Agent sees the full `/agents/{class}/{name}/...` path. The same
+  // handler has to serve both.
+  if (pathname.endsWith("/probe/ignore")) {
+    return Response.json({ agentName, probe: "ignore" });
+  }
+
+  if (pathname.endsWith("/probe/first-chunk")) {
+    if (!request.body) {
+      return Response.json({ agentName, chunk: null, probe: "first-chunk" });
+    }
+    const reader = request.body.getReader();
+    try {
+      const { done, value } = await reader.read();
+      return Response.json({
+        agentName,
+        chunk: value ? new TextDecoder().decode(value) : null,
+        done,
+        probe: "first-chunk"
+      });
+    } finally {
+      // Let go without draining — the point of this probe is that the
+      // child can act on a prefix of a body the client hasn't finished
+      // sending.
+      reader.cancel().catch(() => {});
+    }
+  }
+
+  if (pathname.endsWith("/probe/drain")) {
+    const body = await request.arrayBuffer();
+    return Response.json({
+      agentName,
+      bytes: body.byteLength,
+      contentLength: request.headers.get("content-length"),
+      probe: "drain",
+      sha256: toHex(await crypto.subtle.digest("SHA-256", body))
+    });
+  }
+
+  return Response.json(
+    { agentName, path: pathname, probe: "unknown" },
+    {
+      status: 404
+    }
+  );
+}
+
+/** Facet-only child. Reached via `/sub/body-probe-sub-agent/{name}`. */
+export class BodyProbeSubAgent extends Agent {
+  override async onRequest(request: Request): Promise<Response> {
+    return handleBodyProbe(this.name, request);
+  }
+}
+
+/**
+ * Root Agent running the identical handler — the canonical (non-facet)
+ * control path from the issue's measurement table.
+ */
+export class BodyProbeRootAgent extends Agent {
+  override async onRequest(request: Request): Promise<Response> {
+    return handleBodyProbe(this.name, request);
+  }
+}

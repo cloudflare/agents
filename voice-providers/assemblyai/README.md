@@ -7,7 +7,7 @@ Uses AssemblyAI's real-time WebSocket API to transcribe audio continuously. A si
 ## Install
 
 ```bash
-npm install @cloudflare/voice-assemblyai
+npm install agents @cloudflare/voice-assemblyai
 ```
 
 ## Usage
@@ -16,11 +16,7 @@ Set `transcriber` on your voice agent:
 
 ```typescript
 import { Agent } from "agents";
-import {
-  withVoice,
-  WorkersAITTS,
-  type VoiceTurnContext
-} from "@cloudflare/voice";
+import { withVoice, WorkersAITTS, type VoiceTurnContext } from "agents/voice";
 import { AssemblyAISTT } from "@cloudflare/voice-assemblyai";
 
 const VoiceAgent = withVoice(Agent);

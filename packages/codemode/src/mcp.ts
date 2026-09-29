@@ -15,43 +15,28 @@ import {
 import { normalizeCode } from "./normalize";
 import { sanitizeToolName } from "./utils";
 import type { Executor } from "./executor";
+import { truncateResult } from "./truncate";
 
 import type { JSONSchema7 } from "json-schema";
 
 // -- Shared utilities --
 
-const CHARS_PER_TOKEN = 4;
-const MAX_TOKENS = 6000;
-const MAX_CHARS = MAX_TOKENS * CHARS_PER_TOKEN;
-const TRUNCATION_MARKER = "--- TRUNCATED ---";
-const TRUNCATION_FOOTER_PREFIX = `\n\n${TRUNCATION_MARKER}\nResponse was ~`;
-const MAX_SANDBOX_TRUNCATED_CHARS = MAX_CHARS + 512;
+/** Character budget for a tool response (~6,000 tokens). */
+const MAX_RESPONSE_CHARS = 24_000;
 
-function truncateResponse(content: unknown): string {
-  const text =
-    typeof content === "string"
-      ? content
-      : (JSON.stringify(content, null, 2) ?? "undefined");
-
-  if (text.length <= MAX_CHARS) {
-    return text;
-  }
-
-  const truncated = text.slice(0, MAX_CHARS);
-  const estimatedTokens = Math.ceil(text.length / CHARS_PER_TOKEN);
-
-  return `${truncated}\n\n${TRUNCATION_MARKER}\nResponse was ~${estimatedTokens.toLocaleString()} tokens (limit: ${MAX_TOKENS.toLocaleString()}). Use more specific queries to reduce response size.`;
-}
-
-function sandboxResponseText(content: unknown): string {
-  if (
-    typeof content === "string" &&
-    content.length <= MAX_SANDBOX_TRUNCATED_CHARS &&
-    content.slice(MAX_CHARS).startsWith(TRUNCATION_FOOTER_PREFIX)
-  ) {
-    return content;
-  }
-  return truncateResponse(content);
+/**
+ * Model-facing text for a sandbox or executor result. Strings are clipped to
+ * the budget; structured values are truncated structurally (largest values
+ * first) so the text stays valid JSON. The budget applies to the emitted text:
+ * pretty-printed when that still fits, compact otherwise.
+ */
+function responseText(content: unknown): string {
+  const shaped = truncateResult(content, { maxChars: MAX_RESPONSE_CHARS });
+  if (typeof shaped === "string") return shaped;
+  const pretty = JSON.stringify(shaped, null, 2) ?? "undefined";
+  return pretty.length <= MAX_RESPONSE_CHARS
+    ? pretty
+    : (JSON.stringify(shaped) ?? "undefined");
 }
 
 function formatError(error: unknown): string {
@@ -231,7 +216,7 @@ export async function codeMcpServer(
         }
         return {
           content: [
-            { type: "text" as const, text: truncateResponse(result.result) }
+            { type: "text" as const, text: responseText(result.result) }
           ]
         };
       } catch (error) {
@@ -417,17 +402,10 @@ const __resolveRefs = (obj, root, seen = new Set()) => {
   return result;
 };
 let __resolvedSpec;
-const __truncateResponse = (content) => {
-  const text = typeof content === "string" ? content : (JSON.stringify(content, null, 2) ?? "undefined");
-  if (text.length <= ${MAX_CHARS}) return text;
-  const truncated = text.slice(0, ${MAX_CHARS});
-  const estimatedTokens = Math.ceil(text.length / ${CHARS_PER_TOKEN});
-  return truncated + "\\n\\n${TRUNCATION_MARKER}\\nResponse was ~" + estimatedTokens.toLocaleString() + " tokens (limit: ${MAX_TOKENS.toLocaleString()}). Use more specific queries to reduce response size.";
-};
 const codemode = {
   spec: async () => (__resolvedSpec ??= __resolveRefs(__rawSpec, __rawSpec))${requestFn ? `,\n  ${requestFn}` : ""}
 };
-return __truncateResponse(await (${normalized})());
+return await (${normalized})();
 }`;
 }
 
@@ -508,7 +486,7 @@ async () => {
         }
         return {
           content: [
-            { type: "text" as const, text: sandboxResponseText(result.result) }
+            { type: "text" as const, text: responseText(result.result) }
           ]
         };
       } catch (error) {
@@ -567,7 +545,7 @@ async () => {
         }
         return {
           content: [
-            { type: "text" as const, text: sandboxResponseText(result.result) }
+            { type: "text" as const, text: responseText(result.result) }
           ]
         };
       } catch (error) {

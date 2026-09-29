@@ -34,8 +34,8 @@ export type ChatRecoveryScheduleCallback =
   | "_chatRecoveryRetry";
 
 /**
- * Why a recovery callback is being scheduled. The idempotency of the underlying
- * `schedule()` call depends ONLY on this:
+ * Why a recovery callback is being scheduled. The idempotency of the
+ * underlying Task run's `idempotencyKey` depends ONLY on this:
  *
  * - `"initial"` — the first schedule of a continuation/retry when an interrupted
  *   turn is detected on wake. A deploy rollout drops/reconnects the socket
@@ -44,13 +44,20 @@ export type ChatRecoveryScheduleCallback =
  *   instead of N duplicates.
  *
  * - `"stable_timeout_retry"` — a reschedule issued from INSIDE the currently-
- *   executing one-shot schedule row (a continuation that timed out waiting for
- *   stable state). `alarm()` deletes that row only AFTER the callback returns,
- *   so an idempotent reschedule would dedup onto the doomed row and be deleted
- *   with it — the retry would never fire. A fresh (non-idempotent) delayed row
- *   survives the deletion.
+ *   executing recovery attempt (a continuation that timed out waiting for
+ *   stable state). That attempt — a `__cf_internal_chat_recovery` Task run —
+ *   settles only AFTER the callback returns, so an idempotent reschedule would
+ *   dedup onto the doomed attempt and settle with it — the retry would never
+ *   fire. A fresh (non-idempotent) delayed attempt survives.
+ *
+ * - `"chained_retry"` — the next attempt, scheduled from inside an executing
+ *   recovery attempt that was interrupted again. Non-idempotent for the same
+ *   reason as `"stable_timeout_retry"`.
  */
-export type ChatRecoveryScheduleReason = "initial" | "stable_timeout_retry";
+export type ChatRecoveryScheduleReason =
+  | "initial"
+  | "stable_timeout_retry"
+  | "chained_retry";
 
 /**
  * A reconstructed orphaned-stream partial. The engine seam is deliberately
@@ -72,21 +79,6 @@ export type RecoveryPartial = {
 
 /** Lifecycle status of a recovered stream's metadata row. */
 export type ChatStreamStatus = "streaming" | "completed" | "error";
-
-/**
- * Resolve the `schedule()` idempotency option for a recovery schedule. Single
- * source of truth for both packages; see {@link ChatRecoveryScheduleReason} for
- * the rationale behind each case.
- *
- * This is a cutover invariant: flipping either case silently breaks deploy-storm
- * dedup (initial) or stalls stable-timeout retries (reschedule), and neither is
- * caught by a type error — only by the recovery suites.
- */
-export function chatRecoverySchedulePolicy(
-  reason: ChatRecoveryScheduleReason
-): { idempotent: boolean } {
-  return { idempotent: reason === "initial" };
-}
 
 /** Identity + context for opening (or re-evaluating) a recovery incident. */
 export interface BeginChatRecoveryIncidentInput {
@@ -149,6 +141,12 @@ export interface ChatRecoveryAdapter {
    * fixture) omits it and the engine treats the turn as never parked (`false`).
    */
   isAwaitingClientInteraction?(): boolean;
+  /**
+   * Optional: list the live (not yet terminalized) incidents. Required for
+   * {@link ChatRecoveryEngine.cancelScheduledRecovery}; a host that omits it
+   * cannot cancel a scheduled recovery.
+   */
+  listActiveIncidents?(): Promise<ChatRecoveryIncident[]>;
   /** Persist the evaluated incident under `key`. */
   putIncident(key: string, incident: ChatRecoveryIncident): Promise<void>;
   /**
@@ -160,15 +158,11 @@ export interface ChatRecoveryAdapter {
   /** Broadcast a lifecycle event produced by the evaluation or a transition. */
   emitRecoveryEvent(event: ChatRecoveryIncidentEvent): void;
   /**
-   * Enqueue a recovery callback. A thin pass-through to the package's
-   * `schedule(delaySeconds, callback, data, chatRecoverySchedulePolicy(reason))`
-   * — the engine owns the surrounding orchestration (the transition + emit for
-   * the initial schedule in {@link ChatRecoveryEngine.scheduleRecovery}, the
-   * attempt bump for {@link ChatRecoveryEngine.rescheduleAfterStableTimeout});
-   * the package owns the Durable Object alarm write and the payload shape.
-   * `reason` selects the idempotency policy and `delaySeconds` the alarm delay
-   * (`0` for the initial enqueue, `CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS` for
-   * a stable-timeout reschedule).
+   * Enqueue a recovery callback. The engine owns the surrounding orchestration
+   * and the package chooses its durable transport: a Task for a root chat agent,
+   * or the temporary routed-schedule fallback for a dynamic agent. `reason`
+   * selects deduplication and `delaySeconds` is `0` initially or the stable
+   * retry delay for a chained attempt.
    */
   scheduleRecovery(
     callback: ChatRecoveryScheduleCallback,
@@ -205,7 +199,12 @@ export interface ChatRecoveryAdapter {
     config: ResolvedChatRecoveryConfig,
     partial: RecoveryPartial,
     streamId: string,
-    createdAt: number
+    createdAt: number,
+    /**
+     * The fiber snapshot's origin ids (#2280). A restored pre-stream turn has
+     * no stream row or live request to recover them from otherwise.
+     */
+    originMessageIds?: string[]
   ): Promise<void>;
   /**
    * Resolve the orphaned stream identity for a (recovery-root) request id —
@@ -476,7 +475,8 @@ export class ChatRecoveryEngine {
         config,
         partial,
         streamId,
-        ctx.createdAt
+        ctx.createdAt,
+        snapshot?.originMessageIds
       );
       return true;
     }
@@ -613,7 +613,8 @@ export class ChatRecoveryEngine {
    * 1. transition the incident to `scheduled` (persist + drive the #1620
    *    "recovering…" status) via {@link updateIncident};
    * 2. emit `chat:recovery:scheduled`; and
-   * 3. enqueue the callback through the adapter's idempotent schedule.
+   * 3. enqueue the callback through the adapter's transport — a Task run on
+   *    a root agent, an idempotent schedule on the routed fallback.
    *
    * `recoveryKind` is passed explicitly (not read off the incident) because a
    * caller can legitimately report a different kind than the incident was opened
@@ -628,6 +629,7 @@ export class ChatRecoveryEngine {
     callback: ChatRecoveryScheduleCallback;
     data: Record<string, unknown>;
     reason?: ChatRecoveryScheduleReason;
+    delaySeconds?: number;
   }): Promise<void> {
     const { incident } = input;
     await this.updateIncident(incident.incidentId, "scheduled");
@@ -643,18 +645,20 @@ export class ChatRecoveryEngine {
       input.callback,
       input.data,
       input.reason ?? "initial",
-      0
+      input.delaySeconds ?? 0
     );
   }
 
   /**
    * Reschedule a recovery continuation/retry that timed out waiting for stable
-   * state, INSIDE the currently-executing one-shot schedule row. Reads the
+   * state, from INSIDE the currently-executing recovery attempt (a
+   * `__cf_internal_chat_recovery` Task run for a root agent, the routed
+   * one-shot schedule row for a dynamic agent). Reads the
    * incident; if it is still under the attempt cap, bumps `attempt`, marks it
-   * `scheduled` with `reason:"stable_timeout_retry"`, and issues a delayed,
-   * NON-idempotent schedule (`alarm()` deletes the executing row only after this
-   * returns, so an idempotent reschedule would dedup onto that doomed row and
-   * never fire — see {@link chatRecoverySchedulePolicy}).
+   * `scheduled` with `reason:"stable_timeout_retry"`, and issues a separate
+   * delayed attempt. It must not join the currently executing attempt: Tasks
+   * enqueue an unkeyed chained run, while the routed fallback creates a
+   * non-idempotent schedule.
    *
    * Returns `true` when a retry was scheduled, `false` when there is no incident
    * (no id / record gone) or the attempt budget is already spent — in which case
@@ -695,6 +699,62 @@ export class ChatRecoveryEngine {
   }
 
   /**
+   * Bump the incident's durable `transientRetries` counter before scheduling a
+   * recovery for a transient or rate-limited stream error, and return the new
+   * count so the caller can derive its backoff. Returns `1` when the incident
+   * record is gone.
+   */
+  async recordTransientRetry(incidentId: string): Promise<number> {
+    const { adapter } = this;
+    const key = chatRecoveryIncidentKey(incidentId);
+    const incident = await adapter.getIncident(key);
+    if (!incident) return 1;
+    const transientRetries = (incident.transientRetries ?? 0) + 1;
+    await adapter.putIncident(key, { ...incident, transientRetries });
+    return transientRetries;
+  }
+
+  /**
+   * The user cancelled `requestId` while its recovery was scheduled but not
+   * yet running (e.g. during a transient-error backoff). Marks every
+   * `scheduled` incident whose recovery root or current attempt is
+   * `requestId` as `skipped` with {@link CHAT_RECOVERY_CANCELLED_REASON}, so
+   * the queued callback bails when it fires (see {@link isRecoveryCancelled}).
+   * Returns whether any incident was cancelled.
+   */
+  async cancelScheduledRecovery(requestId: string): Promise<boolean> {
+    const incidents = (await this.adapter.listActiveIncidents?.()) ?? [];
+    let cancelled = false;
+    for (const incident of incidents) {
+      if (
+        incident.status === "scheduled" &&
+        (incident.recoveryRootRequestId === requestId ||
+          incident.requestId === requestId)
+      ) {
+        await this.updateIncident(
+          incident.incidentId,
+          "skipped",
+          CHAT_RECOVERY_CANCELLED_REASON
+        );
+        cancelled = true;
+      }
+    }
+    return cancelled;
+  }
+
+  /** Whether the user cancelled this incident's scheduled recovery. */
+  async isRecoveryCancelled(incidentId: string | undefined): Promise<boolean> {
+    if (!incidentId) return false;
+    const incident = await this.adapter.getIncident(
+      chatRecoveryIncidentKey(incidentId)
+    );
+    return (
+      incident?.status === "skipped" &&
+      incident.reason === CHAT_RECOVERY_CANCELLED_REASON
+    );
+  }
+
+  /**
    * Record that a recovery callback observed a Durable Object memory-limit reset
    * (the isolate exceeded its 128 MB limit — `isDurableObjectMemoryLimitReset`)
    * and decide what to do next (#1825).
@@ -702,9 +762,9 @@ export class ChatRecoveryEngine {
    * Bumps the incident's durable `oomAttempts` counter, then:
    *  - if it is still within `maxOomRetries`, issues a delayed, NON-idempotent
    *    reschedule of the SAME callback (same machinery as
-   *    {@link rescheduleAfterStableTimeout}: the executing one-shot row is
-   *    deleted only after the callback returns, so an idempotent reschedule
-   *    would dedup onto that doomed row) and returns `"rescheduled"`. The small
+   *    {@link rescheduleAfterStableTimeout}: the executing attempt settles
+   *    only after the callback returns, so an idempotent reschedule would
+   *    dedup onto that doomed attempt) and returns `"rescheduled"`. The small
    *    delay lets a transient memory spike clear before the re-run;
    *  - otherwise leaves the incremented count persisted (so a begin-path
    *    re-evaluation agrees) and returns `"exhausted"` — the caller then
@@ -774,8 +834,9 @@ export class ChatRecoveryEngine {
    * 6. terminalize via `exhaustChatRecovery` — BEFORE sealing. The terminal
    *    writes can reject with a platform transient in the deploy/storage window
    *    a give-up runs in (#1730); letting that throw propagate is deliberate, so
-   *    `Agent._executeScheduleCallback` defers the one-shot row and the WHOLE
-   *    give-up re-runs on a healthy isolate. Sealing first would arm the
+   *    the current recovery attempt (a Task run on a root agent, a one-shot
+   *    schedule row on the routed fallback) defers and the WHOLE give-up
+   *    re-runs on a healthy isolate. Sealing first would arm the
    *    re-entry guard and turn that re-run into a no-op, dropping the durable
    *    terminal record. The re-run is idempotent (terminal writes overwrite the
    *    same key); a second banner is the documented at-least-once edge; and
@@ -941,6 +1002,83 @@ export class ChatRecoveryEngine {
       await adapter.setRecovering(false);
     }
   }
+}
+
+/** `incident.reason` for a scheduled recovery the user cancelled. */
+export const CHAT_RECOVERY_CANCELLED_REASON = "user_cancelled";
+
+/** Cap on the exponential backoff between transient-error recoveries. */
+export const CHAT_RECOVERY_MAX_BACKOFF_SECONDS = 30;
+
+/** Cap on a provider `Retry-After` honored for a rate-limited recovery. */
+export const CHAT_RECOVERY_MAX_RETRY_AFTER_SECONDS = 60;
+
+/**
+ * Delay before the `retries`-th transient-error recovery: exponential backoff
+ * capped at {@link CHAT_RECOVERY_MAX_BACKOFF_SECONDS}. A provider
+ * `retryAfterSeconds` (rate limits) extends it, capped at
+ * {@link CHAT_RECOVERY_MAX_RETRY_AFTER_SECONDS}.
+ */
+export function chatRecoveryBackoffSeconds(
+  retries: number,
+  retryAfterSeconds?: number
+): number {
+  const backoff = Math.min(
+    2 ** (retries - 1),
+    CHAT_RECOVERY_MAX_BACKOFF_SECONDS
+  );
+  if (retryAfterSeconds === undefined) return backoff;
+  return Math.min(
+    Math.max(backoff, retryAfterSeconds),
+    CHAT_RECOVERY_MAX_RETRY_AFTER_SECONDS
+  );
+}
+
+/**
+ * The `Retry-After` an error carries, in whole seconds. Reads
+ * `responseHeaders` (AI SDK `APICallError`) or `headers` on the error or its
+ * `cause` chain; accepts delta-seconds or an HTTP date. `undefined` when absent
+ * or unparseable.
+ */
+export function retryAfterSeconds(
+  error: unknown,
+  now: number = Date.now()
+): number | undefined {
+  let current = error;
+  for (let depth = 0; depth < 8 && current != null; depth++) {
+    if (typeof current !== "object") return undefined;
+    const record = current as {
+      responseHeaders?: unknown;
+      headers?: unknown;
+      cause?: unknown;
+    };
+    const value =
+      readRetryAfterHeader(record.responseHeaders) ??
+      readRetryAfterHeader(record.headers);
+    if (value !== undefined) return parseRetryAfter(value, now);
+    current = record.cause;
+  }
+  return undefined;
+}
+
+function readRetryAfterHeader(headers: unknown): string | undefined {
+  if (headers == null || typeof headers !== "object") return undefined;
+  if (headers instanceof Headers)
+    return headers.get("retry-after") ?? undefined;
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() === "retry-after" && typeof value === "string") {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function parseRetryAfter(value: string, now: number): number | undefined {
+  const trimmed = value.trim();
+  if (/^\d+(\.\d+)?$/.test(trimmed)) return Math.ceil(Number(trimmed));
+  const date = Date.parse(trimmed);
+  if (Number.isNaN(date)) return undefined;
+  return Math.max(0, Math.ceil((date - now) / 1000));
 }
 
 /**

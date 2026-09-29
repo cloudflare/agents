@@ -66,12 +66,10 @@ The `SubAgentClass<T>` type uses `env: never` as a variance trick. Since `never`
 
 ### Initialization
 
-`subAgent()` does two things:
-
-1. `ctx.facets.get(name, () => ({ class: exports[cls.name] }))` — creates or retrieves the facet
-2. A set-name fetch (`/cdn-cgi/partyserver/set-name/`) — triggers `Server` initialization, which calls `onStart()` on first access
-
-The set-name fetch is the same pattern used by `getAgentByName` / `getServerByName`. It's a no-op if the child is already initialized. `onStart()` runs lazily on first `subAgent()` call, not eagerly on parent construction.
+`subAgent()` creates or retrieves the facet with an explicit named
+`FacetStartupOptions.id`, then invokes `_cf_initAsFacet()` over native RPC. The
+child records Agent-specific parent metadata and starts its composed lifecycle.
+`onStart()` runs lazily on first access, not during parent construction.
 
 ### Validation
 

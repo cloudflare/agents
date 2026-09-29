@@ -42,6 +42,11 @@ export type ChatResponseResult = {
   /** Error message when `status` is `"error"`. */
   error?: string;
   /**
+   * `true` when the hook is delivered by recovery after a restart, because
+   * the turn's message was persisted but the hook had not run yet.
+   */
+  recovered?: boolean;
+  /**
    * Advisory reply attachments recorded during the turn (best-effort,
    * producing-attempt only — not re-applied on a ledger replay).
    */
@@ -210,10 +215,11 @@ export type ChatRecoveryProgressContext = {
   maxAttempts: number;
   recoveryKind: "retry" | "continue";
   /**
-   * Recovery work units produced since this incident began — a durable,
-   * monotonic, reconnect-immune count of produced content/tool segments (not
-   * tokens). The signal that distinguishes a healthy long turn from a runaway
-   * loop.
+   * Recovery work produced since this incident began — a durable, monotonic,
+   * reconnect-immune count of flushed stream segments (roughly ten packed
+   * streaming chunks, one settled tool result, or one forwarded sub-agent
+   * credit each; not tokens). The signal that distinguishes a healthy long turn
+   * from a runaway loop, in the same unit as `maxRecoveryWork`.
    */
   work: number;
   /** Wall-clock ms since the incident's first interruption. */
@@ -221,9 +227,11 @@ export type ChatRecoveryProgressContext = {
 };
 
 /**
- * Configuration for durable chat recovery. `true` uses these defaults:
- * `maxAttempts: 10`, `stableTimeoutMs: 10_000`, `noProgressTimeoutMs: 300_000`
- * (5 min), `maxRecoveryWork: 1000`, and a generic terminal message.
+ * Configuration for durable chat recovery, which is always enabled for chat
+ * turns. `true` uses these defaults: `maxAttempts: 10`,
+ * `stableTimeoutMs: 10_000`, `noProgressTimeoutMs: 300_000` (5 min),
+ * `maxRecoveryWork: 10000`, and a generic terminal message. Assign an object to
+ * tune recovery without disabling its durable bookkeeping.
  *
  * **Apply this as a class field or in the constructor — never assign it in
  * `onStart()`.** On every wake the SDK evaluates recovery budgets (and may seal
@@ -235,7 +243,7 @@ export type ChatRecoveryProgressContext = {
  * `onStart()`.
  */
 export type ChatRecoveryConfig =
-  | boolean
+  | true
   | {
       maxAttempts?: number;
       stableTimeoutMs?: number;
@@ -249,9 +257,9 @@ export type ChatRecoveryConfig =
        */
       noProgressTimeoutMs?: number;
       /**
-       * Runaway-loop guard. Maximum recovery WORK — produced content/tool units
-       * since the incident began — before a still-progressing turn is sealed
-       * with `reason="work_budget_exceeded"`. Defaults to `1000`: a generous
+       * Runaway-loop guard. Maximum recovery WORK since the incident began
+       * before a still-progressing turn is sealed with
+       * `reason="work_budget_exceeded"`. Defaults to `10000`: a generous
        * backstop that bounds wasted re-run cost when a turn keeps emitting a
        * little content but never converges (e.g. an isolate that OOMs mid-stream
        * on every recovery — #1825 — which otherwise resets the attempt cap and
@@ -261,6 +269,14 @@ export type ChatRecoveryConfig =
        * that legitimately needs more can raise this (or set `Infinity` to
        * disable the framework cap and bound the runaway via `shouldKeepRecovering`
        * instead).
+       *
+       * The unit is one durably flushed stream segment: roughly ten packed
+       * streaming chunks, one settled tool result (flushed on its own), or one
+       * explicit credit for forwarded sub-agent output. It is not tokens,
+       * messages, or chunks. The unit changed from "credited chunk" in #2223
+       * (and the default moved from `1000` to `10000`); an explicit value
+       * carried over from an earlier release is not recalibrated, so measure
+       * `ctx.work` for a healthy interrupted turn before choosing a cap.
        */
       maxRecoveryWork?: number;
       /**
@@ -297,8 +313,8 @@ export type ChatRecoveryConfig =
       onExhausted?(ctx: ChatRecoveryExhaustedContext): void | Promise<void>;
     };
 
+/** Fully-defaulted configuration for always-on durable chat recovery. */
 export type ResolvedChatRecoveryConfig = {
-  enabled: boolean;
   maxAttempts: number;
   stableTimeoutMs: number;
   terminalMessage: string;

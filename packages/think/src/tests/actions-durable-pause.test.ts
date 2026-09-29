@@ -1,12 +1,40 @@
 import { describe, expect, it, vi } from "vitest";
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
 import { z } from "zod";
 import { action } from "../think";
 
+const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
+const MSG_TOOL_RESULT = "cf_agent_tool_result";
+
 async function freshPauseAgent(name: string) {
   return getAgentByName(env.ThinkToolsTestAgent, name);
+}
+
+async function connectWS(room: string) {
+  const res = await exports.default.fetch(
+    `http://example.com/agents/think-tools-test-agent/${room}`,
+    { headers: { Upgrade: "websocket" } }
+  );
+  expect(res.status).toBe(101);
+  const ws = res.webSocket as WebSocket;
+  ws.accept();
+  return ws;
+}
+
+/** Chat response frames the connection receives from now on. */
+function collectChatResponses(ws: WebSocket): Array<Record<string, unknown>> {
+  const frames: Array<Record<string, unknown>> = [];
+  ws.addEventListener("message", (event: MessageEvent) => {
+    try {
+      const frame = JSON.parse(event.data as string) as Record<string, unknown>;
+      if (frame.type === MSG_CHAT_RESPONSE) frames.push(frame);
+    } catch {
+      // ignore non-JSON frames
+    }
+  });
+  return frames;
 }
 
 type PausedOutput = {
@@ -287,12 +315,12 @@ describe("durable-pause actions (turn-driven, connection-less)", () => {
     expect(pausedPart?.output).toMatchObject({ status: "paused" });
     expect(pausedPart?.output).not.toHaveProperty("permissions");
 
-    const countAssistantText = (msgs: UIMessage[]) =>
+    const assistantTexts = (msgs: UIMessage[]) =>
       msgs
         .filter((message) => message.role === "assistant")
         .flatMap((message) => message.parts)
-        .filter((part) => part.type === "text").length;
-    const textPartsBefore = countAssistantText(messages);
+        .flatMap((part) => (part.type === "text" ? [part.text] : []));
+    expect(assistantTexts(messages)).not.toContain("acknowledged");
 
     // Approve with NO open connection → must still run + continue the model.
     const approved = await agent.approveExecutionForTest(executionId);
@@ -308,12 +336,786 @@ describe("durable-pause actions (turn-driven, connection-less)", () => {
     await vi.waitFor(
       async () => {
         const latest = (await agent.getStoredMessages()) as UIMessage[];
-        expect(countAssistantText(latest)).toBeGreaterThan(textPartsBefore);
+        expect(assistantTexts(latest)).toContain("acknowledged");
       },
       { timeout: 5000, interval: 50 }
     );
 
     expect(await agent.listActionPendingForTest()).toHaveLength(0);
+  });
+
+  it("reports a connection-less continuation that fails before streaming (#2381)", async () => {
+    const agent = await freshPauseAgent(`dp-fail-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+
+    const first = await agent.testChat("call pauseAction");
+    expect(first.done).toBe(true);
+    const [pending] = await agent.listActionPendingForTest();
+
+    await agent.failContinuationBeforeStreamForTest();
+    await agent.approveExecutionForTest(pending.execution_id);
+
+    await vi.waitFor(
+      async () => {
+        expect((await agent.getResponseStatusesForTest()).at(-1)).toEqual({
+          status: "error",
+          continuation: true,
+          error: "continuation failed before streaming"
+        });
+      },
+      { timeout: 5000, interval: 50 }
+    );
+  });
+
+  it("labels orphaned durable-pause outcomes without re-invoking the action", async () => {
+    const agent = await freshPauseAgent(`dp-orphan-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+
+    const first = await agent.testChat("call pauseAction");
+    expect(first.done).toBe(true);
+
+    const pending = await agent.listActionPendingForTest();
+    expect(pending).toHaveLength(1);
+    const executionId = pending[0].execution_id;
+    await agent.stripDurablePausePartsForTest();
+
+    const messagesBefore = (await agent.getStoredMessages()) as UIMessage[];
+    const textPartsBefore = messagesBefore
+      .filter((message) => message.role === "assistant")
+      .flatMap((message) => message.parts)
+      .filter((part) => part.type === "text").length;
+
+    const rejected = (await agent.rejectExecutionForTest(
+      executionId,
+      "not now"
+    )) as PausedOutput;
+    expect(rejected.status).toBe("rejected");
+
+    await vi.waitFor(
+      async () => {
+        const messages = (await agent.getStoredMessages()) as UIMessage[];
+        const note = messages.find((message) =>
+          message.id.startsWith(`exec-outcome-${executionId}-`)
+        );
+        const noteText = note?.parts
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("");
+        expect(note?.role).toBe("system");
+        expect(noteText).toContain("[durable action]");
+        expect(noteText).not.toContain("[execute tool]");
+        expect(noteText).toContain('"action":"pauseAction"');
+
+        const textPartsAfter = messages
+          .filter((message) => message.role === "assistant")
+          .flatMap((message) => message.parts)
+          .filter((part) => part.type === "text").length;
+        expect(textPartsAfter).toBeGreaterThan(textPartsBefore);
+        expect(await agent.listActionPendingForTest()).toHaveLength(0);
+      },
+      { timeout: 5000, interval: 50 }
+    );
+  });
+
+  it("rejects without starting a connection-less continuation when disabled", async () => {
+    const agent = await freshPauseAgent(
+      `dp-reject-pause-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest();
+
+    const first = await agent.testChat("call pauseAction");
+    expect(first.done).toBe(true);
+
+    const pending = await agent.listActionPendingForTest();
+    expect(pending).toHaveLength(1);
+    const modelCallsBefore = await agent.getDurablePauseModelCallCount();
+
+    const rejected = (await agent.rejectExecutionForTest(
+      pending[0].execution_id,
+      "pause here",
+      { autoContinue: false }
+    )) as PausedOutput;
+
+    expect(rejected.status).toBe("rejected");
+    expect(rejected.reason).toBe("pause here");
+    expect(await agent.getDurablePauseExecCount()).toBe(0);
+    expect(await agent.listActionPendingForTest()).toHaveLength(0);
+
+    expect(await agent.waitUntilStableForTest()).toBe(true);
+    expect(await agent.getDurablePauseModelCallCount()).toBe(modelCallsBefore);
+  });
+
+  it("rejects without continuing on an open WebSocket connection when disabled", async () => {
+    const room = `dp-reject-ws-${crypto.randomUUID()}`;
+    const agent = await freshPauseAgent(room);
+    await agent.useDurablePauseActionForTest();
+    const first = await agent.testChat("call pauseAction");
+    expect(first.done).toBe(true);
+    const [pending] = await agent.listActionPendingForTest();
+    const modelCallsBefore = await agent.getDurablePauseModelCallCount();
+
+    const ws = await connectWS(room);
+    const frames = collectChatResponses(ws);
+    try {
+      await agent.rejectExecutionForTest(pending.execution_id, "pause here", {
+        autoContinue: false
+      });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(await agent.waitUntilStableForTest()).toBe(true);
+
+      expect(await agent.getDurablePauseModelCallCount()).toBe(
+        modelCallsBefore
+      );
+      expect(frames).toEqual([]);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("continues once for a sibling that opted in beside a rejection that did not", async () => {
+    const room = `dp-reject-batch-${crypto.randomUUID()}`;
+    const agent = await freshPauseAgent(room);
+    await agent.useDurablePauseActionForTest();
+    const paused = (await agent.parkDurablePauseForTest(
+      "hello",
+      "tc-batch-pause"
+    )) as PausedOutput;
+    await agent.appendMessagesForTest([
+      {
+        id: "u-batch",
+        role: "user",
+        parts: [{ type: "text", text: "do both" }]
+      },
+      {
+        id: "a-batch",
+        role: "assistant",
+        parts: [
+          { type: "step-start" },
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-batch-client",
+            state: "input-available",
+            input: { action: "go" }
+          },
+          {
+            type: "tool-pauseAction",
+            toolCallId: "tc-batch-pause",
+            state: "output-available",
+            input: { message: "hello" },
+            output: paused
+          }
+        ]
+      } as UIMessage
+    ]);
+
+    const ws = await connectWS(room);
+    const frames = collectChatResponses(ws);
+    try {
+      await agent.rejectExecutionForTest(
+        paused.executionId as string,
+        "not this one",
+        { autoContinue: false }
+      );
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(await agent.getDurablePauseModelCallCount()).toBe(0);
+
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId: "tc-batch-client",
+          toolName: "client_action",
+          output: "done",
+          autoContinue: true
+        })
+      );
+      await vi.waitFor(
+        () => {
+          expect(frames.some((frame) => frame.done === true)).toBe(true);
+        },
+        { timeout: 5000, interval: 50 }
+      );
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(await agent.waitUntilStableForTest()).toBe(true);
+
+      expect(await agent.getDurablePauseModelCallCount()).toBe(1);
+      expect(
+        frames.filter((frame) => frame.done === true && frame.continuation)
+      ).toHaveLength(1);
+      const messages = (await agent.getStoredMessages()) as UIMessage[];
+      const parts = messages.flatMap((message) => message.parts) as Array<
+        Record<string, unknown>
+      >;
+      expect(
+        parts.find((part) => part.toolCallId === "tc-batch-pause")?.output
+      ).toMatchObject({ status: "rejected" });
+      expect(
+        parts.find((part) => part.toolCallId === "tc-batch-client")?.output
+      ).toBe("done");
+    } finally {
+      ws.close();
+    }
+  });
+});
+
+describe("resolving a durable pause drops pending-state generation (#2054)", () => {
+  const PENDING_REASONING = "reasoning:The action is waiting for approval.";
+  const PENDING_TEXT = "text:Once approved, the change will be applied.";
+
+  function ownerOf(messages: UIMessage[], toolCallId: string) {
+    return messages.find(
+      (message) =>
+        message.role === "assistant" &&
+        message.parts.some(
+          (part) => "toolCallId" in part && part.toolCallId === toolCallId
+        )
+    );
+  }
+
+  /** `type:text` for each text/reasoning part after the tool call's part. */
+  function generatedAfter(
+    message: UIMessage | undefined,
+    toolCallId: string
+  ): string[] {
+    const parts = message?.parts ?? [];
+    const index = parts.findIndex(
+      (part) => "toolCallId" in part && part.toolCallId === toolCallId
+    );
+    return parts
+      .slice(index + 1)
+      .flatMap((part) =>
+        part.type === "text" || part.type === "reasoning"
+          ? [`${part.type}:${part.text}`]
+          : []
+      );
+  }
+
+  function toolOutput(message: UIMessage | undefined, toolCallId: string) {
+    const part = message?.parts.find(
+      (p) => "toolCallId" in p && p.toolCallId === toolCallId
+    ) as { output?: unknown } | undefined;
+    return part?.output;
+  }
+
+  async function parkInTurn(name: string) {
+    const agent = await freshPauseAgent(`${name}-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+    const first = await agent.testChat("call pauseAction");
+    expect(first.done).toBe(true);
+    const [pending] = await agent.listActionPendingForTest();
+    return { agent, executionId: pending.execution_id };
+  }
+
+  async function continuationPrompt(
+    agent: Awaited<ReturnType<typeof parkInTurn>>["agent"]
+  ): Promise<string> {
+    // Two model calls park the turn (tool call, then pending-state text);
+    // the third is the continuation after the outcome.
+    let prompts: string[] = [];
+    await vi.waitFor(
+      async () => {
+        prompts = await agent.getDurablePausePromptsForTest();
+        expect(prompts.length).toBeGreaterThanOrEqual(3);
+      },
+      { timeout: 5000, interval: 50 }
+    );
+    return prompts[2];
+  }
+
+  it("drops text and reasoning written after the paused part on approve", async () => {
+    const { agent, executionId } = await parkInTurn("dp-stale-approve");
+    const parked = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(generatedAfter(parked, "dp1")).toEqual([
+      PENDING_REASONING,
+      PENDING_TEXT
+    ]);
+
+    await agent.approveExecutionForTest(executionId);
+
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(resolved?.id).toBe(parked?.id);
+    expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+    expect(generatedAfter(resolved, "dp1")).toEqual([]);
+
+    const prompt = await continuationPrompt(agent);
+    expect(prompt).toContain("paused-exec: hello");
+    expect(prompt).not.toContain("Once approved");
+    expect(prompt).not.toContain("waiting for approval");
+  });
+
+  it("drops text and reasoning written after the paused part on reject", async () => {
+    const { agent, executionId } = await parkInTurn("dp-stale-reject");
+
+    await agent.rejectExecutionForTest(executionId, "not now");
+
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(toolOutput(resolved, "dp1")).toMatchObject({ status: "rejected" });
+    expect(generatedAfter(resolved, "dp1")).toEqual([]);
+
+    const prompt = await continuationPrompt(agent);
+    expect(prompt).not.toContain("Once approved");
+  });
+
+  it("keeps earlier content and later non-generated parts", async () => {
+    const agent = await freshPauseAgent(`dp-stale-keep-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+    const toolCallId = "tc-seeded";
+    const paused = (await agent.parkDurablePauseForTest(
+      "hello",
+      toolCallId
+    )) as PausedOutput;
+    await agent.appendMessagesForTest([
+      {
+        id: "u-seeded",
+        role: "user",
+        parts: [{ type: "text", text: "do the thing" }]
+      },
+      {
+        id: "a-seeded",
+        role: "assistant",
+        parts: [
+          { type: "step-start" },
+          { type: "text", text: "Checking first." },
+          {
+            type: "tool-pauseAction",
+            toolCallId,
+            state: "output-available",
+            input: { message: "hello" },
+            output: paused
+          },
+          { type: "step-start" },
+          { type: "reasoning", text: "Waiting on a human." },
+          { type: "text", text: "Once approved, it runs." },
+          {
+            type: "tool-lookup",
+            toolCallId: "tc-lookup",
+            state: "output-available",
+            input: {},
+            output: "42"
+          },
+          { type: "file", mediaType: "text/plain", url: "data:,42" }
+        ]
+      } as UIMessage
+    ]);
+
+    await agent.approveExecutionForTest(paused.executionId as string);
+
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      toolCallId
+    );
+    expect(resolved?.parts.map((part) => part.type)).toEqual([
+      "step-start",
+      "text",
+      "tool-pauseAction",
+      "step-start",
+      "tool-lookup",
+      "file"
+    ]);
+    expect(resolved?.parts[1]).toMatchObject({ text: "Checking first." });
+    expect(toolOutput(resolved, toolCallId)).toBe("paused-exec: hello");
+    expect(toolOutput(resolved, "tc-lookup")).toBe("42");
+  });
+
+  it("keeps text in later steps that answer other tools", async () => {
+    const agent = await freshPauseAgent(
+      `dp-stale-steps-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest();
+    await agent.holdConnectionlessContinuationForTest();
+    const toolCallId = "tc-seeded-steps";
+    const paused = (await agent.parkDurablePauseForTest(
+      "hello",
+      toolCallId
+    )) as PausedOutput;
+    await agent.appendMessagesForTest([
+      {
+        id: "u-seeded-steps",
+        role: "user",
+        parts: [{ type: "text", text: "do the thing" }]
+      },
+      {
+        id: "a-seeded-steps",
+        role: "assistant",
+        parts: [
+          { type: "step-start" },
+          {
+            type: "tool-pauseAction",
+            toolCallId,
+            state: "output-available",
+            input: { message: "hello" },
+            output: paused
+          },
+          { type: "step-start" },
+          { type: "text", text: "Once approved, it runs." },
+          {
+            type: "tool-lookup",
+            toolCallId: "tc-lookup-steps",
+            state: "output-available",
+            input: {},
+            output: "42"
+          },
+          { type: "step-start" },
+          { type: "reasoning", text: "The lookup finished." },
+          { type: "text", text: "The lookup returned 42." }
+        ]
+      } as UIMessage
+    ]);
+
+    await agent.approveExecutionForTest(paused.executionId as string);
+
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      toolCallId
+    );
+    expect(generatedAfter(resolved, toolCallId)).toEqual([
+      "reasoning:The lookup finished.",
+      "text:The lookup returned 42."
+    ]);
+    expect(toolOutput(resolved, toolCallId)).toBe("paused-exec: hello");
+  });
+
+  it("drops the generation once the parking turn ends when rejected mid-stream without continuing", async () => {
+    const agent = await freshPauseAgent(
+      `dp-stale-live-reject-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest();
+    await agent.rejectParkedInNextStepForTest({ autoContinue: false });
+
+    const first = await agent.testChat("call pauseAction");
+    expect(first.done).toBe(true);
+
+    await vi.waitFor(
+      async () => {
+        const resolved = ownerOf(
+          (await agent.getStoredMessages()) as UIMessage[],
+          "dp1"
+        );
+        expect(toolOutput(resolved, "dp1")).toMatchObject({
+          status: "rejected"
+        });
+        expect(generatedAfter(resolved, "dp1")).toEqual([]);
+      },
+      { timeout: 5000, interval: 50 }
+    );
+    const durable = ownerOf(await agent.getDurableMessagesForTest(), "dp1");
+    expect(generatedAfter(durable, "dp1")).toEqual([]);
+    expect(await agent.waitUntilStableForTest()).toBe(true);
+    // The parking turn's two model calls, and no continuation.
+    expect(await agent.getDurablePauseModelCallCount()).toBe(2);
+  });
+
+  it("drops the generation once the parking turn ends when approved mid-stream", async () => {
+    const agent = await freshPauseAgent(`dp-stale-live-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+    await agent.approveParkedInNextStepForTest();
+
+    const first = await agent.testChat("call pauseAction");
+    expect(first.done).toBe(true);
+
+    const prompt = await continuationPrompt(agent);
+    expect(prompt).toContain("paused-exec: hello");
+    expect(prompt).not.toContain("Once approved");
+    expect(prompt).not.toContain("waiting for approval");
+
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+    expect(generatedAfter(resolved, "dp1")).toEqual([]);
+  });
+
+  async function approvedMidStreamWithoutContinuation(name: string) {
+    const agent = await freshPauseAgent(`${name}-${crypto.randomUUID()}`);
+    await agent.useDurablePauseActionForTest();
+    await agent.holdConnectionlessContinuationForTest();
+    await agent.approveParkedInNextStepForTest();
+    const first = await agent.testChat("call pauseAction");
+    expect(first.done).toBe(true);
+    return agent;
+  }
+
+  it("drops the generation before a user turn that runs ahead of the continuation", async () => {
+    const agent = await approvedMidStreamWithoutContinuation("dp-stale-user");
+
+    await agent.testChat("what is the status?");
+
+    const prompts = await agent.getDurablePausePromptsForTest();
+    expect(prompts[2]).toContain("paused-exec: hello");
+    expect(prompts[2]).not.toContain("Once approved");
+    expect(prompts[2]).not.toContain("waiting for approval");
+  });
+
+  it("drops the generation after an eviction between the pause resolving and the next turn", async () => {
+    const agent = await approvedMidStreamWithoutContinuation("dp-stale-evict");
+    await agent.forgetDeferredResolvedPausesForTest();
+
+    await agent.testChat("what is the status?");
+
+    const prompts = await agent.getDurablePausePromptsForTest();
+    expect(prompts[2]).not.toContain("Once approved");
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(generatedAfter(resolved, "dp1")).toEqual([]);
+  });
+
+  it("drops the generation after a restart between writing the outcome and the drop", async () => {
+    const { agent, executionId } = await parkInTurn("dp-stale-restart");
+    await agent.holdConnectionlessContinuationForTest();
+    await agent.skipNextResolvedPauseDropForTest();
+    await agent.approveExecutionForTest(executionId);
+    await agent.forgetDeferredResolvedPausesForTest();
+    const written = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(toolOutput(written, "dp1")).toBe("paused-exec: hello");
+
+    await agent.testChat("what is the status?");
+
+    const prompts = await agent.getDurablePausePromptsForTest();
+    expect(prompts[2]).toContain("paused-exec: hello");
+    expect(prompts[2]).not.toContain("Once approved");
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(generatedAfter(resolved, "dp1")).toEqual([]);
+  });
+
+  it("writes the outcome after a restart before it reached the transcript", async () => {
+    const { agent, executionId } = await parkInTurn("dp-stale-unwritten");
+    await agent.holdConnectionlessContinuationForTest();
+    await agent.skipNextToolUpdateForTest();
+    await agent.skipNextResolvedPauseDropForTest();
+    await agent.approveExecutionForTest(executionId);
+    await agent.forgetDeferredResolvedPausesForTest();
+    const unwritten = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(toolOutput(unwritten, "dp1")).toMatchObject({ status: "paused" });
+
+    await agent.testChat("what is the status?");
+
+    const prompts = await agent.getDurablePausePromptsForTest();
+    expect(prompts[2]).toContain("paused-exec: hello");
+    expect(prompts[2]).not.toContain("Once approved");
+    const resolved = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+    expect(generatedAfter(resolved, "dp1")).toEqual([]);
+  });
+
+  it("retries loading deferred cleanup after a failed storage read", async () => {
+    const agent = await approvedMidStreamWithoutContinuation("dp-stale-load");
+    await agent.forgetDeferredResolvedPausesForTest();
+    await agent.failNextStorageGetForTest("cf_think_deferred_resolved_pauses");
+
+    const failed = await agent.testChat("first try");
+    expect(failed.error).toContain("simulated storage read failure");
+    await agent.testChat("what is the status?");
+
+    const prompts = await agent.getDurablePausePromptsForTest();
+    expect(prompts.at(-1)).toContain("paused-exec: hello");
+    expect(prompts.at(-1)).not.toContain("Once approved");
+  });
+
+  it("keeps the outcome when a stale client resubmits the paused message", async () => {
+    const { agent, executionId } = await parkInTurn("dp-stale-client");
+    await agent.holdConnectionlessContinuationForTest();
+    const stale = (await agent.getStoredMessages()) as UIMessage[];
+    await agent.approveExecutionForTest(executionId);
+
+    await agent.persistClientMessagesForTest([
+      ...stale,
+      {
+        id: "u-stale-client",
+        role: "user",
+        parts: [{ type: "text", text: "is it done?" }]
+      }
+    ]);
+
+    const resolved = ownerOf(await agent.getDurableMessagesForTest(), "dp1");
+    expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+    expect(generatedAfter(resolved, "dp1")).toEqual([]);
+  });
+
+  it("does not resolve a later paused call that reuses the toolCallId (#1992)", async () => {
+    const { agent, executionId } = await parkInTurn("dp-reused-id");
+    await agent.holdConnectionlessContinuationForTest();
+    const parked = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    await agent.approveExecutionForTest(executionId);
+    const settled = (await agent.getStoredMessages()) as UIMessage[];
+
+    // A later turn from a provider that reuses toolCallIds: same id, new
+    // input, still paused.
+    const reused: UIMessage = {
+      ...parked!,
+      id: "a-reused",
+      parts: parked!.parts.map((part) =>
+        "toolCallId" in part && part.toolCallId === "dp1"
+          ? ({ ...part, input: { reused: true } } as typeof part)
+          : part
+      )
+    };
+    await agent.persistClientMessagesForTest([
+      ...settled,
+      {
+        id: "u-reused",
+        role: "user",
+        parts: [{ type: "text", text: "do it again" }]
+      },
+      reused
+    ]);
+
+    const durable = (await agent.getDurableMessagesForTest()) as UIMessage[];
+    const first = durable.find((message) => message.id === parked!.id);
+    const later = durable.find((message) => message.id === "a-reused");
+    expect(toolOutput(first, "dp1")).toBe("paused-exec: hello");
+    expect(toolOutput(later, "dp1")).toMatchObject({ status: "paused" });
+    expect(generatedAfter(later, "dp1")).toEqual(generatedAfter(parked, "dp1"));
+  });
+
+  it("keeps a stored paused call paused when an unsubmitted row settled the same call (#1992)", async () => {
+    const { agent } = await parkInTurn("dp-own-row-paused");
+    await agent.holdConnectionlessContinuationForTest();
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    const parked = ownerOf(stored, "dp1")!;
+
+    // Another stored turn settled an identical call under the reused ID. The
+    // client does not submit it, so it stays unclaimed.
+    await agent.appendMessagesForTest([
+      {
+        ...parked,
+        id: "a-other-turn",
+        parts: parked.parts.flatMap((part) =>
+          "toolCallId" in part && part.toolCallId === "dp1"
+            ? [
+                {
+                  ...part,
+                  state: "output-available",
+                  output: "other turn's result"
+                } as typeof part
+              ]
+            : []
+        )
+      }
+    ]);
+
+    await agent.persistClientMessagesForTest([
+      ...stored,
+      {
+        id: "u-own-row",
+        role: "user",
+        parts: [{ type: "text", text: "still waiting?" }]
+      }
+    ]);
+
+    const durable = (await agent.getDurableMessagesForTest()) as UIMessage[];
+    const own = durable.find((message) => message.id === parked.id);
+    expect(toolOutput(own, "dp1")).toMatchObject({ status: "paused" });
+    expect(generatedAfter(own, "dp1")).toEqual(generatedAfter(parked, "dp1"));
+  });
+
+  it("does not resolve a later identical paused call from an echoed row (#1992)", async () => {
+    const { agent, executionId } = await parkInTurn("dp-reused-same-input");
+    await agent.holdConnectionlessContinuationForTest();
+    const parked = ownerOf(
+      (await agent.getStoredMessages()) as UIMessage[],
+      "dp1"
+    );
+    await agent.approveExecutionForTest(executionId);
+    const settled = (await agent.getStoredMessages()) as UIMessage[];
+
+    // Same toolCallId and same input, but the resolved row is echoed under
+    // its own ID, so this is a separate call and must stay paused.
+    await agent.persistClientMessagesForTest([
+      ...settled,
+      {
+        id: "u-reused",
+        role: "user",
+        parts: [{ type: "text", text: "do it again" }]
+      },
+      { ...parked!, id: "a-reused-same" }
+    ]);
+
+    const durable = (await agent.getDurableMessagesForTest()) as UIMessage[];
+    const first = durable.find((message) => message.id === parked!.id);
+    const later = durable.find((message) => message.id === "a-reused-same");
+    expect(toolOutput(first, "dp1")).toBe("paused-exec: hello");
+    expect(toolOutput(later, "dp1")).toMatchObject({ status: "paused" });
+    expect(generatedAfter(later, "dp1")).toEqual(generatedAfter(parked, "dp1"));
+  });
+
+  it("resolves a paused part outside the hydrated window in place", async () => {
+    const { agent, executionId } = await parkInTurn("dp-stale-window-approve");
+    await agent.holdConnectionlessContinuationForTest();
+    await agent.appendMessagesForTest([
+      {
+        id: "u-later",
+        role: "user",
+        parts: [{ type: "text", text: "anything else?" }]
+      },
+      {
+        id: "a-later",
+        role: "assistant",
+        parts: [{ type: "text", text: "Not yet." }]
+      }
+    ]);
+    await agent.windowCachedMessagesForTest(1);
+
+    await agent.approveExecutionForTest(executionId);
+
+    const durable = (await agent.getDurableMessagesForTest()) as UIMessage[];
+    const resolved = ownerOf(durable, "dp1");
+    expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+    expect(generatedAfter(resolved, "dp1")).toEqual([]);
+    expect(durable.filter((message) => message.role === "system")).toEqual([]);
+  });
+
+  it("writes the outcome after a restart when the paused part is outside the hydrated window", async () => {
+    const { agent, executionId } = await parkInTurn("dp-stale-windowed");
+    await agent.holdConnectionlessContinuationForTest();
+    await agent.skipNextToolUpdateForTest();
+    await agent.skipNextResolvedPauseDropForTest();
+    await agent.approveExecutionForTest(executionId);
+    await agent.appendMessagesForTest([
+      {
+        id: "u-later",
+        role: "user",
+        parts: [{ type: "text", text: "anything else?" }]
+      },
+      {
+        id: "a-later",
+        role: "assistant",
+        parts: [{ type: "text", text: "Not yet." }]
+      }
+    ]);
+    await agent.forgetDeferredResolvedPausesForTest();
+    await agent.windowCachedMessagesForTest(1);
+
+    await agent.testChat("what is the status?");
+
+    const resolved = ownerOf(await agent.getDurableMessagesForTest(), "dp1");
+    expect(toolOutput(resolved, "dp1")).toBe("paused-exec: hello");
+    expect(generatedAfter(resolved, "dp1")).toEqual([]);
   });
 });
 

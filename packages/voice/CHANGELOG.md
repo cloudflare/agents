@@ -1,5 +1,52 @@
 # @cloudflare/voice
 
+## 0.5.0
+
+### Minor Changes
+
+- [#2225](https://github.com/cloudflare/agents/pull/2225) [`8c8f86d`](https://github.com/cloudflare/agents/commit/8c8f86d84f99397fde06431d78ed1f9a82eda85d) Thanks [@cjol](https://github.com/cjol)! - Deprecate `@cloudflare/voice` in favor of the Voice exports in `agents`.
+
+  All existing entry points remain compatible re-export wrappers. Replace imports
+  from `@cloudflare/voice`, `/client`, `/react`, and `/errors` with the matching
+  `agents/voice` paths.
+
+## 0.4.0
+
+### Minor Changes
+
+- [#2157](https://github.com/cloudflare/agents/pull/2157) [`f08ee06`](https://github.com/cloudflare/agents/commit/f08ee06fd610756de0d8abf539dfe9b746bdd7c5) Thanks [@cjol](https://github.com/cjol)! - Improve voice lifecycle accuracy, diagnostics, and per-turn timing visibility.
+
+  - Clear stale interim transcripts when calls start, end, disconnect, close, or fail during startup.
+  - Emit `speaking` only when the first server audio chunk is sent.
+  - Add structured, content-free browser diagnostics and structured Worker error logging without reading arbitrary provider response bodies.
+  - Report transcriber startup and runtime failures through `onFatalError`, structured client errors, and reliable call cleanup.
+  - Preserve model finish reasons and distinguish no-output, output-limit, content-filtered, and model-error completions.
+  - Add stable typed per-turn timing summaries for speech, text, terminal outcomes, model streaming, reasoning exposed by the model stream, and overlapping TTS work through `VoiceClient` and the React hooks.
+  - Keep the existing four-field metrics wire shape compatible while making no-audio and streamed TTS accounting consistent.
+  - Update the bundled voice providers to propagate lifecycle failures and log errors consistently.
+
+## 0.3.6
+
+### Patch Changes
+
+- [#2083](https://github.com/cloudflare/agents/pull/2083) [`48eeba7`](https://github.com/cloudflare/agents/commit/48eeba71f59eee41fc541b215150377e0aba3593) Thanks [@cjol](https://github.com/cjol)! - Define `VoiceTurnContext.messages` as completed history before the current transcript for both text and audio turns, preventing duplicate user messages when following the documented prompt construction.
+
+  Existing `onTurn()` implementations:
+
+  - If you pass `context.messages` directly as the complete LLM input, append `transcript` exactly once.
+  - If you already append `transcript` to `context.messages`, no change is required.
+  - Direct `getConversationHistory()` calls inside `onTurn()` continue to include the current transcript.
+
+- [#2004](https://github.com/cloudflare/agents/pull/2004) [`0efd545`](https://github.com/cloudflare/agents/commit/0efd545a58c9075885977627e5d853b6e98f6d54) Thanks [@cjol](https://github.com/cjol)! - Pass the full `keyterms` array to Workers AI Flux and Nova-3 STT instead of only the first term.
+
+- [#2049](https://github.com/cloudflare/agents/pull/2049) [`ce0e608`](https://github.com/cloudflare/agents/commit/ce0e608675e41794b02178dce0fb13bb62530aa8) Thanks [@cjol](https://github.com/cjol)! - Preserve spacing between streamed text segments separated by tool calls. Think messenger delivery and Voice now share the same boundary-aware text joining logic from `agents/chat`.
+
+  Existing users must:
+
+  - Replace imports of `textDeltaFromStreamChunk()` from `@cloudflare/think/messengers` with `TextStreamCallback`, passing it the complete structured stream events.
+  - Upgrade to `agents@0.21.0` when installing `@cloudflare/think@0.16.0` or `@cloudflare/voice@0.3.6`; both now require `agents >=0.20.2`.
+  - Update exact-text expectations if they relied on segments around tool calls being concatenated without a space.
+
 ## 0.3.5
 
 ### Patch Changes
@@ -100,6 +147,7 @@
   The transcriber session is now created at `start_call` and lives for the entire call duration. The model handles turn detection — no client-side `start_of_speech`/`end_of_speech` required for STT. Voice agents use `keepAlive` to prevent DO eviction during calls.
 
   New API:
+
   - `transcriber` property replaces `stt`, `streamingStt`, and `vad`
   - `createTranscriber(connection)` hook for runtime model switching
   - `WorkersAIFluxSTT` — per-call Flux sessions (recommended for `withVoice`)
@@ -109,6 +157,7 @@
   - Duplicate `start_call` is silently ignored when already in a call
 
   Removed:
+
   - `stt` (batch STT), `streamingStt` (per-utterance streaming), `vad` (server-side VAD)
   - `WorkersAISTT`, `WorkersAIVAD`, `pcmToWav`
   - `prerollMs`, `vadThreshold`, `vadPushbackSeconds`, `vadRetryMs`, `minAudioBytes` options

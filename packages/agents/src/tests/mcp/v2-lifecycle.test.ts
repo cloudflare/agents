@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { MCPClientConnection } from "../../mcp/client-connection";
+import { MCPClientConnection } from "../../mcp/client/connection";
 import { createMcpHandler } from "../../mcp/server";
 
 function lifecycleServer() {

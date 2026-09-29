@@ -1,7 +1,8 @@
 # Agent Tools
 
 Agent tools let one chat agent dispatch another chat-capable sub-agent as part
-of its work. The child is a real sub-agent with its own Durable Object storage,
+of its work — per-run, parent-supervised delegation is the flagship use case
+for facet-backed dynamic agents. The child is a real sub-agent with its own Durable Object storage,
 messages, tools, resumable stream, and drill-in URL. The parent keeps a small
 run registry so clients can render the child timeline, replay it after refresh,
 and clean it up later.
@@ -47,6 +48,35 @@ export class Assistant extends Think<Env> {
   }
 }
 ```
+
+### Use Valibot or another schema library
+
+`agentTool()` accepts the AI SDK's flexible schema format. For Valibot, wrap the
+schema with `valibotSchema()` so the AI SDK receives both runtime validation and
+the JSON Schema required by the model. Use `@ai-sdk/valibot` v2 with AI SDK 6
+and v3 with AI SDK 7:
+
+```ts
+import { valibotSchema } from "@ai-sdk/valibot";
+import { agentTool } from "agents/agent-tools";
+import * as v from "valibot";
+
+const researchInput = valibotSchema(
+  v.object({
+    query: v.pipe(v.string(), v.minLength(3))
+  })
+);
+
+const research = agentTool(Researcher, {
+  description: "Research one topic in depth.",
+  inputSchema: researchInput
+});
+```
+
+You can also provide a Zod schema, a Standard JSON Schema-compatible schema, or
+a raw JSON Schema wrapped with `jsonSchema()` from `ai`. A validation-only
+Standard Schema is not sufficient for a tool input because it does not provide
+the JSON Schema sent to the model.
 
 The child can also be an `AIChatAgent`:
 
@@ -430,6 +460,31 @@ bounded only by the absolute `detachedMaxBudgetMs` ceiling — a run is never
 given up on merely for being slow. Set `noProgressBudgetMs` to `0` or `Infinity`
 to disable the resetting window for a run.
 
+### Deliver only progress and the final result
+
+By default, the parent forwards every chunk of the child's stream to its
+clients, and the child broadcasts the same chunks to its own connections. When
+nobody watches the child's text as it streams (for example, a server-side
+pipeline that only reads the result), pass `eventDelivery: "terminal"`:
+
+```ts
+const result = await this.runAgentTool(ResearchAgent, {
+  input: { query: "Durable Objects" },
+  eventDelivery: "terminal"
+});
+```
+
+The run still produces `started`, progress, milestone, and terminal
+(`finished`, `error`, `aborted`, or `interrupted`) events, and the result,
+summary, and output are unchanged. Ordinary child chunks are not forwarded to the
+parent's clients, are not replayed on reconnect, and are not broadcast by the
+child. The child still stores its own conversation, so `getAgentToolChunks()`
+keeps working. A client that drills in to the child sees the stored
+conversation when it connects and the final messages when the run ends, but
+does not see text stream live while the run is in flight. Use the default
+`eventDelivery` for runs you expect users to watch. Detached runs do not
+support `eventDelivery: "terminal"` and reject it.
+
 ## Render child timelines in React
 
 `useAgentToolEvents()` is a headless hook. It subscribes to the existing parent
@@ -513,10 +568,10 @@ finalized in the parent without re-running already-finished work.
 The re-attach wait is **progress-keyed**, not a fixed wall clock. Two static
 `options` tune it:
 
-| Option                                 | Default          | Behavior                                                                                                                                                                                                        |
-| -------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `agentToolReattachNoProgressTimeoutMs` | `120000` (2 min) | How long the parent waits with **no** forward progress before giving up. Resets on every forwarded chunk, so a streaming child is followed through to terminal.                                                 |
-| `agentToolReattachMaxWindowMs`         | `Infinity`       | Optional hard wall-clock ceiling on a single re-attach. Uncapped by default (mirrors chat recovery's `maxRecoveryWork`), so a healthy, long-running child is never cut off. Set a finite value to impose a cap. |
+| Option                                 | Default          | Behavior                                                                                                                                                                                                                          |
+| -------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agentToolReattachNoProgressTimeoutMs` | `120000` (2 min) | How long the parent waits with **no** forward progress before giving up. Resets on every forwarded chunk, so a streaming child is followed through to terminal.                                                                   |
+| `agentToolReattachMaxWindowMs`         | `Infinity`       | Optional hard wall-clock ceiling on a single re-attach. Uncapped by default, so a healthy, long-running child is never cut off; a runaway child is bounded by its own `chatRecovery` budgets. Set a finite value to impose a cap. |
 
 Give-up outcomes map to the `AgentToolFailure` fields:
 

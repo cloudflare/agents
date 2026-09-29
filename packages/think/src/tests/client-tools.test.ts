@@ -1,5 +1,5 @@
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "agents";
 import { subscribe } from "agents/observability";
 import type { UIMessage } from "ai";
@@ -804,6 +804,199 @@ describe("Think — auto-continuation", () => {
     await closeWS(ws);
   });
 
+  it("settles an approved tool that never ran once a new user turn moves past it (#2382)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setServerApprovalToolMode(true);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const initialDone = waitForDone(ws, 15000);
+    sendChatRequest(ws, [makeUserMessage("update my trigger")]);
+    await initialDone;
+
+    // Approve without a continuation, so nothing ever executes the call.
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc-server-approval-1",
+        approved: true,
+        autoContinue: false
+      })
+    );
+    await vi.waitFor(async () => {
+      const part = ((await agent.getMessages()) as UIMessage[])
+        .flatMap((message) => message.parts)
+        .find(
+          (p) => "toolCallId" in p && p.toolCallId === "tc-server-approval-1"
+        );
+      expect(part).toMatchObject({ state: "approval-responded" });
+    });
+
+    await agent.setServerApprovalToolMode(false);
+    await agent.setTextOnlyMode(true);
+    const followUpDone = waitForDone(ws, 15000);
+    const history = (await agent.getMessages()) as UIMessage[];
+    sendChatRequest(ws, [...history, makeUserMessage("thanks")]);
+    const followUpFrames = await followUpDone;
+    expect(
+      followUpFrames.some(
+        (frame) => frame.type === MSG_CHAT_RESPONSE && frame.error === true
+      )
+    ).toBe(false);
+
+    expect(await agent.getServerApprovalToolExecutions()).toBe(0);
+    const toolPart = ((await agent.getMessages()) as UIMessage[])
+      .flatMap((message) => message.parts)
+      .find(
+        (part) =>
+          "toolCallId" in part && part.toolCallId === "tc-server-approval-1"
+      );
+    expect(toolPart).toMatchObject({
+      state: "output-error",
+      errorText:
+        "The tool call was approved but did not run before the next turn started."
+    });
+
+    await closeWS(ws);
+  });
+
+  it("reports an approval continuation that fails before streaming (#2381)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setServerApprovalToolMode(true);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const initialDone = waitForDone(ws, 15000);
+    sendChatRequest(ws, [makeUserMessage("update my trigger")]);
+    await initialDone;
+
+    await agent.setFailContinuationBeforeStream(true);
+    const continuationDone = waitForDone(ws, 15000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc-server-approval-1",
+        approved: true,
+        autoContinue: true
+      })
+    );
+    const frames = await continuationDone;
+    const terminal = frames.find(
+      (frame) => frame.type === MSG_CHAT_RESPONSE && frame.done === true
+    );
+    expect(terminal).toMatchObject({
+      error: true,
+      continuation: true,
+      body: "continuation failed before streaming"
+    });
+
+    const responseLog = async () =>
+      (await agent.getResponseLog()) as ChatResponseResult[];
+    await vi.waitFor(async () => {
+      expect((await responseLog()).at(-1)).toMatchObject({
+        requestId: terminal?.id,
+        continuation: true,
+        status: "error",
+        error: "continuation failed before streaming"
+      });
+    });
+    await delay(200);
+    expect(
+      (await responseLog()).filter((response) => response.status === "error")
+    ).toHaveLength(1);
+    expect(await agent.getChatErrorLog()).toContainEqual(
+      expect.objectContaining({
+        requestId: terminal?.id,
+        stage: "turn",
+        continuation: true
+      })
+    );
+    expect(await agent.getServerApprovalToolExecutions()).toBe(0);
+
+    await closeWS(ws);
+  });
+
+  it("sends a failed continuation's error frame before onChatResponse returns (#2381)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setServerApprovalToolMode(true);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const initialDone = waitForDone(ws, 15000);
+    sendChatRequest(ws, [makeUserMessage("update my trigger")]);
+    await initialDone;
+
+    await agent.setFailContinuationBeforeStream(true);
+    await agent.setStallResponseHook(true);
+    try {
+      const continuationDone = waitForDone(ws, 15000);
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_APPROVAL,
+          toolCallId: "tc-server-approval-1",
+          approved: true,
+          autoContinue: true
+        })
+      );
+      const frames = await continuationDone;
+      expect(
+        frames.find(
+          (frame) => frame.type === MSG_CHAT_RESPONSE && frame.done === true
+        )
+      ).toMatchObject({ error: true, continuation: true });
+    } finally {
+      await agent.setStallResponseHook(false);
+    }
+
+    await closeWS(ws);
+  });
+
+  it("continues after approving a tool that shares its message with a settled tool (#2185)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setSequentialApprovalToolMode(true);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const initialDone = waitForDone(ws, 15000);
+    sendChatRequest(ws, [makeUserMessage("update my trigger")]);
+    await initialDone;
+
+    const pending = ((await agent.getMessages()) as UIMessage[]).at(-1);
+    expect(
+      pending?.parts
+        .filter((part) => "toolCallId" in part)
+        .map((part) => ("state" in part ? part.state : undefined))
+    ).toEqual(["output-available", "approval-requested"]);
+
+    const continuationDone = waitForDone(ws, 5000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc-seq-approval",
+        approved: true,
+        autoContinue: true
+      })
+    );
+    await continuationDone;
+
+    expect(await agent.getServerApprovalToolExecutions()).toBe(1);
+    const toolPart = ((await agent.getMessages()) as UIMessage[])
+      .flatMap((message) => message.parts)
+      .find(
+        (part) => "toolCallId" in part && part.toolCallId === "tc-seq-approval"
+      );
+    expect(toolPart).toMatchObject({
+      state: "output-available",
+      output: { enabled: true }
+    });
+
+    await closeWS(ws);
+  });
+
   it("treats a pending approved tool as complete — no spurious transcript-repair backstop (#1627)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
@@ -1064,6 +1257,46 @@ describe("Think — auto-continuation", () => {
     await closeWS(ws);
   });
 
+  it("applies a tool result without reading the transcript, whatever its length", async () => {
+    // The apply used to re-read the whole persisted path per tool update —
+    // one full history read for every client result, approval and
+    // cross-message update in a long turn. It now resolves the owning row
+    // from the live cache and reads that row alone, so the billed reads are
+    // the same for a short transcript and a long one.
+    const short = await (await freshAgent()).measureToolUpdateRowsForTest(12);
+    const long = await (await freshAgent()).measureToolUpdateRowsForTest(160);
+
+    expect(short.state).toBe("output-available");
+    expect(long.state).toBe("output-available");
+    expect(short.cacheCoversPath).toBe(true);
+    expect(long.cacheCoversPath).toBe(true);
+    // One point read of the owner, Sessions' own no-op guard re-read, and
+    // the reference bookkeeping of the rewrite — never a path walk.
+    expect(long.rowsRead).toBeLessThan(20);
+    expect(long.rowsRead).toBe(short.rowsRead);
+    expect(long.rowsWritten).toBe(short.rowsWritten);
+  });
+
+  it("starts a turn without re-reading or re-writing the echoed transcript", async () => {
+    // A chat request carries the client's whole transcript. Reconciliation
+    // used to read the full path from storage, upsert every echoed message
+    // (an existence read plus a full-row compare each), then read the path
+    // again to refresh the cache. Now the cache is the server transcript,
+    // unchanged messages are skipped before Sessions sees them, and only the
+    // new user message is written.
+    const short = await (await freshAgent()).measureTurnStartRowsForTest(12);
+    const long = await (await freshAgent()).measureTurnStartRowsForTest(160);
+
+    expect(short.persisted).toBe(true);
+    expect(long.persisted).toBe(true);
+    expect(short.cached).toBe(13);
+    expect(long.cached).toBe(161);
+    expect(long.rowsWritten).toBe(1);
+    expect(short.rowsWritten).toBe(1);
+    expect(long.rowsRead).toBeLessThan(10);
+    expect(long.rowsRead).toBe(short.rowsRead);
+  });
+
   it("serializes overlapping tool-result applies so neither clobbers the other (#1649)", async () => {
     const agent = await freshAgent();
     // Two overlapping read-modify-writes through the interaction-apply queue.
@@ -1166,6 +1399,53 @@ describe("Think — auto-continuation", () => {
     } finally {
       unsubscribe();
     }
+
+    await closeWS(ws);
+  }, 25000);
+
+  // Port of ai-chat's "does not fire a stale continuation when the active
+  // stream completes with stop" (#2171, #2352). There the stream consumed the
+  // mid-stream result in a later step, so the held continuation was stale.
+  // Think's stream cannot advance past an execute-less client tool call, so a
+  // result that lands mid-stream is never consumed by that stream even when it
+  // finishes with `stop`: the one continuation is owed, and its prompt ends in
+  // the tool result rather than assistant text (no prefill).
+  it("continues exactly once, from the tool result, when a mid-stream result's stream stops (#2352)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setSlowClientToolStreamMode(true, 25, 16, "stop");
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    sendChatRequest(ws, [makeUserMessage("do the thing")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await waitUntil(async () => {
+      const state = await agent.streamingToolCallState("tc-client-1");
+      return state === "input-available";
+    }, 8000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-client-1",
+        toolName: "client_action",
+        output: "mid-stream output",
+        autoContinue: true
+      })
+    );
+
+    await waitUntil(async () => {
+      const log = (await agent.getResponseLog()) as ChatResponseResult[];
+      return log.some((entry) => entry.continuation);
+    }, 8000);
+    await delay(300);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.filter((entry) => entry.continuation)).toHaveLength(1);
+    expect(await agent.getSlowClientToolPromptTailsForTest()).toEqual([
+      "user",
+      "tool"
+    ]);
 
     await closeWS(ws);
   }, 25000);
@@ -3248,9 +3528,9 @@ describe("Think — messageConcurrency", () => {
 
     const request2 = sendChatRequest(ws, [makeUserMessage("Second")]);
     const done2 = waitForDoneId(ws, request2, 3000);
-    await done2;
+    expect((await done2).at(-1)?.outcome).toBe("skipped");
 
-    await done1;
+    expect((await done1).at(-1)?.outcome).toBe("completed");
     await delay(200);
 
     const log = (await agent.getResponseLog()) as ChatResponseResult[];
@@ -3260,6 +3540,24 @@ describe("Think — messageConcurrency", () => {
     const userMessages = messages.filter((m: UIMessage) => m.role === "user");
     expect(userMessages.length).toBe(1);
 
+    await closeWS(ws);
+  });
+
+  it("reports a cancelled running turn as aborted", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 100, 15);
+    const requestId = sendChatRequest(ws, [makeUserMessage("Cancel me")]);
+    const done = waitForDoneId(ws, requestId, 10000);
+    await waitForActiveTurn(agent);
+    ws.send(
+      JSON.stringify({ type: "cf_agent_chat_request_cancel", id: requestId })
+    );
+
+    expect((await done).at(-1)?.outcome).toBe("aborted");
     await closeWS(ws);
   });
 

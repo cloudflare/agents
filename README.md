@@ -110,7 +110,7 @@ The agent is a Durable Object, so it needs a binding and a SQLite migration in `
 | **WebSockets**          | Real-time bidirectional communication with lifecycle hooks                      |
 | **AI Chat**             | Message persistence, resumable streaming, server/client tool execution          |
 | **MCP**                 | Act as MCP servers or connect as MCP clients (HTTP, SSE, RPC, elicitation)      |
-| **WebMCP**              | Expose browser-side tools to agents over WebSocket                              |
+| **WebMCP**              | Expose page-local tools or bridge remote MCP tools to browser agents            |
 | **Workflows**           | Durable multi-step tasks with human-in-the-loop approval                        |
 | **Email**               | Send, receive, and reply via Cloudflare Email Service                           |
 | **Voice**               | Continuous STT, streaming TTS, VAD, interruption, SFU utilities                 |
@@ -125,16 +125,16 @@ The agent is a Durable Object, so it needs a binding and a SQLite migration in `
 
 ## Packages
 
-| Package                                                 | Description                                                                                       |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| [`agents`](packages/agents)                             | Core SDK — `Agent` class, routing, state, scheduling, MCP, email, workflows, x402, browser agents |
-| [`@cloudflare/ai-chat`](packages/ai-chat)               | Higher-level AI chat — persistent messages, resumable streaming, tool execution                   |
-| [`@cloudflare/think`](packages/think)                   | Opinionated chat agent base — agentic loop, stream resumption, client tools, workspace tools      |
-| [`@cloudflare/codemode`](packages/codemode)             | LLMs write executable code that calls your tools, instead of one tool call at a time              |
-| [`@cloudflare/shell`](packages/shell)                   | Sandboxed JS execution + virtual filesystem (`Workspace`) for agents                              |
-| [`@cloudflare/voice`](packages/voice)                   | Voice pipeline — STT, TTS, VAD, streaming, SFU utilities                                          |
-| [`@cloudflare/worker-bundler`](packages/worker-bundler) | Build and bundle Workers at runtime, for use with the Worker Loader binding                       |
-| [`hono-agents`](packages/hono-agents)                   | Hono middleware for adding agents to Hono apps                                                    |
+| Package                                                 | Description                                                                                   |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| [`agents`](packages/agents)                             | Core SDK — Agents, routing, Voice, Channels, scheduling, MCP, workflows, x402, browser agents |
+| [`@cloudflare/ai-chat`](packages/ai-chat)               | Higher-level AI chat — persistent messages, resumable streaming, tool execution               |
+| [`@cloudflare/think`](packages/think)                   | Opinionated chat agent base — agentic loop, stream resumption, client tools, workspace tools  |
+| [`@cloudflare/codemode`](packages/codemode)             | LLMs write executable code that calls your tools, instead of one tool call at a time          |
+| [`@cloudflare/shell`](packages/shell)                   | Sandboxed JS execution + virtual filesystem (`Workspace`) for agents                          |
+| [`@cloudflare/voice`](packages/voice)                   | Deprecated compatibility wrapper for the `agents/voice` exports                               |
+| [`@cloudflare/worker-bundler`](packages/worker-bundler) | Build and bundle Workers at runtime, for use with the Worker Loader binding                   |
+| [`hono-agents`](packages/hono-agents)                   | Hono middleware for adding agents to Hono apps                                                |
 
 > AI-chat modules used to live in `agents/ai-chat-agent`, `agents/chat`, `agents/ai-react`, and `agents/ai-types`. Those entry points still re-export, but they're deprecated — import from `@cloudflare/ai-chat` directly. New chat-from-scratch projects should look at `@cloudflare/think`.
 
@@ -144,11 +144,11 @@ The [`examples/`](examples) directory has 30+ self-contained demos. A non-exhaus
 
 - **Showcase** — [`playground/`](examples/playground) is the kitchen-sink app: state, callable methods, scheduling, chat, tools, MCP, workflows, email, voice — all in one UI
 - **Chat & assistants** — [`assistant/`](examples/assistant), [`agents-as-tools/`](examples/agents-as-tools), [`agent-skills/`](examples/agent-skills), [`workspace-chat/`](examples/workspace-chat), [`resumable-stream-chat/`](examples/resumable-stream-chat), [`structured-input/`](examples/structured-input), [`dynamic-tools/`](examples/dynamic-tools), [`multi-ai-chat/`](examples/multi-ai-chat), [`context-overflow-recovery/`](examples/context-overflow-recovery)
-- **MCP** — [`mcp/`](examples/mcp), [`mcp-client/`](examples/mcp-client), [`mcp-server/`](examples/mcp-server), [`mcp-worker/`](examples/mcp-worker), [`mcp-worker-authenticated/`](examples/mcp-worker-authenticated), [`mcp-elicitation-mrtr/`](examples/mcp-elicitation-mrtr), [`mcp-elicitation/`](examples/mcp-elicitation), [`mcp-rpc-transport/`](examples/mcp-rpc-transport), [`webmcp/`](examples/webmcp)
+- **MCP** — [`mcp/`](examples/mcp), [`mcp-client/`](examples/mcp-client), [`mcp-server/`](examples/mcp-server), [`mcp-worker/`](examples/mcp-worker), [`mcp-worker-authenticated/`](examples/mcp-worker-authenticated), [`mcp-elicitation-mrtr/`](examples/mcp-elicitation-mrtr), [`mcp-elicitation/`](examples/mcp-elicitation), [`mcp-rpc-transport/`](examples/mcp-rpc-transport), [`webmcp/`](examples/webmcp), [`webmcp-react/`](examples/webmcp-react)
 - **Code Mode & sandboxes** — [`codemode/`](examples/codemode), [`codemode-mcp/`](examples/codemode-mcp), [`codemode-mcp-openapi/`](examples/codemode-mcp-openapi), [`dynamic-workers/`](examples/dynamic-workers), [`dynamic-workers-playground/`](examples/dynamic-workers-playground), [`worker-bundler-playground/`](examples/worker-bundler-playground)
 - **Voice** — [`voice-agent/`](examples/voice-agent) is the unified voice pipeline example with Workers AI, AssemblyAI, Telnyx, and ElevenLabs STT; [`voice-input/`](examples/voice-input) covers dictation; [`telnyx-voice-agent/`](examples/telnyx-voice-agent) covers phone transport; [`elevenlabs-starter/`](examples/elevenlabs-starter) covers broader ElevenLabs media APIs
 - **Workflows & approvals** — [`workflows/`](examples/workflows), [`a2a/`](examples/a2a)
-- **Auth, payments, comms** — [`auth-agent/`](examples/auth-agent), [`cross-domain/`](examples/cross-domain), [`x402/`](examples/x402), [`x402-mcp/`](examples/x402-mcp), [`email-agent/`](examples/email-agent), [`github-webhook/`](examples/github-webhook), [`push-notifications/`](examples/push-notifications)
+- **Auth, payments, comms** — [`auth-agent/`](examples/auth-agent), [`channels/`](examples/channels), [`cross-domain/`](examples/cross-domain), [`x402/`](examples/x402), [`x402-mcp/`](examples/x402-mcp), [`email-agent/`](examples/email-agent), [`github-webhook/`](examples/github-webhook), [`push-notifications/`](examples/push-notifications)
 - **Game & misc** — [`tictactoe/`](examples/tictactoe), [`ai-chat/`](examples/ai-chat)
 
 Examples using the [OpenAI Agents SDK](https://openai.github.io/openai-agents-js/) live in [`openai-sdk/`](openai-sdk). Work-in-progress experiments live in [`experimental/`](experimental) (no stability guarantees).
@@ -177,7 +177,7 @@ npm start
 | [`packages/think/`](packages/think)                   | Opinionated chat agent base                              |
 | [`packages/codemode/`](packages/codemode)             | Code Mode                                                |
 | [`packages/shell/`](packages/shell)                   | Sandboxed execution + filesystem                         |
-| [`packages/voice/`](packages/voice)                   | Voice pipeline                                           |
+| [`packages/voice/`](packages/voice)                   | Deprecated Voice compatibility wrapper                   |
 | [`packages/worker-bundler/`](packages/worker-bundler) | Runtime Workers bundler                                  |
 | [`packages/hono-agents/`](packages/hono-agents)       | Hono integration                                         |
 | [`examples/`](examples)                               | Self-contained demo apps                                 |

@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
-import { DurableObjectEventStore } from "../../mcp/event-store";
+import { DurableObjectEventStore } from "../../mcp/server/event-store";
 
 /**
  * Minimal in-memory mock of the subset of {@link DurableObjectStorage} that

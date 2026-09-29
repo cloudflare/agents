@@ -8,53 +8,48 @@ Works as both a **top-level agent** (WebSocket chat protocol for browser clients
 
 ## Quick start
 
+Create an explicit Worker entry:
+
 ```ts
 import { Think } from "@cloudflare/think";
-import { createWorkersAI } from "workers-ai-provider";
+import { routeAgentRequest } from "agents";
 
 export class MyAgent extends Think<Env> {
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code"
-    );
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   getSystemPrompt() {
     return "You are a helpful coding assistant.";
   }
 }
+
+export default {
+  async fetch(request: Request, env: Env) {
+    return (
+      (await routeAgentRequest(request, env)) ||
+      new Response("Not found", { status: 404 })
+    );
+  }
+} satisfies ExportedHandler<Env>;
 ```
 
-That's it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. Connect from the browser with `useAgentChat` from `@cloudflare/think/react`.
+Export the class from the Worker entry and configure its binding and migration:
 
-## Think framework
-
-The Think Vite plugin can generate the Worker entry, stable Durable Object
-exports, friendly route helpers, and inferred Worker config from an `agents/`
-directory:
-
-```ts
-import { cloudflare } from "@cloudflare/vite-plugin";
-import { think } from "@cloudflare/think/vite";
-import { defineConfig } from "vite";
-
-export default defineConfig({
-  plugins: [think(), cloudflare()]
-});
+```jsonc
+{
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI" },
+  "durable_objects": {
+    "bindings": [{ "class_name": "MyAgent", "name": "MyAgent" }]
+  },
+  "migrations": [{ "new_sqlite_classes": ["MyAgent"], "tag": "v1" }]
+}
 ```
 
-Use `main: "virtual:think/entry"` in framework projects. Top-level agents under
-`agents/` get generated Durable Object bindings and migrations; nested
-`agents/*/agents/*` entries are facet exports for `ctx.exports` and do not need
-production Wrangler bindings or migrations. Apps with auth or custom routing can
-add `src/server.ts`; the generated entry still wraps it and injects
-`think.router` for manifest-aware routing.
-
-The framework supports one sub-agent layer today. If you need nested sub-agents,
-please reach out with your use case so we can design that model deliberately.
-
-The published package includes the full Think documentation at
-`docs/index.md`.
+Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. Connect from the browser with `useAgentChat` from `@cloudflare/think/react`.
 
 ## Messengers
 
@@ -82,9 +77,8 @@ export class SupportAgent extends Think<Env> {
 }
 ```
 
-The root Think agent handles the webhook route with this precedence: framework
-sub-agent routing, Think internal routes, messenger routes, then user
-`onRequest`. By default, `telegram` maps to
+The root Think agent handles the webhook route with this precedence: sub-agent
+routing, Think internal routes, messenger routes, then user `onRequest`. By default, `telegram` maps to
 `/messengers/telegram/webhook`, direct messages and mentions are routed to the
 agent, and new mentions subscribe the thread so later mentions in the same
 thread are still observed. Ordinary subscribed-thread messages and button
@@ -234,9 +228,22 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Bundled skills use the Agents Vite plugin. The `agents:skills` specifier
-resolves to a `./skills` directory next to the importing file; use
-`agents:skills/<dir>` for a differently named sibling directory:
+Bundled skills use the Agents Vite plugin. Register it alongside the Cloudflare
+plugin in `vite.config.ts`:
+
+```ts
+import { cloudflare } from "@cloudflare/vite-plugin";
+import agents from "agents/vite";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [agents(), cloudflare()]
+});
+```
+
+The `agents:skills` specifier resolves to a `./skills` directory next to the
+importing file; use `agents:skills/<dir>` for a differently named sibling
+directory:
 
 ```ts
 import bundledSkills from "agents:skills";
@@ -254,6 +261,23 @@ plain `@cloudflare/ai-chat` `onChatMessage`, can build a `SkillRegistry`);
 `@cloudflare/think` re-exports it as `skills` and wires `getSkills()` into the
 turn automatically.
 
+Think can also project each resolved `SKILL.md` into the active workspace so
+the agent can read and edit skills as files. This is off by default: skills
+load from their sources and nothing is written to the Workspace. Computer uses
+`/workspace/.agents/skills`; legacy Shell uses `/.agents/skills`. Existing
+workspace edits are preserved and affect later activation. Resources copy into
+the workspace on first use rather than at startup. Think records a durable
+source fingerprint, so unchanged cold wakes do not stat or rewrite every skill
+file.
+
+Enable projection, or override its path, with:
+
+```ts
+skillWorkspace = {};
+// or, for a custom Computer proxy that presents legacy direct methods:
+skillWorkspace = { root: "/workspace/.agents/skills" };
+```
+
 The imported directory should contain one child directory per skill:
 
 ```text
@@ -270,9 +294,10 @@ from other skills.
 
 Skills are on-demand instructions, not always-on system prompt text. The model
 sees the catalog first, then calls `activate_skill` when a user task matches a
-skill description. Use a Session context block for behavior that should apply to
-every turn, especially when the agent also uses skills. `getSystemPrompt()` is a
-legacy fallback and is ignored once Session context blocks are configured.
+skill description. Use a context block from `configureContext()` for behavior
+that should apply to every turn, especially when the agent also uses skills.
+`getSystemPrompt()` is a legacy fallback and is ignored once context blocks are
+configured.
 
 Script execution is opt-in and **experimental**. `getSkillScriptRunner()`
 enables `run_skill_script`, which can run JavaScript, TypeScript, Python, and
@@ -318,8 +343,8 @@ Script execution requires a Worker Loader binding:
 | Export                                  | Description                                                   |
 | --------------------------------------- | ------------------------------------------------------------- |
 | `@cloudflare/think`                     | `Think`, `Session`, `Workspace` — main class + re-exports     |
-| `@cloudflare/think/framework`           | Framework manifest discovery and Worker config helpers        |
-| `@cloudflare/think/server-entry`        | Framework Worker entry helpers for custom server handlers     |
+| `agents/sessions`                       | `Sessions`, `Session`, `createCompactFunction`, attachments   |
+| `agents/context`                        | `ContextBlocks`, providers, `ContextConfig` — prompt assembly |
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
 | `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
@@ -327,7 +352,6 @@ Script execution requires a Worker Loader binding:
 | `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
 | `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
 | `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
-| `@cloudflare/think/vite`                | Think Vite plugin and generated Worker config helpers         |
 
 ## Think
 
@@ -340,11 +364,17 @@ Script execution requires a Worker Loader binding:
 | `getTools()`               | `{}`                               | AI SDK `ToolSet` for the agentic loop                                                                                                                                                                                        |
 | `getMessengers()`          | `{}`                               | Messenger ingress and delivery declarations                                                                                                                                                                                  |
 | `getScheduledTasks()`      | `{}`                               | Code-declared recurring prompts                                                                                                                                                                                              |
+| `getScheduledTasksScope()` | `"root"`                           | Which instances arm declared tasks — `"root"` or `"all"` (sub-agents too)                                                                                                                                                    |
 | `getDefaultTimezone()`     | `undefined`                        | Default timezone for wall-clock schedules                                                                                                                                                                                    |
 | `maxSteps`                 | `10`                               | Max tool-call rounds per turn (property)                                                                                                                                                                                     |
 | `sendReasoning`            | `true`                             | Send reasoning chunks to chat clients                                                                                                                                                                                        |
-| `configureSession()`       | identity                           | Add context blocks, compaction, search, skills                                                                                                                                                                               |
+| `messageMetadata`          | `undefined`                        | Default writer for server-authored assistant-message metadata (override per turn via `TurnConfig`)                                                                                                                           |
+| `configureSession()`       | identity                           | Configure the default session handle: compaction and search                                                                                                                                                                  |
+| `configureContext()`       | `[]`                               | Declare prompt context blocks. See [Session and context](#session-and-context)                                                                                                                                               |
+| `hydrationByteBudget`      | 32 MiB                             | Byte budget for startup transcript hydration. Charges each row its full stored size, including the continuation rows a large message is split across                                                                         |
+| `mediaEviction`            | `true`                             | Media eviction policy: aged media leaves the conversation and is preserved as a Workspace file. `false` keeps aged media in the conversation                                                                                 |
 | `getSkills()`              | `[]`                               | First-class Agent Skills sources                                                                                                                                                                                             |
+| `skillWorkspace`           | `false`                            | Project skills into the Workspace as files; `{}` enables with defaults                                                                                                                                                       |
 | `getSkillScriptRunner()`   | `null`                             | Optional runner for `run_skill_script`                                                                                                                                                                                       |
 | `getExtensions()`          | `[]`                               | Sandboxed extension declarations (load order)                                                                                                                                                                                |
 | `extensionLoader`          | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                                                                                                                  |
@@ -352,15 +382,15 @@ Script execution requires a Worker Loader binding:
 | `fetchTools`               | `false`                            | Opt-in allowlisted HTTP read tools (`fetch_url` + per-binding `fetch_<name>`). Set to a config object; see [Fetch tool](#fetch-tool)                                                                                         |
 | `includeMcpTools`          | `true`                             | Automatically convert connected MCP tools to AI SDK tools and merge them into model turns                                                                                                                                    |
 | `waitForMcpConnections`    | `false`                            | Wait for MCP connections to settle before inference                                                                                                                                                                          |
-| `chatRecovery`             | `true`                             | Wrap turns in `runFiber` for durable execution. Set `{ maxAttempts, terminalMessage, onExhausted }` to tune bounded recovery                                                                                                 |
-| `chatStreamStallTimeoutMs` | `0` (off)                          | Inactivity watchdog: abort a turn whose model stream produces no chunk for this long, surfacing a terminal stream error instead of an infinite spinner                                                                       |
+| `chatRecovery`             | Always on                          | Durable recovery configuration. See [`ChatRecoveryConfig`](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md#stream-recovery) for all options and defaults                                           |
+| `chatStreamStallTimeoutMs` | `0` (off)                          | Opt-in inactivity watchdog that routes a stalled model stream into bounded recovery instead of leaving the client spinning indefinitely                                                                                      |
 | `contextOverflow`          | `undefined`                        | Opt-in mid-turn context-overflow handling: `{ reactive?, maxRetries?, proactive? }`. Requires `classifyChatError` + a session compaction function. See [Context-window overflow recovery](#context-window-overflow-recovery) |
 
 On each turn, Think appends a small capability block to the assembled system prompt. The block is based on the tools available for that turn, so models learn about workspace tools, context-loading tools, extension tools, sandboxed execution, MCP/client tools, and delegated-agent tools only when they are actually exposed.
 
-Think enables Durable Object eviction recovery by default. This is separate from client resumable streaming: resumable streaming handles browser disconnect/reconnect while the object keeps running, while `chatRecovery` recovers turns interrupted by process restarts, deploys, or object eviction.
+Think always enables Durable Object eviction recovery. This is separate from client resumable streaming: resumable streaming handles browser disconnect/reconnect while the object keeps running, while durable chat recovery handles turns interrupted by process restarts, deploys, or object eviction. `chatRecovery = false` is no longer supported; assign an object only to tune recovery.
 
-`chatStreamStallTimeoutMs` is a separate, opt-in safety net for a different failure: a model stream that **parks without ever throwing** (no chunk, no error, no `done`), which otherwise leaves the client spinning forever. When set, if no UI-message-stream chunk arrives within the window the watchdog aborts the turn and a `chat:stream:stalled` observability event fires. With `chatRecovery` on (the default), the stall is then routed into the **same bounded recovery path** as a deploy/eviction interruption: the settled partial is preserved and a continuation is scheduled, so a transient hang recovers automatically. A persistently hanging provider still terminalizes once the recovery budget is exhausted — and it exhausts through the **same path as deploy recovery**, so your configured `terminalMessage` is shown, `onExhausted` fires, and the `chat:recovery:exhausted` event is emitted (you do **not** get the raw `"Chat stream stalled…"` error). (With `chatRecovery` disabled, the watchdog exits with a terminal stream error via `onChatError` `stage: "stream"`.) When the stalled turn is a sub-agent dispatched via `runAgentTool()`, a recovering stall closes the RPC stream without firing `onError`/`onDone` — the scheduled continuation owns the real terminal outcome, so the parent observes a (slightly delayed) completion rather than an error, exactly as it would for a deploy-interrupted child. It is **off by default** because it measures the gap _between_ stream chunks, which includes server-side tool execution time (no chunks flow while a tool runs) — set it comfortably above your slowest model time-to-first-token and slowest tool, e.g. `120_000`, or you will abort healthy long turns. For a turn you _know_ will invoke a slow tool, return `{ chatStreamStallTimeoutMs }` from `beforeTurn` (a `TurnConfig` field) to raise or disable (`0`) the watchdog for that one turn instead of permanently widening the global window; it auto-resets afterward.
+`chatStreamStallTimeoutMs` is a separate, opt-in safety net for a different failure: a model stream that **parks without ever throwing** (no chunk, no error, no `done`), which otherwise leaves the client spinning forever. When set, if no UI-message-stream chunk arrives within the window the watchdog aborts the turn and a `chat:stream:stalled` observability event fires. The stall is then routed into the **same bounded recovery path** as a deploy/eviction interruption: the settled partial is preserved and a continuation is scheduled, so a transient hang recovers automatically. A persistently hanging provider still terminalizes once the recovery budget is exhausted — and it exhausts through the **same path as deploy recovery**, so your configured `terminalMessage` is shown, `onExhausted` fires, and the `chat:recovery:exhausted` event is emitted (you do **not** get the raw `"Chat stream stalled…"` error). When the stalled turn is a sub-agent dispatched via `runAgentTool()`, a recovering stall closes the RPC stream without firing `onError`/`onDone` — the scheduled continuation owns the real terminal outcome, so the parent observes a (slightly delayed) completion rather than an error, exactly as it would for a deploy-interrupted child. It is **off by default** because it measures the gap _between_ stream chunks, which includes server-side tool execution time (no chunks flow while a tool runs) — set it comfortably above your slowest model time-to-first-token and slowest tool, e.g. `120_000`, or you will abort healthy long turns. For a turn you _know_ will invoke a slow tool, return `{ chatStreamStallTimeoutMs }` from `beforeTurn` (a `TurnConfig` field) to raise or disable (`0`) the watchdog for that one turn instead of permanently widening the global window; it auto-resets afterward.
 
 Override `onChatRecovery(ctx)` when you need provider-specific recovery. The default behavior persists partial assistant output and continues or retries when safe:
 
@@ -517,6 +547,14 @@ work such as creating a Workflow run or writing a run ledger. Delivery is
 at-least-once; use `idempotencyKey` or `occurrenceKey` for your own durable
 idempotency.
 
+Declared tasks are armed on the **root agent only**. Because
+`getScheduledTasks()` is normally a static declaration, it returns the same
+tasks on every instance of the class, so arming it on sub-agents as well would
+dispatch each occurrence once per live sub-agent on top of the root. Override
+`getScheduledTasksScope()` to return `"all"` when a class genuinely declares
+different tasks per sub-agent — each sub-agent then owns an independent
+schedule.
+
 Static declarations reconcile on startup. If `getScheduledTasks()` reads
 product-owned data that can change while the Durable Object is live, call
 `internal_reconcileScheduledTasks()` after updating that data. During
@@ -551,8 +589,8 @@ overflow could not be recovered, and `undefined` otherwise.
 
 `classifyChatError` maps a raw provider error to a provider-agnostic category
 (`"context_overflow" | "rate_limit" | "transient" | "fatal" | "unknown"`).
-Think ships no provider-specific matching in core — the app owns it, the same
-split as the `tokenCounter` passed to `compactAfter()`. Today it drives only
+Think ships no provider-specific matching in core: the app owns it, the same
+split as the `summarize` function passed to `createCompactFunction()`. Today it drives only
 context-overflow recovery: it is consulted when a turn errors and
 `contextOverflow.reactive` is enabled, and only `"context_overflow"` is acted on
 (other categories are reserved for future use). For the common case, assign the
@@ -573,9 +611,13 @@ The AI SDK-derived contexts spread the SDK's own types at the top level — no i
 
 `TurnConfig` also accepts `sendReasoning` to override whether reasoning chunks are emitted for the current UI message stream. The instance-level `sendReasoning` property defaults to `true`; return `{ sendReasoning: false }` from `beforeTurn` to hide reasoning for a single turn, for example on internal continuation turns.
 
+`TurnConfig.messageMetadata` writes server-authored metadata onto the assistant message a turn persists — the same AI SDK `messageMetadata` callback base `AIChatAgent` + `streamText` accept, now forwarded through Think. It is called with each stream part; return a JSON-serializable object (typically from the `start` and/or `finish` part) and each return is shallow-merged into the message's metadata. An auto-continuation is its own turn: `beforeTurn` runs again with `ctx.continuation: true`, and the continuation persists as a separate assistant message with its own metadata. Its return value is broadcast to clients and persisted, so it must not carry server-only secrets. Set the instance-level `messageMetadata` property for turn-independent metadata (e.g. stamping a `createdAt` timestamp on every assistant message); return `messageMetadata` from `beforeTurn` to override it for a single turn. Because it is a function, configure it from a Think subclass — sandboxed extension hooks cannot provide it over RPC.
+
 `TurnConfig` also accepts stable AI SDK `streamText` call settings such as `maxOutputTokens`, `temperature`, `stopSequences`, `seed`, `maxRetries`, `timeout`, and `headers`. Use them to tune model behavior per turn, for example disabling retries or adding a chunk timeout during recovery flows.
 
 `TurnConfig.stopWhen` accepts AI SDK stop conditions such as `hasToolCall("finalAnswer")` for ending a turn early. Think composes these with its own `maxSteps` bound, so a custom condition can stop before the cap without removing the safety limit. Because stop conditions are functions, return `stopWhen` from a Think subclass's `beforeTurn`; sandboxed extension hooks cannot provide it over RPC.
+
+`TurnConfig.repairToolCall` repairs a complete tool call that the AI SDK cannot parse or validate. Return the original raw call with a corrected `input` JSON string, or `null` when it cannot be repaired. The AI SDK revalidates the returned call before Think's `beforeToolCall` hook and tool execution. Configure this function from a Think subclass; sandboxed extension hooks cannot provide it over RPC.
 
 `TurnConfig` also accepts an `output` field that is forwarded to `streamText` as the AI SDK's structured-output spec. Combine with `activeTools: []` for providers (e.g. `workers-ai-provider`) that strip tools when `responseFormat: "json"` is active. Use `telemetry` to pass the AI SDK's per-call telemetry settings through to `streamText`; the previous `experimental_telemetry` name remains as a deprecated alias. Trace payload storage is separately controlled by the agent fields `storeMessages` (chat messages) and `storeTools` (tool arguments/results); both default to `false`. Stored messages follow the OpenTelemetry GenAI schemas: `{ role, parts }`, `{ type, content }` for text/reasoning, `tool_call` / `tool_call_response` for tools, and `finish_reason` on model output.
 
@@ -696,6 +738,7 @@ interface TurnConfig {
   maxSteps?: number; // override maxSteps for this turn
   stopWhen?: StopCondition | StopCondition[]; // additional early-exit conditions
   sendReasoning?: boolean; // send reasoning chunks for this turn
+  messageMetadata?: MessageMetadataCallback; // write assistant-message metadata for this turn
   maxOutputTokens?: number;
   temperature?: number;
   topP?: number;
@@ -708,6 +751,7 @@ interface TurnConfig {
   timeout?: TimeoutConfiguration;
   headers?: Record<string, string | undefined>;
   providerOptions?: Record<string, unknown>;
+  repairToolCall?: ToolCallRepairFunction;
   telemetry?: TelemetrySettings;
   /** @deprecated Prefer telemetry. */
   experimental_telemetry?: TelemetrySettings;
@@ -722,53 +766,131 @@ When the LLM calls a client tool, the tool call chunk is sent to the client. The
 
 Tool approval flows are also supported via `CF_AGENT_TOOL_APPROVAL`.
 
-### Session and context blocks
+### Session and context
 
-Think uses Session for conversation storage. Override `configureSession` to add persistent memory, skills, compaction, and search:
+Think splits conversation storage from prompt assembly. `agents/sessions` stores
+messages; `agents/context` builds the system prompt. Think wires both during
+`onStart`.
+
+`configureSession()` configures the default session handle: compaction and
+search.
 
 ```ts
+import { createCompactFunction, type Session } from "agents/sessions";
+
 export class MyAgent extends Think<Env> {
   getModel() { ... }
 
   configureSession(session: Session) {
     return session
-      .withContext("memory", { description: "Learned facts", maxTokens: 2000 })
-      .withCachedPrompt();
+      .onCompaction(
+        createCompactFunction({
+          summarize: (prompt) => this.summarize(prompt),
+          keepRecentTokens: 20_000
+        })
+      )
+      .compactAfter(100_000);
   }
 }
 ```
 
-#### Dynamic context blocks
-
-Context blocks can also be added at runtime (e.g., by extensions):
+`configureContext()` declares the prompt blocks:
 
 ```ts
-await session.addContext("notes", { description: "User notes" });
-await session.refreshSystemPrompt(); // rebuild the prompt
+import type { ContextConfig } from "agents/context";
 
-session.removeContext("notes");
-await session.refreshSystemPrompt();
-```
-
-#### Legacy Session Skills
-
-Session still supports lower-level loadable context providers. Prefer the
-first-class Think skills API (`getSkills()`, `activate_skill`, and
-`read_skill_resource`) for new Agent Skills directories. Use Session skill
-providers only when you need generic `load_context` / `unload_context`
-management instead of Think's skills workflow.
-
-```ts
-import { R2SkillProvider } from "agents/experimental/memory/session";
-
-configureSession(session: Session) {
-  return session
-    .withContext("skills", {
-      provider: new R2SkillProvider(this.env.SKILLS_BUCKET, { prefix: "skills/" })
-    })
-    .withCachedPrompt();
+export class MyAgent extends Think<Env> {
+  configureContext(): ContextConfig[] {
+    return [
+      { label: "soul", provider: { get: async () => "You are helpful." } },
+      { label: "memory", description: "Learned facts", maxTokens: 2_000 }
+    ];
+  }
 }
 ```
+
+A block declared without a `provider` is auto-wired to durable per-agent SQLite,
+so `memory` above is writable through the `set_context` tool with no extra
+wiring. The frozen system prompt is always persisted, so there is nothing to opt
+into: a cold wake reuses the exact prompt string the model already cached.
+
+The assembled blocks are available as `this.context` once the Lifecycle has
+started. See [Context](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md)
+for providers, tools, and frozen-prompt behavior.
+
+### Upgrading from 0.17
+
+A subclass written against 0.17 keeps compiling and running. `configureSession(session)` still accepts the `withContext()` / `withCachedPrompt()` chain, and `this.session` still carries the context methods (`addContext`, `getContextBlock`, `replaceContextBlock`, `refreshSystemPrompt`, `freezeSystemPrompt`, `tools()`), which now forward to `this.context`. They are deprecated; move blocks into `configureContext()` and read `this.context` at your own pace. Blocks from both hooks are merged, `configureContext()` first.
+
+Two things do change on upgrade:
+
+- **Storage migrates on first wake and cannot be rolled back.** Each Durable Object lifts its `assistant_*` tables into `cf_agents_session_*`, verifies every row, and drops the old tables. An object that has woken on this version has an empty conversation if you roll back; rolling forward again is safe. Canary the deploy if you need a rollback path.
+- **Hydration has no message-count floor.** `hydrationByteBudget` (now 32 MiB) is a hard ceiling that charges each row its stored size plus attachments, so a run of very large messages can hydrate fewer than four. `getHistory()` still reads the full path.
+
+Annotate a `configureSession` override with `Session` imported from `@cloudflare/think`. The `Session` class exported by `agents/sessions` is the raw storage handle and is not assignable to Think's.
+
+`sessionAttachments` is gone (Sessions stores media out of the row on its own), `MediaEvictionConfig.externalizeToWorkspace` is ignored (bytes are always preserved), and `WorkspaceLike.writeFileBytes` is optional (a workspace without it disables media eviction and skills projection with a one-time warning).
+
+#### Dynamic context blocks
+
+Blocks can be added at runtime, for example by extensions:
+
+```ts
+await this.context.addBlock({ label: "notes", description: "User notes" });
+await this.context.refreshSystemPrompt(); // rebuild the prompt
+
+this.context.removeBlock("notes");
+await this.context.refreshSystemPrompt();
+```
+
+#### Message storage
+
+Sessions stores MESSAGES; it is not a file store. A message rides in one
+SQLite row until its serialized JSON exceeds the 1.5 MiB row budget; a message
+larger than that is split across continuation rows and reassembled on read.
+Nothing is truncated and no message is too large to store, so there is no size
+error to handle and nothing to configure.
+
+Splitting never reclaims database space — the continuation rows live in the
+same Durable Object as the message — and Sessions imposes no upper bound on a
+single message, so one very large write can consume a meaningful share of the
+10 GB an object has. Bounding untrusted input is the application's job. Files
+belong in the Workspace, which spills to R2; put a reference to one in the
+message. This is a storage detail: invisible to the model, and unrelated to
+media eviction.
+
+#### Media eviction
+
+Media eviction is a context-window technique, not a storage one. Re-sending a
+screenshot the model has already looked at on every later turn is pure cost, so
+once a message has aged past `mediaEviction.keepRecentMessages` (8 by default)
+on the active path, Think takes the media out of the conversation and leaves a
+marker in its place:
+
+```
+[evicted image/png, 812004 bytes; preserved at /attachments/evicted/msg_01H8-0.png]
+```
+
+The bytes are written to the Workspace at that path, raw and with their real
+mime type — not as a `data:` URL string. The workspace `read` tool recognises
+`image/*`, so when the agent decides it needs the picture again it reads the
+path out of the marker and the actual image goes back into context. Eviction is
+visible to the model and lossy on purpose.
+
+Passes are bounded (`maxRowsPerPass`, 64 by default) and run in the background
+after a turn or a hydration read, rescheduling while a backlog remains. Only
+payloads of at least `minPartBytes` are evicted, and `keepRecentMessages` is
+clamped to the four messages the model replays at full fidelity. Once a row is
+rewritten the Sessions attachment reference is dropped and the blob is reaped,
+so the bytes exist in exactly one place: the Workspace file.
+
+`mediaEviction: false` keeps aged media in the conversation, so the model keeps
+seeing it. It does not change where Sessions keeps the bytes.
+
+Startup hydration reads a recent window bounded by `hydrationByteBudget`
+(32 MiB by default). The budget charges each row its stored bytes plus the
+attachment bytes it re-inflates, so it bounds isolate memory rather than the
+on-disk footprint.
 
 ### MCP integration
 
@@ -859,12 +981,19 @@ Tools belong to the child agent; define them with `getTools()` or use
 `configure()` and `getConfig()` persist a JSON-serializable config blob in SQLite — useful for private server-side settings that should survive hibernation and restarts. Pass the config shape as a method generic for typed call sites:
 
 ```ts
+import { Think } from "@cloudflare/think";
+
 type MyConfig = { modelTier: "fast" | "capable"; systemPrompt: string };
+
+const MODEL_IDS = {
+  fast: "@cf/meta/llama-3.1-8b-instruct",
+  capable: "@cf/moonshotai/kimi-k2.7-code"
+} as const;
 
 export class MyAgent extends Think<Env> {
   getModel() {
     const tier = this.getConfig<MyConfig>()?.modelTier ?? "fast";
-    return createWorkersAI({ binding: this.env.AI })(MODEL_IDS[tier]);
+    return MODEL_IDS[tier];
   }
 }
 ```

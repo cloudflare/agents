@@ -1,5 +1,13 @@
 # Multi AI Chat
 
+> **A note on the pattern.** This example works and demonstrates the
+> full sub-agent routing surface, but for many long-lived chats per
+> user we now recommend one top-level Durable Object per chat plus a
+> per-user push-based index instead of facets — see
+> [`examples/next/routing`](../next/routing) and
+> [When to use dynamic agents](../../docs/agents/sub-agents.md#when-to-use-dynamic-agents)
+> in the docs.
+
 Multi-session AI chat built on the sub-agent routing primitive. A
 single `Inbox` Durable Object owns the chat list + per-user shared
 memory; each chat is a **facet** of that inbox — its own
@@ -104,10 +112,8 @@ Key things worth looking at in `src/server.ts`:
   `this.parentAgent(Chat)` to get context from its direct parent even
   though `Chat` is itself a facet rather than a top-level binding.
 - Each `Chat` owns its own SQLite database, stream state, and recovery
-  state. `AIChatAgent` client streams resume on reconnect by default. If you
-  want Durable Object eviction recovery for each chat facet, opt in with
-  `override chatRecovery = true` on the `Chat` class. If you build this pattern
-  with `Think`, `chatRecovery` is already enabled by default. In both cases the
+  state. `AIChatAgent` client streams resume on reconnect, and Durable Object
+  eviction recovery is always enabled for both `AIChatAgent` and `Think`. The
   root parent's alarm drives recovery checks back into idle children, and
   reconnecting to the `/sub/chat/{chatId}` URL attaches directly to that child.
 - The worker entry is a one-liner: `routeAgentRequest(request, env)`.

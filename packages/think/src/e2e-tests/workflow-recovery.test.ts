@@ -8,11 +8,12 @@
  *     notification is drained, and the workflow resumes + completes with the
  *     validated structured output (no real LLM, no kill)
  *  2. recovery — the workflow turn is interrupted mid-stream by a SIGKILL; on
- *     restart the turn is recovered and the workflow reaches a terminal state
- *     via the workflow-notification drain replay
+ *     restart the turn is recovered and the workflow completes with the
+ *     structured output via the workflow-notification drain replay
  */
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
-import { spawn, execSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { killProcess, killProcessOnPort } from "./wrangler-process";
 import { setDefaultAutoSelectFamily } from "node:net";
 import "./harden-net";
 import path from "node:path";
@@ -34,49 +35,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function killProcessOnPort(port: number): void {
-  try {
-    const output = execSync(
-      `lsof -tiTCP:${port} -sTCP:LISTEN 2>/dev/null || true`
-    )
-      .toString()
-      .trim();
-    if (output) {
-      for (const pid of output.split("\n").filter(Boolean)) {
-        try {
-          process.kill(Number(pid), "SIGKILL");
-        } catch {
-          // Already dead
-        }
-      }
-    }
-  } catch {
-    // lsof not available
-  }
-}
-
-function killProcessTree(pid: number): void {
-  let children: number[] = [];
-  try {
-    children = execSync(`pgrep -P ${pid} 2>/dev/null || true`)
-      .toString()
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map(Number);
-  } catch {
-    // pgrep may be unavailable; killing the parent is still useful.
-  }
-  for (const childPid of children) {
-    killProcessTree(childPid);
-  }
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    // Already dead
-  }
-}
-
 function startWrangler(): ChildProcess {
   const configPath = path.join(__dirname, "wrangler.jsonc");
   const child = spawn(
@@ -96,6 +54,9 @@ function startWrangler(): ChildProcess {
     {
       cwd: __dirname,
       stdio: ["pipe", "pipe", "pipe"],
+      // A process-group leader, so killProcess() can take down wrangler and
+      // every workerd it spawns in one signal.
+      detached: true,
       env: { ...process.env, NODE_ENV: "test" }
     }
   );
@@ -137,21 +98,6 @@ async function waitForPortFree(maxAttempts = 30, delayMs = 500): Promise<void> {
     await sleep(delayMs);
   }
   throw new Error(`Port ${PORT} did not free in time`);
-}
-
-function killProcess(child: ChildProcess): Promise<void> {
-  return new Promise((resolve) => {
-    if (!child.pid) {
-      resolve();
-      return;
-    }
-    const fallback = setTimeout(resolve, 3000);
-    child.on("exit", () => {
-      clearTimeout(fallback);
-      resolve();
-    });
-    killProcessTree(child.pid);
-  });
 }
 
 async function restartWrangler(child: ChildProcess): Promise<ChildProcess> {
@@ -289,7 +235,7 @@ describe("Think workflow-turn recovery e2e", () => {
     expect(stats.delivered).toBeGreaterThanOrEqual(1);
   });
 
-  it("unblocks a workflow whose turn was interrupted mid-stream via the notification drain replay", async () => {
+  it("completes a workflow whose structured turn was interrupted mid-stream (#1727)", async () => {
     const agent = "workflow-recovery";
 
     wrangler = startWrangler();
@@ -297,31 +243,25 @@ describe("Think workflow-turn recovery e2e", () => {
 
     const id = (await callAgent(agent, "startGreetingWorkflow")) as string;
 
-    // Wait until the workflow-turn submission is mid-stream (chat fiber row).
-    await pollUntil(
-      "workflow turn in-flight",
-      () => callAgent(agent, "hasFiberRows") as Promise<boolean>,
-      (has) => has === true,
-      { attempts: 30, delayMs: 250 }
+    type Progress = { streams: number; emitted: number; total: number };
+    const progress = () =>
+      callAgent(agent, "getFinalAnswerProgress") as Promise<Progress>;
+
+    // Wait until the final-answer tool input is part-way through streaming.
+    const beforeKill = await pollUntil(
+      "final-answer input mid-stream",
+      progress,
+      (p) => p.emitted >= 1,
+      { attempts: 200, delayMs: 100 }
     );
+    expect(beforeKill.emitted).toBeLessThan(beforeKill.total);
 
     // Kill mid-stream and restart with the same persist dir.
     wrangler = await restartWrangler(wrangler);
 
-    // The proven recovery guarantee: on restart the interrupted workflow turn is
-    // reconciled to a terminal submission status and the workflow-notification
-    // drain REPLAYS that result via `sendWorkflowEvent`, so the workflow's
-    // `waitForEvent` resolves and the workflow reaches a terminal state instead
-    // of hanging forever.
-    //
-    // NOTE (deferred): a STRUCTURED workflow turn interrupted mid-stream is
-    // currently recovered as `skipped` — the mid-stream partial makes the chat
-    // recovery continuation skip rather than re-run the turn, so the workflow
-    // surfaces `ThinkPromptSkippedError` rather than completing with the
-    // structured output. Full output-preserving structured-turn recovery (the
-    // workflow COMPLETING after a mid-stream kill) is a known gap and is
-    // deferred here; this test locks in the no-hang + notification-replay
-    // guarantee that holds today.
+    // The kill lands inside the final-answer tool input, so recovery re-runs
+    // the turn with the structured-output tool armed, and the drain delivers
+    // the recovered output to the workflow.
     const view = await pollUntil(
       "workflow status (recovery)",
       () =>
@@ -332,8 +272,9 @@ describe("Think workflow-turn recovery e2e", () => {
         v.status === "terminated",
       { attempts: 120, delayMs: 1000 }
     );
-    // The workflow is unblocked (terminal), not hung.
-    expect(["complete", "errored", "terminated"]).toContain(view.status);
+    expect(view.status).toBe("complete");
+    expect(view.output).toMatchObject({ greeting: GREETING });
+    expect((await progress()).streams).toBeGreaterThanOrEqual(2);
 
     // The submission's terminal status was delivered through the
     // workflow-notification drain (replay after restart).

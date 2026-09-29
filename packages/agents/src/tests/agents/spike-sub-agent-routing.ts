@@ -120,9 +120,9 @@ export class SpikeSubChild extends Agent {
   async rehydrateConnectionSnapshotForTest(tag?: string) {
     (
       this as unknown as {
-        _cf_virtualSubAgentConnections: Map<string, unknown>;
+        _dynamicAgents: { clearVirtualConnections(): void };
       }
-    )._cf_virtualSubAgentConnections.clear();
+    )._dynamicAgents.clearVirtualConnections();
     await this._cf_hydrateSubAgentConnectionsFromRoot();
     return this.connectionSnapshot(tag);
   }
@@ -132,22 +132,6 @@ export class SpikeSubChild extends Agent {
     if (!connection) return false;
     connection.send(`direct:${this.name}:${message}`);
     return true;
-  }
-
-  /**
-   * Register a delivery that never settles, from outside any frame —
-   * standing in for a background broadcast or a stream that outlives
-   * the frame that started it.
-   *
-   * A frame must not wait on this. When deliveries were tracked in an
-   * agent-wide set, every later frame drained it and hung forever.
-   */
-  stallBackgroundDeliveryForTest(): void {
-    (
-      this as unknown as {
-        _cf_trackSubAgentDelivery(promise: Promise<unknown>): void;
-      }
-    )._cf_trackSubAgentDelivery(new Promise<never>(() => {}));
   }
 
   async onConnect(_connection: Connection): Promise<void> {

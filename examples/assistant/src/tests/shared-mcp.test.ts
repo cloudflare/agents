@@ -5,7 +5,7 @@
  *
  * The example's MCP surface is intentionally thin. `AssistantDirectory`
  * delegates `listMcpToolDescriptors` to `this.mcp.listTools()` and
- * `callMcpTool` to `this.mcp.callTool()`. The framework already
+ * `callMcpTool` to `this.mcp.callTool()`. The Agents SDK already
  * exercises those code paths in
  * `packages/agents/src/tests/mcp/add-rpc-mcp-server.test.ts` (RPC
  * transport) and the streamable-http/SSE protocol tests. There's
@@ -19,7 +19,7 @@
  *      `env.TestMcpStub` as an argument. From a vitest test file the
  *      call goes vitest-runner→DO and structured-clones the args,
  *      which fails with `DataCloneError: Could not serialize
- *      DurableObjectNamespace`. The pattern in the framework's own
+ *      DurableObjectNamespace`. The pattern in the Agents SDK's own
  *      `add-rpc-mcp-server.test.ts` works around this by routing the
  *      call through a test-side Agent that calls `this.addMcpServer`
  *      from inside the same DO, where the binding never has to cross
@@ -43,7 +43,7 @@
  *
  * If/when we need deeper MCP coverage in this example, add a small
  * test-only helper Agent that performs the registration from inside
- * its own DO. The framework's `add-rpc-mcp-server.test.ts` is the
+ * its own DO. The Agents SDK's `add-rpc-mcp-server.test.ts` is the
  * canonical reference for that pattern.
  */
 

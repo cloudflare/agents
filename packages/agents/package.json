@@ -9,15 +9,12 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.20.1",
+  "version": "0.24.0",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
     "type": "git",
     "url": "git+https://github.com/cloudflare/agents.git"
-  },
-  "bin": {
-    "agents": "dist/cli/index.js"
   },
   "author": "Cloudflare Inc.",
   "bugs": {
@@ -27,17 +24,18 @@
     "@babel/plugin-proposal-decorators": "^8.0.2",
     "@cfworker/json-schema": "^4.1.1",
     "@rolldown/plugin-babel": "^0.2.3",
+    "capnweb": "^0.12.0",
     "cron-schedule": "^6.0.0",
     "esbuild": "^0.28.1",
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.16",
-    "partyserver": "^0.5.9",
     "partysocket": "1.3.0",
-    "yaml": "^2.9.0",
-    "yargs": "^18.0.0"
+    "postal-mime": "^2.7.5",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@ai-sdk/react": "^4.0.0",
+    "@ai-sdk/valibot": "3.0.6",
     "@cloudflare/codemode": "workspace:*",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/conformance-v2": "npm:@modelcontextprotocol/conformance@0.2.0-alpha.10",
@@ -45,8 +43,7 @@
     "@modelcontextprotocol/server": "2.0.0",
     "@tanstack/ai": "0.38.0",
     "@types/react": "^19.2.17",
-    "@types/yargs": "^17.0.35",
-    "@vitest/browser-playwright": "^4.1.9",
+    "@valibot/to-json-schema": "1.3.0",
     "@x402/core": "^2.17.0",
     "@x402/evm": "^2.17.0",
     "ai": "^7.0.0",
@@ -54,8 +51,9 @@
     "glob": "^13.0.6",
     "just-bash": "^3.0.2",
     "react": "^19.2.7",
-    "vitest-browser-react": "^2.2.0",
-    "zod": "^4.4.3"
+    "teleproto": "^1.228.5",
+    "valibot": "1.4.2",
+    "zod": "^4.5.4"
   },
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.0 || ^4.0.0",
@@ -122,6 +120,36 @@
       "import": "./dist/client.js",
       "require": "./dist/client.js"
     },
+    "./routing": {
+      "types": "./dist/routing/index.d.ts",
+      "import": "./dist/routing/index.js",
+      "require": "./dist/routing/index.js"
+    },
+    "./streams": {
+      "types": "./dist/streams/index.d.ts",
+      "import": "./dist/streams/index.js",
+      "require": "./dist/streams/index.js"
+    },
+    "./context": {
+      "types": "./dist/context/index.d.ts",
+      "import": "./dist/context/index.js",
+      "require": "./dist/context/index.js"
+    },
+    "./sessions": {
+      "types": "./dist/sessions/index.d.ts",
+      "import": "./dist/sessions/index.js",
+      "require": "./dist/sessions/index.js"
+    },
+    "./tasks": {
+      "types": "./dist/tasks/index.d.ts",
+      "import": "./dist/tasks/index.js",
+      "require": "./dist/tasks/index.js"
+    },
+    "./lifecycle": {
+      "types": "./dist/lifecycle/index.d.ts",
+      "import": "./dist/lifecycle/index.js",
+      "require": "./dist/lifecycle/index.js"
+    },
     "./agent-tools": {
       "types": "./dist/agent-tools.d.ts",
       "import": "./dist/agent-tools.js",
@@ -138,19 +166,19 @@
       "require": "./dist/mcp/index.js"
     },
     "./mcp/client": {
-      "types": "./dist/mcp/client.d.ts",
-      "import": "./dist/mcp/client.js",
-      "require": "./dist/mcp/client.js"
+      "types": "./dist/mcp/client/index.d.ts",
+      "import": "./dist/mcp/client/index.js",
+      "require": "./dist/mcp/client/index.js"
     },
     "./mcp/server": {
-      "types": "./dist/mcp/server.d.ts",
-      "import": "./dist/mcp/server.js",
-      "require": "./dist/mcp/server.js"
+      "types": "./dist/mcp/server/index.d.ts",
+      "import": "./dist/mcp/server/index.js",
+      "require": "./dist/mcp/server/index.js"
     },
     "./mcp/do-oauth-client-provider": {
-      "types": "./dist/mcp/do-oauth-client-provider.d.ts",
-      "import": "./dist/mcp/do-oauth-client-provider.js",
-      "require": "./dist/mcp/do-oauth-client-provider.js"
+      "types": "./dist/mcp/client/do-oauth-client-provider.d.ts",
+      "import": "./dist/mcp/client/do-oauth-client-provider.js",
+      "require": "./dist/mcp/client/do-oauth-client-provider.js"
     },
     "./observability": {
       "types": "./dist/observability/index.d.ts",
@@ -167,25 +195,40 @@
       "import": "./dist/react.js",
       "require": "./dist/react.js"
     },
+    "./websockets": {
+      "types": "./dist/websockets/index.d.ts",
+      "import": "./dist/websockets/index.js",
+      "require": "./dist/websockets/index.js"
+    },
+    "./state": {
+      "types": "./dist/state/index.d.ts",
+      "import": "./dist/state/index.js",
+      "require": "./dist/state/index.js"
+    },
     "./schedule": {
       "types": "./dist/schedule.d.ts",
       "import": "./dist/schedule.js",
       "require": "./dist/schedule.js"
     },
+    "./queue": {
+      "types": "./dist/queue/index.d.ts",
+      "import": "./dist/queue/index.js",
+      "require": "./dist/queue/index.js"
+    },
+    "./schedules": {
+      "types": "./dist/schedules/index.d.ts",
+      "import": "./dist/schedules/index.js",
+      "require": "./dist/schedules/index.js"
+    },
+    "./schedules/parser": {
+      "types": "./dist/schedules/parser.d.ts",
+      "import": "./dist/schedules/parser.js",
+      "require": "./dist/schedules/parser.js"
+    },
     "./workflows": {
       "types": "./dist/workflows.d.ts",
       "import": "./dist/workflows.js",
       "require": "./dist/workflows.js"
-    },
-    "./experimental/memory/session": {
-      "types": "./dist/experimental/memory/session/index.d.ts",
-      "import": "./dist/experimental/memory/session/index.js",
-      "require": "./dist/experimental/memory/session/index.js"
-    },
-    "./experimental/memory/utils": {
-      "types": "./dist/experimental/memory/utils/index.d.ts",
-      "import": "./dist/experimental/memory/utils/index.js",
-      "require": "./dist/experimental/memory/utils/index.js"
     },
     "./experimental/webmcp": {
       "types": "./dist/experimental/webmcp.d.ts",
@@ -193,9 +236,9 @@
       "require": "./dist/experimental/webmcp.js"
     },
     "./x402": {
-      "types": "./dist/mcp/x402.d.ts",
-      "import": "./dist/mcp/x402.js",
-      "require": "./dist/mcp/x402.js"
+      "types": "./dist/mcp/client/x402.d.ts",
+      "import": "./dist/mcp/client/x402.js",
+      "require": "./dist/mcp/client/x402.js"
     },
     "./chat": {
       "types": "./dist/chat/index.d.ts",
@@ -257,6 +300,81 @@
       "import": "./dist/browser/tanstack-ai.js",
       "require": "./dist/browser/tanstack-ai.js"
     },
+    "./voice": {
+      "types": "./dist/voice/index.d.ts",
+      "import": "./dist/voice/index.js",
+      "require": "./dist/voice/index.js"
+    },
+    "./voice/types": {
+      "types": "./dist/voice/types.d.ts",
+      "import": "./dist/voice/types.js",
+      "require": "./dist/voice/types.js"
+    },
+    "./voice/client": {
+      "types": "./dist/voice/client.d.ts",
+      "import": "./dist/voice/client.js",
+      "require": "./dist/voice/client.js"
+    },
+    "./voice/react": {
+      "types": "./dist/voice/react.d.ts",
+      "import": "./dist/voice/react.js",
+      "require": "./dist/voice/react.js"
+    },
+    "./voice/errors": {
+      "types": "./dist/voice/errors.d.ts",
+      "import": "./dist/voice/errors.js",
+      "require": "./dist/voice/errors.js"
+    },
+    "./voice/workers-ai": {
+      "types": "./dist/voice/workers-ai.d.ts",
+      "import": "./dist/voice/workers-ai.js",
+      "require": "./dist/voice/workers-ai.js"
+    },
+    "./voice/sfu": {
+      "types": "./dist/voice/sfu.d.ts",
+      "import": "./dist/voice/sfu.js",
+      "require": "./dist/voice/sfu.js"
+    },
+    "./voice/text": {
+      "types": "./dist/voice/text.d.ts",
+      "import": "./dist/voice/text.js",
+      "require": "./dist/voice/text.js"
+    },
+    "./channels": {
+      "types": "./dist/channels/index.d.ts",
+      "import": "./dist/channels/index.js",
+      "require": "./dist/channels/index.js"
+    },
+    "./channels/email": {
+      "types": "./dist/channels/email.d.ts",
+      "import": "./dist/channels/email.js",
+      "require": "./dist/channels/email.js"
+    },
+    "./channels/slack": {
+      "types": "./dist/channels/slack.d.ts",
+      "import": "./dist/channels/slack.js",
+      "require": "./dist/channels/slack.js"
+    },
+    "./channels/telegram": {
+      "types": "./dist/channels/telegram.d.ts",
+      "import": "./dist/channels/telegram.js",
+      "require": "./dist/channels/telegram.js"
+    },
+    "./channels/voice": {
+      "types": "./dist/channels/voice.d.ts",
+      "import": "./dist/channels/voice.js",
+      "require": "./dist/channels/voice.js"
+    },
+    "./channels/ai-sdk": {
+      "types": "./dist/channels/ai-sdk.d.ts",
+      "import": "./dist/channels/ai-sdk.js",
+      "require": "./dist/channels/ai-sdk.js"
+    },
+    "./channels/tanstack-ai": {
+      "types": "./dist/channels/tanstack-ai.d.ts",
+      "import": "./dist/channels/tanstack-ai.js",
+      "require": "./dist/channels/tanstack-ai.js"
+    },
     "./tsconfig": "./agents.tsconfig.json",
     "./vite": {
       "types": "./dist/vite.d.ts",
@@ -307,8 +425,12 @@
     "build": "tsx ./scripts/build.ts",
     "evals": "(cd evals; evalite)",
     "test": "vitest --run",
-    "test:cli": "vitest --project cli",
+    "test:node": "vitest --project node",
     "test:react": "vitest --project react",
+    "test:voice:workers": "vitest --project voice-workers",
+    "test:voice:react": "vitest --project voice-react",
+    "test:channels": "vitest --project channels",
+    "test:channels:live": "vitest --run -c src/channels/vitest.live.config.ts",
     "test:browser": "vitest run --config src/browser-tests/vitest.config.ts",
     "test:workers": "vitest --project workers",
     "test:chat": "vitest --project chat",
