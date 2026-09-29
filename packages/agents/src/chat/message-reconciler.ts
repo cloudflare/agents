@@ -19,9 +19,7 @@ import type { UIMessage } from "ai";
  *    toolCallIds across turns.
  * 2. Merges server-known tool outputs into incoming messages that still
  *    show stale states (input-available, approval-requested, approval-responded).
- *    Outputs come from the server row the message resolved to. A call that
- *    row does not carry may merge only from a server row no incoming message
- *    claimed, and only when exactly one such row holds the same tool call.
+ *    Outputs come only from the server row the message resolved to.
  * 3. Drops a stale copy of an assistant the same submit also echoes under its
  *    stored ID (see {@link dropStaleToolCopies}).
  *
@@ -44,11 +42,7 @@ export function reconcileMessages(
     sanitizeForContentKey
   );
   return dropStaleToolCopies(
-    mergeServerToolOutputs(
-      withReconciledAssistantIds,
-      serverMessages,
-      sanitizeForContentKey
-    ),
+    mergeServerToolOutputs(withReconciledAssistantIds, serverMessages),
     serverMessages,
     sanitizeForContentKey
   );
@@ -217,24 +211,17 @@ export function assistantContentKey(
 
 function mergeServerToolOutputs(
   incoming: UIMessage[],
-  serverMessages: readonly UIMessage[],
-  sanitize?: (message: UIMessage) => UIMessage
+  serverMessages: readonly UIMessage[]
 ): UIMessage[] {
-  // Index resolved tool parts by message ID first, then toolCallId. Providers
-  // may reuse toolCallIds across turns, so a conversation-wide index can merge
-  // an older result into a newer assistant message.
+  // Resolved tool parts indexed by message ID, then toolCallId. Results merge
+  // only from the row a message resolved to. Providers may reuse toolCallIds
+  // across turns, and a result on any other row can belong to another turn.
+  // There is no cross-row fallback: a message that claimed no row would have
+  // claimed any unclaimed row carrying the same calls, so a remaining
+  // candidate always disagrees on at least one call.
   const serverResolvedPartsByMessage = new Map<
     string,
     Map<string, Record<string, unknown>>
-  >();
-  // Per-part fallback candidates, from server rows that no incoming message
-  // resolved to. A row an incoming message claimed belongs to that message;
-  // its results must not be copied into a different message, which may be a
-  // later call reusing the same toolCallId and input.
-  const claimedIds = new Set(incoming.map((msg) => msg.id));
-  const unclaimedResolvedByToolCallId = new Map<
-    string,
-    Record<string, unknown>[]
   >();
 
   for (const msg of serverMessages) {
@@ -243,13 +230,7 @@ function mergeServerToolOutputs(
     for (const part of msg.parts) {
       const record = part as Record<string, unknown>;
       if (isResolvedToolPart(record)) {
-        const toolCallId = record.toolCallId as string;
-        resolvedParts.set(toolCallId, record);
-        if (!claimedIds.has(msg.id)) {
-          const candidates = unclaimedResolvedByToolCallId.get(toolCallId);
-          if (candidates) candidates.push(record);
-          else unclaimedResolvedByToolCallId.set(toolCallId, [record]);
-        }
+        resolvedParts.set(record.toolCallId as string, record);
       }
     }
     if (resolvedParts.size > 0) {
@@ -262,29 +243,15 @@ function mergeServerToolOutputs(
   return incoming.map((msg) => {
     if (msg.role !== "assistant") return msg;
     const ownResolvedParts = serverResolvedPartsByMessage.get(msg.id);
-    let comparableParts: Map<string, Record<string, unknown>> | undefined;
+    if (!ownResolvedParts) return msg;
 
     let hasChanges = false;
     const updatedParts = msg.parts.map((part) => {
       const record = part as Record<string, unknown>;
       if (!isPendingToolPart(record)) return part;
 
-      // Prefer the row this message resolved to. If that row does not carry
-      // this call, the result may have been persisted on a different row that
-      // the client did not submit. Merge from it only when exactly one such
-      // row holds the same call (toolCallId, tool and input); anything more
-      // ambiguous leaves the part pending rather than risk attaching a result
-      // to the wrong turn.
-      const toolCallId = record.toolCallId as string;
-      let server = ownResolvedParts?.get(toolCallId);
-      const candidates = unclaimedResolvedByToolCallId.get(toolCallId);
-      if (!server && candidates) {
-        comparableParts ??= toolPartsByCallId(sanitize ? sanitize(msg) : msg);
-        server = uniqueSameCall(
-          candidates,
-          comparableParts.get(toolCallId) ?? record
-        );
-      }
+      // A call still pending on this message's own row stays pending.
+      const server = ownResolvedParts.get(record.toolCallId as string);
 
       if (server) {
         hasChanges = true;
@@ -341,6 +308,11 @@ function reconcileAssistantIds(
       return incomingMessage;
     }
 
+    // Candidates are taken in transcript order, first unclaimed row first, so
+    // repeated identical assistants (the same reused call, or the same text
+    // reply) pair up turn by turn (#1008). That order is the only evidence of
+    // which turn a copy belongs to, so it assumes the submitted transcript
+    // covers the stored rows it could match.
     const incomingToolParts = toolPartsByCallId(
       sanitize ? sanitize(incomingMessage) : incomingMessage
     );
@@ -410,17 +382,6 @@ function isPendingToolPart(record: Record<string, unknown>): boolean {
       record.state === "approval-requested" ||
       record.state === "approval-responded")
   );
-}
-
-/** The single candidate that is the same call as `record`, if exactly one. */
-function uniqueSameCall(
-  candidates: Record<string, unknown>[] | undefined,
-  record: Record<string, unknown>
-): Record<string, unknown> | undefined {
-  const matches = candidates?.filter((candidate) =>
-    sameToolCall(candidate, record)
-  );
-  return matches?.length === 1 ? matches[0] : undefined;
 }
 
 /**

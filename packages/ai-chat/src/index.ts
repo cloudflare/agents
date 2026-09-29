@@ -6391,11 +6391,15 @@ export class AIChatAgent<
    * Used to detect when a tool result should update an existing message rather than
    * creating a new one.
    *
+   * Searches newest first: providers may reuse a toolCallId across turns, and
+   * an incoming result belongs to the latest call carrying it.
+   *
    * @param toolCallId - The tool call ID to search for
    * @returns The existing message if found, undefined otherwise
    */
   private _findMessageByToolCallId(toolCallId: string): UIMessage | undefined {
-    for (const msg of this.messages) {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const msg = this.messages[i];
       if (msg.role !== "assistant") continue;
 
       for (const part of msg.parts) {

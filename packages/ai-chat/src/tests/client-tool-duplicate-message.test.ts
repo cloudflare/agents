@@ -334,6 +334,76 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.close(1000);
   });
 
+  it("applies a client tool result to the newest call when the toolCallId is reused", async () => {
+    const room = crypto.randomUUID();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const toolCallId = "call_reused_result";
+    await agentStub.persistMessages([
+      { id: "user-1", role: "user", parts: [{ type: "text", text: "One" }] },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "output-available",
+            input: { turn: 1 },
+            output: "first"
+          }
+        ] as ChatMessage["parts"]
+      },
+      { id: "user-2", role: "user", parts: [{ type: "text", text: "Two" }] },
+      {
+        id: "assistant-2",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "input-available",
+            input: { turn: 2 }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId,
+        toolName: "testTool",
+        output: "second"
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const outputs = Object.fromEntries(
+      messages
+        .filter((message) => message.role === "assistant")
+        .map((message) => [
+          message.id,
+          (message.parts[0] as { state: string; output?: unknown }).output
+        ])
+    );
+    expect(outputs).toEqual({
+      "assistant-1": "first",
+      "assistant-2": "second"
+    });
+
+    ws.close(1000);
+  });
+
   it("CF_AGENT_TOOL_RESULT applies tool result without auto-continuation by default", async () => {
     const room = crypto.randomUUID();
     const res = await exports.default.fetch(

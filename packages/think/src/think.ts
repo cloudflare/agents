@@ -543,18 +543,16 @@ function executionToolCallIn(
  * after it as the resolution did.
  *
  * Providers may reuse a toolCallId across turns, so the resolution is taken
- * from the server row the message reconciled to. Another row's resolution is
- * used only when no incoming message claimed that row and it is the single
- * such row holding the same call (toolCallId, tool and input).
+ * only from the server row the message reconciled to; a pause still pending
+ * there stays pending. A resolution on any other row can belong to another
+ * turn.
  */
 function keepResolvedPauses(
   incoming: UIMessage[],
   serverMessages: readonly UIMessage[]
 ): UIMessage[] {
   type Part = UIMessage["parts"][number];
-  const claimedIds = new Set(incoming.map((message) => message.id));
   const resolvedByMessage = new Map<string, Map<string, Part>>();
-  const unclaimedByToolCallId = new Map<string, Part[]>();
   for (const message of serverMessages) {
     if (message.role !== "assistant") continue;
     for (const part of message.parts) {
@@ -572,11 +570,6 @@ function keepResolvedPauses(
           resolvedByMessage.set(message.id, own);
         }
         own.set(record.toolCallId, part);
-        if (!claimedIds.has(message.id)) {
-          const candidates = unclaimedByToolCallId.get(record.toolCallId);
-          if (candidates) candidates.push(part);
-          else unclaimedByToolCallId.set(record.toolCallId, [part]);
-        }
       }
     }
   }
@@ -585,24 +578,14 @@ function keepResolvedPauses(
   return incoming.map((message) => {
     if (message.role !== "assistant") return message;
     const own = resolvedByMessage.get(message.id);
+    if (!own) return message;
     const stale = new Map<string, Part>();
     for (const part of message.parts) {
       const record = part as Record<string, unknown>;
       if (typeof record.toolCallId !== "string" || !isPausedToolPart(record)) {
         continue;
       }
-      const sameCall = unclaimedByToolCallId
-        .get(record.toolCallId)
-        ?.filter((candidate) => {
-          const other = candidate as Record<string, unknown>;
-          return (
-            other.type === record.type &&
-            stableJsonEqual(other.input, record.input)
-          );
-        });
-      const server =
-        own?.get(record.toolCallId) ??
-        (sameCall?.length === 1 ? sameCall[0] : undefined);
+      const server = own.get(record.toolCallId);
       if (server) stale.set(record.toolCallId, server);
     }
     if (stale.size === 0) return message;

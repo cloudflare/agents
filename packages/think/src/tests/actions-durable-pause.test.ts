@@ -993,6 +993,47 @@ describe("resolving a durable pause drops pending-state generation (#2054)", () 
     expect(generatedAfter(later, "dp1")).toEqual(generatedAfter(parked, "dp1"));
   });
 
+  it("keeps a stored paused call paused when an unsubmitted row settled the same call (#1992)", async () => {
+    const { agent } = await parkInTurn("dp-own-row-paused");
+    await agent.holdConnectionlessContinuationForTest();
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    const parked = ownerOf(stored, "dp1")!;
+
+    // Another stored turn settled an identical call under the reused ID. The
+    // client does not submit it, so it stays unclaimed.
+    await agent.appendMessagesForTest([
+      {
+        ...parked,
+        id: "a-other-turn",
+        parts: parked.parts.flatMap((part) =>
+          "toolCallId" in part && part.toolCallId === "dp1"
+            ? [
+                {
+                  ...part,
+                  state: "output-available",
+                  output: "other turn's result"
+                } as typeof part
+              ]
+            : []
+        )
+      }
+    ]);
+
+    await agent.persistClientMessagesForTest([
+      ...stored,
+      {
+        id: "u-own-row",
+        role: "user",
+        parts: [{ type: "text", text: "still waiting?" }]
+      }
+    ]);
+
+    const durable = (await agent.getDurableMessagesForTest()) as UIMessage[];
+    const own = durable.find((message) => message.id === parked.id);
+    expect(toolOutput(own, "dp1")).toMatchObject({ status: "paused" });
+    expect(generatedAfter(own, "dp1")).toEqual(generatedAfter(parked, "dp1"));
+  });
+
   it("does not resolve a later identical paused call from an echoed row (#1992)", async () => {
     const { agent, executionId } = await parkInTurn("dp-reused-same-input");
     await agent.holdConnectionlessContinuationForTest();
