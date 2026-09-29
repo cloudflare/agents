@@ -360,8 +360,10 @@ export class Session {
    * id that already exists writes nothing and dispatches nothing.
    *
    * Unlike the other writes, a `compaction_` id is imported as given: a
-   * transcript copied from an affected session can have later rows parented
-   * to one, and dropping it would cut them off. History reads hide it.
+   * summary copied from another session's `history()` is the only record of
+   * the context it replaced, and later rows may be parented to it. History
+   * reads hide such a row only when it duplicates one of this session's own
+   * compaction overlays.
    */
   async importMessage(
     message: SessionMessage,
