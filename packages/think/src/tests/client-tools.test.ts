@@ -3408,6 +3408,125 @@ describe("Think — regeneration", () => {
     await closeWS(ws);
   });
 
+  it("regeneration prompts the model from the parent user message, not the old response (#2028)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+
+    const userMsg = makeUserMessage("explain monads");
+    let donePromise = waitForDone(ws);
+    sendChatRequest(ws, [userMsg]);
+    await donePromise;
+    await delay(200);
+
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
+    await donePromise;
+    await delay(200);
+
+    const prompts = await agent.getTextOnlyPromptTextsForTest();
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toEqual(prompts[0]);
+    expect(prompts[1].map((m) => m.role)).toEqual(["system", "user"]);
+    expect(prompts[1][1].text).toBe("explain monads");
+
+    await closeWS(ws);
+  });
+
+  it("regenerating an earlier response drops everything after its user message (#2028)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+
+    const user1 = makeUserMessage("hello");
+    let donePromise = waitForDone(ws);
+    sendChatRequest(ws, [user1]);
+    await donePromise;
+    await delay(200);
+    const assistant1 = ((await agent.getMessages()) as UIMessage[])[1];
+
+    const user2 = makeUserMessage("tell me more");
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [user1, assistant1, user2]);
+    await donePromise;
+    await delay(200);
+
+    // Regenerate the second response.
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [user1, assistant1, user2], {
+      trigger: "regenerate-message"
+    });
+    await donePromise;
+    await delay(200);
+
+    // Regenerate the first response while the second turn is still stored.
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [user1], { trigger: "regenerate-message" });
+    await donePromise;
+    await delay(200);
+
+    const prompts = await agent.getTextOnlyPromptTextsForTest();
+    expect(prompts).toHaveLength(4);
+    const conversation = (prompt: (typeof prompts)[number]) =>
+      prompt.slice(1).map((m) => `${m.role}: ${m.text}`);
+    expect(prompts[2]).toEqual(prompts[1]);
+    expect(conversation(prompts[2])).toEqual([
+      "user: hello",
+      "assistant: Hello",
+      "user: tell me more"
+    ]);
+    expect(prompts[3]).toEqual(prompts[0]);
+    expect(conversation(prompts[3])).toEqual(["user: hello"]);
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages[0].id).toBe(user1.id);
+    expect((await agent.getBranches(user1.id)) as UIMessage[]).toHaveLength(2);
+
+    await closeWS(ws);
+  });
+
+  it("regenerating an earlier response leaves later stored answers untouched (#2028)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+
+    const user1 = makeUserMessage("hello");
+    let donePromise = waitForDone(ws);
+    sendChatRequest(ws, [user1]);
+    await donePromise;
+    await delay(200);
+
+    // A later answer still waiting on a client tool result. Transcript
+    // repair would record it as failed if it reached the regeneration.
+    const user2 = makeUserMessage("run the tool");
+    await agent.persistToolCallMessage([
+      user2,
+      makeToolMessage("tc-later", "client_action", "input-available")
+    ]);
+
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [user1], { trigger: "regenerate-message" });
+    await donePromise;
+    await delay(200);
+
+    const [later] = (await agent.getBranches(user2.id)) as UIMessage[];
+    expect((later.parts[0] as Record<string, unknown>).state).toBe(
+      "input-available"
+    );
+
+    await closeWS(ws);
+  });
+
   it("regeneration fires onChatResponse", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

@@ -484,6 +484,8 @@ type StreamInterruptionRoute = {
   streamId: string;
   partialParts: MessagePart[];
   persistPartial: () => Promise<string | undefined>;
+  /** The user message a regeneration answers as a new sibling branch. */
+  branchParentId?: string;
   /** Delay the continuation with exponential backoff (transient errors). */
   backoff?: boolean;
   /** Provider `Retry-After` (rate limits); extends the backoff delay. */
@@ -1376,6 +1378,12 @@ type ProgrammaticMessagesResult = SaveMessagesResult & {
 
 type ChatRecoveryRetryData = {
   targetUserId?: string;
+  /**
+   * Set when the interrupted turn regenerated `targetUserId`: the leaf the new
+   * response branches beside. The retry answers `targetUserId` as a sibling
+   * branch, and only while this is still the leaf.
+   */
+  regeneratedLeafId?: string;
   originalRequestId?: string;
   incidentId?: string;
   originMessageIds?: string[];
@@ -1393,6 +1401,21 @@ type ChatRecoveryContinueData = {
   lastClientTools?: ClientToolSchema[] | null;
   recoveredRequestId?: string;
 };
+
+/**
+ * Think's chat fiber snapshot. `branchParentId` is set for a regeneration: the
+ * user message the turn answers as a new sibling branch.
+ */
+type ThinkChatFiberSnapshot = ChatFiberSnapshot<"think-chat-turn"> & {
+  branchParentId?: string;
+};
+
+function regenerationParentOf(
+  snapshot: ChatFiberSnapshot | null
+): string | undefined {
+  const parentId = (snapshot as ThinkChatFiberSnapshot | null)?.branchParentId;
+  return typeof parentId === "string" ? parentId : undefined;
+}
 
 /**
  * `Think`'s `classifyRecoveredTurn` detail (the {@link ChatFiberWakeHooks}
@@ -4219,7 +4242,14 @@ export class Think<
       }
     }
 
-    this._replaceCachedMessages(repair.messages);
+    // `messages` can be a cut or off-cache path, so merge by id rather than
+    // replacing the cache with it.
+    const repairedById = new Map(
+      repair.messages.map((message) => [message.id, message])
+    );
+    this._replaceCachedMessages(
+      this.messages.map((message) => repairedById.get(message.id) ?? message)
+    );
     this._broadcastMessages();
     this._emit("chat:transcript:repaired", {
       removedToolCalls: repair.removedToolCalls,
@@ -5970,18 +6000,23 @@ export class Think<
   private async _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
-    fn: () => Promise<T>
+    fn: () => Promise<T>,
+    branchParentId?: string
   ): Promise<T> {
-    const snapshot = createChatFiberSnapshot({
-      kind: "think-chat-turn",
-      requestId,
-      recoveryRootRequestId: this._activeChatRecoveryRootRequestId ?? requestId,
-      continuation,
-      messages: this.messages,
-      lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools,
-      originMessageIds: this._originMessageIdsFor(requestId)
-    });
+    const snapshot: ThinkChatFiberSnapshot = {
+      ...createChatFiberSnapshot({
+        kind: "think-chat-turn",
+        requestId,
+        recoveryRootRequestId:
+          this._activeChatRecoveryRootRequestId ?? requestId,
+        continuation,
+        messages: this.messages,
+        lastBody: this._lastBody,
+        lastClientTools: this._lastClientTools,
+        originMessageIds: this._originMessageIdsFor(requestId)
+      }),
+      ...(branchParentId !== undefined && { branchParentId })
+    };
     const liveTurn = { createdAt: Date.now(), recoveryData: null as unknown };
     const wrap = (data: unknown) => {
       liveTurn.recoveryData = data;
@@ -6304,6 +6339,13 @@ export class Think<
   private _turnModelMessageBaseline = 0;
   /** The context reminder the current turn was assembled with. */
   private _turnContextReminder: string | null = null;
+
+  /**
+   * The last message the current turn's model history reaches, when that is
+   * not the leaf: a regeneration answers its parent user message, so the
+   * response it replaces (a stored sibling branch) stays out of the prompt.
+   */
+  private _turnHistoryLeafId: string | undefined;
 
   /**
    * The assembled tool set for the current turn, captured in
@@ -6928,7 +6970,7 @@ export class Think<
     extra?: { requestId?: string; attempt?: number }
   ): Promise<boolean> {
     try {
-      const result = await this.session.compact();
+      const result = await this.session.compact(this._turnHistoryLeafId);
       const shortened = Boolean(result);
       this._emit("chat:context:compacted", {
         reason,
@@ -7052,6 +7094,31 @@ export class Think<
   // ── Inference loop (Think owns this) ──────────────────────────
 
   /**
+   * The repaired history the current turn's model request is built from: the
+   * active path, cut at `_turnHistoryLeafId` when one is set. A leaf off the
+   * cached path (another branch, or outside a windowed cache) is read from
+   * storage. The cut comes before repair so messages past the leaf, which the
+   * request never sees, are not rewritten.
+   */
+  private async _turnHistory(): Promise<UIMessage[]> {
+    const leafId = this._turnHistoryLeafId;
+    if (leafId === undefined) {
+      return this._repairTranscriptForProvider(this.messages);
+    }
+    const cut = this.messages.findIndex((message) => message.id === leafId);
+    if (cut >= 0) {
+      return this._repairTranscriptForProvider(this.messages.slice(0, cut + 1));
+    }
+    const budget = this.hydrationByteBudget;
+    const path = (
+      Number.isFinite(budget) && budget > 0
+        ? (await this.session.getRecentHistory(budget, { leafId })).messages
+        : await this.session.getHistory({ leafId })
+    ) as UIMessage[];
+    return this._repairTranscriptForProvider(path);
+  }
+
+  /**
    * Assemble provider-ready model messages from the current session history:
    * repair the transcript, truncate older messages, drop any still-incomplete
    * tool calls, and convert to `ModelMessage[]`. Shared by the turn entry point
@@ -7061,7 +7128,7 @@ export class Think<
   private async _assembleModelMessages(
     tools: ToolSet
   ): Promise<Awaited<ReturnType<typeof convertToModelMessages>>> {
-    const history = await this._repairTranscriptForProvider(this.messages);
+    const history = await this._turnHistory();
     const providerSafeHistory = history.map(
       toProviderSafeExecutionOutcomeMessage
     );
@@ -7324,9 +7391,13 @@ export class Think<
   /**
    * The single convergence point for all chat turn entry paths.
    * Merges tools, assembles context, fires lifecycle hooks, wraps tools
-   * for interception, and calls streamText.
+   * for interception, and calls streamText. `historyLeafId` cuts the model
+   * history at that message (see `_turnHistoryLeafId`).
    */
-  private async _runInferenceLoop(input: TurnInput): Promise<StreamableResult> {
+  private async _runInferenceLoop(
+    input: TurnInput,
+    historyLeafId?: string
+  ): Promise<StreamableResult> {
     const turn = admittedTurnContext.getStore();
     const active = this._activeAdmittedTurn();
     const invoke = await withAgentSpan(
@@ -7346,7 +7417,7 @@ export class Think<
             }
           : {})
       },
-      () => this._prepareInferenceInvocation(input)
+      () => this._prepareInferenceInvocation(input, historyLeafId)
     );
     const result = invoke();
     // Recorded once the stream starts, not at admission: a turn skipped by a
@@ -7357,8 +7428,10 @@ export class Think<
   }
 
   private async _prepareInferenceInvocation(
-    input: TurnInput
+    input: TurnInput,
+    historyLeafId: string | undefined
   ): Promise<() => StreamableResult> {
+    this._turnHistoryLeafId = historyLeafId;
     await this._flushDeferredResolvedPauses();
     // Keep one exposure policy for this inference attempt even if subclass
     // code changes the instance property while asynchronous setup is running.
@@ -13358,12 +13431,21 @@ export class Think<
   private async _retryLastUserTurn(
     clientTools?: ClientToolSchema[],
     body?: Record<string, unknown>,
-    options?: SaveMessagesOptions & { trigger?: TurnTrigger; channel?: string }
+    options?: SaveMessagesOptions & {
+      trigger?: TurnTrigger;
+      channel?: string;
+      /** Answer this user message as a new sibling branch (a regeneration). */
+      branchParentId?: string;
+    }
   ): Promise<SaveMessagesResult> {
     const trigger = options?.trigger ?? "recovery-retry";
     this._assertNotInsideAdmittedTurn(trigger);
-    const lastLeaf = await this.session.getLatestLeaf();
-    if (!lastLeaf || lastLeaf.role !== "user") {
+    const branchParentId = options?.branchParentId;
+    const target =
+      branchParentId === undefined
+        ? await this.session.getLatestLeaf()
+        : await this.session.getMessage(branchParentId);
+    if (!target || target.role !== "user") {
       return { requestId: "", status: "skipped" };
     }
 
@@ -13411,13 +13493,16 @@ export class Think<
                 email: undefined
               },
               () =>
-                this._runInferenceLoop({
-                  signal: abortSignal,
-                  clientTools,
-                  body,
-                  workflowPrompt,
-                  continuation: false
-                })
+                this._runInferenceLoop(
+                  {
+                    signal: abortSignal,
+                    clientTools,
+                    body,
+                    workflowPrompt,
+                    continuation: false
+                  },
+                  branchParentId
+                )
             );
 
             if (result) {
@@ -13425,14 +13510,22 @@ export class Think<
                 requestId,
                 result,
                 abortSignal,
-                { captureOutput: Boolean(workflowPrompt?.output) }
+                {
+                  captureOutput: Boolean(workflowPrompt?.output),
+                  parentId: branchParentId
+                }
               );
               status = streamResult.status;
               error = streamResult.error;
             }
           };
 
-          await this._runChatRecoveryFiber(requestId, false, retryTurnBody);
+          await this._runChatRecoveryFiber(
+            requestId,
+            false,
+            retryTurnBody,
+            branchParentId
+          );
         } finally {
           if (abortSignal?.aborted) wasAborted = true;
           detachExternal();
@@ -13866,12 +13959,15 @@ export class Think<
                     email: undefined
                   },
                   () =>
-                    this._runInferenceLoop({
-                      signal: abortSignal,
-                      clientTools: clientToolsForTurn,
-                      body: bodyForTurn,
-                      continuation: false
-                    })
+                    this._runInferenceLoop(
+                      {
+                        signal: abortSignal,
+                        clientTools: clientToolsForTurn,
+                        body: bodyForTurn,
+                        continuation: false
+                      },
+                      branchParentId
+                    )
                 );
 
                 if (!result) {
@@ -13964,7 +14060,12 @@ export class Think<
               }
             };
 
-            await this._runChatRecoveryFiber(requestId, false, chatTurnBody);
+            await this._runChatRecoveryFiber(
+              requestId,
+              false,
+              chatTurnBody,
+              branchParentId
+            );
           }
         });
 
@@ -15259,6 +15360,7 @@ export class Think<
             transientClassification
           ),
           partialParts: partialMsg.parts,
+          branchParentId: parentId,
           persistPartial: async () => {
             if (
               this._turnQueue.generation !== clearGen ||
@@ -17192,7 +17294,9 @@ export class Think<
     const latestUserMessageId =
       [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
     const retryTargetUserId =
-      input.partialParts.length === 0 ? await this._latestUserLeafId() : null;
+      input.partialParts.length === 0
+        ? (input.branchParentId ?? (await this._latestUserLeafId()))
+        : null;
     const recoveryKind: ChatRecoveryKind = retryTargetUserId
       ? "retry"
       : "continue";
@@ -17305,7 +17409,7 @@ export class Think<
       ? null
       : input.partialParts.length === 0
         ? retryTargetUserId
-        : await this._latestUserLeafId();
+        : (input.branchParentId ?? (await this._latestUserLeafId()));
     await this._claimMessengerRecoveryDelivery(
       input.requestId,
       incident.incidentId,
@@ -17332,6 +17436,9 @@ export class Think<
         callback: "_chatRecoveryRetry",
         data: {
           targetUserId: unansweredUserId,
+          ...(input.branchParentId !== undefined && {
+            regeneratedLeafId: (await this.session.getLatestLeaf())?.id
+          }),
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: this._lastBody ?? null,
@@ -17646,6 +17753,10 @@ export class Think<
         callback: "_chatRecoveryRetry",
         data: {
           targetUserId: retryTargetUserId,
+          ...(regenerationParentOf(snapshot) !== undefined &&
+            snapshot?.latestMessageId && {
+              regeneratedLeafId: snapshot.latestMessageId
+            }),
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: snapshot?.lastBody ?? null,
@@ -17733,6 +17844,14 @@ export class Think<
     }
 
     const lastLeaf = await this.session.getLatestLeaf();
+    // A regeneration branches beside the response it replaces, so that
+    // response, not the user message, is still the leaf.
+    const branchParentId = regenerationParentOf(snapshot);
+    if (branchParentId !== undefined) {
+      return lastLeaf !== null && lastLeaf.id === snapshot.latestMessageId
+        ? branchParentId
+        : null;
+    }
     return lastLeaf?.role === "user" &&
       lastLeaf.id === snapshot.latestUserMessageId
       ? snapshot.latestUserMessageId
@@ -18219,7 +18338,11 @@ export class Think<
       }
 
       const lastLeaf = await this.session.getLatestLeaf();
-      if (!lastLeaf || lastLeaf.role !== "user") {
+      const regeneratedLeafId = data?.regeneratedLeafId;
+      if (
+        !lastLeaf ||
+        (regeneratedLeafId === undefined && lastLeaf.role !== "user")
+      ) {
         // The user turn is no longer the leaf — it was already answered (an
         // assistant message now follows) or the conversation moved on. This is
         // a benign skip, not an error: a completing turn marks the submission
@@ -18240,7 +18363,8 @@ export class Think<
         return;
       }
 
-      if (data?.targetUserId && lastLeaf.id !== data.targetUserId) {
+      const expectedLeafId = regeneratedLeafId ?? data?.targetUserId;
+      if (expectedLeafId && lastLeaf.id !== expectedLeafId) {
         // Superseded by a genuinely newer user turn — terminal `skipped`, not an
         // error (recovery being superseded is benign).
         await this._updateChatRecoveryIncident(
@@ -18265,13 +18389,13 @@ export class Think<
         recoveredSubmission,
         onTurnStarted,
         () =>
-          this._retryLastUserTurn(
-            this._lastClientTools,
-            this._lastBody,
-            controller
-              ? { signal: controller.signal, trigger: "recovery-retry" }
-              : { trigger: "recovery-retry" }
-          )
+          this._retryLastUserTurn(this._lastClientTools, this._lastBody, {
+            ...(controller && { signal: controller.signal }),
+            trigger: "recovery-retry",
+            ...(regeneratedLeafId !== undefined && {
+              branchParentId: data?.targetUserId
+            })
+          })
       );
       if (
         result.status !== "completed" &&
