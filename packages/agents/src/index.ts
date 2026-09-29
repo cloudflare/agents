@@ -1013,10 +1013,22 @@ export const getCurrentAgent = getCurrentLifecycleAgent as <
   T extends DurableObject = Agent<Cloudflare.Env>
 >() => CurrentAgentContext<T, AgentEmail>;
 
+const AsyncFunction: Function = Object.getPrototypeOf(
+  async () => {}
+).constructor;
+
+/** Functions produced by {@link withAgentContext}, so they are wrapped once. */
+const agentContextWrappers = new WeakSet<Function>();
+
 /**
  * Restore Agent context when a public method is entered outside a Lifecycle
  * hook, notably through native Durable Object RPC or cross-Agent re-entry.
  * Lifecycle already owns context for its capability and semantic user hooks.
+ *
+ * Native RPC bypasses the lifecycle's runtime handlers, so an `async` method
+ * entered from outside this Agent's context first starts the lifecycle when
+ * the call is the one that wakes a cold instance. Synchronous methods are
+ * never deferred, so they keep their synchronous return type.
  */
 
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
@@ -1026,7 +1038,10 @@ function withAgentContext<T extends (...args: any[]) => any>(
   this: Agent<Cloudflare.Env, unknown>,
   ...args: Parameters<T>
 ) => ReturnType<T> {
-  return function (...args: Parameters<T>): ReturnType<T> {
+  const enter = function (
+    this: Agent<Cloudflare.Env, unknown>,
+    ...args: Parameters<T>
+  ): ReturnType<T> {
     const { agent } = getCurrentAgent();
 
     if (agent === this) {
@@ -1047,6 +1062,26 @@ function withAgentContext<T extends (...args: any[]) => any>(
       }
     );
   };
+
+  if (!(method instanceof AsyncFunction)) {
+    agentContextWrappers.add(enter);
+    return enter;
+  }
+
+  const enterStarted = async function (
+    this: Agent<Cloudflare.Env, unknown>,
+    ...args: Parameters<T>
+  ): Promise<unknown> {
+    if (getCurrentAgent().agent !== this && !this.lifecycle.isStarted()) {
+      await this.lifecycle.start();
+    }
+    return enter.apply(this, args);
+  };
+  agentContextWrappers.add(enterStarted);
+  return enterStarted as unknown as (
+    this: Agent<Cloudflare.Env, unknown>,
+    ...args: Parameters<T>
+  ) => ReturnType<T>;
 }
 
 /**
@@ -2965,12 +3000,16 @@ export class Agent<
         proto = Object.getPrototypeOf(proto);
       }
     }
-    // Get all methods from the current instance's prototype chain
+    // The nearest descriptor for a name is authoritative: a subclass getter
+    // or field that shadows an inherited method must not be replaced by a
+    // wrapper around the inherited method.
+    const seen = new Set<string>();
     let proto = Object.getPrototypeOf(this);
-    let depth = 0;
-    while (proto && proto !== Object.prototype && depth < 10) {
+    while (proto && proto !== Agent.prototype && proto !== Object.prototype) {
       const methodNames = Object.getOwnPropertyNames(proto);
       for (const methodName of methodNames) {
+        if (seen.has(methodName)) continue;
+        seen.add(methodName);
         const descriptor = Object.getOwnPropertyDescriptor(proto, methodName);
 
         // Skip if it's a private method, a base method, a getter, or not a function,
@@ -2979,25 +3018,22 @@ export class Agent<
           methodName.startsWith("_") ||
           !descriptor ||
           !!descriptor.get ||
-          typeof descriptor.value !== "function"
+          typeof descriptor.value !== "function" ||
+          agentContextWrappers.has(descriptor.value)
         ) {
           continue;
         }
 
-        // Now, methodName is confirmed to be a custom method/function
-        // Wrap the custom method with context
+        const method = descriptor.value as Function;
         /* oxlint-disable @typescript-eslint/no-explicit-any -- dynamic method wrapping requires any */
         const wrappedFunction = withAgentContext(
-          this[methodName as keyof this] as (...args: any[]) => any
+          method as (...args: any[]) => any
         ) as any;
         /* oxlint-enable @typescript-eslint/no-explicit-any */
 
         // if the method is callable, copy the metadata from the original method
         if (this._isCallable(methodName)) {
-          copyCallableMetadata(
-            this[methodName as keyof this] as Function,
-            wrappedFunction
-          );
+          copyCallableMetadata(method, wrappedFunction);
         }
 
         // set the wrapped function on the prototype
@@ -3005,7 +3041,6 @@ export class Agent<
       }
 
       proto = Object.getPrototypeOf(proto);
-      depth++;
     }
   }
 
@@ -5110,6 +5145,15 @@ export class Agent<
   ): Promise<void> {
     await this.__unsafe_ensureInitialized();
     await this._dynamicAgents.closeConnection(connectionId, code, reason);
+  }
+
+  async _cf_closeSubAgentConnectionsForPrefix(
+    prefix: ReadonlyArray<AgentPathStep>,
+    code: number,
+    reason: string
+  ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
+    this._dynamicAgents.closeConnectionsForPrefix(prefix, code, reason);
   }
 
   async _cf_setSubAgentConnectionState(

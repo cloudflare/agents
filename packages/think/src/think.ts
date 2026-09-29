@@ -217,7 +217,6 @@ import {
   toolPartHasSettledResult,
   persistReconstructedOrphan,
   reconcileMessages,
-  resolveToolMergeId,
   CHAT_RECOVERY_TASK_NAME,
   chatRecoveryTaskRunOptions,
   createChatRecoveryTaskDefinition,
@@ -485,6 +484,8 @@ type StreamInterruptionRoute = {
   streamId: string;
   partialParts: MessagePart[];
   persistPartial: () => Promise<string | undefined>;
+  /** The user message a regeneration answers as a new sibling branch. */
+  branchParentId?: string;
   /** Delay the continuation with exponential backoff (transient errors). */
   backoff?: boolean;
   /** Provider `Retry-After` (rate limits); extends the backoff delay. */
@@ -542,12 +543,18 @@ function executionToolCallIn(
  * and reconciliation protects server results only from pre-output client
  * states. Keep the server's resolved part, and drop the pending-state text
  * after it as the resolution did.
+ *
+ * Providers may reuse a toolCallId across turns, so the resolution is taken
+ * only from the server row the message reconciled to; a pause still pending
+ * there stays pending. A resolution on any other row can belong to another
+ * turn.
  */
 function keepResolvedPauses(
   incoming: UIMessage[],
   serverMessages: readonly UIMessage[]
 ): UIMessage[] {
-  const resolved = new Map<string, UIMessage["parts"][number]>();
+  type Part = UIMessage["parts"][number];
+  const resolvedByMessage = new Map<string, Map<string, Part>>();
   for (const message of serverMessages) {
     if (message.role !== "assistant") continue;
     for (const part of message.parts) {
@@ -559,30 +566,36 @@ function keepResolvedPauses(
           record.state === "output-denied") &&
         !isPausedToolPart(record)
       ) {
-        resolved.set(record.toolCallId, part);
+        let own = resolvedByMessage.get(message.id);
+        if (!own) {
+          own = new Map();
+          resolvedByMessage.set(message.id, own);
+        }
+        own.set(record.toolCallId, part);
       }
     }
   }
-  if (resolved.size === 0) return incoming;
+  if (resolvedByMessage.size === 0) return incoming;
 
   return incoming.map((message) => {
     if (message.role !== "assistant") return message;
-    const stale = message.parts.flatMap((part) => {
+    const own = resolvedByMessage.get(message.id);
+    if (!own) return message;
+    const stale = new Map<string, Part>();
+    for (const part of message.parts) {
       const record = part as Record<string, unknown>;
-      return typeof record.toolCallId === "string" &&
-        isPausedToolPart(record) &&
-        resolved.has(record.toolCallId)
-        ? [record.toolCallId]
-        : [];
-    });
-    if (stale.length === 0) return message;
+      if (typeof record.toolCallId !== "string" || !isPausedToolPart(record)) {
+        continue;
+      }
+      const server = own.get(record.toolCallId);
+      if (server) stale.set(record.toolCallId, server);
+    }
+    if (stale.size === 0) return message;
     let parts = message.parts;
-    for (const toolCallId of stale) {
+    for (const [toolCallId, server] of stale) {
       parts = dropGenerationAfterToolCall(
         parts.map((part) =>
-          "toolCallId" in part && part.toolCallId === toolCallId
-            ? resolved.get(toolCallId)!
-            : part
+          "toolCallId" in part && part.toolCallId === toolCallId ? server : part
         ),
         toolCallId
       );
@@ -1365,6 +1378,12 @@ type ProgrammaticMessagesResult = SaveMessagesResult & {
 
 type ChatRecoveryRetryData = {
   targetUserId?: string;
+  /**
+   * Set when the interrupted turn regenerated `targetUserId`: the leaf the new
+   * response branches beside. The retry answers `targetUserId` as a sibling
+   * branch, and only while this is still the leaf.
+   */
+  regeneratedLeafId?: string;
   originalRequestId?: string;
   incidentId?: string;
   originMessageIds?: string[];
@@ -1382,6 +1401,21 @@ type ChatRecoveryContinueData = {
   lastClientTools?: ClientToolSchema[] | null;
   recoveredRequestId?: string;
 };
+
+/**
+ * Think's chat fiber snapshot. `branchParentId` is set for a regeneration: the
+ * user message the turn answers as a new sibling branch.
+ */
+type ThinkChatFiberSnapshot = ChatFiberSnapshot<"think-chat-turn"> & {
+  branchParentId?: string;
+};
+
+function regenerationParentOf(
+  snapshot: ChatFiberSnapshot | null
+): string | undefined {
+  const parentId = (snapshot as ThinkChatFiberSnapshot | null)?.branchParentId;
+  return typeof parentId === "string" ? parentId : undefined;
+}
 
 /**
  * `Think`'s `classifyRecoveredTurn` detail (the {@link ChatFiberWakeHooks}
@@ -4208,7 +4242,14 @@ export class Think<
       }
     }
 
-    this._replaceCachedMessages(repair.messages);
+    // `messages` can be a cut or off-cache path, so merge by id rather than
+    // replacing the cache with it.
+    const repairedById = new Map(
+      repair.messages.map((message) => [message.id, message])
+    );
+    this._replaceCachedMessages(
+      this.messages.map((message) => repairedById.get(message.id) ?? message)
+    );
     this._broadcastMessages();
     this._emit("chat:transcript:repaired", {
       removedToolCalls: repair.removedToolCalls,
@@ -4838,6 +4879,7 @@ export class Think<
   private _agentToolRunsByRequestId = new Map<string, string | null>();
   private _submissionTableEnsured = false;
   private _declaredScheduledTasksTableEnsured = false;
+  private _warnedFacetScheduledTasksDisarmed = false;
   private _actionLedgerTableEnsured = false;
   private _actionPendingTableEnsured = false;
   private _submissionAbortControllers = new Map<string, AbortController>();
@@ -5696,6 +5738,29 @@ export class Think<
   }
 
   /**
+   * Return which instances of this class arm the declared scheduled tasks.
+   *
+   * `"root"` (the default) arms them only on the top-level agent. Because
+   * `getScheduledTasks()` is usually a static code declaration, it returns the
+   * same tasks on every instance — so without this scope an agent that also
+   * has sub-agents would arm one private copy per live facet and dispatch each
+   * occurrence once per facet on top of the root (#1877).
+   *
+   * Return `"all"` to arm on facets as well. That is only correct when
+   * `getScheduledTasks()` genuinely varies per facet (for example when it
+   * reads per-facet state), since each facet then owns an independent
+   * schedule.
+   *
+   * The value must be stable across wakes. Reporting `"root"` on a facet that
+   * previously armed cancels its occurrences, so a scope that flickers with
+   * request-scoped or not-yet-loaded state will repeatedly tear down and
+   * re-create that facet's schedule.
+   */
+  getScheduledTasksScope(): "root" | "all" | Promise<"root" | "all"> {
+    return "root";
+  }
+
+  /**
    * Reconcile code-declared scheduled tasks immediately.
    * Static declarations are reconciled on startup automatically; call this
    * after changing app-owned data that `getScheduledTasks()` reads.
@@ -5935,18 +6000,23 @@ export class Think<
   private async _runChatRecoveryFiber<T>(
     requestId: string,
     continuation: boolean,
-    fn: () => Promise<T>
+    fn: () => Promise<T>,
+    branchParentId?: string
   ): Promise<T> {
-    const snapshot = createChatFiberSnapshot({
-      kind: "think-chat-turn",
-      requestId,
-      recoveryRootRequestId: this._activeChatRecoveryRootRequestId ?? requestId,
-      continuation,
-      messages: this.messages,
-      lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools,
-      originMessageIds: this._originMessageIdsFor(requestId)
-    });
+    const snapshot: ThinkChatFiberSnapshot = {
+      ...createChatFiberSnapshot({
+        kind: "think-chat-turn",
+        requestId,
+        recoveryRootRequestId:
+          this._activeChatRecoveryRootRequestId ?? requestId,
+        continuation,
+        messages: this.messages,
+        lastBody: this._lastBody,
+        lastClientTools: this._lastClientTools,
+        originMessageIds: this._originMessageIdsFor(requestId)
+      }),
+      ...(branchParentId !== undefined && { branchParentId })
+    };
     const liveTurn = { createdAt: Date.now(), recoveryData: null as unknown };
     const wrap = (data: unknown) => {
       liveTurn.recoveryData = data;
@@ -6269,6 +6339,13 @@ export class Think<
   private _turnModelMessageBaseline = 0;
   /** The context reminder the current turn was assembled with. */
   private _turnContextReminder: string | null = null;
+
+  /**
+   * The last message the current turn's model history reaches, when that is
+   * not the leaf: a regeneration answers its parent user message, so the
+   * response it replaces (a stored sibling branch) stays out of the prompt.
+   */
+  private _turnHistoryLeafId: string | undefined;
 
   /**
    * The assembled tool set for the current turn, captured in
@@ -6893,7 +6970,7 @@ export class Think<
     extra?: { requestId?: string; attempt?: number }
   ): Promise<boolean> {
     try {
-      const result = await this.session.compact();
+      const result = await this.session.compact(this._turnHistoryLeafId);
       const shortened = Boolean(result);
       this._emit("chat:context:compacted", {
         reason,
@@ -7017,6 +7094,31 @@ export class Think<
   // ── Inference loop (Think owns this) ──────────────────────────
 
   /**
+   * The repaired history the current turn's model request is built from: the
+   * active path, cut at `_turnHistoryLeafId` when one is set. A leaf off the
+   * cached path (another branch, or outside a windowed cache) is read from
+   * storage. The cut comes before repair so messages past the leaf, which the
+   * request never sees, are not rewritten.
+   */
+  private async _turnHistory(): Promise<UIMessage[]> {
+    const leafId = this._turnHistoryLeafId;
+    if (leafId === undefined) {
+      return this._repairTranscriptForProvider(this.messages);
+    }
+    const cut = this.messages.findIndex((message) => message.id === leafId);
+    if (cut >= 0) {
+      return this._repairTranscriptForProvider(this.messages.slice(0, cut + 1));
+    }
+    const budget = this.hydrationByteBudget;
+    const path = (
+      Number.isFinite(budget) && budget > 0
+        ? (await this.session.getRecentHistory(budget, { leafId })).messages
+        : await this.session.getHistory({ leafId })
+    ) as UIMessage[];
+    return this._repairTranscriptForProvider(path);
+  }
+
+  /**
    * Assemble provider-ready model messages from the current session history:
    * repair the transcript, truncate older messages, drop any still-incomplete
    * tool calls, and convert to `ModelMessage[]`. Shared by the turn entry point
@@ -7026,7 +7128,7 @@ export class Think<
   private async _assembleModelMessages(
     tools: ToolSet
   ): Promise<Awaited<ReturnType<typeof convertToModelMessages>>> {
-    const history = await this._repairTranscriptForProvider(this.messages);
+    const history = await this._turnHistory();
     const providerSafeHistory = history.map(
       toProviderSafeExecutionOutcomeMessage
     );
@@ -7289,9 +7391,13 @@ export class Think<
   /**
    * The single convergence point for all chat turn entry paths.
    * Merges tools, assembles context, fires lifecycle hooks, wraps tools
-   * for interception, and calls streamText.
+   * for interception, and calls streamText. `historyLeafId` cuts the model
+   * history at that message (see `_turnHistoryLeafId`).
    */
-  private async _runInferenceLoop(input: TurnInput): Promise<StreamableResult> {
+  private async _runInferenceLoop(
+    input: TurnInput,
+    historyLeafId?: string
+  ): Promise<StreamableResult> {
     const turn = admittedTurnContext.getStore();
     const active = this._activeAdmittedTurn();
     const invoke = await withAgentSpan(
@@ -7311,7 +7417,7 @@ export class Think<
             }
           : {})
       },
-      () => this._prepareInferenceInvocation(input)
+      () => this._prepareInferenceInvocation(input, historyLeafId)
     );
     const result = invoke();
     // Recorded once the stream starts, not at admission: a turn skipped by a
@@ -7322,8 +7428,10 @@ export class Think<
   }
 
   private async _prepareInferenceInvocation(
-    input: TurnInput
+    input: TurnInput,
+    historyLeafId: string | undefined
   ): Promise<() => StreamableResult> {
+    this._turnHistoryLeafId = historyLeafId;
     await this._flushDeferredResolvedPauses();
     // Keep one exposure policy for this inference attempt even if subclass
     // code changes the instance property while asynchronous setup is running.
@@ -8831,14 +8939,17 @@ export class Think<
   // ── Host bridge methods (called by HostBridgeLoopback via DO RPC) ──
 
   async _hostReadFile(path: string): Promise<string | null> {
+    await this.__unsafe_ensureInitialized();
     return (await this.workspace.readFile(path)) ?? null;
   }
 
   async _hostWriteFile(path: string, content: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     await this.workspace.writeFile(path, content);
   }
 
   async _hostDeleteFile(path: string): Promise<boolean> {
+    await this.__unsafe_ensureInitialized();
     try {
       await this.workspace.rm(path);
       return true;
@@ -8852,6 +8963,7 @@ export class Think<
   ): Promise<
     Array<{ name: string; type: string; size: number; path: string }>
   > {
+    await this.__unsafe_ensureInitialized();
     const entries = await this.workspace.readDir(dir);
     return entries.map((e) => ({
       name: e.name,
@@ -8862,17 +8974,20 @@ export class Think<
   }
 
   async _hostGetContext(label: string): Promise<string | null> {
+    await this.__unsafe_ensureInitialized();
     const block = this.context.getBlock(label);
     return block?.content ?? null;
   }
 
   async _hostSetContext(label: string, content: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     await this.context.setBlock(label, content);
   }
 
   async _hostGetMessages(
     limit?: number
   ): Promise<Array<{ id: string; role: string; content: string }>> {
+    await this.__unsafe_ensureInitialized();
     const history = this.messages;
     const sliced =
       limit !== undefined && limit !== null
@@ -8891,6 +9006,7 @@ export class Think<
   }
 
   async _hostSendMessage(content: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const msg = {
       id: crypto.randomUUID(),
       role: "user" as const,
@@ -8907,6 +9023,7 @@ export class Think<
   async _hostGetSessionInfo(): Promise<{
     messageCount: number;
   }> {
+    await this.__unsafe_ensureInitialized();
     return {
       messageCount: this.messages.length
     };
@@ -11088,6 +11205,20 @@ export class Think<
     return stableHash(this.selfPath);
   }
 
+  /**
+   * Whether this instance arms the declared scheduled tasks.
+   *
+   * The root always arms. Facets only arm when the class opts in via
+   * `getScheduledTasksScope()`; see that hook for why root-only is the
+   * default (#1877). `parentPath` is hydrated before the reconcile step of
+   * `onStart` — persisted by `_cf_initAsFacet` on a facet's first boot, and
+   * restored from storage by the base agent on every later wake.
+   */
+  private async _declaredScheduledTasksArmedHere(): Promise<boolean> {
+    if (this.parentPath.length === 0) return true;
+    return (await this.getScheduledTasksScope()) === "all";
+  }
+
   private _declaredScheduleValidationError(
     rawSchedule: string,
     taskTimezone?: string,
@@ -11130,7 +11261,14 @@ export class Think<
   }
 
   private async _reconcileDeclaredScheduledTasks(): Promise<void> {
-    const tasks = await this._declaredScheduledTasksForNow();
+    // A facet that does not arm reconciles against an empty task set rather
+    // than skipping outright: the prune pass below then cancels and deletes
+    // any rows an earlier version armed here, so pre-existing duplicates heal
+    // on the next wake instead of firing forever (#1877).
+    const armed = await this._declaredScheduledTasksArmedHere();
+    const tasks = armed
+      ? await this._declaredScheduledTasksForNow()
+      : new Map<string, NormalizedDeclaredTask>();
     this._ensureDeclaredScheduledTasksTable();
     const ownerKey = this._declaredScheduleOwnerKey();
     const now = Date.now();
@@ -11245,6 +11383,48 @@ export class Think<
           AND task_id = ${row.task_id}
       `;
     }
+
+    if (!armed) await this._warnFacetScheduledTasksDisarmed(existing.length);
+  }
+
+  /**
+   * Warn once when a sub-agent declares tasks it will not arm.
+   *
+   * Two populations need this, and only one of them leaves a trace. A facet
+   * upgrading from the pre-#1877 default has rows to prune, so `armedCount`
+   * is non-zero. A facet declaring tasks for the first time under the root
+   * default never armed anything, so the only way to tell it apart from a
+   * class that declares nothing is to ask — otherwise its schedule is
+   * silently inert, which is the failure mode #1877 was filed about.
+   */
+  private async _warnFacetScheduledTasksDisarmed(
+    armedCount: number
+  ): Promise<void> {
+    if (this._warnedFacetScheduledTasksDisarmed) return;
+    let declaredCount = armedCount;
+    if (declaredCount === 0) {
+      try {
+        declaredCount = Object.keys(await this.getScheduledTasks()).length;
+      } catch {
+        // Only the warning depends on this; a declaration that throws still
+        // surfaces from whichever instance actually arms it.
+        return;
+      }
+    }
+    if (declaredCount === 0) return;
+    this._warnedFacetScheduledTasksDisarmed = true;
+    console.warn(
+      `[Think] Sub-agent "${this.name}" declares ${declaredCount} scheduled ` +
+        `task(s) that are not armed here. Declared tasks run on the root ` +
+        `agent only, so each occurrence fires once rather than once per live ` +
+        `sub-agent (#1877)` +
+        (armedCount > 0
+          ? `; the occurrences this sub-agent had already armed have been ` +
+            `cancelled`
+          : ``) +
+        `. Override getScheduledTasksScope() to return "all" if this class ` +
+        `intentionally declares per-sub-agent tasks.`
+    );
   }
 
   private async _scheduleDeclaredTaskOccurrence(
@@ -11322,6 +11502,12 @@ export class Think<
     ) {
       throw new Error("Invalid declared scheduled task payload");
     }
+
+    // A dispatch can reach a facet that no longer arms — either racing the
+    // reconcile that prunes its rows, or arriving before this wake got that
+    // far. Returning here keeps the `finally` below from re-arming the very
+    // occurrence the prune is trying to retire (#1877).
+    if (!(await this._declaredScheduledTasksArmedHere())) return;
 
     const row = this._readDeclaredScheduledTaskRow(payload.taskId);
     if (!row || row.schedule_hash !== payload.scheduleHash) return;
@@ -13245,12 +13431,21 @@ export class Think<
   private async _retryLastUserTurn(
     clientTools?: ClientToolSchema[],
     body?: Record<string, unknown>,
-    options?: SaveMessagesOptions & { trigger?: TurnTrigger; channel?: string }
+    options?: SaveMessagesOptions & {
+      trigger?: TurnTrigger;
+      channel?: string;
+      /** Answer this user message as a new sibling branch (a regeneration). */
+      branchParentId?: string;
+    }
   ): Promise<SaveMessagesResult> {
     const trigger = options?.trigger ?? "recovery-retry";
     this._assertNotInsideAdmittedTurn(trigger);
-    const lastLeaf = await this.session.getLatestLeaf();
-    if (!lastLeaf || lastLeaf.role !== "user") {
+    const branchParentId = options?.branchParentId;
+    const target =
+      branchParentId === undefined
+        ? await this.session.getLatestLeaf()
+        : await this.session.getMessage(branchParentId);
+    if (!target || target.role !== "user") {
       return { requestId: "", status: "skipped" };
     }
 
@@ -13298,13 +13493,16 @@ export class Think<
                 email: undefined
               },
               () =>
-                this._runInferenceLoop({
-                  signal: abortSignal,
-                  clientTools,
-                  body,
-                  workflowPrompt,
-                  continuation: false
-                })
+                this._runInferenceLoop(
+                  {
+                    signal: abortSignal,
+                    clientTools,
+                    body,
+                    workflowPrompt,
+                    continuation: false
+                  },
+                  branchParentId
+                )
             );
 
             if (result) {
@@ -13312,14 +13510,22 @@ export class Think<
                 requestId,
                 result,
                 abortSignal,
-                { captureOutput: Boolean(workflowPrompt?.output) }
+                {
+                  captureOutput: Boolean(workflowPrompt?.output),
+                  parentId: branchParentId
+                }
               );
               status = streamResult.status;
               error = streamResult.error;
             }
           };
 
-          await this._runChatRecoveryFiber(requestId, false, retryTurnBody);
+          await this._runChatRecoveryFiber(
+            requestId,
+            false,
+            retryTurnBody,
+            branchParentId
+          );
         } finally {
           if (abortSignal?.aborted) wasAborted = true;
           detachExternal();
@@ -13753,12 +13959,15 @@ export class Think<
                     email: undefined
                   },
                   () =>
-                    this._runInferenceLoop({
-                      signal: abortSignal,
-                      clientTools: clientToolsForTurn,
-                      body: bodyForTurn,
-                      continuation: false
-                    })
+                    this._runInferenceLoop(
+                      {
+                        signal: abortSignal,
+                        clientTools: clientToolsForTurn,
+                        body: bodyForTurn,
+                        continuation: false
+                      },
+                      branchParentId
+                    )
                 );
 
                 if (!result) {
@@ -13851,7 +14060,12 @@ export class Think<
               }
             };
 
-            await this._runChatRecoveryFiber(requestId, false, chatTurnBody);
+            await this._runChatRecoveryFiber(
+              requestId,
+              false,
+              chatTurnBody,
+              branchParentId
+            );
           }
         });
 
@@ -15146,6 +15360,7 @@ export class Think<
             transientClassification
           ),
           partialParts: partialMsg.parts,
+          branchParentId: parentId,
           persistPartial: async () => {
             if (
               this._turnQueue.generation !== clearGen ||
@@ -15603,7 +15818,6 @@ export class Think<
           if (!options.isCurrent()) return false;
           await this._persistIncomingMessage(
             msg,
-            serverMessages,
             serverMessagesById,
             options.channel
           );
@@ -15639,10 +15853,9 @@ export class Think<
   }
 
   /**
-   * Persist an incoming message after reconciliation. For assistant
-   * messages, also resolve their ID against any server-side row that
-   * already owns the same `toolCallId` so we update the existing row
-   * instead of inserting an orphan duplicate.
+   * Persist an incoming message after batch reconciliation has resolved
+   * assistant IDs (one-to-one against server rows) and merged any
+   * server-owned tool outputs.
    *
    * A message whose stored form is what the server already holds is skipped
    * outright. The client posts its whole transcript on every request, so
@@ -15656,14 +15869,11 @@ export class Think<
    */
   private async _persistIncomingMessage(
     msg: UIMessage,
-    serverMessages: readonly UIMessage[],
     serverMessagesById?: ReadonlyMap<string, UIMessage>,
     channel?: string
   ): Promise<void> {
-    const resolved =
-      msg.role === "assistant" ? resolveToolMergeId(msg, serverMessages) : msg;
-    const prior = serverMessagesById?.get(resolved.id);
-    const incoming = stripReservedMetadata(sanitizeMessage(resolved));
+    const prior = serverMessagesById?.get(msg.id);
+    const incoming = stripReservedMetadata(sanitizeMessage(msg));
     if (
       prior &&
       JSON.stringify(stripReservedMetadata(prior)) === JSON.stringify(incoming)
@@ -15676,7 +15886,7 @@ export class Think<
         ? { channel }
         : undefined;
     if (!reserved) {
-      await this._upsertMessageInHistory(resolved, undefined, "client");
+      await this._upsertMessageInHistory(msg, undefined, "client");
       return;
     }
     await this._upsertMessageInHistory(
@@ -17084,7 +17294,9 @@ export class Think<
     const latestUserMessageId =
       [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
     const retryTargetUserId =
-      input.partialParts.length === 0 ? await this._latestUserLeafId() : null;
+      input.partialParts.length === 0
+        ? (input.branchParentId ?? (await this._latestUserLeafId()))
+        : null;
     const recoveryKind: ChatRecoveryKind = retryTargetUserId
       ? "retry"
       : "continue";
@@ -17197,7 +17409,7 @@ export class Think<
       ? null
       : input.partialParts.length === 0
         ? retryTargetUserId
-        : await this._latestUserLeafId();
+        : (input.branchParentId ?? (await this._latestUserLeafId()));
     await this._claimMessengerRecoveryDelivery(
       input.requestId,
       incident.incidentId,
@@ -17224,6 +17436,9 @@ export class Think<
         callback: "_chatRecoveryRetry",
         data: {
           targetUserId: unansweredUserId,
+          ...(input.branchParentId !== undefined && {
+            regeneratedLeafId: (await this.session.getLatestLeaf())?.id
+          }),
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: this._lastBody ?? null,
@@ -17538,6 +17753,10 @@ export class Think<
         callback: "_chatRecoveryRetry",
         data: {
           targetUserId: retryTargetUserId,
+          ...(regenerationParentOf(snapshot) !== undefined &&
+            snapshot?.latestMessageId && {
+              regeneratedLeafId: snapshot.latestMessageId
+            }),
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: snapshot?.lastBody ?? null,
@@ -17625,6 +17844,14 @@ export class Think<
     }
 
     const lastLeaf = await this.session.getLatestLeaf();
+    // A regeneration branches beside the response it replaces, so that
+    // response, not the user message, is still the leaf.
+    const branchParentId = regenerationParentOf(snapshot);
+    if (branchParentId !== undefined) {
+      return lastLeaf !== null && lastLeaf.id === snapshot.latestMessageId
+        ? branchParentId
+        : null;
+    }
     return lastLeaf?.role === "user" &&
       lastLeaf.id === snapshot.latestUserMessageId
       ? snapshot.latestUserMessageId
@@ -18111,7 +18338,11 @@ export class Think<
       }
 
       const lastLeaf = await this.session.getLatestLeaf();
-      if (!lastLeaf || lastLeaf.role !== "user") {
+      const regeneratedLeafId = data?.regeneratedLeafId;
+      if (
+        !lastLeaf ||
+        (regeneratedLeafId === undefined && lastLeaf.role !== "user")
+      ) {
         // The user turn is no longer the leaf — it was already answered (an
         // assistant message now follows) or the conversation moved on. This is
         // a benign skip, not an error: a completing turn marks the submission
@@ -18132,7 +18363,8 @@ export class Think<
         return;
       }
 
-      if (data?.targetUserId && lastLeaf.id !== data.targetUserId) {
+      const expectedLeafId = regeneratedLeafId ?? data?.targetUserId;
+      if (expectedLeafId && lastLeaf.id !== expectedLeafId) {
         // Superseded by a genuinely newer user turn — terminal `skipped`, not an
         // error (recovery being superseded is benign).
         await this._updateChatRecoveryIncident(
@@ -18157,13 +18389,13 @@ export class Think<
         recoveredSubmission,
         onTurnStarted,
         () =>
-          this._retryLastUserTurn(
-            this._lastClientTools,
-            this._lastBody,
-            controller
-              ? { signal: controller.signal, trigger: "recovery-retry" }
-              : { trigger: "recovery-retry" }
-          )
+          this._retryLastUserTurn(this._lastClientTools, this._lastBody, {
+            ...(controller && { signal: controller.signal }),
+            trigger: "recovery-retry",
+            ...(regeneratedLeafId !== undefined && {
+              branchParentId: data?.targetUserId
+            })
+          })
       );
       if (
         result.status !== "completed" &&
@@ -19472,7 +19704,7 @@ export class Think<
     Array<Record<string, unknown>>
   > {
     const messages: Array<Record<string, unknown>> = [
-      { type: MSG_CHAT_MESSAGES, messages: this.messages }
+      { type: MSG_CHAT_MESSAGES, messages: this.messages, connect: true }
     ];
     // Replay an in-progress "recovering…" status so a client that connects
     // mid-recovery reads the turn as working rather than frozen (#1620). This

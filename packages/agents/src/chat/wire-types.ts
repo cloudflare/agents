@@ -77,6 +77,13 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
       type: MessageType.CF_AGENT_CHAT_MESSAGES;
       /** Array of chat messages */
       messages: readonly ChatMessage[];
+      /**
+       * Set on the transcript a server sends to a newly connected client. It
+       * predates any request the client buffered while disconnected, so the
+       * client keeps those optimistic sends; any other snapshot is
+       * authoritative (#1983).
+       */
+      connect?: boolean;
     }
   | {
       /** Indicates this message is a response to a chat request */

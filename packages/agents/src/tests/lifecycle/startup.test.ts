@@ -74,6 +74,89 @@ describe("Lifecycle startup", () => {
     expect(await stub.getHostStarts()).toBe(1);
   });
 
+  it("makes concurrent independent start() callers wait for completed startup", async () => {
+    const stub = env.ConcurrentStartObject.getByName(crypto.randomUUID());
+
+    expect(await stub.startConcurrently()).toEqual({
+      observed: ["first:ready", "second:ready"],
+      events: ["capability:start:first", "host:start:first"]
+    });
+  });
+
+  it("returns a nested start() from a capability without replacing props", async () => {
+    const stub = env.ConcurrentStartObject.getByName(crypto.randomUUID());
+
+    expect(await stub.startConcurrently({ nestFromCapability: true })).toEqual({
+      observed: ["first:ready", "second:ready"],
+      events: [
+        "capability:start:first",
+        "capability:nested-returned",
+        "host:start:first"
+      ]
+    });
+  });
+
+  it("returns a nested start() from the host onStart without deadlocking", async () => {
+    const stub = env.ConcurrentStartObject.getByName(crypto.randomUUID());
+
+    expect(await stub.startConcurrently({ nestFromHost: true })).toEqual({
+      observed: ["first:ready", "second:ready"],
+      events: [
+        "capability:start:first",
+        "host:start:first",
+        "host:nested-returned"
+      ]
+    });
+  });
+
+  it("rejects every concurrent start() caller when startup fails", async () => {
+    const stub = env.ConcurrentStartObject.getByName(crypto.randomUUID());
+
+    expect(await stub.startConcurrently({ failCapability: true })).toEqual({
+      observed: [
+        "first:rejected:intentional concurrent startup failure",
+        "second:rejected:intentional concurrent startup failure"
+      ],
+      events: ["capability:start:first"]
+    });
+  });
+
+  it("makes an independent capability operation wait for in-flight startup", async () => {
+    const stub = env.ConcurrentStartObject.getByName(crypto.randomUUID());
+
+    expect(await stub.operateDuringStartup()).toEqual({
+      start: "ready",
+      operation: "ready",
+      events: ["capability:start:first", "host:start:first"]
+    });
+  });
+
+  it("rejects an independent capability operation when startup fails", async () => {
+    const stub = env.ConcurrentStartObject.getByName(crypto.randomUUID());
+
+    expect(await stub.operateDuringStartup({ failCapability: true })).toEqual({
+      start: "rejected:intentional concurrent startup failure",
+      operation: "rejected:intentional concurrent startup failure",
+      events: ["capability:start:first"]
+    });
+  });
+
+  it("returns a nested capability readiness check without deadlocking", async () => {
+    const stub = env.ConcurrentStartObject.getByName(crypto.randomUUID());
+
+    expect(
+      await stub.operateDuringStartup({ nestReadyFromCapability: true })
+    ).toEqual({
+      start: "ready",
+      operation: "ready",
+      events: [
+        "capability:start:first",
+        "capability:nested-ready-returned",
+        "host:start:first"
+      ]
+    });
+  });
+
   it("rejects adding capabilities after startup", async () => {
     const stub = env.PlainLifecycleObject.getByName(crypto.randomUUID());
     await stub.startFromRpc({ label: "late" });

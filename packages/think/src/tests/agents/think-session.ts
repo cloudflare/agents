@@ -241,6 +241,19 @@ export type MockModelCallOptions = {
   }>;
 };
 
+/** A model call's prompt as `role: text` lines, for prompt assertions. */
+function promptLinesForTest(callOptions: MockModelCallOptions): string[] {
+  return (callOptions.prompt ?? []).map((message) => {
+    const text =
+      typeof message.content === "string"
+        ? message.content
+        : (message.content ?? [])
+            .map((part) => (part.type === "text" ? (part.text ?? "") : ""))
+            .join("");
+    return `${message.role}: ${text}`;
+  });
+}
+
 /** Create a streaming text model with static or prompt-derived output. */
 export function createMockModel(
   response: string | ((callOptions: MockModelCallOptions) => string),
@@ -1380,6 +1393,7 @@ export class ThinkTestAgent extends Think {
   private _releaseBeforeStepGate: (() => void) | null = null;
   private _beforeStepGateEntered = false;
   private _lastModelCallSettings: CapturedModelCallSettings | null = null;
+  private _modelPromptsForTest: string[][] = [];
   private _reasoningResponse: { response: string; reasoning: string } | null =
     null;
   private _inBandErrorResponse: {
@@ -1723,12 +1737,9 @@ export class ThinkTestAgent extends Think {
   async persistIncomingMessageForTest(msg: UIMessage): Promise<void> {
     await (
       this as unknown as {
-        _persistIncomingMessage(
-          m: UIMessage,
-          serverMessages: readonly UIMessage[]
-        ): Promise<void>;
+        _persistIncomingMessage(m: UIMessage): Promise<void>;
       }
-    )._persistIncomingMessage(msg, this.messages);
+    )._persistIncomingMessage(msg);
   }
 
   async runChannelTurnForTest(options: {
@@ -1990,6 +2001,11 @@ export class ThinkTestAgent extends Think {
 
   async getLastModelCallSettings(): Promise<CapturedModelCallSettings | null> {
     return this._lastModelCallSettings;
+  }
+
+  /** Each model call's prompt as `role: text` lines, oldest first. */
+  async getModelPromptsForTest(): Promise<string[][]> {
+    return this._modelPromptsForTest;
   }
 
   async getBeforeStepLog(): Promise<
@@ -3655,11 +3671,17 @@ export class ThinkTestAgent extends Think {
     if (this._multiChunks) {
       return createMultiChunkMockModel(this._multiChunks);
     }
-    return createMockModel(this._response, {
-      onCall: (settings) => {
-        this._lastModelCallSettings = settings;
+    return createMockModel(
+      (callOptions) => {
+        this._modelPromptsForTest.push(promptLinesForTest(callOptions));
+        return this._response;
+      },
+      {
+        onCall: (settings) => {
+          this._lastModelCallSettings = settings;
+        }
       }
-    });
+    );
   }
 
   async getChatErrorLog(): Promise<string[]> {
@@ -3670,12 +3692,24 @@ export class ThinkTestAgent extends Think {
     return this.getMessages();
   }
 
+  async getBranchesForTest(messageId: string): Promise<UIMessage[]> {
+    return (await this.session.getBranches(messageId)) as UIMessage[];
+  }
+
   async getCachedMessagesForTest(): Promise<UIMessage[]> {
     return this.messages;
   }
 
   async getSessionHistoryForTest(): Promise<UIMessage[]> {
     return (await this.session.getHistory()) as UIMessage[];
+  }
+
+  /**
+   * Probe a stored row by id. Overlays exist only on history reads, so a
+   * `compaction_` id resolves here only if it was filed as a real row.
+   */
+  async getSessionMessageForTest(id: string): Promise<UIMessage | null> {
+    return (await this.session.getMessage(id)) as UIMessage | null;
   }
 
   async deliverNoticeErrorForTest(
@@ -7106,6 +7140,11 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _failNextContinueTransient: string | null = null;
   private _useRecoveryToolModel = false;
   private _recoveryToolExecutions = 0;
+  private _coldRpcOnStartCount = 0;
+
+  override onStart(): void {
+    this._coldRpcOnStartCount++;
+  }
 
   /**
    * Arm a ONE-SHOT platform-transient fault on the next `continueLastTurn`
@@ -7181,6 +7220,16 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async getMessagesForTest(): Promise<UIMessage[]> {
     return this.getMessages();
+  }
+
+  async getSessionMessagesForColdRpcTest(): Promise<{
+    messages: UIMessage[];
+    onStartCount: number;
+  }> {
+    return {
+      messages: (await this.session.getHistory()) as UIMessage[],
+      onStartCount: this._coldRpcOnStartCount
+    };
   }
 
   override onChatResponse(result: ChatResponseResult): void {
@@ -8703,6 +8752,13 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
     return this.ctx.storage.get<string>("scheduledTasksDefaultTimezone");
   }
 
+  override async getScheduledTasksScope(): Promise<"root" | "all"> {
+    return (
+      (await this.ctx.storage.get<"root" | "all">("scheduledTasksScope")) ??
+      "root"
+    );
+  }
+
   override async getScheduledTasks(): Promise<ThinkScheduledTasks> {
     const config =
       (await this.ctx.storage.get<Record<string, ScheduledTaskConfigForTest>>(
@@ -8775,6 +8831,10 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
       return;
     }
     await this.ctx.storage.put("scheduledTasksDefaultTimezone", timezone);
+  }
+
+  async setScheduledTasksScopeForTest(scope: "root" | "all"): Promise<void> {
+    await this.ctx.storage.put("scheduledTasksScope", scope);
   }
 
   async reconcileScheduledTasksForTest(): Promise<void> {
@@ -8939,6 +8999,45 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
     await child.setDefaultTimezoneForTest(timezone);
   }
 
+  async setChildScheduledTasksScopeForTest(
+    name: string,
+    scope: "root" | "all"
+  ): Promise<void> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    await child.setScheduledTasksScopeForTest(scope);
+  }
+
+  /**
+   * Force the child facet to restart, so the next `subAgent()` call replays
+   * its `onStart` — including the declared-task reconcile step. Storage is
+   * left intact, unlike `deleteSubAgent`.
+   */
+  async restartChildForTest(name: string): Promise<void> {
+    this.abortSubAgent(ThinkScheduledTasksTestAgent, name, "restart-for-test");
+  }
+
+  async runChildDeclaredPayloadForTest(
+    name: string,
+    payload: DeclaredScheduledTaskPayloadForTest
+  ): Promise<void> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    await child.runDeclaredPayloadForTest(payload);
+  }
+
+  async getChildFirstDeclaredPayloadForTest(
+    name: string
+  ): Promise<DeclaredScheduledTaskPayloadForTest> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    return child.getFirstDeclaredPayloadForTest();
+  }
+
+  async listChildScheduledTaskHandlerEventsForTest(
+    name: string
+  ): Promise<ScheduledTaskHandlerEventForTest[]> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    return child.listScheduledTaskHandlerEventsForTest();
+  }
+
   async reconcileChildScheduledTasksForTest(name: string): Promise<void> {
     const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
     await child.reconcileScheduledTasksForTest();
@@ -9046,6 +9145,7 @@ export class ThinkRecoveryTestAgent extends Think {
   private _stashResult: { success: boolean; error?: string } | null = null;
   private _rejectPrefill = false;
   private _lastPromptRole: string | undefined;
+  private _modelPromptsForTest: string[][] = [];
   private _throwBeforeTurnMessage: string | null = null;
   // recovery × channels: capture the channel context + assembled system prompt
   // that each turn (including recovered ones) actually ran with, so a test can
@@ -9193,7 +9293,15 @@ export class ThinkRecoveryTestAgent extends Think {
         }
       });
     }
-    return createMockModel("Continued response.");
+    return createMockModel((callOptions) => {
+      this._modelPromptsForTest.push(promptLinesForTest(callOptions));
+      return "Continued response.";
+    });
+  }
+
+  /** Each model call's prompt as `role: text` lines, oldest first. */
+  async getModelPromptsForTest(): Promise<string[][]> {
+    return this._modelPromptsForTest;
   }
 
   override beforeTurn(ctx: TurnContext): void {
@@ -9257,6 +9365,10 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async getStoredMessages(): Promise<UIMessage[]> {
     return this.getMessages();
+  }
+
+  async getBranchesForTest(messageId: string): Promise<UIMessage[]> {
+    return (await this.session.getBranches(messageId)) as UIMessage[];
   }
 
   async getActiveFibers(): Promise<Array<{ id: string; name: string }>> {

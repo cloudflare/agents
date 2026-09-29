@@ -221,6 +221,122 @@ describe("Think — message reconciliation on incoming submits", () => {
     ws.close(1000);
   });
 
+  it("collapses an optimistic copy of a provider-executed tool with a large input", async () => {
+    // Think stores tool inputs as submitted (Sessions offloads large payloads
+    // losslessly), so the client's full input still matches the stored row.
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+    await agent.setTextOnlyMode(true);
+
+    const largePart = {
+      type: "tool-code_execution",
+      toolCallId: TOOL_CALL_ID,
+      state: "output-available",
+      providerExecuted: true,
+      input: { code: "x".repeat(50_000) },
+      output: "done"
+    } as unknown as UIMessage["parts"][number];
+    const userA = makeUserMessage("user-a", "run code");
+    await agent.persistToolCallMessage([
+      userA,
+      { id: "server-large", role: "assistant", parts: [largePart] }
+    ]);
+    const stored = (await agent.getMessages()) as UIMessage[];
+    expect(
+      (stored[1].parts[0] as { input: { code: string } }).input.code
+    ).toHaveLength(50_000);
+
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [
+      userA,
+      { id: "client-optimistic-large", role: "assistant", parts: [largePart] },
+      makeUserMessage("user-b", "continue")
+    ]);
+    await done;
+    await delay(200);
+
+    const ids = ((await agent.getMessages()) as UIMessage[]).map((m) => m.id);
+    expect(ids).toContain("server-large");
+    expect(ids).not.toContain("client-optimistic-large");
+
+    ws.close(1000);
+  });
+
+  it("keeps a stale copy beside its echoed row out of storage and the prompt", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "create a cat");
+    const serverAsst = makeServerToolAssistant("server-cat-assistant");
+    await agent.persistToolCallMessage([userA, serverAsst]);
+
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [
+      userA,
+      serverAsst,
+      makeClientOptimisticAssistant("client-stale-copy"),
+      makeUserMessage("user-b", "create a dog")
+    ]);
+    await done;
+    await delay(200);
+
+    const ids = ((await agent.getMessages()) as UIMessage[]).map((m) => m.id);
+    expect(ids).toContain("server-cat-assistant");
+    expect(ids).not.toContain("client-stale-copy");
+
+    const [prompt] = (await agent.getTextOnlyPromptsForTest()) as unknown[][];
+    const toolCallIds = (prompt as Array<{ role: string; content: unknown }>)
+      .filter((message) => message.role === "assistant")
+      .flatMap((message) =>
+        Array.isArray(message.content)
+          ? (message.content as Array<{ type: string; toolCallId?: string }>)
+          : []
+      )
+      .filter((part) => part.type === "tool-call")
+      .map((part) => part.toolCallId);
+    expect(toolCallIds).toEqual([TOOL_CALL_ID]);
+
+    ws.close(1000);
+  });
+
+  it("keeps a later assistant when a toolCallId is reused across turns", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "create a cat");
+    const firstAssistant = makeServerToolAssistant("server-first-assistant");
+    await agent.persistToolCallMessage([userA, firstAssistant]);
+
+    const userB = makeUserMessage("user-b", "create another cat");
+    const secondAssistant = makeServerToolAssistant("client-second-assistant");
+    const userC = makeUserMessage("user-c", "continue");
+
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [userA, firstAssistant, userB, secondAssistant, userC]);
+    await done;
+    await delay(200);
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const assistantsWithTool = messages.filter(
+      (message) =>
+        message.role === "assistant" &&
+        assistantToolPart(message)?.toolCallId === TOOL_CALL_ID
+    );
+
+    expect(assistantsWithTool.map((message) => message.id)).toEqual([
+      "server-first-assistant",
+      "client-second-assistant"
+    ]);
+
+    ws.close(1000);
+  });
+
   it("merges server tool outputs into a stale client snapshot when IDs match", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

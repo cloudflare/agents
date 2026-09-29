@@ -3,9 +3,9 @@
  * with server state during persistence.
  *
  * Three strategies applied in order:
- * 1. Merge server-known tool outputs into stale client messages
- * 2. Reconcile assistant IDs (exact match → content-key → toolCallId)
- * 3. Per-message toolCallId dedup for persistence
+ * 1. Reconcile assistant IDs (exact match → same tool call → content-key)
+ * 2. Merge server-known tool outputs into the resolved message
+ * 3. Drop stale copies of assistants echoed in the same submit
  */
 
 import type { UIMessage } from "ai";
@@ -13,14 +13,22 @@ import type { UIMessage } from "ai";
 /**
  * Reconcile incoming client messages against server state.
  *
- * 1. Merges server-known tool outputs into incoming messages that still
- *    show stale states (input-available, approval-requested, approval-responded)
- * 2. Reconciles assistant IDs: exact match → content-key match → toolCallId match
+ * 1. Reconciles assistant IDs: exact match → same tool call → content-key
+ *    match. Each server row is claimed at most once, and a tool-call match
+ *    requires the same toolCallId, tool and input, since providers may reuse
+ *    toolCallIds across turns.
+ * 2. Merges server-known tool outputs into incoming messages that still
+ *    show stale states (input-available, approval-requested, approval-responded).
+ *    Outputs come only from the server row the message resolved to.
+ * 3. Drops a stale copy of an assistant the same submit also echoes under its
+ *    stored ID (see {@link dropStaleToolCopies}).
  *
  * @param incoming - Messages from the client
  * @param serverMessages - Current server-side messages (source of truth)
  * @param sanitizeForContentKey - Function to sanitize a message before computing
- *   its content key (typically strips ephemeral provider metadata)
+ *   its content key or comparing its tool calls against stored rows
+ *   (typically the host's persistence sanitizer, so a tool input the host
+ *   truncates on write compares equal to its stored form)
  * @returns Reconciled messages ready for persistence
  */
 export function reconcileMessages(
@@ -28,21 +36,88 @@ export function reconcileMessages(
   serverMessages: readonly UIMessage[],
   sanitizeForContentKey?: (message: UIMessage) => UIMessage
 ): UIMessage[] {
-  const withMergedToolOutputs = mergeServerToolOutputs(
+  const withReconciledAssistantIds = reconcileAssistantIds(
     incoming,
-    serverMessages
+    serverMessages,
+    sanitizeForContentKey
   );
-  return reconcileAssistantIds(
-    withMergedToolOutputs,
+  return dropStaleToolCopies(
+    mergeServerToolOutputs(withReconciledAssistantIds, serverMessages),
     serverMessages,
     sanitizeForContentKey
   );
 }
 
 /**
+ * Drop a stale client copy of an assistant that the same submit also echoes
+ * under its stored ID. Kept, the copy persists as a second row carrying the
+ * same toolCallIds and reaches the next prompt as a duplicate tool call, which
+ * providers that issue unique IDs reject.
+ *
+ * A message is dropped only when it claimed no server row, is not the last
+ * submitted message (a new call awaiting its result sits there), and consists
+ * solely of `step-start` parts and pending tool parts each matching the same
+ * call already settled on a server row this submit claimed. Anything else is
+ * kept.
+ */
+function dropStaleToolCopies(
+  reconciled: UIMessage[],
+  serverMessages: readonly UIMessage[],
+  sanitize?: (message: UIMessage) => UIMessage
+): UIMessage[] {
+  const reconciledIds = new Set(reconciled.map((msg) => msg.id));
+  const serverIds = new Set<string>();
+  const settledOnClaimed = new Map<string, Record<string, unknown>[]>();
+  for (const msg of serverMessages) {
+    serverIds.add(msg.id);
+    if (msg.role !== "assistant" || !reconciledIds.has(msg.id)) continue;
+    for (const part of msg.parts) {
+      const record = part as Record<string, unknown>;
+      if (!isResolvedToolPart(record)) continue;
+      const toolCallId = record.toolCallId as string;
+      const settled = settledOnClaimed.get(toolCallId);
+      if (settled) settled.push(record);
+      else settledOnClaimed.set(toolCallId, [record]);
+    }
+  }
+  if (settledOnClaimed.size === 0) return reconciled;
+
+  const lastIndex = reconciled.length - 1;
+  const kept = reconciled.filter((msg, index) => {
+    if (index === lastIndex) return true;
+    if (msg.role !== "assistant" || serverIds.has(msg.id)) return true;
+    const comparable = sanitize ? sanitize(msg) : msg;
+    let hasToolPart = false;
+    for (const part of comparable.parts) {
+      const record = part as Record<string, unknown>;
+      if (record.type === "step-start") continue;
+      if (
+        typeof record.toolCallId !== "string" ||
+        !(isPendingToolPart(record) || record.state === "input-streaming")
+      ) {
+        return true;
+      }
+      const settled = settledOnClaimed.get(record.toolCallId);
+      if (!settled?.some((candidate) => sameToolCall(candidate, record))) {
+        return true;
+      }
+      hasToolPart = true;
+    }
+    return !hasToolPart;
+  });
+  return kept.length === reconciled.length ? reconciled : kept;
+}
+
+/**
  * For a single message, resolve its ID by matching toolCallId against server state.
  * Prevents duplicate DB rows when client IDs differ from server IDs.
- * Tool call IDs are unique per conversation, so matching is safe regardless of state.
+ *
+ * @deprecated Unsafe when a provider reuses a toolCallId across turns. This
+ * scans the whole conversation and claims nothing, so a later assistant can
+ * adopt an earlier row's ID and overwrite it on upsert (#1992). Use
+ * {@link reconcileMessages}, which claims server rows one-to-one over the
+ * whole transcript. Retained only for backwards compatibility; no longer used
+ * by `@cloudflare/ai-chat` or `@cloudflare/think`.
  */
 export function resolveToolMergeId(
   message: UIMessage,
@@ -138,47 +213,48 @@ function mergeServerToolOutputs(
   incoming: UIMessage[],
   serverMessages: readonly UIMessage[]
 ): UIMessage[] {
-  // Index the server's RESOLVED tool parts so a stale client part (still in a
-  // pre-output state) can't clobber the server's terminal state on persist.
-  // All three terminal states must be protected, not just `output-available`:
-  // otherwise a client that hasn't seen the server's `output-error` /
-  // `output-denied` yet would persist its stale `input-available` over the
-  // resolved result, losing the error/denial.
-  const serverResolvedParts = new Map<string, Record<string, unknown>>();
+  // Resolved tool parts indexed by message ID, then toolCallId. Results merge
+  // only from the row a message resolved to. Providers may reuse toolCallIds
+  // across turns, and a result on any other row can belong to another turn.
+  // There is no cross-row fallback: a message that claimed no row would have
+  // claimed any unclaimed row carrying the same calls, so a remaining
+  // candidate always disagrees on at least one call.
+  const serverResolvedPartsByMessage = new Map<
+    string,
+    Map<string, Record<string, unknown>>
+  >();
+
   for (const msg of serverMessages) {
     if (msg.role !== "assistant") continue;
+    const resolvedParts = new Map<string, Record<string, unknown>>();
     for (const part of msg.parts) {
       const record = part as Record<string, unknown>;
-      if (
-        "toolCallId" in record &&
-        "state" in record &&
-        (record.state === "output-available" ||
-          record.state === "output-error" ||
-          record.state === "output-denied")
-      ) {
-        serverResolvedParts.set(record.toolCallId as string, record);
+      if (isResolvedToolPart(record)) {
+        resolvedParts.set(record.toolCallId as string, record);
       }
+    }
+    if (resolvedParts.size > 0) {
+      serverResolvedPartsByMessage.set(msg.id, resolvedParts);
     }
   }
 
-  if (serverResolvedParts.size === 0) return incoming;
+  if (serverResolvedPartsByMessage.size === 0) return incoming;
 
   return incoming.map((msg) => {
     if (msg.role !== "assistant") return msg;
+    const ownResolvedParts = serverResolvedPartsByMessage.get(msg.id);
+    if (!ownResolvedParts) return msg;
 
     let hasChanges = false;
     const updatedParts = msg.parts.map((part) => {
       const record = part as Record<string, unknown>;
-      if (
-        "toolCallId" in record &&
-        "state" in record &&
-        (record.state === "input-available" ||
-          record.state === "approval-requested" ||
-          record.state === "approval-responded") &&
-        serverResolvedParts.has(record.toolCallId as string)
-      ) {
+      if (!isPendingToolPart(record)) return part;
+
+      // A call still pending on this message's own row stays pending.
+      const server = ownResolvedParts.get(record.toolCallId as string);
+
+      if (server) {
         hasChanges = true;
-        const server = serverResolvedParts.get(record.toolCallId as string)!;
         // Overlay the server's resolved state, keeping the client part's
         // identity/input. Carry ONLY the result field that belongs to the
         // server's terminal state — so a stray `output` left on an
@@ -228,10 +304,31 @@ function reconcileAssistantIds(
       return incomingMessage;
     }
 
-    if (
-      incomingMessage.role !== "assistant" ||
-      hasToolCallPart(incomingMessage)
-    ) {
+    if (incomingMessage.role !== "assistant") {
+      return incomingMessage;
+    }
+
+    // Candidates are taken in transcript order, first unclaimed row first, so
+    // repeated identical assistants (the same reused call, or the same text
+    // reply) pair up turn by turn (#1008). That order is the only evidence of
+    // which turn a copy belongs to, so it assumes the submitted transcript
+    // covers the stored rows it could match.
+    const incomingToolParts = toolPartsByCallId(
+      sanitize ? sanitize(incomingMessage) : incomingMessage
+    );
+    if (incomingToolParts.size > 0) {
+      for (let i = 0; i < serverMessages.length; i++) {
+        if (claimedServerIndices.has(i)) continue;
+
+        const serverMessage = serverMessages[i];
+        if (
+          serverMessage.role === "assistant" &&
+          carriesSameToolCalls(serverMessage, incomingToolParts)
+        ) {
+          claimedServerIndices.add(i);
+          return { ...incomingMessage, id: serverMessage.id };
+        }
+      }
       return incomingMessage;
     }
 
@@ -263,6 +360,98 @@ function reconcileAssistantIds(
 
 function hasToolCallPart(message: UIMessage): boolean {
   return message.parts.some((part) => "toolCallId" in part);
+}
+
+/** A server-side tool part that has reached a terminal state. */
+function isResolvedToolPart(record: Record<string, unknown>): boolean {
+  return (
+    "toolCallId" in record &&
+    "state" in record &&
+    (record.state === "output-available" ||
+      record.state === "output-error" ||
+      record.state === "output-denied")
+  );
+}
+
+/** A client-side tool part still waiting on a result. */
+function isPendingToolPart(record: Record<string, unknown>): boolean {
+  return (
+    "toolCallId" in record &&
+    "state" in record &&
+    (record.state === "input-available" ||
+      record.state === "approval-requested" ||
+      record.state === "approval-responded")
+  );
+}
+
+/**
+ * Whether `serverMessage` shares at least one toolCallId with the incoming
+ * message and every shared toolCallId is the same call on both sides. A
+ * provider that reuses a toolCallId for a new call carries a different tool
+ * or input, so it cannot adopt the older row's ID.
+ */
+function carriesSameToolCalls(
+  serverMessage: UIMessage,
+  incomingToolParts: Map<string, Record<string, unknown>>
+): boolean {
+  let shared = false;
+  for (const part of serverMessage.parts) {
+    const record = part as Record<string, unknown>;
+    if (typeof record.toolCallId !== "string") continue;
+    const incomingPart = incomingToolParts.get(record.toolCallId);
+    if (!incomingPart) continue;
+    if (!sameToolCall(record, incomingPart)) return false;
+    shared = true;
+  }
+  return shared;
+}
+
+/**
+ * Same tool and structurally equal input (object key order ignored). Static
+ * tool parts may omit `toolName`, so it is compared only when both carry it.
+ */
+function sameToolCall(
+  a: Record<string, unknown>,
+  b: Record<string, unknown>
+): boolean {
+  return (
+    a.type === b.type &&
+    (a.toolName === undefined ||
+      b.toolName === undefined ||
+      a.toolName === b.toolName) &&
+    stableStringify(a.input) === stableStringify(b.input)
+  );
+}
+
+function stableStringify(value: unknown): string | undefined {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item) ?? "null").join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .filter((key) => record[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+    .join(",")}}`;
+}
+
+function toolPartsByCallId(
+  message: UIMessage
+): Map<string, Record<string, unknown>> {
+  const parts = new Map<string, Record<string, unknown>>();
+  for (const part of message.parts) {
+    const record = part as Record<string, unknown>;
+    if (
+      typeof record.toolCallId === "string" &&
+      !parts.has(record.toolCallId)
+    ) {
+      parts.set(record.toolCallId, record);
+    }
+  }
+  return parts;
 }
 
 function findMessageByToolCallId(

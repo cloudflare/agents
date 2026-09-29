@@ -14,6 +14,7 @@
 import { extractAttachments, resolveAttachments } from "./attachment-ingest";
 import { AttachmentStore } from "./attachment-store";
 import { splitContent } from "./chunking";
+import { COMPACTION_PREFIX } from "./compaction-helpers";
 import type { SessionsIo } from "./io";
 import { overlayMessage, planOverlays, type OverlaySpan } from "./overlays";
 import {
@@ -57,6 +58,34 @@ const NEWEST_FIRST_WINDOW_ROWS = 8;
  */
 const MAX_PATH_DEPTH = 10_000;
 
+/**
+ * Hidden overlay rows: a stored `compaction_<id>` row whose `<id>` names one
+ * of the session's own compaction records, so it duplicates an overlay the
+ * session renders itself. Writes refuse overlays, but sessions written before
+ * that guard (#1984) can hold one, usually with later rows parented to it.
+ * Reads skip such a row and walk through it, so its children take its place.
+ * A `compaction_` row with no matching record, such as a summary imported
+ * from another session's history, is the only copy of that context and stays
+ * visible.
+ */
+function hasOverlayPrefix(id: string): boolean {
+  return id.startsWith(COMPACTION_PREFIX);
+}
+
+/**
+ * SQL twin of the hidden-overlay test for the row id in `idColumn` of the
+ * session in `sessionExpr`. The record lookup runs only for prefixed ids.
+ * Both must be table-qualified: inside the lookup an unqualified `id` or
+ * `session_id` binds to the compactions table, not the row being tested.
+ */
+function hiddenOverlayRowSql(idColumn: string, sessionExpr: string): string {
+  const length = COMPACTION_PREFIX.length;
+  return `(substr(${idColumn}, 1, ${length}) = '${COMPACTION_PREFIX}'
+    AND EXISTS (SELECT 1 FROM cf_agents_session_compactions oc
+      WHERE oc.session_id = ${sessionExpr}
+        AND oc.id = substr(${idColumn}, ${length + 1})))`;
+}
+
 /** What a hydration window needs from a path row: its id, and its stored size when the window is byte-bounded. */
 type PathRow = { id: string; bytes: number };
 
@@ -75,7 +104,10 @@ type PathTokens = {
   leafId: string | null;
   counted: Set<string>;
   total: number;
-  /** Rows the walk returned: the memo is only extended while under the path cap. */
+  /**
+   * Stored rows the walk visited, hidden overlay rows included, since the
+   * path cap counts those: the memo is only extended while under the cap.
+   */
   depth: number;
 };
 
@@ -423,21 +455,69 @@ export class SessionsCore {
     return this.latestLeafId(sessionId);
   }
 
+  /**
+   * Which of `ids` are hidden overlay rows. Reads the session's compaction
+   * records only when some id carries the prefix.
+   */
+  #hiddenOverlayIds(sessionId: string, ids: readonly string[]): Set<string> {
+    if (!ids.some(hasOverlayPrefix)) return new Set();
+    const overlays = new Set(
+      this.getCompactions(sessionId).map(
+        (compaction) => `${COMPACTION_PREFIX}${compaction.id}`
+      )
+    );
+    return new Set(ids.filter((id) => overlays.has(id)));
+  }
+
   getLatestLeaf(sessionId: string): SessionMessage | null {
-    const leafId = this.latestLeafId(sessionId);
+    let leafId = this.latestLeafId(sessionId);
+    while (
+      leafId !== null &&
+      this.#hiddenOverlayIds(sessionId, [leafId]).has(leafId)
+    ) {
+      const [row] = this.io.sql<{ parent_id: string | null }>(
+        "SELECT parent_id FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+        [sessionId, leafId]
+      );
+      leafId = row?.parent_id ?? null;
+    }
     return leafId ? this.getMessage(sessionId, leafId) : null;
   }
 
-  getBranches(sessionId: string, messageId: string): SessionMessage[] {
+  /** Children of a row in `seq` order, hidden overlay rows replaced by theirs. */
+  #childRows(
+    sessionId: string,
+    parentId: string
+  ): Array<{
+    id: string;
+    seq: number;
+    content: string;
+    content_chunks: number;
+  }> {
     const rows = this.io.sql<{
       id: string;
+      seq: number;
       content: string;
       content_chunks: number;
     }>(
-      `SELECT id, content, content_chunks FROM cf_agents_session_messages
+      `SELECT id, seq, content, content_chunks FROM cf_agents_session_messages
        WHERE session_id = ? AND parent_id = ? ORDER BY seq ASC`,
-      [sessionId, messageId]
+      [sessionId, parentId]
     );
+    const hidden = this.#hiddenOverlayIds(
+      sessionId,
+      rows.map((row) => row.id)
+    );
+    if (hidden.size === 0) return rows;
+    return rows
+      .flatMap((row) =>
+        hidden.has(row.id) ? this.#childRows(sessionId, row.id) : [row]
+      )
+      .sort((a, b) => a.seq - b.seq);
+  }
+
+  getBranches(sessionId: string, messageId: string): SessionMessage[] {
+    const rows = this.#childRows(sessionId, messageId);
     const continued = this.#continuations(
       sessionId,
       rows.filter((row) => row.content_chunks > 0).map((row) => row.id)
@@ -463,9 +543,21 @@ export class SessionsCore {
    * budget over these rows bounds real hydrated memory.
    */
   pathRowStats(sessionId: string, leafId?: string | null): SessionRowStat[] {
+    return this.#pathRows(sessionId, leafId).rows;
+  }
+
+  /**
+   * `pathRowStats` plus what the walk itself saw: the path cap counts stored
+   * rows, hidden overlay rows included, so whether the walk was cut short
+   * is judged from the unfiltered path.
+   */
+  #pathRows(
+    sessionId: string,
+    leafId?: string | null
+  ): { rows: SessionRowStat[]; walked: number; oldestId: string | null } {
     const leaf = this.#resolveLeafId(sessionId, leafId);
-    if (!leaf) return [];
-    return this.io.sql<SessionRowStat>(
+    if (!leaf) return { rows: [], walked: 0, oldestId: null };
+    const walked = this.io.sql<SessionRowStat & { hidden: number }>(
       `WITH RECURSIVE path(id, parent_id, depth) AS (
         SELECT id, parent_id, 0 FROM cf_agents_session_messages
         WHERE session_id = ? AND id = ?
@@ -487,12 +579,22 @@ export class SessionsCore {
             JOIN cf_agents_session_attachment_meta meta ON meta.hash = r.hash
             WHERE r.session_id = am.session_id AND r.message_id = am.id
           ), 0) AS bytes,
-        am.token_estimate AS tokenEstimate
+        am.token_estimate AS tokenEstimate,
+        ${hiddenOverlayRowSql("path.id", "am.session_id")} AS hidden
       FROM path JOIN cf_agents_session_messages am
         ON am.session_id = ? AND am.id = path.id
       ORDER BY path.depth DESC`,
       [sessionId, leaf, sessionId, sessionId]
     );
+    const rows: SessionRowStat[] = [];
+    for (const { hidden, ...row } of walked) {
+      if (!hidden) rows.push(row);
+    }
+    return {
+      rows,
+      walked: walked.length,
+      oldestId: walked[0]?.id ?? null
+    };
   }
 
   /**
@@ -514,8 +616,10 @@ export class SessionsCore {
           JOIN path p ON m.id = p.parent_id
           WHERE m.session_id = ? AND p.depth < ${MAX_PATH_DEPTH}
         )
-        SELECT id FROM path ORDER BY depth DESC`,
-        [sessionId, leaf, sessionId]
+        SELECT path.id AS id FROM path
+        WHERE NOT ${hiddenOverlayRowSql("path.id", "?")}
+        ORDER BY depth DESC`,
+        [sessionId, leaf, sessionId, sessionId]
       )
       .map((row) => row.id);
   }
@@ -686,6 +790,9 @@ export class SessionsCore {
   ): AsyncGenerator<SessionMessage, void, undefined> {
     const compactions = this.getCompactions(sessionId);
     const spanEnds = new Set(compactions.map((c) => c.toMessageId));
+    const hiddenIds = new Set(
+      compactions.map((c) => `${COMPACTION_PREFIX}${c.id}`)
+    );
     let next = this.#resolveLeafId(sessionId, leafId);
     let depth = 0;
     while (next !== null && depth <= MAX_PATH_DEPTH) {
@@ -712,13 +819,15 @@ export class SessionsCore {
         [sessionId, next]
       );
       if (!row) return;
-      const json =
-        row.content_chunks === 0
-          ? row.content
-          : row.content +
-            (this.#continuations(sessionId, [next]).get(next) ?? "");
-      const parsed = this.#parse(json);
-      if (parsed) yield this.#inline(parsed);
+      if (!hiddenIds.has(next)) {
+        const json =
+          row.content_chunks === 0
+            ? row.content
+            : row.content +
+              (this.#continuations(sessionId, [next]).get(next) ?? "");
+        const parsed = this.#parse(json);
+        if (parsed) yield this.#inline(parsed);
+      }
       next = row.parent_id;
       depth++;
     }
@@ -781,7 +890,7 @@ export class SessionsCore {
     maxContentBytes: number,
     leafId?: string | null
   ): Promise<RecentHistoryResult> {
-    const stats = this.pathRowStats(sessionId, leafId);
+    const { rows: stats, walked, oldestId } = this.#pathRows(sessionId, leafId);
     if (stats.length === 0) {
       return { messages: [], truncated: false, totalContentBytes: 0 };
     }
@@ -803,10 +912,12 @@ export class SessionsCore {
       messages.push(message);
     }
     // The path cap hides older rows exactly as the budget does. A read that
-    // filled the cap is truncated only if the oldest row it returned still
+    // filled the cap is truncated only if the oldest row it walked still
     // has a parent; a branch of exactly the cap's length is complete.
     const capped =
-      stats.length > MAX_PATH_DEPTH && this.#hasParent(sessionId, stats[0].id);
+      walked > MAX_PATH_DEPTH &&
+      oldestId !== null &&
+      this.#hasParent(sessionId, oldestId);
     return { messages, truncated: start > 0 || capped, totalContentBytes };
   }
 
@@ -822,7 +933,7 @@ export class SessionsCore {
     if (memo && memo.leafId === leafId)
       return Math.max(0, Math.ceil(memo.total));
 
-    const stats = this.pathRowStats(sessionId);
+    const { rows: stats, walked } = this.#pathRows(sessionId);
     const counted = new Set(stats.map((row) => row.id));
     let tokens = stats.reduce((sum, row) => sum + row.tokenEstimate, 0);
     for (const span of planOverlays(
@@ -839,7 +950,7 @@ export class SessionsCore {
       leafId,
       counted,
       total: tokens,
-      depth: stats.length
+      depth: walked
     });
     return Math.max(0, Math.ceil(tokens));
   }
@@ -1243,6 +1354,7 @@ export class SessionsCore {
          INNER JOIN cf_agents_session_messages m
            ON m.session_id = f.session_id AND m.id = f.id
          WHERE cf_agents_session_fts MATCH ? AND f.session_id = ?
+           AND NOT ${hiddenOverlayRowSql("f.id", "f.session_id")}
          ORDER BY rank LIMIT ?`,
         [sanitized, sessionId, limit]
       )

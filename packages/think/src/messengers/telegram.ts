@@ -9,6 +9,15 @@ export const TELEGRAM_FOLLOWUP_CHUNK_LIMIT = 3_500;
 
 const TELEGRAM_DEDUPE_PREFIX = "dedupe:telegram:";
 
+/**
+ * `@chat-adapter/telegram` 4.38 added `nativeStreaming` and
+ * `allowUnverifiedWebhooks`. Older adapters in the supported range ignore them.
+ */
+type TelegramAdapterConfigCompat = TelegramAdapterConfig & {
+  allowUnverifiedWebhooks?: boolean;
+  nativeStreaming?: boolean;
+};
+
 export interface TelegramMessengerOptions extends Omit<
   ChatSdkMessengerOptions,
   "adapter" | "provider" | "userName" | "verifyWebhook"
@@ -16,6 +25,13 @@ export interface TelegramMessengerOptions extends Omit<
   apiBaseUrl?: string;
   apiUrl?: string;
   mode?: TelegramAdapterConfig["mode"];
+  /**
+   * Stream private-chat replies as native Telegram drafts instead of posting
+   * a message and editing it. Requires `@chat-adapter/telegram` 4.38 or later,
+   * where it defaults to `false`; earlier versions always use drafts in
+   * private chats. Group chats always post and edit.
+   */
+  nativeStreaming?: boolean;
   secretToken?: string;
   token: string;
   userName: string;
@@ -42,14 +58,19 @@ export function telegramMessenger(
     );
   }
 
-  const adapter = createTelegramAdapter({
+  const adapterConfig: TelegramAdapterConfigCompat = {
+    // Without a secret token, Think verifies the webhook itself (or the caller
+    // opted out above), so the adapter must not reject the missing token.
+    allowUnverifiedWebhooks: !options.secretToken,
     apiBaseUrl: options.apiBaseUrl,
     apiUrl: options.apiUrl,
     botToken: options.token,
     mode: options.mode ?? "webhook",
+    nativeStreaming: options.nativeStreaming,
     secretToken: options.secretToken,
     userName: options.userName
-  });
+  };
+  const adapter = createTelegramAdapter(adapterConfig);
 
   return chatSdkMessenger({
     ...options,

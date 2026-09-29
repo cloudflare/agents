@@ -9,7 +9,7 @@
  */
 
 import type { CompactResult } from "./compaction-helpers";
-import { COMPACTION_PREFIX } from "./compaction-helpers";
+import { COMPACTION_PREFIX, isCompactionMessage } from "./compaction-helpers";
 import type { SessionsCore } from "./core";
 import { mirrorSessionChanges, type SessionMirrorOptions } from "./mirror";
 import { byteLength, sanitizeMessage } from "./sanitize";
@@ -207,12 +207,18 @@ export class Session {
   /**
    * Append one message. Idempotent on id: a repeated append returns the row
    * already stored and dispatches an `append` event with `inserted: false`.
+   *
+   * A compaction overlay (a `compaction_` id) is derived on read and is never
+   * stored. Clients post their transcript back after every compaction, so
+   * this and every other write drops one silently: nothing is written and no
+   * event is dispatched.
    */
   async appendMessage(
     message: SessionMessage,
     options: AppendOptions = {}
   ): Promise<AppendResult> {
     await this.#ready();
+    if (isCompactionMessage(message)) return { inserted: false, message };
     const prepared = this.#prepare(message, options.source);
     const result = this.#core.append(
       this.sessionId,
@@ -234,13 +240,15 @@ export class Session {
   /**
    * Update one stored row. Returns the stored form, or `null` when the id is
    * not in this session. An unchanged message writes nothing and dispatches
-   * no event.
+   * no event. A compaction overlay is never a stored row, so it reports
+   * `null`.
    */
   async updateMessage(
     message: SessionMessage,
     options: WriteOptions = {}
   ): Promise<SessionMessage | null> {
     await this.#ready();
+    if (isCompactionMessage(message)) return null;
     const prepared = this.#prepare(message, options.source);
     const outcome = this.#core.update(
       this.sessionId,
@@ -281,6 +289,12 @@ export class Session {
     return {
       abandon: () => this.#core.forgetCaches(this.sessionId),
       upsert: (message, options = {}) => {
+        if (isCompactionMessage(message)) {
+          return {
+            result: { inserted: false, message },
+            after: () => Promise.resolve()
+          };
+        }
         const prepared = this.#prepare(message, options.source);
         if (!this.#core.exists(this.sessionId, message.id)) {
           const result = this.#core.append(
@@ -328,6 +342,7 @@ export class Session {
     options: AppendOptions = {}
   ): Promise<AppendResult> {
     await this.#ready();
+    if (isCompactionMessage(message)) return { inserted: false, message };
     if (!this.#core.exists(this.sessionId, message.id)) {
       return this.appendMessage(message, options);
     }
@@ -343,6 +358,12 @@ export class Session {
    * `import` change event so a host cache can mark itself stale; it is not
    * an `append`, so a cache does not patch itself per imported row, and an
    * id that already exists writes nothing and dispatches nothing.
+   *
+   * Unlike the other writes, a `compaction_` id is imported as given: a
+   * summary copied from another session's `history()` is the only record of
+   * the context it replaced, and later rows may be parented to it. History
+   * reads hide such a row only when it duplicates one of this session's own
+   * compaction overlays.
    */
   async importMessage(
     message: SessionMessage,
