@@ -1,0 +1,21 @@
+docs/think/sub-agents.md
+  s_b2b9b60652ef3b::t_840dedf177d561 236-237
+packages/think/src/think.ts
+  s_b2b9b60652ef3b::t_46dea77c82f274 11313-11314
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0a13d01cb7e54e29f60f38d48bf898c83b2360d9",
+  "prompts": {},
+  "sessions": {
+    "s_b2b9b60652ef3b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "116a35e7-e84f-4df0-b25d-8bdcbff2fca7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
