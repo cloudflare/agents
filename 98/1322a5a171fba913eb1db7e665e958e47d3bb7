@@ -1,0 +1,27 @@
+packages/think/src/tests/agents/client-tools.ts
+  s_b2b9b60652ef3b::t_9bd264e8a6eb27 726-745,754-755,825,964-967,1014-1018
+packages/think/src/tests/agents/think-session.ts
+  s_b2b9b60652ef3b::t_b61524dc7a51d1 244-256,1396,2009-2013,3677-3685,3687,3698-3701,9078,9226-9234,9300-9303
+packages/think/src/tests/think-session.test.ts
+  s_b2b9b60652ef3b::t_7f8cedc8c89b53 686-745,4412-4467
+packages/think/src/think.ts
+  s_b2b9b60652ef3b::t_45e984af3ff749 488-489,1370-1375,1394-1408,5961-5962,5964-5977,6301-6307,7054-7084,7095,7358-7359,7361-7364,7384,7395-7396,7398,13320-13325,13329-13334,13382-13391,13399-13402,13409-13414,13848-13856,13949-13954,15249,17188-17190,17303,17330-17332,17647-17650,17738-17745,18232-18236,18257-18258,18283-18289
+packages/think/src/tests/client-tools.test.ts
+  s_b2b9b60652ef3b::t_79f7b18d0f867c 3411-3494
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "981322a5a171fba913eb1db7e665e958e47d3bb7",
+  "prompts": {},
+  "sessions": {
+    "s_b2b9b60652ef3b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "116a35e7-e84f-4df0-b25d-8bdcbff2fca7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
