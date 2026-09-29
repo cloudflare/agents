@@ -1,0 +1,19 @@
+packages/agents/src/react-tests/resume-replay-burst.test.tsx
+  s_b2b9b60652ef3b::t_22981aacf56c53 226-227,247
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5eb4c350adf49055cceb86dbfad8094a963c1b56",
+  "prompts": {},
+  "sessions": {
+    "s_b2b9b60652ef3b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "116a35e7-e84f-4df0-b25d-8bdcbff2fca7",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
