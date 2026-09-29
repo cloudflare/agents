@@ -1,0 +1,143 @@
+.changeset/cold-rpc-starts-think.md
+  s_b2b9b60652ef3b::t_7b71f6c76ac509 1-8
+.changeset/common-snails-smoke.md
+  s_b2b9b60652ef3b::t_7331a33400f977 1-5
+.changeset/compaction-overlay-echo.md
+  s_b2b9b60652ef3b::t_5f9230bf37197e 1-6
+.changeset/quiet-tools-reconcile.md
+  s_b2b9b60652ef3b::t_017cb3ba29a06d 1-21
+.changeset/reconnect-optimistic-send.md
+  s_b2b9b60652ef3b::t_c11957d8d08f5a 1-5
+.changeset/think-connect-transcript-marker.md
+  s_b2b9b60652ef3b::t_34cf438460f560 1-5
+.changeset/think-scheduled-tasks-root-scope.md
+  s_b2b9b60652ef3b::t_d365da812486d7 1-40
+.changeset/tricky-buckets-relate.md
+  s_b2b9b60652ef3b::t_428493ad6190ce 1-5
+design/AGENTS.md
+  s_b2b9b60652ef3b::t_4b9904dd19c04f 109
+design/durable-object-lifecycle.md
+  s_b2b9b60652ef3b::t_6949a0809d16a6 28-36,167-180
+design/rfc-cold-rpc-initialization.md
+  s_b2b9b60652ef3b::t_8ec60134583d0c 1-117
+design/test-coverage-matrix.md
+  s_b2b9b60652ef3b::t_7709ddce055095 53-76
+docs/agents/lifecycle.md
+  s_b2b9b60652ef3b::t_e9f66720456de4 436-441
+docs/think/index.md
+  s_b2b9b60652ef3b::t_b87ef9ebf1f64b 403,821-841
+docs/think/sub-agents.md
+  s_b2b9b60652ef3b::t_abd1a31ddbe67e 218-222,235-246,253-272
+packages/agents/src/chat/__tests__/message-reconciler.test.ts
+  s_b2b9b60652ef3b::t_b1440983f3e640 256,264-771,825,838,867
+packages/agents/src/chat/message-reconciler.ts
+  s_b2b9b60652ef3b::t_9b7b8e776871d5 6-8,16-24,29-31,39,41-42,44-45,51-110,114-120,216-226,229,232-233,236-238,241,245-246,251-256,307-331,365-456
+packages/agents/src/chat/react.tsx
+  s_b2b9b60652ef3b::t_73adebd711c2b2 654-672,1069-1072,1105-1109,1655,1668-1670,2161-2168,2208-2210
+packages/agents/src/chat/wire-types.ts
+  s_b2b9b60652ef3b::t_76edf84172868d 80-86
+packages/agents/src/chat/ws-chat-transport.ts
+  s_b2b9b60652ef3b::t_ca69377300aab6 35-51,58-60,98-104,123,163,485,510-514,516,526-531,859-860,862-866,992
+packages/agents/src/dynamic-agents/dynamic-agents.ts
+  s_b2b9b60652ef3b::t_4a8e8d93d52dcb 23-27,60-65,439-440,586,740-793,826,828-833,845-892,1259-1264,1305-1307,1325-1327,1339-1347,1350-1359,1366-1371,1377,1387,1390,1400,1405-1410,1424,1754,1770
+packages/agents/src/dynamic-agents/types.ts
+  s_b2b9b60652ef3b::t_40fa0123d34aff 187-191
+packages/agents/src/index.ts
+  s_b2b9b60652ef3b::t_098c2f65993f27 1016-1022,1027-1031,1041-1044,1065-1084,3003-3006,3008,3011-3012,3021-3022,3027,3030,3036,5150-5158
+packages/agents/src/lifecycle/UPSTREAM.md
+  s_b2b9b60652ef3b::t_4547fd536c87a7 29-32
+packages/agents/src/lifecycle/capability.ts
+  s_b2b9b60652ef3b::t_0775803225af14 82-86
+packages/agents/src/lifecycle/durable-object-lifecycle.ts
+  s_b2b9b60652ef3b::t_ebf7fc22ba2546 1,121-123,420-421,654-657,659,662-664,668-675,677-696,706-707,709-725
+packages/agents/src/react-tests/reconnect-optimistic-send.test.tsx
+  s_b2b9b60652ef3b::t_755f692c2a471d 1-388
+packages/agents/src/react-tests/resume-replay-burst.test.tsx
+  s_b2b9b60652ef3b::t_d0c497f1aead33 226-227,247
+packages/agents/src/sessions/core.ts
+  s_b2b9b60652ef3b::t_b3a056bdf6bbcc 17,61-88,107-110,458-471,473-483,487-496,499,503,505,507-520,546-557,559-560,582-583,589-597,619-622,793-795,822-830,893,915,918-920,936,953,1357
+packages/agents/src/sessions/handle.ts
+  s_b2b9b60652ef3b::t_6a9ef72a634e73 12,210-214,221,243-244,251,292-297,345,361-366
+packages/agents/src/tests/agents-core-eviction.test.ts
+  s_b2b9b60652ef3b::t_71e9004f4d0a88 111-112,115-116,128,143-145
+packages/agents/src/tests/agents/index.ts
+  s_b2b9b60652ef3b::t_b26400fabb91f0 54
+packages/agents/src/tests/agents/native-rpc.ts
+  s_b2b9b60652ef3b::t_0ee633b153ae48 1-70
+packages/agents/src/tests/agents/sub-agent.ts
+  s_b2b9b60652ef3b::t_e8931767b6e233 3-4,13-14,105-108,947-954,1438-1475,1929-1938
+packages/agents/src/tests/capabilities/lifecycle.ts
+  s_b2b9b60652ef3b::t_bf2e79c7f24fe2 696-812
+packages/agents/src/tests/lifecycle/startup.test.ts
+  s_b2b9b60652ef3b::t_1598879e199ed5 77-159
+packages/agents/src/tests/mcp/create-oauth-provider.test.ts
+  s_b2b9b60652ef3b::t_7f7f6135088f67 43-45
+packages/agents/src/tests/mcp/do-oauth-client-provider.test.ts
+  s_b2b9b60652ef3b::t_26bbecef8f29c6 10-12
+packages/agents/src/tests/mcp/wait-connections-e2e.test.ts
+  s_b2b9b60652ef3b::t_f46df96126e51a 17-58
+packages/agents/src/tests/native-rpc-initialization.test.ts
+  s_b2b9b60652ef3b::t_a5a77a6f0827ae 1-176
+packages/agents/src/tests/run-fiber.test.ts
+  s_b2b9b60652ef3b::t_3b0b7701807023 1172-1174
+packages/agents/src/tests/sessions/capability.test.ts
+  s_b2b9b60652ef3b::t_21b1fd51f3c3b9 269-551
+packages/agents/src/tests/sessions/migration.test.ts
+  s_b2b9b60652ef3b::t_62a31e3ef96f08 157-193
+packages/agents/src/tests/spike-sub-agent-routing.test.ts
+  s_b2b9b60652ef3b::t_9e96f24733969b 151-204
+packages/agents/src/tests/sub-agent.test.ts
+  s_b2b9b60652ef3b::t_70bbc3e8db2d67 49-67,1926-2046
+packages/agents/src/tests/worker.ts
+  s_b2b9b60652ef3b::t_667fbbd4a47eea 13,19,121,208,227,286
+packages/agents/src/tests/wrangler.jsonc
+  s_b2b9b60652ef3b::t_bf37566ae69256 31-34,269-272,438,495
+packages/ai-chat/src/index.ts
+  s_b2b9b60652ef3b::t_7d7a3f59df9aef 6307
+packages/ai-chat/src/react-tests/use-agent-chat.test.tsx
+  s_b2b9b60652ef3b::t_022f11ff0c28ff 8136-8300
+packages/ai-chat/src/tests/client-tool-duplicate-message.test.ts
+  s_b2b9b60652ef3b::t_eabca09958d3c1 84-274
+packages/ai-chat/src/tests/ws-transport-resume.test.ts
+  s_b2b9b60652ef3b::t_31cd1e4e9f471b 43-59,76,95-153,487-488,573,598,891,914
+packages/think/README.md
+  s_b2b9b60652ef3b::t_3848e7107bda02 367,550-557
+packages/think/src/tests/actions-durable-pause.test.ts
+  s_b2b9b60652ef3b::t_c1cc7f32ab2404 957-1066
+packages/think/src/tests/agents/client-tools.ts
+  s_b2b9b60652ef3b::t_8bf6f053bb46df 744,754-755,831,965-967,1014-1015,1019-1025
+packages/think/src/tests/agents/think-session.ts
+  s_b2b9b60652ef3b::t_14b46b3134e4f0 1740,1742,3707-3714,7143-7147,7225-7234,8755-8761,8836-8839,9002-9040
+packages/think/src/tests/client-tools.test.ts
+  s_b2b9b60652ef3b::t_fd0601c599f745 3430,3474
+packages/think/src/tests/cold-rpc-initialization.test.ts
+  s_b2b9b60652ef3b::t_7e630262f1598a 1-103
+packages/think/src/tests/message-reconciliation.test.ts
+  s_b2b9b60652ef3b::t_6f9b39894cf8c5 224-339
+packages/think/src/tests/onconnect-broadcast.test.ts
+  s_b2b9b60652ef3b::t_122be5159a084e 137-141
+packages/think/src/tests/scheduled-tasks.test.ts
+  s_b2b9b60652ef3b::t_966ab9107700fa 47,91-94,102-111,429,450,498-499,548-647
+packages/think/src/tests/think-eviction.test.ts
+  s_b2b9b60652ef3b::t_f01212c222c344 113-153
+packages/think/src/tests/think-session.test.ts
+  s_b2b9b60652ef3b::t_e3f03636396d77 1349-1373
+packages/think/src/think.ts
+  s_b2b9b60652ef3b::t_c0764c49166f78 546-550,556-557,569-574,578,582-585,587-593,595,598,4875,5733-5755,8941,8946,8951,8965,8976,8982,8989,9008,9025,11207-11220,11263-11270,11385-11426,11505-11510,15855-15857,15874-15875,15888,19706
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a9efedbb5bfc9d93c61df268bc1c6da27859f8ce",
+  "prompts": {},
+  "sessions": {
+    "s_b2b9b60652ef3b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "116a35e7-e84f-4df0-b25d-8bdcbff2fca7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
