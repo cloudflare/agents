@@ -28,8 +28,9 @@ the reference Think app. The code below is taken from that example.
 > and `deleteSubAgent()`. Those methods are aliases for `this.dynamicAgents`.
 > The same ownership split also works with one top-level Durable Object per
 > chat behind a per-user hub (see
-> [Routing to independent Agents](https://github.com/cloudflare/agents/blob/main/docs/agents/routing.md#routing-to-independent-agents));
-> only the routing and the child-to-parent lookup differ.
+> [Routing to independent Agents](https://github.com/cloudflare/agents/blob/main/docs/agents/routing.md#routing-to-independent-agents)),
+> but that topology needs its own chat catalog on the hub instead of the facet
+> registry. See [Known limits](#known-limits).
 
 ## Architecture
 
@@ -564,10 +565,15 @@ See [Scheduled Tasks](./index.md#scheduled-tasks) for the schedule syntax.
   depend on the root for their native WebSockets, so every chat frame wakes the
   directory. The
   [dynamic agents guide](https://github.com/cloudflare/agents/blob/main/docs/agents/sub-agents.md#when-to-use-dynamic-agents)
-  covers these tradeoffs. If a user has many chats streaming at once, host each
-  chat as a top-level Durable Object and look up the directory with
-  `getAgentByName()` instead of `parentAgent()`; the workspace and MCP
-  boundaries do not change.
+  covers these tradeoffs and does not recommend facets for many independent,
+  busy chats per user. For that case, host each chat as a top-level Durable
+  Object: the hub keeps its own catalog of chats (the facet registry behind
+  `listSubAgents()` no longer applies), and chats look up the hub with
+  `getAgentByName()` instead of `parentAgent()`. The workspace and MCP
+  boundaries do not change. Moving existing facet chats to top-level objects
+  means exporting and re-importing each chat's state; there is no in-place
+  storage move (see
+  [`rfc-user-chat-durable-objects.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-user-chat-durable-objects.md#migration-of-existing-facet-backed-apps)).
 - **The directory is the fan-in point.** Every shared workspace call and every
   MCP tool call from every chat is one RPC into the directory's single-threaded
   isolate. Writes to the same path serialize there, and concurrent MCP calls
