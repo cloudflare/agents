@@ -1,0 +1,19 @@
+docs/think/multi-chat.md
+  s_2569688183b285::t_00c2aa8dbc6529 31-33,568-576
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "efc2bae64d536711cebacf6b77b74e1cf63dfdb4",
+  "prompts": {},
+  "sessions": {
+    "s_2569688183b285": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "b40acb03-72f6-402b-bbba-e37b905e09f9",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
