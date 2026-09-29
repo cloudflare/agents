@@ -1,5 +1,0 @@
-.dev.vars
-.wrangler
-env.d.ts
-node_modules
-dist

@@ -23,7 +23,9 @@ function asMetadata(value: unknown): Record<string, unknown> | undefined {
 
 export interface StreamAccumulatorOptions {
   messageId: string;
+  /** Whether chunks continue the current assistant message when merged. */
   continuation?: boolean;
+  /** Eager seed; omitted continuations seed from the messages passed to `mergeInto`. */
   existingParts?: UIMessage["parts"];
   existingMetadata?: Record<string, unknown>;
 }
@@ -61,6 +63,8 @@ export class StreamAccumulator {
   readonly parts: UIMessage["parts"];
   metadata?: Record<string, unknown>;
   private _isContinuation: boolean;
+  // Continuation chunks wait here until mergeInto can seed from current state.
+  private _pendingContinuationChunks: StreamChunkData[] | null;
 
   constructor(options: StreamAccumulatorOptions) {
     this.messageId = options.messageId;
@@ -69,9 +73,16 @@ export class StreamAccumulator {
     this.metadata = options.existingMetadata
       ? { ...options.existingMetadata }
       : undefined;
+    this._pendingContinuationChunks =
+      this._isContinuation &&
+      options.existingParts === undefined &&
+      options.existingMetadata === undefined
+        ? []
+        : null;
   }
 
   applyChunk(chunk: StreamChunkData): ChunkResult {
+    this._pendingContinuationChunks?.push(chunk);
     const handled = applyChunkToParts(this.parts, chunk);
 
     // Detect tool-approval-request for early persistence signaling
@@ -198,7 +209,8 @@ export class StreamAccumulator {
   /**
    * Merge this accumulator's message into an existing message array.
    * Handles continuation (walk backward for last assistant), replacement
-   * (update existing by messageId), or append (new message).
+   * (update existing by messageId), or append (new message). An unseeded
+   * continuation adopts current parts here before applying its queued chunks.
    */
   mergeInto(messages: UIMessage[]): UIMessage[] {
     let existingIdx = messages.findIndex((m) => m.id === this.messageId);
@@ -209,6 +221,27 @@ export class StreamAccumulator {
           existingIdx = i;
           break;
         }
+      }
+    }
+
+    if (this._pendingContinuationChunks !== null) {
+      const pendingChunks = this._pendingContinuationChunks;
+      this._pendingContinuationChunks = null;
+      this.parts.splice(
+        0,
+        this.parts.length,
+        ...(existingIdx >= 0 ? messages[existingIdx].parts : [])
+      );
+      const currentMetadata =
+        existingIdx >= 0
+          ? asMetadata(messages[existingIdx].metadata)
+          : undefined;
+      this.metadata = currentMetadata ? { ...currentMetadata } : undefined;
+      if (existingIdx >= 0) {
+        this.messageId = messages[existingIdx].id;
+      }
+      for (const chunk of pendingChunks) {
+        this.applyChunk(chunk);
       }
     }
 

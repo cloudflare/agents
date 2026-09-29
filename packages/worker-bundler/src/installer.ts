@@ -3,39 +3,19 @@
  *
  * This module fetches packages from the npm registry and populates
  * a virtual node_modules directory structure.
+ * It also branches into the Python logic in installer-python.ts
+ * if dependencies are declared for a Python dynamic worker.
  */
 
+import { isTextFile, fetchWithTimeout, DEFAULT_TIMEOUT_MS } from "./common.ts";
+import type { InstallResult } from "./common.ts";
+import { installDependenciesPython } from "./installer-python";
+import type { PyprojectToml } from "./installer-python";
 import * as semver from "semver";
 import type { FileSystem } from "./file-system";
+import { parse as parseToml } from "smol-toml";
 
 const NPM_REGISTRY = "https://registry.npmjs.org";
-const DEFAULT_TIMEOUT_MS = 30000; // 30 seconds
-
-/**
- * Fetch with a timeout.
- * Throws an error if the request takes longer than the specified timeout.
- */
-async function fetchWithTimeout(
-  url: string,
-  options: RequestInit = {},
-  timeoutMs = DEFAULT_TIMEOUT_MS
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(
-        `Request to ${url} timed out after ${timeoutMs}ms (npm registry slow or unreachable from this Worker)`
-      );
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
 
 interface PackageJson {
   name: string;
@@ -70,19 +50,6 @@ interface InstallOptions {
   registry?: string;
 }
 
-export interface InstallResult {
-  /**
-   * Packages that were freshly installed in this call.
-   * Packages already present in the filesystem are skipped and not listed here.
-   */
-  installed: string[];
-
-  /**
-   * Warnings encountered during installation
-   */
-  warnings: string[];
-}
-
 /**
  * Install npm dependencies into a virtual file system.
  *
@@ -106,48 +73,54 @@ export async function installDependencies(
 
   // Read package.json
   const packageJsonContent = fileSystem.read("package.json");
-  if (!packageJsonContent) {
-    return result; // No package.json, nothing to install
-  }
+  const pyprojectTomlContent = fileSystem.read("pyproject.toml");
 
-  let packageJson: PackageJson;
-  try {
-    packageJson = JSON.parse(packageJsonContent) as PackageJson;
-  } catch {
-    result.warnings.push("Failed to parse package.json");
+  if (packageJsonContent && pyprojectTomlContent) {
+    result.warnings.push("Cannot have package.json and pyproject.toml");
     return result;
   }
 
-  // Collect dependencies to install
-  const depsToInstall: Record<string, string> = {
-    ...packageJson.dependencies,
-    ...(dev ? packageJson.devDependencies : {})
-  };
+  if (packageJsonContent) {
+    let packageJson: PackageJson;
+    try {
+      packageJson = JSON.parse(packageJsonContent) as PackageJson;
+    } catch {
+      result.warnings.push("Failed to parse package.json");
+      return result;
+    }
 
-  if (Object.keys(depsToInstall).length === 0) {
-    return result; // No dependencies to install
-  }
+    // Collect dependencies to install
+    const depsToInstall: Record<string, string> = {
+      ...packageJson.dependencies,
+      ...(dev ? packageJson.devDependencies : {})
+    };
 
-  // Track installed packages to avoid duplicates
-  const installedPackages = new Map<string, string>(); // name -> version
-  // Track in-progress installations to avoid duplicate work
-  const inProgress = new Map<string, Promise<void>>();
+    if (Object.keys(depsToInstall).length === 0) {
+      return result; // No dependencies to install
+    }
 
-  // Install all dependencies in parallel
-  await Promise.all(
-    Object.entries(depsToInstall).map(([name, versionRange]) =>
-      installPackage(
-        name,
-        versionRange,
-        result,
-        fileSystem,
-        installedPackages,
-        inProgress,
-        registry
+    // Track installed packages to avoid duplicates
+    const installedPackages = new Set<string>();
+    // Track in-progress installations to avoid duplicate work
+    const inProgress = new Map<string, Promise<void>>();
+
+    // Install all dependencies in parallel
+    await Promise.all(
+      Object.entries(depsToInstall).map(([name, versionRange]) =>
+        installPackage(
+          name,
+          versionRange,
+          result,
+          fileSystem,
+          installedPackages,
+          inProgress,
+          registry
+        )
       )
-    )
-  );
-
+    );
+  } else if (pyprojectTomlContent) {
+    return await installDependenciesPython(fileSystem, pyprojectTomlContent);
+  }
   return result;
 }
 
@@ -159,7 +132,7 @@ async function installPackage(
   versionRange: string,
   result: InstallResult,
   fileSystem: FileSystem,
-  installedPackages: Map<string, string>,
+  installedPackages: Set<string>,
   inProgress: Map<string, Promise<void>>,
   registry: string
 ): Promise<void> {
@@ -175,7 +148,7 @@ async function installPackage(
   // already present. Transitive deps are assumed to also be present when the
   // top-level package.json is found.
   if (fileSystem.read(`node_modules/${name}/package.json`) !== null) {
-    installedPackages.set(name, "existing");
+    installedPackages.add(name);
     return;
   }
 
@@ -208,7 +181,7 @@ async function installPackage(
       }
 
       // Mark as installed (before fetching to prevent cycles)
-      installedPackages.set(name, version);
+      installedPackages.add(name);
       result.installed.push(`${name}@${version}`);
 
       // Fetch and extract the package tarball
@@ -541,68 +514,31 @@ function readString(
 }
 
 /**
- * Check if a file path is likely a text file.
- */
-function isTextFile(path: string): boolean {
-  const textExtensions = [
-    ".js",
-    ".mjs",
-    ".cjs",
-    ".ts",
-    ".mts",
-    ".cts",
-    ".tsx",
-    ".jsx",
-    ".json",
-    ".md",
-    ".txt",
-    ".css",
-    ".html",
-    ".yml",
-    ".yaml",
-    ".toml",
-    ".xml",
-    ".svg",
-    ".map",
-    ".d.ts",
-    ".d.mts",
-    ".d.cts"
-  ];
-
-  // Check common config files without extensions
-  const configFiles = [
-    "LICENSE",
-    "README",
-    "CHANGELOG",
-    "package.json",
-    "tsconfig.json",
-    ".npmignore",
-    ".gitignore"
-  ];
-
-  const fileName = path.split("/").pop() ?? "";
-
-  if (
-    configFiles.some((f) => fileName.toUpperCase().startsWith(f.toUpperCase()))
-  ) {
-    return true;
-  }
-
-  return textExtensions.some((ext) => path.toLowerCase().endsWith(ext));
-}
-
-/**
- * Check if files contain a package.json with dependencies that need installing.
+ * Check if files contain a package.json or pyproject.toml with dependencies that need installing.
  */
 export function hasDependencies(files: FileSystem): boolean {
+  const pyprojectToml = files.read("pyproject.toml");
   const packageJson = files.read("package.json");
-  if (!packageJson) return false;
+  if (!packageJson && !pyprojectToml) return false;
 
-  try {
-    const pkg = JSON.parse(packageJson);
-    const deps = pkg.dependencies ?? {};
-    return Object.keys(deps).length > 0;
-  } catch {
-    return false;
+  if (packageJson) {
+    try {
+      const pkg = JSON.parse(packageJson);
+      const deps = pkg.dependencies ?? {};
+      return Object.keys(deps).length > 0;
+    } catch {
+      return false;
+    }
   }
+
+  if (pyprojectToml) {
+    try {
+      const pkg = parseToml(pyprojectToml) as PyprojectToml;
+      const deps = pkg.project?.dependencies ?? [];
+      return deps.length > 0;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }

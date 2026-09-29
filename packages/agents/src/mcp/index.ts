@@ -6,4 +6,4 @@
  * This barrel retains the SDK v1 `McpAgent`, `WorkerTransport`, legacy handler,
  * edge transports, and historical exports for existing applications.
  */
-export * from "./legacy-agent";
+export * from "./server/legacy-agent";

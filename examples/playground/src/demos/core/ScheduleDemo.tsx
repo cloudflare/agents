@@ -45,10 +45,10 @@ class ScheduleAgent extends Agent<Env> {
       "Pass a callback name and payload — the agent will keep invoking it at the given interval. Use this.cancelSchedule(id) to stop it.",
     code: `  @callable()
   async scheduleRecurring(intervalSeconds: number, label: string) {
-    const schedule = await this.schedule(
+    const schedule = await this.scheduleEvery(
       intervalSeconds,
       "onRecurringTask",
-      { label, recurring: true }
+      { label }
     );
     return schedule.id;
   }

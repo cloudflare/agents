@@ -1085,6 +1085,33 @@ describe("useAgent hook", () => {
   });
 
   describe("sub-agent routing via `sub:` option", () => {
+    it("keeps a disabled placeholder child identity renderable", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+
+      const { container } = await render(
+        <TestAgentComponent
+          options={{
+            agent: "TestSubAgentParent",
+            name: "placeholder-parent",
+            host,
+            protocol,
+            sub: [{ agent: "CounterSubAgent", name: "" }],
+            enabled: false
+          }}
+          onAgent={(agent) => {
+            capturedAgent = agent;
+          }}
+        />
+      );
+
+      await vi.waitFor(() => expect(capturedAgent).not.toBeNull());
+      expect(
+        container.querySelector('[data-testid="agent-status"]')?.textContent
+      ).toBe("connecting");
+      expect(capturedAgent!.getHttpUrl()).toContain("/sub/counter-sub-agent/");
+    });
+
     // Synchronous URL composition check. The sub-agent WebSocket path
     // is computed at render time, independent of the actual
     // connection handshake, so we can observe it via `getHttpUrl()`
@@ -1128,6 +1155,35 @@ describe("useAgent hook", () => {
       );
     });
 
+    it("preserves URL-normalizable characters in a nested user path", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+
+      await render(
+        <TestAgentComponent
+          options={{
+            agent: "TestSubAgentParent",
+            name: "sub-url-parent-unicode",
+            host,
+            protocol,
+            sub: [{ agent: "CounterSubAgent", name: "sub-url-child-unicode" }],
+            path: "rooms/日本語"
+          }}
+          onAgent={(agent) => {
+            capturedAgent = agent;
+          }}
+        />
+      );
+
+      await vi.waitFor(() => expect(capturedAgent).not.toBeNull(), {
+        timeout: 10000
+      });
+
+      expect(capturedAgent!.getHttpUrl()).toContain(
+        "/sub/counter-sub-agent/sub-url-child-unicode/rooms/日本語"
+      );
+    });
+
     it("combines sub-chain alone when no user path is given", async () => {
       const { host, protocol } = getTestWorkerHost();
       let capturedAgent: TestAgent | null = null;
@@ -1155,6 +1211,160 @@ describe("useAgent hook", () => {
       expect(url).toMatch(
         /\/agents\/test-sub-agent-parent\/sub-url-parent-2\/sub\/counter-sub-agent\/sub-url-child-2(\?|$)/
       );
+    });
+  });
+});
+
+describe("useAgent ready and the initial state (#2268)", () => {
+  type Snapshot = { identified: boolean; state: unknown };
+
+  function ReadyProbe({
+    options,
+    onRender,
+    onReady
+  }: {
+    options: UseAgentOptions<unknown>;
+    onRender: (snapshot: Snapshot) => void;
+    onReady: (state: unknown) => void;
+  }) {
+    const agent = useAgent(options);
+    onRender({ identified: agent.identified, state: agent.state });
+    useEffect(() => {
+      void agent.ready.then(() => onReady(agent.state));
+      // oxlint-disable-next-line react-hooks/exhaustive-deps -- once per socket
+    }, [agent]);
+    return null;
+  }
+
+  it("never renders identified without the stored state, and ready resolves with it", async () => {
+    const { host, protocol } = getTestWorkerHost();
+    const renders: Snapshot[] = [];
+    const onReady = vi.fn();
+
+    await render(
+      <ReadyProbe
+        options={{
+          agent: "TestStateAgent",
+          name: `ready-state-${crypto.randomUUID()}`,
+          host,
+          protocol
+        }}
+        onRender={(snapshot) => renders.push(snapshot)}
+        onReady={onReady}
+      />
+    );
+
+    await vi.waitFor(() => expect(onReady).toHaveBeenCalled(), {
+      timeout: 10000
+    });
+    const initial = { count: 0, items: [], lastUpdated: null };
+    expect(onReady).toHaveBeenCalledWith(initial);
+    const identified = renders.filter((snapshot) => snapshot.identified);
+    expect(identified.length).toBeGreaterThan(0);
+    for (const snapshot of identified) {
+      expect(snapshot.state).toEqual(initial);
+    }
+  });
+
+  it("resolves ready with a state the initial onStateUpdate set", async () => {
+    const { host, protocol } = getTestWorkerHost();
+    const onReady = vi.fn();
+    const agentRef: { current: { setState(state: unknown): void } | null } = {
+      current: null
+    };
+
+    function SetStateProbe() {
+      const agent = useAgent({
+        agent: "TestStateAgent",
+        name: `ready-set-state-${crypto.randomUUID()}`,
+        host,
+        protocol,
+        onStateUpdate: (state, source) => {
+          if (source !== "server") return;
+          agentRef.current?.setState({ ...(state as object), count: 1 });
+        }
+      });
+      agentRef.current = agent;
+      useEffect(() => {
+        void agent.ready.then(() => onReady(agent.state));
+        // oxlint-disable-next-line react-hooks/exhaustive-deps -- once per socket
+      }, [agent]);
+      return null;
+    }
+
+    await render(<SetStateProbe />);
+
+    await vi.waitFor(() => expect(onReady).toHaveBeenCalled(), {
+      timeout: 10000
+    });
+    expect(onReady).toHaveBeenCalledWith({
+      count: 1,
+      items: [],
+      lastUpdated: null
+    });
+  });
+
+  it("resolves ready when onStateUpdate throws on the initial state", async () => {
+    const { host, protocol } = getTestWorkerHost();
+    const onReady = vi.fn();
+    const thrown: unknown[] = [];
+    const onError = (event: ErrorEvent) => {
+      if (event.error?.message !== "state callback failed") return;
+      event.preventDefault();
+      thrown.push(event.error);
+    };
+    window.addEventListener("error", onError);
+    try {
+      await render(
+        <ReadyProbe
+          options={{
+            agent: "TestStateAgent",
+            name: `ready-throw-${crypto.randomUUID()}`,
+            host,
+            protocol,
+            onStateUpdate: () => {
+              throw new Error("state callback failed");
+            }
+          }}
+          onRender={() => {}}
+          onReady={onReady}
+        />
+      );
+
+      await vi.waitFor(
+        () =>
+          expect(onReady).toHaveBeenCalledWith({
+            count: 0,
+            items: [],
+            lastUpdated: null
+          }),
+        { timeout: 10000 }
+      );
+      expect(thrown).toHaveLength(1);
+    } finally {
+      window.removeEventListener("error", onError);
+    }
+  });
+
+  it("resolves ready for an agent with no state", async () => {
+    const { host, protocol } = getTestWorkerHost();
+    const onReady = vi.fn();
+
+    await render(
+      <ReadyProbe
+        options={{
+          agent: "TestStateAgentNoInitial",
+          name: `ready-no-state-${crypto.randomUUID()}`,
+          host,
+          protocol
+        }}
+        onRender={() => {}}
+        onReady={onReady}
+      />
+    );
+
+    await vi.waitFor(() => expect(onReady).toHaveBeenCalledWith(undefined), {
+      timeout: 10000
     });
   });
 });

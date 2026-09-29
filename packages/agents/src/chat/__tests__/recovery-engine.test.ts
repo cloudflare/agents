@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   ChatRecoveryEngine,
   buildChatRecoveryExhaustedContext,
-  chatRecoverySchedulePolicy,
+  chatRecoveryBackoffSeconds,
+  retryAfterSeconds,
   notifyChatRecoveryExhausted,
   runChatRecoveryExhaustion,
   type ChatRecoveryAdapter,
@@ -29,89 +30,6 @@ import {
   type ChatRecoveryIncident,
   type ChatRecoveryIncidentEvent
 } from "../recovery-incident";
-
-/**
- * Layer-2 shared engine seam tests (rfc-chat-recovery-foundation, Phase 2).
- *
- * The scheduling-idempotency policy is a cutover invariant that no type error
- * guards: an initial recovery schedule MUST be idempotent (so a deploy storm of
- * re-detections collapses to one enqueued continuation), and a stable-timeout
- * reschedule MUST NOT be idempotent (so it does not dedup onto the executing
- * one-shot row that `alarm()` is about to delete). Both `AIChatAgent` and
- * `Think` now source this single flag from `chatRecoverySchedulePolicy`; these
- * tests pin it both directly and through a fake scheduler exercised exactly the
- * way the packages call `schedule()`.
- */
-describe("chatRecoverySchedulePolicy", () => {
-  it("makes the initial recovery schedule idempotent (deploy-storm dedup)", () => {
-    expect(chatRecoverySchedulePolicy("initial")).toEqual({ idempotent: true });
-  });
-
-  it("makes the stable-timeout reschedule non-idempotent (survives row deletion)", () => {
-    expect(chatRecoverySchedulePolicy("stable_timeout_retry")).toEqual({
-      idempotent: false
-    });
-  });
-
-  it("is exhaustive over the schedule reasons", () => {
-    const reasons: ChatRecoveryScheduleReason[] = [
-      "initial",
-      "stable_timeout_retry"
-    ];
-    for (const reason of reasons) {
-      const policy = chatRecoverySchedulePolicy(reason);
-      expect(typeof policy.idempotent).toBe("boolean");
-    }
-  });
-});
-
-describe("recovery scheduling seam (fake scheduler)", () => {
-  type ScheduleCall = {
-    delaySeconds: number;
-    callback: ChatRecoveryScheduleCallback;
-    options: { idempotent: boolean };
-  };
-
-  function makeFakeScheduler() {
-    const calls: ScheduleCall[] = [];
-    const schedule = (
-      delaySeconds: number,
-      callback: ChatRecoveryScheduleCallback,
-      _data: Record<string, unknown>,
-      options: { idempotent: boolean }
-    ): Promise<void> => {
-      calls.push({ delaySeconds, callback, options });
-      return Promise.resolve();
-    };
-    return { calls, schedule };
-  }
-
-  it("passes idempotent:true when a package schedules an initial continuation", async () => {
-    const scheduler = makeFakeScheduler();
-    // Mirrors `AIChatAgent`/`Think` scheduling an initial continuation.
-    await scheduler.schedule(
-      0,
-      "_chatRecoveryContinue",
-      { incidentId: "abc" },
-      chatRecoverySchedulePolicy("initial")
-    );
-    expect(scheduler.calls).toHaveLength(1);
-    expect(scheduler.calls[0]?.options).toEqual({ idempotent: true });
-  });
-
-  it("passes idempotent:false when a package reschedules after a stable timeout", async () => {
-    const scheduler = makeFakeScheduler();
-    // Mirrors the stable-timeout reschedule issued from inside the executing row.
-    await scheduler.schedule(
-      5,
-      "_chatRecoveryRetry",
-      { incidentId: "abc" },
-      chatRecoverySchedulePolicy("stable_timeout_retry")
-    );
-    expect(scheduler.calls).toHaveLength(1);
-    expect(scheduler.calls[0]?.options).toEqual({ idempotent: false });
-  });
-});
 
 /**
  * Layer-2 orchestration seam test for `ChatRecoveryEngine.beginIncident`. The
@@ -753,9 +671,6 @@ describe("ChatRecoveryEngine.rescheduleAfterStableTimeout (fake adapter)", () =>
       reason: "stable_timeout_retry",
       delaySeconds: CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
     });
-    expect(
-      chatRecoverySchedulePolicy(fake.schedules[0].reason).idempotent
-    ).toBe(false);
   });
 
   it("returns false (caller gives up) when the incident id is missing", async () => {
@@ -942,9 +857,6 @@ describe("ChatRecoveryEngine.recordOomAndDecide (fake adapter)", () => {
       reason: "stable_timeout_retry",
       delaySeconds: CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
     });
-    expect(
-      chatRecoverySchedulePolicy(fake.schedules[0].reason).idempotent
-    ).toBe(false);
   });
 
   it("returns exhausted (caller terminalizes) once the bump crosses the budget", async () => {
@@ -2037,5 +1949,43 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
     expect(h.calls).toContain("exhaust");
     expect(h.calls).not.toContain("dispatch");
+  });
+});
+
+describe("transient recovery backoff", () => {
+  it("doubles per retry, capped at 30s", () => {
+    expect(
+      [1, 2, 3, 5, 6, 12].map((r) => chatRecoveryBackoffSeconds(r))
+    ).toEqual([1, 2, 4, 16, 30, 30]);
+  });
+
+  it("waits at least Retry-After, capped at 60s", () => {
+    expect(chatRecoveryBackoffSeconds(1, 7)).toBe(7);
+    expect(chatRecoveryBackoffSeconds(4, 2)).toBe(8);
+    expect(chatRecoveryBackoffSeconds(1, 600)).toBe(60);
+  });
+
+  it("reads Retry-After from response headers, headers or the cause chain", () => {
+    const now = Date.parse("2026-01-01T00:00:00Z");
+    expect(retryAfterSeconds({ responseHeaders: { "Retry-After": "3" } })).toBe(
+      3
+    );
+    expect(
+      retryAfterSeconds({ headers: new Headers({ "retry-after": "1.2" }) })
+    ).toBe(2);
+    expect(
+      retryAfterSeconds(
+        new Error("wrapped", {
+          cause: {
+            responseHeaders: { "retry-after": "Thu, 01 Jan 2026 00:00:09 GMT" }
+          }
+        }),
+        now
+      )
+    ).toBe(9);
+    expect(
+      retryAfterSeconds({ responseHeaders: { "retry-after": "soon" } })
+    ).toBe(undefined);
+    expect(retryAfterSeconds(new Error("no headers"))).toBeUndefined();
   });
 });

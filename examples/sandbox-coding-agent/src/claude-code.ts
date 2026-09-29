@@ -34,8 +34,23 @@ export interface ClaudeRunContext {
     message?: string;
     fraction?: number;
   }): void;
-  /** Called once the turn finishes with the diff it produced. */
-  onResult(result: WorkspaceDiff): void;
+  /**
+   * Called once the turn finishes with the diff it produced; `error` is set
+   * when the turn failed (the run is then also reported as an error).
+   */
+  onResult(result: WorkspaceDiff & { error?: string }): void;
+}
+
+/** Upper bound on output tokens per model request, enforced by the proxy too. */
+export const MAX_OUTPUT_TOKENS = 32_000;
+
+// Claude Code session ids are UUIDs. Anything else read from stdout or storage
+// is rejected before it can reach the `--resume` shell argument.
+const SESSION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isSessionId(id: unknown): id is string {
+  return typeof id === "string" && SESSION_ID.test(id);
 }
 
 /**
@@ -51,10 +66,12 @@ export async function runClaudeCode(ctx: ClaudeRunContext): Promise<Response> {
   const { sandbox, workDir, abortSignal, prompt } = ctx;
 
   // Reuse the native Claude session across turns so it keeps its own context.
-  let sessionId = ctx.loadSessionId();
-  const sessionFlag = sessionId
-    ? `--resume ${sessionId}`
-    : `--session-id ${(sessionId = crypto.randomUUID())}`;
+  const stored = ctx.loadSessionId();
+  const sessionId = isSessionId(stored) ? stored : crypto.randomUUID();
+  const sessionFlag =
+    sessionId === stored
+      ? `--resume ${sessionId}`
+      : `--session-id ${sessionId}`;
   ctx.saveSessionId(sessionId);
 
   ctx.reportProgress({ phase: "starting", message: "Launching Claude Code…" });
@@ -76,6 +93,10 @@ export async function runClaudeCode(ctx: ClaudeRunContext): Promise<Response> {
       // Sandbox intercepts the (default) api.anthropic.com egress and routes it
       // through the AI Gateway binding, which authenticates via the account.
       ANTHROPIC_API_KEY: "cf-aig-placeholder",
+      // The proxy only forwards the Messages API, so skip telemetry and
+      // update checks it would block anyway.
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(MAX_OUTPUT_TOKENS),
       // The container runs as root, where Claude Code refuses
       // `--permission-mode bypassPermissions` unless it knows it's sandboxed.
       IS_SANDBOX: "1"
@@ -96,8 +117,7 @@ export async function runClaudeCode(ctx: ClaudeRunContext): Promise<Response> {
       const mapper = new ClaudeStreamMapper(
         writer,
         (id) => {
-          sessionId = id;
-          ctx.saveSessionId(id);
+          if (isSessionId(id)) ctx.saveSessionId(id);
         },
         (toolName) =>
           ctx.reportProgress({
@@ -109,52 +129,82 @@ export async function runClaudeCode(ctx: ClaudeRunContext): Promise<Response> {
       let buffer = "";
       let stderr = "";
       let exitCode: number | undefined;
-      for await (const log of parseSSEStream<LogEvent>(logs, abortSignal)) {
-        if (log.type === "stdout") {
-          buffer += log.data;
-          // Claude emits one JSON event per line; chunks may straddle lines.
-          let newline = buffer.indexOf("\n");
-          while (newline !== -1) {
-            const line = buffer.slice(0, newline).trim();
-            buffer = buffer.slice(newline + 1);
-            if (line) mapper.handleLine(line);
-            newline = buffer.indexOf("\n");
+      let streamError: string | undefined;
+      try {
+        for await (const log of parseSSEStream<LogEvent>(logs, abortSignal)) {
+          if (log.type === "stdout") {
+            buffer += log.data;
+            // Claude emits one JSON event per line; chunks may straddle lines.
+            let newline = buffer.indexOf("\n");
+            while (newline !== -1) {
+              const line = buffer.slice(0, newline).trim();
+              buffer = buffer.slice(newline + 1);
+              if (line) mapper.handleLine(line);
+              newline = buffer.indexOf("\n");
+            }
+          } else if (log.type === "stderr") {
+            stderr += log.data;
+          } else if (log.type === "exit") {
+            exitCode = log.exitCode;
+          } else if (log.type === "error") {
+            streamError = log.data || "Claude Code process error.";
+            break;
           }
-        } else if (log.type === "stderr") {
-          stderr += log.data;
-        } else if (log.type === "exit") {
-          exitCode = log.exitCode;
-        } else if (log.type === "error") {
-          throw new Error(log.data || "Claude Code process error.");
         }
+      } catch (error) {
+        if (abortSignal?.aborted) throw error;
+        streamError = `Lost the Claude Code log stream: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
       }
       if (buffer.trim()) mapper.handleLine(buffer.trim());
       mapper.flush();
+      if (abortSignal?.aborted) throw new Error("Claude Code run aborted.");
 
-      // Surface failures the CLI reports out-of-band. Without this, a Claude
-      // error (e.g. a bad upstream response) yields an empty turn that looks
-      // like "no output, no changes" — impossible to debug from the UI.
-      const failure = mapper.failure();
-      if (failure || (exitCode !== undefined && exitCode !== 0)) {
-        const detail = failure ?? `Claude Code exited with code ${exitCode}.`;
+      // Every way the process can end without a clean exit 0 is a failure —
+      // including the log stream ending with no `exit` event at all, which is
+      // what a container that died mid-turn looks like.
+      let failure =
+        streamError ??
+        (exitCode === undefined
+          ? "Claude Code ended without an exit status (the container may have stopped)."
+          : exitCode !== 0
+            ? [`Claude Code exited with code ${exitCode}.`, mapper.failure()]
+                .filter(Boolean)
+                .join(" ")
+            : mapper.failure());
+
+      // Snapshot the diff the run produced: hand it to the agent (so it can be
+      // returned as the agent-tool output) and append it to the message so it
+      // renders inline wherever this stream is shown.
+      ctx.reportProgress({ phase: "diffing", message: "Capturing diff…" });
+      let result: WorkspaceDiff = { files: [], diff: "" };
+      try {
+        result = await snapshotDiff(sandbox, workDir);
+      } catch (error) {
+        const detail = `Could not capture the diff: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        failure = failure ? `${failure}\n\n${detail}` : detail;
+      }
+      ctx.onResult(failure ? { ...result, error: failure } : result);
+
+      // Surface failures in the message too. Without this, a Claude error
+      // (e.g. a bad upstream response) yields an empty turn that looks like
+      // "no output, no changes" — impossible to debug from the UI.
+      if (failure) {
         const tail = stderr.trim().split("\n").slice(-12).join("\n");
         writer.write({ type: "text-start", id: "error" });
         writer.write({
           type: "text-delta",
           id: "error",
           delta:
-            `\n\n**Claude Code error**\n\n${detail}` +
+            `\n\n**Claude Code error**\n\n${failure}` +
             (tail ? `\n\n\`\`\`\n${tail}\n\`\`\`` : "")
         });
         writer.write({ type: "text-end", id: "error" });
       }
 
-      // Snapshot the diff the run produced: hand it to the agent (so it can be
-      // returned as the agent-tool output) and append it to the message so it
-      // renders inline wherever this stream is shown.
-      ctx.reportProgress({ phase: "diffing", message: "Capturing diff…" });
-      const result = await snapshotDiff(sandbox, workDir);
-      ctx.onResult(result);
       if (result.diff.trim()) {
         writer.write({ type: "text-start", id: "diff" });
         writer.write({
@@ -165,6 +215,9 @@ export async function runClaudeCode(ctx: ClaudeRunContext): Promise<Response> {
         writer.write({ type: "text-end", id: "diff" });
       }
 
+      // Throwing turns into an `error` chunk, which marks the agent-tool run
+      // as failed instead of completed.
+      if (failure) throw new Error(failure);
       writer.write({ type: "finish" });
     }
   });

@@ -1,3 +1,4 @@
+import { asSchema } from "ai";
 import { describe, expect, it } from "vitest";
 import {
   browserContent,
@@ -224,6 +225,33 @@ describe("createQuickActionTools", () => {
       "browser_content",
       "browser_markdown"
     ]);
+  });
+
+  it("rejects stringified extraction schemas", async () => {
+    const { browser } = fakeBrowser(() => jsonResult({ ok: true }));
+    const tool = createQuickActionTools({ browser }).browser_extract;
+    const schema = asSchema(tool.inputSchema);
+    if (!schema.validate)
+      throw new Error("Expected a runtime schema validator");
+
+    expect(schema.jsonSchema).toMatchObject({
+      properties: { schema: { type: "object" } }
+    });
+
+    const invalid = await schema.validate({
+      url: "https://example.com",
+      schema: '{"type":"object"}'
+    });
+    expect(invalid.success).toBe(false);
+    if (invalid.success) throw new Error("Expected validation to fail");
+    expect(invalid.error.message).toContain("Schema must be a JSON object");
+
+    await expect(
+      schema.validate({
+        url: "https://example.com",
+        schema: { type: "object" }
+      })
+    ).resolves.toMatchObject({ success: true });
   });
 
   it("truncates long markdown results to maxChars", async () => {

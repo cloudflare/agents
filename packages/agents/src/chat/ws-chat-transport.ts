@@ -1,15 +1,18 @@
 /**
- * WebSocket-based ChatTransport for useAgentChat.
+ * Framework-neutral WebSocket transport for AI SDK chat clients.
  *
- * Replaces the aiFetch + DefaultChatTransport indirection with a direct
- * WebSocket implementation that speaks the CF_AGENT protocol natively.
- *
- * Data flow (old): WS → aiFetch fake Response → DefaultChatTransport → useChat
- * Data flow (new): WS → WebSocketChatTransport → useChat
+ * Speaks the CF_AGENT protocol directly and returns AI SDK UI message chunks
+ * without reconstructing an HTTP response or parsing an SSE stream.
  */
 
 import type { ChatTransport, UIMessage, UIMessageChunk } from "ai";
 import { nanoid } from "nanoid";
+import {
+  applyChatResponseFrame,
+  failChatStream,
+  ReplayChunkBatch
+} from "./replay-batch";
+import { AppliedChunkLedger, ContinuationReplayFilter } from "./replay-dedupe";
 import { MessageType, type OutgoingMessage } from "./wire-types";
 
 /**
@@ -31,7 +34,8 @@ const RESUME_PENDING_TIMEOUT_MS = 60000;
 
 /**
  * Agent-like interface for sending/receiving WebSocket messages.
- * Matches the shape returned by useAgent from agents/react.
+ * Matches `AgentClient` from `agents/client` and the connection returned by
+ * `useAgent` from `agents/react`.
  */
 export interface AgentConnection {
   send: (data: string) => void;
@@ -49,11 +53,10 @@ export interface AgentConnection {
 export type WebSocketChatTransportOptions<
   ChatMessage extends UIMessage = UIMessage
 > = {
-  /** The agent connection from useAgent */
+  /** The framework-neutral AgentClient or useAgent connection. */
   agent: AgentConnection;
   /**
-   * Callback to prepare the request body before sending.
-   * Can add custom headers, body fields, or credentials.
+   * Callback to add custom fields to the request body before sending.
    */
   prepareBody?: (options: {
     messages: ChatMessage[];
@@ -78,7 +81,11 @@ export type WebSocketChatTransportOptions<
 /**
  * ChatTransport that sends messages over WebSocket and returns a
  * ReadableStream<UIMessageChunk> that the AI SDK's useChat consumes directly.
- * No fake fetch, no Response reconstruction, no double SSE parsing.
+ *
+ * This low-level transport handles new and regenerated request streams plus
+ * cancellation. Higher-level protocol coordination such as automatic reconnect
+ * resume, cross-tab transcript synchronization, and client-tool continuations
+ * is provided by integrations such as `useAgentChat`.
  */
 export class WebSocketChatTransport<
   ChatMessage extends UIMessage = UIMessage
@@ -91,6 +98,11 @@ export class WebSocketChatTransport<
   // Pending resume resolver — set by reconnectToStream, called by
   // handleStreamResuming when onAgentMessage sees CF_AGENT_STREAM_RESUMING.
   private _resumeResolver: ((data: { id: string }) => void) | null = null;
+  /**
+   * Continuation chunks this client applied, shared with the hook's fallback
+   * observer so a replay after reconnect skips them on either path (#1951).
+   */
+  readonly appliedChunks = new AppliedChunkLedger();
   // Pending "no stream" resolver — called by handleStreamResumeNone
   // when onAgentMessage sees CF_AGENT_STREAM_RESUME_NONE.
   private _resumeNoneResolver:
@@ -156,6 +168,15 @@ export class WebSocketChatTransport<
 
     const cancelledToolContinuation = this.abortActiveToolContinuation();
     return cancelledRequest || cancelledToolContinuation;
+  }
+
+  /**
+   * The server turn this transport last attached to that has not reported a
+   * terminal frame. A socket close ends the local stream but keeps this set,
+   * since the server keeps running the turn.
+   */
+  get activeServerTurnId(): string | null {
+    return this._activeServerTurnId;
   }
 
   private sendCancelFrame(requestId: string) {
@@ -604,6 +625,9 @@ export class WebSocketChatTransport<
     let requestId: string | null = null;
     let readerController: ReadableStreamDefaultController<UIMessageChunk> | null =
       null;
+    // Held outside start() so the close and detach paths can flush replayed
+    // content before they close the stream.
+    let replayBatch: ReplayChunkBatch | null = null;
     const probeId = nanoid(8);
     let onResumeRef: ((data: { id: string }) => void) | null = null;
     let onResumeNoneRef: ((data: { probeId?: string }) => boolean) | null =
@@ -681,7 +705,10 @@ export class WebSocketChatTransport<
     this._abortToolContinuation = abortToolContinuationRef;
     detachResumeStreamRef = () => {
       if (completed) return false;
-      finish(() => readerController?.close());
+      finish(() => {
+        replayBatch?.flush();
+        readerController?.close();
+      });
       return true;
     };
     this._detachResumeStream = detachResumeStreamRef;
@@ -689,6 +716,13 @@ export class WebSocketChatTransport<
     return new ReadableStream<UIMessageChunk>({
       start(controller) {
         readerController = controller;
+        const batch = new ReplayChunkBatch(controller);
+        replayBatch = batch;
+        let replayFilter: ContinuationReplayFilter<
+          OutgoingMessage<UIMessage> & {
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE;
+          }
+        > | null = null;
         let timeout: ReturnType<typeof setTimeout> | undefined;
 
         const armTimeout = (delay: number) => {
@@ -762,22 +796,21 @@ export class WebSocketChatTransport<
             }
 
             if (data.error) {
-              finish(() =>
-                controller.error(new Error(data.body || "Stream error"))
-              );
+              transport.appliedChunks.forget(requestId);
+              finish(() => failChatStream(batch, data.body || "Stream error"));
               return;
             }
 
-            if (data.body?.trim()) {
-              try {
-                const chunk = JSON.parse(data.body) as UIMessageChunk;
-                controller.enqueue(chunk);
-              } catch {
-                // Skip malformed chunk bodies
-              }
+            replayFilter ??= new ContinuationReplayFilter(
+              transport.appliedChunks,
+              requestId
+            );
+            for (const frame of replayFilter.frames(data)) {
+              applyChatResponseFrame(batch, frame);
             }
 
             if (data.done) {
+              transport.appliedChunks.forget(requestId);
               finish(() => controller.close());
             }
           } catch {
@@ -785,7 +818,11 @@ export class WebSocketChatTransport<
           }
         };
 
-        const onClose = () => finish(() => controller.close());
+        const onClose = () =>
+          finish(() => {
+            batch.flush();
+            controller.close();
+          });
 
         agent.addEventListener("message", onMessage, {
           signal: streamController.signal
@@ -850,6 +887,9 @@ export class WebSocketChatTransport<
 
     let streamController: ReadableStreamDefaultController<UIMessageChunk> | null =
       null;
+    // Held outside start() so the close and detach paths can flush replayed
+    // content before they close the stream.
+    let replayBatch: ReplayChunkBatch | null = null;
     const cancelActiveRequest = () => {
       if (completed) return false;
       finish(() => streamController?.error(abortError), true);
@@ -860,7 +900,10 @@ export class WebSocketChatTransport<
     const transport = this;
     detachResumeStream = () => {
       if (completed) return false;
-      finish(() => streamController?.close());
+      finish(() => {
+        replayBatch?.flush();
+        streamController?.close();
+      });
       return true;
     };
     this._detachResumeStream = detachResumeStream;
@@ -868,6 +911,13 @@ export class WebSocketChatTransport<
     return new ReadableStream<UIMessageChunk>({
       start(controller) {
         streamController = controller;
+        const batch = new ReplayChunkBatch(controller);
+        replayBatch = batch;
+        const replayFilter = new ContinuationReplayFilter<
+          OutgoingMessage<UIMessage> & {
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE;
+          }
+        >(transport.appliedChunks, requestId);
 
         const onMessage = (event: MessageEvent) => {
           try {
@@ -879,23 +929,17 @@ export class WebSocketChatTransport<
             if (data.id !== requestId) return;
 
             if (data.error) {
-              finish(() =>
-                controller.error(new Error(data.body || "Stream error"))
-              );
+              transport.appliedChunks.forget(requestId);
+              finish(() => failChatStream(batch, data.body || "Stream error"));
               return;
             }
 
-            // Parse and enqueue the chunk
-            if (data.body?.trim()) {
-              try {
-                const chunk = JSON.parse(data.body) as UIMessageChunk;
-                controller.enqueue(chunk);
-              } catch {
-                // Skip malformed chunk bodies
-              }
+            for (const frame of replayFilter.frames(data)) {
+              applyChatResponseFrame(batch, frame);
             }
 
             if (data.done) {
+              transport.appliedChunks.forget(requestId);
               finish(() => controller.close());
             }
           } catch {
@@ -904,7 +948,14 @@ export class WebSocketChatTransport<
         };
 
         const onClose = () => {
-          finish(() => controller.close(), false, false);
+          finish(
+            () => {
+              batch.flush();
+              controller.close();
+            },
+            false,
+            false
+          );
         };
 
         agent.addEventListener("message", onMessage, {

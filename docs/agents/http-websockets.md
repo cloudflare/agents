@@ -408,17 +408,7 @@ export class MyAgent extends Agent {
 
 ## Hibernation
 
-Agents support hibernation - they can sleep when inactive and wake when needed. This saves resources while maintaining WebSocket connections.
-
-### Enabling Hibernation
-
-Hibernation is enabled by default. To disable:
-
-```typescript
-export class AlwaysOnAgent extends Agent {
-  static options = { hibernate: false };
-}
-```
+Agent WebSockets always use Cloudflare's Hibernation API. An idle Agent can leave memory while its WebSocket clients remain connected; there is no non-hibernating mode.
 
 ### How Hibernation Works
 

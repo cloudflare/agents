@@ -146,8 +146,8 @@ describe("retry integration", () => {
 
       // Backdate the schedule so runDurableObjectAlarm considers it due
       await runInDurableObject(stub, async (instance: TestRetryAgent) => {
-        const past = Math.floor(Date.now() / 1000) - 1;
-        instance.sql`UPDATE cf_agents_schedules SET time = ${past}`;
+        const past = Date.now() - 1_000;
+        instance.sql`UPDATE cf_agents_jobs SET time = ${past}`;
       });
 
       // Fire the alarm deterministically

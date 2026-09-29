@@ -113,6 +113,10 @@
       {
         "class_name": "StuckAgentToolChild",
         "name": "StuckAgentToolChild"
+      },
+      {
+        "class_name": "OverridingPersistAgent",
+        "name": "OverridingPersistAgent"
       }
       // Agent-tool children are addressed as facets of
       // `AIChatAgentToolParent`, so they do not need migration entries.
@@ -189,6 +193,13 @@
     {
       "new_sqlite_classes": ["AIChatAgentToolParent"],
       "tag": "v13"
+    },
+    {
+      "tag": "v14"
+    },
+    {
+      "new_sqlite_classes": ["OverridingPersistAgent"],
+      "tag": "v15"
     }
   ]
 }

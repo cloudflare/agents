@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
 import { RPCClientTransport, RPCServerTransport } from "../../../mcp/rpc";
 import type {
   JSONRPCMessage,
@@ -687,26 +686,11 @@ describe("RPC Transport", () => {
     });
   });
 
-  describe("Cold Wake Initialization (issue #1282)", () => {
-    async function seedStorageForColdWake(
-      stub: DurableObjectStub<McpAgent>,
-      doName: string
-    ) {
-      await runInDurableObject(stub, async (instance) => {
-        const ctx = (instance as unknown as { ctx: DurableObjectState }).ctx;
-        await ctx.storage.put("__ps_name", doName);
-      });
-    }
-
-    it("should hydrate name and run onStart when handleMcpMessage is the first entry point", async () => {
+  describe("Native RPC initialization (issue #1282)", () => {
+    it("should resolve the native name and run onStart when handleMcpMessage is the first entry point", async () => {
       const doName = "rpc:cold-wake-init";
       const id = env.MCP_OBJECT.idFromName(doName);
       const stub = env.MCP_OBJECT.get(id);
-
-      // Seed __ps_name directly, bypassing setName/onStart.
-      // Simulates a DO that was previously initialized, hibernated,
-      // and wakes cold — #_name is unset, only storage has the name.
-      await seedStorageForColdWake(stub, doName);
 
       // Call handleMcpMessage directly via RPC — the native DO RPC
       // entry point that bypasses fetch/alarm/webSocket paths.
@@ -724,7 +708,6 @@ describe("RPC Transport", () => {
       const id = env.MCP_OBJECT.idFromName(doName);
       const stub = env.MCP_OBJECT.get(id) as DurableObjectStub<McpAgent>;
 
-      await seedStorageForColdWake(stub, doName);
       await stub.handleMcpMessage(TEST_MESSAGES.initialize);
 
       const first = stub.handleMcpMessage({
@@ -755,9 +738,8 @@ describe("RPC Transport", () => {
       const id = env.MCP_OBJECT.idFromName(doName);
       const stub = env.MCP_OBJECT.get(id);
 
-      await seedStorageForColdWake(stub, doName);
-
-      // Initialize the MCP server first
+      // Initialize the MCP server first; native named identity is available
+      // even though RPC bypasses fetch.
       await stub.handleMcpMessage(TEST_MESSAGES.initialize);
 
       // Now call a tool — verifies the server is fully functional

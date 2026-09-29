@@ -12,6 +12,14 @@
   "durable_objects": {
     "bindings": [
       {
+        "class_name": "ConnectionStateParent",
+        "name": "ConnectionStateParent"
+      },
+      {
+        "class_name": "ConnectionStateThink",
+        "name": "ConnectionStateThink"
+      },
+      {
         "class_name": "TestAssistantToolsAgent",
         "name": "TestAssistantToolsAgent"
       },
@@ -40,6 +48,10 @@
         "name": "ThinkTestAgent"
       },
       {
+        "class_name": "ThinkContinueOverrideTestAgent",
+        "name": "ThinkContinueOverrideTestAgent"
+      },
+      {
         "class_name": "ThinkPropsTestAgent",
         "name": "ThinkPropsTestAgent"
       },
@@ -62,6 +74,34 @@
       {
         "class_name": "ThinkSystemPromptSkillsWarningAgent",
         "name": "ThinkSystemPromptSkillsWarningAgent"
+      },
+      {
+        "class_name": "ThinkDefaultSystemPromptSkillsAgent",
+        "name": "ThinkDefaultSystemPromptSkillsAgent"
+      },
+      {
+        "class_name": "ThinkInheritedSystemPromptSkillsAgent",
+        "name": "ThinkInheritedSystemPromptSkillsAgent"
+      },
+      {
+        "class_name": "ThinkSystemPromptFieldSkillsAgent",
+        "name": "ThinkSystemPromptFieldSkillsAgent"
+      },
+      {
+        "class_name": "ThinkMissingClassifierWarningAgent",
+        "name": "ThinkMissingClassifierWarningAgent"
+      },
+      {
+        "class_name": "ThinkClassifierMethodAgent",
+        "name": "ThinkClassifierMethodAgent"
+      },
+      {
+        "class_name": "ThinkInheritedClassifierAgent",
+        "name": "ThinkInheritedClassifierAgent"
+      },
+      {
+        "class_name": "ThinkClassifierFieldAgent",
+        "name": "ThinkClassifierFieldAgent"
       },
       {
         "class_name": "ThinkAsyncConfigSessionAgent",
@@ -116,6 +156,14 @@
         "name": "ThinkExtensionHookAgent"
       },
       {
+        "class_name": "ThinkExtensionBeforeTurnModelAgent",
+        "name": "ThinkExtensionBeforeTurnModelAgent"
+      },
+      {
+        "class_name": "ThinkMessengerDeliveryTestAgent",
+        "name": "ThinkMessengerDeliveryTestAgent"
+      },
+      {
         "class_name": "ThinkMessengerRouteTestAgent",
         "name": "ThinkMessengerRouteTestAgent"
       },
@@ -152,8 +200,20 @@
         "name": "ThinkMediaEvictionAgent"
       },
       {
+        "class_name": "ThinkPromptCacheTestAgent",
+        "name": "ThinkPromptCacheTestAgent"
+      },
+      {
         "class_name": "ThinkMediaEvictionAutoAgent",
         "name": "ThinkMediaEvictionAutoAgent"
+      },
+      {
+        "class_name": "ThinkPointerHydrationAgent",
+        "name": "ThinkPointerHydrationAgent"
+      },
+      {
+        "class_name": "ThinkLegacySessionApiAgent",
+        "name": "ThinkLegacySessionApiAgent"
       },
       {
         "class_name": "BrowserToolsHost",
@@ -165,6 +225,10 @@
       {
         "class_name": "CodemodeRuntime",
         "name": "CodemodeRuntime"
+      },
+      {
+        "class_name": "ThinkMessengerStateAgent",
+        "name": "ThinkMessengerStateAgent"
       }
     ]
   },
@@ -173,6 +237,8 @@
   "migrations": [
     {
       "new_sqlite_classes": [
+        "ConnectionStateParent",
+        "ConnectionStateThink",
         "TestAssistantToolsAgent",
         "TestAssistantAgentAgent",
         "BareAssistantAgent",
@@ -180,12 +246,20 @@
         "LoopToolTestAgent",
         "OverflowRecoveryTestAgent",
         "ThinkTestAgent",
+        "ThinkContinueOverrideTestAgent",
         "ThinkPropsTestAgent",
         "ThinkToolsTestAgent",
         "ThinkFiberTestAgent",
         "ThinkClientToolsAgent",
         "ThinkSessionTestAgent",
         "ThinkSystemPromptSkillsWarningAgent",
+        "ThinkDefaultSystemPromptSkillsAgent",
+        "ThinkInheritedSystemPromptSkillsAgent",
+        "ThinkSystemPromptFieldSkillsAgent",
+        "ThinkMissingClassifierWarningAgent",
+        "ThinkClassifierMethodAgent",
+        "ThinkInheritedClassifierAgent",
+        "ThinkClassifierFieldAgent",
         "ThinkAsyncConfigSessionAgent",
         "ThinkConfigTestAgent",
         "ThinkLegacyConfigMigrationAgent",
@@ -199,6 +273,8 @@
         "ThinkNestedMiddleAgent",
         "StuckThinkAgentToolChild",
         "ThinkExtensionHookAgent",
+        "ThinkExtensionBeforeTurnModelAgent",
+        "ThinkMessengerDeliveryTestAgent",
         "ThinkMessengerRouteTestAgent",
         "ThinkMcpToolMaterializationAgent",
         "ThinkExecuteToolAgent",
@@ -208,7 +284,10 @@
         "ThinkOnStartHydrationFailureAgent",
         "ThinkWindowedHydrationAgent",
         "ThinkMediaEvictionAgent",
+        "ThinkPromptCacheTestAgent",
         "ThinkMediaEvictionAutoAgent",
+        "ThinkPointerHydrationAgent",
+        "ThinkLegacySessionApiAgent",
         "BrowserToolsHost"
       ],
       "tag": "v1"

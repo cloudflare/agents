@@ -4,6 +4,14 @@ This project incorporates code from the following open-source projects.
 
 ## Dependencies
 
+### PartyServer
+
+- **License**: ISC License
+- **Repository**: https://github.com/cloudflare/partykit/tree/main/packages/partyserver
+- **Copyright**: Copyright 2024 Sunil Pai <spai@cloudflare.com>
+- **Full License**: [licenses/isc-partyserver.txt](licenses/isc-partyserver.txt)
+- **Vendored from**: [cloudflare/partykit@f0a2e97d](https://github.com/cloudflare/partykit/commit/f0a2e97d233f24545b2648aec2ed6a191e11074e)
+
 ### Anthropic MCP TS SDK
 
 - **License**: Apache License 2.0

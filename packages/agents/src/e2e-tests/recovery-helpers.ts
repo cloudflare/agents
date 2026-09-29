@@ -71,28 +71,6 @@ export function killProcessOnPort(port: number): void {
   }
 }
 
-function killProcessTree(pid: number): void {
-  let children: number[] = [];
-  try {
-    children = execSync(`pgrep -P ${pid} 2>/dev/null || true`)
-      .toString()
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map(Number);
-  } catch {
-    // pgrep may be unavailable; killing the parent is still useful.
-  }
-  for (const childPid of children) {
-    killProcessTree(childPid);
-  }
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    // Already dead
-  }
-}
-
 export function startWrangler(h: Harness): ChildProcess {
   const child = spawn(
     "npx",
@@ -111,6 +89,9 @@ export function startWrangler(h: Harness): ChildProcess {
     {
       cwd: h.configPath.replace(/\/wrangler\.jsonc$/, ""),
       stdio: ["pipe", "pipe", "pipe"],
+      // A process-group leader, so killProcess() can take down wrangler and
+      // every workerd it spawns in one signal.
+      detached: true,
       env: { ...process.env, NODE_ENV: "test" }
     }
   );
@@ -177,7 +158,20 @@ export function killProcess(child: ChildProcess): Promise<void> {
       clearTimeout(fallback);
       resolve();
     });
-    killProcessTree(child.pid);
+    // The child is a process-group leader (spawned detached): one signal
+    // takes down npm exec, wrangler, esbuild, and every workerd. Walking the
+    // tree with pgrep and killing children first leaves a window in which
+    // wrangler respawns workerd; that orphan keeps the port and the restart
+    // fails with "Address already in use".
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      try {
+        process.kill(child.pid, "SIGKILL");
+      } catch {
+        // Already dead.
+      }
+    }
   });
 }
 

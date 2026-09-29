@@ -7,10 +7,18 @@ This is the Cloudflare-native take on the ["agent harness"](https://ai-sdk.dev/d
 ## What it demonstrates
 
 - **Agents as tools / sub-agents.** The orchestrator exposes `agentTool(ClaudeCodeAgent, …)` so its planning loop can delegate work. When it does, the framework spawns the sub-agent as a _facet_, forwards its chat chunks to the parent as `agent-tool-event` frames, and surfaces its `reportProgress` on a live bar — all on the same WebSocket.
-- **One container per task.** A sub-agent runs as a facet whose `this.name` is the agent-tool **run id** (`agent-tool:<toolCallId>`); we hash it to a DNS-safe `sandboxIdFor(this.name)` so `getSandbox(env.Sandbox, …)` gives every delegated task its _own_ isolated container with the repo checked out.
+- **One container per task.** A sub-agent runs as a facet whose `this.name` is the agent-tool **run id** (`agent-tool:<toolCallId>`); we hash the orchestrator's name plus that run id into a DNS-safe sandbox id so `getSandbox(env.Sandbox, …)` gives every delegated task its _own_ isolated container with the repo checked out. The orchestrator destroys the container as soon as the run finishes (`onAgentToolFinish`) and when you clear runs.
 - **Parallel fan-out.** `delegate_parallel` dispatches several tasks at once (or competing attempts at one task) via `runAgentTool`, each in its own container, then compares the diffs.
 - **Think owns the planning loop; Claude Code owns the coding loop.** The orchestrator's loop runs on Workers AI; each sub-agent drives the Claude Code CLI headless inside its container and maps its `stream-json` output into AI SDK `UIMessage` chunks.
-- **No tokens, no secrets.** The container has zero credentials. The Sandbox intercepts Claude Code's egress to `api.anthropic.com` and forwards it through the `env.AI.gateway()` binding, which authenticates via your Cloudflare account. The only config is a plaintext gateway id.
+- **No credentials in the container.** The Sandbox intercepts Claude Code's egress to `api.anthropic.com` and forwards it through the `env.AI.gateway()` binding, which authenticates via your Cloudflare account. The only config is a plaintext gateway id. This does **not** make the container harmless: anything running in it can spend through your gateway (see [Security](#security)).
+
+## Security
+
+This is a local demo. Read this before deploying it anywhere:
+
+- **`/agents/*` has no authentication.** Anyone who can reach the Worker can chat with any orchestrator by name, start containers, and spend your Workers AI and AI Gateway budget. Put it behind [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) or add an auth check before `routeAgentRequest` before deploying.
+- **The container runs model-directed commands with internet access.** Claude Code runs with `--permission-mode bypassPermissions`, so it executes whatever shell commands it decides on, without approval, and the container can reach the public internet (`enableInternet = true`, needed for the `git clone`). Don't put anything in the container you wouldn't hand to an untrusted process.
+- **The Anthropic proxy is bounded, not locked down.** It only forwards `POST /v1/messages` and `POST /v1/messages/count_tokens` and rejects message requests whose `max_tokens` is missing or above `MAX_OUTPUT_TOKENS`, but any process in the container can still call those endpoints on your account. Set spend limits / rate limits on the gateway.
 
 The demo repo is [`threepointone/aywson`](https://github.com/threepointone/aywson), a small JSONC parser with tests.
 
@@ -52,6 +60,9 @@ export class Sandbox extends BaseSandbox<Env> {
 Sandbox.outboundByHost = {
   "api.anthropic.com": async (req, env) => {
     const endpoint = new URL(req.url).pathname.replace(/^\/+/, ""); // "v1/messages"
+    if (!ALLOWED_ANTHROPIC_ENDPOINTS.has(endpoint)) {
+      return new Response("Blocked", { status: 403 });
+    }
     return env.AI.gateway(env.GATEWAY_ID).run({
       provider: "anthropic",
       endpoint,
@@ -77,7 +88,7 @@ CodingOrchestrator (Think, Durable Object)  ── planning loop on Workers AI
         │              delegate_parallel    = runAgentTool fan-out
         ▼
 ClaudeCodeAgent (AIChatAgent facet, name = runId)   ── one per delegated task
-        │  getSandbox(env.Sandbox, sandboxIdFor(this.name))
+        │  sandboxFor(env, orchestratorName, this.name)  (destroyed on finish)
         ▼
 Sandbox container (@cloudflare/sandbox) — `claude -p` against the aywson checkout
         │  egress to api.anthropic.com is intercepted →
@@ -104,10 +115,8 @@ The sub-agent runs Claude in its own container and reports the diff (`src/server
 ```ts
 export class ClaudeCodeAgent extends AIChatAgent<Env> {
   async onChatMessage(_onFinish, options) {
-    const sandbox = getSandbox(this.env.Sandbox, sandboxIdFor(this.name), {
-      sleepAfter: "15m"
-    });
-    await this.ensureWorkspace(sandbox);
+    const sandbox = this.sandbox(); // one per (orchestrator, run id)
+    await this.ensureWorkspace(sandbox); // throws if the clone fails
     return runClaudeCode({
       sandbox,
       workDir,
@@ -121,10 +130,31 @@ export class ClaudeCodeAgent extends AIChatAgent<Env> {
   }
   // What the orchestrator sees — a compact summary, not the whole diff.
   protected getAgentToolOutput() {
-    /* files changed from this.lastResult */
+    /* files changed (or the error) from this.lastResult */
   }
 }
 ```
+
+The orchestrator tears each container down once its run is over:
+
+```ts
+export class CodingOrchestrator extends Think<Env> {
+  override async onAgentToolFinish(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ) {
+    // The orchestrator stopped waiting, but the child may still be working.
+    if (result.status === "interrupted" && result.childStillRunning !== false) {
+      return;
+    }
+    await sandboxFor(this.env, this.name, run.runId).destroy();
+  }
+}
+```
+
+An `interrupted` run (the orchestrator gave up waiting, e.g. after a restart) keeps its container while the child may still be working, and a run whose child failed to start never delivers a finish at all. So on every wake the orchestrator also sweeps its tracked containers (`releaseIdleSandboxes`) and destroys any whose child run is no longer `running`.
+
+A turn only counts as successful if the `claude` process exits with code 0 and every `git` command succeeds. A failed clone, a non-zero exit, or a log stream that ends with no exit event (what a container dying mid-turn looks like) is reported in the delegate's panel and marks the run as an error, so the orchestrator sees a failure rather than "no file changes".
 
 ## Durability & recovery
 
@@ -136,22 +166,24 @@ CodingOrchestrator (Think DO)        chat + planning loop      ← SQLite-backed
        └─ Sandbox (container DO)     claude -p + the checkout  ← disk is EPHEMERAL
 ```
 
-The two Durable Objects are SQLite-backed and recover well. The container is the weak link: its filesystem does not survive a sleep.
+The two Durable Objects are SQLite-backed and recover well. The container is the weak link: its filesystem does not survive a sleep, and the orchestrator destroys it on purpose once the run finishes.
 
 | Event                                    | DO state (SQLite)                                 | In-flight stream                          | Container disk                     |
 | ---------------------------------------- | ------------------------------------------------- | ----------------------------------------- | ---------------------------------- |
 | Client disconnect (tab close, nav)       | kept                                              | buffered in SQLite, replayed on reconnect | untouched                          |
 | DO hibernation (idle)                    | persisted; `onStart` rehydrates `claudeSessionId` | n/a                                       | warm if within `sleepAfter`        |
 | DO eviction mid-turn (deploy/restart)    | `chatRecovery` recovers the turn                  | tail lost; turn re-issued                 | keeps running (orphaned)           |
+| Run finishes (completed/error/aborted)   | unaffected; `lastResult` kept                     | n/a                                       | **destroyed** by the orchestrator  |
+| Run `interrupted`, child still working   | unaffected                                        | child keeps running                       | kept; destroyed by the wake sweep  |
 | Container sleep (`sleepAfter`, 15m idle) | unaffected                                        | n/a                                       | **gone** — fresh disk on next wake |
 
-- **Hibernation is fine.** Both agents use the WebSocket Hibernation API and set `chatRecovery = true`. We persist Claude's session id in `onStart`, and the last diff (`lastResult`) lives on the facet DO, so between-turn state is durable.
+- **Hibernation is fine.** Both agents use the WebSocket Hibernation API and always-on durable chat recovery. We persist Claude's session id and the last turn's outcome (`lastResult`, including any error) in the facet DO's storage, so between-turn state is durable.
 - **Mid-turn eviction is only partially recovered.** The sub-agent's "model call" is `runClaudeCode` — a loop reading `sandbox.streamProcessLogs(...)`. If the facet DO is evicted mid-turn, the `claude -p` process keeps running **orphaned** in the container and the tail of that turn is lost; recovery re-enters `onChatMessage` and starts a _new_ `claude -p --resume` rather than re-attaching to the live process (the framework's "child runtime is not live-tailable" case). Hence **resume is between turns, not mid-turn.**
 - **The container disk is ephemeral — the real gap.** After `sleepAfter` (15m idle) the container stops and Cloudflare Containers cold-start a clean filesystem from the image. Two things live only on that disk:
   1. the repo + Claude's edits — `ensureWorkspace` papers over the repo with an idempotent re-clone, but **uncommitted edits from prior turns are lost**;
   2. Claude's native session (`~/.claude/…`) — we persist the session _id_ and pass `--resume`, but the session _data_ was on the disk, so after a sleep `--resume` points at a session the fresh container has never seen.
 
-  Net: **within the 15-min warm window multi-turn works** (real `--resume`, edits accumulate); **across a sleep the session silently resets** to a clean checkout. Fine for the single-shot-style demo, a correctness gap for long-lived multi-turn coding.
+  Net: each delegated run is single-shot. Its container is destroyed when the run finishes (so finished runs don't hold `max_instances` slots or bill for 15 idle minutes), which means a later drill-in turn on the same sub-agent starts from a clean checkout and a session the fresh container has never seen. Fine for this demo, a correctness gap for long-lived multi-turn coding.
 
 ### Upgrade path (deferred — revisit later)
 
@@ -164,7 +196,8 @@ The two Durable Objects are SQLite-backed and recover well. The container is the
 - **Diffs render inline.** Each sub-agent appends its `git diff` to the message it streams, so the diff shows in that delegate's panel. The compact `getAgentToolOutput` (files changed) is what the orchestrator model reasons over, to keep its context small.
 - **Claude Code runs as root.** The Sandbox container is root, where the CLI refuses `--permission-mode bypassPermissions` unless it knows it's sandboxed — so the runtime sets `IS_SANDBOX=1`. If a turn ends with no output, the runtime surfaces the CLI's stderr / exit code in the delegate panel instead of silently showing "no changes".
 - **HTTPS egress interception.** Routing `https://api.anthropic.com` through the binding relies on the container platform terminating TLS for that host (`interceptHttps`); this works under local Docker. If it ever doesn't fire in your environment, fall back to setting `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` on the container directly (pointing at an AI Gateway URL).
-- **Concurrency** is bounded by `maxConcurrentAgentTools` (orchestrator) and the container `max_instances` (wrangler).
+- **Concurrency** is bounded by `maxConcurrentAgentTools` (orchestrator) and the container `max_instances` (wrangler). Containers are destroyed when their run finishes and when you clear the chat (`clearDelegatedRuns`), so slots free up immediately.
+- **Pinned versions.** The Dockerfile's `cloudflare/sandbox` base image tag matches the `@cloudflare/sandbox` version in `package.json`, and the Claude Code CLI is pinned because the runtime parses its `stream-json` output. Bump both deliberately.
 
 ## Related examples
 

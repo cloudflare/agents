@@ -63,9 +63,9 @@ a short, polite comment saying the repro-agent skipped it and why; begin it with
 ## 2. Understand the relevant code
 
 With the repo cloned at `$REPO_DIR`, read the relevant parts of
-`packages/agents`, `packages/think`, or the matching `think-starters/` template
-to understand the area the issue touches. Match the user's versions where it
-matters.
+`packages/agents`, `packages/think`, or the closest focused example under
+`examples/` to understand the area the issue touches. Match the user's versions
+where it matters.
 
 ## 3. Scaffold a minimal reproduction
 
@@ -84,9 +84,9 @@ Build the **smallest** project that can exhibit the bug — but every repro
 ships a **minimal Vite frontend** (next section) so a maintainer can click the
 deployed link and watch the issue happen in a UI. Keep the _backend_ tight:
 only the agent/worker code the bug needs, no auth, nothing unrelated. For
-think-related bugs, lift the relevant backend logic from the closest
-`think-starters/` template (e.g. `coding-agent`, `basic`) into the project
-shape below — the shape itself is non-negotiable.
+Think-related bugs, lift the relevant backend logic from the closest focused
+example into the project shape below, keeping an explicit Worker entry and
+Wrangler bindings — the shape itself is non-negotiable.
 
 If the bug needs extras (`@cloudflare/think`, `worker_loaders` for the execute
 tool, `ai`/KV bindings, …), add them to `package.json`, `wrangler.jsonc`, and

@@ -12,7 +12,6 @@ export class TestReadonlyAgent extends Agent<
   { count: number }
 > {
   initialState = { count: 0 };
-  static options = { hibernate: true };
 
   // Track state update attempts for testing
   stateUpdateAttempts: Array<{

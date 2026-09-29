@@ -398,6 +398,120 @@ describe("reconcileMessages — ID reconciliation", () => {
     ).toBeUndefined();
   });
 
+  it.each(["approval-requested", "approval-responded"])(
+    "keeps a later %s call that reuses a toolCallId pending",
+    (state) => {
+      const server = [
+        userMsg("u1", "first"),
+        toolAssistantMsg("srv-a1", "tc1", "output-available", {
+          input: { turn: 1 },
+          output: "old result"
+        })
+      ];
+      const client = [
+        userMsg("u1", "first"),
+        toolAssistantMsg("srv-a1", "tc1", "output-available", {
+          input: { turn: 1 },
+          output: "old result"
+        }),
+        userMsg("u2", "second"),
+        toolAssistantMsg("cli-a2", "tc1", state, { input: { turn: 2 } })
+      ];
+
+      const result = reconcileMessages(client, server);
+      const later = result[3].parts[0] as Record<string, unknown>;
+
+      expect(result.map((message) => message.id)).toEqual([
+        "u1",
+        "srv-a1",
+        "u2",
+        "cli-a2"
+      ]);
+      expect(later.state).toBe(state);
+      expect(later.output).toBeUndefined();
+      expect((result[1].parts[0] as Record<string, unknown>).output).toBe(
+        "old result"
+      );
+    }
+  );
+
+  it("does not carry an earlier denial onto a later approval that reuses the toolCallId", () => {
+    const server: ChatMessage[] = [
+      userMsg("u1", "first"),
+      {
+        id: "srv-a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-calc",
+            toolCallId: "tc1",
+            toolName: "calc",
+            state: "output-denied",
+            input: { turn: 1 },
+            approval: { id: "ap1", approved: false }
+          } as unknown as ChatMessage["parts"][number]
+        ]
+      } as ChatMessage
+    ];
+    const client = [
+      ...server,
+      userMsg("u2", "second"),
+      toolAssistantMsg("cli-a2", "tc1", "approval-responded", {
+        input: { turn: 2 }
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+    const later = result[3].parts[0] as Record<string, unknown>;
+
+    expect(result[3].id).toBe("cli-a2");
+    expect(later.state).toBe("approval-responded");
+    expect(later.approval).toBeUndefined();
+  });
+
+  it("resolves a pending approval on the row it claimed when the toolCallId is reused", () => {
+    // Two turns reuse tc1; the second turn's approval was denied server-side.
+    // A stale client that still shows approval-requested must pick up the
+    // denial from its own row, not the first turn's result.
+    const server: ChatMessage[] = [
+      userMsg("u1", "first"),
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { turn: 1 },
+        output: "old result"
+      }),
+      userMsg("u2", "second"),
+      {
+        id: "srv-a2",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-calc",
+            toolCallId: "tc1",
+            toolName: "calc",
+            state: "output-denied",
+            input: { turn: 2 },
+            approval: { id: "ap2", approved: false }
+          } as unknown as ChatMessage["parts"][number]
+        ]
+      } as ChatMessage
+    ];
+    const client = [
+      server[0],
+      server[1],
+      server[2],
+      toolAssistantMsg("srv-a2", "tc1", "approval-requested", {
+        input: { turn: 2 }
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+    const later = result[3].parts[0] as Record<string, unknown>;
+
+    expect(later.state).toBe("output-denied");
+    expect((later.approval as Record<string, unknown>).id).toBe("ap2");
+    expect(later.output).toBeUndefined();
+  });
+
   it("passes through when server state is empty", () => {
     const client = [userMsg("u1", "hi"), assistantMsg("cli-a1", "Hello")];
     const result = reconcileMessages(client, []);

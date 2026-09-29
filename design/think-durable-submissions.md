@@ -8,7 +8,7 @@ Durable programmatic chat turns for `Think`, exposed through
 Related:
 
 - [think.md](./think.md) — overall Think architecture
-- [think-sessions.md](./think-sessions.md) — Session-backed message storage
+- [sessions.md](./sessions.md) — Session-backed message storage
 - [docs/think/programmatic-submissions.md](../docs/think/programmatic-submissions.md) — user-facing API guide
 - [server-driven-messages.md](../docs/agents/server-driven-messages.md) — lighter-weight server message patterns
 - [workflows.md](../docs/agents/workflows.md) — durable multi-step orchestration

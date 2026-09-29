@@ -7,56 +7,54 @@ Receive webhook events from external services and route them to dedicated agent 
 ```typescript
 import { Agent, getAgentByName, routeAgentRequest } from "agents";
 
-// Agent that handles webhooks for a specific entity
+type GitHubWebhookPayload = {
+  repository?: { full_name?: string };
+};
+
+async function verifyGitHubWebhook(
+  rawBody: string,
+  signature: string | null,
+  secret: string
+): Promise<boolean> {
+  if (!signature || !/^sha256=[0-9a-f]{64}$/i.test(signature)) return false;
+
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["verify"]
+  );
+  const signatureBytes = Uint8Array.from(
+    signature.slice("sha256=".length).match(/.{2}/g) ?? [],
+    (byte) => Number.parseInt(byte, 16)
+  );
+
+  return crypto.subtle.verify(
+    "HMAC",
+    key,
+    signatureBytes,
+    encoder.encode(rawBody)
+  );
+}
+
 export class WebhookAgent extends Agent<Env> {
   async onRequest(request: Request): Promise<Response> {
     if (request.method !== "POST") {
       return new Response("Method not allowed", { status: 405 });
     }
 
-    // Verify the webhook signature
+    const rawBody = await request.text();
     const signature = request.headers.get("X-Hub-Signature-256");
-    const body = await request.text();
-
     if (
-      !(await this.verifySignature(body, signature, this.env.WEBHOOK_SECRET))
+      !(await verifyGitHubWebhook(rawBody, signature, this.env.WEBHOOK_SECRET))
     ) {
       return new Response("Invalid signature", { status: 401 });
     }
 
-    // Process the webhook payload
-    const payload = JSON.parse(body);
-    await this.processEvent(payload);
-
-    return new Response("OK", { status: 200 });
-  }
-
-  private async verifySignature(
-    payload: string,
-    signature: string | null,
-    secret: string
-  ): Promise<boolean> {
-    if (!signature) return false;
-
-    const encoder = new TextEncoder();
-    const key = await crypto.subtle.importKey(
-      "raw",
-      encoder.encode(secret),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"]
-    );
-
-    const signatureBytes = await crypto.subtle.sign(
-      "HMAC",
-      key,
-      encoder.encode(payload)
-    );
-    const expected = `sha256=${Array.from(new Uint8Array(signatureBytes))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("")}`;
-
-    return signature === expected;
+    await this.processEvent(JSON.parse(rawBody));
+    return new Response("OK");
   }
 
   private async processEvent(payload: unknown) {
@@ -64,19 +62,30 @@ export class WebhookAgent extends Agent<Env> {
   }
 }
 
-// Route webhooks to the right agent instance
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // Webhook endpoint: POST /webhooks/:entityId
-    if (url.pathname.startsWith("/webhooks/") && request.method === "POST") {
-      const entityId = url.pathname.split("/")[2];
-      const agent = await getAgentByName(env.WebhookAgent, entityId);
+    if (url.pathname === "/webhooks/github" && request.method === "POST") {
+      const rawBody = await request.clone().text();
+      const signature = request.headers.get("X-Hub-Signature-256");
+      if (
+        !(await verifyGitHubWebhook(rawBody, signature, env.WEBHOOK_SECRET))
+      ) {
+        return new Response("Invalid signature", { status: 401 });
+      }
+
+      const payload = JSON.parse(rawBody) as GitHubWebhookPayload;
+      const repository = payload.repository?.full_name;
+      if (!repository) {
+        return new Response("Missing repository", { status: 400 });
+      }
+
+      const agentName = repository.toLowerCase().replace(/\//g, "-");
+      const agent = await getAgentByName(env.WebhookAgent, agentName);
       return agent.fetch(request);
     }
 
-    // Default routing for WebSocket connections
     return (
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
@@ -131,7 +140,7 @@ Webhooks combined with agents enable powerful patterns where each external entit
 
 ## Routing Webhooks to Agents
 
-The key pattern is extracting an entity identifier from the webhook and using `getAgentByName()` to route to a dedicated agent instance.
+The key pattern is verifying the raw request before parsing it, then deriving the Agent identity from authenticated payload data. A body signature does not authenticate an unrelated URL segment or arbitrary header.
 
 ### Extract Entity from Payload
 
@@ -140,19 +149,23 @@ Most webhooks include an identifier in the payload:
 ```typescript
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/webhooks/github") {
-      const payload = await request.clone().json();
+      const rawBody = await request.clone().text();
+      const signature = request.headers.get("X-Hub-Signature-256");
+      if (
+        !(await verifyGitHubWebhook(rawBody, signature, env.WEBHOOK_SECRET))
+      ) {
+        return new Response("Invalid signature", { status: 401 });
+      }
 
-      // Extract entity ID from payload
-      const repoFullName = payload.repository?.full_name;
-      if (!repoFullName) {
+      const payload = JSON.parse(rawBody) as GitHubWebhookPayload;
+      const repository = payload.repository?.full_name;
+      if (!repository) {
         return new Response("Missing repository", { status: 400 });
       }
 
-      // Sanitize for use as agent name
-      const agentName = repoFullName.toLowerCase().replace(/\//g, "-");
-
-      // Route to dedicated agent
+      const agentName = repository.toLowerCase().replace(/\//g, "-");
       const agent = await getAgentByName(env.RepoAgent, agentName);
       return agent.fetch(request);
     }
@@ -160,69 +173,21 @@ export default {
 };
 ```
 
-### Extract Entity from URL
+### Validate Entity IDs in URLs
 
-Alternatively, include the entity ID in the webhook URL:
+A provider's body signature does not authenticate the webhook URL. If the URL includes an entity ID, compare it with the corresponding identity from the verified provider payload and reject a mismatch before calling `getAgentByName()`.
 
-```typescript
-// Webhook URL: https://your-worker.dev/webhooks/stripe/cus_123456
-if (url.pathname.startsWith("/webhooks/stripe/")) {
-  const customerId = url.pathname.split("/")[3]; // "cus_123456"
-  const agent = await getAgentByName(env.StripeAgent, customerId);
-  return agent.fetch(request);
-}
-```
+### Derive Slack Identity from the Verified Body
 
-### Extract Entity from Headers
-
-Some services include identifiers in headers:
-
-```typescript
-// Slack sends workspace info in headers
-const teamId = request.headers.get("X-Slack-Team-Id");
-if (teamId) {
-  const agent = await getAgentByName(env.SlackAgent, teamId);
-  return agent.fetch(request);
-}
-```
+Slack does not send an authenticated `X-Slack-Team-Id` routing header. Validate Slack's timestamped signature and replay window against the raw body, then read `team_id` from the verified event or form body.
 
 ## Signature Verification
 
-Always verify webhook signatures to ensure requests are authentic. Most providers use HMAC-SHA256.
+Always verify webhook signatures before trusting or processing the payload.
 
-### HMAC-SHA256 Pattern
+### GitHub HMAC-SHA256 Pattern
 
-```typescript
-async function verifySignature(
-  payload: string,
-  signature: string | null,
-  secret: string
-): Promise<boolean> {
-  if (!signature) return false;
-
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-
-  const signatureBytes = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    encoder.encode(payload)
-  );
-
-  const expected = `sha256=${Array.from(new Uint8Array(signatureBytes))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("")}`;
-
-  // Use timing-safe comparison in production
-  return signature === expected;
-}
-```
+The Quick Start's `verifyGitHubWebhook()` helper verifies GitHub's `sha256=<hex>` signature over the raw body with `crypto.subtle.verify()`. This format is GitHub-specific. Other providers use different signature encodings, signed inputs, timestamp checks, and replay protections; follow the provider documentation linked under [Common Webhook Providers](#common-webhook-providers).
 
 ### Provider-Specific Headers
 
@@ -238,7 +203,7 @@ async function verifySignature(
 
 ### The onRequest Handler
 
-Use `onRequest()` to handle incoming webhooks in your agent:
+Use `onRequest()` to handle incoming webhooks in your agent. If the Worker has not already verified the request, verify it before parsing the body. This example reuses the Quick Start's `verifyGitHubWebhook()` helper:
 
 ```typescript
 export class WebhookAgent extends Agent<Env, MyState> {
@@ -248,14 +213,16 @@ export class WebhookAgent extends Agent<Env, MyState> {
       return new Response("Method not allowed", { status: 405 });
     }
 
-    // 2. Get event type from headers
-    const eventType = request.headers.get("X-Event-Type");
+    // 2. Get the GitHub event type
+    const eventType = request.headers.get("X-GitHub-Event") ?? "unknown";
 
-    // 3. Verify signature
-    const signature = request.headers.get("X-Signature");
+    // 3. Verify the GitHub signature
+    const signature = request.headers.get("X-Hub-Signature-256");
     const body = await request.text();
 
-    if (!(await this.verifySignature(body, signature))) {
+    if (
+      !(await verifyGitHubWebhook(body, signature, this.env.WEBHOOK_SECRET))
+    ) {
       return new Response("Invalid signature", { status: 401 });
     }
 
@@ -462,35 +429,41 @@ fibers retain status, dedupe provider retries, and let `onFiberRecovered()` or
 
 ### Multi-Provider Routing
 
-Handle webhooks from multiple services in one worker:
+Keep provider-specific verification and parsing behind one typed seam. Its implementation must validate the raw request according to the provider documentation linked under [Common Webhook Providers](#common-webhook-providers), then derive `agentName` only from the verified body.
 
 ```typescript
+type VerifiedWebhook =
+  | { provider: "github"; agentName: string }
+  | { provider: "stripe"; agentName: string }
+  | { provider: "slack"; agentName: string };
+
+declare function verifyAndParseWebhook(
+  request: Request,
+  env: Env
+): Promise<VerifiedWebhook | null>;
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-
-    if (request.method === "POST") {
-      // GitHub webhooks
-      if (url.pathname.startsWith("/webhooks/github/")) {
-        const payload = await request.clone().json();
-        const repoName = payload.repository?.full_name?.replace("/", "-");
-        const agent = await getAgentByName(env.GitHubAgent, repoName);
-        return agent.fetch(request);
+    if (request.method === "POST" && url.pathname.startsWith("/webhooks/")) {
+      const verified = await verifyAndParseWebhook(request.clone(), env);
+      if (!verified) {
+        return new Response("Invalid signature", { status: 401 });
       }
 
-      // Stripe webhooks
-      if (url.pathname.startsWith("/webhooks/stripe/")) {
-        const payload = await request.clone().json();
-        const customerId = payload.data?.object?.customer;
-        const agent = await getAgentByName(env.StripeAgent, customerId);
-        return agent.fetch(request);
-      }
-
-      // Slack webhooks
-      if (url.pathname === "/webhooks/slack") {
-        const teamId = request.headers.get("X-Slack-Team-Id");
-        const agent = await getAgentByName(env.SlackAgent, teamId);
-        return agent.fetch(request);
+      switch (verified.provider) {
+        case "github":
+          return (
+            await getAgentByName(env.GitHubAgent, verified.agentName)
+          ).fetch(request);
+        case "stripe":
+          return (
+            await getAgentByName(env.StripeAgent, verified.agentName)
+          ).fetch(request);
+        case "slack":
+          return (
+            await getAgentByName(env.SlackAgent, verified.agentName)
+          ).fetch(request);
       }
     }
 
