@@ -605,9 +605,7 @@ function keepResolvedPauses(
     for (const [toolCallId, server] of stale) {
       parts = dropGenerationAfterToolCall(
         parts.map((part) =>
-          "toolCallId" in part && part.toolCallId === toolCallId
-            ? server
-            : part
+          "toolCallId" in part && part.toolCallId === toolCallId ? server : part
         ),
         toolCallId
       );

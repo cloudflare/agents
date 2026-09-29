@@ -985,14 +985,12 @@ describe("resolving a durable pause drops pending-state generation (#2054)", () 
       reused
     ]);
 
-    const durable = await agent.getDurableMessagesForTest();
+    const durable = (await agent.getDurableMessagesForTest()) as UIMessage[];
     const first = durable.find((message) => message.id === parked!.id);
     const later = durable.find((message) => message.id === "a-reused");
     expect(toolOutput(first, "dp1")).toBe("paused-exec: hello");
     expect(toolOutput(later, "dp1")).toMatchObject({ status: "paused" });
-    expect(generatedAfter(later, "dp1")).toEqual(
-      generatedAfter(parked, "dp1")
-    );
+    expect(generatedAfter(later, "dp1")).toEqual(generatedAfter(parked, "dp1"));
   });
 
   it("resolves a paused part outside the hydrated window in place", async () => {
