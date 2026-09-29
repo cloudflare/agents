@@ -1,0 +1,21 @@
+packages/agents/src/chat/react.tsx
+  s_314dda6a308d8f::t_e82ed096d775af 591-621,1326-1331,1552,1557-1570,1972-1977
+packages/agents/src/react-tests/reconnect-optimistic-send.test.tsx
+  s_314dda6a308d8f::t_b77f191865ab5e 1-228
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5934de3b4b2054445253ae79a623e55c36b5177b",
+  "prompts": {},
+  "sessions": {
+    "s_314dda6a308d8f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_033d9f2baffeE0KTspLGWBPG8f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Viswa M <wishymovies@gmail.com>"
+    }
+  }
+}

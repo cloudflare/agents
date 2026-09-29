@@ -1,0 +1,17 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0050d40858bf9344351cba66b350e020d46f6e2d",
+  "prompts": {},
+  "sessions": {
+    "s_feacbb8fc0c31f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0389e1ea3ffefDX9wv6ICmgnAT",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Viswa M <wishymovies@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,31 @@
+packages/agents/src/experimental/memory/session/providers/agent.ts
+  s_cce7a3af3047ce::t_b9b8e72215e569 16-19,535-541
+packages/agents/src/experimental/memory/session/providers/postgres.ts
+  s_cce7a3af3047ce::t_1e09f3e5f51c3f 26,269-272
+packages/agents/src/experimental/memory/session/session.ts
+  s_cce7a3af3047ce::t_959102d5fcaf6f 28-31,624-636
+packages/agents/src/tests/experimental/memory/session/provider.test.ts
+  s_cce7a3af3047ce::t_2a28a72c84b904 302-364
+packages/agents/src/tests/experimental/memory/session/session.test.ts
+  s_cce7a3af3047ce::t_52eb72866852fd 3,689-731
+packages/think/src/tests/agents/think-session.ts
+  s_cce7a3af3047ce::t_4e5c1ae8e3368e 1895-1903
+packages/think/src/tests/think-session.test.ts
+  s_cce7a3af3047ce::t_d8a37e75a5d7ff 904-928
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ffaafdc401a95f5de5b57679991cc4e86b535e21",
+  "prompts": {},
+  "sessions": {
+    "s_cce7a3af3047ce": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_03330b4beffeNRri2aEpCG5kg6",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Viswa M <wishymovies@gmail.com>"
+    }
+  }
+}

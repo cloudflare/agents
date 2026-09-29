@@ -1,0 +1,19 @@
+packages/agents/src/chat/ws-chat-transport.ts
+  s_feacbb8fc0c31f::t_0cb294039c8066 436-440,792-795,914-918
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7ce1697fa3bd45742509af36355e354b3fd4bbd0",
+  "prompts": {},
+  "sessions": {
+    "s_feacbb8fc0c31f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0389e1ea3ffefDX9wv6ICmgnAT",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Viswa M <wishymovies@gmail.com>"
+    }
+  }
+}

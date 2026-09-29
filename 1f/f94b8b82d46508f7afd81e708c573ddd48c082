@@ -1,0 +1,19 @@
+packages/agents/src/react-tests/reconnect-optimistic-send.test.tsx
+  s_314dda6a308d8f::t_08de811fe0700b 3-5,11-20,52-57,126-129,136-137,248-339
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1ff94b8b82d46508f7afd81e708c573ddd48c082",
+  "prompts": {},
+  "sessions": {
+    "s_314dda6a308d8f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_033d9f2baffeE0KTspLGWBPG8f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Viswa M <wishymovies@gmail.com>"
+    }
+  }
+}
