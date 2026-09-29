@@ -1,0 +1,23 @@
+.changeset/chat-agents-peer-025.md
+  s_46701a8326b811::t_78feaaa17d47e9 1-8
+packages/ai-chat/package.json
+  s_46701a8326b811::t_a4b4f5af7ca631 34
+packages/think/package.json
+  s_46701a8326b811::t_0e08ffe31b3e9e 51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a1b68dcbcaaa4e316ada1266424fe10a45ccaee8",
+  "prompts": {},
+  "sessions": {
+    "s_46701a8326b811": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "c5664ea7-9ff8-4ae0-b44f-b02cd748dcaa",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
