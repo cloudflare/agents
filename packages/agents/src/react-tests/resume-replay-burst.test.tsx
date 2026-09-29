@@ -223,7 +223,8 @@ describe("#1913 — resume replay burst", () => {
     // A second disconnect can arrive before the coalescing window closes.
     // Content already received must not be lost — it was visible before the
     // batch existed, because each chunk was enqueued on arrival and a closed
-    // stream still yields whatever it has queued.
+    // stream still yields whatever it has queued. The close itself still
+    // surfaces as an interrupted turn (#2013).
     const h = await mount("replay-close");
     await vi.waitFor(() =>
       expect(countType(h.sentMessages, RESUME_REQUEST)).toBe(1)
@@ -243,7 +244,7 @@ describe("#1913 — resume replay burst", () => {
       error: h.read("error")
     }).toEqual({
       chars: String(expectedChars(120)),
-      error: ""
+      error: "WebSocket closed mid-stream"
     });
   });
 

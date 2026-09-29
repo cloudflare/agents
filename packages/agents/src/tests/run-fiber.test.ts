@@ -1169,7 +1169,9 @@ describe("runFiber", () => {
     it("should emit fiber recovery events when recovery fails", async () => {
       const events: ObservabilityEvent[] = [];
       const unsubscribe = subscribe("fiber", (event) => events.push(event));
-      const agent = await freshManagedAgent("managed-recovery-events");
+      const agent = await freshManagedAgent(
+        `managed-recovery-events-${crypto.randomUUID()}`
+      );
 
       await agent.insertInterruptedManagedFiber(
         "managed-events",

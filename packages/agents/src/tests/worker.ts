@@ -10,11 +10,13 @@ import {
 export { CapabilityHarnessObject } from "./capabilities/harness.ts";
 import type { CapabilityHarnessObject } from "./capabilities/harness.ts";
 export {
+  ConcurrentStartObject,
   PlainLifecycleObject,
   RetryableStartObject,
   StatefulPlainObject
 } from "./capabilities/lifecycle.ts";
 import type {
+  ConcurrentStartObject,
   PlainLifecycleObject,
   RetryableStartObject,
   StatefulPlainObject
@@ -116,6 +118,7 @@ export {
   TestMigrationAgent,
   TestSessionAgent,
   TestWaitConnectionsAgent,
+  TestNativeRpcAgent,
   RoutingOwnerAgent,
   RoutedChatAgent,
   TestSubAgentParent,
@@ -202,6 +205,7 @@ import type {
   TestMigrationAgent,
   TestSessionAgent,
   TestWaitConnectionsAgent,
+  TestNativeRpcAgent,
   RoutingOwnerAgent,
   RoutedChatAgent,
   TestSubAgentParent,
@@ -220,6 +224,7 @@ export type Env = {
   CapabilityHarnessObject: DurableObjectNamespace<CapabilityHarnessObject>;
   PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
   RetryableStartObject: DurableObjectNamespace<RetryableStartObject>;
+  ConcurrentStartObject: DurableObjectNamespace<ConcurrentStartObject>;
   StatefulPlainObject: DurableObjectNamespace<StatefulPlainObject>;
   ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
   SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;
@@ -278,6 +283,7 @@ export type Env = {
   TestMigrationAgent: DurableObjectNamespace<TestMigrationAgent>;
   TestSessionAgent: DurableObjectNamespace<TestSessionAgent>;
   TestWaitConnectionsAgent: DurableObjectNamespace<TestWaitConnectionsAgent>;
+  TestNativeRpcAgent: DurableObjectNamespace<TestNativeRpcAgent>;
   RoutingOwnerAgent: DurableObjectNamespace<RoutingOwnerAgent>;
   RoutedChatAgent: DurableObjectNamespace<RoutedChatAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
