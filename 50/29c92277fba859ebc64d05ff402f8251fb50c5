@@ -1,0 +1,35 @@
+.changeset/cold-rpc-starts-think.md
+  s_d0e5bf68a766f9::t_d9c057df7b86e4 6
+design/rfc-cold-rpc-initialization.md
+  s_d0e5bf68a766f9::t_2e9ebf120e0577 55-60
+packages/agents/src/lifecycle/UPSTREAM.md
+  s_d0e5bf68a766f9::t_35891e5d4fe6a1 29-32
+packages/agents/src/lifecycle/durable-object-lifecycle.ts
+  s_d0e5bf68a766f9::t_52b637963aa00c 1,121-123,655-657,660,663-665,678-695,697,707-708,710-726
+packages/agents/src/tests/lifecycle/startup.test.ts
+  s_d0e5bf68a766f9::t_5812f2d08b6ae0 77-123
+packages/agents/src/tests/worker.ts
+  s_d0e5bf68a766f9::t_0ac871d154042a 13,19,227
+packages/agents/src/tests/wrangler.jsonc
+  s_d0e5bf68a766f9::t_42ba70769a3850 31-34,438
+design/durable-object-lifecycle.md
+  s_d0e5bf68a766f9::t_089b7efe716568 28-36,167-180
+packages/agents/src/tests/capabilities/lifecycle.ts
+  s_d0e5bf68a766f9::t_e49faa8af9d44f 696-755
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5029c92277fba859ebc64d05ff402f8251fb50c5",
+  "prompts": {},
+  "sessions": {
+    "s_d0e5bf68a766f9": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "949d5d10-4895-4693-818e-5b6d232ed34a",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
