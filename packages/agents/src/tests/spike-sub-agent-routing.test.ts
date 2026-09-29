@@ -148,6 +148,60 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     ws.close();
   });
 
+  it("establishes a WebSocket through two nested facet hops", async () => {
+    // Regression for #2026. The root owns the physical socket and
+    // remembers the whole route in a private header. That header used
+    // to be copied into every descendant's forwarded request, so the
+    // leaf stored its *ancestor's* route as its own and re-read the
+    // first hop as one of its own children — creating facets
+    // recursively until workerd rejected the chain with "Facet nesting
+    // depth limit exceeded". The upgrade returned 101 and the socket
+    // then died with 1011 during session setup. One hop passed only
+    // because the leaf's self-strip happened to consume its own segment.
+    const parent = uniqueName();
+    const middle = uniqueName();
+    const leaf = uniqueName();
+
+    const ws = await openWS(
+      parent,
+      "spike-sub-child",
+      middle,
+      `/sub/spike-sub-child/${leaf}`
+    );
+
+    ws.send("hello");
+    const [reply] = await collectMessages(ws, 1);
+
+    expect(reply).toBe(`pong:${leaf}:hello`);
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+
+    ws.close();
+  });
+
+  it("delivers a leaf broadcast to the root-owned socket across two hops", async () => {
+    // The reply travels leaf → middle → root over per-hop RPC bridges.
+    // Covers `broadcast()`, which is sync by contract and so cannot be
+    // awaited by its caller, across more than one hop (#2026).
+    const parent = uniqueName();
+    const middle = uniqueName();
+    const leaf = uniqueName();
+
+    const ws = await openWS(
+      parent,
+      "spike-sub-child",
+      middle,
+      `/sub/spike-sub-child/${leaf}`
+    );
+
+    ws.send("broadcast:hello");
+    const [reply] = await collectMessages(ws, 1);
+
+    expect(reply).toBe(`pong:${leaf}:broadcast:hello`);
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+
+    ws.close();
+  });
+
   it("this.broadcast(...) inside a facet reaches the facet's own WS clients", async () => {
     // Regression: an earlier guard in Agent.broadcast() no-op'd when
     // `_isFacet` was set, assuming facets had no direct client
