@@ -1,0 +1,23 @@
+packages/ai-chat/src/index.ts
+  s_2569688183b285::t_d8793eca3eb3ab 6390-6392,6394-6395,6397-6399,6401-6403,6407,6599-6601,6603-6618,6731
+packages/think/src/think.ts
+  s_2569688183b285::t_1317fbe6a596db 16441,16443-16445,16478,16480-16486,16503,16565,16575-16580,16585-16586,16588-16590,16592,16594
+.changeset/quiet-tools-reconcile.md
+  s_2569688183b285::t_58e28d5d165939 9,13-19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "bb33c3b0a03c791c1e60b05f7a017d56728f01ce",
+  "prompts": {},
+  "sessions": {
+    "s_2569688183b285": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "b40acb03-72f6-402b-bbba-e37b905e09f9",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
