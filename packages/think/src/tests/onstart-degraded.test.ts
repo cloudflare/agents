@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { getServerByName } from "partyserver";
+import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import { subscribe } from "agents/observability";
 import type {
@@ -38,7 +38,7 @@ function uniqueName(prefix: string): string {
 describe("Think onStart degradation (#1710)", () => {
   describe("scheduled-task reconcile failure", () => {
     it("agent starts and serves despite getScheduledTasks() throwing", async () => {
-      const agent = (await getServerByName(
+      const agent = (await getAgentByName(
         env.ThinkOnStartReconcileFailureAgent,
         uniqueName("reconcile-fail")
       )) as unknown as ReconcileFailureStub;
@@ -70,7 +70,7 @@ describe("Think onStart degradation (#1710)", () => {
       });
 
       try {
-        const agent = (await getServerByName(
+        const agent = (await getAgentByName(
           env.ThinkOnStartReconcileFailureAgent,
           uniqueName("reconcile-fail-event")
         )) as unknown as ReconcileFailureStub;
@@ -89,7 +89,7 @@ describe("Think onStart degradation (#1710)", () => {
     });
 
     it("chat still works on the degraded agent", async () => {
-      const agent = (await getServerByName(
+      const agent = (await getAgentByName(
         env.ThinkOnStartReconcileFailureAgent,
         uniqueName("reconcile-fail-chat")
       )) as unknown as ReconcileFailureStub;
@@ -106,7 +106,7 @@ describe("Think onStart degradation (#1710)", () => {
 
   describe("transcript hydration failure (simulated SQLITE_NOMEM)", () => {
     it("agent starts with an empty in-memory view instead of bricking", async () => {
-      const agent = (await getServerByName(
+      const agent = (await getAgentByName(
         env.ThinkOnStartHydrationFailureAgent,
         uniqueName("hydration-fail")
       )) as unknown as HydrationFailureStub;
@@ -123,7 +123,7 @@ describe("Think onStart degradation (#1710)", () => {
     });
 
     it("persistence keeps working and a later sync recovers the history", async () => {
-      const agent = (await getServerByName(
+      const agent = (await getAgentByName(
         env.ThinkOnStartHydrationFailureAgent,
         uniqueName("hydration-fail-recover")
       )) as unknown as HydrationFailureStub;

@@ -1,10 +1,10 @@
 import { env } from "cloudflare:workers";
-import { getServerByName } from "partyserver";
+import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { ThinkRecoveryTestAgent } from "./agents/think-session";
 
 async function freshRecoveryAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.ThinkRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkRecoveryTestAgent>,
     name
   );
@@ -79,5 +79,50 @@ describe("agent-tool rebind: no-op safety on non-child recovery", () => {
     expect(
       await agent.resolveAgentToolRunForRequestForTest("recovery-req")
     ).toBe("run-new");
+  });
+
+  it("migrates a pre-upgrade child-run table before rebinding (fresh isolate)", async () => {
+    const agent = await freshRecoveryAgent(
+      `rebind-legacy-table-${crypto.randomUUID()}`
+    );
+
+    // Created by an older release: no `event_delivery` column, and this
+    // isolate has not run the child-run ensure yet.
+    await agent.seedLegacyAgentToolChildRunForTest("run-legacy", "old-req");
+
+    await agent.rebindAgentToolChildRunRequestIdForTest("recovery-req");
+
+    expect(await agent.getAgentToolChildRunRequestIdForTest("run-legacy")).toBe(
+      "recovery-req"
+    );
+  });
+
+  it("drops a terminal-only run from suppression once its recovered turn settles", async () => {
+    const agent = await freshRecoveryAgent(
+      `rebind-terminal-only-${crypto.randomUUID()}`
+    );
+
+    const result = await agent.terminalOnlyRunAfterRecoveredTurnForTest(
+      "run-terminal",
+      "recovery-req"
+    );
+
+    expect(result).toEqual({ afterRebind: true, afterFinalize: false });
+  });
+});
+
+describe("chat-turn recovery evidence", () => {
+  it("does not treat a settled chat-turn fiber row as recoverable (#2363)", async () => {
+    const agent = await freshRecoveryAgent(
+      `settled-fiber-evidence-${crypto.randomUUID()}`
+    );
+
+    // A settled fiber whose row delete failed keeps `completed_at`.
+    expect(
+      await agent.chatTurnFiberEvidenceForTest("settled-req", true)
+    ).toEqual({ recoverable: false, freshEvidence: false });
+    expect(await agent.chatTurnFiberEvidenceForTest("live-req", false)).toEqual(
+      { recoverable: true, freshEvidence: true }
+    );
   });
 });

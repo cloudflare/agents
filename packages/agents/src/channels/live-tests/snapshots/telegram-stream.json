@@ -1,0 +1,9 @@
+{
+  "duringStream": [[], [], []],
+  "afterStream": [
+    {
+      "text": "Cloudflare Channels live streaming smoke test."
+    }
+  ],
+  "previews": 3
+}

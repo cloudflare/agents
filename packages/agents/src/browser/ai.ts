@@ -1,4 +1,4 @@
-import { tool, type ToolSet } from "ai";
+import { tool, type JSONValue, type ToolSet } from "ai";
 import { z } from "zod";
 import {
   createCodemodeRuntime,
@@ -6,6 +6,7 @@ import {
   truncateResult,
   type CodemodeRuntimeHandle
 } from "@cloudflare/codemode";
+import { redactBase64Payloads } from "../core/base64-redaction";
 import { __DO_NOT_USE_WILL_BREAK__agentContext as agentContext } from "../internal_context";
 import type { BrowserBinding } from "./browser-run";
 import {
@@ -107,8 +108,10 @@ export interface CreateBrowserToolsOptions {
    * `browser_execute` tool.
    *
    * Enabled by default whenever a Browser Run `browser` binding is available
-   * (they share it). Pass an object to configure them, or `false` to disable.
-   * The Quick Action binding defaults to `browser`; override it via
+   * (they share it), except when `session.browser` selects Kitesurf because
+   * the binding RPC cannot select that engine. Pass `true` or an object to
+   * explicitly add Chromium Quick Actions alongside Kitesurf, or `false` to
+   * disable them. The Quick Action binding defaults to `browser`; override it via
    * `quickActions.browser`. When only `cdpUrl` is set (no binding), the
    * defaults are skipped silently — pass `quickActions: { browser }` to force
    * them.
@@ -140,6 +143,83 @@ export interface BrowserRuntime {
 
 let didWarnExperimental = false;
 let didDebugQuickActionSkip = false;
+
+interface BrowserScreenshotOutput {
+  type: "browser_screenshot";
+  mediaType: string;
+  data: string;
+}
+
+function browserScreenshotOutput(
+  value: unknown
+): BrowserScreenshotOutput | null {
+  const outer =
+    typeof value === "object" && value !== null
+      ? (value as Record<string, unknown>)
+      : null;
+  const result =
+    outer && typeof outer.result === "object" && outer.result !== null
+      ? (outer.result as Record<string, unknown>)
+      : outer;
+  if (
+    result?.type !== "browser_screenshot" ||
+    typeof result.mediaType !== "string" ||
+    typeof result.data !== "string"
+  ) {
+    return null;
+  }
+  return result as unknown as BrowserScreenshotOutput;
+}
+
+function transformBrowserResult(value: unknown): unknown {
+  // Keep canonical screenshot output intact for UIMessage persistence and the
+  // chat renderer. Other results are redacted before truncation so a nested
+  // binary payload cannot become a large serialized preview.
+  return browserScreenshotOutput(value)
+    ? value
+    : truncateResult(redactBase64Payloads(value));
+}
+
+function browserExecuteModelOutput(
+  output: unknown
+): { type: "text"; value: string } | { type: "json"; value: JSONValue } {
+  const screenshot = browserScreenshotOutput(output);
+  if (screenshot) {
+    const approximateBytes = Math.floor((screenshot.data.length * 3) / 4);
+    return {
+      type: "text",
+      value: `Screenshot captured successfully (${screenshot.mediaType}, approximately ${approximateBytes.toLocaleString()} bytes); the image is kept for the UI and omitted here.`
+    };
+  }
+
+  // `calls` is the durable audit log; like the codemode tool's own projection,
+  // it stays on the persisted part and never enters the model's context, and
+  // the sandbox `logs` are bounded like a result.
+  const modelFacing =
+    typeof output === "object" && output !== null && !Array.isArray(output)
+      ? (({ calls: _calls, ...rest }: { calls?: unknown; logs?: unknown }) => ({
+          ...rest,
+          ...(Array.isArray(rest.logs)
+            ? { logs: truncateResult(rest.logs) }
+            : {})
+        }))(output)
+      : output;
+  const redacted = redactBase64Payloads(modelFacing);
+  try {
+    const serialized = JSON.stringify(redacted);
+    return {
+      type: "json",
+      value:
+        serialized === undefined ? null : (JSON.parse(serialized) as JSONValue)
+    };
+  } catch {
+    return {
+      type: "text",
+      value:
+        "Browser execution completed, but its result could not be serialized for model context."
+    };
+  }
+}
 
 /**
  * The Durable Object state to build the runtime in: the explicit `ctx` if
@@ -231,20 +311,40 @@ export function createBrowserRuntime(
     }),
     connectors: [connector],
     name: options.name ?? "browser",
-    transformResult: truncateResult
+    transformResult: transformBrowserResult
   });
 
-  const tools: ToolSet = { browser_execute: runtime.tool() };
+  // `connectorOptions` drops `session` when a custom endpoint is used, so the
+  // connector is plain Chromium there whatever the session options say.
+  const isKitesurf = !options.cdpUrl && options.session?.browser === "kitesurf";
+  const browserExecute = runtime.tool({
+    connectorHints: {
+      cdp: isKitesurf
+        ? 'Kitesurf one-shot Browser CDP. Call codemode.describe("cdp") for connector types and Kitesurf execution rules. codemode.search indexes connector methods and snippets, not underlying CDP commands. Complete the task in one execution and do not pause. Return screenshots as { type: "browser_screenshot", mediaType: "image/png", data: screenshot.data }.'
+        : "Browser CDP. Return screenshots as { type: 'browser_screenshot', mediaType: 'image/png', data: screenshot.data }; the UI keeps the image while the model receives a compact summary."
+    }
+  });
+  const tools: ToolSet = {
+    browser_execute: {
+      ...browserExecute,
+      toModelOutput: ({ output }: { output: unknown }) =>
+        browserExecuteModelOutput(output)
+    }
+  };
 
-  // Quick Actions ride the same `browser` binding, so they are on by default.
+  // Quick Actions ride the same `browser` binding, so they are on by default
+  // for Chromium. The binding RPC cannot select Kitesurf, so selecting
+  // Kitesurf disables the defaults rather than silently adding Chromium tools.
+  // Callers can still request a mixed-engine toolset explicitly.
+  const enableQuickActions =
+    options.quickActions !== false &&
+    (!isKitesurf || options.quickActions !== undefined);
   // `env.BROWSER` satisfies both the CDP `BrowserBinding` (fetch) and the
   // `QuickActionBinding` (quickAction) surfaces; our narrower option type only
   // sees the former, so reuse it here unless an explicit binding wins.
-  if (options.quickActions !== false) {
+  if (enableQuickActions) {
     const qa =
-      options.quickActions == null || options.quickActions === true
-        ? {}
-        : options.quickActions;
+      typeof options.quickActions === "object" ? options.quickActions : {};
     const quickActionBrowser =
       qa.browser ??
       (options.browser as unknown as QuickActionBinding | undefined);

@@ -17,7 +17,7 @@ env:
 
 jobs:
   ci:
-    timeout-minutes: 20
+    timeout-minutes: 35
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -34,7 +34,7 @@ jobs:
 
       - name: Get Playwright version
         id: playwright-version
-        run: echo "version=$(node -p 'require(\"playwright/package.json\").version')" >> $GITHUB_OUTPUT
+        run: echo "version=$(node -p "require('playwright/package.json').version")" >> $GITHUB_OUTPUT
 
       - name: Cache Playwright browsers
         uses: actions/cache@v5

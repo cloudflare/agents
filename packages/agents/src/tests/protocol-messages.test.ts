@@ -1,5 +1,7 @@
-import { exports } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
+import { getAgentByName } from "../index";
 import { MessageType } from "../types";
 
 // ── Message types ─────────────────────────────────────────────────────
@@ -163,6 +165,35 @@ describe("Protocol Messages", () => {
       expect(types).toContain(MessageType.CF_AGENT_MCP_SERVERS);
     }, 10000);
 
+    it("flags the identity frame when the state frame follows it (#2268)", async () => {
+      const { ws } = await connectWS(`${BASE}/${crypto.randomUUID()}`);
+      const messages = await collectMessages(ws, 500);
+      ws.close();
+
+      expect(messages[0]).toMatchObject({
+        type: MessageType.CF_AGENT_IDENTITY,
+        stateFollows: true
+      });
+      expect(messages[1]).toMatchObject({
+        type: MessageType.CF_AGENT_STATE,
+        state: { count: 0 }
+      });
+    }, 10000);
+
+    it("does not flag the identity frame of an agent with no state (#2268)", async () => {
+      const { ws } = await connectWS(
+        `/agents/hooking-sub-agent-parent/${crypto.randomUUID()}`
+      );
+      const messages = await collectMessages(ws, 500);
+      ws.close();
+
+      expect(messages[0]).toMatchObject({
+        type: MessageType.CF_AGENT_IDENTITY
+      });
+      expect(messages[0]).not.toHaveProperty("stateFollows");
+      expect(protocolTypes(messages)).not.toContain(MessageType.CF_AGENT_STATE);
+    }, 10000);
+
     it("should send exactly one initial state message to protocol-enabled connections", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectWS(`${BASE}/${room}`);
@@ -186,8 +217,10 @@ describe("Protocol Messages", () => {
       const room = crypto.randomUUID();
       const { ws: existing } = await connectProtocol(room);
 
-      const resetMsg = await sendRpc(existing, "resetStateForLazyInitTest");
+      const resetMsg = await sendRpc(existing, "deleteStateForLazyInitTest");
       expect(resetMsg.success).toBe(true);
+      const agent = await getAgentByName(env.TestProtocolMessagesAgent, room);
+      await evictDurableObject(agent);
 
       const existingStatePromise = waitForMessage<StateMessage>(
         existing,

@@ -34,6 +34,7 @@
     ]
   },
   "worker_loaders": [{ "binding": "LOADER" }],
+  "vars": { "DEV_USER": "assistant-routing-test-user" },
   "main": "worker.ts",
   "migrations": [
     {

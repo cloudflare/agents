@@ -24,7 +24,7 @@ If the client and server share the origin, the browser will send cookies during 
 
 ### Cross origin
 
-Cookies do not help across origins. Pass credentials in the URL query, then verify on the server.
+Cross-origin cookie behavior depends on the cookie's domain and `SameSite` attributes, whether the two origins are same-site, and browser third-party cookie policy. If you cannot rely on a cookie, pass a short-lived credential in the URL query and verify it on the server.
 
 ## Usage examples
 
@@ -79,50 +79,22 @@ function ChatComponent() {
 
 ### JWT refresh pattern
 
-Refresh the token when the connection fails due to authentication error.
+`useAgent` resolves an async query before connecting and reevaluates it when reconnecting. Return a fresh, short-lived application token each time:
 
 ```ts
 import { useAgent } from "agents/react";
-import { useCallback, useEffect } from "react";
+import { useCallback } from "react";
 
-const validateToken = async (token: string) => {
-  // An example of how you might implement this
-  const res = await fetch(`${API_HOST}/api/users/me`, {
-    headers: {
-      Authorization: `Bearer ${token}`
-    }
-  });
-
-  return res.ok;
-};
-
-const refreshToken = () => {
-  // Depends on implementation:
-  // - You could use a longer-lived token to refresh the expired token
-  // - De-auth the app and prompt the user to log in manually
-  // - ...
-};
+declare function getShortLivedAccessToken(): Promise<string>;
 
 function useJWTAgent(agentName: string) {
   const asyncQuery = useCallback(async () => {
-    let token = localStorage.getItem("jwt");
-
-    // If no token OR the token is no longer valid
-    // request a fresh token
-    if (!token && !(await validateToken(token))) {
-      token = await refreshToken();
-      localStorage.setItem("jwt", token);
-    }
-
-    return {
-      token
-    };
+    return { token: await getShortLivedAccessToken() };
   }, []);
 
-  const agent = useAgent({
+  return useAgent({
     agent: agentName,
-    query: asyncQuery,
-    queryDeps: [] // Run on mount
+    query: asyncQuery
   });
 }
 ```

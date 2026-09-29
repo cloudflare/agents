@@ -52,7 +52,7 @@ function isWebSocketUpgrade(c: Context): boolean {
 
 /**
  * Handles WebSocket upgrade requests
- * Returns a WebSocket upgrade response if successful, null otherwise
+ * Returns matched HTTP responses unchanged and null only when no Agent route matches
  */
 async function handleWebSocketUpgrade<E extends Env>(
   c: Context<E>,
@@ -64,8 +64,12 @@ async function handleWebSocketUpgrade<E extends Env>(
     options
   );
 
-  if (!response?.webSocket) {
+  if (response === null) {
     return null;
+  }
+
+  if (!response.webSocket) {
+    return response;
   }
 
   return new Response(null, {

@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { expect } from "vitest";
 import worker from "../worker";
-import { MCPClientConnection } from "../../mcp/client-connection";
+import { MCPClientConnection } from "../../mcp/client/connection";
 
 /**
  * Common test messages for MCP protocol testing

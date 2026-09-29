@@ -140,17 +140,12 @@ describe("waitForConnections E2E", () => {
     expect(result.connectionStates["oauth-server"]).toBe("authenticating");
   });
 
-  describe("true hibernation round-trip (onStart lifecycle)", () => {
+  describe("Agent startup restoration after eviction", () => {
     it("should settle connections when waiting after onStart", async () => {
-      const agentId = env.TestWaitConnectionsAgent.idFromName(
-        "hibernation-roundtrip"
-      );
-      const stub = env.TestWaitConnectionsAgent.get(agentId);
+      const name = "hibernation-roundtrip";
+      let stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
 
-      // Boot the agent initially (creates tables, etc.)
-      await stub.__unsafe_ensureInitialized();
-
-      // Insert an MCP server row (simulating state from before hibernation)
+      // Insert an MCP server row (simulating state from before hibernation).
       await stub.insertMcpServer(
         "roundtrip-server",
         "Round Trip Server",
@@ -159,27 +154,21 @@ describe("waitForConnections E2E", () => {
         null
       );
 
-      // Simulate hibernation: reset in-memory state so onStart re-restores
-      await stub.resetRestoredFlag();
-
-      // Full round-trip: onStart → restoreConnectionsFromStorage (fires
-      // _trackConnection internally) → waitForConnections
-      const result = await stub.hibernationRoundTrip(5000);
+      // Eviction tears down the instance while retaining SQLite. Resolving the
+      // Agent again runs the real lifecycle capability startup path.
+      await evictDurableObject(stub);
+      stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+      const result = await stub.waitAndReport(5000);
 
       expect(result.connectionIds).toContain("roundtrip-server");
-      // Connection should have settled (failed, since no real server)
-      // — NOT still "connecting"
       const state = result.connectionStates["roundtrip-server"];
       expect(state).toBeDefined();
       expect(state).not.toBe("connecting");
     });
 
     it("should show race condition without waiting after onStart", async () => {
-      const agentId =
-        env.TestWaitConnectionsAgent.idFromName("hibernation-race");
-      const stub = env.TestWaitConnectionsAgent.get(agentId);
-
-      await stub.__unsafe_ensureInitialized();
+      const name = "hibernation-race";
+      let stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
 
       await stub.insertMcpServer(
         "race-roundtrip-server",
@@ -189,26 +178,20 @@ describe("waitForConnections E2E", () => {
         null
       );
 
-      await stub.resetRestoredFlag();
-
-      // Round-trip WITHOUT waiting — demonstrates the race condition
-      const result = await stub.hibernationRoundTripNoWait();
+      await evictDurableObject(stub);
+      stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+      const result = await stub.reportWithoutWait();
 
       expect(result.connectionIds).toContain("race-roundtrip-server");
-      // Without waiting, connection should still be "connecting"
       expect(result.connectionStates["race-roundtrip-server"]).toBe(
         "connecting"
       );
     });
 
     it("should handle mixed server types through onStart lifecycle", async () => {
-      const agentId =
-        env.TestWaitConnectionsAgent.idFromName("hibernation-mixed");
-      const stub = env.TestWaitConnectionsAgent.get(agentId);
+      const name = "hibernation-mixed";
+      let stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
 
-      await stub.__unsafe_ensureInitialized();
-
-      // Insert one regular server and one OAuth server
       await stub.insertMcpServer(
         "regular-server",
         "Regular Server",
@@ -224,17 +207,13 @@ describe("waitForConnections E2E", () => {
         "https://auth.example.com/authorize"
       );
 
-      await stub.resetRestoredFlag();
-
-      // onStart → restore → wait: OAuth server is not tracked as pending,
-      // regular server's promise settles via allSettled
-      const result = await stub.hibernationRoundTrip(5000);
+      await evictDurableObject(stub);
+      stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
+      const result = await stub.waitAndReport(5000);
 
       expect(result.connectionIds).toContain("regular-server");
       expect(result.connectionIds).toContain("oauth-server");
-      // Regular server should have settled
       expect(result.connectionStates["regular-server"]).not.toBe("connecting");
-      // OAuth server should be in authenticating state
       expect(result.connectionStates["oauth-server"]).toBe("authenticating");
     });
 

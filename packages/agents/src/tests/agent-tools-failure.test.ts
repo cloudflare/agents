@@ -1,4 +1,6 @@
+import { valibotSchema } from "@ai-sdk/valibot";
 import { describe, expect, it } from "vitest";
+import * as v from "valibot";
 import { z } from "zod";
 import { agentTool } from "../agent-tools";
 import { __DO_NOT_USE_WILL_BREAK__agentContext as agentContext } from "../internal_context";
@@ -8,6 +10,8 @@ import type {
   RunAgentToolOptions,
   RunAgentToolResult
 } from "../agent-tool-types";
+
+const answerSchema = valibotSchema(v.object({ answer: v.number() }));
 
 /**
  * Drive `agentTool().execute` against a stubbed `runAgentTool` so we can assert
@@ -107,6 +111,71 @@ describe("agentTool failure envelope", () => {
     });
 
     expect(out).toBe("all done");
+  });
+
+  it("validates structured output with a Valibot adapter", async () => {
+    const stubAgent = {
+      async runAgentTool(): Promise<RunAgentToolResult> {
+        return {
+          runId: "r5",
+          agentType: "Child",
+          status: "completed",
+          output: { answer: 42 }
+        };
+      }
+    };
+    const subAgent = agentTool(class {} as unknown as ChatCapableAgentClass, {
+      description: "Run a sub-agent",
+      inputSchema: z.object({ task: z.string() }),
+      outputSchema: answerSchema
+    });
+    const execute = subAgent.execute as (input: {
+      task: string;
+    }) => Promise<unknown>;
+
+    const output = await agentContext.run(
+      {
+        agent: stubAgent,
+        connection: undefined,
+        request: undefined,
+        email: undefined
+      },
+      () => execute({ task: "calculate" })
+    );
+
+    expect(output).toEqual({ answer: 42 });
+  });
+
+  it("rejects structured output that fails flexible schema validation", async () => {
+    const subAgent = agentTool(class {} as unknown as ChatCapableAgentClass, {
+      description: "Run a sub-agent",
+      inputSchema: z.object({ task: z.string() }),
+      outputSchema: answerSchema
+    });
+    const execute = subAgent.execute as (input: {
+      task: string;
+    }) => Promise<unknown>;
+
+    await expect(
+      agentContext.run(
+        {
+          agent: {
+            async runAgentTool(): Promise<RunAgentToolResult> {
+              return {
+                runId: "r6",
+                agentType: "Child",
+                status: "completed",
+                output: { answer: "not a number" }
+              };
+            }
+          },
+          connection: undefined,
+          request: undefined,
+          email: undefined
+        },
+        () => execute({ task: "calculate" })
+      )
+    ).rejects.toThrow('Expected number but received "not a number"');
   });
 
   it("derives a stable runId from the tool call id so recovery re-attaches instead of re-running (#1630)", async () => {

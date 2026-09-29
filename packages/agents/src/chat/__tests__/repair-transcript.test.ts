@@ -105,6 +105,72 @@ describe("repairInterruptedToolParts", () => {
     expect(part.state).toBe("approval-responded");
   });
 
+  describe("repairApprovalResponded (#2382)", () => {
+    function approvalMsg(approved: boolean): ChatMessage {
+      return toolMsg("a1", {
+        type: "tool-deploy",
+        toolCallId: "tc1",
+        toolName: "deploy",
+        state: "approval-responded",
+        input: { env: "prod" },
+        approval: { id: "ap1", approved }
+      });
+    }
+    const thanks = {
+      id: "u2",
+      role: "user",
+      parts: [{ type: "text", text: "thanks" }]
+    } as ChatMessage;
+
+    function repairApprovals(messages: ChatMessage[]) {
+      return repairInterruptedToolParts(messages, {
+        repairPart: flipToError,
+        repairApprovalResponded: true
+      });
+    }
+
+    it("repairs an approved call a later message moved past", () => {
+      const result = repairApprovals([approvalMsg(true), thanks]);
+      expect(result.removedToolCalls).toBe(1);
+      expect(result.toolCallIds).toEqual(["tc1"]);
+      const part = result.messages[0].parts[0] as Record<string, unknown>;
+      expect(part.state).toBe("output-error");
+      expect(part.input).toEqual({ env: "prod" });
+      expect(result.messages[1]).toBe(thanks);
+    });
+
+    it("settles a denied call as output-denied instead of an error", () => {
+      const result = repairApprovals([approvalMsg(false), thanks]);
+      const part = result.messages[0].parts[0] as Record<string, unknown>;
+      expect(part.state).toBe("output-denied");
+      expect(part.approval).toEqual({ id: "ap1", approved: false });
+      expect(part.errorText).toBeUndefined();
+    });
+
+    it("keeps an approval in the last message, which the next inference executes", () => {
+      const messages = [approvalMsg(true)];
+      const result = repairApprovals(messages);
+      expect(result.removedToolCalls).toBe(0);
+      expect(result.messages[0]).toBe(messages[0]);
+    });
+
+    it("keeps approvals when the option is off", () => {
+      const messages = [approvalMsg(true), thanks];
+      const result = repair(messages);
+      expect(result.removedToolCalls).toBe(0);
+      expect(result.messages[0]).toBe(messages[0]);
+    });
+
+    it("still respects shouldRepair for an approved call", () => {
+      const result = repairInterruptedToolParts([approvalMsg(true), thanks], {
+        repairPart: flipToError,
+        repairApprovalResponded: true,
+        shouldRepair: () => false
+      });
+      expect(result.removedToolCalls).toBe(0);
+    });
+  });
+
   it("normalizes a malformed input on a settled tool call without re-erroring it", () => {
     const messages = [
       toolMsg("a1", {

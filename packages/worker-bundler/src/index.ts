@@ -63,11 +63,8 @@ export {
 } from "./file-system";
 
 // Re-export installer utilities
-export {
-  installDependencies,
-  hasDependencies,
-  type InstallResult
-} from "./installer";
+export { installDependencies, hasDependencies } from "./installer";
+export type { InstallResult } from "./common";
 
 /**
  * Creates a worker bundle from source files.
