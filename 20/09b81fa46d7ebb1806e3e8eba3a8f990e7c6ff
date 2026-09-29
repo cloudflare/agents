@@ -1,0 +1,23 @@
+packages/agents/src/tests/sessions/capability.test.ts
+  s_8fc925ee098aa3::t_0c3805f1aacdce 367-369
+packages/agents/src/tests/sessions/migration.test.ts
+  s_8fc925ee098aa3::t_dc912caa048ae8 188-190
+.changeset/compaction-overlay-echo.md
+  s_8fc925ee098aa3::t_31349afd15dcd9 1-6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2009b81fa46d7ebb1806e3e8eba3a8f990e7c6ff",
+  "prompts": {},
+  "sessions": {
+    "s_8fc925ee098aa3": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "eda079f6-f1c3-4907-bdbb-744beec81636",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
