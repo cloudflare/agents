@@ -1,0 +1,29 @@
+packages/agents/src/chat/message-reconciler.ts
+  s_2569688183b285::t_b0bda7727f2015 6,8,25-26,31-33,46-114,220-221,265,279-287,344-346
+packages/ai-chat/src/tests/client-tool-duplicate-message.test.ts
+  s_2569688183b285::t_dfbd539156162c 162-274
+packages/think/src/tests/agents/client-tools.ts
+  s_2569688183b285::t_2c2c72338cbd14 726-728,737-738,814,947-950,997-1001
+.changeset/quiet-tools-reconcile.md
+  s_2569688183b285::t_384baba649339f 9,11-13
+packages/agents/src/chat/__tests__/message-reconciler.test.ts
+  s_2569688183b285::t_14e3fb0b2999c9 471-561
+packages/think/src/tests/message-reconciliation.test.ts
+  s_2569688183b285::t_05efceb068e91c 224-304
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3790f3ed9cc16e7a79bd27d77e16738d40685ac8",
+  "prompts": {},
+  "sessions": {
+    "s_2569688183b285": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "b40acb03-72f6-402b-bbba-e37b905e09f9",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
