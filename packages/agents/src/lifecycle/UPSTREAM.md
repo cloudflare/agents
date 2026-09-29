@@ -26,6 +26,10 @@ the repository `NOTICE`, and `THIRD_PARTY_LICENSES.md`.
   RPCs, and fallback writes were removed. Existing `__ps_name` records remain
   readable solely to migrate objects created by older releases.
 - Deprecated route and connection fields were removed.
+- `isStarted()` exposes whether startup has completed. Concurrent `start()`
+  callers share one in-flight startup, and a `start()` made from inside that
+  startup returns immediately instead of re-entering it, so hosts can start
+  the lifecycle from native RPC entry points.
 - Workers Types v5 compatibility uses `WebSocket.OPEN`, an explicit connection
   iterator, mutable `new Request(request)` copies, and Event-typed WebSocket
   error listeners.
