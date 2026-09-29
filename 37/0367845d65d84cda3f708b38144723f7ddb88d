@@ -1,0 +1,21 @@
+packages/agents/src/tests/sessions/capability.test.ts
+  s_8fc925ee098aa3::t_ec6c215e8c7a7c 454-523
+packages/agents/src/sessions/core.ts
+  s_8fc925ee098aa3::t_407db77ca064a5 78-79,107-110,619-620,936,953
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "370367845d65d84cda3f708b38144723f7ddb88d",
+  "prompts": {},
+  "sessions": {
+    "s_8fc925ee098aa3": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "eda079f6-f1c3-4907-bdbb-744beec81636",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
