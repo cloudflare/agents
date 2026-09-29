@@ -1,0 +1,21 @@
+design/think.md
+  s_b2b9b60652ef3b::t_c43786b3a477a1 164
+docs/think/multi-chat.md
+  s_b2b9b60652ef3b::t_8b299f1cb722d6 559-563
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8df3fe4aae06b95faefa8e31d0a3decac7e26304",
+  "prompts": {},
+  "sessions": {
+    "s_b2b9b60652ef3b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "116a35e7-e84f-4df0-b25d-8bdcbff2fca7",
+        "model": "unknown"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
