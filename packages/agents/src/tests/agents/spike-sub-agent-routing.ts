@@ -120,9 +120,9 @@ export class SpikeSubChild extends Agent {
   async rehydrateConnectionSnapshotForTest(tag?: string) {
     (
       this as unknown as {
-        _cf_virtualSubAgentConnections: Map<string, unknown>;
+        _dynamicAgents: { clearVirtualConnections(): void };
       }
-    )._cf_virtualSubAgentConnections.clear();
+    )._dynamicAgents.clearVirtualConnections();
     await this._cf_hydrateSubAgentConnectionsFromRoot();
     return this.connectionSnapshot(tag);
   }

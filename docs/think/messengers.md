@@ -128,6 +128,70 @@ they get a speaker prefix in channels so the model can attribute interactive
 clicks, and no prefix in DMs. Returning `null` or an empty string from
 `channelSpeakerLabel` suppresses the channel label as well.
 
+## Message Bursts
+
+People often send one thought as several quick messages. Think's messenger
+runtime waits about 600 ms after a message for more to arrive, then answers the
+whole burst once instead of starting a reply per message. Every message in the
+burst reaches the model, oldest first, in a single user turn:
+
+```text
+summarize the thread
+for me
+and keep it short
+```
+
+In channels, speaker labels follow the same rules as above. Consecutive messages
+from one person share a single label, and a new label starts whenever the
+speaker changes:
+
+```text
+Bob: @support_bot is the deploy done?
+Ada: @support_bot what changed?
+```
+
+The turn is keyed to the newest message, so its id, idempotency key, and
+`getMessengerContext()?.message` all refer to that message. The earlier messages
+are available as `getMessengerContext()?.skipped`. A custom `toEvent` receives
+them as `input.skipped`, and the default event copies them onto
+`event.skipped`. A custom `toEvent` that builds its own event must copy them
+too, or start from `defaultChatSdkEvent(definition, input)`, otherwise the
+model sees only the newest message.
+
+A burst counts as a mention when any of its messages mentions the bot, in a
+subscribed thread or not. With the default `respondTo`, a mention followed by
+an ordinary line is still answered, and the thread is subscribed.
+
+### Change the Concurrency Strategy
+
+Set `messengerConcurrency` to use another Chat SDK concurrency strategy. It
+defaults to `DEFAULT_MESSENGER_CONCURRENCY`, which is
+`{ strategy: "burst", debounceMs: 600 }`. One setting covers every messenger on
+the agent, and it must be a class field, because the runtime reads it before
+`onStart` runs.
+
+```ts
+import { Think } from "@cloudflare/think";
+
+export class SupportAgent extends Think<Env> {
+  // Answer the first message right away. Messages that arrive during the
+  // reply are answered together once it finishes.
+  messengerConcurrency = "queue" as const;
+}
+```
+
+Use `{ strategy: "burst", debounceMs: 1500 }` to wait longer for a burst. The
+`"drop"` strategy discards a message that arrives while a reply is running.
+`"concurrent"` hands every message to Think without a thread lock, so none are
+batched or dropped. Think still runs the turns of one conversation one at a
+time, so the replies arrive in order rather than in parallel.
+
+Think keeps the thread lock alive for as long as a reply runs, and keeps queued
+messages for 30 minutes (the Chat SDK default is 90 seconds), so a message that
+arrives during a slow reply is still answered after it. Set `queueEntryTtlMs`
+in a `ConcurrencyConfig` to change that. Messages still queued when the Durable
+Object restarts are answered once the interrupted reply is recovered.
+
 ## Conversation Targets
 
 The default conversation mode is one Think sub-agent per Chat SDK thread. This
@@ -177,10 +241,29 @@ idempotent managed fiber, resolves the conversation target, calls
 `target.chat(message, callback)`, and lets the provider delivery policy post or
 edit visible messages.
 
+While the model is working, Think shows the provider's typing indicator and
+re-sends it every 4 seconds until the reply's first text is posted (set the
+messenger's `delivery.typingRefreshMs` to change that; `0` sends it once). A
+provider that fails to show the indicator does not stop the reply. On
+providers with native streaming, the reply streams in place. On providers
+without it, Think posts the reply once the first text arrives and edits that
+message as the rest streams in. It never posts a `...` placeholder first, so
+notification previews (for example, in Slack) show the start of the actual
+reply. Replies delivered by recovery after a restart behave the same way.
+
 Recovery snapshots store only serializable event and Chat SDK thread data. If a
 restart happens before streaming starts, Think can replay the answer. If a
 restart happens after streaming starts, Think posts the configured interruption
 message instead of risking a duplicate partial answer.
+
+A reply can also be interrupted without a restart, for example by the stream
+stall watchdog or by a model error that `classifyChatError` marks as
+`"transient"` or `"rate_limit"`. Think then continues the turn through chat
+recovery and posts the rest of the answer to the thread as a new message once
+the continuation finishes. This works whether the conversation target is the
+root agent or a per-thread sub-agent. If recovery gives up, Think posts the
+configured interruption message instead. A reset after recovery finishes but
+before the post lands can post the recovered text twice.
 
 Delivery errors use a generic user-facing message by default so internal
 exception details are not posted into external chats. Override
@@ -190,7 +273,9 @@ exception details are not posted into external chats. Override
 
 During a messenger turn, `getMessengerContext()` returns provider, thread,
 author, message, capabilities, and attachment metadata for the initiating event.
-Use it from prompts, tools, or hooks that need channel-specific behavior.
+When the turn answers a [burst](#message-bursts), `skipped` lists the earlier
+messages in that burst, oldest first. Use it from prompts, tools, or hooks that
+need channel-specific behavior.
 
 ```typescript
 const messenger = this.getMessengerContext();
@@ -198,6 +283,8 @@ if (messenger?.thread.isDirectMessage === false) {
   // Adjust behavior for group chats.
 }
 ```
+
+The context belongs to the turn, so concurrent messenger turns on one agent each see their own thread. In `beforeTurn`, `ctx.messenger` holds the same value. Unlike `getMessengerContext()`, it is `undefined` for a turn that is not a messenger turn, rather than falling back to the metadata on the latest message.
 
 ## Self-Mentions
 

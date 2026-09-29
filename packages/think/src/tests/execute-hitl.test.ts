@@ -211,6 +211,38 @@ describe("Think HITL — approve/reject paused executions", () => {
     ws.close();
   });
 
+  it("reject can preserve the outcome without auto-continuing", async () => {
+    const room = crypto.randomUUID();
+    const { agent, ws, executionId } = await runTurnToPause(room);
+    const outcome = (await callRpc(ws, "rejectExecution", [
+      executionId,
+      "pause here",
+      { autoContinue: false }
+    ])) as { status: string; reason?: string };
+    expect(outcome.status).toBe("rejected");
+    expect(outcome.reason).toBe("pause here");
+
+    await waitUntil(async () => {
+      const parts = await agent.executeParts();
+      return (parts[0].output as PausedOutput).status === "rejected";
+    });
+    expect(await agent.gatedCallCount()).toBe(0);
+
+    // The rejection is durable, but it does not start another model turn.
+    expect(await agent.waitUntilStableForTest()).toBe(true);
+    expect(await agent.lastAssistantText()).not.toContain("rejected");
+
+    // A later user turn can resume the conversation normally.
+    const done = waitForDone(ws);
+    sendChatRequest(ws, "continue with a different approach");
+    await done;
+    await waitUntil(async () =>
+      (await agent.lastAssistantText()).includes("rejected")
+    );
+
+    ws.close();
+  });
+
   it("pause-again: the next gated call re-pauses; a second approve completes", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

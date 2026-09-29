@@ -301,6 +301,7 @@ const client = new AgentClient({
   host: "your-worker.workers.dev"
 });
 
+// Resolves once the agent's stored state has arrived, if it has any
 await client.ready;
 
 // Read state directly

@@ -43,7 +43,7 @@ interface AgentRouteMatch<Env = Cloudflare.Env> {
 
 interface AgentRouteOptions<
   Env = Cloudflare.Env,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends object = object
 > {
   /** URL prefix before the binding and instance name. Default: `agents`. */
   prefix?: string;
@@ -88,10 +88,7 @@ interface AgentRouteOptions<
 export type AgentOptions<Env> = AgentRouteOptions<Env>;
 
 /** Options for resolving and starting a named Agent. */
-export type AgentGetOptions<
-  Env,
-  Props extends Record<string, unknown> = Record<string, unknown>
-> = Pick<
+export type AgentGetOptions<Env, Props extends object = object> = Pick<
   AgentRouteOptions<Env, Props>,
   "jurisdiction" | "locationHint" | "props" | "routingRetry"
 >;
@@ -393,7 +390,7 @@ export async function routeAgentRequest<Env>(
 export async function getAgentByName<
   Env extends Cloudflare.Env = Cloudflare.Env,
   T extends Agent<Env> = Agent<Env>,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends object = object
 >(
   namespace: DurableObjectNamespace<T>,
   name: string,

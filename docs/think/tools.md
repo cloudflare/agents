@@ -9,7 +9,7 @@ On every turn, Think merges tools from multiple sources. Later sources override 
 1. **Workspace tools** — `read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, `bash` (built-in)
 2. **`getTools()`** — your custom server-side tools
 3. **Extension tools** — tools from loaded extensions (prefixed by extension name)
-4. **Session tools** — `set_context`, `load_context`, `search_context` (from `configureSession`)
+4. **Context tools** — `set_context`, `search_context` (from `configureContext`)
 5. **Skill tools** — `activate_skill`, `read_skill_resource`, `run_skill_script` (from `getSkills()`)
 6. **MCP tools** — from connected MCP servers (when `includeMcpTools` is enabled)
 7. **Client tools** — from the browser (see [Client Tools](./client-tools.md))
@@ -316,7 +316,10 @@ createExecuteTool({
 An AI SDK tool with `needsApproval` doesn't run immediately inside the sandbox — calling it **pauses the run durably**. The pause comes back as a normal tool output (`{ status: "paused", executionId, pending }`), the model tells the user what it needs, and the turn ends. Note this differs from the client-side approval flow for plain `getTools()` tools: inside the sandbox a function-valued `needsApproval` can't be evaluated against the call's arguments ahead of time, so it conservatively **always** requires approval. Think ships built-in callables to resolve it:
 
 - `approveExecution(executionId)` — resumes the run where it stopped (already-done work is replayed, not re-executed); the outcome replaces the paused output in the transcript and the chat auto-continues.
-- `rejectExecution(executionId, reason?)` — ends the run with `{ status: "rejected", reason }` so the model can adapt.
+- `rejectExecution(executionId, reason?, { autoContinue? })` — ends the run with `{ status: "rejected", reason }` so the model can adapt. Pass `{ autoContinue: false }` to record the rejection without starting another model turn.
+
+Either way, the text and reasoning the model wrote after the paused output (its "waiting for approval" reply) are removed from that assistant message, so the continuation does not read a stale pending state next to the real outcome.
+
 - `pendingExecutions()` — pending actions (with full args) for rendering approval UI.
 
 > **Render approval cards from `pendingExecutions()`, not the transcript.** The `pending` array in the paused tool output is a _truncated preview_ — args are bounded (~2 KB each) so they don't blow up model context, but the full args (up to 1 MB) are what actually execute on approve. A human approving a gated call must see the authoritative args, so fetch them via `pendingExecutions(executionId)` before enabling the Approve button. `examples/assistant`'s `PausedExecutionCard` shows the pattern.
@@ -530,7 +533,7 @@ Loaded extensions persist across DO restarts via `extensionManager.restore()`.
 
 ### Extension Context Blocks
 
-Extensions can declare context blocks in their manifest. These are automatically registered with the Session:
+Extensions can declare context blocks in their manifest. These are automatically added to the agent's context blocks:
 
 ```typescript
 getExtensions() {

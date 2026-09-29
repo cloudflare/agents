@@ -220,6 +220,7 @@ export type {
   AgentToolChildAdapter,
   AgentToolDisplayMetadata,
   AgentToolEvent,
+  AgentToolEventDelivery,
   AgentToolEventMessage,
   AgentToolEventState,
   AgentToolFailure,

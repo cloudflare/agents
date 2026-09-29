@@ -13,6 +13,90 @@
   "durable_objects": {
     "bindings": [
       {
+        "class_name": "CapabilityHarnessObject",
+        "name": "CapabilityHarnessObject"
+      },
+      {
+        "class_name": "PlainLifecycleObject",
+        "name": "PlainLifecycleObject"
+      },
+      {
+        "class_name": "StatefulPlainObject",
+        "name": "StatefulPlainObject"
+      },
+      {
+        "class_name": "RetryableStartObject",
+        "name": "RetryableStartObject"
+      },
+      {
+        "class_name": "ScheduledLifecycleObject",
+        "name": "ScheduledLifecycleObject"
+      },
+      {
+        "class_name": "SchedulerHarnessObject",
+        "name": "SchedulerHarnessObject"
+      },
+      {
+        "class_name": "SchedulerStartupWarnObject",
+        "name": "SchedulerStartupWarnObject"
+      },
+      {
+        "class_name": "QueueHarnessObject",
+        "name": "QueueHarnessObject"
+      },
+      {
+        "class_name": "BrowserHarnessObject",
+        "name": "BrowserHarnessObject"
+      },
+      {
+        "class_name": "TestBrowserAgent",
+        "name": "TestBrowserAgent"
+      },
+      {
+        "class_name": "TaskHarnessObject",
+        "name": "TaskHarnessObject"
+      },
+      {
+        "class_name": "TaskSchedulerCoexistObject",
+        "name": "TaskSchedulerCoexistObject"
+      },
+      {
+        "class_name": "StreamHarnessObject",
+        "name": "StreamHarnessObject"
+      },
+      {
+        "class_name": "CutoverHarnessObject",
+        "name": "CutoverHarnessObject"
+      },
+      {
+        "class_name": "SqliteStrategiesBench",
+        "name": "SqliteStrategiesBench"
+      },
+      {
+        "class_name": "TaskStreamComposeObject",
+        "name": "TaskStreamComposeObject"
+      },
+      {
+        "class_name": "StreamBenchObject",
+        "name": "StreamBenchObject"
+      },
+      {
+        "class_name": "SessionHarnessObject",
+        "name": "SessionHarnessObject"
+      },
+      {
+        "class_name": "SessionSearchHarnessObject",
+        "name": "SessionSearchHarnessObject"
+      },
+      {
+        "class_name": "SessionBenchObject",
+        "name": "SessionBenchObject"
+      },
+      {
+        "class_name": "PlainMcpClientObject",
+        "name": "PlainMcpClientObject"
+      },
+      {
         "class_name": "TestMcpAgent",
         "name": "MCP_OBJECT"
       },
@@ -64,6 +148,10 @@
       {
         "class_name": "TestScheduleAgent",
         "name": "TestScheduleAgent"
+      },
+      {
+        "class_name": "TestTaskAgent",
+        "name": "TestTaskAgent"
       },
       {
         "class_name": "TestOnStartScheduleWarnAgent",
@@ -171,20 +259,16 @@
         "name": "TestSessionAgent"
       },
       {
-        "class_name": "TestSessionAgentWithContext",
-        "name": "TestSessionAgentWithContext"
-      },
-      {
-        "class_name": "TestSearchAgent",
-        "name": "TestSearchAgent"
-      },
-      {
-        "class_name": "TestMultiSessionAgent",
-        "name": "TestMultiSessionAgent"
-      },
-      {
         "class_name": "TestWaitConnectionsAgent",
         "name": "TestWaitConnectionsAgent"
+      },
+      {
+        "class_name": "RoutingOwnerAgent",
+        "name": "RoutingOwnerAgent"
+      },
+      {
+        "class_name": "RoutedChatAgent",
+        "name": "RoutedChatAgent"
       },
       {
         "class_name": "TestSubAgentParent",
@@ -203,6 +287,10 @@
       {
         "class_name": "OuterSubAgent",
         "name": "OuterSubAgent"
+      },
+      {
+        "class_name": "DenyingSubAgent",
+        "name": "DenyingSubAgent"
       },
       {
         "class_name": "InnerSubAgent",
@@ -335,6 +423,27 @@
   "migrations": [
     {
       "new_sqlite_classes": [
+        "CapabilityHarnessObject",
+        "PlainLifecycleObject",
+        "StatefulPlainObject",
+        "RetryableStartObject",
+        "ScheduledLifecycleObject",
+        "SchedulerHarnessObject",
+        "SchedulerStartupWarnObject",
+        "QueueHarnessObject",
+        "BrowserHarnessObject",
+        "TestBrowserAgent",
+        "TaskHarnessObject",
+        "TaskSchedulerCoexistObject",
+        "StreamHarnessObject",
+        "CutoverHarnessObject",
+        "SqliteStrategiesBench",
+        "TaskStreamComposeObject",
+        "StreamBenchObject",
+        "SessionHarnessObject",
+        "SessionSearchHarnessObject",
+        "SessionBenchObject",
+        "PlainMcpClientObject",
         "TestMcpAgent",
         "TestCodemodeMcpAgent",
         "TestEmailAgent",
@@ -349,6 +458,7 @@
         "TestReadonlyAgent",
         "TestProtocolMessagesAgent",
         "TestScheduleAgent",
+        "TestTaskAgent",
         "TestOnStartScheduleWarnAgent",
         "TestOnStartScheduleNoWarnAgent",
         "TestOnStartScheduleExplicitFalseAgent",
@@ -372,10 +482,9 @@
         "TestRunFiberAgent",
         "TestKeepAliveAgent",
         "TestSessionAgent",
-        "TestSessionAgentWithContext",
-        "TestSearchAgent",
-        "TestMultiSessionAgent",
         "TestWaitConnectionsAgent",
+        "RoutingOwnerAgent",
+        "RoutedChatAgent",
         "TestSubAgentParent",
         "CustomBoundSubAgentParent",
         "TestWorkflowSubAgent",

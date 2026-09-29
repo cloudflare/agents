@@ -520,13 +520,9 @@ their cleanup and skipped continuations return immediately.
 
 #### Overriding the clear handler
 
-The SDK's built-in `CF_AGENT_CHAT_CLEAR` handler calls `resetTurnState()`
-automatically. If your `onMessage` override intercepts `CF_AGENT_CHAT_CLEAR`
-and returns before the SDK sees the message — for example, to scope the delete
-to a specific workflow — the built-in handler never runs. The active stream
-continues and queued continuations persist into the newly-cleared conversation.
+The SDK's built-in `CF_AGENT_CHAT_CLEAR` handler calls `resetTurnState()` and clears the default Sessions handle. If an `onMessage` override intercepts this frame and returns early, the built-in handler cannot stop the active stream or clear history.
 
-Call `this.resetTurnState()` before performing your scoped delete:
+Perform authorization or logging, then pass the frame to the original handler:
 
 ```typescript
 import { MessageType } from "@cloudflare/ai-chat/types";
@@ -536,18 +532,15 @@ this.onMessage = async (connection, message) => {
   if (typeof message === "string") {
     const data = JSON.parse(message);
     if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
-      this.resetTurnState();
-      this.sql`
-        DELETE FROM cf_ai_chat_agent_messages
-        WHERE workflow_id = ${this.workflowId}
-      `;
-      await this.saveMessages([]);
-      return;
+      await this.authorizeClear(connection);
+      console.log("clearing conversation");
     }
   }
   return _onMessage(connection, message);
 };
 ```
+
+Do not write directly to Sessions tables. Use `this.sessions.session().clearMessages()` when implementing a separate server-side history operation outside the chat protocol.
 
 ### Lifecycle Hooks
 
@@ -593,6 +586,8 @@ If you do not pass `abortSignal` to `streamText`, the LLM call will continue run
 When a Durable Object is evicted mid-stream (code update, inactivity timeout, resource limit), the LLM connection is severed permanently and the in-memory streaming state is lost. Durable recovery wraps every `AIChatAgent` and `Think` chat turn in a [`runFiber()`](./durable-execution.md), providing automatic `keepAlive` during streaming and a recovery hook on restart.
 
 If the agent is evicted mid-stream, the fiber row survives in SQLite. On the next activation, the framework detects the interrupted fiber, reconstructs the partial response from buffered stream chunks, and calls `onChatRecovery`.
+
+The same bounded recovery handles an `AIChatAgent` stream that fails while the agent stays up. If the response reader throws a platform transient error, such as `Network connection lost.`, the agent keeps the partial response and schedules a continuation instead of ending the turn with an error. If the error arrives before any response part, the agent re-runs the turn instead. The agent calls `onChatRecovery` first, so returning `{ continue: false }` ends the turn with the error. Each repeated transient error waits longer before the next attempt and counts against `maxAttempts`. Other reader errors still end the turn.
 
 Durable recovery is always enabled. Use `chatRecovery` only to tune its budgets and terminal behavior.
 
@@ -670,10 +665,10 @@ override chatRecovery = {
   // Primary stuck-turn bound. Resets on every progress-bearing attempt, so a
   // turn that keeps producing content survives unbounded interruption.
   noProgressTimeoutMs: 5 * 60 * 1000,
-  // Runaway-loop guard. Defaults to a finite backstop (1000). Set a different
-  // value to tune when a turn that keeps emitting content but never converges
-  // is sealed.
-  maxRecoveryWork: 200,
+  // Runaway-loop guard, counted in durable stream segments. Defaults to a
+  // finite backstop (10000). Set a different value to tune when a turn that
+  // keeps emitting content but never converges is sealed.
+  maxRecoveryWork: 2000,
   // Tight retry budget for a Durable Object memory-limit reset (the isolate
   // exceeded its 128 MB limit). Defaults to 3; an OOM usually re-OOMs on
   // re-run, so recovery seals it with `out_of_memory` after a few attempts.
@@ -700,23 +695,23 @@ override chatRecovery = {
 | `stableTimeoutMs`      | `10_000`          | How long a recovery attempt waits for the isolate to reach stable state before rescheduling.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `terminalMessage`      | generic message   | The message shown to the user when recovery is given up on.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `noProgressTimeoutMs`  | `300_000` (5 min) | Primary stuck-turn bound: how long an incident may go without forward progress before it is sealed (`no_progress_timeout`). **Resets on every progress-bearing attempt**, so a turn that keeps producing content survives unbounded interruption.                                                                                                                                                                                                                                                                                                                                                              |
-| `maxRecoveryWork`      | `1000`            | Runaway-loop guard. Maximum produced content/tool units since the incident began before a still-progressing turn is sealed (`work_budget_exceeded`). A generous finite backstop so an agent that keeps emitting a little content but never converges (for example an isolate that runs out of memory mid-stream on every recovery) cannot loop forever. Work only accrues from the first interruption until the turn completes. Set a higher value, or `Infinity`, for a very long agentic turn that legitimately needs more.                                                                                  |
+| `maxRecoveryWork`      | `10000`           | Runaway-loop guard. Maximum recovery work since the incident began before a still-progressing turn is sealed (`work_budget_exceeded`), counted in durable stream segments (see [Recovery work units](#recovery-work-units)). A generous finite backstop so an agent that keeps emitting a little content but never converges (for example an isolate that runs out of memory mid-stream on every recovery) cannot loop forever. Work only accrues from the first interruption until the turn completes. Set a higher value, or `Infinity`, for a very long agentic turn that legitimately needs more.          |
 | `maxOomRetries`        | `3`               | Tight retry budget for the specific case of a Durable Object isolate exceeding its memory limit and being reset mid-turn. An OOM is usually deterministic (the turn's working set no longer fits in 128 MB) so re-running re-OOMs, but a single OOM can be a transient spike — so recovery retries this many times before sealing with `out_of_memory`. Counts only attempts that ended in an OOM (not total attempts), so a turn interrupted by deploys is unaffected. Set `0` to seal on the first OOM. Far tighter than `maxRecoveryWork` because an OOM is attributable and each re-run re-runs the model. |
 | `shouldKeepRecovering` | —                 | Caller policy consulted from the second recovery attempt onward (never on the first detection, never once a hard bound has sealed the incident). Return `false` to stop recovery. The hook point for a token/cost budget — `ctx.work` is a coarse segment count, not tokens, so track real spend yourself.                                                                                                                                                                                                                                                                                                     |
 | `onExhausted`          | —                 | Called once when recovery is given up on, before the terminal message is delivered. Inspect `ctx.reason` for why.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 **`ChatRecoveryProgressContext`** (the `ctx` passed to `shouldKeepRecovering`):
 
-| Field                   | Type                    | Description                                                                                       |
-| ----------------------- | ----------------------- | ------------------------------------------------------------------------------------------------- |
-| `incidentId`            | `string`                | Stable ID for this recovery incident.                                                             |
-| `requestId`             | `string`                | Request ID for the current continuation (changes per chained continuation).                       |
-| `recoveryRootRequestId` | `string`                | Stable ID for the whole continuation chain — the right key for per-incident budget tracking.      |
-| `attempt`               | `number`                | Attempt number for this incident (2 or greater when this hook runs).                              |
-| `maxAttempts`           | `number`                | Configured attempt cap.                                                                           |
-| `recoveryKind`          | `"retry" \| "continue"` | Whether recovery retries an unanswered user turn or continues a partial assistant turn.           |
-| `work`                  | `number`                | Coarse, monotonic count of content/tool segments produced since the incident opened (not tokens). |
-| `ageMs`                 | `number`                | Wall-clock ms since the incident's first interruption.                                            |
+| Field                   | Type                    | Description                                                                                  |
+| ----------------------- | ----------------------- | -------------------------------------------------------------------------------------------- |
+| `incidentId`            | `string`                | Stable ID for this recovery incident.                                                        |
+| `requestId`             | `string`                | Request ID for the current continuation (changes per chained continuation).                  |
+| `recoveryRootRequestId` | `string`                | Stable ID for the whole continuation chain — the right key for per-incident budget tracking. |
+| `attempt`               | `number`                | Attempt number for this incident (2 or greater when this hook runs).                         |
+| `maxAttempts`           | `number`                | Configured attempt cap.                                                                      |
+| `recoveryKind`          | `"retry" \| "continue"` | Whether recovery retries an unanswered user turn or continues a partial assistant turn.      |
+| `work`                  | `number`                | Monotonic count of durable stream segments produced since the incident opened (not tokens).  |
+| `ageMs`                 | `number`                | Wall-clock ms since the incident's first interruption.                                       |
 
 A progressing turn survives unbounded interruption (for example a dense deploy window) as long as it keeps making forward progress and stays under the `maxRecoveryWork` backstop. Recovery is sealed only by one of these `ctx.reason` values:
 
@@ -727,7 +722,19 @@ A progressing turn survives unbounded interruption (for example a dense deploy w
 - `recovery_aborted` — your `shouldKeepRecovering` hook returned `false`.
 - `stable_timeout` — recovery attempts kept timing out waiting for stable state until the budget drained (extreme churn).
 
-> `maxRecoveryWork` defaults to a generous finite backstop (`1000`) rather than no cap, so a runaway turn cannot loop forever out of the box. The default is far above what a healthy interrupted turn produces; if you lower it, pick a cap well above a healthy turn's output, and for a precise budget prefer `shouldKeepRecovering` with real token/cost accounting. A very long agentic turn that legitimately produces a large amount of content under heavy interruption can raise the cap or set it to `Infinity` to restore fully-unbounded recovery.
+> `maxRecoveryWork` defaults to a generous finite backstop (`10000`) rather than no cap, so a runaway turn cannot loop forever out of the box. The default is far above what a healthy interrupted turn produces; if you lower it, pick a cap well above a healthy turn's output, and for a precise budget prefer `shouldKeepRecovering` with real token/cost accounting. A very long agentic turn that legitimately produces a large amount of content under heavy interruption can raise the cap or set it to `Infinity` to restore fully-unbounded recovery.
+
+#### Recovery work units
+
+`maxRecoveryWork` and `ctx.work` count **durable stream segments**, not tokens, messages, or chunks. One unit is one of:
+
+- a flushed segment of the turn's stream log, which holds roughly ten packed streaming chunks;
+- a settled tool result, which is flushed as its own segment;
+- an explicit progress credit for output forwarded from a sub-agent.
+
+The unit is only meaningful relative to another `ctx.work` reading, so to choose a cap, log `ctx.work` from `shouldKeepRecovering` for a healthy interrupted turn and set `maxRecoveryWork` well above it.
+
+> **Upgrading an explicit `maxRecoveryWork`?** Releases before `agents@0.23.0` (`@cloudflare/ai-chat@0.12.0`, `@cloudflare/think@0.18.0`) counted "credited chunks" (one per tool call, one per text or reasoning segment start, and one per five seconds of streamed deltas), and the default was `1000`. The unit changed to durable segments and the default moved to `10000`. An explicit value is not recalibrated automatically, and there is no fixed conversion factor between the two units: a delta-heavy turn produces far more segments than it used to produce credits, while a turn dominated by tool calls changes much less. Measure `ctx.work` for your own turns before carrying an old value forward.
 
 > **Out-of-memory crash loops have a last-resort backstop.** A severe memory-limit reset can bypass the recovery budgets above entirely — for example if the Durable Object out-of-memories while _loading its state on wake_, before recovery even evaluates, or if the budget's own bookkeeping writes also out-of-memory. Left unhandled, the platform auto-retries the alarm forever, re-running the doomed (billable) turn each cycle. The SDK guards this at the alarm boundary: after `maxAlarmMemoryLimitStrikes` (a base `Agent` static option, default `3`) consecutive alarms end in a memory-limit reset, it seals the interrupted turn with `out_of_memory` and stops the loop, emitting an `alarm:memory_limit_reset` observability event. This bounds the blast radius (and the bill); it does not shrink the working set — a turn whose context genuinely no longer fits in 128 MB needs a smaller transcript/fewer or smaller tool results.
 
@@ -892,6 +899,7 @@ function Chat() {
 | ----------------------------- | ----------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `agent`                       | `ReturnType<typeof useAgent>`                   | Required | Agent connection from `useAgent`                                                                                                                                                   |
 | `onToolCall`                  | `({ toolCall, addToolOutput }) => void`         | —        | Handle client-side tool execution                                                                                                                                                  |
+| `onTurnEnd`                   | `(event: ChatTurnEndEvent) => void`             | —        | Called once for each chat request that ends, with its `messageIds` and `outcome`. See [Settle sends when a turn ends](#settle-sends-when-a-turn-ends)                              |
 | `autoContinueAfterToolResult` | `boolean`                                       | `true`   | Auto-continue conversation after client tool results and approvals                                                                                                                 |
 | `resume`                      | `boolean`                                       | `true`   | Enable automatic stream resumption on reconnect                                                                                                                                    |
 | `cancelOnClientAbort`         | `boolean`                                       | `false`  | Cancel the server turn when generic client stream abort/cleanup occurs. Explicit `stop()` always cancels the server turn                                                           |
@@ -915,6 +923,47 @@ function Chat() {
 | `isServerStreaming`       | `boolean`                          | `true` when a server-initiated stream is active (e.g. from `saveMessages`)                                                                                                                                                                    |
 | `isStreaming`             | `boolean`                          | `true` when any stream is active (client or server-initiated)                                                                                                                                                                                 |
 | `isRecovering`            | `boolean`                          | `true` while a durable turn is being recovered (interrupted and resuming). Distinct from `isStreaming` — a recovering turn is not producing tokens yet. Render a "recovering…" hint; most UIs treat `isStreaming \|\| isRecovering` as "busy" |
+
+### Settle sends when a turn ends
+
+An application that renders a send as pending before the server answers needs
+to know when that exact send is finished. `onTurnEnd` is called once for each
+chat request that ends, with the ids of the user messages it carried and how it
+ended:
+
+```tsx
+const chat = useAgentChat({
+  agent,
+  onTurnEnd: ({ messageIds, outcome, error }) => {
+    if (!messageIds) return;
+    for (const id of messageIds) {
+      settlePendingSend(id, outcome, error);
+    }
+  }
+});
+```
+
+The event has these fields:
+
+- `requestId`: the transport id of the request.
+- `messageIds`: the ids of the user messages the request ended with. These are
+  the ids the client minted when it sent them. Absent when the request did not
+  end with a user message.
+- `outcome`: `"completed"`, `"error"`, `"aborted"` (cancelled while it ran), or
+  `"skipped"` (it never ran, because a newer send superseded it or the
+  `messageConcurrency` policy dropped it).
+- `error`: the error message, when `outcome` is `"error"`.
+- `replay`: `true` when the outcome was replayed on reconnect rather than seen
+  live.
+
+`onTurnEnd` also fires for requests from other tabs and for outcomes replayed
+after a reconnect, so match `messageIds` against the sends this client is
+tracking. It does not fire when recovery continues a turn under a new request;
+the new request reports the same `messageIds` when it ends.
+
+A message id can appear in more than one event. With the `latest` or `merge`
+policies, a skipped send can still be answered by the turn that superseded it,
+which lists that id again. Treat the last event for an id as its outcome.
 
 ## Tools
 
@@ -995,6 +1044,8 @@ const { messages, sendMessage } = useAgentChat({
 ```
 
 When the LLM invokes `getLocation`, the stream pauses. The `onToolCall` callback fires, your code provides the output, and the conversation continues.
+
+`onToolCall` fires once the response stream ends, for each tool call that is still waiting for a result. A server tool runs and resolves in the same stream, so it never reaches `onToolCall`.
 
 ### Dynamic Client Tools (SDK/Platform Pattern)
 
@@ -1679,6 +1730,44 @@ The chat protocol uses typed JSON messages over WebSocket:
 | `CF_AGENT_MESSAGE_UPDATED`       | Server → Client | Notify of message update    |
 | `CF_AGENT_STREAM_RESUMING`       | Server → Client | Notify of stream resumption |
 | `CF_AGENT_STREAM_RESUME_REQUEST` | Client → Server | Request stream resume check |
+
+#### Correlate terminal frames with sent messages
+
+A `CF_AGENT_USE_CHAT_RESPONSE` frame names its request by `id`. Terminal frames
+(`done: true` or `error: true`) also carry `messageIds`: the ids of the user
+messages at the end of the request's `messages`. One send carries one id, and
+queued sends that arrive together carry several. This applies to completion,
+errors before or during the stream, skipped and cancelled requests, and
+terminals replayed on reconnect.
+
+The final `done` frame of a request can also carry `outcome`: `"completed"`,
+`"error"`, `"aborted"`, `"skipped"`, or `"recovering"`. When it is absent, the
+request errored if that frame or an earlier frame for the request carried
+`error: true`, and completed otherwise. `"recovering"` means the request
+stopped but recovery continues the same turn under a new request, which reports
+the same `messageIds` when it ends.
+
+React applications should use [`onTurnEnd`](#settle-sends-when-a-turn-ends),
+which applies these rules for you. Without React, read the frames directly:
+
+```ts
+const erroredRequests = new Set<string>();
+
+agent.addEventListener("message", (event) => {
+  const frame = JSON.parse(event.data);
+  if (frame.type !== "cf_agent_use_chat_response") return;
+  if (frame.error) erroredRequests.add(frame.id);
+  if (!frame.done) return;
+  const errored = erroredRequests.delete(frame.id);
+  const outcome = frame.outcome ?? (errored ? "error" : "completed");
+  if (outcome !== "recovering" && frame.messageIds) {
+    settlePendingSends(frame.messageIds, outcome);
+  }
+});
+```
+
+`messageIds` is absent when the request did not end with a user message, or
+when the server no longer has a record of the request.
 
 ## Examples
 

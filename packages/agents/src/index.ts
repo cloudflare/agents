@@ -19,7 +19,6 @@ export { __DO_NOT_USE_WILL_BREAK__agentContext } from "./internal_context";
  */
 export { withInvocationScope as __DO_NOT_USE_WILL_BREAK__withInvocationScope } from "./observability/tracing/tracer";
 import {
-  SUB_PREFIX,
   parseSubAgentPath as _parseSubAgentPath,
   type AgentPathStep
 } from "./sub-routing";
@@ -36,8 +35,42 @@ export type {
   BuildAgentPathOptions,
   SubAgentPathMatch
 } from "./sub-routing";
-import { signAgentHeaders } from "./email";
-import { parseCronExpression } from "cron-schedule";
+import {
+  isClosedWebSocketSendError,
+  registerFacetStreamingDelivery,
+  sendFacetRpcResponseIfOpen,
+  sendFacetStreamingResponse,
+  DynamicAgentConnectionBridge as SubAgentConnectionBridge,
+  dynamicAgentRpcReplyContext as subAgentRpcReplyContext,
+  waitForFacetStreamingResponseDeliveries
+} from "./dynamic-agents/bridges";
+import {
+  CF_SUB_AGENT_OUTER_URL_KEY,
+  CF_SUB_AGENT_TAGS_KEY,
+  SUB_AGENT_OUTER_URL_HEADER,
+  rejectSubAgentWebSocket
+} from "./dynamic-agents/dynamic-agents";
+import { logicalNameFromPathV2Identity } from "./dynamic-agents/identity";
+import { DynamicAgentsInternal } from "./dynamic-agents/dynamic-agents";
+import { DynamicAgents as DynamicAgentsApi } from "./dynamic-agents/api";
+import type { DynamicAgentHostPort } from "./dynamic-agents/host";
+import type {
+  FacetCapableCtx,
+  RootFacetRpcSurface,
+  DynamicAgentClass as SubAgentClass,
+  DynamicAgentConnectionMeta as SubAgentConnectionMeta,
+  DynamicAgentPathInvokeEndpoint as SubAgentPathInvokeEndpoint,
+  DynamicAgentStub as SubAgentStub
+} from "./dynamic-agents/types";
+export type {
+  DynamicAgentClass,
+  DynamicAgentStub,
+  DynamicAgentClass as SubAgentClass,
+  DynamicAgentStub as SubAgentStub
+} from "./dynamic-agents/types";
+import { signAgentHeaders, type SendEmailOptions } from "./email";
+import { sendAgentEmail } from "./email-send";
+export type { EmailSendBinding, SendEmailOptions } from "./email";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
 import {
@@ -46,12 +79,35 @@ import {
   exports as workerExports
 } from "cloudflare:workers";
 import {
+  type LifecycleJobContext,
+  type MemoryLimitContext,
   type Connection,
   type ConnectionContext,
   Lifecycle,
+  type LifecycleJobOutcome,
+  setLifecycleEventSink,
+  setLifecycleHostInvoker,
+  setLifecycleRouteTransport,
+  type LifecycleRouteEnvelope,
   type WSMessage
 } from "./lifecycle/durable-object-lifecycle";
+import { abortWithoutAlarmRetry } from "./lifecycle/abort";
+import type { LifecycleRouteAddress } from "./lifecycle/capability";
+import {
+  getCurrentAgent as getCurrentLifecycleAgent,
+  type CurrentAgentContext
+} from "./lifecycle/current-agent";
 import { getAgentByName, type AgentOptions } from "./agent-routing";
+import { WebSockets } from "./websockets";
+import {
+  ensureConnectionWrapped,
+  getConnectionFlag,
+  isConnectionProtocolEnabled as connectionProtocolEnabled,
+  isConnectionReadonly as connectionReadonly,
+  registerInternalConnectionKeys,
+  setConnectionFlag,
+  setConnectionReadonly as markConnectionReadonly
+} from "./websockets/connection-flags";
 export {
   getAgentByName,
   routeAgentRequest,
@@ -61,13 +117,11 @@ export {
 } from "./agent-routing";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
 export { camelCaseToKebabCase } from "./utils";
+import { SqlError } from "./sql-error";
 import {
   type RetryOptions,
   tryN,
-  isDurableObjectCodeUpdateReset,
-  isDurableObjectMemoryLimitReset,
   isErrorRetryable,
-  isPlatformTransientError,
   validateRetryOptions
 } from "./retries";
 export {
@@ -76,11 +130,7 @@ export {
   isDurableObjectStorageReset,
   isPlatformTransientError
 } from "./retries";
-import {
-  MCPClientManager,
-  normalizeServerId,
-  type MCPClientOAuthResult
-} from "./mcp/client";
+import { MCPClientManager, normalizeServerId } from "./mcp/client";
 import type {
   WorkflowCallback,
   WorkflowTrackingRow,
@@ -92,11 +142,11 @@ import type {
   WorkflowPage,
   AgentWorkflowOrigin
 } from "./workflow-types";
-import { MCPConnectionState } from "./mcp/client-connection";
+import { MCPConnectionState } from "./mcp/client/connection";
 import {
   DurableObjectOAuthClientProvider,
   type AgentMcpOAuthProvider
-} from "./mcp/do-oauth-client-provider";
+} from "./mcp/client/do-oauth-client-provider";
 import type { McpClientOptions, TransportType } from "./mcp/types";
 import {
   genericObservability,
@@ -114,14 +164,37 @@ import {
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
+import { ensureMcpServerTable } from "./mcp/client/storage";
 import type { McpAgent } from "./mcp";
+import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
+import { Queue, setQueueCallbackResolver } from "./queue/queue";
+import type { QueueItem } from "./queue/types";
+export type { QueueItem } from "./queue/types";
+import {
+  Tasks,
+  setTaskDefinitionResolver,
+  setTaskRoutedMemoryLimitHandler
+} from "./tasks/tasks";
+import type { TaskCallbacks, TaskHandlers } from "./tasks/types";
+import type {
+  Schedule,
+  ScheduleCriteria,
+  ScheduleOptions
+} from "./schedules/types";
+export type {
+  Schedule,
+  ScheduleCriteria,
+  ScheduleOptions
+} from "./schedules/types";
+import { State } from "./state";
 export {
   AGENT_TOOL_PROGRESS_PART,
   AGENT_TOOL_MILESTONE_PART
 } from "./agent-tool-types";
 import {
   AGENT_TOOL_MILESTONE_PART,
-  AGENT_TOOL_PROGRESS_PART
+  AGENT_TOOL_PROGRESS_PART,
+  isAgentToolLifecycleChunk
 } from "./agent-tool-types";
 import type {
   AgentToolChildAdapter,
@@ -148,6 +221,7 @@ export type {
   AgentToolChildAdapter,
   AgentToolDisplayMetadata,
   AgentToolEvent,
+  AgentToolEventDelivery,
   AgentToolEventMessage,
   AgentToolEventState,
   AgentToolFailure,
@@ -176,46 +250,6 @@ export type {
   WSMessage
 } from "./lifecycle/durable-object-lifecycle";
 export { MessageType } from "./types";
-
-/**
- * Structural type for Cloudflare's `send_email` binding.
- * Accepts both raw MIME messages and structured builder objects.
- */
-export type EmailSendBinding = {
-  send(
-    message:
-      | EmailMessage
-      | {
-          from: string | { email: string; name?: string };
-          to: string | string[];
-          subject: string;
-          replyTo?: string | { email: string; name?: string };
-          cc?: string | string[];
-          bcc?: string | string[];
-          headers?: Record<string, string>;
-          text?: string;
-          html?: string;
-        }
-  ): Promise<EmailSendResult>;
-};
-
-/**
- * Options for Agent.sendEmail()
- */
-export type SendEmailOptions = {
-  binding: EmailSendBinding;
-  to: string | string[];
-  from: string | { email: string; name?: string };
-  subject: string;
-  text?: string;
-  html?: string;
-  replyTo?: string | { email: string; name?: string };
-  cc?: string | string[];
-  bcc?: string | string[];
-  inReplyTo?: string;
-  headers?: Record<string, string>;
-  secret?: string;
-};
 
 /**
  * RPC request message from client
@@ -272,13 +306,6 @@ function runInInvocation<T>(
   return agentContext.run(store, () => withInvocationScope(body, options));
 }
 
-function isClosedWebSocketSendError(error: unknown): boolean {
-  return (
-    error instanceof TypeError &&
-    error.message.includes("WebSocket send() after close")
-  );
-}
-
 function sendRpcResponseIfOpen(
   connection: Connection,
   response: RPCResponse
@@ -289,92 +316,6 @@ function sendRpcResponseIfOpen(
   } catch (error) {
     if (isClosedWebSocketSendError(error)) return false;
     throw error;
-  }
-}
-
-type RPCReplyTarget = {
-  send(message: string | ArrayBuffer | ArrayBufferView): void | Promise<void>;
-};
-
-type FacetRPCResponseDelivery = {
-  sent: boolean;
-  completion: Promise<void>;
-};
-
-type SubAgentRpcReplyInvocationContext = {
-  bridge?: SubAgentConnectionBridge;
-};
-
-const subAgentRpcReplyContext =
-  new AsyncLocalStorage<SubAgentRpcReplyInvocationContext>();
-
-function sendFacetRpcResponseIfOpen(
-  target: RPCReplyTarget,
-  response: RPCResponse
-): FacetRPCResponseDelivery {
-  try {
-    const completion = Promise.resolve(
-      target.send(JSON.stringify(response))
-    ).catch((error: unknown) => {
-      if (!isClosedWebSocketSendError(error)) {
-        console.error("[Agent] Facet RPC response delivery failed:", error);
-      }
-    });
-    return { sent: true, completion };
-  } catch (error) {
-    if (isClosedWebSocketSendError(error)) {
-      return { sent: false, completion: Promise.resolve() };
-    }
-    throw error;
-  }
-}
-
-type FacetStreamingResponseDeliveryState = {
-  replyTarget: RPCReplyTarget;
-  pending: Set<Promise<void>>;
-};
-
-const facetStreamingResponseDeliveryStates = new WeakMap<
-  StreamingResponse,
-  FacetStreamingResponseDeliveryState
->();
-
-function createStreamingResponse(
-  connection: Connection,
-  id: string,
-  facetReplyTarget?: RPCReplyTarget
-): StreamingResponse {
-  const stream = new StreamingResponse(connection, id);
-  if (facetReplyTarget) {
-    facetStreamingResponseDeliveryStates.set(stream, {
-      replyTarget: facetReplyTarget,
-      pending: new Set()
-    });
-  }
-  return stream;
-}
-
-function trackFacetStreamingResponseDelivery(
-  stream: StreamingResponse,
-  completion: Promise<void>
-): void {
-  const state = facetStreamingResponseDeliveryStates.get(stream);
-  if (!state) return;
-
-  state.pending.add(completion);
-  void completion.finally(() => state.pending.delete(completion));
-}
-
-async function waitForFacetStreamingResponseDeliveries(
-  stream: StreamingResponse
-): Promise<void> {
-  const state = facetStreamingResponseDeliveryStates.get(stream);
-  if (!state) return;
-
-  try {
-    await Promise.all(state.pending);
-  } finally {
-    facetStreamingResponseDeliveryStates.delete(stream);
   }
 }
 
@@ -399,348 +340,20 @@ function isRPCRequest(msg: unknown): msg is RPCRequest {
 /**
  * Type guard for state update messages
  */
-function isStateUpdateMessage(msg: unknown): msg is StateUpdateMessage {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "type" in msg &&
-    msg.type === MessageType.CF_AGENT_STATE &&
-    "state" in msg
-  );
-}
+export {
+  callable,
+  unstable_callable,
+  type CallableMetadata
+} from "./callable-decorator";
+import {
+  copyCallableMetadata,
+  decoratedMethods,
+  getCallableMetadata,
+  isCallableMethod,
+  type CallableMetadata
+} from "./callable-decorator";
 
-/**
- * Metadata for a callable method
- */
-export type CallableMetadata = {
-  /** Optional description of what the method does */
-  description?: string;
-  /** Whether the method supports streaming responses */
-  streaming?: boolean;
-};
-
-const callableMetadata = new WeakMap<Function, CallableMetadata>();
-
-/**
- * Error class for SQL execution failures, containing the query that failed
- */
-export class SqlError extends Error {
-  /** The SQL query that failed */
-  readonly query: string;
-
-  constructor(query: string, cause: unknown) {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    super(`SQL query failed: ${message}`, { cause });
-    this.name = "SqlError";
-    this.query = query;
-  }
-}
-
-// ── Sub-agent (facet) types ──────────────────────────────────────────
-
-/**
- * Internal narrowing of `DurableObjectState` to the parts the facet
- * bootstrap path uses. We only need this because `ctx.exports` in the
- * real types (`Cloudflare.Exports`) is keyed by the *consumer's*
- * worker MainModule, which is invisible from inside this library —
- * so we widen it to a generic Record indexed by class name.
- *
- * @internal
- */
-interface FacetCapableCtx {
-  facets: DurableObjectFacets;
-  /**
-   * Worker exports keyed by class export name. For facet creation, the
-   * runtime only needs the exported Durable Object class. Top-level
-   * Durable Object bindings may also expose namespace helpers here, but
-   * facet-only classes do not need to.
-   */
-  exports: Record<
-    string,
-    | (DurableObjectClass & Partial<Pick<DurableObjectNamespace, "idFromName">>)
-    | undefined
-  >;
-}
-
-type SubAgentPathInvokeEndpoint = {
-  _cf_invokeSubAgentPath(
-    path: ReadonlyArray<{ className: string; name: string }>,
-    method: string,
-    args: unknown[]
-  ): Promise<unknown>;
-};
-
-type SubAgentConnectionMeta = {
-  id: string;
-  uri: string | null;
-  tags: string[];
-  state: unknown;
-  requestHeaders?: [string, string][];
-};
-
-type SubAgentConnectionBridgeLike = {
-  send(message: string | ArrayBuffer | ArrayBufferView): void;
-  close(code?: number, reason?: string): void;
-  setState(state: unknown): unknown;
-  broadcast(
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): void;
-};
-
-type StoredSubAgentConnection = {
-  bridge: SubAgentConnectionBridgeLike;
-  meta: SubAgentConnectionMeta;
-  connection?: Connection;
-};
-
-type SubAgentWebSocketEndpoint = {
-  _cf_handleSubAgentWebSocketConnect(
-    bridge: SubAgentConnectionBridge,
-    meta: SubAgentConnectionMeta
-  ): Promise<void>;
-  _cf_handleSubAgentWebSocketMessage(
-    message: WSMessage,
-    bridge: SubAgentConnectionBridge,
-    meta: SubAgentConnectionMeta,
-    replyBridge?: SubAgentConnectionBridge
-  ): Promise<void>;
-  _cf_handleSubAgentWebSocketClose(
-    code: number,
-    reason: string,
-    wasClean: boolean,
-    bridge: SubAgentConnectionBridge,
-    meta: SubAgentConnectionMeta
-  ): Promise<void>;
-};
-
-class SubAgentConnectionBridge
-  extends RpcTarget
-  implements SubAgentConnectionBridgeLike
-{
-  #connection: Connection;
-  #broadcast?: (
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ) => void;
-
-  constructor(
-    connection: Connection,
-    broadcast?: (
-      ownerPath: ReadonlyArray<{ className: string; name: string }>,
-      message: string | ArrayBuffer | ArrayBufferView,
-      without?: string[]
-    ) => void
-  ) {
-    super();
-    this.#connection = connection;
-    this.#broadcast = broadcast;
-  }
-
-  send(message: string | ArrayBuffer | ArrayBufferView): void {
-    this.#connection.send(message);
-  }
-
-  close(code?: number, reason?: string): void {
-    this.#connection.close(code, reason);
-  }
-
-  setState(state: unknown): unknown {
-    return this.#connection.setState(state);
-  }
-
-  broadcast(
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): void {
-    this.#broadcast?.(ownerPath, message, without);
-  }
-}
-
-class RootSubAgentConnectionBridge implements SubAgentConnectionBridgeLike {
-  #root: RootFacetRpcSurface;
-  #connectionId: string;
-
-  constructor(root: RootFacetRpcSurface, connectionId: string) {
-    this.#root = root;
-    this.#connectionId = connectionId;
-  }
-
-  send(message: string | ArrayBuffer | ArrayBufferView): void {
-    void this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
-  }
-
-  close(code?: number, reason?: string): void {
-    void this.#root._cf_closeSubAgentConnection(
-      this.#connectionId,
-      code,
-      reason
-    );
-  }
-
-  setState(state: unknown): unknown {
-    void this.#root._cf_setSubAgentConnectionState(this.#connectionId, state);
-    return state;
-  }
-
-  broadcast(
-    ownerPath: ReadonlyArray<{ className: string; name: string }>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): void {
-    void this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
-  }
-}
-
-/**
- * Constructor type for a sub-agent class.
- * Used by {@link Agent.subAgent} to reference the child class
- * via `ctx.exports`.
- *
- * The class name (`cls.name`) must match the export name in the
- * worker entry point — re-exports under a different name
- * (e.g. `export { Foo as Bar }`) are not supported.
- */
-export type SubAgentClass<T extends Agent = Agent> = {
-  new (ctx: DurableObjectState, env: never): T;
-};
-
-/**
- * Wraps `T` in a `Promise` unless it already is one.
- */
-type Promisify<T> = T extends Promise<unknown> ? T : Promise<T>;
-
-/**
- * A typed RPC stub for a sub-agent. Exposes all public instance methods
- * as callable RPC methods with Promise-wrapped return types.
- *
- * Methods owned by `Agent`, its lifecycle, or `DurableObject` internals
- * are excluded — only user-defined methods on the subclass are exposed.
- */
-export type SubAgentStub<T extends Agent> = {
-  [K in keyof T as K extends keyof Agent
-    ? never
-    : T[K] extends (...args: never[]) => unknown
-      ? K
-      : never]: T[K] extends (...args: infer A) => infer R
-    ? (...args: A) => Promisify<R>
-    : never;
-};
-
-/**
- * Decorator that marks a method as callable by clients
- * @param metadata Optional metadata about the callable method
- */
-export function callable(metadata: CallableMetadata = {}) {
-  return function callableDecorator<This, Args extends unknown[], Return>(
-    target: (this: This, ...args: Args) => Return,
-    _context: ClassMethodDecoratorContext
-  ) {
-    if (!callableMetadata.has(target)) {
-      callableMetadata.set(target, metadata);
-    }
-
-    return target;
-  };
-}
-
-let didWarnAboutUnstableCallable = false;
-
-/**
- * Decorator that marks a method as callable by clients
- * @deprecated this has been renamed to callable, and unstable_callable will be removed in the next major version
- * @param metadata Optional metadata about the callable method
- */
-export const unstable_callable = (metadata: CallableMetadata = {}) => {
-  if (!didWarnAboutUnstableCallable) {
-    didWarnAboutUnstableCallable = true;
-    console.warn(
-      "unstable_callable is deprecated, use callable instead. unstable_callable will be removed in the next major version."
-    );
-  }
-  return callable(metadata);
-};
-
-export type QueueItem<T = string> = {
-  id: string;
-  payload: T;
-  callback: keyof Agent<Cloudflare.Env>;
-  created_at: number;
-  retry?: RetryOptions;
-};
-
-/**
- * Represents a scheduled task within an Agent
- * @template T Type of the payload data
- */
-export type Schedule<T = string> = {
-  /** Unique identifier for the schedule */
-  id: string;
-  /** Name of the method to be called */
-  callback: string;
-  /** Data to be passed to the callback */
-  payload: T;
-  /** Retry options for callback execution */
-  retry?: RetryOptions;
-} & (
-  | {
-      /** Type of schedule for one-time execution at a specific time */
-      type: "scheduled";
-      /** Timestamp when the task should execute */
-      time: number;
-    }
-  | {
-      /** Type of schedule for delayed execution */
-      type: "delayed";
-      /** Timestamp when the task should execute */
-      time: number;
-      /** Number of seconds to delay execution */
-      delayInSeconds: number;
-    }
-  | {
-      /** Type of schedule for recurring execution based on cron expression */
-      type: "cron";
-      /** Timestamp for the next execution */
-      time: number;
-      /** Cron expression defining the schedule */
-      cron: string;
-    }
-  | {
-      /** Type of schedule for recurring execution at fixed intervals */
-      type: "interval";
-      /** Timestamp for the next execution */
-      time: number;
-      /** Number of seconds between executions */
-      intervalSeconds: number;
-    }
-);
-
-type ScheduleStorageRow = {
-  id: string;
-  callback: string;
-  payload: string;
-  type: "scheduled" | "delayed" | "cron" | "interval";
-  time: number;
-  delayInSeconds?: number;
-  cron?: string;
-  intervalSeconds?: number;
-  retry?: RetryOptions;
-  running?: number;
-  execution_started_at?: number | null;
-  retry_options?: string | null;
-  owner_path?: string | null;
-  owner_path_key?: string | null;
-};
-
-type FacetRunStorageRow = {
-  owner_path: string;
-  owner_path_key: string;
-  run_id: string;
-  created_at: number;
-};
+export { SqlError } from "./sql-error";
 
 type AgentToolRunStorageRow = {
   run_id: string;
@@ -773,90 +386,6 @@ type AgentToolRunStorageRow = {
 
 type DeferredAgentToolFinish = () => Promise<void>;
 type DetachedReconcilePayload = { cadenceIndex?: number };
-
-export type ScheduleCriteria = {
-  id?: string;
-  type?: "scheduled" | "delayed" | "cron" | "interval";
-  timeRange?: { start?: Date; end?: Date };
-};
-
-/**
- * Internal RPC surface exposed by the root agent for facets to
- * delegate alarm-owning operations (schedules + facet teardown).
- * @internal
- */
-type RootFacetRpcSurface = {
-  _cf_scheduleForFacet<T>(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    when: Date | string | number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
-  ): Promise<{ schedule: Schedule<T>; created: boolean }>;
-  _cf_cancelScheduleForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    id: string
-  ): Promise<{ ok: boolean; callback?: string }>;
-  _cf_scheduleEveryForFacet<T>(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    intervalSeconds: number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; _idempotent?: boolean }
-  ): Promise<{ schedule: Schedule<T>; created: boolean }>;
-  _cf_cleanupFacetPrefix(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<void>;
-  _cf_getScheduleForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    id: string
-  ): Promise<Schedule<unknown> | undefined>;
-  _cf_listSchedulesForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    criteria?: ScheduleCriteria
-  ): Promise<Schedule<unknown>[]>;
-  _cf_destroyDescendantFacet(
-    targetPath: ReadonlyArray<AgentPathStep>
-  ): Promise<void>;
-  _cf_acquireFacetKeepAlive(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<string>;
-  _cf_releaseFacetKeepAlive(token: string): Promise<void>;
-  _cf_registerFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void>;
-  _cf_unregisterFacetRun(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    runId: string
-  ): Promise<void>;
-  _cf_broadcastToSubAgent(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): Promise<void>;
-  _cf_subAgentConnectionMetas(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<SubAgentConnectionMeta[]>;
-  _cf_sendToSubAgentConnection(
-    connectionId: string,
-    message: string | ArrayBuffer | ArrayBufferView
-  ): Promise<void>;
-  _cf_closeSubAgentConnection(
-    connectionId: string,
-    code?: number,
-    reason?: string
-  ): Promise<void>;
-  _cf_setSubAgentConnectionState(
-    connectionId: string,
-    state: unknown
-  ): Promise<unknown>;
-  _cf_closeSubAgentConnectionsForPrefix(
-    prefix: ReadonlyArray<AgentPathStep>,
-    code: number,
-    reason: string
-  ): Promise<void>;
-};
 
 /**
  * Context passed to the `runFiber` callback. Provides checkpoint
@@ -995,11 +524,6 @@ type InternalFiberOptions = {
   ) => void;
 };
 
-function getNextCronTime(cron: string) {
-  const interval = parseCronExpression(cron);
-  return interval.getNextDate();
-}
-
 export type { TransportType } from "./mcp/types";
 export type { RetryOptions } from "./retries";
 export {
@@ -1013,7 +537,7 @@ export {
   type AgentMcpOAuthProvider,
   /** @deprecated Use {@link AgentMcpOAuthProvider} instead. */
   type AgentsOAuthProvider
-} from "./mcp/do-oauth-client-provider";
+} from "./mcp/client/do-oauth-client-provider";
 
 /**
  * MCP Server state update message from server -> Client
@@ -1119,13 +643,18 @@ const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
 // next wake must complete instead of resuming normal work.
 //
 // Scope: the marker is only consulted on alarm-driven paths (`alarm()` and
-// `_scheduleNextAlarm()`). It deliberately does NOT gate request entrypoints
+// `_syncHostJobs()`). It deliberately does NOT gate request entrypoints
 // (`onRequest`/`onMessage`/RPC) — a request that lands between scheduling and
 // the teardown alarm runs normally and `_ensureSchema()` recreates tables. For
 // the MCP session-DELETE use case this is benign: the session id is unique and
 // is never addressed again after DELETE, so no further request reaches a
 // condemned session DO before its teardown alarm fires.
 const DESTROY_PENDING_KEY = "cf_agents_destroy_pending";
+
+// Stable ids for Agent-owned host jobs in the Lifecycle job queue.
+const HOST_JOB_KEEP_ALIVE_ID = "cf:keep-alive";
+const HOST_JOB_HOUSEKEEPING_ID = "cf:housekeeping";
+const HOST_JOB_DESTROY_ID = "cf:destroy";
 // Delay before the deferred-teardown alarm fires (#1625). `_cf_scheduleDestroy`
 // is awaited by an HTTP handler (the MCP session-DELETE) that then returns its
 // response. The teardown alarm runs `destroy()`, which ends in
@@ -1158,9 +687,9 @@ const FIBER_RECOVERY_BACKOFF_MAX_EXP = 20;
 // budget abandoned healthy, still-advancing children); only a genuinely
 // silent/hung child seals `interrupted` after a full no-progress window.
 const DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS = 120_000;
-// Optional hard wall-clock ceiling on a single re-attach. Defaults to NO cap,
-// mirroring chat-recovery's `maxRecoveryWork: Infinity` (#1672): the SDK does
-// not impose an implicit wall-clock bound on a child that keeps making forward
+// Optional hard wall-clock ceiling on a single re-attach. Defaults to NO cap
+// (#1672): the SDK does not impose an implicit wall-clock bound on a child that
+// keeps making forward
 // progress — a re-attached parent follows a healthy, still-streaming child for
 // as long as it advances, exactly as it would on the live (never-evicted) path.
 // A hung/silent child is already bounded by the progress-keyed no-progress
@@ -1208,14 +737,6 @@ const DETACHED_RECONCILE_CALLBACK = "_cfDetachedReconcileTick";
 // receive `detached: { notify: true }` completions. Resolved by name so the
 // base Agent stays decoupled from the chat layer.
 const DETACHED_NOTIFY_CALLBACK = "_cfDetachedNotifyFinish";
-const SUB_AGENT_IDENTITY_VERSION_LEGACY = "legacy";
-const SUB_AGENT_IDENTITY_VERSION_PATH_V2 = "path-v2";
-const SUB_AGENT_IDENTITY_PATH_V2_PREFIX = "cf-agents:v2:";
-
-type SubAgentIdentityVersion =
-  | typeof SUB_AGENT_IDENTITY_VERSION_LEGACY
-  | typeof SUB_AGENT_IDENTITY_VERSION_PATH_V2;
-
 type AgentToolRecoveryInspection =
   | {
       status: "inspected";
@@ -1228,75 +749,22 @@ type AgentToolRecoveryInspection =
 /**
  * Schema version for the Agent's internal SQLite tables.
  * Bump this when adding new tables, columns, or migrations.
- * The constructor stores this as a row in cf_agents_state and checks it
- * on wake to skip DDL on established DOs.
+ * The constructor stores this under a namespaced KV key (the same convention
+ * every capability uses for its own schema version) and checks it on wake to
+ * skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 11;
+const CURRENT_SCHEMA_VERSION = 14;
+const SCHEMA_VERSION_KEY = "cf_agents:schema_version";
 
-const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
-const STATE_ROW_ID = "cf_state_row_id";
-// Legacy key — no longer written, but read for backward compatibility with
-// DOs that were created before the single-row state optimization.
-const STATE_WAS_CHANGED = "cf_state_was_changed";
+// Before the State capability owned `cf_agents_state`, Agent kept its schema
+// version as a row in that table. Read once for DOs created under that layout,
+// then moved to the KV key so the table has a single owner.
+const LEGACY_SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 
+// Sentinel for "no initial state provided" on the Agent's overridable
+// `initialState` field. The State capability owns state storage; this only
+// distinguishes an unset initialState when the `state` getter seeds it.
 const DEFAULT_STATE = {} as unknown;
-
-async function sha256Hex(value: string): Promise<string> {
-  const bytes = new TextEncoder().encode(value);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function pathV2IdentityName(logicalName: string, digest: string): string {
-  return `${SUB_AGENT_IDENTITY_PATH_V2_PREFIX}${encodeURIComponent(logicalName)}:${digest}`;
-}
-
-function logicalNameFromPathV2Identity(identityName: string): string | null {
-  if (!identityName.startsWith(SUB_AGENT_IDENTITY_PATH_V2_PREFIX)) {
-    return null;
-  }
-  const rest = identityName.slice(SUB_AGENT_IDENTITY_PATH_V2_PREFIX.length);
-  const separator = rest.lastIndexOf(":");
-  if (separator === -1) return null;
-
-  try {
-    return decodeURIComponent(rest.slice(0, separator));
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Validate that a stored `parentPath` has the expected shape. Used
- * when restoring from DO storage to guard against corrupted data.
- */
-function isValidParentPath(
-  value: unknown
-): value is Array<{ className: string; name: string }> {
-  if (!Array.isArray(value)) return false;
-  return value.every(
-    (entry) =>
-      entry != null &&
-      typeof entry === "object" &&
-      typeof (entry as { className?: unknown }).className === "string" &&
-      typeof (entry as { name?: unknown }).name === "string"
-  );
-}
-
-/**
- * Internal key used to store the readonly flag in connection state.
- * Prefixed with _cf_ to avoid collision with user state keys.
- */
-const CF_READONLY_KEY = "_cf_readonly";
-
-/**
- * Internal key used to store the no-protocol flag in connection state.
- * When set, protocol messages (identity, state sync, MCP servers) are not
- * sent to this connection — neither on connect nor via broadcasts.
- */
-const CF_NO_PROTOCOL_KEY = "_cf_no_protocol";
 
 /**
  * Internal key used to store voice call state in connection state.
@@ -1304,65 +772,14 @@ const CF_NO_PROTOCOL_KEY = "_cf_no_protocol";
  */
 const CF_VOICE_IN_CALL_KEY = "_cf_voiceInCall";
 
-/**
- * Internal key used to remember the outer `/sub/...` URL for a
- * WebSocket accepted by the parent on behalf of a child facet.
- * Hibernated events then wake the parent, which forwards frames to
- * the child over serializable RPC while keeping native WebSocket I/O
- * parent-owned.
- */
-const CF_SUB_AGENT_OUTER_URL_KEY = "_cf_subAgentOuterUrl";
-const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
-
-const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
-
-/**
- * The set of all internal keys stored in connection state that must be
- * hidden from user code and preserved across setState calls.
- */
-const CF_INTERNAL_KEYS: ReadonlySet<string> = new Set([
-  CF_READONLY_KEY,
-  CF_NO_PROTOCOL_KEY,
+// Agent's own per-connection flags ride the WebSockets capability's
+// connection-state namespace: hidden from `connection.state`, preserved
+// across user `setState`, and carried through hibernation.
+registerInternalConnectionKeys(
   CF_VOICE_IN_CALL_KEY,
   CF_SUB_AGENT_OUTER_URL_KEY,
   CF_SUB_AGENT_TAGS_KEY
-]);
-
-/** Check if a raw connection state object contains any internal keys. */
-function rawHasInternalKeys(raw: Record<string, unknown>): boolean {
-  for (const key of Object.keys(raw)) {
-    if (CF_INTERNAL_KEYS.has(key)) return true;
-  }
-  return false;
-}
-
-/** Return a copy of `raw` with all internal keys removed, or null if no user keys remain. */
-function stripInternalKeys(
-  raw: Record<string, unknown>
-): Record<string, unknown> | null {
-  const result: Record<string, unknown> = {};
-  let hasUserKeys = false;
-  for (const key of Object.keys(raw)) {
-    if (!CF_INTERNAL_KEYS.has(key)) {
-      result[key] = raw[key];
-      hasUserKeys = true;
-    }
-  }
-  return hasUserKeys ? result : null;
-}
-
-/** Return a copy containing only the internal keys present in `raw`. */
-function extractInternalFlags(
-  raw: Record<string, unknown>
-): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (const key of Object.keys(raw)) {
-    if (CF_INTERNAL_KEYS.has(key)) {
-      result[key] = raw[key];
-    }
-  }
-  return result;
-}
+);
 
 /** Max length for error strings broadcast to clients. */
 const MAX_ERROR_STRING_LENGTH = 500;
@@ -1448,9 +865,9 @@ export const DEFAULT_AGENT_STATIC_OPTIONS = {
   /**
    * Optional hard wall-clock ceiling (ms) on a single agent-tool re-attach
    * (#1630). Caps the total wait even as the no-progress budget re-arms across
-   * stream-closes. Defaults to `Infinity` (no implicit cap), mirroring
-   * chat-recovery's `maxRecoveryWork` (#1672): a healthy, still-advancing child
-   * is followed for as long as it makes progress — a hung child is bounded by
+   * stream-closes. Defaults to `Infinity` (no implicit cap, #1672): a healthy,
+   * still-advancing child is followed for as long as it makes progress — a
+   * hung child is bounded by
    * the no-progress budget, and a content-runaway by the child's own
    * `maxRecoveryWork` / `shouldKeepRecovering`. Set a finite value to impose a
    * wall-clock cap (which also tears the child down on `window-exceeded`).
@@ -1539,9 +956,9 @@ export interface AgentStaticOptions {
   /**
    * Optional hard wall-clock ceiling in milliseconds on a single agent-tool
    * re-attach (#1630). Caps the total wait even as the no-progress budget
-   * re-arms across stream-closes. Default: `Infinity` (no implicit cap),
-   * mirroring chat-recovery's `maxRecoveryWork` (#1672) — a healthy,
-   * still-advancing child is followed for as long as it makes progress, exactly
+   * re-arms across stream-closes. Default: `Infinity` (no implicit cap,
+   * #1672) — a healthy, still-advancing child is followed for as long as it
+   * makes progress, exactly
    * as on the live (never-evicted) path. Set a finite value to impose a
    * wall-clock cap (which also tears the child down on `window-exceeded`); `0`
    * also disables the ceiling.
@@ -1587,72 +1004,19 @@ export interface AgentStaticOptions {
   maxAlarmMemoryLimitStrikes?: number;
 }
 
-/**
- * Parse the raw `retry_options` TEXT column from a SQLite row into a
- * typed `RetryOptions` object, or `undefined` if not set.
- */
-function parseRetryOptions(
-  row: Record<string, unknown>
-): RetryOptions | undefined {
-  const raw = row.retry_options;
-  if (typeof raw !== "string") return undefined;
-  return JSON.parse(raw) as RetryOptions;
-}
+// `isDurableObjectCodeUpdateReset` / `isPlatformTransientError` live in
+// ./retries and remain re-exported from the package root so higher layers
+// classify platform failures with the same matcher instead of drifting copies.
+
+/** Compatibility alias for the lifecycle-owned current Agent accessor. */
+export const getCurrentAgent = getCurrentLifecycleAgent as <
+  T extends DurableObject = Agent<Cloudflare.Env>
+>() => CurrentAgentContext<T, AgentEmail>;
 
 /**
- * Resolve per-task retry options against class-level defaults and call
- * `tryN`. This is the shared retry-execution path used by both queue
- * flush and schedule alarm handlers.
- */
-function resolveRetryConfig(
-  taskRetry: RetryOptions | undefined,
-  defaults: Required<RetryOptions>
-): { maxAttempts: number; baseDelayMs: number; maxDelayMs: number } {
-  return {
-    maxAttempts: taskRetry?.maxAttempts ?? defaults.maxAttempts,
-    baseDelayMs: taskRetry?.baseDelayMs ?? defaults.baseDelayMs,
-    maxDelayMs: taskRetry?.maxDelayMs ?? defaults.maxDelayMs
-  };
-}
-
-// `isDurableObjectCodeUpdateReset` / `isPlatformTransientError` (used by the
-// scheduler's defer-vs-abandon decisions below) live in ./retries next to
-// `isErrorRetryable`, and are re-exported from the package root so higher
-// layers (e.g. `@cloudflare/think`) classify with the SAME matcher instead of
-// drifting copies.
-
-export function getCurrentAgent<
-  T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
->(): {
-  agent: T | undefined;
-  connection: Connection | undefined;
-  request: Request | undefined;
-  email: AgentEmail | undefined;
-} {
-  const store = agentContext.getStore() as
-    | {
-        agent: T;
-        connection: Connection | undefined;
-        request: Request | undefined;
-        email: AgentEmail | undefined;
-      }
-    | undefined;
-  if (!store) {
-    return {
-      agent: undefined,
-      connection: undefined,
-      request: undefined,
-      email: undefined
-    };
-  }
-  return store;
-}
-
-/**
- * Wraps a method to run within the agent context, ensuring getCurrentAgent() works properly
- * @param agent The agent instance
- * @param method The method to wrap
- * @returns A wrapped method that runs within the agent context
+ * Restore Agent context when a public method is entered outside a Lifecycle
+ * hook, notably through native Durable Object RPC or cross-Agent re-entry.
+ * Lifecycle already owns context for its capability and semantic user hooks.
  */
 
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
@@ -1703,15 +1067,66 @@ type WorkflowName<E> = WorkflowBinding<E> | (string & {});
 /**
  * Base class for creating Agent implementations
  * @template Env Environment type containing bindings
- * @template State State type to store within the Agent
+ * @template TState State type to store within the Agent
  */
 export class Agent<
   Env extends Cloudflare.Env = Cloudflare.Env,
-  State = unknown,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  TState = unknown,
+  Props extends object = object
 > extends DurableObject<Env> {
-  /** Runtime lifecycle and reusable durable capabilities for this Agent. */
-  readonly lifecycle = Lifecycle.install<Env, Props>(this);
+  /**
+   * Runtime lifecycle and reusable durable capabilities for this Agent.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  readonly lifecycle = Lifecycle.install<Env, Props>(this, {
+    maxAlarmMemoryLimitStrikes: this._resolvedOptions.maxAlarmMemoryLimitStrikes
+  });
+
+  /**
+   * WebSocket connection subsystem. Constructed as a field initializer
+   * so it exists before the constructor installs it; the handler arrows
+   * defer to `this.*`, so they always hit the framework-wrapped hooks.
+   * Those wrappers still open their own invocation scope even though
+   * the capability's dispatch already entered one via the host invoker
+   * — the inner wrap is kept because the wrapped hooks are also invoked
+   * from paths that do not pass through the capability (facet bridging,
+   * direct calls).
+   */
+  /**
+   * Durable state: the `cf_agents_state` row, lazy load, validated persistence.
+   * `initialState` stays on Agent (a subclass field, initialized after this
+   * one) and is seeded by the `state` getter. Typed `<unknown>` rather than
+   * `<TState>` because `TState` appears in both `get()` and `set()` positions,
+   * which would make `Agent`'s own `TState` parameter invariant and break
+   * `Subclass -> Agent<Env, unknown>` assignability; the typed boundary is
+   * re-established in `state` / `setState`.
+   */
+  readonly _state: State<unknown> = new State<unknown>({
+    validateStateChange: (nextState, source) =>
+      this.validateStateChange(nextState as TState, source),
+    onChanged: (nextState, source) =>
+      this._handleStateChanged(nextState as TState, source)
+  });
+
+  private readonly _webSockets = new WebSockets({
+    handlers: {
+      onConnect: (connection, ctx) => this.onConnect(connection, ctx),
+      onMessage: (connection, message) => this.onMessage(connection, message),
+      onClose: (connection, code, reason, wasClean) =>
+        this.onClose(connection, code, reason, wasClean),
+      onError: (connection, error) => this.onError(connection, error)
+    },
+    // Agent answers its own rpc frames in onMessage (facet bridging,
+    // StreamingResponse). It also drives the connect sequence itself —
+    // `sendIdentity`/`sendState` after deciding whether the connection
+    // belongs to a facet — so the capability provides the protocol but
+    // does not run it: `protocol: false`.
+    protocol: false,
+    state: this._state,
+    getConnectionTags: (connection, ctx) =>
+      this.getConnectionTags(connection, ctx)
+  });
 
   /** Run user initialization after lifecycle components have started. */
   onStart(_props?: Props): void | Promise<void> {}
@@ -1754,7 +1169,6 @@ export class Agent<
     await this.lifecycle.start(props);
   }
 
-  private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
   private _destroyed = false;
 
@@ -1763,13 +1177,6 @@ export class Agent<
    * Used by internal flag methods (readonly, no-protocol) to read/write
    * _cf_-prefixed keys without going through the user-facing state/setState.
    */
-  private _rawStateAccessors = new WeakMap<
-    Connection,
-    {
-      getRaw: () => Record<string, unknown> | null;
-      setRaw: (state: unknown) => unknown;
-    }
-  >();
 
   /**
    * Cached persistence-hook dispatch mode, computed once in the constructor.
@@ -1783,11 +1190,6 @@ export class Agent<
   private _isFacet = false;
 
   private _protocolBroadcastExcludeIds = new Set<string>();
-  private _cf_currentSubAgentBridge?: SubAgentConnectionBridgeLike;
-  private _cf_virtualSubAgentConnections = new Map<
-    string,
-    StoredSubAgentConnection
-  >();
 
   /**
    * User-facing facet name. For legacy facets this is the same as
@@ -1805,17 +1207,11 @@ export class Agent<
    */
   private _parentPath: ReadonlyArray<AgentPathStep> = [];
 
-  /** True while user's onStart() is executing. Used to warn about non-idempotent schedule() calls. */
-  private _insideOnStart = false;
-
-  /** Tracks callbacks already warned about during this onStart() to avoid log spam. */
-  private _warnedScheduleInOnStart = new Set<string>();
-
   /** Warn-once guard: `chatRecovery` reassigned during onStart() (too late for wake recovery). */
   private _warnedChatRecoveryInOnStart = false;
 
   /**
-   * Number of active keepAlive() callers. When > 0, `_scheduleNextAlarm()`
+   * Number of active keepAlive() callers. When > 0, `_syncHostJobs()`
    * caps the next alarm at `keepAliveIntervalMs` so the DO stays alive.
    * Purely in-memory — lost on eviction, which is correct because the
    * in-memory work keepAlive was protecting is also lost.
@@ -1823,13 +1219,43 @@ export class Agent<
    */
   _keepAliveRefs = 0;
 
+  /** @internal The extracted dynamic-agent (facet) machinery. */
+  private _dynamicAgentsInstance: DynamicAgentsInternal | undefined;
+
+  /** @internal */
+  private get _dynamicAgents(): DynamicAgentsInternal {
+    this._dynamicAgentsInstance ??= new DynamicAgentsInternal(
+      this as unknown as DynamicAgentHostPort
+    );
+    return this._dynamicAgentsInstance;
+  }
+
+  /** @internal */
+  private _dynamicAgentsApi: DynamicAgentsApi | undefined;
+
   /**
-   * In-memory tokens for keepAlive leases acquired by facets and held
-   * on the root alarm owner. Lost on eviction, like `_keepAliveRefs`,
-   * because the in-memory work those leases were protecting is also gone.
-   * @internal
+   * The dynamic-agents capability: facet-backed child agents that run
+   * in their own isolate with their own SQLite database, colocated
+   * with — and supervised by — this agent.
+   *
+   * Use dynamic agents for code whose class or lifecycle this agent
+   * owns: dynamically-loaded or AI-generated code, per-run tool
+   * agents, sandboxed components. For independent peers (for example
+   * one Durable Object per chat), use `getAgentByName` instead.
+   *
+   * ```ts
+   * const child = await this.dynamicAgents.get(Researcher, id);
+   * await child.doWork();
+   * this.dynamicAgents.abort(Researcher, id, reason);
+   * await this.dynamicAgents.delete(Researcher, id);
+   * ```
+   *
+   * @experimental The API surface may change before stabilizing.
    */
-  private _facetKeepAliveTokens = new Set<string>();
+  get dynamicAgents(): DynamicAgentsApi {
+    this._dynamicAgentsApi ??= new DynamicAgentsApi(this._dynamicAgents);
+    return this._dynamicAgentsApi;
+  }
 
   /** @internal In-memory set of fiber IDs running in this process. */
   private _runFiberActiveFibers = new Set<string>();
@@ -1855,8 +1281,52 @@ export class Agent<
   /** @internal Edge-trigger latch for the live-detached-count warning. */
   private _detachedLiveCountWarned = false;
 
-  private _ParentClass: typeof Agent<Env, State> =
+  private _ParentClass: typeof Agent<Env, TState> =
     Object.getPrototypeOf(this).constructor;
+
+  /**
+   * Durable scheduling capability installed into this Agent's Lifecycle.
+   *
+   * @experimental The API surface may change before stabilizing. Agent's
+   * schedule()/scheduleEvery()/getScheduleById()/listSchedules()/
+   * cancelSchedule() methods are the stable surface.
+   */
+  readonly scheduler: Scheduler;
+
+  /**
+   * Durable background-work capability installed into this Agent's
+   * Lifecycle. Agent's queue()/dequeue()/dequeueAll()/dequeueAllByCallback()/
+   * getQueue()/getQueues() methods are its surface.
+   */
+  private readonly _queue: Queue;
+
+  /**
+   * Durable replayable execution capability installed into this Agent's
+   * Lifecycle. Declare definitions on the overridable
+   * {@link taskDefinitions} property and start runs with
+   * `this.tasks.run(name, input, options)`.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  readonly tasks: Tasks;
+
+  /**
+   * Named Task definitions for this Agent, resolved lazily on every
+   * dispatch. Declare as a field so the map is rebuilt on every Durable
+   * Object wake — that is what lets in-flight runs resolve their persisted
+   * definition names after a restart:
+   *
+   * ```ts
+   * readonly taskDefinitions = {
+   *   "build-report@v1": async (input: ReportInput, step: TaskStep) => {
+   *     // ...
+   *   }
+   * } satisfies TaskHandlers;
+   * ```
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  declare readonly taskDefinitions?: TaskHandlers;
 
   readonly mcp: MCPClientManager;
 
@@ -1864,7 +1334,7 @@ export class Agent<
    * Initial state for the Agent
    * Override to provide default state values
    */
-  initialState: State = DEFAULT_STATE as State;
+  initialState: TState = DEFAULT_STATE as TState;
 
   /**
    * Stable key for Workers AI session affinity (prefix-cache optimization).
@@ -1888,54 +1358,20 @@ export class Agent<
   }
 
   /**
-   * Current state of the Agent
+   * Current state of the Agent.
+   *
+   * Delegates to the State capability, which owns lazy load and the
+   * in-memory cache; Agent seeds `initialState` on first access.
    */
-  get state(): State {
-    if (this._state !== DEFAULT_STATE) {
-      // state was previously set, and populated internal state
-      return this._state;
-    }
-    // looks like this is the first time the state is being accessed
-    // check if the state was set in a previous life
-    const result = this.sql<{ state: State | undefined }>`
-      SELECT state FROM cf_agents_state WHERE id = ${STATE_ROW_ID}
-    `;
-
-    // Row existence is the signal that state was previously set.
-    // This handles all values including falsy ones (null, 0, false, "").
-    if (result.length > 0) {
-      const state = result[0].state as string;
-
-      try {
-        this._state = JSON.parse(state);
-      } catch (e) {
-        console.error(
-          "Failed to parse stored state, falling back to initialState:",
-          e
-        );
-        if (this.initialState !== DEFAULT_STATE) {
-          this._state = this.initialState;
-          // Persist the fixed state to prevent future parse errors
-          this._setStateInternal(this.initialState);
-        } else {
-          // No initialState defined - clear corrupted data to prevent infinite retry loop
-          this.sql`DELETE FROM cf_agents_state WHERE id = ${STATE_ROW_ID}`;
-          return undefined as State;
-        }
-      }
-      return this._state;
-    }
-
-    // ok, this is the first time the state is being accessed
-    // and the state was not set in a previous life
-    // so we need to set the initial state (if provided)
-    if (this.initialState === DEFAULT_STATE) {
-      // no initial state provided, so we return undefined
-      return undefined as State;
-    }
-    // initial state provided, so we set the state,
-    // update db and return the initial state
-    this._setStateInternal(this.initialState);
+  get state(): TState {
+    const stored = this._state.get();
+    // `undefined` is not JSON-representable, so it uniquely means "no row":
+    // nothing stored yet, or a corrupt row the capability just cleared.
+    if (stored !== undefined) return stored as TState;
+    if (this.initialState === DEFAULT_STATE) return undefined as TState;
+    // First access with nothing stored: seed the initial state. Goes through
+    // set() so it persists, broadcasts, and runs the notification hook.
+    this._state.set(this.initialState, "server");
     return this.initialState;
   }
 
@@ -2123,149 +1559,26 @@ export class Agent<
    */
   protected _ensureSchema(): void {
     // Schema version gating: skip all DDL on established DOs whose schema
-    // is already up-to-date. We always create cf_agents_state first (cheap
-    // idempotent DDL) and store the version as a row inside it.
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_state (
-        id TEXT PRIMARY KEY NOT NULL,
-        state TEXT
-      )
-    `;
-
-    const versionRow = this.sql<{ state: string | null }>`
-      SELECT state FROM cf_agents_state WHERE id = ${SCHEMA_VERSION_ROW_ID}
-    `;
-    const schemaVersion =
-      versionRow.length > 0 ? Number(versionRow[0].state) : 0;
+    // is already up-to-date. `cf_agents_state` belongs to the State
+    // capability (state/index.ts), which creates and migrates it itself.
+    const schemaVersion = this._readSchemaVersion();
 
     if (schemaVersion < CURRENT_SCHEMA_VERSION) {
-      this.sql`
-          CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
-            id TEXT PRIMARY KEY NOT NULL,
-            name TEXT NOT NULL,
-            server_url TEXT NOT NULL,
-            callback_url TEXT NOT NULL,
-            client_id TEXT,
-            auth_url TEXT,
-            server_options TEXT
-          )
-        `;
+      ensureMcpServerTable(this.ctx.storage);
 
-      this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_queues (
-          id TEXT PRIMARY KEY NOT NULL,
-          payload TEXT,
-          callback TEXT,
-          created_at INTEGER DEFAULT (unixepoch())
-        )
-      `;
-
-      this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_schedules (
-          id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-          callback TEXT,
-          payload TEXT,
-          type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
-          time INTEGER,
-          delayInSeconds INTEGER,
-          cron TEXT,
-          intervalSeconds INTEGER,
-          running INTEGER DEFAULT 0,
-          created_at INTEGER DEFAULT (unixepoch()),
-          execution_started_at INTEGER,
-          retry_options TEXT,
-          owner_path TEXT,
-          owner_path_key TEXT
-        )
-      `;
-
-      // Migration: Add columns for interval scheduling (for existing agents)
-      // Use raw exec to avoid error logging through onError for expected failures
+      // Queue and schedule schema and migrations are owned by the Queue and
+      // Scheduler capabilities.
       const addColumnIfNotExists = (sql: string) => {
         try {
           this.ctx.storage.sql.exec(sql);
-        } catch (e) {
-          // Only ignore "duplicate column" errors, re-throw unexpected errors
-          const message = e instanceof Error ? e.message : String(e);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
           if (!message.toLowerCase().includes("duplicate column")) {
-            throw e;
+            throw error;
           }
         }
       };
-
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN intervalSeconds INTEGER"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN running INTEGER DEFAULT 0"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN execution_started_at INTEGER"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN retry_options TEXT"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN owner_path TEXT"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN owner_path_key TEXT"
-      );
-      addColumnIfNotExists(
-        "ALTER TABLE cf_agents_queues ADD COLUMN retry_options TEXT"
-      );
-
-      // Migration: Update CHECK constraint on type column to include 'interval'.
-      // SQLite doesn't support ALTER TABLE to modify constraints, so we recreate
-      // the table when the old constraint is detected.
-      {
-        const rows = this.ctx.storage.sql
-          .exec(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='cf_agents_schedules'"
-          )
-          .toArray();
-        if (rows.length > 0) {
-          const ddl = String(rows[0].sql);
-          if (!ddl.includes("'interval'")) {
-            // Drop any leftover temp table from a previous partial migration
-            this.ctx.storage.sql.exec(
-              "DROP TABLE IF EXISTS cf_agents_schedules_new"
-            );
-            this.ctx.storage.sql.exec(`
-              CREATE TABLE cf_agents_schedules_new (
-                id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-                callback TEXT,
-                payload TEXT,
-                type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
-                time INTEGER,
-                delayInSeconds INTEGER,
-                cron TEXT,
-                intervalSeconds INTEGER,
-                running INTEGER DEFAULT 0,
-                created_at INTEGER DEFAULT (unixepoch()),
-                execution_started_at INTEGER,
-                retry_options TEXT,
-                owner_path TEXT,
-                owner_path_key TEXT
-              )
-            `);
-            this.ctx.storage.sql.exec(`
-              INSERT INTO cf_agents_schedules_new
-                (id, callback, payload, type, time, delayInSeconds, cron,
-                 intervalSeconds, running, created_at, execution_started_at, retry_options,
-                 owner_path, owner_path_key)
-              SELECT id, callback, payload, type, time, delayInSeconds, cron,
-                     intervalSeconds, running, created_at, execution_started_at, retry_options,
-                     owner_path, owner_path_key
-              FROM cf_agents_schedules
-            `);
-            this.ctx.storage.sql.exec("DROP TABLE cf_agents_schedules");
-            this.ctx.storage.sql.exec(
-              "ALTER TABLE cf_agents_schedules_new RENAME TO cf_agents_schedules"
-            );
-          }
-        }
-      }
 
       // Workflow tracking table for Agent-Workflow integration
       this.sql`
@@ -2295,27 +1608,16 @@ export class Agent<
         CREATE INDEX IF NOT EXISTS idx_workflows_name ON cf_agents_workflows(workflow_name)
       `;
 
-      // Clean up legacy STATE_WAS_CHANGED rows from the single-row state optimization
-      this.ctx.storage.sql.exec(
-        "DELETE FROM cf_agents_state WHERE id = ?",
-        STATE_WAS_CHANGED
-      );
-
-      // v2: keepAlive no longer uses schedule rows. Remove any orphaned
-      // heartbeat schedules left over from the previous implementation.
-      if (schemaVersion < 2) {
-        this.ctx.storage.sql.exec(
-          "DELETE FROM cf_agents_schedules WHERE callback = '_cf_keepAliveHeartbeat'"
-        );
-      }
-
       // v3: durable fibers table for runFiber
       this.sql`
         CREATE TABLE IF NOT EXISTS cf_agents_runs (
           id TEXT PRIMARY KEY NOT NULL,
           name TEXT NOT NULL,
           snapshot TEXT,
-          created_at INTEGER NOT NULL
+          created_at INTEGER NOT NULL,
+          completed_at INTEGER,
+          outcome TEXT,
+          error_message TEXT
         )
       `;
 
@@ -2463,12 +1765,26 @@ export class Agent<
       addColumnIfNotExists(
         "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_milestones TEXT"
       );
+      // A legacy fiber body that settled whose row delete then failed. Recovery
+      // deletes it without calling `onFiberRecovered()` (#2305).
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_runs ADD COLUMN completed_at INTEGER"
+      );
+      // How that settled body ended, so recovery settles a managed ledger
+      // whose own settle write failed with the body's real outcome.
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_runs ADD COLUMN outcome TEXT"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_runs ADD COLUMN error_message TEXT"
+      );
+      // `runAgentTool({ eventDelivery: "terminal" })`: NULL means "full".
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN event_delivery TEXT"
+      );
 
       // Mark schema as up-to-date
-      this.sql`
-        INSERT OR REPLACE INTO cf_agents_state (id, state)
-        VALUES (${SCHEMA_VERSION_ROW_ID}, ${String(CURRENT_SCHEMA_VERSION)})
-      `;
+      this.ctx.storage.kv.put(SCHEMA_VERSION_KEY, CURRENT_SCHEMA_VERSION);
     }
 
     this._schemaInitialization = {
@@ -2478,8 +1794,168 @@ export class Agent<
     };
   }
 
+  /**
+   * Read the Agent's schema version from its KV key. A DO created before the
+   * State capability owned `cf_agents_state` has the version as a row in that
+   * table instead: read it once, move it to the key, and delete the row so the
+   * table is left with a single owner. Synchronous (`storage.kv`) because the
+   * constructor gates DDL on it.
+   */
+  private _readSchemaVersion(): number {
+    const stored = this.ctx.storage.kv.get<number>(SCHEMA_VERSION_KEY);
+    if (stored !== undefined) return stored;
+
+    const hasStateTable =
+      this.ctx.storage.sql
+        .exec(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cf_agents_state'"
+        )
+        .toArray().length > 0;
+    if (!hasStateTable) return 0;
+
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT state FROM cf_agents_state WHERE id = ?",
+        LEGACY_SCHEMA_VERSION_ROW_ID
+      )
+      .toArray() as { state: string | null }[];
+    if (rows.length === 0) return 0;
+
+    const version = Number(rows[0].state) || 0;
+    this.ctx.storage.kv.put(SCHEMA_VERSION_KEY, version);
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_state WHERE id = ?",
+      LEGACY_SCHEMA_VERSION_ROW_ID
+    );
+    return version;
+  }
+
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
+
+    const routeHost = this;
+    setLifecycleRouteTransport(this.lifecycle, {
+      get source() {
+        return routeHost._lifecycleRouteAddress();
+      },
+      toRoot: (envelope) => this._routeLifecycleToRoot(envelope),
+      to: (target, envelope) => this._routeLifecycleToTarget(target, envelope)
+    });
+    setLifecycleEventSink(this.lifecycle, (event) => {
+      const payload =
+        event.payload !== null &&
+        typeof event.payload === "object" &&
+        !Array.isArray(event.payload)
+          ? (event.payload as Record<string, unknown>)
+          : { value: event.payload };
+      // Lifecycle events are open-ended; Agent's installed capabilities emit
+      // event names represented by the observability union.
+      this._emit(event.type as ObservabilityEvent["type"], payload);
+    });
+
+    // Capability-run user callbacks (scheduled callbacks today, future
+    // capability callbacks tomorrow) enter through Agent's invocation
+    // boundary so they get the same tracing span scope as every other Agent
+    // entry point.
+    // Connection-scoped callbacks (e.g. from a WebSockets capability)
+    // carry their live connection/request in the scope.
+    setLifecycleHostInvoker(this.lifecycle, (run, scope) =>
+      runInInvocation(
+        {
+          agent: this,
+          connection: scope?.connection,
+          request: scope?.request,
+          email: undefined
+        },
+        run
+      )
+    );
+
+    this.scheduler = new Scheduler({
+      retry: this._resolvedOptions.retry,
+      hungScheduleTimeoutSeconds:
+        this._resolvedOptions.hungScheduleTimeoutSeconds,
+      onError: (error: unknown) =>
+        runInInvocation(
+          {
+            agent: this,
+            connection: undefined,
+            request: undefined,
+            email: undefined
+          },
+          () => this.onError(error)
+        )
+    });
+
+    // Agent's historical name-based scheduling API: names outside the
+    // (empty) registered map resolve to methods on this Agent. The resolved
+    // handler still runs inside the Lifecycle host boundary, so it gets the
+    // tracing invocation scope installed above.
+    setSchedulerCallbackResolver(this.scheduler, (name) => {
+      const method = this[name as keyof this];
+      if (typeof method !== "function") return undefined;
+      return (payload, schedule) =>
+        (
+          method as (payload: unknown, schedule: Schedule<unknown>) => unknown
+        ).call(this, payload, schedule);
+    });
+
+    this._queue = new Queue({
+      retry: this._resolvedOptions.retry,
+      onError: (error: unknown) =>
+        runInInvocation(
+          {
+            agent: this,
+            connection: undefined,
+            request: undefined,
+            email: undefined
+          },
+          () => this.onError(error)
+        )
+    });
+
+    // Agent's historical name-based queue API: names resolve to methods on
+    // this Agent, run inside the Lifecycle host boundary.
+    setQueueCallbackResolver(this._queue, (name) => {
+      const method = this[name as keyof this];
+      if (typeof method !== "function") return undefined;
+      return (payload, item) =>
+        (
+          method as (payload: unknown, item: QueueItem<unknown>) => unknown
+        ).call(this, payload, item);
+    });
+
+    this.tasks = new Tasks({
+      onError: (error) => this.onError(error)
+    });
+
+    // Twin bridge for a routed Task run: the physical alarm lives on the
+    // root, but the run's storage and this hook live on the owning dynamic
+    // agent, whose own Lifecycle never observes the root's alarm directly.
+    setTaskRoutedMemoryLimitHandler(this.tasks, (context) => {
+      const hook = (
+        this as unknown as {
+          onAlarmMemoryLimit?: (value: typeof context) => void | Promise<void>;
+        }
+      ).onAlarmMemoryLimit;
+      return hook?.call(this, context);
+    });
+
+    // Framework-internal reserved (`__cf`-prefixed) definitions — chat
+    // turns, chat recovery, messenger replies — register eagerly through
+    // `this.tasks.register()` from each host subclass's own constructor
+    // (AIChatAgent, Think), which runs after `this.tasks` exists here.
+    // What remains for Agent to bridge is only the end user's own
+    // overridable `taskDefinitions` field, which cannot be read yet: a
+    // further-downstream subclass's field initializer runs only after
+    // every constructor body up this chain (this one included) returns.
+    // The resolver stays lazy for exactly that reason; nothing else needs
+    // it any more.
+    setTaskDefinitionResolver(
+      this.tasks,
+      (name) =>
+        this.taskDefinitions?.[name] as TaskCallbacks[string] | undefined
+    );
 
     this.mcp = this._withAgentSpan(
       "agent_initialization",
@@ -2511,19 +1987,35 @@ export class Agent<
           }
         );
 
-        // Initialize MCPClientManager AFTER tables are created
+        // Initialize MCPClientManager AFTER tables are created.
         return new MCPClientManager(this._ParentClass.name, "0.0.1", {
-          storage: this.ctx.storage,
+          env: this.env,
           createAuthProvider: (callbackUrl) =>
             this.createMcpOAuthProvider(callbackUrl)
         });
       }
     );
 
-    // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
+    // Agent's WebSocket connections ride the WebSockets capability —
+    // Lifecycle itself no longer models connections. The handlers call
+    // through `this.*` so they always hit the framework-wrapped hooks.
+    this.lifecycle
+      .use(this.scheduler)
+      .use(this._queue)
+      .use(this.mcp)
+      .use(this._state)
+      .use(this._webSockets)
+      .use(this.tasks)
+      // Registered for capability identity/services; its hot paths are
+      // wired directly (see the DynamicAgentsInternal class doc).
+      .use(this._dynamicAgents);
+
+    // MCP starts before Agent restores facet routing state. Defer its initial
+    // publication until broadcasts can be routed to the correct owner.
+    let mcpBroadcastReady = false;
     this._disposables.add(
-      this.mcp.onServerStateChanged(async () => {
-        this.broadcastMcpServers();
+      this.mcp.onServerStateChanged(() => {
+        if (mcpBroadcastReady) this.broadcastMcpServers();
       })
     );
 
@@ -2576,35 +2068,43 @@ export class Agent<
       // default "none" already set in field initializer
     }
 
+    const _onAlarm = this.onAlarm.bind(this);
+    this.onAlarm = async () => {
+      if (this._destroyed) return;
+      await _onAlarm();
+      if (this._destroyed) return;
+      await this._onAlarmHousekeeping();
+      // Housekeeping scans change fiber/facet/keep-alive state; refresh the
+      // host jobs that guarantee their wakes before Lifecycle re-arms.
+      if (this._destroyed) return;
+      await this._syncHostJobs();
+    };
+
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = (request: Request) => {
       return runInInvocation(
         { agent: this, connection: undefined, request, email: undefined },
-        async () => {
-          // Handle MCP OAuth callback if this is one
-          const oauthResponse = await this.handleMcpOAuthCallback(request);
-          if (oauthResponse) {
-            return oauthResponse;
-          }
-
-          return this._tryCatch(() => _onRequest(request));
-        }
+        () => this._tryCatch(() => _onRequest(request))
       );
     };
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       const replyBridge = subAgentRpcReplyContext.getStore()?.bridge;
+      // Lifecycle establishes the root socket context before entering this
+      // wrapper. Do not carry root-owned native I/O into the facet RPC.
       if (
-        await this._cf_forwardSubAgentWebSocketMessage(
-          connection,
-          message,
-          replyBridge
+        await agentContext.exit(() =>
+          this._cf_forwardSubAgentWebSocketMessage(
+            connection,
+            message,
+            replyBridge
+          )
         )
       ) {
         return;
       }
-      this._ensureConnectionWrapped(connection);
+      ensureConnectionWrapped(connection);
       return runInInvocation(
         { agent: this, connection, request: undefined, email: undefined },
         async () => {
@@ -2620,31 +2120,10 @@ export class Agent<
             return this._tryCatch(() => _onMessage(connection, message));
           }
 
-          if (isStateUpdateMessage(parsed)) {
-            // Check if connection is readonly
-            if (this.isConnectionReadonly(connection)) {
-              // Send error response back to the connection
-              connection.send(
-                JSON.stringify({
-                  type: MessageType.CF_AGENT_STATE_ERROR,
-                  error: "Connection is readonly"
-                })
-              );
-              return;
-            }
-            try {
-              this._setStateInternal(parsed.state as State, connection);
-            } catch (e) {
-              // validateStateChange (or another sync error) rejected the update.
-              // Log the full error server-side, send a generic message to the client.
-              console.error("[Agent] State update rejected:", e);
-              connection.send(
-                JSON.stringify({
-                  type: MessageType.CF_AGENT_STATE_ERROR,
-                  error: "State update rejected"
-                })
-              );
-            }
+          // State frames: readonly check, validation, error replies — all
+          // the capability's. Root sockets never reach here with one (the
+          // capability consumed it); bridged facet connections do.
+          if (this._webSockets.applyStateFrame(connection, parsed)) {
             return;
           }
 
@@ -2662,15 +2141,14 @@ export class Agent<
                 throw new Error(`Method ${method} is not callable`);
               }
 
-              const metadata = callableMetadata.get(methodFn as Function);
+              const metadata = getCallableMetadata(methodFn as Function);
 
               // For streaming methods, pass a StreamingResponse object
               if (metadata?.streaming) {
-                const stream = createStreamingResponse(
-                  connection,
-                  id,
-                  replyBridge
-                );
+                const stream = new StreamingResponse(connection, id);
+                if (replyBridge) {
+                  registerFacetStreamingDelivery(stream, replyBridge);
+                }
 
                 this._emit("rpc", { method, streaming: true });
 
@@ -2742,7 +2220,7 @@ export class Agent<
 
     const _onConnect = this.onConnect.bind(this);
     this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
-      this._ensureConnectionWrapped(connection);
+      ensureConnectionWrapped(connection);
       const subAgentOuterUrl = ctx.request.headers.get(
         SUB_AGENT_OUTER_URL_HEADER
       );
@@ -2753,13 +2231,13 @@ export class Agent<
           subAgentOuterUrl
         );
       }
+      // Lifecycle establishes the root socket/request context before entering
+      // this wrapper. Do not carry root-owned native I/O into the facet RPC.
       if (
-        await this._cf_forwardSubAgentWebSocketConnect(
-          connection,
-          ctx.request,
-          {
+        await agentContext.exit(() =>
+          this._cf_forwardSubAgentWebSocketConnect(connection, ctx.request, {
             gate: false
-          }
+          })
         )
       ) {
         return;
@@ -2779,6 +2257,18 @@ export class Agent<
           // connection. When disabled, no identity/state/MCP text frames
           // are sent — useful for binary-only clients (e.g. MQTT devices).
           if (this.shouldSendProtocolMessages(connection, ctx)) {
+            const wasExcludedFromStateInitBroadcast =
+              this._protocolBroadcastExcludeIds.has(connection.id);
+            let currentState: TState | undefined;
+            this._protocolBroadcastExcludeIds.add(connection.id);
+            try {
+              currentState = this.state;
+            } finally {
+              if (!wasExcludedFromStateInitBroadcast) {
+                this._protocolBroadcastExcludeIds.delete(connection.id);
+              }
+            }
+
             // Send agent identity first so client knows which instance it's connected to
             // Can be disabled via static options for security-sensitive instance names
             if (this._resolvedOptions.sendIdentityOnConnect) {
@@ -2809,34 +2299,14 @@ export class Agent<
                   );
                 }
               }
-              connection.send(
-                JSON.stringify({
-                  name: this.name,
-                  agent: camelCaseToKebabCase(this._ParentClass.name),
-                  type: MessageType.CF_AGENT_IDENTITY
-                })
-              );
-            }
-
-            const wasExcludedFromStateInitBroadcast =
-              this._protocolBroadcastExcludeIds.has(connection.id);
-            let currentState: State | undefined;
-            this._protocolBroadcastExcludeIds.add(connection.id);
-            try {
-              currentState = this.state;
-            } finally {
-              if (!wasExcludedFromStateInitBroadcast) {
-                this._protocolBroadcastExcludeIds.delete(connection.id);
-              }
-            }
-
-            if (currentState !== undefined) {
-              connection.send(
-                JSON.stringify({
-                  state: currentState,
-                  type: MessageType.CF_AGENT_STATE
-                })
-              );
+              // Agent's public identity: the logical name (a facet's routed
+              // name is an internal encoding of it) and the exported class.
+              this._webSockets.sendConnectFrames(connection, {
+                name: this.name,
+                agent: camelCaseToKebabCase(this._ParentClass.name)
+              });
+            } else if (currentState !== undefined) {
+              this._webSockets.sendState(connection);
             }
 
             connection.send(
@@ -2846,7 +2316,7 @@ export class Agent<
               })
             );
           } else {
-            this._setConnectionNoProtocol(connection);
+            this._webSockets.setProtocolEnabled(connection, false);
           }
 
           this._emit("connect", { connectionId: connection.id });
@@ -2863,12 +2333,16 @@ export class Agent<
       reason: string,
       wasClean: boolean
     ) => {
+      // Lifecycle establishes the root socket context before entering this
+      // wrapper. Do not carry root-owned native I/O into the facet RPC.
       if (
-        await this._cf_forwardSubAgentWebSocketClose(
-          connection,
-          code,
-          reason,
-          wasClean
+        await agentContext.exit(() =>
+          this._cf_forwardSubAgentWebSocketClose(
+            connection,
+            code,
+            reason,
+            wasClean
+          )
         )
       ) {
         return;
@@ -2899,56 +2373,11 @@ export class Agent<
           email: undefined
         },
         async () => {
-          await this._withAgentSpan(
-            "restore_agent_state",
-            "startup",
-            {},
-            async () => {
-              // Hydrate _isFacet from persistent storage so the flag
-              // survives hibernation (the DO constructor resets it to false).
-              const isFacet =
-                await this.ctx.storage.get<boolean>("cf_agents_is_facet");
-              if (isFacet) this._isFacet = true;
-
-              const storedFacetName = await this.ctx.storage.get<string>(
-                "cf_agents_facet_name"
-              );
-              if (typeof storedFacetName === "string") {
-                this._facetName = storedFacetName;
-              }
-
-              const storedParentPath = await this.ctx.storage.get<
-                Array<{ className: string; name: string }>
-              >("cf_agents_parent_path");
-              if (isValidParentPath(storedParentPath)) {
-                this._parentPath = storedParentPath;
-              }
-              try {
-                await this._cf_hydrateSubAgentConnectionsFromRoot();
-              } catch (error) {
-                console.warn(
-                  "[Agent] Unable to hydrate sub-agent WebSocket connections:",
-                  error
-                );
-              }
-            }
-          );
+          await this._restoreAgentFacetContext();
 
           await this._tryCatch(async () => {
-            // Restore MCP connections before fiber/chat recovery so recovered
-            // turns see MCP tools. Restored connections re-advertise the
-            // capabilities persisted from the previous session; the handlers
-            // behind them attach when onStart() configures them.
-            await this._withAgentSpan(
-              "restore_mcp_connections",
-              "startup",
-              {},
-              async () => {
-                await this.mcp.restoreConnectionsFromStorage(this.name);
-                await this._restoreRpcMcpServers();
-                this.broadcastMcpServers();
-              }
-            );
+            mcpBroadcastReady = true;
+            this.broadcastMcpServers();
 
             const startupAgentToolRunIds = await this._withAgentSpan(
               "recover_agent_work",
@@ -2957,6 +2386,9 @@ export class Agent<
               async () => {
                 this._checkOrphanedWorkflows();
                 await this._checkRunFibers();
+                // Interrupted Task runs (including chat turns) recover via
+                // the Lifecycle job queue: their mirror jobs are overdue and
+                // re-fire on the post-startup alarm derivation.
                 return this._agentToolRunRecoveryRunIds();
               }
             );
@@ -2976,19 +2408,12 @@ export class Agent<
             const chatRecoveryBefore = (this as { chatRecovery?: unknown })
               .chatRecovery;
 
-            this._insideOnStart = true;
-            this._warnedScheduleInOnStart.clear();
-            let result: Awaited<ReturnType<typeof _onStart>>;
-            try {
-              result = await this._withAgentSpan(
-                "run_user_on_start",
-                "startup",
-                {},
-                () => _onStart(props)
-              );
-            } finally {
-              this._insideOnStart = false;
-            }
+            const result = await this._withAgentSpan(
+              "run_user_on_start",
+              "startup",
+              {},
+              () => _onStart(props)
+            );
 
             const chatRecoveryAfter = (this as { chatRecovery?: unknown })
               .chatRecovery;
@@ -3018,6 +2443,11 @@ export class Agent<
             this._scheduleAgentToolRunRecovery({
               runIds: startupAgentToolRunIds
             });
+
+            // Push-based host jobs replace the pull-based alarm contribution:
+            // re-sync them on every wake so orphaned fiber/facet recovery
+            // state left by a dead process re-arms its housekeeping wake.
+            await this._syncHostJobs();
             return result;
           });
         }
@@ -3027,6 +2457,12 @@ export class Agent<
       this._withAgentSpan("agent_start", "startup", {}, (update) =>
         startAgent(props, update)
       );
+  }
+
+  private async _restoreAgentFacetContext(): Promise<void> {
+    await this._withAgentSpan("restore_agent_state", "startup", {}, () =>
+      this._dynamicAgents.restoreFacetContext()
+    );
   }
 
   /**
@@ -3096,21 +2532,17 @@ export class Agent<
     this.broadcast(msg, exclude);
   }
 
-  private _setStateInternal(
-    nextState: State,
-    source: Connection | "server" = "server"
+  /**
+   * React to a persisted state change from the State capability.
+   *
+   * Reproduces the pre-migration steps 3-4: broadcast the new state to
+   * protocol-enabled connections (excluding the originating connection) and
+   * run the notification hook off the invocation tail.
+   */
+  private _handleStateChanged(
+    nextState: TState,
+    source: Connection | "server"
   ): void {
-    // Validation/gating hook (sync only)
-    this.validateStateChange(nextState, source);
-
-    // Persist state — row existence in cf_agents_state is the signal that
-    // state was set (no separate wasChanged flag needed).
-    this._state = nextState;
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_state (id, state)
-      VALUES (${STATE_ROW_ID}, ${JSON.stringify(nextState)})
-    `;
-
     // Broadcast state to protocol-enabled connections, excluding the source
     this._broadcastProtocol(
       JSON.stringify({
@@ -3153,114 +2585,13 @@ export class Agent<
    * @param state New state to set
    * @throws Error if called from a readonly connection context
    */
-  setState(state: State): void {
+  setState(state: TState): void {
     // Check if the current context has a readonly connection
     const store = agentContext.getStore();
     if (store?.connection && this.isConnectionReadonly(store.connection)) {
       throw new Error("Connection is readonly");
     }
-    this._setStateInternal(state, "server");
-  }
-
-  /**
-   * Wraps connection.state and connection.setState so that internal
-   * _cf_-prefixed flags (readonly, no-protocol) are hidden from user code
-   * and cannot be accidentally overwritten.
-   *
-   * Idempotent — safe to call multiple times on the same connection.
-   * After hibernation, the _rawStateAccessors WeakMap is empty but the
-   * connection's state getter still reads from the persisted WebSocket
-   * attachment. Calling this method re-captures the raw getter so that
-   * predicate methods (isConnectionReadonly, isConnectionProtocolEnabled)
-   * work correctly post-hibernation.
-   */
-  private _ensureConnectionWrapped(connection: Connection) {
-    if (this._rawStateAccessors.has(connection)) return;
-
-    // Hibernating lifecycle connections expose attachment-backed state as a
-    // configurable accessor. Virtual facet connections use a data property,
-    // so retain both projections below.
-    const descriptor = Object.getOwnPropertyDescriptor(connection, "state");
-
-    let getRaw: () => Record<string, unknown> | null;
-    let setRaw: (state: unknown) => unknown;
-
-    if (descriptor?.get) {
-      // Accessor property — bind the original getter directly.
-      // The getter reads from the serialized WebSocket attachment, so it
-      // always returns the latest value even after setState updates it.
-      getRaw = descriptor.get.bind(connection) as () => Record<
-        string,
-        unknown
-      > | null;
-      setRaw = connection.setState.bind(connection);
-    } else {
-      // Data property — track raw state in a closure variable.
-      // Reading `connection.state` after our override would call our filtered
-      // getter (circular), so we snapshot the value here and keep it in sync.
-      let rawState = (connection.state ?? null) as Record<
-        string,
-        unknown
-      > | null;
-      getRaw = () => rawState;
-      setRaw = (state: unknown) => {
-        rawState = state as Record<string, unknown> | null;
-        return rawState;
-      };
-    }
-
-    this._rawStateAccessors.set(connection, { getRaw, setRaw });
-
-    // Override state getter to hide all internal _cf_ flags from user code
-    Object.defineProperty(connection, "state", {
-      configurable: true,
-      enumerable: true,
-      get() {
-        const raw = getRaw();
-        if (raw != null && typeof raw === "object" && rawHasInternalKeys(raw)) {
-          return stripInternalKeys(raw);
-        }
-        return raw;
-      }
-    });
-
-    // Override setState to preserve internal flags when user sets state
-    Object.defineProperty(connection, "setState", {
-      configurable: true,
-      writable: true,
-      value(stateOrFn: unknown | ((prev: unknown) => unknown)) {
-        const raw = getRaw();
-        const flags =
-          raw != null && typeof raw === "object"
-            ? extractInternalFlags(raw as Record<string, unknown>)
-            : {};
-        const hasFlags = Object.keys(flags).length > 0;
-
-        let newUserState: unknown;
-        if (typeof stateOrFn === "function") {
-          // Pass only the user-visible state (without internal flags) to the callback
-          const userVisible = hasFlags
-            ? stripInternalKeys(raw as Record<string, unknown>)
-            : raw;
-          newUserState = (stateOrFn as (prev: unknown) => unknown)(userVisible);
-        } else {
-          newUserState = stateOrFn;
-        }
-
-        // Merge back internal flags if any were set
-        if (hasFlags) {
-          if (newUserState != null && typeof newUserState === "object") {
-            return setRaw({
-              ...(newUserState as Record<string, unknown>),
-              ...flags
-            });
-          }
-          // User set null — store just the flags
-          return setRaw(flags);
-        }
-        return setRaw(newUserState);
-      }
-    });
+    this._state.set(state, "server");
   }
 
   /**
@@ -3269,17 +2600,7 @@ export class Agent<
    * @param readonly Whether the connection should be readonly (default: true)
    */
   setConnectionReadonly(connection: Connection, readonly = true) {
-    this._ensureConnectionWrapped(connection);
-    const accessors = this._rawStateAccessors.get(connection)!;
-    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
-    if (readonly) {
-      accessors.setRaw({ ...raw, [CF_READONLY_KEY]: true });
-    } else {
-      // Remove the key entirely instead of storing false — avoids dead keys
-      // accumulating in the connection attachment.
-      const { [CF_READONLY_KEY]: _, ...rest } = raw;
-      accessors.setRaw(Object.keys(rest).length > 0 ? rest : null);
-    }
+    markConnectionReadonly(connection, readonly);
   }
 
   /**
@@ -3291,12 +2612,7 @@ export class Agent<
    * @returns True if the connection is readonly
    */
   isConnectionReadonly(connection: Connection): boolean {
-    this._ensureConnectionWrapped(connection);
-    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
-      string,
-      unknown
-    > | null;
-    return !!raw?.[CF_READONLY_KEY];
+    return connectionReadonly(connection);
   }
 
   /**
@@ -3312,12 +2628,7 @@ export class Agent<
    * @internal
    */
   _unsafe_getConnectionFlag(connection: Connection, key: string): unknown {
-    this._ensureConnectionWrapped(connection);
-    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
-      string,
-      unknown
-    > | null;
-    return raw?.[key];
+    return getConnectionFlag(connection, key);
   }
 
   /**
@@ -3325,8 +2636,8 @@ export class Agent<
    *
    * Write an internal `_cf_`-prefixed flag to the raw connection state,
    * bypassing the user-facing state wrapper. The key must be registered
-   * in `CF_INTERNAL_KEYS` so it is preserved across user `setState` calls
-   * and hidden from `connection.state`.
+   * with `registerInternalConnectionKeys` so it is preserved across user
+   * `setState` calls and hidden from `connection.state`.
    *
    * @internal
    */
@@ -3335,15 +2646,7 @@ export class Agent<
     key: string,
     value: unknown
   ): void {
-    this._ensureConnectionWrapped(connection);
-    const accessors = this._rawStateAccessors.get(connection)!;
-    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
-    if (value === undefined) {
-      const { [key]: _, ...rest } = raw;
-      accessors.setRaw(Object.keys(rest).length > 0 ? rest : null);
-    } else {
-      accessors.setRaw({ ...raw, [key]: value });
-    }
+    setConnectionFlag(connection, key, value);
   }
 
   /**
@@ -3393,23 +2696,7 @@ export class Agent<
    * @returns True if the connection receives protocol messages
    */
   isConnectionProtocolEnabled(connection: Connection): boolean {
-    this._ensureConnectionWrapped(connection);
-    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
-      string,
-      unknown
-    > | null;
-    return !raw?.[CF_NO_PROTOCOL_KEY];
-  }
-
-  /**
-   * Mark a connection as having protocol messages disabled.
-   * Called internally when shouldSendProtocolMessages returns false.
-   */
-  private _setConnectionNoProtocol(connection: Connection) {
-    this._ensureConnectionWrapped(connection);
-    const accessors = this._rawStateAccessors.get(connection)!;
-    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
-    accessors.setRaw({ ...raw, [CF_NO_PROTOCOL_KEY]: true });
+    return connectionProtocolEnabled(connection);
   }
 
   /**
@@ -3419,7 +2706,7 @@ export class Agent<
    * IMPORTANT: This hook must be synchronous.
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  validateStateChange(_nextState: State, _source: Connection | "server") {
+  validateStateChange(_nextState: TState, _source: Connection | "server") {
     // override this to validate state updates
   }
 
@@ -3432,7 +2719,7 @@ export class Agent<
    * @param source Source of the state update ("server" or a client connection)
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  onStateChanged(_state: State | undefined, _source: Connection | "server") {
+  onStateChanged(_state: TState | undefined, _source: Connection | "server") {
     // override this to handle state updates after persist + broadcast
   }
 
@@ -3448,7 +2735,7 @@ export class Agent<
    * @param source Source of the state update ("server" or a client connection)
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  onStateUpdate(_state: State | undefined, _source: Connection | "server") {
+  onStateUpdate(_state: TState | undefined, _source: Connection | "server") {
     // override this to handle state updates (deprecated — use onStateChanged)
   }
 
@@ -3457,7 +2744,7 @@ export class Agent<
    * cached in the constructor. No prototype walks at call time.
    */
   private async _callStatePersistenceHook(
-    state: State | undefined,
+    state: TState | undefined,
     source: Connection | "server"
   ): Promise<void> {
     switch (this._persistenceHookMode) {
@@ -3635,46 +2922,9 @@ export class Agent<
    */
   async sendEmail(options: SendEmailOptions): Promise<EmailSendResult> {
     return this._tryCatch(async () => {
-      if (!options.binding) {
-        throw new Error(
-          "binding is required. Pass your send_email binding, " +
-            "e.g. this.sendEmail({ binding: this.env.EMAIL, ... })."
-        );
-      }
-
-      const agentName = camelCaseToKebabCase(this._ParentClass.name);
-      const agentId = this.name;
-
-      const headers: Record<string, string> = {
-        ...options.headers,
-        "X-Agent-Name": agentName,
-        "X-Agent-ID": agentId
-      };
-
-      if (options.inReplyTo) {
-        headers["In-Reply-To"] = options.inReplyTo;
-      }
-
-      if (typeof options.secret === "string") {
-        const signedHeaders = await signAgentHeaders(
-          options.secret,
-          agentName,
-          agentId
-        );
-        headers["X-Agent-Sig"] = signedHeaders["X-Agent-Sig"];
-        headers["X-Agent-Sig-Ts"] = signedHeaders["X-Agent-Sig-Ts"];
-      }
-
-      const result = await options.binding.send({
-        from: options.from,
-        to: options.to,
-        subject: options.subject,
-        text: options.text,
-        html: options.html,
-        replyTo: options.replyTo,
-        cc: options.cc,
-        bcc: options.bcc,
-        headers
+      const result = await sendAgentEmail(options, {
+        agentName: camelCaseToKebabCase(this._ParentClass.name),
+        agentId: this.name
       });
 
       const fromAddr =
@@ -3698,8 +2948,8 @@ export class Agent<
   }
 
   /**
-   * Automatically wrap custom methods with agent context
-   * This ensures getCurrentAgent() works in all custom methods without decorators
+   * Wrap public subclass methods that may be entered outside Lifecycle, such as
+   * native Durable Object RPC. Lifecycle hooks already have Agent context.
    */
   private _autoWrapCustomMethods() {
     // Agent.prototype traversal also covers the DurableObject base class.
@@ -3744,9 +2994,9 @@ export class Agent<
 
         // if the method is callable, copy the metadata from the original method
         if (this._isCallable(methodName)) {
-          callableMetadata.set(
-            wrappedFunction,
-            callableMetadata.get(this[methodName as keyof this] as Function)!
+          copyCallableMetadata(
+            this[methodName as keyof this] as Function,
+            wrappedFunction
           );
         }
 
@@ -3822,160 +3072,54 @@ export class Agent<
   }
 
   /**
-   * Queue a task to be executed in the future
+   * Queue a task to run in the background.
+   *
+   * The item is durable: it runs from the Lifecycle alarm event loop after
+   * this call returns, in push order, one at a time, with retries per
+   * `options.retry`, and survives the Durable Object leaving memory.
    * @param callback Name of the method to call
    * @param payload Payload to pass to the callback
    * @param options Options for the queued task
    * @param options.retry Retry options for the callback execution
+   * @param options.id Stable id; a push with an existing id replaces that item
    * @returns The ID of the queued task
    */
   async queue<T = unknown>(
     callback: keyof this,
     payload: T,
-    options?: { retry?: RetryOptions }
+    options?: { retry?: RetryOptions; id?: string }
   ): Promise<string> {
-    const id = nanoid(9);
     if (typeof callback !== "string") {
       throw new Error("Callback must be a string");
     }
-
     if (typeof this[callback] !== "function") {
       throw new Error(`this.${callback} is not a function`);
     }
-
-    if (options?.retry) {
-      validateRetryOptions(options.retry, this._resolvedOptions.retry);
-    }
-
-    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
-
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_queues (id, payload, callback, retry_options)
-      VALUES (${id}, ${JSON.stringify(payload)}, ${callback}, ${retryJson})
-    `;
-
-    this._emit("queue:create", { callback: callback as string, id });
-
-    void this._flushQueue().catch((e) => {
-      console.error("Error flushing queue:", e);
-    });
-
-    return id;
-  }
-
-  private _flushingQueue = false;
-
-  private async _flushQueue() {
-    if (this._flushingQueue) {
-      return;
-    }
-    this._flushingQueue = true;
-    try {
-      while (true) {
-        const result = this.sql<QueueItem<string>>`
-        SELECT * FROM cf_agents_queues
-        ORDER BY created_at ASC
-      `;
-
-        if (!result || result.length === 0) {
-          break;
-        }
-
-        for (const row of result || []) {
-          const callback = this[row.callback as keyof Agent<Env>];
-          if (!callback) {
-            console.error(`callback ${row.callback} not found`);
-            await this.dequeue(row.id);
-            continue;
-          }
-          const { connection, request, email } = agentContext.getStore() || {};
-          await runInInvocation(
-            {
-              agent: this,
-              connection,
-              request,
-              email
-            },
-            async () => {
-              const retryOpts = parseRetryOptions(
-                row as unknown as Record<string, unknown>
-              );
-              const { maxAttempts, baseDelayMs, maxDelayMs } =
-                resolveRetryConfig(retryOpts, this._resolvedOptions.retry);
-              const parsedPayload = JSON.parse(row.payload as string);
-              try {
-                await tryN(
-                  maxAttempts,
-                  async (attempt) => {
-                    if (attempt > 1) {
-                      this._emit("queue:retry", {
-                        callback: row.callback,
-                        id: row.id,
-                        attempt,
-                        maxAttempts
-                      });
-                    }
-                    await (
-                      callback as (
-                        payload: unknown,
-                        queueItem: QueueItem<string>
-                      ) => Promise<void>
-                    ).bind(this)(parsedPayload, row);
-                  },
-                  { baseDelayMs, maxDelayMs }
-                );
-              } catch (e) {
-                console.error(
-                  `queue callback "${row.callback}" failed after ${maxAttempts} attempts`,
-                  e
-                );
-                this._emit("queue:error", {
-                  callback: row.callback,
-                  id: row.id,
-                  error: e instanceof Error ? e.message : String(e),
-                  attempts: maxAttempts
-                });
-                try {
-                  await this.onError(e);
-                } catch {
-                  // swallow onError errors
-                }
-              } finally {
-                this.dequeue(row.id);
-              }
-            },
-            // The drain loop is started with `void` and routinely outlives the
-            // handler that enqueued the item.
-            { detached: true }
-          );
-        }
-      }
-    } finally {
-      this._flushingQueue = false;
-    }
+    const item = await this._queue.push(callback, payload, options);
+    return item.id;
   }
 
   /**
    * Dequeue a task by ID
    * @param id ID of the task to dequeue
    */
-  dequeue(id: string) {
-    this.sql`DELETE FROM cf_agents_queues WHERE id = ${id}`;
+  dequeue(id: string): Promise<boolean> {
+    return this._queue.cancel(id);
   }
 
   /**
    * Dequeue all tasks
    */
-  dequeueAll() {
-    this.sql`DELETE FROM cf_agents_queues`;
+  dequeueAll(): Promise<number> {
+    return this._queue.cancelAll();
   }
 
   /**
    * Dequeue all tasks by callback
    * @param callback Name of the callback to dequeue
    */
-  dequeueAllByCallback(callback: string) {
-    this.sql`DELETE FROM cf_agents_queues WHERE callback = ${callback}`;
+  dequeueAllByCallback(callback: string): Promise<number> {
+    return this._queue.cancelAll(callback);
   }
 
   /**
@@ -3983,492 +3127,60 @@ export class Agent<
    * @param id ID of the task to get
    * @returns The task or undefined if not found
    */
-  getQueue(id: string): QueueItem<string> | undefined {
-    const result = this.sql<QueueItem<string>>`
-      SELECT * FROM cf_agents_queues WHERE id = ${id}
-    `;
-    if (!result || result.length === 0) return undefined;
-    const row = result[0];
-    return {
-      ...row,
-      payload: JSON.parse(row.payload as unknown as string),
-      retry: parseRetryOptions(row as unknown as Record<string, unknown>)
-    };
+  getQueue<T = unknown>(id: string): Promise<QueueItem<T> | undefined> {
+    return this._queue.get<T>(id);
   }
 
   /**
-   * Get all queues by key and value
+   * Get all queued tasks whose payload has `key` equal to `value`
    * @param key Key to filter by
    * @param value Value to filter by
    * @returns Array of matching QueueItem objects
    */
-  getQueues(key: string, value: string): QueueItem<string>[] {
-    const result = this.sql<QueueItem<string>>`
-      SELECT * FROM cf_agents_queues
-    `;
-    return result
-      .filter(
-        (row) => JSON.parse(row.payload as unknown as string)[key] === value
-      )
-      .map((row) => ({
-        ...row,
-        payload: JSON.parse(row.payload as unknown as string),
-        retry: parseRetryOptions(row as unknown as Record<string, unknown>)
-      }));
-  }
-
-  private _scheduleOwnerPathKey(
-    path: ReadonlyArray<AgentPathStep> | null
-  ): string | null {
-    if (!path) return null;
-    return path
-      .map(
-        (step) =>
-          `${encodeURIComponent(step.className)}:${encodeURIComponent(step.name)}`
-      )
-      .join("/");
-  }
-
-  private _facetRunRowsForPrefix(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): FacetRunStorageRow[] {
-    const rows = this.sql<FacetRunStorageRow>`
-      SELECT owner_path, owner_path_key, run_id, created_at
-      FROM cf_agents_facet_runs
-    `;
-    return rows.filter((row) => {
-      try {
-        const rowOwnerPath = JSON.parse(row.owner_path) as AgentPathStep[];
-        return this._isSameAgentPathPrefix(ownerPath, rowOwnerPath);
-      } catch {
-        return false;
-      }
-    });
-  }
-
-  private _deleteFacetRunRowsForPrefix(
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): void {
-    for (const row of this._facetRunRowsForPrefix(ownerPath)) {
-      this.sql`
-        DELETE FROM cf_agents_facet_runs
-        WHERE owner_path_key = ${row.owner_path_key}
-          AND run_id = ${row.run_id}
-      `;
-    }
-  }
-
-  private async _rootAlarmOwner(): Promise<RootFacetRpcSurface> {
-    const root = this._parentPath[0];
-    if (!root) {
-      throw new Error("Facet scheduler delegation requires a root parent.");
-    }
-
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    const binding = ctx.exports?.[root.className] as
-      | DurableObjectNamespace
-      | undefined;
-    if (!binding) {
-      throw new Error(
-        `Unable to resolve root scheduler "${root.className}" for sub-agent schedule delegation.`
-      );
-    }
-
-    return (await getAgentByName<Cloudflare.Env, Agent>(
-      binding as unknown as DurableObjectNamespace<Agent>,
-      root.name
-    )) as unknown as RootFacetRpcSurface;
-  }
-
-  private _cf_rootResolvesToSelf(): boolean {
-    const root = this._parentPath[0];
-    if (!root) return false;
-
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    const binding = ctx.exports?.[root.className] as
-      | DurableObjectNamespace
-      | undefined;
-    if (!binding?.idFromName) return false;
-
-    return binding.idFromName(root.name).equals(this.ctx.id);
-  }
-
-  private _validateScheduleCallback(
-    when: Date | string | number,
-    callback: keyof this,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
-  ): asserts callback is Extract<keyof this, string> {
-    if (typeof callback !== "string") {
-      throw new Error("Callback must be a string");
-    }
-
-    if (typeof this[callback] !== "function") {
-      throw new Error(`this.${callback} is not a function`);
-    }
-
-    if (options?.retry) {
-      validateRetryOptions(options.retry, this._resolvedOptions.retry);
-    }
-
-    if (
-      this._insideOnStart &&
-      options?.idempotent === undefined &&
-      typeof when !== "string" &&
-      !this._warnedScheduleInOnStart.has(callback)
-    ) {
-      this._warnedScheduleInOnStart.add(callback);
-      console.warn(
-        `schedule("${callback}") called inside onStart() without { idempotent: true }. ` +
-          `This creates a new row on every Durable Object restart, which can cause ` +
-          `duplicate executions. Pass { idempotent: true } to deduplicate, or use ` +
-          `scheduleEvery() for recurring tasks.`
-      );
-    }
-  }
-
-  /**
-   * Insert (or, for idempotent calls, return the existing row for) a
-   * schedule owned by either this top-level agent (`ownerPath === null`)
-   * or a descendant facet. Returns `{ schedule, created }` — `created`
-   * is `false` when an idempotent insert deduplicates onto an existing
-   * row, so callers can suppress the `schedule:create` event in that
-   * case to match historic semantics.
-   * @internal
-   */
-  private async _insertScheduleForOwner<T = string>(
-    ownerPath: ReadonlyArray<AgentPathStep> | null,
-    when: Date | string | number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
-  ): Promise<{ schedule: Schedule<T>; created: boolean }> {
-    const ownerPathJson = ownerPath ? JSON.stringify(ownerPath) : null;
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
-    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
-    const payloadJson = JSON.stringify(payload);
-
-    if (when instanceof Date) {
-      const timestamp = Math.floor(when.getTime() / 1000);
-
-      if (options?.idempotent) {
-        const existing = this.sql<ScheduleStorageRow>`
-          SELECT * FROM cf_agents_schedules
-          WHERE type = 'scheduled'
-            AND callback = ${callback}
-            AND payload IS ${payloadJson}
-            AND owner_path_key IS ${ownerPathKey}
-          LIMIT 1
-        `;
-
-        if (existing.length > 0) {
-          const row = existing[0];
-          await this._scheduleNextAlarm();
-          return {
-            schedule: {
-              callback: row.callback,
-              id: row.id,
-              payload: JSON.parse(row.payload) as T,
-              retry: parseRetryOptions(
-                row as unknown as Record<string, unknown>
-              ),
-              time: row.time,
-              type: "scheduled"
-            },
-            created: false
-          };
-        }
-      }
-
-      const id = nanoid(9);
-      this.sql`
-        INSERT OR REPLACE INTO cf_agents_schedules
-          (id, callback, payload, type, time, retry_options, owner_path, owner_path_key)
-        VALUES
-          (${id}, ${callback}, ${payloadJson}, 'scheduled', ${timestamp}, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
-      `;
-
-      await this._scheduleNextAlarm();
-      return {
-        schedule: {
-          callback,
-          id,
-          payload: payload as T,
-          retry: options?.retry,
-          time: timestamp,
-          type: "scheduled"
-        },
-        created: true
-      };
-    }
-
-    if (typeof when === "number") {
-      const timestamp = Math.floor((Date.now() + when * 1000) / 1000);
-
-      if (options?.idempotent) {
-        const existing = this.sql<ScheduleStorageRow>`
-          SELECT * FROM cf_agents_schedules
-          WHERE type = 'delayed'
-            AND callback = ${callback}
-            AND payload IS ${payloadJson}
-            AND owner_path_key IS ${ownerPathKey}
-          LIMIT 1
-        `;
-
-        if (existing.length > 0) {
-          const row = existing[0];
-          await this._scheduleNextAlarm();
-          return {
-            schedule: {
-              callback: row.callback,
-              delayInSeconds: row.delayInSeconds ?? 0,
-              id: row.id,
-              payload: JSON.parse(row.payload) as T,
-              retry: parseRetryOptions(
-                row as unknown as Record<string, unknown>
-              ),
-              time: row.time,
-              type: "delayed"
-            },
-            created: false
-          };
-        }
-      }
-
-      const id = nanoid(9);
-      this.sql`
-        INSERT OR REPLACE INTO cf_agents_schedules
-          (id, callback, payload, type, delayInSeconds, time, retry_options, owner_path, owner_path_key)
-        VALUES
-          (${id}, ${callback}, ${payloadJson}, 'delayed', ${when}, ${timestamp}, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
-      `;
-
-      await this._scheduleNextAlarm();
-      return {
-        schedule: {
-          callback,
-          delayInSeconds: when,
-          id,
-          payload: payload as T,
-          retry: options?.retry,
-          time: timestamp,
-          type: "delayed"
-        },
-        created: true
-      };
-    }
-
-    if (typeof when === "string") {
-      const timestamp = Math.floor(getNextCronTime(when).getTime() / 1000);
-      const idempotent = options?.idempotent !== false;
-
-      if (idempotent) {
-        const existing = this.sql<ScheduleStorageRow>`
-          SELECT * FROM cf_agents_schedules
-          WHERE type = 'cron'
-            AND callback = ${callback}
-            AND cron = ${when}
-            AND payload IS ${payloadJson}
-            AND owner_path_key IS ${ownerPathKey}
-          LIMIT 1
-        `;
-
-        if (existing.length > 0) {
-          const row = existing[0];
-          await this._scheduleNextAlarm();
-          return {
-            schedule: {
-              callback: row.callback,
-              cron: row.cron ?? when,
-              id: row.id,
-              payload: JSON.parse(row.payload) as T,
-              retry: parseRetryOptions(
-                row as unknown as Record<string, unknown>
-              ),
-              time: row.time,
-              type: "cron"
-            },
-            created: false
-          };
-        }
-      }
-
-      const id = nanoid(9);
-      this.sql`
-        INSERT OR REPLACE INTO cf_agents_schedules
-          (id, callback, payload, type, cron, time, retry_options, owner_path, owner_path_key)
-        VALUES
-          (${id}, ${callback}, ${payloadJson}, 'cron', ${when}, ${timestamp}, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
-      `;
-
-      await this._scheduleNextAlarm();
-      return {
-        schedule: {
-          callback,
-          cron: when,
-          id,
-          payload: payload as T,
-          retry: options?.retry,
-          time: timestamp,
-          type: "cron"
-        },
-        created: true
-      };
-    }
-
-    throw new Error(
-      `Invalid schedule type: ${JSON.stringify(when)}(${typeof when}) trying to schedule ${callback}`
+  async getQueues<T = unknown>(
+    key: string,
+    value: string
+  ): Promise<QueueItem<T>[]> {
+    const items = await this._queue.list<T>();
+    return items.filter(
+      (item) =>
+        typeof item.payload === "object" &&
+        item.payload !== null &&
+        (item.payload as Record<string, unknown>)[key] === value
     );
   }
 
-  /**
-   * Insert a schedule row owned by a descendant facet. Called via RPC
-   * from the facet's `schedule()`. Returns `{ schedule, created }`
-   * so the originating facet can suppress `schedule:create` on
-   * idempotent dedup. This method does not emit observability
-   * events itself.
-   * @internal
-   */
-  async _cf_scheduleForFacet<T = string>(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    when: Date | string | number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
-  ): Promise<{ schedule: Schedule<T>; created: boolean }> {
-    return this._insertScheduleForOwner(
-      ownerPath,
-      when,
-      callback,
-      payload,
-      options
-    );
+  private _lifecycleRouteAddress(): LifecycleRouteAddress | undefined {
+    return this._dynamicAgents.lifecycleRouteAddress();
   }
 
-  /**
-   * Insert (or, for idempotent calls, return the existing row for) an
-   * interval schedule. Mirrors {@link _insertScheduleForOwner} —
-   * returns `{ schedule, created }` so callers can suppress
-   * `schedule:create` on dedup.
-   * @internal
-   */
-  private async _insertIntervalScheduleForOwner<T = string>(
-    ownerPath: ReadonlyArray<AgentPathStep> | null,
-    intervalSeconds: number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; _idempotent?: boolean }
-  ): Promise<{ schedule: Schedule<T>; created: boolean }> {
-    const ownerPathJson = ownerPath ? JSON.stringify(ownerPath) : null;
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
-    const idempotent = options?._idempotent !== false;
-    const payloadJson = JSON.stringify(payload);
-
-    if (idempotent) {
-      const existing = this.sql<ScheduleStorageRow>`
-        SELECT * FROM cf_agents_schedules
-        WHERE type = 'interval'
-          AND callback = ${callback}
-          AND intervalSeconds = ${intervalSeconds}
-          AND payload IS ${payloadJson}
-          AND owner_path_key IS ${ownerPathKey}
-        LIMIT 1
-      `;
-
-      if (existing.length > 0) {
-        const row = existing[0];
-        await this._scheduleNextAlarm();
-        return {
-          schedule: {
-            callback: row.callback,
-            id: row.id,
-            intervalSeconds: row.intervalSeconds ?? intervalSeconds,
-            payload: JSON.parse(row.payload) as T,
-            retry: parseRetryOptions(row as unknown as Record<string, unknown>),
-            time: row.time,
-            type: "interval"
-          },
-          created: false
-        };
-      }
-    }
-
-    const id = nanoid(9);
-    const timestamp = Math.floor((Date.now() + intervalSeconds * 1000) / 1000);
-    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
-
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_schedules
-        (id, callback, payload, type, intervalSeconds, time, running, retry_options, owner_path, owner_path_key)
-      VALUES
-        (${id}, ${callback}, ${payloadJson}, 'interval', ${intervalSeconds}, ${timestamp}, 0, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
-    `;
-
-    await this._scheduleNextAlarm();
-    return {
-      schedule: {
-        callback,
-        id,
-        intervalSeconds,
-        payload: payload as T,
-        retry: options?.retry,
-        time: timestamp,
-        type: "interval"
-      },
-      created: true
-    };
+  private _routeLifecycleToRoot(
+    envelope: LifecycleRouteEnvelope
+  ): Promise<unknown> {
+    return this._dynamicAgents.routeLifecycleToRoot(envelope);
   }
 
-  /**
-   * Insert an interval schedule row owned by a descendant facet.
-   * Called via RPC from the facet's `scheduleEvery()`. Returns
-   * `{ schedule, created }` so the originating facet can suppress
-   * `schedule:create` on idempotent dedup. This method does not
-   * emit observability events itself.
-   * @internal
-   */
-  async _cf_scheduleEveryForFacet<T = string>(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    intervalSeconds: number,
-    callback: string,
-    payload?: T,
-    options?: { retry?: RetryOptions; _idempotent?: boolean }
-  ): Promise<{ schedule: Schedule<T>; created: boolean }> {
-    return this._insertIntervalScheduleForOwner(
-      ownerPath,
-      intervalSeconds,
-      callback,
-      payload,
-      options
-    );
+  private _routeLifecycleToTarget(
+    target: LifecycleRouteAddress,
+    envelope: LifecycleRouteEnvelope
+  ): Promise<unknown> {
+    return this._dynamicAgents.routeLifecycleToTarget(target, envelope);
   }
 
-  /**
-   * Cancel a schedule row owned by a descendant facet, scoped by
-   * `owner_path_key` so siblings can't reach each other's rows.
-   * Returns the canceled row's callback name so the originating
-   * facet can emit `schedule:cancel`. This method does not emit
-   * observability events itself.
-   * @internal
-   */
-  async _cf_cancelScheduleForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    id: string
-  ): Promise<{ ok: boolean; callback?: string }> {
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
-    const result = this.sql<ScheduleStorageRow>`
-      SELECT * FROM cf_agents_schedules
-      WHERE id = ${id} AND owner_path_key IS ${ownerPathKey}
-    `;
-    if (result.length === 0) return { ok: false };
-
-    const callback = result[0].callback;
-    this.sql`
-      DELETE FROM cf_agents_schedules
-      WHERE id = ${id} AND owner_path_key IS ${ownerPathKey}
-    `;
-    await this._scheduleNextAlarm();
-    return { ok: true, callback };
+  /** Single native-RPC aperture for routed Lifecycle capabilities. */
+  async _cf_routeLifecycle(
+    target: LifecycleRouteAddress | undefined,
+    envelope: LifecycleRouteEnvelope
+  ): Promise<unknown> {
+    await this.__unsafe_ensureInitialized();
+    return this._dynamicAgents.routeLifecycle(target, envelope);
   }
+
+  private _rootAlarmOwner(): Promise<RootFacetRpcSurface> {
+    return this._dynamicAgents.rootAlarmOwner();
+  }
+
+  // ── Scheduling (delegates to agents/schedules) ─────────────────────────
 
   /**
    * Clean root-owned bookkeeping for a sub-tree of facets. This
@@ -4483,162 +3195,21 @@ export class Agent<
   async _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
-    const rows = this.sql<ScheduleStorageRow>`
-      SELECT * FROM cf_agents_schedules
-      WHERE owner_path IS NOT NULL
-    `;
-    const rowsToDelete = rows.filter((row) => {
-      if (!row.owner_path) return false;
-      try {
-        const rowOwnerPath = JSON.parse(row.owner_path) as AgentPathStep[];
-        return this._isSameAgentPathPrefix(ownerPath, rowOwnerPath);
-      } catch {
-        return false;
-      }
-    });
-
-    for (const row of rowsToDelete) {
-      this._emit("schedule:cancel", {
-        callback: row.callback,
-        id: row.id
-      });
-      this.sql`DELETE FROM cf_agents_schedules WHERE id = ${row.id}`;
-    }
-
-    this._deleteFacetRunRowsForPrefix(ownerPath);
-    await this._scheduleNextAlarm();
-  }
-
-  private _scheduleRowToSchedule<T>(row: ScheduleStorageRow): Schedule<T> {
-    const base = {
-      callback: row.callback,
-      id: row.id,
-      payload: JSON.parse(row.payload) as T,
-      retry: parseRetryOptions(row as unknown as Record<string, unknown>)
-    };
-
-    switch (row.type) {
-      case "scheduled":
-        return {
-          ...base,
-          time: row.time,
-          type: "scheduled"
-        };
-      case "delayed":
-        return {
-          ...base,
-          delayInSeconds: row.delayInSeconds ?? 0,
-          time: row.time,
-          type: "delayed"
-        };
-      case "cron":
-        return {
-          ...base,
-          cron: row.cron ?? "",
-          time: row.time,
-          type: "cron"
-        };
-      case "interval":
-        return {
-          ...base,
-          intervalSeconds: row.intervalSeconds ?? 0,
-          time: row.time,
-          type: "interval"
-        };
-    }
-  }
-
-  private _getScheduleForOwner<T = string>(
-    ownerPath: ReadonlyArray<AgentPathStep> | null,
-    id: string
-  ): Schedule<T> | undefined {
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
-    const result = this.sql<ScheduleStorageRow>`
-      SELECT * FROM cf_agents_schedules
-      WHERE id = ${id} AND owner_path_key IS ${ownerPathKey}
-    `;
-    if (!result || result.length === 0) {
-      return undefined;
-    }
-    return this._scheduleRowToSchedule<T>(result[0]);
-  }
-
-  private _listSchedulesForOwner<T = string>(
-    ownerPath: ReadonlyArray<AgentPathStep> | null,
-    criteria: ScheduleCriteria = {}
-  ): Schedule<T>[] {
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
-    let query = "SELECT * FROM cf_agents_schedules WHERE owner_path_key IS ?";
-    const params: Array<string | number | null> = [ownerPathKey];
-
-    if (criteria.id) {
-      query += " AND id = ?";
-      params.push(criteria.id);
-    }
-
-    if (criteria.type) {
-      query += " AND type = ?";
-      params.push(criteria.type);
-    }
-
-    if (criteria.timeRange) {
-      query += " AND time >= ? AND time <= ?";
-      const start = criteria.timeRange.start || new Date(0);
-      const end = criteria.timeRange.end || new Date(999999999999999);
-      params.push(
-        Math.floor(start.getTime() / 1000),
-        Math.floor(end.getTime() / 1000)
-      );
-    }
-
-    return this.ctx.storage.sql
-      .exec(query, ...params)
-      .toArray()
-      .map((row) =>
-        this._scheduleRowToSchedule<T>(row as unknown as ScheduleStorageRow)
-      );
-  }
-
-  /**
-   * Read a single schedule row owned by a descendant facet.
-   * @internal
-   */
-  async _cf_getScheduleForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    id: string
-  ): Promise<Schedule<unknown> | undefined> {
-    return this._getScheduleForOwner(ownerPath, id);
-  }
-
-  /**
-   * List schedule rows owned by a descendant facet, scoped by
-   * `owner_path_key` so siblings remain isolated from each other.
-   * @internal
-   */
-  async _cf_listSchedulesForFacet(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    criteria: ScheduleCriteria = {}
-  ): Promise<Schedule<unknown>[]> {
-    return this._listSchedulesForOwner(ownerPath, criteria);
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.cleanupPrefix(ownerPath);
   }
 
   /**
    * Acquire a root-owned keepAlive ref on behalf of a descendant facet.
-   * Facets share the root isolate but cannot set their own physical
-   * alarm, so this lets facet work use the root alarm heartbeat.
+   * Facets run in separate colocated isolates but cannot set their own
+   * physical alarm, so this lets facet work use the root alarm heartbeat.
    * @internal
    */
   async _cf_acquireFacetKeepAlive(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<string> {
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
-    const token = `${ownerPathKey ?? "unknown"}:${nanoid(9)}`;
-    this._facetKeepAliveTokens.add(token);
-    this._keepAliveRefs++;
-    if (this._keepAliveRefs === 1) {
-      await this._scheduleNextAlarm();
-    }
-    return token;
+    await this.__unsafe_ensureInitialized();
+    return this._dynamicAgents.acquireKeepAlive(ownerPath);
   }
 
   /**
@@ -4647,9 +3218,8 @@ export class Agent<
    * @internal
    */
   async _cf_releaseFacetKeepAlive(token: string): Promise<void> {
-    if (!this._facetKeepAliveTokens.delete(token)) return;
-    this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
-    await this._scheduleNextAlarm();
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.releaseKeepAlive(token);
   }
 
   /**
@@ -4662,18 +3232,8 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
-    const ownerPathJson = JSON.stringify(ownerPath);
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
-    if (!ownerPathKey) {
-      throw new Error("_cf_registerFacetRun requires a non-empty owner path.");
-    }
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_facet_runs
-        (owner_path, owner_path_key, run_id, created_at)
-      VALUES
-        (${ownerPathJson}, ${ownerPathKey}, ${runId}, ${Date.now()})
-    `;
-    await this._scheduleNextAlarm();
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.registerRun(ownerPath, runId);
   }
 
   /**
@@ -4684,13 +3244,8 @@ export class Agent<
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void> {
-    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
-    this.sql`
-      DELETE FROM cf_agents_facet_runs
-      WHERE owner_path_key IS ${ownerPathKey}
-        AND run_id = ${runId}
-    `;
-    await this._scheduleNextAlarm();
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.unregisterRun(ownerPath, runId);
   }
 
   /**
@@ -4715,39 +3270,20 @@ export class Agent<
    * @param options.idempotent Dedup by callback+payload. Defaults to `true` for cron, `false` otherwise.
    * @returns Schedule object representing the scheduled task
    */
-  async schedule<T = string>(
+  schedule<T = string>(
     when: Date | string | number,
     callback: keyof this,
     payload?: T,
-    options?: { retry?: RetryOptions; idempotent?: boolean }
+    options?: ScheduleOptions
   ): Promise<Schedule<T>> {
-    this._validateScheduleCallback(when, callback, options);
-
-    const result = this._isFacet
-      ? await (
-          await this._rootAlarmOwner()
-        )._cf_scheduleForFacet<T>(
-          this.selfPath,
-          when,
-          callback,
-          payload,
-          options
-        )
-      : await this._insertScheduleForOwner(
-          null,
-          when,
-          callback,
-          payload,
-          options
-        );
-
-    if (result.created) {
-      this._emit("schedule:create", {
-        callback: result.schedule.callback,
-        id: result.schedule.id
-      });
-    }
-    return result.schedule;
+    // SAFETY: Agent's historical generic promises Schedule<T>; the untyped
+    // scheduler default carries Schedule<unknown> for name-based calls.
+    return this.scheduler.set(
+      when,
+      callback as string,
+      payload,
+      options
+    ) as Promise<Schedule<T>>;
   }
 
   /**
@@ -4776,62 +3312,18 @@ export class Agent<
    * @param options.retry Retry options for the callback execution
    * @returns Schedule object representing the scheduled task
    */
-  async scheduleEvery<T = string>(
+  scheduleEvery<T = string>(
     intervalSeconds: number,
     callback: keyof this,
     payload?: T,
     options?: { retry?: RetryOptions; _idempotent?: boolean }
   ): Promise<Schedule<T>> {
-    // DO alarms have a max schedule time of 30 days
-    const MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60; // 30 days in seconds
-
-    if (typeof intervalSeconds !== "number" || intervalSeconds <= 0) {
-      throw new Error("intervalSeconds must be a positive number");
-    }
-
-    if (intervalSeconds > MAX_INTERVAL_SECONDS) {
-      throw new Error(
-        `intervalSeconds cannot exceed ${MAX_INTERVAL_SECONDS} seconds (30 days)`
-      );
-    }
-
-    if (typeof callback !== "string") {
-      throw new Error("Callback must be a string");
-    }
-
-    if (typeof this[callback] !== "function") {
-      throw new Error(`this.${callback} is not a function`);
-    }
-
-    if (options?.retry) {
-      validateRetryOptions(options.retry, this._resolvedOptions.retry);
-    }
-
-    const result = this._isFacet
-      ? await (
-          await this._rootAlarmOwner()
-        )._cf_scheduleEveryForFacet<T>(
-          this.selfPath,
-          intervalSeconds,
-          callback,
-          payload,
-          options
-        )
-      : await this._insertIntervalScheduleForOwner(
-          null,
-          intervalSeconds,
-          callback,
-          payload,
-          options
-        );
-
-    if (result.created) {
-      this._emit("schedule:create", {
-        callback: result.schedule.callback,
-        id: result.schedule.id
-      });
-    }
-    return result.schedule;
+    // SAFETY: Agent's historical generic promises Schedule<T>; the untyped
+    // scheduler default carries Schedule<unknown> for name-based calls.
+    return this.scheduler.every(intervalSeconds, callback as string, payload, {
+      retry: options?.retry,
+      idempotent: options?._idempotent
+    }) as Promise<Schedule<T>>;
   }
 
   /**
@@ -4843,13 +3335,7 @@ export class Agent<
    * Durable Object boundaries and throws inside sub-agents.
    */
   getSchedule<T = string>(id: string): Schedule<T> | undefined {
-    if (this._isFacet) {
-      throw new Error(
-        "getSchedule() is synchronous and cannot read parent-owned sub-agent schedules. " +
-          "Use await this.getScheduleById(id) instead."
-      );
-    }
-    return this._getScheduleForOwner(null, id);
+    return this.scheduler.__DO_NOT_USE_WILL_REMOVE__getSchedule<T>(id);
   }
 
   /**
@@ -4858,16 +3344,11 @@ export class Agent<
    * Unlike the deprecated synchronous {@link getSchedule}, this works inside
    * sub-agents by delegating to the top-level parent that owns the alarm.
    *
-   * @template T Type of the payload data
    * @param id ID of the scheduled task
    * @returns The Schedule object or undefined if not found
    */
-  async getScheduleById(id: string): Promise<Schedule<unknown> | undefined> {
-    if (this._isFacet) {
-      const root = await this._rootAlarmOwner();
-      return root._cf_getScheduleForFacet(this.selfPath, id);
-    }
-    return this._getScheduleForOwner(null, id);
+  getScheduleById(id: string): Promise<Schedule<unknown> | undefined> {
+    return this.scheduler.get(id);
   }
 
   /**
@@ -4879,14 +3360,7 @@ export class Agent<
    * Durable Object boundaries and throws inside sub-agents.
    */
   getSchedules<T = string>(criteria: ScheduleCriteria = {}): Schedule<T>[] {
-    if (this._isFacet) {
-      throw new Error(
-        "getSchedules() is synchronous and cannot read parent-owned sub-agent schedules. " +
-          "Use await this.listSchedules(criteria) instead."
-      );
-    }
-
-    return this._listSchedulesForOwner(null, criteria);
+    return this.scheduler.__DO_NOT_USE_WILL_REMOVE__getSchedules<T>(criteria);
   }
 
   /**
@@ -4895,18 +3369,11 @@ export class Agent<
    * Unlike the deprecated synchronous {@link getSchedules}, this works inside
    * sub-agents by delegating to the top-level parent that owns the alarm.
    *
-   * @template T Type of the payload data
    * @param criteria Criteria to filter schedules
    * @returns Array of matching Schedule objects
    */
-  async listSchedules(
-    criteria: ScheduleCriteria = {}
-  ): Promise<Schedule<unknown>[]> {
-    if (this._isFacet) {
-      const root = await this._rootAlarmOwner();
-      return root._cf_listSchedulesForFacet(this.selfPath, criteria);
-    }
-    return this._listSchedulesForOwner(null, criteria);
+  listSchedules(criteria: ScheduleCriteria = {}): Promise<Schedule<unknown>[]> {
+    return this.scheduler.list(criteria);
   }
 
   /**
@@ -4923,29 +3390,8 @@ export class Agent<
    * @param id ID of the task to cancel
    * @returns true if the task was cancelled, false if the task was not found
    */
-  async cancelSchedule(id: string): Promise<boolean> {
-    if (this._isFacet) {
-      const root = await this._rootAlarmOwner();
-      const result = await root._cf_cancelScheduleForFacet(this.selfPath, id);
-      if (result.ok && result.callback) {
-        this._emit("schedule:cancel", { callback: result.callback, id });
-      }
-      return result.ok;
-    }
-    const schedule = this._getScheduleForOwner(null, id);
-    if (!schedule) {
-      return false;
-    }
-
-    this._emit("schedule:cancel", {
-      callback: schedule.callback,
-      id: schedule.id
-    });
-
-    this.sql`DELETE FROM cf_agents_schedules WHERE id = ${id}`;
-
-    await this._scheduleNextAlarm();
-    return true;
+  cancelSchedule(id: string): Promise<boolean> {
+    return this.scheduler.cancel(id);
   }
 
   /**
@@ -4989,7 +3435,7 @@ export class Agent<
     this._keepAliveRefs++;
 
     if (this._keepAliveRefs === 1) {
-      await this._scheduleNextAlarm();
+      await this._syncHostJobs();
     }
 
     let disposed = false;
@@ -5004,7 +3450,7 @@ export class Agent<
       // (mirrors `_cf_releaseFacetKeepAlive`).
       if (this._keepAliveRefs === 0) {
         this.ctx.waitUntil(
-          this._scheduleNextAlarm().catch((e) => {
+          this._syncHostJobs().catch((e) => {
             console.error(
               "[Agent] Failed to reschedule alarm after keepAlive dispose:",
               e
@@ -5584,7 +4030,7 @@ export class Agent<
     `;
   }
 
-  // ── Fibers: durable execution ───────────────────────────────────────
+  // ── Legacy fibers: durable execution (see agents/tasks for the new engine) ──
 
   /**
    * Run a function as a durable fiber. The fiber is registered in SQLite
@@ -5834,6 +4280,9 @@ export class Agent<
 
     let root: RootFacetRpcSurface | undefined;
     let registeredFacetRun = false;
+    let bodyOutcome:
+      | { status: "completed" | "error" | "aborted"; error: string | null }
+      | undefined;
     let dispose: () => void = () => {};
     try {
       if ("initialSnapshot" in (options ?? {})) {
@@ -5852,9 +4301,19 @@ export class Agent<
       };
 
       try {
-        const result = await _fiberALS.run({ id, signal, stash }, () =>
-          fn({ id, signal, stash, snapshot: null })
-        );
+        let result: T;
+        try {
+          result = await _fiberALS.run({ id, signal, stash }, () =>
+            fn({ id, signal, stash, snapshot: null })
+          );
+        } catch (error) {
+          bodyOutcome = {
+            status: signal.aborted ? "aborted" : "error",
+            error: this._fiberErrorMessage(error)
+          };
+          throw error;
+        }
+        bodyOutcome = { status: "completed", error: null };
         options?.beforeRunCleanup?.({ ok: true });
         this._emit("fiber:run:completed", {
           fiberId: id,
@@ -5876,19 +4335,43 @@ export class Agent<
       }
     } finally {
       this._runFiberActiveFibers.delete(id);
-      this._withAgentSpan(
-        "finalize_fiber",
-        "fiber",
-        {
-          "cloudflare.agents.fiber.id": id,
-          "cloudflare.agents.fiber.name": name
-        },
-        () => {
-          this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
-        }
-      );
+      let rowDeleted = false;
+      try {
+        this._withAgentSpan(
+          "finalize_fiber",
+          "fiber",
+          {
+            "cloudflare.agents.fiber.id": id,
+            "cloudflare.agents.fiber.name": name
+          },
+          () => {
+            if (bodyOutcome) {
+              try {
+                this.sql`
+                  UPDATE cf_agents_runs
+                  SET completed_at = ${Date.now()},
+                      outcome = ${bodyOutcome.status},
+                      error_message = ${bodyOutcome.error}
+                  WHERE id = ${id}
+                `;
+              } catch {
+                // The delete below is still worth attempting.
+              }
+            }
+            this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
+          }
+        );
+        rowDeleted = true;
+      } catch (error) {
+        console.error(
+          `[Agent] Failed to finalize fiber "${name}" (${id}); leaving run row for recovery:`,
+          error
+        );
+      }
       dispose();
-      if (root && registeredFacetRun) {
+      // The root's registration is what brings recovery back to an idle facet,
+      // so it stays until the leftover row is gone.
+      if (root && registeredFacetRun && rowDeleted) {
         try {
           await root._cf_unregisterFacetRun(this.selfPath, id);
         } catch (e) {
@@ -5914,6 +4397,23 @@ export class Agent<
       throw new Error("stash() called outside a fiber");
     }
     ctx.stash(data);
+  }
+
+  /**
+   * Run `fn` inside the fiber stash context so `this.stash()` keeps working
+   * for turns executing on the `tasks` capability exactly as it does inside
+   * legacy `runFiber()` closures.
+   * @internal
+   */
+  protected _withFiberStash<T>(
+    context: {
+      id: string;
+      signal: AbortSignal;
+      stash: (data: unknown) => void;
+    },
+    fn: () => Promise<T>
+  ): Promise<T> {
+    return _fiberALS.run(context, fn);
   }
 
   /**
@@ -5956,7 +4456,7 @@ export class Agent<
     const fiberRecoveryMaxAgeMs = this._resolvedOptions.fiberRecoveryMaxAgeMs;
     // Forward progress this scan = at least one fiber was resolved (orphan row
     // deleted via recovery/age-out/managed-terminal, or a ledger-only managed
-    // fiber finalized). Drives the recovery-alarm backoff in `_scheduleNextAlarm`.
+    // fiber finalized). Drives the recovery-alarm backoff in `_syncHostJobs`.
     let madeProgress = false;
 
     try {
@@ -5965,7 +4465,14 @@ export class Agent<
         name: string;
         snapshot: string | null;
         created_at: number;
-      }>`SELECT id, name, snapshot, created_at FROM cf_agents_runs`;
+        completed_at: number | null;
+        outcome: "completed" | "error" | "aborted" | null;
+        error_message: string | null;
+      }>`
+        SELECT id, name, snapshot, created_at, completed_at, outcome,
+               error_message
+        FROM cf_agents_runs
+      `;
 
       for (const row of rows) {
         if (scanDeadlineMs > 0 && Date.now() - scanStartedAt > scanDeadlineMs) {
@@ -5979,6 +4486,38 @@ export class Agent<
         }
         if (this._runFiberActiveFibers.has(row.id)) continue;
 
+        const managedRow = this._readFiber(row.id);
+        // A managed row needs the recorded outcome; without it the ledger
+        // can't be settled truthfully, so it falls through to recovery.
+        if (
+          row.completed_at !== null &&
+          (!managedRow || row.outcome !== null)
+        ) {
+          // The body settled and only its cleanup failed: nothing to recover.
+          // A managed ledger still non-terminal here means its settle write
+          // failed too, so record the body's own outcome.
+          if (managedRow) {
+            this.sql`
+              UPDATE cf_agents_fibers
+              SET status = ${row.outcome},
+                  error_message = ${row.error_message},
+                  completed_at = ${row.completed_at}
+              WHERE fiber_id = ${row.id}
+                AND status IN ('pending', 'running')
+            `;
+          }
+          this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+          madeProgress = true;
+          if (managedRow) this._notifyManagedFiberTerminal(row.id);
+          continue;
+        }
+        if (managedRow && this._isTerminalFiberStatus(managedRow.status)) {
+          this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+          madeProgress = true;
+          this._notifyManagedFiberTerminal(row.id);
+          continue;
+        }
+
         const snapshot = this._parseFiberRecoverySnapshot(row.id, row.snapshot);
         const ctx: FiberRecoveryContext = {
           id: row.id,
@@ -5988,7 +4527,6 @@ export class Agent<
           recoveryReason: "interrupted"
         };
 
-        const managedRow = this._readFiber(row.id);
         this._emit("fiber:recovery:detected", {
           ...this._fiberRecoveryPayload(ctx, managedRow),
           elapsedMs: Date.now() - row.created_at
@@ -6001,13 +4539,6 @@ export class Agent<
           elapsedMs: Date.now() - row.created_at
         });
         if (managedRow) {
-          if (this._isTerminalFiberStatus(managedRow.status)) {
-            this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
-            madeProgress = true;
-            this._notifyManagedFiberTerminal(row.id);
-            continue;
-          }
-
           const completedAt = Date.now();
           this.sql`
             UPDATE cf_agents_fibers
@@ -6116,7 +4647,7 @@ export class Agent<
       this._runFiberRecoveryInProgress = false;
       // Update the recovery-alarm backoff streak: reset on any forward progress,
       // otherwise grow it only while work is still pending (a repeatedly-failing
-      // poison hook). `_scheduleNextAlarm` reads this to space out retries.
+      // poison hook). `_syncHostJobs` reads this to space out retries.
       if (madeProgress) {
         this._recoveryNoProgressScans = 0;
       } else {
@@ -6151,55 +4682,8 @@ export class Agent<
    * recovery hooks live in each facet's own `cf_agents_runs` table.
    * @internal
    */
-  private async _checkFacetRunFibers(): Promise<void> {
-    // Only the root owns the physical alarm and facet-run index.
-    if (this._parentPath.length > 0) return;
-
-    const rows = this.sql<FacetRunStorageRow>`
-      SELECT owner_path, owner_path_key, run_id, created_at
-      FROM cf_agents_facet_runs
-      ORDER BY created_at ASC
-    `;
-    const firstRowByOwner = new Map<string, FacetRunStorageRow>();
-    for (const row of rows) {
-      if (!firstRowByOwner.has(row.owner_path_key)) {
-        firstRowByOwner.set(row.owner_path_key, row);
-      }
-    }
-
-    for (const row of firstRowByOwner.values()) {
-      let ownerPath: AgentPathStep[];
-      try {
-        ownerPath = JSON.parse(row.owner_path) as AgentPathStep[];
-      } catch (e) {
-        console.warn(
-          `[Agent] Corrupted facet fiber owner path for ${row.owner_path_key}; pruning stale lease.`,
-          e
-        );
-        this.sql`
-          DELETE FROM cf_agents_facet_runs
-          WHERE owner_path_key = ${row.owner_path_key}
-        `;
-        continue;
-      }
-
-      try {
-        const remaining = await this._cf_checkRunFibersForFacet(ownerPath);
-        if (remaining === 0) {
-          this.sql`
-            DELETE FROM cf_agents_facet_runs
-            WHERE owner_path_key = ${row.owner_path_key}
-          `;
-        }
-      } catch (e) {
-        // Keep the lease so a transient failure (e.g. facet init error)
-        // gets retried on the next root heartbeat.
-        console.error(
-          `[Agent] Facet fiber recovery check failed for ${row.owner_path_key}:`,
-          e
-        );
-      }
-    }
+  private _checkFacetRunFibers(): Promise<void> {
+    return this._dynamicAgents.checkRunFibers();
   }
 
   /**
@@ -6208,92 +4692,10 @@ export class Agent<
    * rows on the target facet after recovery.
    * @internal
    */
-  async _cf_checkRunFibersForFacet(
+  _cf_checkRunFibersForFacet(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<number> {
-    const selfPath = this.selfPath;
-    if (!this._isSameAgentPathPrefix(selfPath, ownerPath)) {
-      throw new Error(
-        `Facet fiber owner path does not descend from ${JSON.stringify(selfPath)}.`
-      );
-    }
-
-    if (selfPath.length === ownerPath.length) {
-      await this._checkRunFibers();
-      const rows = this.sql<{ count: number }>`
-        SELECT COUNT(*) as count FROM cf_agents_runs
-      `;
-      return rows[0]?.count ?? 0;
-    }
-
-    const next = ownerPath[selfPath.length];
-    if (!this.hasSubAgent(next.className, next.name)) {
-      // The facet was deleted or its registry was cleared. The root
-      // should prune the root-side lease; there is no remaining child
-      // storage to recover through the public registry path.
-      return 0;
-    }
-
-    const stub = await this._cf_resolveSubAgent(next.className, next.name);
-    const handle = stub as unknown as {
-      _cf_checkRunFibersForFacet(
-        ownerPath: ReadonlyArray<AgentPathStep>
-      ): Promise<number>;
-    };
-    return handle._cf_checkRunFibersForFacet(ownerPath);
-  }
-
-  /**
-   * Dispatch a scheduled callback into the facet identified by
-   * `ownerPath`. Walks one step at a time: if `ownerPath` matches
-   * `selfPath`, executes the callback locally; otherwise resolves
-   * the next descendant facet and recurses through its own RPC.
-   *
-   * Called by the root's `alarm()` (which owns the physical alarm
-   * for facet-owned schedules) and by intermediate facets while
-   * walking down the chain.
-   * @internal
-   */
-  async _cf_dispatchScheduledCallback(
-    ownerPath: ReadonlyArray<AgentPathStep>,
-    row: ScheduleStorageRow
-  ): Promise<boolean> {
-    const selfPath = this.selfPath;
-    if (!this._isSameAgentPathPrefix(selfPath, ownerPath)) {
-      throw new Error(
-        `Schedule owner path does not descend from ${JSON.stringify(selfPath)}.`
-      );
-    }
-
-    if (selfPath.length === ownerPath.length) {
-      await this._executeScheduleCallback(row);
-      return true;
-    }
-
-    const next = ownerPath[selfPath.length];
-    if (!this.hasSubAgent(next.className, next.name)) {
-      // The target facet was deleted or its registry entry was lost. Since
-      // this schedule can no longer be dispatched through the public registry,
-      // prune root-side bookkeeping for the stale sub-tree instead of
-      // repeatedly re-arming the same impossible alarm.
-      const stalePath = ownerPath.slice(0, selfPath.length + 1);
-      if (this._isFacet) {
-        const root = await this._rootAlarmOwner();
-        await root._cf_cleanupFacetPrefix(stalePath);
-      } else {
-        await this._cf_cleanupFacetPrefix(stalePath);
-      }
-      return false;
-    }
-
-    const stub = await this._cf_resolveSubAgent(next.className, next.name);
-    const handle = stub as unknown as {
-      _cf_dispatchScheduledCallback(
-        ownerPath: ReadonlyArray<AgentPathStep>,
-        row: ScheduleStorageRow
-      ): Promise<boolean>;
-    };
-    return handle._cf_dispatchScheduledCallback(ownerPath, row);
+    return this._dynamicAgents.checkRunFibersAtPath(ownerPath);
   }
 
   /**
@@ -6302,61 +4704,12 @@ export class Agent<
    * `this.agent` calls back to the exact sub-agent that started a workflow.
    * @internal
    */
-  async _cf_invokeAgentPath(
+  _cf_invokeAgentPath(
     targetPath: ReadonlyArray<AgentPathStep>,
     method: string,
     args: unknown[]
   ): Promise<unknown> {
-    await this.__unsafe_ensureInitialized();
-
-    const selfPath = this.selfPath;
-    if (!this._isSameAgentPathPrefix(selfPath, targetPath)) {
-      throw new Error(
-        `Workflow origin path does not descend from ${JSON.stringify(selfPath)}.`
-      );
-    }
-
-    if (selfPath.length === targetPath.length) {
-      // Match real DO-stub RPC semantics: refuse JS-internal probes
-      // (`constructor`, `toString`, symbol keys, thenable checks, …) and
-      // anything inherited from `Object.prototype` so a facet-origin workflow
-      // cannot reach a method surface a top-level workflow's stub would deny.
-      // The framework's own `_workflow_*` / `_cf_*` RPC methods and any
-      // user-defined Agent methods live on the subclass prototype, not
-      // `Object.prototype`, so they remain callable.
-      const target = this as unknown as Record<string, unknown>;
-      const fn = target[method];
-      if (
-        isInternalJsStubProp(method) ||
-        method in Object.prototype ||
-        typeof fn !== "function"
-      ) {
-        throw new Error(
-          `Workflow origin method "${method}" is not callable on ${this.constructor.name}.`
-        );
-      }
-      return await (fn as (...methodArgs: unknown[]) => unknown).apply(
-        this,
-        args
-      );
-    }
-
-    const next = targetPath[selfPath.length];
-    if (!this.hasSubAgent(next.className, next.name)) {
-      throw new Error(
-        `Workflow origin sub-agent ${next.className} "${next.name}" no longer exists.`
-      );
-    }
-
-    const stub = await this._cf_resolveSubAgent(next.className, next.name);
-    const handle = stub as unknown as {
-      _cf_invokeAgentPath(
-        path: ReadonlyArray<AgentPathStep>,
-        method: string,
-        args: unknown[]
-      ): Promise<unknown>;
-    };
-    return await handle._cf_invokeAgentPath(targetPath, method, args);
+    return this._dynamicAgents.invokeAgentPath(targetPath, method, args);
   }
 
   /**
@@ -6375,237 +4728,8 @@ export class Agent<
   async _cf_destroyDescendantFacet(
     targetPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
-    const selfPath = this.selfPath;
-
-    if (targetPath.length === 0) {
-      throw new Error(
-        "_cf_destroyDescendantFacet: target path must not be empty."
-      );
-    }
-    if (selfPath.length >= targetPath.length) {
-      throw new Error(
-        "_cf_destroyDescendantFacet: target must be a strict descendant."
-      );
-    }
-    if (!this._isSameAgentPathPrefix(selfPath, targetPath)) {
-      throw new Error(
-        "_cf_destroyDescendantFacet: target path does not descend from this agent."
-      );
-    }
-
-    // The root owns every schedule row; cancel the target's prefix
-    // upfront so we don't have to make an extra round trip back from
-    // each intermediate hop.
-    if (this._parentPath.length === 0) {
-      await this._cf_cleanupFacetPrefix(targetPath);
-    }
-
-    if (selfPath.length === targetPath.length - 1) {
-      // We are the immediate parent of the target — perform the local
-      // facet teardown the same way `deleteSubAgent` does.
-      const target = targetPath[targetPath.length - 1];
-      const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-      if (!ctx.facets) {
-        throw new Error(
-          "destroy() (delegated from facet) is not supported in this runtime — " +
-            "`ctx.facets` is unavailable. " +
-            "Update to the latest `compatibility_date` in your wrangler.jsonc."
-        );
-      }
-
-      // Close any client WebSocket connected directly to the target
-      // (or a descendant) before deleting it — mirrors `deleteSubAgent`.
-      // `this` may itself be the root (target is its direct child) or
-      // an intermediate facet reached by recursing below; only the
-      // root holds real hibernatable connections, so an intermediate
-      // facet delegates through its own root stub.
-      if (this._isFacet) {
-        const root = await this._rootAlarmOwner();
-        await root._cf_closeSubAgentConnectionsForPrefix(
-          targetPath,
-          1001,
-          "Sub-agent deleted"
-        );
-      } else {
-        await this._cf_closeSubAgentConnectionsForPrefix(
-          targetPath,
-          1001,
-          "Sub-agent deleted"
-        );
-      }
-
-      try {
-        ctx.facets.delete(`${target.className}\0${target.name}`);
-      } catch {
-        // no-op — facet wasn't registered (already deleted / never spawned)
-      }
-      this._forgetSubAgent(target.className, target.name);
-      return;
-    }
-
-    // Recurse one step deeper.
-    const next = targetPath[selfPath.length];
-    if (!this.hasSubAgent(next.className, next.name)) {
-      // Already gone — schedules are cleared, nothing more to do.
-      return;
-    }
-    const stub = await this._cf_resolveSubAgent(next.className, next.name);
-    const handle = stub as unknown as {
-      _cf_destroyDescendantFacet(
-        targetPath: ReadonlyArray<AgentPathStep>
-      ): Promise<void>;
-    };
-    await handle._cf_destroyDescendantFacet(targetPath);
-  }
-
-  private async _executeScheduleCallback(
-    row: ScheduleStorageRow
-  ): Promise<void> {
-    const callback = this[row.callback as keyof Agent<Env>];
-    if (!callback) {
-      console.error(`callback ${row.callback} not found`);
-      return;
-    }
-
-    await runInInvocation(
-      {
-        agent: this,
-        connection: undefined,
-        request: undefined,
-        email: undefined
-      },
-      async () => {
-        const retryOpts = parseRetryOptions(
-          row as unknown as Record<string, unknown>
-        );
-        const { maxAttempts, baseDelayMs, maxDelayMs } = resolveRetryConfig(
-          retryOpts,
-          this._resolvedOptions.retry
-        );
-
-        let parsedPayload: unknown;
-        try {
-          parsedPayload = JSON.parse(row.payload as string);
-        } catch (e) {
-          console.error(
-            `Failed to parse payload for schedule "${row.id}" (callback "${row.callback}")`,
-            e
-          );
-          this._emit("schedule:error", {
-            callback: row.callback,
-            id: row.id,
-            error: e instanceof Error ? e.message : String(e),
-            attempts: 0
-          });
-          return;
-        }
-
-        // A one-shot row is deleted by `alarm()` once this returns normally.
-        // If it fails with a superseded-isolate error (a deploy / code update
-        // replaced the isolate — "reset because its code was updated" or "this
-        // script has been upgraded"), burning in-process retries is futile
-        // (code never reloads mid-invocation) and swallowing the error would
-        // let `alarm()` delete the row — permanently abandoning the work (e.g.
-        // an interrupted chat-recovery continuation, or a queued submission's
-        // drain alarm, leaving the submission orphaned with no driver). For
-        // that transient we skip the doomed retries and re-throw so `alarm()`
-        // rejects, the one-shot row survives, and the platform re-runs it on a
-        // fresh isolate (= new code) under the at-least-once alarm guarantee.
-        //
-        // Other platform transients ("Network connection lost." / errors the
-        // platform flags `retryable`) MAY succeed on an in-process retry (a
-        // momentary blip), so they keep the normal retry budget — but if the
-        // budget drains while the platform is still unhealthy (#1730: a
-        // deploy-reset window outlasts the few-seconds retry schedule by
-        // design), the row is deferred on exhaustion instead of consumed: the
-        // platform failed, not the callback, and the same work succeeds when
-        // the alarm re-fires in the healthy window that follows. A genuinely
-        // failing callback throws application-shaped errors (none of the
-        // platform signals) and is still abandoned after `maxAttempts` exactly
-        // as before.
-        const isOneShotSchedule =
-          row.type === "delayed" || row.type === "scheduled";
-        const shouldDeferReset = (error: unknown): boolean =>
-          isOneShotSchedule && isDurableObjectCodeUpdateReset(error);
-        const shouldDeferOnExhaustion = (error: unknown): boolean =>
-          isOneShotSchedule && isPlatformTransientError(error);
-        // A memory-limit reset is re-thrown (not swallowed) so the one-shot row
-        // is preserved and the error reaches the alarm-boundary circuit breaker
-        // (#1825), which bounds it: it tolerates a few strikes (a transient
-        // spike may clear on a fresh isolate) and then seals + purges the
-        // looping row. Deferral is only SAFE because that breaker bounds it —
-        // re-running a deterministic OOM forever is exactly what we must avoid,
-        // and without the breaker this would amplify the loop (see retries.ts).
-        const shouldDeferMemoryLimit = (error: unknown): boolean =>
-          isOneShotSchedule && isDurableObjectMemoryLimitReset(error);
-
-        try {
-          this._emit("schedule:execute", {
-            callback: row.callback,
-            id: row.id
-          });
-
-          await tryN(
-            maxAttempts,
-            async (attempt) => {
-              if (attempt > 1) {
-                this._emit("schedule:retry", {
-                  callback: row.callback,
-                  id: row.id,
-                  attempt,
-                  maxAttempts
-                });
-              }
-              await (
-                callback as (
-                  payload: unknown,
-                  schedule: Schedule<unknown>
-                ) => Promise<void>
-              ).bind(this)(parsedPayload, row as unknown as Schedule<unknown>);
-            },
-            {
-              baseDelayMs,
-              maxDelayMs,
-              shouldRetry: (error) => !shouldDeferReset(error)
-            }
-          );
-        } catch (e) {
-          if (shouldDeferReset(e)) {
-            console.warn(
-              `Deferring scheduled callback "${row.callback}" to a fresh invocation after a Durable Object code-update reset; the one-shot row is preserved and the alarm will re-run on new code.`
-            );
-            throw e;
-          }
-          if (shouldDeferOnExhaustion(e)) {
-            console.warn(
-              `Deferring scheduled callback "${row.callback}" after exhausting in-process retries on a transient platform error; the one-shot row is preserved and the alarm will re-run once the platform recovers.`
-            );
-            throw e;
-          }
-          if (shouldDeferMemoryLimit(e)) {
-            console.warn(
-              `Deferring scheduled callback "${row.callback}" to the alarm memory-limit circuit breaker after a Durable Object memory-limit reset; the one-shot row is preserved so the breaker can bound the retry loop and seal it (#1825).`
-            );
-            throw e;
-          }
-          console.error(
-            `error executing callback "${row.callback}" after ${maxAttempts} attempts`,
-            e
-          );
-          this._emit("schedule:error", {
-            callback: row.callback,
-            id: row.id,
-            error: e instanceof Error ? e.message : String(e),
-            attempts: maxAttempts
-          });
-          try {
-            await this.onError(e);
-          } catch {
-            // swallow onError errors
-          }
-        }
-      }
-    );
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.destroyDescendant(targetPath);
   }
 
   /**
@@ -6614,7 +4738,7 @@ export class Agent<
    * executing in memory, which already hold a keepAlive ref) or managed
    * ledger fibers stuck in a non-terminal state with no live run row.
    *
-   * Used by `_scheduleNextAlarm` to arm a follow-up alarm so multi-pass
+   * Used by `_syncHostJobs` to arm a follow-up alarm so multi-pass
    * recovery (e.g. after a scan-deadline yield, or while retrying a throwing
    * recovery hook) resumes instead of starving.
    * @internal
@@ -6637,94 +4761,86 @@ export class Agent<
     return (ledgerOnly[0]?.count ?? 0) > 0;
   }
 
-  private async _scheduleNextAlarm(): Promise<void> {
-    await this._withAgentSpan("schedule_agent_alarm", "alarm", {}, () =>
-      this._scheduleNextAlarmBody()
-    );
-  }
-
-  private async _scheduleNextAlarmBody(): Promise<void> {
-    // A pending destroy (#1625) owns the alarm: keep it armed immediately so
-    // teardown lands, and never let the "no work pending" branch below
-    // delete it out from under `_cf_scheduleDestroy`.
-    if (await this._hasPendingDestroy()) {
-      await this.ctx.storage.setAlarm(Date.now());
+  /**
+   * Synchronize Agent-owned host jobs with current durable state.
+   *
+   * Replaces the old pull-based `getNextAlarm()` contribution: keep-alive
+   * refs hold a `cf:keep-alive` job, and fiber-recovery / facet-run state
+   * holds a `cf:housekeeping` job. Every state change that used to trigger
+   * an alarm recalculation now re-pushes or cancels these jobs; queue
+   * mutations re-arm the physical alarm automatically.
+   * @internal
+   */
+  private async _syncHostJobs(): Promise<void> {
+    if (this._destroyed) return;
+    if (this._isFacet) {
+      // A facet has no alarm slot (`setAlarm()` throws): the root holds its
+      // keepAlive refs and facet-run leases, and facets never write the
+      // destroy marker. Earlier releases could persist a host job here
+      // before the re-arm threw; drop it so it cannot re-arm again.
+      const work = this.lifecycle.jobs;
+      for (const id of [
+        HOST_JOB_DESTROY_ID,
+        HOST_JOB_KEEP_ALIVE_ID,
+        HOST_JOB_HOUSEKEEPING_ID
+      ]) {
+        if (work.get(id)) await work.cancel(id);
+      }
       return;
     }
+    await this._withAgentSpan("schedule_agent_alarm", "alarm", {}, async () => {
+      const work = this.lifecycle.jobs;
+      const nowMs = Date.now();
 
-    const nowMs = Date.now();
-    const nowSeconds = Math.floor(nowMs / 1000);
-    const hungCutoffSeconds =
-      nowSeconds - this._resolvedOptions.hungScheduleTimeoutSeconds;
+      // A pending destroy (#1625) must keep its wake armed and exclusive
+      // through any re-sync — including markers written by a pre-job-queue
+      // release — so a keepAlive-holding agent cannot delay its own
+      // condemnation. The durable marker stays authoritative; the job is
+      // re-derived from it.
+      const pendingDestroy = await this._pendingDestroyAlarm();
+      if (pendingDestroy !== null) {
+        await work.push({
+          id: HOST_JOB_DESTROY_ID,
+          fn: "destroy",
+          time: pendingDestroy,
+          exclusive: true
+        });
+        return;
+      }
+      if (work.get(HOST_JOB_DESTROY_ID)) {
+        await work.cancel(HOST_JOB_DESTROY_ID);
+      }
 
-    // Find the earliest schedule row that is safe to execute now, even if it
-    // is already overdue. Overdue schedules can happen after a DO restart
-    // because the SQLite row survives but the in-memory alarm does not.
-    const readySchedules = this.sql<{
-      time: number;
-    }>`
-      SELECT time FROM cf_agents_schedules
-      WHERE type != 'interval'
-        OR running = 0
-        OR coalesce(execution_started_at, 0) <= ${hungCutoffSeconds}
-      ORDER BY time ASC
-      LIMIT 1
-    `;
+      if (this._keepAliveRefs > 0) {
+        await work.push({
+          id: HOST_JOB_KEEP_ALIVE_ID,
+          fn: "keepAlive",
+          time: nowMs + this._resolvedOptions.keepAliveIntervalMs
+        });
+      } else if (work.get(HOST_JOB_KEEP_ALIVE_ID)) {
+        await work.cancel(HOST_JOB_KEEP_ALIVE_ID);
+      }
 
-    // Running interval schedules that are not hung yet still need a future
-    // alarm so the runtime can re-check them once they cross the hung timeout.
-    const recoveringIntervals = this.sql<{
-      execution_started_at: number | null;
-    }>`
-      SELECT execution_started_at FROM cf_agents_schedules
-      WHERE type = 'interval'
-        AND running = 1
-        AND coalesce(execution_started_at, 0) > ${hungCutoffSeconds}
-      ORDER BY execution_started_at ASC
-      LIMIT 1
-    `;
+      const housekeepingAt = this._nextHousekeepingWakeMs(nowMs);
+      if (housekeepingAt !== null) {
+        await work.push({
+          id: HOST_JOB_HOUSEKEEPING_ID,
+          fn: "housekeeping",
+          time: housekeepingAt
+        });
+      } else if (work.get(HOST_JOB_HOUSEKEEPING_ID)) {
+        await work.cancel(HOST_JOB_HOUSEKEEPING_ID);
+      }
+    });
+  }
 
+  /**
+   * The next wake fiber-recovery or facet-run housekeeping needs, or `null`
+   * when neither has pending durable state.
+   */
+  private _nextHousekeepingWakeMs(nowMs: number): number | null {
     let nextTimeMs: number | null = null;
-    if (readySchedules.length > 0 && "time" in readySchedules[0]) {
-      nextTimeMs = Math.max(
-        (readySchedules[0].time as number) * 1000,
-        nowMs + 1
-      );
-    }
 
-    if (
-      recoveringIntervals.length > 0 &&
-      recoveringIntervals[0].execution_started_at !== null
-    ) {
-      const recoveryTimeMs =
-        (recoveringIntervals[0].execution_started_at +
-          this._resolvedOptions.hungScheduleTimeoutSeconds) *
-        1000;
-      nextTimeMs =
-        nextTimeMs === null
-          ? recoveryTimeMs
-          : Math.min(nextTimeMs, recoveryTimeMs);
-    }
-
-    if (this._keepAliveRefs > 0) {
-      const keepAliveMs = nowMs + this._resolvedOptions.keepAliveIntervalMs;
-      nextTimeMs =
-        nextTimeMs === null ? keepAliveMs : Math.min(nextTimeMs, keepAliveMs);
-    }
-
-    // Fibers left behind by a dead process (orphaned `cf_agents_runs` rows or
-    // interrupted/pending managed ledger rows) are recovered by the alarm-
-    // driven scan. A single scan can leave work behind — it yields once it
-    // crosses `fiberRecoveryScanDeadlineMs`, and a repeatedly-throwing
-    // unmanaged recovery hook keeps its row until it ages out. Without a
-    // follow-up alarm those leftovers would starve, since the orphans hold no
-    // keepAlive ref. Arm one so recovery resumes.
-    //
-    // The delay backs off exponentially while scans make no forward progress
-    // (a poison hook that keeps throwing, or a `fiberRecoveryMaxAgeMs: 0`
-    // retain-forever row) so the DO is not woken every `keepAliveIntervalMs`
-    // indefinitely. A scan that recovers anything resets the streak (see
-    // `_checkRunFibers`), so legitimate multi-pass draining stays prompt.
     if (this._hasPendingFiberRecovery()) {
       const base = this._resolvedOptions.keepAliveIntervalMs;
       const exp = Math.min(
@@ -6735,9 +4851,7 @@ export class Agent<
         FIBER_RECOVERY_MAX_BACKOFF_MS,
         base * 2 ** exp
       );
-      const recoveryMs = nowMs + recoveryDelayMs;
-      nextTimeMs =
-        nextTimeMs === null ? recoveryMs : Math.min(nextTimeMs, recoveryMs);
+      nextTimeMs = nowMs + recoveryDelayMs;
     }
 
     const facetRuns = this.sql<{ count: number }>`
@@ -6751,25 +4865,90 @@ export class Agent<
           : Math.min(nextTimeMs, facetRecoveryMs);
     }
 
-    if (nextTimeMs !== null) {
-      await this.ctx.storage.setAlarm(nextTimeMs);
-    } else {
-      await this.ctx.storage.deleteAlarm();
-    }
+    return nextTimeMs;
   }
 
-  /** Lifecycle alarm callback; Agent scheduling runs in the platform alarm. */
+  /** Lifecycle alarm callback; Agent housekeeping runs after user alarm work. */
   onAlarm(): void {}
 
   /**
-   * Method called when an alarm fires.
-   * Executes any scheduled tasks that are due.
+   * Drive one Agent-owned host job from the Lifecycle queue.
+   * @internal Dispatched by Lifecycle's alarm event loop; extensions add
+   * job fns through {@link _onHostJob}.
+   */
+  onJob(
+    context: LifecycleJobContext
+  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
+    return this._onHostJob(context.job.fn, context);
+  }
+
+  /**
+   * @internal Dispatch one host job fn. Agent extensions (Think) override
+   * this to add fns and delegate unknown ones to `super`.
+   */
+  protected _onHostJob(
+    fn: string,
+    _context: LifecycleJobContext
+  ): LifecycleJobOutcome | void | Promise<LifecycleJobOutcome | void> {
+    switch (fn) {
+      case "keepAlive":
+        // This job's only purpose is guaranteeing wakes while refs are
+        // held; housekeeping itself runs on every alarm via the onAlarm
+        // wrapper.
+        return this._keepAliveRefs > 0
+          ? {
+              rescheduleAt:
+                Date.now() + this._resolvedOptions.keepAliveIntervalMs
+            }
+          : undefined;
+      case "housekeeping": {
+        const next = this._nextHousekeepingWakeMs(Date.now());
+        return next === null ? undefined : { rescheduleAt: next };
+      }
+      case "destroy":
+        // The alarm preamble consumes pending destroys before the event
+        // loop runs; a surviving job is stale.
+        return undefined;
+      default:
+        console.warn(`Unknown Agent host job fn ${JSON.stringify(fn)}`);
+        return undefined;
+    }
+  }
+
+  /**
+   * Apply host policy after the alarm memory-limit breaker records a strike.
    *
-   * Runs the lifecycle alarm phase before due schedules and housekeeping.
+   * New chat hosts override this hook directly. The sealed-only fallback keeps
+   * `agents` 0.23 compatible with already-published chat packages whose peer
+   * ranges accept it but which implement only the former
+   * `_cf_sealMemoryLimitedRecovery` template method. Queue membership remains
+   * job-row policy; this invokes terminalization only and can be removed once
+   * old chat releases no longer accept the current `agents` range.
    *
-   * @remarks
-   * To schedule a task, please use the `this.schedule` method instead.
-   * See {@link https://developers.cloudflare.com/agents/api-reference/schedule-tasks/}
+   * @internal
+   */
+  protected async onAlarmMemoryLimit(
+    context: MemoryLimitContext
+  ): Promise<void> {
+    if (!context.sealed) return;
+    const legacySeal = (
+      this as unknown as {
+        _cf_sealMemoryLimitedRecovery?: () => void | Promise<void>;
+      }
+    )._cf_sealMemoryLimitedRecovery;
+    await legacySeal?.call(this);
+  }
+
+  /**
+   * Run Lifecycle's alarm event loop after the pending-destroy preamble.
+   *
+   * The alarm memory-limit circuit breaker (#1825) lives inside
+   * `Lifecycle.alarm()`; capabilities and hosts opt into extra domain
+   * policy via their `onMemoryLimit` / `onAlarmMemoryLimit` hooks and the
+   * `recoveryLoop` schedule option.
+   *
+   * @remarks Use `this.schedule()` for named Agent callbacks. Reusable durable
+   * work belongs in a capability that pushes jobs and implements `onJob()`.
    */
   async alarm() {
     // A pending destroy (#1625) pre-empts everything — including lifecycle
@@ -6784,351 +4963,7 @@ export class Agent<
       return;
     }
 
-    // Outermost alarm frame: a Durable Object memory-limit reset (#1825) that
-    // propagates here would otherwise be re-thrown to the platform, which
-    // auto-retries the alarm forever — the OOM crash loop. Intercept ONLY that
-    // class (everything else re-throws, unchanged) and break the loop from the
-    // boundary, where the heavy turn has unwound and GC has reclaimed its
-    // footprint, so the seal/purge writes can land where mid-turn ones OOMed.
-    try {
-      await this._cf_runAlarmBody();
-      // A clean alarm clears the strike counter so the breaker bounds
-      // CONSECUTIVE memory-limit resets, not lifetime ones (#1825). Without
-      // this a Durable Object that hits rare, non-consecutive transient
-      // spikes (e.g. one a month) would eventually reach the strike budget
-      // and wrongly seal healthy recovery work.
-      await this._cf_clearAlarmMemoryLimitStrikes();
-    } catch (error) {
-      if (!isDurableObjectMemoryLimitReset(error)) throw error;
-      await this._cf_handleAlarmMemoryLimitReset(error);
-    }
-  }
-
-  /**
-   * The alarm body: lifecycle init + due-schedule processing + housekeeping +
-   * next-alarm arm. Extracted from {@link alarm} so the memory-limit circuit
-   * breaker can wrap it at the outermost frame (see {@link alarm}).
-   */
-  private async _cf_runAlarmBody() {
-    // Initialize components and the Agent before processing scheduled tasks.
     await this.lifecycle.alarm();
-
-    const now = Math.floor(Date.now() / 1000);
-
-    // Get all schedules that should be executed now
-    const result = this.sql<ScheduleStorageRow>`
-      SELECT * FROM cf_agents_schedules WHERE time <= ${now}
-    `;
-
-    if (result && Array.isArray(result)) {
-      // Warn when many stale one-shot rows share the same callback — this
-      // usually means schedule() was called repeatedly (e.g. in onStart)
-      // without idempotent:true and rows accumulated across restarts.
-      const DUPLICATE_SCHEDULE_THRESHOLD = 10;
-      const oneShotCounts = new Map<string, number>();
-      for (const row of result) {
-        if (row.type === "delayed" || row.type === "scheduled") {
-          oneShotCounts.set(
-            row.callback,
-            (oneShotCounts.get(row.callback) ?? 0) + 1
-          );
-        }
-      }
-      for (const [cb, count] of oneShotCounts) {
-        if (count >= DUPLICATE_SCHEDULE_THRESHOLD) {
-          try {
-            console.warn(
-              `Processing ${count} stale "${cb}" schedules in a single alarm cycle. ` +
-                `This usually means schedule() is being called repeatedly without ` +
-                `the idempotent option. Consider using scheduleEvery() for recurring ` +
-                `tasks or passing { idempotent: true } to schedule().`
-            );
-            this._emit("schedule:duplicate_warning", {
-              callback: cb,
-              count,
-              type: "one-shot"
-            });
-          } catch {
-            // Warning emission is non-critical — never block row processing.
-          }
-        }
-      }
-
-      for (const row of result as ScheduleStorageRow[]) {
-        let executed = false;
-
-        // Overlap prevention for interval schedules with hung callback detection
-        if (row.type === "interval" && row.running === 1) {
-          const executionStartedAt =
-            (row as { execution_started_at?: number }).execution_started_at ??
-            0;
-          const hungTimeoutSeconds =
-            this._resolvedOptions.hungScheduleTimeoutSeconds;
-          const elapsedSeconds = now - executionStartedAt;
-
-          if (elapsedSeconds < hungTimeoutSeconds) {
-            console.warn(
-              `Skipping interval schedule ${row.id}: previous execution still running`
-            );
-            continue;
-          }
-          // Previous execution appears hung, force reset and re-execute
-          console.warn(
-            `Forcing reset of hung interval schedule ${row.id} (started ${elapsedSeconds}s ago)`
-          );
-        }
-
-        // Mark interval as running before execution
-        if (row.type === "interval") {
-          this
-            .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${now} WHERE id = ${row.id}`;
-        }
-
-        if (row.owner_path) {
-          try {
-            const ownerPath = JSON.parse(row.owner_path) as AgentPathStep[];
-            executed = await this._cf_dispatchScheduledCallback(ownerPath, row);
-          } catch (e) {
-            console.error(
-              `error dispatching scheduled callback "${row.callback}"`,
-              e
-            );
-            this._emit("schedule:error", {
-              callback: row.callback,
-              id: row.id,
-              error: e instanceof Error ? e.message : String(e),
-              attempts: 0
-            });
-            try {
-              await this.onError(e);
-            } catch {
-              // swallow onError errors
-            }
-            // Reset the in-flight flag for interval rows so the row
-            // doesn't stay stuck in `running=1` when dispatch fails
-            // (e.g. the facet's registry entry is missing). The next
-            // alarm cycle will retry.
-            if (row.type === "interval") {
-              this.sql`
-                UPDATE cf_agents_schedules SET running = 0 WHERE id = ${row.id}
-              `;
-            }
-            continue;
-          }
-        } else {
-          // Record the row id so the alarm-boundary circuit breaker can purge
-          // the exact looping row if this callback ends in a memory-limit reset
-          // (#1825). Cleared only on success; on a throw it propagates with the
-          // id still set, and the breaker clears it.
-          this._cf_executingScheduleRowId = row.id;
-          await this._executeScheduleCallback(row);
-          this._cf_executingScheduleRowId = undefined;
-          executed = true;
-        }
-
-        if (this._destroyed) return;
-        if (!executed) continue;
-
-        if (row.type === "cron") {
-          // Update next execution time for cron schedules
-          const nextExecutionTime = getNextCronTime(row.cron ?? "");
-          const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
-
-          this.sql`
-            UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
-          `;
-        } else if (row.type === "interval") {
-          // Reset running flag and schedule next interval execution
-          const nextTimestamp =
-            Math.floor(Date.now() / 1000) + (row.intervalSeconds ?? 0);
-
-          this.sql`
-            UPDATE cf_agents_schedules SET running = 0, time = ${nextTimestamp} WHERE id = ${row.id}
-          `;
-        } else {
-          // Delete one-time schedules after execution
-          this.sql`
-            DELETE FROM cf_agents_schedules WHERE id = ${row.id}
-          `;
-        }
-      }
-    }
-    if (this._destroyed) return;
-
-    await this._onAlarmHousekeeping();
-
-    // Schedule the next alarm
-    await this._scheduleNextAlarm();
-  }
-
-  /**
-   * Durable storage key for the alarm memory-limit strike counter (#1825).
-   */
-  private static readonly _CF_OOM_ALARM_STRIKES_KEY =
-    "cf_agents:oom_alarm_strikes";
-
-  /**
-   * The schedule row id currently executing in the alarm loop, so the
-   * memory-limit circuit breaker can purge the exact looping row (#1825).
-   * `undefined` outside a callback (e.g. an OOM during lifecycle startup).
-   */
-  private _cf_executingScheduleRowId?: string;
-
-  /**
-   * The schedule-callback names whose alarm rows drive a recovery loop that can
-   * deterministically OOM. The base agent has none; chat hosts (`Think`,
-   * `AIChatAgent`) override this to return their recovery continuation callbacks
-   * so the circuit breaker can surgically back them off / purge them WITHOUT
-   * disturbing unrelated scheduled tasks. See {@link _cf_handleAlarmMemoryLimitReset}.
-   */
-  protected _cf_recoveryAlarmCallbacks(): string[] {
-    return [];
-  }
-
-  /**
-   * Hook for a host to terminalize ("seal") any in-flight recovery work as an
-   * out-of-memory exhaustion when the alarm circuit breaker trips at its strike
-   * budget (#1825). Runs at the outermost alarm frame (post-unwind, so writes
-   * can land). Default: no-op. Chat hosts override to fire `onExhausted` + the
-   * terminal banner and persist the sealed incident.
-   */
-  protected async _cf_sealMemoryLimitedRecovery(): Promise<void> {}
-
-  /**
-   * Clear the durable memory-limit strike counter after a clean alarm so the
-   * circuit breaker counts CONSECUTIVE resets rather than lifetime ones
-   * (#1825). Reads first (cheap, usually cached) and only writes when a strike
-   * is actually recorded, so the common no-strike path costs no write.
-   * Best-effort: a stale strike only costs one extra tolerated spike later.
-   */
-  private async _cf_clearAlarmMemoryLimitStrikes(): Promise<void> {
-    try {
-      const prior = await this.ctx.storage.get<number>(
-        Agent._CF_OOM_ALARM_STRIKES_KEY
-      );
-      if (typeof prior === "number" && prior > 0) {
-        await this.ctx.storage.delete(Agent._CF_OOM_ALARM_STRIKES_KEY);
-      }
-    } catch {
-      // best-effort: a leftover strike is harmless beyond one extra tolerated spike
-    }
-  }
-
-  /**
-   * Alarm-boundary circuit breaker for Durable Object memory-limit resets
-   * (#1825). The in-DO recovery budgets (`chatRecovery.maxOomRetries` /
-   * `maxRecoveryWork`) only engage if their code runs AND its writes land; a
-   * severe OOM can defeat both — thrown before the budget runs (boot hydration),
-   * or its own small writes also OOM under memory pressure. In that case the
-   * error reaches {@link alarm} and, unhandled, the platform auto-retries the
-   * alarm indefinitely (re-running the doomed, billable turn each cycle).
-   *
-   * This runs at the OUTERMOST frame: the heavy turn has unwound and GC has
-   * reclaimed its footprint, so the small writes here can land where mid-turn
-   * ones (e.g. give-up's incident read) OOMed. A durable strike counter tolerates
-   * a few resets (a transient spike may clear), backing off the recovery rows so
-   * the retry is not a hot loop. At the `maxAlarmMemoryLimitStrikes` budget it
-   * seals the recovery work and purges the looping rows so the loop — and the
-   * bill — stops. Each step is best-effort: even these tiny writes can OOM, but
-   * swallowing (not re-throwing) still halts the platform's auto-retry, and a
-   * later wake re-arms legitimate schedules.
-   */
-  private async _cf_handleAlarmMemoryLimitReset(error: unknown): Promise<void> {
-    const key = Agent._CF_OOM_ALARM_STRIKES_KEY;
-    let strikes = 1;
-    try {
-      const prior = await this.ctx.storage.get<number>(key);
-      strikes = (typeof prior === "number" ? prior : 0) + 1;
-      await this.ctx.storage.put(key, strikes);
-    } catch {
-      // Even the strike write OOMed; proceed treating this as a strike so the
-      // breaker still progresses toward sealing rather than deadlocking.
-    }
-
-    const limit = this._resolvedOptions.maxAlarmMemoryLimitStrikes;
-    const sealed = strikes >= limit;
-    const recoveryCallbacks = this._cf_recoveryAlarmCallbacks();
-    const executingRowId = this._cf_executingScheduleRowId;
-    this._cf_executingScheduleRowId = undefined;
-
-    console.error(
-      `Alarm hit a Durable Object memory-limit reset (strike ${strikes}/${limit}` +
-        `${sealed ? ", sealing recovery" : ", will retry with backoff"}). ` +
-        "Breaking the platform alarm-retry loop (#1825).",
-      error instanceof Error ? error.message : String(error)
-    );
-
-    if (sealed) {
-      // Surgical purge: remove ONLY the looping rows (the recovery callbacks and
-      // the exact row that was executing) so they stop re-triggering; unrelated
-      // scheduled tasks survive.
-      for (const cb of recoveryCallbacks) {
-        try {
-          this.sql`DELETE FROM cf_agents_schedules WHERE callback = ${cb}`;
-        } catch {
-          // best-effort
-        }
-      }
-      if (executingRowId) {
-        try {
-          this
-            .sql`DELETE FROM cf_agents_schedules WHERE id = ${executingRowId}`;
-        } catch {
-          // best-effort
-        }
-      }
-      try {
-        await this._cf_sealMemoryLimitedRecovery();
-      } catch {
-        // best-effort terminalization; the purge above already broke the loop.
-      }
-      try {
-        await this.ctx.storage.delete(key);
-      } catch {
-        // best-effort counter reset
-      }
-    } else {
-      // Under budget: delay the looping rows so the next attempt runs on a fresh
-      // isolate after a backoff rather than immediately re-OOMing in a hot loop.
-      // A genuinely transient spike can clear in the meantime.
-      const backoffSeconds = Math.min(300, 30 * strikes);
-      const nextTime = Math.floor(Date.now() / 1000) + backoffSeconds;
-      for (const cb of recoveryCallbacks) {
-        try {
-          this
-            .sql`UPDATE cf_agents_schedules SET time = ${nextTime} WHERE callback = ${cb} AND time <= ${nextTime}`;
-        } catch {
-          // best-effort
-        }
-      }
-      if (executingRowId) {
-        try {
-          this
-            .sql`UPDATE cf_agents_schedules SET time = ${nextTime} WHERE id = ${executingRowId} AND time <= ${nextTime}`;
-        } catch {
-          // best-effort
-        }
-      }
-    }
-
-    try {
-      this._emit("alarm:memory_limit_reset", {
-        strikes,
-        limit,
-        sealed,
-        error: error instanceof Error ? error.message : String(error)
-      });
-    } catch {
-      // event emission is non-critical
-    }
-
-    // Re-arm so non-recovery schedules continue. Wrapped because it can itself
-    // OOM; if it does, the next external wake re-arms.
-    try {
-      await this._scheduleNextAlarm();
-    } catch {
-      // best-effort
-    }
   }
 
   // ── Sub-agent routing (external addressability for facets) ──────────────
@@ -7141,9 +4976,9 @@ export class Agent<
    * Response, the framework resolves the facet and hands the
    * request off.
    *
-   * After a WebSocket upgrade completes, subsequent frames route
-   * directly to the child — the parent is only on the path for the
-   * initial request.
+   * The parent owns an upgraded WebSocket for its lifetime. Subsequent
+   * frames wake the root parent, which forwards them to the child over
+   * RPC and routes replies back to the native socket.
    *
    * @experimental The API surface may change before stabilizing.
    */
@@ -7162,10 +4997,16 @@ export class Agent<
       className: match.childClass,
       name: match.childName
     });
-    if (decision instanceof Response) return decision;
+    const isWebSocketUpgrade =
+      request.headers.get("Upgrade")?.toLowerCase() === "websocket";
+    if (decision instanceof Response) {
+      return isWebSocketUpgrade && !decision.webSocket
+        ? rejectSubAgentWebSocket(decision)
+        : decision;
+    }
     const forwardReq = decision instanceof Request ? decision : request;
 
-    if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+    if (isWebSocketUpgrade) {
       const acceptHeaders = new Headers(forwardReq.headers);
       const routedUrl = new URL(forwardReq.url);
       routedUrl.pathname = new URL(request.url).pathname;
@@ -7183,34 +5024,33 @@ export class Agent<
     without?: string[]
   ): void {
     if (this._isFacet) {
-      void this._cf_broadcastToParentSubAgent(msg, without);
+      void this._dynamicAgents.broadcastToParent(msg, without);
       return;
     }
 
-    for (const connection of this.lifecycle.getConnections()) {
+    for (const connection of this._webSockets.getConnections()) {
       if (without?.includes(connection.id)) continue;
-      if (this._cf_connectionHasSubAgentTarget(connection)) continue;
+      if (this._dynamicAgents.connectionHasChildTarget(connection)) continue;
       connection.send(msg);
     }
   }
 
   getConnection<TState = unknown>(id: string): Connection<TState> | undefined {
     if (this._isFacet) {
-      const stored = this._cf_virtualSubAgentConnections.get(id);
-      if (stored) {
-        return this._cf_createSubAgentBridgeConnection(
-          stored.bridge,
-          stored.meta
-        ) as Connection<TState>;
-      }
-      // Do not read lifecycle-owned root connections from a facet — that resolves
-      // to the host/root DO's hibernatable sockets and reading them from the
-      // facet's I/O context throws a cross-DO Native I/O error. See issue #1677.
-      return undefined;
+      // Do not read lifecycle-owned root connections from a facet — that
+      // resolves to the host/root DO's hibernatable sockets and reading them
+      // from the facet's I/O context throws a cross-DO Native I/O error. See
+      // issue #1677. Only virtual (bridged) connections are visible here.
+      return this._dynamicAgents.getVirtualConnection(id) as
+        | Connection<TState>
+        | undefined;
     }
 
-    const connection = this.lifecycle.getConnection<TState>(id);
-    if (!connection || this._cf_connectionHasSubAgentTarget(connection)) {
+    const connection = this._webSockets.getConnection<TState>(id);
+    if (
+      !connection ||
+      this._dynamicAgents.connectionHasChildTarget(connection)
+    ) {
       return undefined;
     }
     return connection;
@@ -7222,38 +5062,21 @@ export class Agent<
     if (this._isFacet) {
       // A facet's client connections are all virtual — they are real
       // WebSockets owned by the ROOT DO and bridged in. We must NOT fall
-      // through to `this.lifecycle.getConnections()` here: on a facet that resolves to
+      // through to `this._webSockets.getConnections()` here: on a facet that resolves to
       // the host/root DO's hibernatable sockets, and reading their attachments
       // from the facet's I/O context throws
       // "Cannot perform I/O on behalf of a different Durable Object (Native)".
       // See issue #1677.
-      for (const stored of this._cf_virtualSubAgentConnections.values()) {
-        if (!tag || stored.meta.tags.includes(tag)) {
-          yield this._cf_createSubAgentBridgeConnection(
-            stored.bridge,
-            stored.meta
-          ) as Connection<TState>;
-        }
-      }
+      yield* this._dynamicAgents.getVirtualConnections(tag) as Iterable<
+        Connection<TState>
+      >;
       return;
     }
 
-    for (const connection of this.lifecycle.getConnections<TState>(tag)) {
-      if (this._cf_connectionHasSubAgentTarget(connection)) continue;
+    for (const connection of this._webSockets.getConnections<TState>(tag)) {
+      if (this._dynamicAgents.connectionHasChildTarget(connection)) continue;
       yield connection;
     }
-  }
-
-  private async _cf_broadcastToParentSubAgent(
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): Promise<void> {
-    if (this._cf_currentSubAgentBridge) {
-      this._cf_currentSubAgentBridge.broadcast(this.selfPath, message, without);
-      return;
-    }
-    const root = await this._rootAlarmOwner();
-    await root._cf_broadcastToSubAgent(this.selfPath, message, without);
   }
 
   async _cf_broadcastToSubAgent(
@@ -7261,43 +5084,23 @@ export class Agent<
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void> {
-    if (this._isFacet && this._cf_currentSubAgentBridge) {
-      this._cf_currentSubAgentBridge.broadcast(ownerPath, message, without);
-      return;
-    }
-
-    for (const connection of this.lifecycle.getConnections()) {
-      if (without?.includes(connection.id)) continue;
-      const targetPath = this._cf_subAgentTargetPath(connection);
-      if (!targetPath) continue;
-      if (!this._isSameAgentPath(targetPath, ownerPath)) continue;
-      connection.send(message);
-    }
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.broadcastToPath(ownerPath, message, without);
   }
 
   async _cf_subAgentConnectionMetas(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<SubAgentConnectionMeta[]> {
-    const metas: SubAgentConnectionMeta[] = [];
-    for (const connection of this.lifecycle.getConnections()) {
-      const meta = this._cf_subAgentConnectionMetaForPath(
-        connection,
-        ownerPath
-      );
-      if (meta) metas.push(meta);
-    }
-    return metas;
+    await this.__unsafe_ensureInitialized();
+    return this._dynamicAgents.connectionMetas(ownerPath);
   }
 
   async _cf_sendToSubAgentConnection(
     connectionId: string,
     message: string | ArrayBuffer | ArrayBufferView
   ): Promise<void> {
-    const connection = this.lifecycle.getConnection(connectionId);
-    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
-      return;
-    }
-    connection.send(message);
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.sendToConnection(connectionId, message);
   }
 
   async _cf_closeSubAgentConnection(
@@ -7305,161 +5108,29 @@ export class Agent<
     code?: number,
     reason?: string
   ): Promise<void> {
-    const connection = this.lifecycle.getConnection(connectionId);
-    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
-      return;
-    }
-    connection.close(code, reason);
+    await this.__unsafe_ensureInitialized();
+    await this._dynamicAgents.closeConnection(connectionId, code, reason);
   }
 
-  /**
-   * Close every root-owned WebSocket connection whose `/sub/...`
-   * target path equals or descends from `prefix`. Called by
-   * {@link deleteSubAgent} and delegated self-destroy teardown so a
-   * client connected directly to a deleted sub-agent (or one of its
-   * descendants) gets an explicit close instead of being left
-   * pointed at nothing — see issue #2003.
-   *
-   * Runs synchronously with respect to the caller's turn (no `await`
-   * before iterating `super.getConnections()`), so it observes every
-   * connection recorded up to this point in the same tick that
-   * teardown starts deleting the target.
-   *
-   * @internal
-   */
   async _cf_closeSubAgentConnectionsForPrefix(
     prefix: ReadonlyArray<AgentPathStep>,
     code: number,
     reason: string
   ): Promise<void> {
-    for (const connection of super.getConnections()) {
-      const targetPath = this._cf_subAgentTargetPath(connection);
-      if (!targetPath) continue;
-      if (!this._isSameAgentPathPrefix(prefix, targetPath)) continue;
-      try {
-        connection.close(code, reason);
-      } catch {
-        // `close()` on a socket that's already closing/closed can
-        // throw. This runs on the shared deletion/self-destroy
-        // critical path, ahead of `ctx.facets.delete()` and
-        // `_forgetSubAgent()` — one uncooperative socket must not
-        // block those state mutations or closing the rest of the
-        // matched connections.
-      }
-    }
+    await this.__unsafe_ensureInitialized();
+    this._dynamicAgents.closeConnectionsForPrefix(prefix, code, reason);
   }
 
   async _cf_setSubAgentConnectionState(
     connectionId: string,
     state: unknown
   ): Promise<unknown> {
-    const connection = this.lifecycle.getConnection(connectionId);
-    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
-      return null;
-    }
-    this._ensureConnectionWrapped(connection);
-    connection.setState(state);
-    return this._cf_getForwardedSubAgentState(connection);
-  }
-
-  private _cf_subAgentConnectionMetaForPath(
-    connection: Connection,
-    ownerPath: ReadonlyArray<AgentPathStep>
-  ): SubAgentConnectionMeta | null {
-    this._ensureConnectionWrapped(connection);
-    const outerUri = this._unsafe_getConnectionFlag(
-      connection,
-      CF_SUB_AGENT_OUTER_URL_KEY
-    );
-    if (typeof outerUri !== "string") return null;
-
-    const target = this._cf_subAgentPathFromOuterUri(outerUri, ownerPath);
-    if (!target) return null;
-
-    const raw = this._cf_getRawConnectionState(connection);
-    const rawTags =
-      raw != null && typeof raw === "object"
-        ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
-        : undefined;
-    const tags = Array.isArray(rawTags)
-      ? rawTags.filter((tag): tag is string => typeof tag === "string")
-      : [...connection.tags];
-    return {
-      id: connection.id,
-      uri: target.uri,
-      tags,
-      state: this._cf_getForwardedSubAgentState(connection)
-    };
-  }
-
-  private _cf_subAgentTargetPath(
-    connection: Connection
-  ): ReadonlyArray<AgentPathStep> | null {
-    this._ensureConnectionWrapped(connection);
-    const outerUri = this._unsafe_getConnectionFlag(
-      connection,
-      CF_SUB_AGENT_OUTER_URL_KEY
-    );
-    if (typeof outerUri !== "string") return null;
-
-    return this._cf_subAgentPathFromOuterUri(outerUri)?.path ?? null;
-  }
-
-  private _cf_subAgentPathFromOuterUri(
-    outerUri: string,
-    stopAt?: ReadonlyArray<AgentPathStep>
-  ): { path: ReadonlyArray<AgentPathStep>; uri: string } | null {
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    const knownClasses = ctx.exports ? Object.keys(ctx.exports) : undefined;
-    const path: AgentPathStep[] = [...this.selfPath];
-    let currentUrl = outerUri;
-
-    while (true) {
-      const match = _parseSubAgentPath(currentUrl, { knownClasses });
-      if (!match) break;
-      path.push({ className: match.childClass, name: match.childName });
-      const rewritten = new URL(currentUrl);
-      rewritten.pathname = match.remainingPath;
-      currentUrl = rewritten.toString();
-      if (stopAt && this._isSameAgentPath(path, stopAt)) {
-        return { path, uri: currentUrl };
-      }
-    }
-
-    if (path.length === this.selfPath.length) return null;
-    if (stopAt) return null;
-    return { path, uri: currentUrl };
-  }
-
-  private _isSameAgentPath(
-    a: ReadonlyArray<AgentPathStep>,
-    b: ReadonlyArray<AgentPathStep>
-  ): boolean {
-    if (a.length !== b.length) return false;
-    return a.every(
-      (step, index) =>
-        step.className === b[index]?.className && step.name === b[index]?.name
-    );
-  }
-
-  private _cf_connectionHasSubAgentTarget(connection: Connection): boolean {
-    this._ensureConnectionWrapped(connection);
-    return (
-      typeof this._unsafe_getConnectionFlag(
-        connection,
-        CF_SUB_AGENT_OUTER_URL_KEY
-      ) === "string"
-    );
+    await this.__unsafe_ensureInitialized();
+    return this._dynamicAgents.setConnectionState(connectionId, state);
   }
 
   protected _cf_connectionTargetsSubAgent(connection: Connection): boolean {
-    if (!connection.uri) return false;
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    return (
-      _parseSubAgentPath(connection.uri, {
-        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
-      }) !== null
-    );
+    return this._dynamicAgents.connectionTargetsChild(connection);
   }
 
   /**
@@ -7471,395 +5142,86 @@ export class Agent<
    * own protocol frames on sockets that are about to be forwarded to a child.
    */
   protected _cf_requestTargetsSubAgent(request: Request): boolean {
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    return (
-      _parseSubAgentPath(request.url, {
-        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
-      }) !== null
-    );
+    return this._dynamicAgents.requestTargetsChild(request);
   }
 
-  private async _cf_forwardSubAgentWebSocketConnect(
+  private _cf_forwardSubAgentWebSocketConnect(
     connection: Connection,
     request: Request,
     options: { gate: boolean }
   ): Promise<boolean> {
-    const routed = await this._cf_resolveSubAgentConnection(connection, {
-      create: true,
-      request,
-      gate: options.gate
-    });
-    if (routed.status !== "ok") return false;
-
-    await routed.child._cf_handleSubAgentWebSocketConnect(
-      this._cf_createSubAgentConnectionBridge(connection),
-      routed.meta
-    );
-    return true;
-  }
-
-  private _cf_createSubAgentConnectionBridge(
-    connection: Connection
-  ): SubAgentConnectionBridge {
-    return new SubAgentConnectionBridge(
+    return this._dynamicAgents.forwardWebSocketConnect(
       connection,
-      (ownerPath, message, without) => {
-        void this._cf_broadcastToSubAgent(ownerPath, message, without);
-      }
+      request,
+      options
     );
   }
 
-  private async _cf_forwardSubAgentWebSocketMessage(
+  private _cf_forwardSubAgentWebSocketMessage(
     connection: Connection,
     message: WSMessage,
     replyBridge?: SubAgentConnectionBridge
   ): Promise<boolean> {
-    const routed = await this._cf_resolveSubAgentConnection(connection, {
-      create: false
-    });
-    if (routed.status === "no-match") return false;
-    if (routed.status === "dropped") return true;
-
-    const bridge = this._cf_createSubAgentConnectionBridge(connection);
-    await routed.child._cf_handleSubAgentWebSocketMessage(
+    return this._dynamicAgents.forwardWebSocketMessage(
+      connection,
       message,
-      bridge,
-      routed.meta,
-      replyBridge ?? bridge
+      replyBridge
     );
-    return true;
   }
 
-  private async _cf_forwardSubAgentWebSocketClose(
+  private _cf_forwardSubAgentWebSocketClose(
     connection: Connection,
     code: number,
     reason: string,
     wasClean: boolean
   ): Promise<boolean> {
-    const routed = await this._cf_resolveSubAgentConnection(connection, {
-      create: false
-    });
-    if (routed.status === "no-match") return false;
-    if (routed.status === "dropped") return true;
-
-    await routed.child._cf_handleSubAgentWebSocketClose(
+    return this._dynamicAgents.forwardWebSocketClose(
+      connection,
       code,
       reason,
-      wasClean,
-      this._cf_createSubAgentConnectionBridge(connection),
-      routed.meta
+      wasClean
     );
-    return true;
   }
 
-  /**
-   * Resolve a WebSocket connection's `/sub/{class}/{name}` target.
-   *
-   * `create: true` (the default, used for the initial `connect` event)
-   * lazily bootstraps the child the same way `subAgent()` does — a
-   * fresh connect legitimately may wake or create the target.
-   *
-   * `create: false` (used for `message`/`close` on an already-forwarded
-   * connection) never creates or re-registers a child: it only resolves
-   * a facet that still has a live registry row. A connection whose
-   * target was removed by `deleteSubAgent()` resolves to `"dropped"` —
-   * the caller must treat that as consumed (not fall through to the
-   * parent's own `onMessage`/`onClose`) and must not forward anything
-   * to a child. This is what prevents a stale message or close event
-   * from resurrecting a deleted sub-agent (issue #2003).
-   */
-  private async _cf_resolveSubAgentConnection(
-    connection: Connection,
-    options: { create: boolean; request?: Request; gate?: boolean } = {
-      create: true
-    }
-  ): Promise<
-    | { status: "no-match" }
-    | { status: "dropped" }
-    | {
-        status: "ok";
-        child: SubAgentWebSocketEndpoint;
-        meta: SubAgentConnectionMeta;
-      }
-  > {
-    this._ensureConnectionWrapped(connection);
-    const outerUri = this._unsafe_getConnectionFlag(
-      connection,
-      CF_SUB_AGENT_OUTER_URL_KEY
-    );
-    const uri = typeof outerUri === "string" ? outerUri : connection.uri;
-    if (!uri) return { status: "no-match" };
-
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    let match = _parseSubAgentPath(uri, {
-      knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
-    });
-    if (!match) return { status: "no-match" };
-    if (
-      this._ParentClass.name === match.childClass &&
-      this.name === match.childName
-    ) {
-      const tailUri = new URL(uri);
-      tailUri.pathname = match.remainingPath;
-      match = _parseSubAgentPath(tailUri.toString(), {
-        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
-      });
-      if (!match) return { status: "no-match" };
-    }
-
-    const request = options.request;
-    let forwardReq = request;
-    if (request && options.gate) {
-      const decision = await this.onBeforeSubAgent(request, {
-        className: match.childClass,
-        name: match.childName
-      });
-      if (decision instanceof Response) {
-        connection.close(1008, "Sub-agent connection rejected");
-        return { status: "dropped" };
-      }
-      forwardReq = decision instanceof Request ? decision : request;
-    }
-
-    const child = options.create
-      ? ((await this._cf_resolveSubAgent(
-          match.childClass,
-          match.childName
-        )) as SubAgentWebSocketEndpoint)
-      : ((await this._cf_resolveExistingSubAgent(
-          match.childClass,
-          match.childName
-        )) as SubAgentWebSocketEndpoint | null);
-    if (!child) return { status: "dropped" };
-
-    const childUri = new URL(forwardReq?.url ?? uri);
-    childUri.pathname = match.remainingPath;
-    const raw = this._cf_getRawConnectionState(connection);
-    const rawTags =
-      raw != null && typeof raw === "object"
-        ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
-        : undefined;
-    const tags = Array.isArray(rawTags)
-      ? rawTags.filter((tag): tag is string => typeof tag === "string")
-      : [...connection.tags];
-
-    return {
-      status: "ok",
-      child,
-      meta: {
-        id: connection.id,
-        uri: childUri.toString(),
-        tags,
-        state: this._cf_getForwardedSubAgentState(connection),
-        requestHeaders: forwardReq ? [...forwardReq.headers] : undefined
-      }
-    };
-  }
-
-  async _cf_handleSubAgentWebSocketConnect(
+  _cf_handleSubAgentWebSocketConnect(
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
-    await this._cf_runWithSubAgentBridge(bridge, async () => {
-      const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
-      const request = new Request(meta.uri ?? "http://placeholder/", {
-        headers: meta.requestHeaders
-      });
-      if (
-        await this._cf_forwardSubAgentWebSocketConnect(connection, request, {
-          gate: true
-        })
-      ) {
-        return;
-      }
-
-      if (this.shouldConnectionBeReadonly(connection, { request })) {
-        this.setConnectionReadonly(connection, true);
-      }
-      if (!this.shouldSendProtocolMessages(connection, { request })) {
-        this._setConnectionNoProtocol(connection);
-      }
-
-      const childTags = await this.getConnectionTags(connection, { request });
-      (connection as unknown as { tags: string[] }).tags = [
-        connection.id,
-        ...childTags.filter((tag) => tag !== connection.id)
-      ];
-      this._cf_storeVirtualSubAgentConnection(bridge, connection);
-      await this.onConnect(connection, { request });
-      this._cf_storeVirtualSubAgentConnection(bridge, connection);
-    });
+    return this._dynamicAgents.handleWebSocketConnect(bridge, meta);
   }
 
-  async _cf_handleSubAgentWebSocketMessage(
+  _cf_handleSubAgentWebSocketMessage(
     message: WSMessage,
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta,
     replyBridge: SubAgentConnectionBridge = bridge
   ): Promise<void> {
-    const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
-    this._cf_storeVirtualSubAgentConnection(bridge, connection);
-    const replyContext: SubAgentRpcReplyInvocationContext = {
-      bridge: replyBridge
-    };
-    try {
-      await subAgentRpcReplyContext.run(replyContext, () =>
-        this._cf_runWithSubAgentBridge(bridge, () =>
-          this.onMessage(connection, message)
-        )
-      );
-    } finally {
-      replyContext.bridge = undefined;
-    }
+    return this._dynamicAgents.handleWebSocketMessage(
+      message,
+      bridge,
+      meta,
+      replyBridge
+    );
   }
 
-  async _cf_handleSubAgentWebSocketClose(
+  _cf_handleSubAgentWebSocketClose(
     code: number,
     reason: string,
     wasClean: boolean,
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Promise<void> {
-    const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
-    this._cf_storeVirtualSubAgentConnection(bridge, connection);
-    await this._cf_runWithSubAgentBridge(bridge, () =>
-      this.onClose(connection, code, reason, wasClean)
-    );
-    this._cf_virtualSubAgentConnections.delete(meta.id);
-  }
-
-  private async _cf_runWithSubAgentBridge<T>(
-    bridge: SubAgentConnectionBridgeLike,
-    fn: () => Promise<T> | T
-  ): Promise<T> {
-    const previous = this._cf_currentSubAgentBridge;
-    this._cf_currentSubAgentBridge = bridge;
-    try {
-      return await fn();
-    } finally {
-      this._cf_currentSubAgentBridge = previous;
-    }
-  }
-
-  private _cf_createSubAgentBridgeConnection(
-    bridge: SubAgentConnectionBridgeLike,
-    meta: SubAgentConnectionMeta
-  ): Connection {
-    let stored = this._cf_virtualSubAgentConnections.get(meta.id);
-    if (stored) {
-      stored.bridge = bridge;
-      stored.meta = meta;
-      if (stored.connection) {
-        (
-          stored.connection as unknown as {
-            uri: string | null;
-            tags: string[];
-          }
-        ).uri = meta.uri;
-        (
-          stored.connection as unknown as {
-            uri: string | null;
-            tags: string[];
-          }
-        ).tags = meta.tags;
-        return stored.connection;
-      }
-    } else {
-      stored = { bridge, meta };
-      this._cf_virtualSubAgentConnections.set(meta.id, stored);
-    }
-
-    const getStored = () =>
-      this._cf_virtualSubAgentConnections.get(meta.id) ?? stored;
-    const updateStoredState = (nextState: unknown) => {
-      const current = this._cf_virtualSubAgentConnections.get(meta.id);
-      if (current) {
-        current.meta = { ...current.meta, state: nextState };
-      }
-    };
-
-    const connection = {
-      id: meta.id,
-      uri: meta.uri,
-      tags: meta.tags,
-      get state() {
-        return getStored().meta.state;
-      },
-      setState(next: unknown | ((prev: unknown) => unknown)) {
-        const currentState = getStored().meta.state;
-        const state = typeof next === "function" ? next(currentState) : next;
-        updateStoredState(state);
-        void getStored().bridge.setState(state);
-        return state;
-      },
-      send(message: string | ArrayBuffer | ArrayBufferView) {
-        void getStored().bridge.send(message);
-      },
-      close(code?: number, reason?: string) {
-        void getStored().bridge.close(code, reason);
-      },
-      addEventListener() {},
-      removeEventListener() {}
-    } as unknown as Connection;
-
-    stored.connection = connection;
-    this._ensureConnectionWrapped(connection);
-    return connection;
-  }
-
-  private _cf_storeVirtualSubAgentConnection(
-    bridge: SubAgentConnectionBridgeLike,
-    connection: Connection
-  ): void {
-    this._unsafe_setConnectionFlag(connection, CF_SUB_AGENT_TAGS_KEY, [
-      ...connection.tags
-    ]);
-    const stored = this._cf_virtualSubAgentConnections.get(connection.id);
-    this._cf_virtualSubAgentConnections.set(connection.id, {
+    return this._dynamicAgents.handleWebSocketClose(
+      code,
+      reason,
+      wasClean,
       bridge,
-      meta: {
-        id: connection.id,
-        uri: connection.uri,
-        tags: [...connection.tags],
-        state: this._cf_getRawConnectionState(connection)
-      },
-      connection: stored?.connection ?? connection
-    });
+      meta
+    );
   }
 
-  protected async _cf_hydrateSubAgentConnectionsFromRoot(): Promise<void> {
-    if (!this._isFacet || this._parentPath.length === 0) return;
-
-    if (this._cf_rootResolvesToSelf()) {
-      // The root stub would resolve back to this blocked Durable Object
-      // during startup. The facet view cannot see root-owned hibernated
-      // sockets locally, so preserve liveness and skip best-effort hydration.
-      return;
-    }
-
-    const root = await this._rootAlarmOwner();
-    const metas = await root._cf_subAgentConnectionMetas(this.selfPath);
-    for (const meta of metas) {
-      this._cf_virtualSubAgentConnections.set(meta.id, {
-        bridge: new RootSubAgentConnectionBridge(root, meta.id),
-        meta
-      });
-    }
-  }
-
-  private _cf_getRawConnectionState(connection: Connection): unknown {
-    this._ensureConnectionWrapped(connection);
-    return this._rawStateAccessors.get(connection)?.getRaw() ?? null;
-  }
-
-  private _cf_getForwardedSubAgentState(connection: Connection): unknown {
-    const raw = this._cf_getRawConnectionState(connection);
-    if (raw == null || typeof raw !== "object") return raw;
-    const { [CF_SUB_AGENT_OUTER_URL_KEY]: _, ...rest } = raw as Record<
-      string,
-      unknown
-    >;
-    return Object.keys(rest).length > 0 ? rest : null;
+  protected _cf_hydrateSubAgentConnectionsFromRoot(): Promise<void> {
+    return this._dynamicAgents.hydrateConnectionsFromRoot();
   }
 
   /**
@@ -7897,7 +5259,7 @@ export class Agent<
    * class Inbox extends Agent {
    *   override async onBeforeSubAgent(req, { className, name }) {
    *     // Strict registry gate
-   *     if (!this.hasSubAgent(className, name)) {
+   *     if (!this.dynamicAgents.has(className, name)) {
    *       return new Response("Not found", { status: 404 });
    *     }
    *   }
@@ -7919,7 +5281,7 @@ export class Agent<
    *
    * @internal
    */
-  private async _cf_forwardToFacet(
+  private _cf_forwardToFacet(
     req: Request,
     match: {
       childClass: string;
@@ -7927,46 +5289,7 @@ export class Agent<
       remainingPath: string;
     }
   ): Promise<Response> {
-    let fetcher: { fetch(r: Request): Promise<Response> };
-    try {
-      fetcher = (await this._cf_resolveSubAgent(
-        match.childClass,
-        match.childName
-      )) as { fetch(r: Request): Promise<Response> };
-    } catch (err) {
-      // Keep the wire response terse: don't leak the parent's view of
-      // exports or internal error text over HTTP. The full error is
-      // still available to developers via worker logs / `console.error`.
-      const message = err instanceof Error ? err.message : String(err);
-      console.error("[agents] sub-agent route failed:", message);
-      if (/null character/i.test(message) || /reserved/i.test(message)) {
-        return new Response("Bad Request", { status: 400 });
-      }
-      return new Response("Not Found", { status: 404 });
-    }
-
-    // Rewrite the URL to strip the /sub/{class}/{name} prefix. The
-    // child's own fetch then processes either its own request (if
-    // no further /sub/... remains) or recurses into its own child.
-    const rewritten = new URL(req.url);
-    rewritten.pathname = match.remainingPath;
-    const forwardedHeaders = new Headers(req.headers);
-    const forwardedInit: RequestInit = {
-      method: req.method,
-      headers: forwardedHeaders
-    };
-    if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
-      forwardedHeaders.set(SUB_AGENT_OUTER_URL_HEADER, req.url);
-    }
-    // Hand the body through as a stream. Reading it here (e.g.
-    // `await req.arrayBuffer()`) materialises the entire body in the
-    // parent DO's isolate, ahead of any application-level intake limit,
-    // and re-materialises it once per `/sub/` hop — see #2015.
-    if (req.body && req.method !== "GET" && req.method !== "HEAD") {
-      forwardedInit.body = req.body;
-    }
-    const forwarded = new Request(rewritten, forwardedInit);
-    return fetcher.fetch(forwarded);
+    return this._dynamicAgents.forward(req, match);
   }
 
   /**
@@ -7976,14 +5299,13 @@ export class Agent<
    *
    * @internal
    */
-  async _cf_invokeSubAgent(
+  _cf_invokeSubAgent(
     className: string,
     name: string,
     method: string,
     args: unknown[]
   ): Promise<unknown> {
-    const stub = await this._cf_resolveSubAgent(className, name);
-    return await this._cf_invokeStubMethod(stub, className, method, args);
+    return this._dynamicAgents.invoke(className, name, method, args);
   }
 
   /**
@@ -7994,64 +5316,12 @@ export class Agent<
    *
    * @internal
    */
-  async _cf_invokeSubAgentPath(
+  _cf_invokeSubAgentPath(
     path: ReadonlyArray<{ className: string; name: string }>,
     method: string,
     args: unknown[]
   ): Promise<unknown> {
-    const [self, next, ...rest] = path;
-    if (!self) {
-      throw new Error(`Sub-agent path invocation requires a non-empty path.`);
-    }
-
-    const ownClassName = (this.constructor as { name: string }).name;
-    if (self.className !== ownClassName || self.name !== this.name) {
-      throw new Error(
-        `Sub-agent path invocation reached ${ownClassName}("${this.name}") ` +
-          `but expected ${self.className}("${self.name}").`
-      );
-    }
-
-    if (!next) {
-      return await this._cf_invokeStubMethod(
-        this,
-        this.constructor.name,
-        method,
-        args
-      );
-    }
-
-    const child = await this._cf_resolveSubAgent(next.className, next.name);
-    if (rest.length === 0) {
-      return await this._cf_invokeStubMethod(
-        child,
-        next.className,
-        method,
-        args
-      );
-    }
-
-    const bridge = child as SubAgentPathInvokeEndpoint;
-    return await bridge._cf_invokeSubAgentPath([next, ...rest], method, args);
-  }
-
-  private async _cf_invokeStubMethod(
-    stub: unknown,
-    className: string,
-    method: string,
-    args: unknown[]
-  ): Promise<unknown> {
-    // Must call `handle[method](...)` in one expression — extracting
-    // via `const fn = handle[method]; fn.apply(handle, args)` breaks
-    // the workerd RpcProperty binding. (Confirmed by the spike.)
-    const handle = stub as unknown as Record<
-      string,
-      (...a: unknown[]) => Promise<unknown>
-    >;
-    if (typeof handle[method] !== "function") {
-      throw new Error(`Method "${method}" not found on ${className}.`);
-    }
-    return await handle[method](...args);
+    return this._dynamicAgents.invokePath(path, method, args);
   }
 
   // ── Sub-agent (facet) management ────────────────────────────────────────
@@ -8080,35 +5350,12 @@ export class Agent<
    *
    * @internal Called by {@link subAgent}.
    */
-  async _cf_initAsFacet(
+  _cf_initAsFacet(
     name: string,
     parentPath: ReadonlyArray<{ className: string; name: string }> = [],
     identityName = name
   ): Promise<void> {
-    const routedName = this.lifecycle.name;
-    if (routedName !== identityName) {
-      throw new Error(
-        `Facet bootstrap mismatch: expected routed identity "${identityName}" but got "${routedName}". ` +
-          `This usually means the parent passed the wrong id to ctx.facets.get(). ` +
-          `See _cf_resolveSubAgent.`
-      );
-    }
-
-    this._isFacet = true;
-    this._facetName = name;
-    this._parentPath = parentPath;
-    // Persist the agent-specific facet keys in parallel.
-    await Promise.all([
-      this.ctx.storage.put("cf_agents_is_facet", true),
-      this.ctx.storage.put("cf_agents_facet_name", name),
-      this.ctx.storage.put("cf_agents_parent_path", parentPath)
-    ]);
-    // Fire onStart() now since native RPC bypasses lifecycle fetch, which is the
-    // entry point that normally triggers it. Protocol broadcasts during this
-    // bootstrap window are safe: on a facet `getConnections()` returns only
-    // virtual sub-agent connections and `broadcast()` routes to the parent
-    // bridge, so neither touches the parent's own WebSocket handles (#1679).
-    await this.__unsafe_ensureInitialized();
+    return this._dynamicAgents.init(name, parentPath, identityName);
   }
 
   get name(): string {
@@ -8354,12 +5601,14 @@ export class Agent<
    * const searcher = await this.subAgent(SearchAgent, "main-search");
    * const results = await searcher.search("cloudflare agents");
    * ```
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.get()} instead.
    */
   async subAgent<T extends Agent>(
     cls: SubAgentClass<T>,
     name: string
   ): Promise<SubAgentStub<T>> {
-    return (await this._cf_resolveSubAgent(cls.name, name)) as SubAgentStub<T>;
+    return this.dynamicAgents.get(cls, name);
   }
 
   /** Maximum number of non-terminal agent-tool runs this parent may own at once. */
@@ -8419,6 +5668,17 @@ export class Agent<
     const runId = options.runId ?? nanoid(12);
     const agentType = cls.name;
     const detached = this._parseDetachedOption(options.detached);
+    const eventDelivery = options.eventDelivery ?? "full";
+    if (eventDelivery !== "full" && eventDelivery !== "terminal") {
+      throw new Error(
+        `runAgentTool: eventDelivery must be "full" or "terminal", got ${JSON.stringify(eventDelivery)}.`
+      );
+    }
+    if (detached && eventDelivery === "terminal") {
+      throw new Error(
+        'runAgentTool: eventDelivery "terminal" is not supported for detached runs.'
+      );
+    }
 
     const existing = this._readAgentToolRun(runId);
     if (existing) {
@@ -8570,13 +5830,14 @@ export class Agent<
         input_redacted, status, display_metadata, display_order, started_at,
         detached, detached_on_finish, detached_notify_source,
         detached_max_budget_at, detached_no_progress_budget_ms,
-        detached_on_milestones
+        detached_on_milestones, event_delivery
       ) VALUES (
         ${runId}, ${options.parentToolCallId ?? null}, ${agentType},
         ${inputPreviewJson}, 1, 'starting', ${displayJson}, ${displayOrder},
         ${startedAt}, ${detached ? 1 : 0}, ${detached?.onFinishName ?? null},
         ${detached?.notifySource ?? null}, ${detachedMaxBudgetAt},
-        ${detachedNoProgressBudgetMs}, ${detachedOnMilestonesJson}
+        ${detachedNoProgressBudgetMs}, ${detachedOnMilestonesJson},
+        ${eventDelivery === "terminal" ? "terminal" : null}
       )
     `;
 
@@ -8606,7 +5867,8 @@ export class Agent<
     const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
     const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
     const childStart = await adapter.startAgentToolRun(options.input, {
-      runId
+      runId,
+      ...(eventDelivery === "terminal" ? { eventDelivery } : {})
     });
     this._markAgentToolRunning(runId);
 
@@ -9166,7 +6428,10 @@ export class Agent<
     await this.schedule(
       DETACHED_BACKBONE_CADENCE_S[0],
       DETACHED_RECONCILE_CALLBACK as keyof this,
-      { cadenceIndex: 0 } satisfies DetachedReconcilePayload
+      { cadenceIndex: 0 } satisfies DetachedReconcilePayload,
+      // Armed during startup recovery; the explicit choice keeps the
+      // non-idempotent-startup-schedule warning for user code only.
+      { idempotent: true }
     );
   }
 
@@ -9663,17 +6928,30 @@ export class Agent<
     replay?: true,
     connection?: Connection
   ): number {
+    const terminalOnly = this._isTerminalOnlyAgentToolRun(runId);
     let next = sequence;
     for (const chunk of chunks) {
+      // Stored chunks are numbered by store position (`started` is 0, stored
+      // chunk i is i + 1) on both the live and replay paths, so they dedupe
+      // against each other. A skipped chunk still takes its sequence.
+      const chunkSequence = next++;
+      if (terminalOnly && !isAgentToolLifecycleChunk(chunk.body)) continue;
       this._broadcastAgentToolEvent(
         parentToolCallId,
-        next++,
+        chunkSequence,
         { kind: "chunk", runId, body: chunk.body },
         replay,
         connection
       );
     }
     return next;
+  }
+
+  private _isTerminalOnlyAgentToolRun(runId: string): boolean {
+    const rows = this.sql<{ event_delivery: string | null }>`
+      SELECT event_delivery FROM cf_agent_tool_runs WHERE run_id = ${runId}
+    `;
+    return rows[0]?.event_delivery === "terminal";
   }
 
   private async _broadcastAgentToolStoredChunks(
@@ -9683,17 +6961,38 @@ export class Agent<
     >,
     sequence: number,
     replay?: true,
-    connection?: Connection
+    connection?: Connection,
+    timeoutMs?: number
   ): Promise<number> {
-    const child = await this._cf_resolveSubAgent(row.agent_type, row.run_id);
+    const deadline = this._agentToolRecoveryDeadline(timeoutMs);
+    const resolving = this._cf_resolveSubAgent(row.agent_type, row.run_id);
+    const child =
+      deadline === undefined
+        ? await resolving
+        : await this._settleWithinRecoveryTimeout(resolving, deadline());
+    if (child === undefined) return sequence;
     const adapter = this._asAgentToolChildAdapter(child);
     return this._broadcastAgentToolStoredChunksFromAdapter(
       adapter,
       row,
       sequence,
       replay,
-      connection
+      connection,
+      deadline?.()
     );
+  }
+
+  /**
+   * One budget shared by every step of a bounded recovery read, so a run's
+   * total time stays within `timeoutMs`. Returns the remaining milliseconds,
+   * never below 1 because a non-positive timeout means "unbounded".
+   */
+  private _agentToolRecoveryDeadline(
+    timeoutMs?: number
+  ): (() => number) | undefined {
+    if (timeoutMs === undefined || timeoutMs <= 0) return undefined;
+    const deadline = Date.now() + timeoutMs;
+    return () => Math.max(1, deadline - Date.now());
   }
 
   private async _broadcastAgentToolStoredChunksFromAdapter(
@@ -9704,20 +7003,75 @@ export class Agent<
     connection?: Connection,
     timeoutMs?: number
   ): Promise<number> {
+    const deadline = this._agentToolRecoveryDeadline(timeoutMs);
     const chunks = await this._getAgentToolChunksForRecovery(
       adapter,
       row.run_id,
+      deadline?.()
+    );
+    const next = chunks
+      ? this._broadcastAgentToolChunks(
+          row.parent_tool_call_id ?? undefined,
+          row.run_id,
+          chunks,
+          sequence,
+          replay,
+          connection
+        )
+      : sequence;
+    return this._broadcastAgentToolMilestones(
+      adapter,
+      row,
+      next,
+      replay,
+      connection,
+      deadline?.()
+    );
+  }
+
+  /**
+   * Milestones are persisted on the child run rather than in its chunk log, so
+   * replay re-emits them from the child's inspection. The client dedupes them
+   * on the milestone's own sequence, so a milestone already seen live is a no-op.
+   * They carry the next stored-chunk sequence without consuming it, matching
+   * the live path.
+   */
+  private async _broadcastAgentToolMilestones(
+    adapter: AgentToolChildAdapter,
+    row: Pick<AgentToolRunStorageRow, "run_id" | "parent_tool_call_id">,
+    sequence: number,
+    replay?: true,
+    connection?: Connection,
+    timeoutMs?: number
+  ): Promise<number> {
+    // Read-only: replaying milestones must never seal a stale child run.
+    const inspection = await this._settleWithinRecoveryTimeout(
+      adapter.inspectAgentToolRun(row.run_id, { reconcile: false }),
       timeoutMs
     );
-    if (!chunks) return sequence;
-    return this._broadcastAgentToolChunks(
-      row.parent_tool_call_id ?? undefined,
-      row.run_id,
-      chunks,
-      sequence,
-      replay,
-      connection
-    );
+    const milestones: AgentToolMilestone[] = inspection?.milestones ?? [];
+    for (const milestone of milestones) {
+      this._broadcastAgentToolEvent(
+        row.parent_tool_call_id ?? undefined,
+        sequence,
+        {
+          kind: "chunk",
+          runId: row.run_id,
+          body: JSON.stringify({
+            type: AGENT_TOOL_MILESTONE_PART,
+            data: {
+              name: milestone.name,
+              sequence: milestone.sequence,
+              at: milestone.at,
+              ...(milestone.data !== undefined ? { data: milestone.data } : {})
+            }
+          })
+        },
+        replay,
+        connection
+      );
+    }
+    return sequence;
   }
 
   private async _forwardAgentToolStream(
@@ -9727,9 +7081,14 @@ export class Agent<
     sequence: number,
     signal?: AbortSignal,
     idleTimeoutMs?: number
-  ): Promise<{ next: number; ended: "done" | "idle" | "aborted" }> {
+  ): Promise<{
+    next: number;
+    ended: "done" | "idle" | "aborted";
+    forwarded: boolean;
+  }> {
     let next = sequence;
-    if (signal?.aborted) return { next, ended: "aborted" };
+    let forwarded = false;
+    if (signal?.aborted) return { next, ended: "aborted", forwarded };
     // How the forward loop ended, so the re-attach caller can re-arm ONLY on a
     // clean stream-close (`done`) and never abandon a fresh reader per idle
     // cycle: `idle` = a full no-progress window elapsed (stalled), `aborted` =
@@ -9777,13 +7136,27 @@ export class Agent<
     // produces output (a silent/hung child forwards nothing → no credit → the
     // parent still exhausts on its own no-progress timer).
     let forwardedSinceProgress = false;
+    const terminalOnly = this._isTerminalOnlyAgentToolRun(runId);
     try {
       const forwardChunk = (chunk: AgentToolStoredChunk) => {
-        this._broadcastAgentToolEvent(parentToolCallId, next++, {
-          kind: "chunk",
-          runId,
-          body: chunk.body
-        });
+        // Progress/milestone frames and chunks too large to store are
+        // broadcast-only on the child and never replayed from its store, so
+        // they must not consume a stored-chunk sequence or live and replayed
+        // numbering drift apart (#2364).
+        const lifecycle = isAgentToolLifecycleChunk(chunk.body);
+        const unstoredId =
+          typeof chunk.unstoredId === "string" ? chunk.unstoredId : undefined;
+        const chunkSequence =
+          lifecycle || unstoredId !== undefined ? next : next++;
+        forwarded = true;
+        if (!terminalOnly || lifecycle) {
+          this._broadcastAgentToolEvent(parentToolCallId, chunkSequence, {
+            kind: "chunk",
+            runId,
+            body: chunk.body,
+            ...(unstoredId !== undefined ? { unstoredId } : {})
+          });
+        }
         // A reserved `data-agent-progress` frame fires the parent `onProgress`
         // hook + refreshes the cached liveness timestamp. Best-effort: never
         // let a progress observation break the forward loop.
@@ -9890,7 +7263,7 @@ export class Agent<
       // The re-attach loop re-arms only on `ended === "done"`, so at most ONE
       // such read is ever left pending per re-attach (no per-cycle leak).
     }
-    return { next, ended };
+    return { next, ended, forwarded };
   }
 
   /**
@@ -10224,9 +7597,9 @@ export class Agent<
    * dies and recovers again during deploy churn is still collected. A genuinely
    * silent/hung child can never block recovery forever: it seals `interrupted`
    * after one `noProgressTimeoutMs` window. `maxWindowMs` is an OPTIONAL hard
-   * wall-clock ceiling (default `Infinity` — uncapped, mirroring #1672's
-   * `maxRecoveryWork`); set it finite to also bound a child that keeps
-   * progressing, which seals `window-exceeded` and tears the child down.
+   * wall-clock ceiling (default `Infinity` — uncapped, #1672); set it finite
+   * to also bound a child that keeps progressing, which seals
+   * `window-exceeded` and tears the child down.
    *
    * Returns the terminal `result` (and `completedAt`) when the child reaches a
    * terminal status, plus the advanced broadcast `sequence`. Returns
@@ -10338,18 +7711,23 @@ export class Agent<
         // reducer appends by arrival order). Forwarding only chunks produced
         // after this point keeps the live stream correct without dupes.
         let afterSequence = -1;
+        // Tailed chunks continue the stored-position numbering replay uses, so
+        // clients that already saw the stored chunks don't dedupe new ones away.
+        let storedCount = 0;
         try {
           const existing = await adapter.getAgentToolChunks(row.run_id);
           const last = existing[existing.length - 1];
           if (last) afterSequence = last.sequence;
+          storedCount = existing.length;
         } catch {
           // Fall back to a full tail if the chunk probe fails.
         }
+        nextSequence = storedCount + 1;
 
-        const beforeSequence = nextSequence;
         // Defaults to a non-`done` end so a tail that throws below does NOT
         // re-arm (we only re-arm on a verified clean stream-close).
         let streamEnded: "done" | "idle" | "aborted" = "idle";
+        let forwardedAny = false;
         try {
           // NOTE: the ceiling signal is NOT forwarded to `tailAgentToolRun` — an
           // AbortSignal can't be serialized across the child-facet DO RPC. We
@@ -10373,6 +7751,7 @@ export class Agent<
           );
           nextSequence = forwarded.next;
           streamEnded = forwarded.ended;
+          forwardedAny = forwarded.forwarded;
         } catch {
           // Tail failures fall through to an inspect; the child remains
           // authoritative for terminal status and durable chunk replay.
@@ -10394,7 +7773,7 @@ export class Agent<
         // abandon a fresh pending reader every cycle. No progress likewise
         // seals.
         if (streamEnded !== "done") break;
-        if (nextSequence <= beforeSequence) break;
+        if (!forwardedAny) break;
       }
     } finally {
       if (ceilingTimer !== undefined) clearTimeout(ceilingTimer);
@@ -10446,11 +7825,14 @@ export class Agent<
       );
 
       try {
+        // Bounded end to end (child resolution included) so one unresponsive
+        // child can't stall onConnect or every later run's replay.
         sequence = await this._broadcastAgentToolStoredChunks(
           row,
           sequence,
           true,
-          connection
+          connection,
+          DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS
         );
       } catch {
         // Keep replay best-effort per run.
@@ -10815,14 +8197,25 @@ export class Agent<
     runId: string,
     timeoutMs?: number
   ): Promise<AgentToolStoredChunk[] | undefined> {
-    const chunks = adapter.getAgentToolChunks(runId).catch(() => undefined);
-    if (timeoutMs === undefined || timeoutMs <= 0) return chunks;
+    return this._settleWithinRecoveryTimeout(
+      adapter.getAgentToolChunks(runId),
+      timeoutMs
+    );
+  }
+
+  /** Resolve to `undefined` when `promise` rejects or outlasts `timeoutMs`. */
+  private async _settleWithinRecoveryTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs?: number
+  ): Promise<T | undefined> {
+    const settled = promise.catch(() => undefined);
+    if (timeoutMs === undefined || timeoutMs <= 0) return settled;
 
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<undefined>((resolve) => {
       timeoutId = setTimeout(() => resolve(undefined), timeoutMs);
     });
-    const result = await Promise.race([chunks, timeout]);
+    const result = await Promise.race([settled, timeout]);
     if (timeoutId !== undefined) clearTimeout(timeoutId);
     return result;
   }
@@ -10836,229 +8229,29 @@ export class Agent<
    *
    * @internal
    */
-  private async _cf_resolveSubAgent(
+  private _cf_resolveSubAgent(
     className: string,
     name: string
   ): Promise<unknown> {
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    if (!ctx.facets || !ctx.exports) {
-      throw new Error(
-        "subAgent() is not supported in this runtime — " +
-          "`ctx.facets` / `ctx.exports` are unavailable. " +
-          "Update to the latest `compatibility_date` in your wrangler.jsonc."
-      );
-    }
-    if (camelCaseToKebabCase(className) === SUB_PREFIX) {
-      // Any class whose kebab-cased name equals the `sub` URL
-      // separator would make `/agents/.../sub/sub/...` ambiguous.
-      // `Sub`, `SUB`, and `Sub_` all kebab-case to `"sub"` — catch
-      // them uniformly rather than listing each spelling.
-      throw new Error(
-        `Sub-agent class name "${className}" kebab-cases to "${SUB_PREFIX}", ` +
-          `which collides with the reserved URL separator — rename the ` +
-          `class (e.g. "SubThing" or "Subtask").`
-      );
-    }
-    const Cls = ctx.exports[className];
-    if (!Cls) {
-      throw new Error(
-        `Sub-agent class "${className}" not found in worker exports. ` +
-          `Make sure the class is exported from your worker entry point ` +
-          `and that the export name matches the class name.`
-      );
-    }
-    if (name.includes("\0")) {
-      // Null char is reserved for the facet composite key delimiter —
-      // letting it through would corrupt the `${class}\0${name}` key.
-      throw new Error(
-        `Sub-agent name contains null character (\\0), which is reserved.`
-      );
-    }
-    // Composite key: class name + NUL + facet name, so two different
-    // classes can share the same user-facing name.
-    const facetKey = `${className}\0${name}`;
-
-    // Derive the child's ancestor chain: our own `parentPath` +
-    // `{ class: this.constructor.name, name: this.name }`. Inductive
-    // across recursive nesting.
-    const childParentPath = this.selfPath;
-    const childPath = [...childParentPath, { className, name }];
-
-    // For nested facets, the immediate parent is itself facet-only
-    // and is not expected to expose namespace helpers. Use the root
-    // supervisor namespace instead; path-v2 identities are scoped to
-    // the full logical path while legacy rows continue using bare names.
-    const rootClassName =
-      this._parentPath[0]?.className ??
-      (this.constructor as { name: string }).name;
-    const rootNs = ctx.exports[rootClassName];
-    if (!rootNs?.idFromName) {
-      // Minification is the most common cause of this error in
-      // production builds: aggressive bundlers rewrite class
-      // identifiers to short ids, so `this.constructor.name`
-      // becomes something like `_a` and the ctx.exports lookup
-      // misses. Detect that case and append a hint, otherwise
-      // the message is mysterious.
-      //
-      // Heuristic: optional leading underscore(s), then 1–3
-      // lowercase letters/digits starting with a letter (e.g.
-      // `_a`, `_ab`, `_a1`, `__a`). Real class names like
-      // `MyAgent` or `_UnboundParent` start with an uppercase
-      // letter and won't match.
-      const looksMinified = /^_*[a-z][a-z0-9]{0,2}$/.test(rootClassName);
-      const minificationHint = looksMinified
-        ? ` The class name "${rootClassName}" looks minified — make sure your bundler preserves class names (e.g. esbuild's \`keepNames: true\`).`
-        : "";
-      throw new Error(
-        `Sub-agent bootstrap requires the root agent class "${rootClassName}" to be available as a Durable Object namespace, but ctx.exports["${rootClassName}"] is missing or doesn't expose idFromName.${minificationHint} Make sure the root agent class is exported under that class name and registered in your wrangler.jsonc durable_objects.bindings.`
-      );
-    }
-    const identity = await this._cf_subAgentIdentity(
-      className,
-      name,
-      childPath
-    );
-    const facetId = rootNs.idFromName(identity.name);
-    const stub = ctx.facets.get(facetKey, () => ({
-      class: Cls as DurableObjectClass,
-      id: facetId
-    }));
-
-    // Record before initialization so a successfully-initialized facet is
-    // not left without identity metadata if the parent is interrupted after
-    // the child RPC returns. Roll back only rows this call created.
-    //
-    // A facet may start a workflow from onStart(); workflow callbacks route
-    // through the parent registry and must be able to find this in-flight
-    // child, so recording before the init RPC is also what lets those
-    // callbacks resolve.
-    this._recordSubAgent(className, name, identity);
-
-    // Initialize the child as a facet via a single RPC that runs
-    // inside the child's isolate. Avoids the cross-DO I/O error that
-    // the previous `stub.fetch(req)` path triggered by handing a
-    // parent-owned Request across the isolate boundary.
-    //
-    // The parent may be inside a WebSocket/message request context here.
-    // Clear native context handles before the child facet RPC so workerd
-    // never sees parent-owned I/O attached to child initialization.
-    try {
-      await runInInvocation(
-        {
-          agent: this,
-          connection: undefined,
-          request: undefined,
-          email: undefined
-        },
-        async () => {
-          await (
-            stub as unknown as {
-              _cf_initAsFacet(
-                name: string,
-                parentPath: ReadonlyArray<{ className: string; name: string }>,
-                identityName: string
-              ): Promise<void>;
-            }
-          )._cf_initAsFacet(name, childParentPath, identity.name);
-        }
-      );
-    } catch (error) {
-      if (!identity.existing) {
-        this._forgetSubAgent(className, name);
-      }
-      throw error;
-    }
-
-    return stub;
+    return this._dynamicAgents.resolve(className, name);
   }
 
   /**
-   * Non-creating counterpart to {@link _cf_resolveSubAgent}, used by
-   * WebSocket `message`/`close` forwarding. Resolves a child **only**
-   * if it still has a live `cf_agents_sub_agents` registry row — it
-   * never inserts a row and never bootstraps a facet that doesn't
-   * already have one. Returns `null` when the registry row is
-   * missing (the sub-agent was deleted, or never existed), which the
-   * caller treats as "drop this event" rather than recreating the
-   * target (issue #2003).
-   *
-   * The one call site (`_cf_resolveSubAgentConnection`) can run on
-   * the root for the first hop or on an intermediate facet while
-   * recursively forwarding a nested `/sub/...` route. In either
-   * case, this connection's initial `connect` event already traversed
-   * the same hop through {@link _cf_resolveSubAgent}, validating
-   * `ctx.facets`, the child export, and the root namespace before a
-   * registry row (or virtual connection) could exist. This therefore
-   * intentionally skips repeating those checks — a missing registry
-   * row is the only reachable "the sub-agent is gone" signal on the
-   * later `message`/`close` path.
-   *
+   * Run `body` in a fresh invocation scope with no native request/
+   * connection context attached, so a child-facet RPC never sees
+   * parent-owned I/O handles.
    * @internal
    */
-  private async _cf_resolveExistingSubAgent(
-    className: string,
-    name: string
-  ): Promise<unknown> {
-    const ctx = this.ctx as unknown as FacetCapableCtx;
-
-    const row = this._subAgentRegistryRow(className, name);
-    if (!row) return null;
-
-    const Cls = ctx.exports[className];
-    const identityName =
-      row.identity_version === SUB_AGENT_IDENTITY_VERSION_PATH_V2 &&
-      typeof row.identity_name === "string"
-        ? row.identity_name
-        : name;
-
-    const rootClassName =
-      this._parentPath[0]?.className ??
-      (this.constructor as { name: string }).name;
-    // See the reachability note above: the initial `connect` already
-    // resolved this namespace, whether this hop is the root or an
-    // intermediate facet deriving it from `_parentPath[0]`.
-    const rootNs = ctx.exports[rootClassName] as DurableObjectClass &
-      Pick<DurableObjectNamespace, "idFromName">;
-
-    const facetKey = `${className}\0${name}`;
-    const facetId = rootNs.idFromName(identityName);
-    const stub = ctx.facets.get(facetKey, () => ({
-      class: Cls as DurableObjectClass,
-      id: facetId
-    }));
-
-    const childParentPath = this.selfPath;
-    try {
-      await runInInvocation(
-        {
-          agent: this,
-          connection: undefined,
-          request: undefined,
-          email: undefined
-        },
-        async () => {
-          await (
-            stub as unknown as {
-              _cf_initAsFacet(
-                name: string,
-                parentPath: ReadonlyArray<{ className: string; name: string }>,
-                identityName: string
-              ): Promise<void>;
-            }
-          )._cf_initAsFacet(name, childParentPath, identityName);
-        }
-      );
-    } catch (error) {
-      // The registry row may have been deleted while this RPC was in
-      // flight (deleteSubAgent aborts the facet before deleting it,
-      // which fails a concurrent init). Treat that interleaving as a
-      // drop rather than propagating a confusing "aborted" error;
-      // any other failure still propagates.
-      if (!this._subAgentRegistryRow(className, name)) return null;
-      throw error;
-    }
-
-    return stub;
+  private _runFacetInitInvocation<T>(body: () => Promise<T>): Promise<T> {
+    return runInInvocation(
+      {
+        agent: this,
+        connection: undefined,
+        request: undefined,
+        email: undefined
+      },
+      body
+    );
   }
 
   /**
@@ -11072,18 +8265,11 @@ export class Agent<
    * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to abort
    * @param reason Error thrown to pending/future RPC callers
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.abort()} instead.
    */
   abortSubAgent(cls: SubAgentClass, name: string, reason?: unknown): void {
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    if (!ctx.facets) {
-      throw new Error(
-        "abortSubAgent() is not supported in this runtime — " +
-          "`ctx.facets` is unavailable. " +
-          "Update to the latest `compatibility_date` in your wrangler.jsonc."
-      );
-    }
-    const facetKey = `${cls.name}\0${name}`;
-    ctx.facets.abort(facetKey, reason);
+    this.dynamicAgents.abort(cls, name, reason);
   }
 
   /**
@@ -11094,193 +8280,14 @@ export class Agent<
    *
    * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to delete
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.delete()} instead.
    */
-  async deleteSubAgent(cls: SubAgentClass, name: string): Promise<void> {
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    if (!ctx.facets) {
-      throw new Error(
-        "deleteSubAgent() is not supported in this runtime — " +
-          "`ctx.facets` is unavailable. " +
-          "Update to the latest `compatibility_date` in your wrangler.jsonc."
-      );
-    }
-    const facetKey = `${cls.name}\0${name}`;
-    const childPath = [...this.selfPath, { className: cls.name, name }];
-    // Only the root DO holds real hibernatable connections and owns
-    // schedule/fiber-lease bookkeeping — a facet delegates both through
-    // the same root stub, resolved once up front.
-    const root = this._isFacet ? await this._rootAlarmOwner() : undefined;
-
-    // Close any client WebSocket connected directly to the target (or
-    // a descendant) before anything else, so a client that was mid
-    // conversation with the deleted sub-agent gets an explicit signal
-    // instead of a socket that silently goes nowhere — see issue #2003.
-    if (root) {
-      await root._cf_closeSubAgentConnectionsForPrefix(
-        childPath,
-        1001,
-        "Sub-agent deleted"
-      );
-    } else {
-      await this._cf_closeSubAgentConnectionsForPrefix(
-        childPath,
-        1001,
-        "Sub-agent deleted"
-      );
-    }
-
-    // Synchronous state change: remove the facet and its registry row
-    // before the awaited root-bookkeeping cleanup below, so any
-    // resolver that runs concurrently observes "gone" as early as
-    // possible rather than after an extra await boundary.
-    //
-    // Idempotent: make `ctx.facets.delete` tolerant of missing keys.
-    // workerd throws an opaque "internal error" when the key isn't
-    // registered; swallow that so double-delete and
-    // delete-never-spawned both succeed silently. The registry DELETE
-    // is already idempotent.
-    try {
-      ctx.facets.delete(facetKey);
-    } catch {
-      // no-op — facet wasn't registered (already deleted / never spawned)
-    }
-    this._forgetSubAgent(cls.name, name);
-
-    // Root-owned bookkeeping (schedules, fiber-recovery leases) only
-    // affects tables no resolver reads to decide whether the child
-    // still exists, so it's safe to run after the state change above.
-    if (root) {
-      await root._cf_cleanupFacetPrefix(childPath);
-    } else {
-      await this._cf_cleanupFacetPrefix(childPath);
-    }
+  deleteSubAgent(cls: SubAgentClass, name: string): Promise<void> {
+    return this.dynamicAgents.delete(cls, name);
   }
 
   // ── Sub-agent registry (backs `hasSubAgent` / `listSubAgents`) ──────────
-
-  /** @internal */
-  private _subAgentRegistryReady = false;
-
-  private _addColumnIfNotExists(sql: string): void {
-    try {
-      this.ctx.storage.sql.exec(sql);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      if (!message.toLowerCase().includes("duplicate column")) {
-        throw e;
-      }
-    }
-  }
-
-  /** @internal */
-  private _ensureSubAgentRegistry(): void {
-    if (this._subAgentRegistryReady) return;
-    // This registry is lazy because older agents may never create sub-agents.
-    // Keep its additive column migrations here instead of the global schema
-    // gate so first sub-agent access upgrades legacy registry tables in place.
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_sub_agents (
-        class TEXT NOT NULL,
-        name TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        identity_version TEXT,
-        identity_name TEXT,
-        PRIMARY KEY (class, name)
-      )
-    `;
-    this._addColumnIfNotExists(
-      "ALTER TABLE cf_agents_sub_agents ADD COLUMN identity_version TEXT"
-    );
-    this._addColumnIfNotExists(
-      "ALTER TABLE cf_agents_sub_agents ADD COLUMN identity_name TEXT"
-    );
-    this._subAgentRegistryReady = true;
-  }
-
-  /** @internal */
-  private _recordSubAgent(
-    className: string,
-    name: string,
-    identity: { version: SubAgentIdentityVersion; name: string }
-  ): void {
-    this._ensureSubAgentRegistry();
-    this.sql`
-      INSERT OR IGNORE INTO cf_agents_sub_agents
-        (class, name, created_at, identity_version, identity_name)
-      VALUES
-        (${className}, ${name}, ${Date.now()}, ${identity.version}, ${identity.name})
-    `;
-  }
-
-  /** @internal */
-  private _subAgentRegistryRow(
-    className: string,
-    name: string
-  ): {
-    identity_version: string | null;
-    identity_name: string | null;
-  } | null {
-    this._ensureSubAgentRegistry();
-    const rows = this.sql<{
-      identity_version: string | null;
-      identity_name: string | null;
-    }>`
-      SELECT identity_version, identity_name
-      FROM cf_agents_sub_agents
-      WHERE class = ${className} AND name = ${name}
-      LIMIT 1
-    `;
-    return rows[0] ?? null;
-  }
-
-  private async _cf_subAgentIdentity(
-    className: string,
-    name: string,
-    childPath: ReadonlyArray<AgentPathStep>
-  ): Promise<{
-    version: SubAgentIdentityVersion;
-    name: string;
-    existing: boolean;
-  }> {
-    const row = this._subAgentRegistryRow(className, name);
-    if (row) {
-      if (
-        row.identity_version === SUB_AGENT_IDENTITY_VERSION_PATH_V2 &&
-        typeof row.identity_name === "string"
-      ) {
-        return {
-          version: SUB_AGENT_IDENTITY_VERSION_PATH_V2,
-          name: row.identity_name,
-          existing: true
-        };
-      }
-      return {
-        version: SUB_AGENT_IDENTITY_VERSION_LEGACY,
-        name,
-        existing: true
-      };
-    }
-
-    // Do not probe the legacy bare-name facet here. `ctx.facets.get()` is
-    // create-on-access, so probing would create or wake legacy storage as a
-    // side effect and could reintroduce old id collisions. Existing registry
-    // rows remain the compatibility signal; new rows use path-v2.
-    const digest = await sha256Hex(JSON.stringify(childPath));
-    return {
-      version: SUB_AGENT_IDENTITY_VERSION_PATH_V2,
-      name: pathV2IdentityName(name, digest),
-      existing: false
-    };
-  }
-
-  /** @internal */
-  private _forgetSubAgent(className: string, name: string): void {
-    this._ensureSubAgentRegistry();
-    this.sql`
-      DELETE FROM cf_agents_sub_agents
-      WHERE class = ${className} AND name = ${name}
-    `;
-  }
 
   /**
    * Whether this agent has previously spawned (and not deleted) a
@@ -11300,18 +8307,15 @@ export class Agent<
    *   }
    * }
    * ```
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.has()} instead.
    */
   hasSubAgent<T extends Agent>(cls: SubAgentClass<T>, name: string): boolean;
   hasSubAgent(className: string, name: string): boolean;
   hasSubAgent(classOrName: SubAgentClass | string, name: string): boolean {
-    const className =
-      typeof classOrName === "string" ? classOrName : classOrName.name;
-    this._ensureSubAgentRegistry();
-    const rows = this.sql<{ n: number }>`
-      SELECT COUNT(*) AS n FROM cf_agents_sub_agents
-      WHERE class = ${className} AND name = ${name}
-    `;
-    return (rows[0]?.n ?? 0) > 0;
+    return typeof classOrName === "string"
+      ? this.dynamicAgents.has(classOrName, name)
+      : this.dynamicAgents.has(classOrName, name);
   }
 
   /**
@@ -11320,6 +8324,8 @@ export class Agent<
    * {@link deleteSubAgent}.
    *
    * @experimental The API surface may change before stabilizing.
+   *
+   * @deprecated Use {@link Agent.dynamicAgents | this.dynamicAgents.list()} instead.
    */
   listSubAgents<T extends Agent>(
     cls: SubAgentClass<T>
@@ -11330,24 +8336,10 @@ export class Agent<
   listSubAgents(
     classOrName?: SubAgentClass | string
   ): Array<{ className: string; name: string; createdAt: number }> {
-    const className =
-      typeof classOrName === "string" ? classOrName : classOrName?.name;
-    this._ensureSubAgentRegistry();
-    const rows = className
-      ? this.sql<{ class: string; name: string; created_at: number }>`
-          SELECT class, name, created_at FROM cf_agents_sub_agents
-          WHERE class = ${className}
-          ORDER BY created_at ASC
-        `
-      : this.sql<{ class: string; name: string; created_at: number }>`
-          SELECT class, name, created_at FROM cf_agents_sub_agents
-          ORDER BY created_at ASC
-        `;
-    return rows.map((r) => ({
-      className: r.class,
-      name: r.name,
-      createdAt: r.created_at
-    }));
+    if (typeof classOrName === "string" || classOrName === undefined) {
+      return this.dynamicAgents.list(classOrName);
+    }
+    return this.dynamicAgents.list(classOrName);
   }
 
   /**
@@ -11383,24 +8375,23 @@ export class Agent<
     // instead of leaving a half-deleted agent whose tables get silently
     // recreated by the constructor. The marker is removed by the
     // `deleteAll()` below, which is also why it is a KV record rather than a
-    // SQL row: it must outlive `_dropInternalTablesForDestroy`.
+    // SQL row: it must outlive live-resource disposal.
     await this.ctx.storage.put(DESTROY_PENDING_KEY, true);
+    await this.lifecycle.disableAlarms();
 
-    this._dropInternalTablesForDestroy();
-
-    // delete all alarms
-    await this.ctx.storage.deleteAlarm();
-    await this.ctx.storage.deleteAll();
-
+    await this.lifecycle.dispose();
     this._disposables.dispose();
-    await this.mcp.dispose();
+    await this.ctx.storage.deleteAll();
 
     this._destroyed = true;
 
     // `ctx.abort` throws an uncatchable error, so we yield to the event loop
-    // to avoid capturing it and let handlers finish cleaning up
+    // to avoid capturing it and let handlers finish cleaning up. When this
+    // destroy landed via the alarm preamble, suppressing the alarm retry
+    // stops the platform re-running the alarm on a fresh instance whose
+    // constructor would recreate the just-deleted schema.
     setTimeout(() => {
-      this.ctx.abort("destroyed");
+      abortWithoutAlarmRetry(this.ctx, "destroyed");
     }, 0);
 
     this._emit("destroy");
@@ -11431,7 +8422,7 @@ export class Agent<
     // /facet bootstrap, and `destroy()` below branches on the in-memory
     // `_isFacet`. Without this, an RPC landing before init would see it as
     // `false`, fall through to `destroy()`'s top-level path, and write the
-    // destroy marker on a facet — which the `alarm()`/`_scheduleNextAlarm()`
+    // destroy marker on a facet — which the `alarm()`/`_syncHostJobs()`
     // guards forbid (only top-level agents write it; facet teardown is
     // root-coordinated via `ctx.facets.delete`). Mirrors the other internal
     // RPC entrypoints (`_workflow_*`). We must NOT push this into `destroy()`
@@ -11444,11 +8435,19 @@ export class Agent<
       await this.destroy();
       return;
     }
-    await this.ctx.storage.put(DESTROY_PENDING_KEY, true);
     // Future, not immediate: see DESTROY_ALARM_DELAY_MS — an immediate alarm
     // aborts the isolate fast enough to race this RPC's response back to the
     // DELETE handler, turning the intended 204 into a 500.
-    await this.ctx.storage.setAlarm(Date.now() + DESTROY_ALARM_DELAY_MS);
+    const destroyAt = Date.now() + DESTROY_ALARM_DELAY_MS;
+    await this.ctx.storage.put(DESTROY_PENDING_KEY, destroyAt);
+    // The exclusive job arms the wake; the durable marker above remains the
+    // authority the alarm preamble consumes before Lifecycle startup.
+    await this.lifecycle.jobs.push({
+      id: HOST_JOB_DESTROY_ID,
+      fn: "destroy",
+      time: destroyAt,
+      exclusive: true
+    });
   }
 
   /**
@@ -11456,22 +8455,16 @@ export class Agent<
    * durable marker directly — the in-memory `_isFacet` flag may not be
    * hydrated yet at the call sites, but facets never write the marker.
    */
-  private async _hasPendingDestroy(): Promise<boolean> {
-    return (await this.ctx.storage.get<boolean>(DESTROY_PENDING_KEY)) === true;
+  private async _pendingDestroyAlarm(): Promise<number | null> {
+    const pending = await this.ctx.storage.get<boolean | number>(
+      DESTROY_PENDING_KEY
+    );
+    if (typeof pending === "number") return pending;
+    return pending === true ? Date.now() : null;
   }
 
-  /** @internal Drop every internal Agents SDK table during top-level destroy. */
-  protected _dropInternalTablesForDestroy(): void {
-    this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_state`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_workflows`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_sub_agents`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_runs`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_fibers`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_facet_runs`;
-    this.sql`DROP TABLE IF EXISTS cf_agent_tool_runs`;
+  private async _hasPendingDestroy(): Promise<boolean> {
+    return (await this._pendingDestroyAlarm()) !== null;
   }
 
   /**
@@ -11480,7 +8473,7 @@ export class Agent<
    * @returns True if the method is marked as callable
    */
   private _isCallable(method: string): boolean {
-    return callableMetadata.has(this[method as keyof this] as Function);
+    return isCallableMethod(this[method as keyof this] as Function);
   }
 
   /**
@@ -11488,34 +8481,7 @@ export class Agent<
    * @returns A map of method names to their metadata
    */
   getCallableMethods(): Map<string, CallableMetadata> {
-    const result = new Map<string, CallableMetadata>();
-
-    // Walk the entire prototype chain to find callable methods from parent classes
-    let prototype = Object.getPrototypeOf(this);
-    while (prototype && prototype !== Object.prototype) {
-      for (const name of Object.getOwnPropertyNames(prototype)) {
-        if (name === "constructor") continue;
-        // Don't override child class methods (first one wins)
-        if (result.has(name)) continue;
-
-        try {
-          const fn = prototype[name];
-          if (typeof fn === "function") {
-            const meta = callableMetadata.get(fn as Function);
-            if (meta) {
-              result.set(name, meta);
-            }
-          }
-        } catch (e) {
-          if (!(e instanceof TypeError)) {
-            throw e;
-          }
-        }
-      }
-      prototype = Object.getPrototypeOf(prototype);
-    }
-
-    return result;
+    return new Map(decoratedMethods(this));
   }
 
   // ==========================================
@@ -12442,52 +9408,6 @@ export class Agent<
     return undefined;
   }
 
-  private async _restoreRpcMcpServers(): Promise<void> {
-    const rpcServers = this.mcp.getRpcServersFromStorage();
-    for (const server of rpcServers) {
-      if (this.mcp.mcpConnections[server.id]) {
-        continue;
-      }
-
-      const opts: { bindingName: string; props?: Record<string, unknown> } =
-        server.server_options ? JSON.parse(server.server_options) : {};
-
-      const namespace = (this.env as Record<string, unknown>)[
-        opts.bindingName
-      ] as DurableObjectNamespace<McpAgent> | undefined;
-      if (!namespace) {
-        console.warn(
-          `[Agent] Cannot restore RPC MCP server "${server.name}": binding "${opts.bindingName}" not found in env`
-        );
-        continue;
-      }
-
-      const normalizedName = server.server_url.replace(RPC_DO_PREFIX, "");
-
-      try {
-        await this.mcp.connect(`${RPC_DO_PREFIX}${normalizedName}`, {
-          reconnect: { id: server.id },
-          transport: {
-            type: "rpc" as TransportType,
-            namespace,
-            name: normalizedName,
-            props: opts.props
-          }
-        });
-
-        const conn = this.mcp.mcpConnections[server.id];
-        if (conn && conn.connectionState === MCPConnectionState.CONNECTED) {
-          await this.mcp.discoverIfConnected(server.id);
-        }
-      } catch (error) {
-        console.error(
-          `[Agent] Error restoring RPC MCP server "${server.name}":`,
-          error
-        );
-      }
-    }
-  }
-
   // ==========================================
   // Workflow Lifecycle Callbacks
   // ==========================================
@@ -12670,13 +9590,13 @@ export class Agent<
   ): Promise<void> {
     await this.__unsafe_ensureInitialized();
     if (action === "set") {
-      this.setState(state as State);
+      this.setState(state as TState);
     } else if (action === "merge") {
-      const currentState = this.state ?? ({} as State);
+      const currentState = this.state ?? ({} as TState);
       this.setState({
         ...currentState,
         ...(state as Record<string, unknown>)
-      } as State);
+      } as TState);
     } else if (action === "reset") {
       this.setState(this.initialState);
     }
@@ -13171,100 +10091,6 @@ export class Agent<
       })
     );
   }
-
-  /**
-   * Handle MCP OAuth callback request if it's an OAuth callback.
-   *
-   * This method encapsulates the entire OAuth callback flow:
-   * 1. Checks if the request is an MCP OAuth callback
-   * 2. Processes the OAuth code exchange
-   * 3. Establishes the connection if successful
-   * 4. Broadcasts MCP server state updates
-   * 5. Returns the appropriate HTTP response
-   *
-   * @param request The incoming HTTP request
-   * @returns Response if this was an OAuth callback, null otherwise
-   */
-  private async handleMcpOAuthCallback(
-    request: Request
-  ): Promise<Response | null> {
-    // Check if this is an OAuth callback request
-    const isCallback = this.mcp.isCallbackRequest(request);
-    if (!isCallback) {
-      return null;
-    }
-
-    // Handle the OAuth callback (exchanges code for token, clears OAuth credentials from storage)
-    // This fires onServerStateChanged event which triggers broadcast
-    const result = await this.mcp.handleCallbackRequest(request);
-
-    // If auth was successful, establish the connection in the background
-    // (establishConnection handles retries internally using per-server retry config)
-    if (result.authSuccess) {
-      this.mcp.establishConnection(result.serverId).catch((error) => {
-        console.error(
-          "[Agent handleMcpOAuthCallback] Connection establishment failed:",
-          error
-        );
-      });
-    }
-
-    this.broadcastMcpServers();
-
-    // Return the HTTP response for the OAuth callback
-    return this.handleOAuthCallbackResponse(result, request);
-  }
-
-  /**
-   * Handle OAuth callback response using MCPClientManager configuration
-   * @param result OAuth callback result
-   * @param request The original request (needed for base URL)
-   * @returns Response for the OAuth callback
-   */
-  private handleOAuthCallbackResponse(
-    result: MCPClientOAuthResult,
-    request: Request
-  ): Response {
-    const config = this.mcp.getOAuthCallbackConfig();
-
-    // Use custom handler if configured
-    if (config?.customHandler) {
-      return config.customHandler(result);
-    }
-
-    const baseOrigin = new URL(request.url).origin;
-
-    // Redirect to success URL if configured
-    if (config?.successRedirect && result.authSuccess) {
-      try {
-        return Response.redirect(
-          new URL(config.successRedirect, baseOrigin).href
-        );
-      } catch (e) {
-        console.error(
-          "Invalid successRedirect URL:",
-          config.successRedirect,
-          e
-        );
-        return Response.redirect(baseOrigin);
-      }
-    }
-
-    // Redirect to error URL if configured
-    if (config?.errorRedirect && !result.authSuccess) {
-      try {
-        const errorUrl = `${config.errorRedirect}?error=${encodeURIComponent(
-          result.authError || "Unknown error"
-        )}`;
-        return Response.redirect(new URL(errorUrl, baseOrigin).href);
-      } catch (e) {
-        console.error("Invalid errorRedirect URL:", config.errorRedirect, e);
-        return Response.redirect(baseOrigin);
-      }
-    }
-
-    return Response.redirect(baseOrigin);
-  }
 }
 
 // A set of classes that have been wrapped with agent context
@@ -13459,14 +10285,9 @@ export class StreamingResponse {
   }
 
   private _send(response: RPCResponse): boolean {
-    const state = facetStreamingResponseDeliveryStates.get(this);
-    if (!state) {
-      return sendRpcResponseIfOpen(this._connection, response);
-    }
-
-    const delivery = sendFacetRpcResponseIfOpen(state.replyTarget, response);
-    trackFacetStreamingResponseDelivery(this, delivery.completion);
-    return delivery.sent;
+    const facetSent = sendFacetStreamingResponse(this, response);
+    if (facetSent !== null) return facetSent;
+    return sendRpcResponseIfOpen(this._connection, response);
   }
 
   /**

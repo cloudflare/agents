@@ -1,4 +1,4 @@
-import type { Transcriber } from "@cloudflare/voice";
+import type { Transcriber } from "agents/voice";
 import { TelnyxSTT } from "@cloudflare/voice-telnyx/stt";
 import { getEnvString } from "./utils";
 

@@ -1,3 +1,4 @@
+import { redactBase64Replacer } from "../../core/base64-redaction";
 import { TraceAttribute } from "../genai/attributes";
 import type { TraceAttributes } from "../tracing/tracer";
 
@@ -63,7 +64,7 @@ export function toolInputAttributes(
   enabled: boolean
 ): TraceAttributes {
   return enabled
-    ? { [TraceAttribute.GenAI.ToolCallArguments]: serialize(value) }
+    ? { [TraceAttribute.GenAI.ToolCallArguments]: serializeToolPayload(value) }
     : {};
 }
 
@@ -72,7 +73,7 @@ export function toolOutputAttributes(
   enabled: boolean
 ): TraceAttributes {
   return enabled
-    ? { [TraceAttribute.GenAI.ToolCallResult]: serialize(value) }
+    ? { [TraceAttribute.GenAI.ToolCallResult]: serializeToolPayload(value) }
     : {};
 }
 
@@ -332,11 +333,30 @@ function serializeMessages(
   }
 }
 
-function serialize(value: unknown): string | undefined {
+/**
+ * Payloads that fit are recorded exactly as `JSON.stringify` emits them.
+ * Oversized payloads (typically screenshots or other images) are re-serialized
+ * with base64 data replaced by a size summary, so the surrounding result is
+ * still reviewable. If that still doesn't fit, a small marker records that a
+ * payload existed rather than leaving the attribute indistinguishable from
+ * `storeTools: false`. Values JSON cannot serialize record nothing, as before.
+ */
+function serializeToolPayload(value: unknown): string | undefined {
   const json = stringify(value);
-  return json !== undefined && byteLength(json) <= MAX_ATTRIBUTE_BYTES
-    ? json
-    : undefined;
+  if (json === undefined) return undefined;
+  const bytes = byteLength(json);
+  if (bytes <= MAX_ATTRIBUTE_BYTES) return json;
+
+  // Re-serialize the parsed JSON, not the original value, so tool-defined
+  // toJSON methods and getters run only once.
+  const redacted = JSON.stringify(JSON.parse(json), redactBase64Replacer);
+  return byteLength(redacted) <= MAX_ATTRIBUTE_BYTES
+    ? redacted
+    : JSON.stringify({
+        omitted: "tool payload exceeds trace attribute limit",
+        // The original payload's size, not the redacted size.
+        bytes
+      });
 }
 
 function stringify(value: unknown): string | undefined {

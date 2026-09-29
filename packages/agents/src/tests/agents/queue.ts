@@ -33,15 +33,16 @@ export class TestQueueAgent extends Agent {
   }
 
   async getQueueLength(): Promise<number> {
-    const result = this.sql`SELECT COUNT(*) as count FROM cf_agents_queues`;
+    const result = this
+      .sql`SELECT COUNT(*) as count FROM cf_agents_jobs WHERE capability = 'queue'`;
     return (result[0] as { count: number }).count;
   }
 
+  /** Wait for the alarm event loop to drain every queued item. */
   async waitForFlush(timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const result = this.sql`SELECT COUNT(*) as count FROM cf_agents_queues`;
-      if ((result[0] as { count: number }).count === 0) {
+      if ((await this.getQueueLength()) === 0) {
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, 50));

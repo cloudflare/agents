@@ -17,6 +17,9 @@ the repository `NOTICE`, and `THIRD_PARTY_LICENSES.md`.
   platform `DurableObject`. `Lifecycle.install(this)` constructs
   and installs fetch, alarm, and hibernating WebSocket entry points; an expanded
   `new ...` plus `installHandlers()` form is also available.
+- Lifecycle owns the physical Durable Object alarm. Capabilities and the host
+  contribute wake times while retaining their own durable state; Lifecycle
+  selects, runs, and rearms the shared alarm.
 - WebSocket hibernation is mandatory. The in-memory connection-manager branch
   and its configuration option were removed.
 - Native `ctx.id.name` is authoritative. Deprecated naming headers, bootstrap

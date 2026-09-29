@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { transition } from "../broadcast-state";
+import { observedDivergesFrom, transition } from "../broadcast-state";
 import type { BroadcastStreamState } from "../broadcast-state";
 import type { UIMessage } from "ai";
 
@@ -243,37 +243,35 @@ describe("broadcast stream state machine", () => {
 
   // ── continuation response ────────────────────────────────────────
 
-  it("creates accumulator with existing parts for continuation", () => {
-    const messages = makeMessages("hi", "first response");
+  it("seeds a continuation from the current messages update", () => {
+    const currentMessages = makeMessages("hi", "current response");
+    const staleRenderedMessages = makeMessages("hi", "stale response");
 
     const result = transition(idle, {
       type: "response",
       streamId: "s1",
       messageId: "fallback-id",
-      chunkData: textChunk(" continued"),
+      chunkData: { type: "text-delta", delta: " continued" },
       continuation: true,
-      currentMessages: messages
+      currentMessages: staleRenderedMessages
     });
 
     expect(result.state.status).toBe("observing");
-    if (result.state.status === "observing") {
-      expect(result.state.accumulator.messageId).toBe("msg-1");
-      expect(result.state.accumulator.parts.length).toBeGreaterThan(0);
-    }
+    expect(result.messagesUpdate).toBeDefined();
+    const messages = result.messagesUpdate!(currentMessages);
+    expect(messages[1].id).toBe("msg-1");
+    expect(messages[1].parts).toMatchObject([
+      { text: "current response continued" }
+    ]);
   });
 
   it("uses fallback messageId when no assistant message exists for continuation", () => {
-    const messages: UIMessage[] = [
-      { id: "u1", role: "user", parts: [{ type: "text", text: "hi" }] }
-    ] as UIMessage[];
-
     const result = transition(idle, {
       type: "response",
       streamId: "s1",
       messageId: "fallback-id",
       chunkData: textChunk("hello"),
-      continuation: true,
-      currentMessages: messages
+      continuation: true
     });
 
     if (result.state.status === "observing") {
@@ -559,8 +557,7 @@ describe("broadcast stream state machine", () => {
         messageId: "tmp",
         chunkData,
         replay: true,
-        continuation: true,
-        currentMessages: current
+        continuation: true
       });
 
     let state = replay(idle, { type: "start", messageId: "msg-1" }).state;
@@ -571,20 +568,13 @@ describe("broadcast stream state machine", () => {
     }).state;
 
     expect(state.status).toBe("observing");
-    if (state.status === "observing") {
-      // Continuation picked up the trailing assistant's id + parts.
-      expect(state.accumulator.messageId).toBe("msg-1");
-      const texts = state.accumulator.parts.filter((p) => p.type === "text");
-      expect(texts.length).toBeGreaterThan(0);
-    }
 
     const done = transition(state, {
       type: "response",
       streamId: "req-c",
       messageId: "tmp",
       done: true,
-      continuation: true,
-      currentMessages: current
+      continuation: true
     });
     const messages = done.messagesUpdate!(current);
     // Continuation merged into the existing assistant, no extra message.
@@ -595,6 +585,111 @@ describe("broadcast stream state machine", () => {
       .join("");
     expect(fullText).toContain("first half");
     expect(fullText).toContain(" second half");
+  });
+
+  // ── diverged accumulator vs stored copy (#2166) ──────────────────
+
+  function observe(deltas: string[]): BroadcastStreamState {
+    let state: BroadcastStreamState = idle;
+    for (const chunkData of [
+      { type: "start", messageId: "a1" },
+      { type: "text-start", id: "t1" },
+      ...deltas.map((delta) => ({ type: "text-delta", id: "t1", delta }))
+    ]) {
+      state = transition(state, {
+        type: "response",
+        streamId: "s-heal",
+        messageId: "tmp",
+        chunkData
+      }).state;
+    }
+    return state;
+  }
+
+  function stored(text: string): UIMessage[] {
+    return [
+      { id: "u1", role: "user", parts: [{ type: "text", text: "hi" }] },
+      { id: "a1", role: "assistant", parts: [{ type: "text", text }] }
+    ] as UIMessage[];
+  }
+
+  function assistantText(messages: UIMessage[]): string {
+    return messages
+      .filter((m) => m.role === "assistant")
+      .flatMap((m) => m.parts)
+      .filter((p) => p.type === "text")
+      .map((p) => (p as { text: string }).text)
+      .join("");
+  }
+
+  it("observedDivergesFrom flags an accumulator that no longer extends the stored copy", () => {
+    const scrambled = observe(["You", " can", "You", " can"]);
+    const healthy = observe(["You", " can", " see"]);
+    if (scrambled.status !== "observing" || healthy.status !== "observing") {
+      throw new Error("expected observing");
+    }
+    expect(observedDivergesFrom(scrambled.accumulator, stored("You can"))).toBe(
+      false
+    );
+    expect(
+      observedDivergesFrom(scrambled.accumulator, stored("You can see"))
+    ).toBe(true);
+    expect(observedDivergesFrom(healthy.accumulator, stored("You can"))).toBe(
+      false
+    );
+    expect(observedDivergesFrom(healthy.accumulator, stored(""))).toBe(false);
+    expect(observedDivergesFrom(healthy.accumulator, makeMessages("hi"))).toBe(
+      false
+    );
+  });
+
+  it("done keeps a stored copy the accumulator diverged from", () => {
+    const state = observe(["You", " canYou", " see can", " see"]);
+    const done = transition(state, {
+      type: "response",
+      streamId: "s-heal",
+      messageId: "tmp",
+      done: true
+    });
+    expect(assistantText(done.messagesUpdate!(stored("You can see")))).toBe(
+      "You can see"
+    );
+  });
+
+  it("a live chunk after a healing snapshot keeps the stored copy", () => {
+    // chunk → snapshot heals the diverged copy → chunk → done
+    let state = observe(["You", " canYou", " see can"]);
+    let messages = stored("You can see");
+    const chunk = transition(state, {
+      type: "response",
+      streamId: "s-heal",
+      messageId: "tmp",
+      chunkData: { type: "text-delta", id: "t1", delta: " more" }
+    });
+    state = chunk.state;
+    messages = chunk.messagesUpdate!(messages);
+    expect(assistantText(messages)).toBe("You can see");
+
+    const done = transition(state, {
+      type: "response",
+      streamId: "s-heal",
+      messageId: "tmp",
+      done: true
+    });
+    expect(assistantText(done.messagesUpdate!(messages))).toBe("You can see");
+  });
+
+  it("done still merges an accumulator that extends the stored copy", () => {
+    const state = observe(["You", " can", " see"]);
+    const done = transition(state, {
+      type: "response",
+      streamId: "s-heal",
+      messageId: "tmp",
+      done: true
+    });
+    expect(assistantText(done.messagesUpdate!(stored("You can")))).toBe(
+      "You can see"
+    );
   });
 
   // ── resume-fallback then response chunks ─────────────────────────

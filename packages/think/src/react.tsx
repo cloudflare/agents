@@ -18,7 +18,9 @@ export type {
   ClientToolSchema,
   PrepareSendMessagesRequestOptions,
   PrepareSendMessagesRequestResult,
-  OnToolCallCallback
+  OnToolCallCallback,
+  ChatTurnEndEvent,
+  ChatTurnOutcome
 } from "agents/chat/react";
 
 export type ThinkChatOptions<

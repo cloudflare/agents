@@ -7,7 +7,7 @@ A critical analysis of the current `@cloudflare/ai-chat` API surface — both th
 Related:
 
 - [think-vs-aichat.md](./think-vs-aichat.md) — feature gap analysis between Think and AIChatAgent
-- [think-sessions.md](./think-sessions.md) — Session integration design for Think
+- [sessions.md](./sessions.md) — Session integration design for Think
 - [think-roadmap.md](./think-roadmap.md) — implementation plan (supersedes the prioritization in this doc)
 
 ---
@@ -692,7 +692,7 @@ This complexity is mostly internal and doesn't leak to users (the `resume: true`
 > **Updated:** The analysis below was written before Session integration. See [think-roadmap.md](./think-roadmap.md) for the current plan. Key changes:
 >
 > - Session solves S3 (message access helpers — `getMessage`, `getLatestLeaf`, `getBranches`, `getPathLength`)
-> - Session solves X2 (conversation management — `SessionManager` provides create/list/delete/rename/fork/search)
+> - The parent-directory plus one-conversation-Durable-Object pattern solves X2; Sessions deliberately does not own the directory
 > - Context blocks provide structured system prompt composition — beyond what `getSystemPrompt()` alone offers
 > - Compaction provides conversation length management — replacing `maxPersistedMessages`
 > - Branching provides non-destructive regeneration — better than AIChatAgent's delete-and-rerun
@@ -726,11 +726,11 @@ See [think-vs-aichat.md](./think-vs-aichat.md) for the full gap analysis. The hi
 
 2. **Sub-agent RPC (`chat()`).** AIChatAgent doesn't have this. The `chat(userMessage, callback, options?)` method for parent agents to drive sub-agent turns via RPC is a genuine differentiator for multi-agent architectures. This should be enhanced with `saveMessages`-equivalent programmatic turns.
 
-3. **Context blocks and compaction.** Session gives Think persistent, LLM-writable context blocks and non-destructive compaction — features AIChatAgent doesn't have. See [think-sessions.md](./think-sessions.md).
+3. **Context blocks and compaction.** Sessions gives Think non-destructive compaction and `agents/context` gives it persistent, LLM-writable prompt blocks. AIChatAgent has neither. See [sessions.md](./sessions.md) and [../docs/agents/context.md](../docs/agents/context.md).
 
 4. **Branching and regeneration.** Session's tree-structured messages provide non-destructive regeneration (alternatives preserved via branches) — strictly better than AIChatAgent's delete-and-rerun approach.
 
-5. **Multi-session and search.** `SessionManager` provides conversation lifecycle, cross-session FTS5 search, usage tracking, and forking — none of which AIChatAgent has.
+5. **Conversation directories and search.** User-facing conversation lifecycle and cross-conversation search belong in a parent directory Durable Object. Sessions provides per-conversation FTS and path forking without embedding a global registry.
 
 6. **Dynamic configuration (`configure()` / `getConfig()`).** This is a cleaner pattern than `body` persistence for agent-level settings. It should coexist with `body` (per-request context) rather than replacing it.
 

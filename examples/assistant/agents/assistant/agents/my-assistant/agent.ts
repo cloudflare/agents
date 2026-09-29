@@ -11,8 +11,8 @@ import { createExecuteTool } from "@cloudflare/think/tools/execute";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
 import { createQuickActionTools } from "@cloudflare/think/tools/browser";
-import { createCompactFunction } from "agents/experimental/memory/utils";
-import { AgentSearchProvider } from "agents/experimental/memory/session";
+import { createCompactFunction } from "agents/sessions";
+import { AgentSearchProvider, type ContextConfig } from "agents/context";
 import type {
   TurnContext,
   TurnConfig,
@@ -139,12 +139,26 @@ export class MyAssistant extends Think<Env> {
   }
 
   configureSession(session: Session) {
+    return session
+      .onCompaction(
+        createCompactFunction({
+          summarize: (prompt) =>
+            generateText({ model: this.resolveModel(), prompt }).then(
+              (r) => r.text
+            )
+        })
+      )
+      .compactAfter(50000);
+  }
+
+  configureContext(): ContextConfig[] {
     const persona =
       this.getConfig<AgentConfig>()?.persona ||
       "You are a capable technical assistant. You have access to a persistent workspace, sandboxed code execution, a real browser you can drive over the Chrome DevTools Protocol (the `cdp.*` namespace inside execute), stateless one-shot browsing tools (browser_markdown, browser_extract, browser_links, browser_scrape), a `fetch_url` tool for reading allowlisted web pages and APIs directly, and the ability to create new tools on the fly. You think before you act, and you prefer writing code over making many sequential tool calls.";
 
-    return session
-      .withContext("soul", {
+    return [
+      {
+        label: "soul",
         provider: {
           get: async () =>
             `${persona}
@@ -155,27 +169,20 @@ For reading a known URL or API, prefer the \`fetch_url\` tool — it is a fast, 
 You can create extensions: new tools that persist across conversations. Offer to create one when a recurring task would benefit from it.
 When you learn something about the user or their project, save it to memory.`
         }
-      })
-      .withContext("memory", {
+      },
+      {
+        label: "memory",
         description:
           "Key facts about the user, their preferences, project context, and decisions made during conversation. Update when you learn something that would be useful in future turns.",
         maxTokens: 2000
-      })
-      .onCompaction(
-        createCompactFunction({
-          summarize: (prompt) =>
-            generateText({ model: this.resolveModel(), prompt }).then(
-              (r) => r.text
-            )
-        })
-      )
-      .compactAfter(50000)
-      .withContext("knowledge", {
+      },
+      {
+        label: "knowledge",
         description:
           "Searchable knowledge base. Index useful information with set_context and retrieve it later with search_context.",
         provider: new AgentSearchProvider(this)
-      })
-      .withCachedPrompt();
+      }
+    ];
   }
 
   getTools(): ToolSet {

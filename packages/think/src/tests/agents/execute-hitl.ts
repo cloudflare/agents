@@ -208,6 +208,10 @@ export class ThinkExecuteHitlAgent extends Think {
     return this.#gatedCalls;
   }
 
+  async waitUntilStableForTest(): Promise<boolean> {
+    return this.waitUntilStable({ timeout: 5_000 });
+  }
+
   /** All execute tool parts in the transcript, oldest first. */
   async executeParts(): Promise<ExecutePartSnapshot[]> {
     const out: ExecutePartSnapshot[] = [];

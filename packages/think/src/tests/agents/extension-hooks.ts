@@ -10,7 +10,7 @@ import type { LanguageModel, UIMessage, ToolSet } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
 import { Think } from "../../think";
-import type { StreamCallback } from "../../think";
+import type { StreamCallback, ThinkModel, TurnConfig } from "../../think";
 
 // AI SDK v3 LanguageModel spec helpers — keep in sync with the helpers
 // in `assistant-agent-loop.ts` / `think-session.ts`.
@@ -201,5 +201,58 @@ export class ThinkExtensionHookAgent extends Think {
 
   async getStoredMessages(): Promise<UIMessage[]> {
     return this.getMessages();
+  }
+}
+
+const BEFORE_TURN_EXTENSION_SOURCE = `{
+  tools: {},
+  hooks: {
+    beforeTurn: async (ctx, host) => {
+      await host?.writeFile("ext-log/before-turn.json", JSON.stringify(ctx));
+      return {};
+    }
+  }
+}`;
+
+/**
+ * The default model is a Workers AI id and the test env has no `AI` binding,
+ * so resolving the default throws. `beforeTurn` supplies its own model and a
+ * `beforeTurn` extension is registered: the turn must never touch the default.
+ */
+export class ThinkExtensionBeforeTurnModelAgent extends Think {
+  extensionLoader = this.env.LOADER;
+
+  override getModel(): ThinkModel {
+    return "@cf/meta/llama-3.1-8b-instruct";
+  }
+
+  override beforeTurn(): TurnConfig {
+    return { model: createMockToolModel() };
+  }
+
+  override getExtensions() {
+    return [
+      {
+        manifest: {
+          name: "turnrec",
+          version: "1.0.0",
+          description: "records beforeTurn snapshots",
+          permissions: { workspace: "read-write" as const },
+          hooks: ["beforeTurn" as const]
+        },
+        source: BEFORE_TURN_EXTENSION_SOURCE
+      }
+    ];
+  }
+
+  async testChat(message: string): Promise<{ done: boolean; error?: string }> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return { done: cb.doneCalled, error: cb.errorMessage };
+  }
+
+  async readBeforeTurnSnapshot(): Promise<{ modelId: string } | null> {
+    const content = await this.workspace.readFile("ext-log/before-turn.json");
+    return content == null ? null : JSON.parse(content);
   }
 }

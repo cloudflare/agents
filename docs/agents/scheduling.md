@@ -15,6 +15,91 @@ The scheduling system supports four modes:
 
 Under the hood, scheduling uses [Durable Object alarms](https://developers.cloudflare.com/durable-objects/api/alarms/) to wake the agent at the right time. Tasks are stored in a SQLite table and executed in order.
 
+## Scheduler Lifecycle primitive
+
+> **Experimental.** The `Scheduler` primitive and the `agents/lifecycle`
+> surface it builds on may change between releases. Agent's established
+> scheduling methods (`this.schedule()` and friends) are stable.
+
+`Scheduler` is a reusable Lifecycle capability. A plain Lifecycle Object can
+install it without extending `Agent`:
+
+```typescript
+import { DurableObject } from "cloudflare:workers";
+import { Lifecycle } from "agents/lifecycle";
+import { Scheduler, type Schedule } from "agents/schedules";
+
+export class ReminderObject extends DurableObject<Env> {
+  readonly scheduler = new Scheduler({
+    callbacks: {
+      sendReminder: (
+        payload: { message: string },
+        schedule: Schedule<{ message: string }>
+      ) => {
+        console.log(schedule.id, payload.message);
+      }
+    }
+  });
+
+  readonly lifecycle = Lifecycle.install(this).use(this.scheduler);
+
+  async createReminder(message: string): Promise<string> {
+    const schedule = await this.scheduler.set(300, "sendReminder", {
+      message
+    });
+    return schedule.id;
+  }
+}
+```
+
+Lifecycle owns the physical Durable Object alarm. Scheduler contributes its
+earliest pending task or hung-interval recheck. Lifecycle selects the earliest
+contribution from Scheduler, other capabilities, and the host, then rearms after
+every alarm phase. A future Fiber or MCP capability can contribute its own wake
+time without storing work in Scheduler or depending on it.
+
+Scheduler's primary API is small: callbacks are registered by name in the
+constructor, `set()` and `every()` create schedules typed against that
+registration, and `get()`, `list()`, and `cancel()` manage them. All of these
+are asynchronous and work inside routed sub-agents.
+
+Scheduler Lifecycle hooks run without ambient host context. Registered
+callbacks are user code, so they run inside the host invocation context with
+the Lifecycle Object available through `getCurrentAgent()`.
+
+## Using Scheduler through Agent
+
+Every `Agent` constructs and installs the same primitive at `this.scheduler`.
+Existing Agent applications continue to use the established methods:
+
+- `this.schedule()` and `this.scheduleEvery()` create schedules.
+- `this.getScheduleById()` and `this.listSchedules()` read schedules.
+- `this.cancelSchedule()` removes a schedule.
+
+These methods delegate to `this.scheduler`; no setup or migration is required.
+Agent registers no callbacks map — a composition-root resolver keeps
+`this.schedule(60, "methodName")` dispatching to Agent methods. Agent passes
+only policy options (retry defaults, hung-interval timeout, error routing) and
+adapts Lifecycle's event sink, facet transport, and host invocation boundary
+at its composition root — there is no Agent-specific Scheduler adapter. Scheduler contributes its next wake time to the same Lifecycle alarm
+selection as Agent keep-alive, fibers, sub-agent work, and deferred
+destruction.
+
+Import `Scheduler` and runtime schedule types from the dependency-light entry
+point:
+
+```typescript
+import {
+  Scheduler,
+  type Schedule,
+  type ScheduleCriteria
+} from "agents/schedules";
+```
+
+Natural-language parsing helpers use Zod and live under
+`agents/schedules/parser`. The previous `agents/schedule` path remains as a
+deprecated compatibility alias.
+
 ## Quick Start
 
 ```typescript
@@ -299,9 +384,9 @@ This is the recommended approach since you cannot forget to dispose the heartbea
 
 ### How it works
 
-`keepAlive()` uses an in-memory reference count and the Durable Object alarm system directly. Each call increments the count; the disposer decrements it. While the count is above zero, `_scheduleNextAlarm()` ensures an alarm fires every 30 seconds, which resets the inactivity timer. No schedule rows are created and no observability events are emitted — the heartbeat is invisible to `listSchedules()` and the `agents:schedule` diagnostics channel.
+`keepAlive()` uses an in-memory reference count. Each call increments the count; the disposer decrements it. While the count is above zero, Agent contributes a wake time every 30 seconds to Lifecycle. No schedule rows are created and no observability events are emitted, so the heartbeat is invisible to `listSchedules()` and the scheduling diagnostics channel.
 
-The heartbeat does not conflict with your own schedules — the alarm system multiplexes all schedules and the keepAlive heartbeat through a single alarm slot.
+The heartbeat does not conflict with scheduled work. Lifecycle selects one physical alarm from both contributions.
 
 Inside sub-agents, `keepAlive()` delegates that heartbeat ref to the top-level parent because facets do not have independent alarm slots. `keepAliveWhile()` works the same way because it calls `keepAlive()` and automatically disposes the delegated ref when the scoped work completes.
 
@@ -642,14 +727,14 @@ class TimezoneAgent extends Agent {
 
 ## AI-Assisted Scheduling
 
-The SDK includes utilities for parsing natural language scheduling requests with AI.
+The SDK includes utilities for parsing natural language scheduling requests with AI. Import them from `agents/schedules/parser`.
 
 ### getSchedulePrompt()
 
 Returns a system prompt for parsing natural language into scheduling parameters:
 
 ```typescript
-import { getSchedulePrompt, scheduleSchema } from "agents";
+import { getSchedulePrompt, scheduleSchema } from "agents/schedules/parser";
 import { generateObject } from "ai";
 import { openai } from "@ai-sdk/openai";
 
@@ -703,7 +788,7 @@ class SmartScheduler extends Agent {
 A Zod schema for validating parsed scheduling data:
 
 ```typescript
-import { scheduleSchema } from "agents";
+import { scheduleSchema } from "agents/schedules/parser";
 
 // The schema uses a discriminated union on `when.type`:
 // {
@@ -751,7 +836,81 @@ When using this schema with OpenAI models via the AI SDK, you must pass `provide
 
 ## API Reference
 
-### schedule()
+Two surfaces share these semantics: the experimental `Scheduler` primitive
+(`agents/schedules`, methods on the scheduler instance) and the stable `Agent`
+methods (on the Agent class, delegating to `this.scheduler`).
+
+### Scheduler primitive
+
+#### `new Scheduler(options?)`
+
+```typescript
+new Scheduler({
+  callbacks?,
+  retry?,
+  hungScheduleTimeoutSeconds?,
+  onError?
+});
+```
+
+- `callbacks` registers scheduled callbacks by name. `set()` and `every()`
+  type both the name and the payload against this map, and dispatch runs the
+  registered function — the typed scheduling surface and the runtime dispatch
+  target are the same object.
+- Lifecycle supplies storage, readiness, startup state, alarm coordination,
+  the host invocation boundary, events, and routing.
+- `retry` supplies callback retry defaults. The defaults are three attempts,
+  100 ms base delay, and 3,000 ms maximum delay.
+- `hungScheduleTimeoutSeconds` defaults to 30 seconds.
+- `onError` observes terminal callback failures outside ambient host context.
+
+Install the constructed object with `Lifecycle.use()` before use. Scheduler
+starts Lifecycle automatically when its asynchronous API is entered. It
+publishes `schedule:*` events through Lifecycle's best-effort event bus. A plain
+Lifecycle Object writes them to the existing `agents:schedule` diagnostics
+channel; `Agent` sends them through its existing observability implementation.
+
+#### set()
+
+```typescript
+async set(when, callback, payload?, options?): Promise<Schedule<Payload>>
+```
+
+Create a one-shot or cron schedule. `when`, `options`, idempotency, and return
+value follow [`schedule()`](#schedule) below. `callback` must be a name
+registered in the constructor's `callbacks` map, and `payload` is typed
+against that callback's first parameter.
+
+#### every()
+
+```typescript
+async every(intervalSeconds, callback, payload?, options?): Promise<Schedule<Payload>>
+```
+
+Create a fixed-interval schedule. Semantics follow
+[`scheduleEvery()`](#scheduleevery) below, and `every()` also accepts
+`options.idempotent` to opt out of interval dedup.
+
+#### get() / list() / cancel()
+
+```typescript
+async get(id): Promise<Schedule<unknown> | undefined>
+async list(criteria?): Promise<Schedule<unknown>[]>
+async cancel(id): Promise<boolean>
+```
+
+Read and cancel schedules — the primitive's equivalents of
+[`getScheduleById()`](#getschedulebyid), [`listSchedules()`](#listschedules),
+and [`cancelSchedule()`](#cancelschedule) below. (Internal synchronous
+variants on the Scheduler back Agent's deprecated `getSchedule()` and
+`getSchedules()`; they are not part of the primitive's contract.)
+
+### Agent methods
+
+Methods on the `Agent` class, delegating to `this.scheduler`. Callback names
+resolve to methods on the Agent.
+
+#### schedule()
 
 ```typescript
 async schedule<T = string>(
@@ -789,7 +948,7 @@ class MyAgent extends Agent {
 }
 ```
 
-### scheduleEvery()
+#### scheduleEvery()
 
 ```typescript
 async scheduleEvery<T = string>(
@@ -800,7 +959,8 @@ async scheduleEvery<T = string>(
 ): Promise<Schedule<T>>
 ```
 
-Schedule a task to run repeatedly at a fixed interval.
+Schedule a task to run repeatedly at a fixed interval. Idempotent by design
+(the primitive's `every()` accepts `options.idempotent` to opt out).
 
 **Parameters:**
 
@@ -819,7 +979,7 @@ Schedule a task to run repeatedly at a fixed interval.
 - If callback throws an error, the interval continues
 - Cancel with `cancelSchedule(id)` to stop the entire interval
 
-### getScheduleById()
+#### getScheduleById()
 
 ```typescript
 async getScheduleById(id: string): Promise<Schedule<unknown> | undefined>
@@ -827,7 +987,7 @@ async getScheduleById(id: string): Promise<Schedule<unknown> | undefined>
 
 Get a scheduled task by ID. This method works in both top-level agents and sub-agents.
 
-### listSchedules()
+#### listSchedules()
 
 ```typescript
 async listSchedules(criteria?: {
@@ -839,7 +999,7 @@ async listSchedules(criteria?: {
 
 Get scheduled tasks matching the criteria. This method works in both top-level agents and sub-agents.
 
-### getSchedule()
+#### getSchedule()
 
 ```typescript
 getSchedule<T = string>(id: string): Schedule<T> | undefined
@@ -847,7 +1007,7 @@ getSchedule<T = string>(id: string): Schedule<T> | undefined
 
 Deprecated. Get a scheduled task by ID synchronously. This method only works in top-level agents; use `await this.getScheduleById(id)` instead.
 
-### getSchedules()
+#### getSchedules()
 
 ```typescript
 getSchedules<T = string>(criteria?: {
@@ -859,7 +1019,7 @@ getSchedules<T = string>(criteria?: {
 
 Deprecated. Get scheduled tasks matching the criteria synchronously. This method only works in top-level agents; use `await this.listSchedules(criteria)` instead.
 
-### cancelSchedule()
+#### cancelSchedule()
 
 ```typescript
 async cancelSchedule(id: string): Promise<boolean>
@@ -867,7 +1027,7 @@ async cancelSchedule(id: string): Promise<boolean>
 
 Cancel a scheduled task. Returns `true` if cancelled, `false` if not found.
 
-### keepAlive()
+#### keepAlive()
 
 ```typescript
 async keepAlive(): Promise<() => void>
@@ -877,7 +1037,7 @@ Create an alarm-backed heartbeat that prevents the Durable Object from being evi
 
 See [Keeping the Agent Alive](#keeping-the-agent-alive) for usage details.
 
-### keepAliveWhile()
+#### keepAliveWhile()
 
 ```typescript
 async keepAliveWhile<T>(fn: () => Promise<T>): Promise<T>

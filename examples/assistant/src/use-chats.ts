@@ -21,12 +21,9 @@
  * `useEffect` dep to keep workspace-backed UI live across chats and
  * open tabs without polling.
  *
- * Why it lives in the example, not the library: the shape of `Chats` /
- * `useChats` is still in flux (what should the parent class own? how do
- * we handle permissions and cross-chat shared state?). Prototyping here
- * keeps us free to iterate — we'll promote it into a library API once
- * we're sure about the surface. See `wip/think-multi-session-assistant-plan.md`
- * (PR 4) for the long-term plan.
+ * It remains local to the example because chat-directory ownership,
+ * permissions, and shared state are application policy rather than a settled
+ * framework abstraction.
  */
 
 import { useCallback, useState } from "react";

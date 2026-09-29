@@ -2,6 +2,8 @@
 
 **Status:** experimental (`agents/browser`)
 
+> A named browser session layer (reattach-or-create sessions, restart signaling, a `BrowserSessions` lifecycle capability) is being built beneath this connector — see [browser-sessions.md](./browser-sessions.md). It is internal and not yet exported. Everything below is the shipping surface.
+
 ## Problem
 
 Agents need full Chrome DevTools Protocol access — navigation, DOM reads, screenshots, network inspection — without shipping a generated protocol bundle, without handing LLM-generated code a raw network capability, and with browser sessions that survive the pauses a durable agent naturally takes (approvals, hibernation, long waits).
@@ -10,7 +12,7 @@ Agents need full Chrome DevTools Protocol access — navigation, DOM reads, scre
 
 Browser access is a **codemode connector**. `BrowserConnector` (namespace `cdp`) plugs into a `CodemodeRuntime` — the durable execution facet from `@cloudflare/codemode` — so the model writes TypeScript against `cdp.*` inside the sandbox and every call is recorded in the runtime's abort-and-replay log:
 
-- `cdp.send(args)` issues a CDP command over a host-side WebSocket; `cdp.attachToTarget` attaches to a page target; `cdp.spec` queries the live protocol description (fetched from the browser, normalized, cached per binding).
+- `cdp.send(args)` issues a CDP command over a host-side WebSocket; `cdp.attachToTarget` attaches to a page target; `cdp.spec` queries the live protocol description (fetched from the browser, normalized, cached per binding). Normalization keeps parameters, return values, and type properties, and domain-qualifies every `$ref` so it matches a type's `name`.
 - `cdp.startSession` / `cdp.sessionInfo` / `cdp.closeSession` / `cdp.resetSession` manage session lifetime from inside the sandbox; `getDebugLog` / `clearDebugLog` aid debugging.
 - `cdp.getLiveViewUrl({ targetId?, mode? })` returns a [Live View](https://developers.cloudflare.com/browser-run/features/live-view/) link for a tab — a URL a human can open to watch and control the session in real time. The sandbox uses it for human-in-the-loop handoffs: surface the link, then make an approval-gated call so the run pauses (the codemode runtime's durable pause/approve) until the human is done. It's a `reexecute` read — the URL is ephemeral (~5 min) so it must never be pinned in the replay log.
 - The sandbox never holds the socket. It sees a typed RPC surface; the WebSocket, the Browser Rendering session, and all session bookkeeping stay on the host.

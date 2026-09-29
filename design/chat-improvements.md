@@ -14,7 +14,7 @@ Related:
 
 - [chat-api.md](./chat-api.md) — API analysis identifying these issues
 - [think-roadmap.md](./think-roadmap.md) — Think implementation plan (all phases complete)
-- [think-sessions.md](./think-sessions.md) — Session integration design (implemented)
+- [sessions.md](./sessions.md) — Session integration design (implemented)
 
 ---
 
