@@ -175,10 +175,35 @@ await agent.rejectExecution(executionId, "Not this release");
 ```
 
 `approveExecution()` runs `execute` once and auto-continues the turn even if no
-client is connected; `rejectExecution()` resolves the action without running it.
+client is connected; `rejectExecution()` resolves the action without running it
+and, by default, continues the turn so the model can adapt. Pass
+`{ autoContinue: false }` when the user wants the agent to stop and wait for a
+new instruction instead:
+
+```typescript
+await agent.rejectExecution(executionId, "Stop here", { autoContinue: false });
+```
+
+The rejection is still recorded in the transcript, so the next user message
+continues the conversation with it in view.
 `pendingApprovals()` merges parked actions and paused Codemode executions, so a
 single approval UI can drive both. (`durable-pause` requires an `approval`
 policy — an action that would never park is rejected at definition time.)
+
+After an action parks, the model can still write a reply in the same turn, such
+as "Once approved, the deploy will start." That text describes the pending
+state, so it is wrong once the execution resolves. When you approve or reject,
+Think replaces the paused output with the outcome and removes the text and
+reasoning parts that follow it in that assistant message. Earlier content and
+later tool and file parts are kept. The continuation then reads a transcript
+that ends with the real outcome. If the outcome arrives while the parking turn
+is still streaming, the removal waits until that turn is saved and runs before
+the next model call, whether that is the continuation or a new user turn. The
+outcome is saved in Durable Object storage before the transcript is updated, so
+if the agent restarts before either write lands, both the outcome and the
+removal are applied before the next model call. A client that resubmits an
+older copy of the message, still showing the paused output, does not restore
+the paused output or the removed text.
 
 Both approval-gated and durable-pause parts carry a stable
 `ActionApprovalDescriptor` (`{ requestId, toolCallId, action, summary, input,
@@ -279,16 +304,16 @@ into a channel notice.
 
 ### Hooks and methods on the agent
 
-| Member                                  | Description                                                                        |
-| --------------------------------------- | ---------------------------------------------------------------------------------- |
-| `getActions()`                          | Return the action descriptors to compile into tools.                               |
-| `authorizeTurn(ctx)`                    | Decide granted permissions once per turn. Defaults to full grant.                  |
-| `authorizeAction(ctx)`                  | Decide authorization per action call. Defaults to checking `authorizeTurn` grants. |
-| `pendingApprovals(executionId?)`        | List parked actions and paused Codemode executions awaiting approval.              |
-| `approveExecution(executionId)`         | Approve a parked execution; runs `execute` and auto-continues the turn.            |
-| `rejectExecution(executionId, reason?)` | Reject a parked execution without running it.                                      |
-| `replyAttachments(requestId?)`          | Read the advisory attachments recorded during a turn.                              |
-| `actionLedgerPendingRetryLeaseMs`       | Stale-pending reclaim window (default `300000`; `false` to disable).               |
+| Member                                                     | Description                                                                                 |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `getActions()`                                             | Return the action descriptors to compile into tools.                                        |
+| `authorizeTurn(ctx)`                                       | Decide granted permissions once per turn. Defaults to full grant.                           |
+| `authorizeAction(ctx)`                                     | Decide authorization per action call. Defaults to checking `authorizeTurn` grants.          |
+| `pendingApprovals(executionId?)`                           | List parked actions and paused Codemode executions awaiting approval.                       |
+| `approveExecution(executionId)`                            | Approve a parked execution; runs `execute` and auto-continues the turn.                     |
+| `rejectExecution(executionId, reason?, { autoContinue? })` | Reject a parked execution without running it. `autoContinue: false` skips the continuation. |
+| `replyAttachments(requestId?)`                             | Read the advisory attachments recorded during a turn.                                       |
+| `actionLedgerPendingRetryLeaseMs`                          | Stale-pending reclaim window (default `300000`; `false` to disable).                        |
 
 ## Related
 

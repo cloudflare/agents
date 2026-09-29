@@ -1800,7 +1800,7 @@ a load-bearing design decision for Slice 4d-2 and the pi adapter.
 
 `Think`'s durable **submission layer** (`cf_think_submissions`, see
 [think-durable-submissions.md](./think-durable-submissions.md)) and its
-**Session-tree leaf** model (see [think-sessions.md](./think-sessions.md)) are
+**Session-tree leaf** model (see [sessions.md](./sessions.md)) are
 _product substrates_, not recovery primitives. Submissions exist to give external
 RPC callers (webhooks, scheduled tasks, workflow `step.prompt`) a durable
 `accepted` boundary with idempotency; `AIChatAgent` — a flat-table protocol adapter

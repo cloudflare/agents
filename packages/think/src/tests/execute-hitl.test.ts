@@ -31,12 +31,17 @@ async function connectWS(room: string) {
   return ws;
 }
 
-function sendChatRequest(ws: WebSocket, text: string) {
+function sendChatRequest(
+  ws: WebSocket,
+  text: string,
+  metadata?: Record<string, unknown>
+) {
   const id = crypto.randomUUID();
   const message: UIMessage = {
     id: crypto.randomUUID(),
     role: "user",
-    parts: [{ type: "text", text }]
+    parts: [{ type: "text", text }],
+    ...(metadata ? { metadata } : {})
   };
   ws.send(
     JSON.stringify({
@@ -125,10 +130,13 @@ type PausedOutput = {
 };
 
 /** Run one chat turn that pauses, returning the paused execute output. */
-async function runTurnToPause(room: string) {
+async function runTurnToPause(
+  room: string,
+  metadata?: Record<string, unknown>
+) {
   const agent = await freshAgent(room);
   const ws = await connectWS(room);
-  sendChatRequest(ws, "deploy please");
+  sendChatRequest(ws, "deploy please", metadata);
   await waitForDone(ws);
 
   const parts = await agent.executeParts();
@@ -196,6 +204,38 @@ describe("Think HITL — approve/reject paused executions", () => {
 
     // The gated tool never ran; the model adapted to the rejection.
     expect(await agent.gatedCallCount()).toBe(0);
+    await waitUntil(async () =>
+      (await agent.lastAssistantText()).includes("rejected")
+    );
+
+    ws.close();
+  });
+
+  it("reject can preserve the outcome without auto-continuing", async () => {
+    const room = crypto.randomUUID();
+    const { agent, ws, executionId } = await runTurnToPause(room);
+    const outcome = (await callRpc(ws, "rejectExecution", [
+      executionId,
+      "pause here",
+      { autoContinue: false }
+    ])) as { status: string; reason?: string };
+    expect(outcome.status).toBe("rejected");
+    expect(outcome.reason).toBe("pause here");
+
+    await waitUntil(async () => {
+      const parts = await agent.executeParts();
+      return (parts[0].output as PausedOutput).status === "rejected";
+    });
+    expect(await agent.gatedCallCount()).toBe(0);
+
+    // The rejection is durable, but it does not start another model turn.
+    expect(await agent.waitUntilStableForTest()).toBe(true);
+    expect(await agent.lastAssistantText()).not.toContain("rejected");
+
+    // A later user turn can resume the conversation normally.
+    const done = waitForDone(ws);
+    sendChatRequest(ws, "continue with a different approach");
+    await done;
     await waitUntil(async () =>
       (await agent.lastAssistantText()).includes("rejected")
     );
@@ -336,9 +376,11 @@ describe("Think HITL — approve/reject paused executions", () => {
     ws.close();
   });
 
-  it("an approval whose paused part was compacted away records a system note", async () => {
+  it("continues after an approval whose paused part was compacted away", async () => {
     const room = crypto.randomUUID();
-    const { agent, ws, executionId } = await runTurnToPause(room);
+    const { agent, ws, executionId } = await runTurnToPause(room, {
+      origin: "original-user-turn"
+    });
 
     // Simulate compaction summarizing the paused tool part away.
     await agent.stripExecutePartsForTest();
@@ -351,11 +393,52 @@ describe("Think HITL — approve/reject paused executions", () => {
     // The runtime still applied the approval — the gated tool ran…
     expect(await agent.gatedCallCount()).toBe(1);
 
-    // …and the outcome was not dropped: it landed as a system note.
+    // …and the outcome was not dropped: it remained a framework-authored
+    // system note in durable history.
     await waitUntil(async () =>
-      (await agent.systemNoteTexts()).some(
-        (text) => text.includes(executionId) && text.includes("completed")
+      (await agent.executionOutcomeNotes()).some(
+        (note) =>
+          note.id.includes(executionId) && note.text.includes("completed")
       )
+    );
+    const note = (await agent.executionOutcomeNotes()).find((candidate) =>
+      candidate.id.includes(executionId)
+    );
+    expect(note?.id).toMatch(new RegExp(`^exec-outcome-${executionId}-`));
+    expect(note?.role).toBe("system");
+    expect(note?.text).toContain(
+      `[execute tool] The paused execution "${executionId}" was resolved, ` +
+        `but its tool call is no longer in the transcript (it may have been ` +
+        `compacted). Outcome: `
+    );
+    expect(note?.text).toContain("completed");
+    expect(note?.metadataOrigin).toBeUndefined();
+
+    // The auto-continuation consumed the fallback successfully after the
+    // provider boundary projected it to ordinary user context.
+    await waitUntil(async () =>
+      (await agent.lastAssistantText()).includes("completed")
+    );
+    expect(await agent.lastAssistantText()).toContain(
+      "execution-outcome-roles:user"
+    );
+
+    ws.close();
+  });
+
+  it("continues a session containing a legacy system-role execution outcome", async () => {
+    const room = crypto.randomUUID();
+    const { agent, ws, executionId } = await runTurnToPause(room);
+
+    await agent.appendLegacyExecutionOutcomeForTest(executionId);
+    sendChatRequest(ws, "what happened?");
+    await waitForDone(ws);
+
+    await waitUntil(async () =>
+      (await agent.lastAssistantText()).includes("completed")
+    );
+    expect(await agent.lastAssistantText()).toContain(
+      "execution-outcome-roles:user"
     );
 
     ws.close();

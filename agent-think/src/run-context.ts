@@ -1,5 +1,5 @@
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
-const CLOUDFLARE_REPO = /^cloudflare\/[A-Za-z0-9_.-]+$/;
+const ALLOWED_REPO = /^(?:cloudflare\/[A-Za-z0-9_.-]+|scuffi\/flue)$/;
 
 export interface RequestedBy {
   login: string;
@@ -23,7 +23,7 @@ export function repoDirectory(repo: string | undefined): string {
 
 export function validateRunTarget(target: RunTarget): RunTarget {
   if (
-    !CLOUDFLARE_REPO.test(target.repo) ||
+    !ALLOWED_REPO.test(target.repo) ||
     target.repo.endsWith("/.") ||
     target.repo.endsWith("/..")
   ) {

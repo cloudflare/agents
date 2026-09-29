@@ -1,5 +1,5 @@
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
 
@@ -201,10 +201,11 @@ describe("Think — streaming flow", () => {
     await collectMessages(ws, 3);
 
     const responsesPromise = collectMessagesOfType(ws, MSG_CHAT_RESPONSE, true);
+    // The transcript is broadcast before `done` (#2119).
+    const transcriptPromise = waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
     sendChatRequest(ws, [makeUserMessage("hello")]);
     await responsesPromise;
-
-    await waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
+    await transcriptPromise;
 
     const messages = (await agent.getMessages()) as unknown as UIMessage[];
     expect(messages.length).toBe(2);
@@ -230,19 +231,27 @@ describe("Think — clear", () => {
     await collectMessages(ws, 3);
 
     const responsesPromise = collectMessagesOfType(ws, MSG_CHAT_RESPONSE, true);
+    // The transcript is broadcast before `done` (#2119).
+    const transcriptPromise = waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
     sendChatRequest(ws, [makeUserMessage("hello")]);
     await responsesPromise;
+    await transcriptPromise;
 
-    await waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
-
-    let messages = (await agent.getMessages()) as unknown as UIMessage[];
+    const messages = (await agent.getMessages()) as unknown as UIMessage[];
     expect(messages.length).toBe(2);
 
     ws.send(JSON.stringify({ type: MSG_CHAT_CLEAR }));
-    await new Promise((r) => setTimeout(r, 200));
-
-    messages = (await agent.getMessages()) as unknown as UIMessage[];
-    expect(messages.length).toBe(0);
+    // The clear frame (WS) and the read (RPC) travel independent transports
+    // with no ordering guarantee, so poll for the effect instead of sleeping.
+    // Messages only reach 0 via the clear, so this cannot pass spuriously.
+    await vi.waitFor(
+      async () => {
+        expect(
+          ((await agent.getMessages()) as unknown as UIMessage[]).length
+        ).toBe(0);
+      },
+      { timeout: 5000, interval: 50 }
+    );
 
     await closeWS(ws);
   });
@@ -283,9 +292,11 @@ describe("Think — message persistence", () => {
     await collectMessages(ws, 3);
 
     const responsesPromise = collectMessagesOfType(ws, MSG_CHAT_RESPONSE, true);
+    // The transcript is broadcast before `done` (#2119).
+    const transcriptPromise = waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
     sendChatRequest(ws, [makeUserMessage("hello")]);
     await responsesPromise;
-    await waitForMessageOfType(ws, MSG_CHAT_MESSAGES);
+    await transcriptPromise;
     await closeWS(ws);
 
     const messages1 = (await agent1.getMessages()) as unknown as UIMessage[];

@@ -26,6 +26,8 @@ export type ChatFiberSnapshot<Kind extends string = string> = {
   startedAt: number;
   lastBody?: Record<string, unknown>;
   lastClientTools?: ClientToolSchema[];
+  /** User message ids the turn's request originated from, if any. */
+  originMessageIds?: string[];
 };
 
 export function createChatFiberSnapshot<Kind extends string>({
@@ -35,7 +37,8 @@ export function createChatFiberSnapshot<Kind extends string>({
   continuation,
   messages,
   lastBody,
-  lastClientTools
+  lastClientTools,
+  originMessageIds
 }: {
   kind: Kind;
   requestId: string;
@@ -44,6 +47,7 @@ export function createChatFiberSnapshot<Kind extends string>({
   messages: ReadonlyArray<SnapshotMessage>;
   lastBody?: Record<string, unknown>;
   lastClientTools?: ClientToolSchema[];
+  originMessageIds?: string[];
 }): ChatFiberSnapshot<Kind> {
   const latestMessage =
     messages.length > 0 ? messages[messages.length - 1] : undefined;
@@ -67,7 +71,8 @@ export function createChatFiberSnapshot<Kind extends string>({
     latestUserMessageId: latestUser?.id,
     startedAt: Date.now(),
     lastBody,
-    lastClientTools
+    lastClientTools,
+    ...(originMessageIds ? { originMessageIds } : {})
   };
 }
 

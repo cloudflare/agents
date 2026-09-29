@@ -40,6 +40,23 @@ function createMockAgent() {
   };
 }
 
+/**
+ * A socket close before `done` ends the stream with an error chunk, which the
+ * AI SDK surfaces as an errored turn rather than a completed one (#2013).
+ */
+async function expectInterrupted(
+  reader: ReadableStreamDefaultReader<UIMessageChunk>
+) {
+  await expect(reader.read()).resolves.toEqual({
+    done: false,
+    value: { type: "error", errorText: "WebSocket closed mid-stream" }
+  });
+  await expect(reader.read()).resolves.toEqual({
+    done: true,
+    value: undefined
+  });
+}
+
 describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () => {
   let agent: ReturnType<typeof createMockAgent>;
   let activeRequestIds: Set<string>;
@@ -75,11 +92,69 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
 
     agent.close();
 
-    // The socket dying mid-stream must surface as a stream error, not a clean
-    // close, so useChat can distinguish a dropped connection from a completed
-    // turn (see issue #2013).
-    await expect(reader.read()).rejects.toThrow("WebSocket closed mid-stream");
+    await expectInterrupted(reader);
     expect(activeRequestIds.size).toBe(0);
+  });
+
+  it("keeps unread sendMessages chunks ahead of the close error", async () => {
+    const stream = await transport.sendMessages({
+      chatId: "chat-1",
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          parts: [{ type: "text", text: "hello" }]
+        }
+      ],
+      abortSignal: undefined,
+      trigger: "submit-message"
+    });
+    const reader = stream.getReader();
+    const requestId = [...activeRequestIds][0];
+
+    agent.dispatch({
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      id: requestId,
+      body: '{"type":"text-delta","id":"t1","delta":"Hel"}',
+      done: false
+    });
+    agent.close();
+
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: { type: "text-delta", id: "t1", delta: "Hel" }
+    });
+    await expectInterrupted(reader);
+  });
+
+  it("completes normally when the socket closes after done", async () => {
+    const stream = await transport.sendMessages({
+      chatId: "chat-1",
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          parts: [{ type: "text", text: "hello" }]
+        }
+      ],
+      abortSignal: undefined,
+      trigger: "submit-message"
+    });
+    const reader = stream.getReader();
+    const requestId = [...activeRequestIds][0];
+
+    agent.dispatch({
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      id: requestId,
+      body: "",
+      done: true
+    });
+    agent.close();
+
+    await expect(reader.read()).resolves.toEqual({
+      done: true,
+      value: undefined
+    });
   });
 
   // ── handleStreamResuming basics ──────────────────────────────────────
@@ -176,6 +251,50 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
 
     const stream = await promise;
     expect(stream).toBeInstanceOf(ReadableStream);
+  });
+
+  it("drops continuation replay chunks the client already applied (#1951)", async () => {
+    transport.appliedChunks.record("req-c", 2);
+    const promise = transport.reconnectToStream({ chatId: "chat-1" });
+    transport.handleStreamResuming({ id: "req-c" });
+    const stream = await promise;
+    const reader = stream!.getReader();
+
+    const chunks = [
+      { type: "start" },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "already" },
+      { type: "text-delta", id: "t1", delta: " more" }
+    ];
+    for (const [seq, chunk] of chunks.entries()) {
+      agent.dispatch({
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        id: "req-c",
+        body: JSON.stringify(chunk),
+        done: false,
+        replay: true,
+        continuation: true,
+        seq
+      });
+    }
+    agent.dispatch({
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      id: "req-c",
+      body: "",
+      done: true,
+      continuation: true
+    });
+
+    const received: unknown[] = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received.push(value);
+    }
+    expect(received).toEqual([
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: " more" }
+    ]);
   });
 
   it("sends ACK when handleStreamResuming is called", async () => {
@@ -476,9 +595,7 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
 
     agent.close();
 
-    // A socket close mid-continuation must error the stream, not close it
-    // cleanly, so useChat can surface the interruption (see issue #2013).
-    await expect(reader.read()).rejects.toThrow("WebSocket closed mid-stream");
+    await expectInterrupted(reader);
     expect(activeRequestIds.has("req-tool-close")).toBe(false);
     expect(transport.abortActiveToolContinuation()).toBe(false);
   });
@@ -794,9 +911,7 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
 
     agent.close();
 
-    // A socket close during chunk replay must error the resumed stream, not
-    // close it cleanly (see issue #2013).
-    await expect(reader.read()).rejects.toThrow("WebSocket closed mid-stream");
+    await expectInterrupted(reader);
     expect(activeRequestIds.has("req-close-cleanup")).toBe(false);
   });
 

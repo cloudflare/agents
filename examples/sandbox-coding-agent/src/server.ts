@@ -10,18 +10,23 @@
  *
  *   CodingOrchestrator (Think)  ── delegate_coding_task / delegate_parallel ──▶
  *     ClaudeCodeAgent (AIChatAgent facet, name = runId)
- *       └─ getSandbox(env.Sandbox, sandboxIdFor(this.name))  ──▶  one per task
+ *       └─ sandboxFor(env, orchestrator, this.name)  ──▶  one per task,
+ *          destroyed by the orchestrator when the run finishes
  */
 
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import { getSandbox, Sandbox as BaseSandbox } from "@cloudflare/sandbox";
 import { Think, type TurnConfig } from "@cloudflare/think";
 import { callable, routeAgentRequest } from "agents";
-import { agentTool } from "agents/agent-tools";
+import {
+  agentTool,
+  type AgentToolLifecycleResult,
+  type AgentToolRunInfo
+} from "agents/agent-tools";
 import { tool, type ToolSet, type UIMessage } from "ai";
 import { z } from "zod";
-import { runClaudeCode } from "./claude-code";
-import { snapshotDiff, type WorkspaceDiff } from "./diff";
+import { MAX_OUTPUT_TOKENS, runClaudeCode } from "./claude-code";
+import type { WorkspaceDiff } from "./diff";
 
 // The SDK's ContainerProxy must be exported from the Worker entry so the
 // container runtime can build outbound-interception fetchers
@@ -32,6 +37,11 @@ const REPO_URL = "https://github.com/threepointone/aywson";
 const WORK_DIR = "/workspace/aywson";
 
 type DelegateInput = { task: string };
+
+const ALLOWED_ANTHROPIC_ENDPOINTS = new Set([
+  "v1/messages",
+  "v1/messages/count_tokens"
+]);
 
 /**
  * Forward the container's Anthropic egress through the AI Gateway binding.
@@ -44,6 +54,38 @@ type DelegateInput = { task: string };
  */
 async function anthropicViaGateway(req: Request, env: Env): Promise<Response> {
   const endpoint = new URL(req.url).pathname.replace(/^\/+/, ""); // "v1/messages"
+  // The container runs model-authored commands with internet access, so this
+  // proxy spends the account's gateway budget on its behalf. Forward only the
+  // endpoints Claude Code needs, and bound the output size of each request.
+  if (req.method !== "POST" || !ALLOWED_ANTHROPIC_ENDPOINTS.has(endpoint)) {
+    return Response.json(
+      { error: `Blocked by the Sandbox proxy: ${req.method} /${endpoint}` },
+      { status: 403 }
+    );
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = (await req.json()) as Record<string, unknown>;
+  } catch {
+    return Response.json({ error: "Expected a JSON body." }, { status: 400 });
+  }
+  // Only `v1/messages` generates output; `count_tokens` takes no `max_tokens`.
+  if (
+    endpoint === "v1/messages" &&
+    !(
+      typeof body.max_tokens === "number" &&
+      Number.isInteger(body.max_tokens) &&
+      body.max_tokens > 0 &&
+      body.max_tokens <= MAX_OUTPUT_TOKENS
+    )
+  ) {
+    return Response.json(
+      {
+        error: `max_tokens must be an integer from 1 to ${MAX_OUTPUT_TOKENS}.`
+      },
+      { status: 400 }
+    );
+  }
   const headers: Record<string, string> = {
     "content-type": "application/json"
   };
@@ -55,7 +97,7 @@ async function anthropicViaGateway(req: Request, env: Env): Promise<Response> {
     provider: "anthropic",
     endpoint,
     headers,
-    query: await req.json()
+    query: body
   });
 }
 
@@ -87,24 +129,26 @@ Sandbox.outboundByHost = { "api.anthropic.com": anthropicViaGateway };
  * isolated in its own container.
  */
 export class ClaudeCodeAgent extends AIChatAgent<Env> {
-  chatRecovery = true;
-
   // Claude owns its native session; persist its id so each turn can --resume it.
   private sessionId: string | undefined;
-  // The diff produced by the most recent turn, returned as the agent-tool output.
-  private lastResult: WorkspaceDiff | undefined;
+  // The outcome of the most recent turn, returned as the agent-tool output.
+  private lastResult: TurnResult | undefined;
 
   async onStart() {
     this.sessionId = await this.ctx.storage.get<string>("claudeSessionId");
+    this.lastResult = await this.ctx.storage.get<TurnResult>("lastResult");
   }
 
   private sandbox(): Sandbox {
-    // One container per sub-agent, kept warm between turns. The facet name is
-    // `agent-tool:<toolCallId>`, which can exceed the 63-char DNS-safe limit a
-    // sandbox id requires, so derive a short stable id from it.
-    return getSandbox(this.env.Sandbox, sandboxIdFor(this.name), {
-      sleepAfter: "15m"
-    });
+    // One container per sub-agent. The orchestrator destroys it when the run
+    // reaches a terminal state; `sleepAfter` only bounds an idle drill-in.
+    const orchestrator = this.parentPath[this.parentPath.length - 1];
+    return sandboxFor(this.env, orchestrator?.name ?? "", this.name);
+  }
+
+  private setLastResult(result: TurnResult): void {
+    this.lastResult = result;
+    void this.ctx.storage.put("lastResult", result);
   }
 
   /**
@@ -119,15 +163,34 @@ export class ClaudeCodeAgent extends AIChatAgent<Env> {
    * "Durability & recovery" section. Deferred to keep this example zero-config.
    */
   private async ensureWorkspace(sandbox: Sandbox): Promise<void> {
-    await sandbox.exec(
+    const clone = await sandbox.exec(
       `[ -d ${WORK_DIR}/.git ] || git clone --depth 1 ${REPO_URL} ${WORK_DIR}`
     );
+    if (!clone.success) {
+      throw new Error(
+        `Could not clone ${REPO_URL} (exit ${clone.exitCode}): ` +
+          (clone.stderr.trim() || "no stderr")
+      );
+    }
   }
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const sandbox = this.sandbox();
-    await this.ensureWorkspace(sandbox);
+    this.lastResult = undefined;
+    await this.ctx.storage.delete("lastResult");
+    try {
+      await this.ensureWorkspace(sandbox);
+      return await this.startClaudeCode(sandbox, options);
+    } catch (error) {
+      // Setup failed before the stream existed (clone, process start, dead
+      // container); the stream reports its own failures through `onResult`.
+      const message = error instanceof Error ? error.message : String(error);
+      this.setLastResult({ files: [], diff: "", error: message });
+      throw error;
+    }
+  }
 
+  private startClaudeCode(sandbox: Sandbox, options?: OnChatMessageOptions) {
     return runClaudeCode({
       sandbox,
       workDir: WORK_DIR,
@@ -140,9 +203,7 @@ export class ClaudeCodeAgent extends AIChatAgent<Env> {
       },
       // Forwarded to the orchestrator UI while running as an agent tool.
       reportProgress: (p) => void this.reportProgress(p),
-      onResult: (result) => {
-        this.lastResult = result;
-      }
+      onResult: (result) => this.setLastResult(result)
     });
   }
 
@@ -153,6 +214,12 @@ export class ClaudeCodeAgent extends AIChatAgent<Env> {
    */
   protected getAgentToolOutput(): unknown {
     const result = this.lastResult;
+    if (result?.error) {
+      return {
+        error: result.error,
+        filesChanged: result.files.map((f) => `${f.status || "M"} ${f.path}`)
+      };
+    }
     if (!result || result.files.length === 0) {
       return "Completed with no file changes.";
     }
@@ -162,12 +229,14 @@ export class ClaudeCodeAgent extends AIChatAgent<Env> {
     };
   }
 
-  /** Live diff for this sub-agent's container (drill-in / debugging). */
+  /**
+   * The outcome captured at the end of the latest turn (drill-in / debugging).
+   * Read from storage rather than the container, which is destroyed once the
+   * run finishes.
+   */
   @callable()
-  async getWorkspaceDiff(): Promise<WorkspaceDiff> {
-    const sandbox = this.sandbox();
-    await this.ensureWorkspace(sandbox);
-    return snapshotDiff(sandbox, WORK_DIR);
+  async getLastResult(): Promise<TurnResult | null> {
+    return this.lastResult ?? null;
   }
 }
 
@@ -176,7 +245,6 @@ export class ClaudeCodeAgent extends AIChatAgent<Env> {
  * loop and delegates the actual coding to `ClaudeCodeAgent` sub-agents.
  */
 export class CodingOrchestrator extends Think<Env> {
-  override chatRecovery = true;
   // Cap how many containers run at once (also bounded by container max_instances).
   override maxConcurrentAgentTools = 3;
 
@@ -290,15 +358,105 @@ export class CodingOrchestrator extends Think<Env> {
     }
   }
 
+  // Containers are billed while awake and count against `max_instances`, so
+  // track every run's sandbox and tear it down as soon as the run is over.
+  override async onAgentToolStart(run: AgentToolRunInfo): Promise<void> {
+    await this.ctx.storage.put(`${SANDBOX_RUN_PREFIX}${run.runId}`, true);
+  }
+
+  override async onAgentToolFinish(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    // `interrupted` means the orchestrator stopped waiting, not that the child
+    // stopped working (`childStillRunning` is unset when that is unknown). Keep
+    // its container; `releaseIdleSandboxes` frees it once the child settles.
+    if (result.status === "interrupted" && result.childStillRunning !== false) {
+      return;
+    }
+    // An `error` can also be the parent losing the child's stream while the
+    // child keeps editing; keep a live child's container for the sweep too.
+    if (result.status === "error" && (await this.isChildLive(run.runId))) {
+      return;
+    }
+    await this.destroySandbox(run.runId);
+  }
+
+  /** Whether the child still reports its run as in flight (or can't be asked). */
+  private async isChildLive(runId: string): Promise<boolean> {
+    if (!this.hasAgentToolRun(ClaudeCodeAgent, runId)) return false;
+    try {
+      const child = await this.dynamicAgents.get(ClaudeCodeAgent, runId);
+      const inspection = await child.inspectAgentToolRun(runId);
+      return (
+        inspection?.status === "running" || inspection?.status === "starting"
+      );
+    } catch (error) {
+      console.warn(`Could not inspect run ${runId}; keeping it:`, error);
+      return true;
+    }
+  }
+
+  // Some runs never deliver a usable finish: a child that failed to start, or
+  // one kept alive above. Sweep them on every wake.
+  override async onStart(): Promise<void> {
+    this.ctx.waitUntil(this.releaseIdleSandboxes());
+  }
+
+  private async releaseIdleSandboxes(): Promise<void> {
+    const tracked = await this.ctx.storage.list({ prefix: SANDBOX_RUN_PREFIX });
+    for (const key of tracked.keys()) {
+      const runId = key.slice(SANDBOX_RUN_PREFIX.length);
+      if (await this.isChildLive(runId)) continue;
+      await this.destroySandbox(runId);
+    }
+  }
+
   @callable()
   async clearDelegatedRuns(): Promise<void> {
     await this.clearAgentToolRuns();
+    const tracked = await this.ctx.storage.list({ prefix: SANDBOX_RUN_PREFIX });
+    await Promise.all(
+      [...tracked.keys()].map((key) =>
+        this.destroySandbox(key.slice(SANDBOX_RUN_PREFIX.length))
+      )
+    );
+  }
+
+  private async destroySandbox(runId: string): Promise<void> {
+    try {
+      await sandboxFor(this.env, this.name, runId).destroy();
+    } catch (error) {
+      console.warn(`Failed to destroy sandbox for run ${runId}:`, error);
+      return;
+    }
+    await this.ctx.storage.delete(`${SANDBOX_RUN_PREFIX}${runId}`);
   }
 }
 
+const SANDBOX_RUN_PREFIX = "sandbox-run:";
+
+/** What one Claude Code turn produced; `error` is set when the turn failed. */
+type TurnResult = WorkspaceDiff & { error?: string };
+
 /**
- * A stable, DNS-safe sandbox id (≤63 chars, lowercase) derived from a facet
- * name. Same name → same id → same warm container across turns.
+ * The sandbox for one delegated run. Its id is derived from the orchestrator
+ * name AND the run id, so two orchestrators never share a container.
+ */
+function sandboxFor(env: Env, orchestratorName: string, runId: string) {
+  return getSandbox(
+    env.Sandbox,
+    sandboxIdFor(`${orchestratorName}\0${runId}`),
+    {
+      sleepAfter: "15m"
+    }
+  );
+}
+
+/**
+ * A stable, DNS-safe sandbox id (≤63 chars, lowercase) derived from a key.
+ * Same key → same id → same container across turns. The run id alone can
+ * exceed the 63-char limit a sandbox id requires, hence the hash.
  */
 function sandboxIdFor(name: string): string {
   let h1 = 0x811c9dc5;

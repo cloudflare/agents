@@ -23,7 +23,8 @@ describe("legacy MCP handler warning", () => {
   it("does not warn for a v2 factory serving a legacy request", async () => {
     vi.resetModules();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { createMcpHandler } = await import("../../mcp/handler-compat");
+    const { createMcpHandler } =
+      await import("../../mcp/server/handler-compat");
     const handler = createMcpHandler(
       () => new StatelessMcpServer({ name: "stateless", version: "1.0.0" })
     );
@@ -59,8 +60,8 @@ describe("legacy MCP handler warning", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const [{ McpServer }, handlerModule, transportModule] = await Promise.all([
       import("@modelcontextprotocol/sdk/server/mcp.js"),
-      import("../../mcp/handler-compat"),
-      import("../../mcp/worker-transport")
+      import("../../mcp/server/handler-compat"),
+      import("../../mcp/server/worker-transport")
     ]);
 
     const server = new McpServer({ name: "legacy", version: "1.0.0" });

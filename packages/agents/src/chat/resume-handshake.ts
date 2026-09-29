@@ -33,6 +33,7 @@ import type { ResumableStream } from "./resumable-stream";
 export interface PendingChatTerminal {
   requestId: string;
   body: string;
+  messageIds?: string[];
 }
 
 /**
@@ -71,6 +72,14 @@ export interface ResumeHandshakeHost {
    * resumed by the replacement connection (#1784).
    */
   isConnectionPresent?(connectionId: string): boolean;
+  /**
+   * Whether the host still holds the request's terminal frames and will
+   * broadcast them once its message is persisted. Optional: hosts that send
+   * the terminal frame with the stream's end omit it. While true, a resume
+   * ACK gets the stored chunks without a terminal, so the connection learns
+   * the outcome from the live frame that follows the transcript.
+   */
+  holdsTerminalFrames?(requestId: string): boolean;
 }
 
 /**
@@ -241,12 +250,19 @@ export class ResumeHandshake {
       }
     } else if (resumableStream.hasActiveStream()) {
       // Ignore ACKs for a different active stream request id.
+    } else if (this.host.holdsTerminalFrames?.(requestId)) {
+      // The stream closed (finished, recovering, or errored) but its message
+      // is still being persisted; the held terminal frames are broadcast
+      // after the transcript (#2334).
+      resumableStream.replayClosedStreamChunks(connection, requestId);
     } else if (await this._replayTerminalOnAck(connection, requestId)) {
       // Delivered the pending terminal error frame on the resumed stream the
       // client just ACKed (#1645).
     } else if (
       !resumableStream.replayCompletedChunksByRequestId(connection, requestId)
     ) {
+      const messageIds = resumableStream.getOriginMessageIds(requestId);
+      const outcome = resumableStream.getOutcome(requestId);
       sendIfOpen(
         connection,
         JSON.stringify({
@@ -254,7 +270,9 @@ export class ResumeHandshake {
           done: true,
           id: requestId,
           type: responseMessageType,
-          replay: true
+          replay: true,
+          ...(messageIds && { messageIds }),
+          ...(outcome && { outcome })
         })
       );
     }
@@ -312,6 +330,9 @@ export class ResumeHandshake {
     ) {
       return true;
     }
+    const messageIds =
+      pending.messageIds ??
+      resumableStream.getOriginMessageIds(pending.requestId);
     sendIfOpen(
       connection,
       JSON.stringify({
@@ -319,7 +340,8 @@ export class ResumeHandshake {
         done: true,
         error: true,
         id: pending.requestId,
-        type: responseMessageType
+        type: responseMessageType,
+        ...(messageIds && { messageIds })
       })
     );
     return true;

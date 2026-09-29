@@ -14,7 +14,8 @@
  * mid-stream SIGKILL.
  */
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
-import { spawn, execSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { killProcess, killProcessOnPort } from "./wrangler-process";
 import { setDefaultAutoSelectFamily } from "node:net";
 import "./harden-net";
 import path from "node:path";
@@ -33,52 +34,14 @@ const PERSIST_DIR = path.join(
 );
 
 type SubmissionView = { status: string; error: string | null } | null;
+type RecoveryOutcome = {
+  userMessages: number;
+  assistantMessages: number;
+  responseCount: number;
+};
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function killProcessOnPort(port: number): void {
-  try {
-    const output = execSync(
-      `lsof -tiTCP:${port} -sTCP:LISTEN 2>/dev/null || true`
-    )
-      .toString()
-      .trim();
-    if (output) {
-      for (const pid of output.split("\n").filter(Boolean)) {
-        try {
-          process.kill(Number(pid), "SIGKILL");
-        } catch {
-          // Already dead
-        }
-      }
-    }
-  } catch {
-    // lsof not available
-  }
-}
-
-function killProcessTree(pid: number): void {
-  let children: number[] = [];
-  try {
-    children = execSync(`pgrep -P ${pid} 2>/dev/null || true`)
-      .toString()
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map(Number);
-  } catch {
-    // pgrep may be unavailable; killing the parent is still useful.
-  }
-  for (const childPid of children) {
-    killProcessTree(childPid);
-  }
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    // Already dead
-  }
 }
 
 function startWrangler(): ChildProcess {
@@ -100,6 +63,9 @@ function startWrangler(): ChildProcess {
     {
       cwd: __dirname,
       stdio: ["pipe", "pipe", "pipe"],
+      // A process-group leader, so killProcess() can take down wrangler and
+      // every workerd it spawns in one signal.
+      detached: true,
       env: { ...process.env, NODE_ENV: "test" }
     }
   );
@@ -141,21 +107,6 @@ async function waitForPortFree(maxAttempts = 30, delayMs = 500): Promise<void> {
     await sleep(delayMs);
   }
   throw new Error(`Port ${PORT} did not free in time`);
-}
-
-function killProcess(child: ChildProcess): Promise<void> {
-  return new Promise((resolve) => {
-    if (!child.pid) {
-      resolve();
-      return;
-    }
-    const fallback = setTimeout(resolve, 3000);
-    child.on("exit", () => {
-      clearTimeout(fallback);
-      resolve();
-    });
-    killProcessTree(child.pid);
-  });
 }
 
 async function restartWrangler(child: ChildProcess): Promise<ChildProcess> {
@@ -325,6 +276,171 @@ describe("Think submission recovery e2e", () => {
     const log = (await callAgent(agent, "getStatusLog")) as string[];
     expect(log).toContain(`${submissionId}:error`);
   });
+
+  it("preserves a production-scheduled empty-stream retry across a second restart", async () => {
+    const agent = "submission-pending-retry";
+    const submissionId = "sub-pending-retry";
+
+    wrangler = startWrangler();
+    await waitForReady();
+    await callAgent(agent, "seedRecoverableEmptySubmission", [submissionId]);
+
+    // Restart #1 runs real interrupted-chat classification. The empty opened
+    // stream becomes a retry carrying production-owned incident/submission data.
+    wrangler = await restartWrangler(wrangler);
+    await pollUntil(
+      "production-scheduled retry backoff",
+      () =>
+        callAgent(agent, "hasWaitingRecoveryRetry", [
+          submissionId
+        ]) as Promise<boolean>,
+      (waiting) => waiting,
+      { attempts: 30, delayMs: 100 }
+    );
+    await expect(
+      callAgent(agent, "getSubmission", [submissionId])
+    ).resolves.toMatchObject({ status: "running" });
+
+    // Restart #2 lands after the first recovery Task has settled and while its
+    // real delayed successor owns the still-running submission.
+    wrangler = await restartWrangler(wrangler);
+    const view = await pollUntil(
+      "empty-stream retry completion",
+      () =>
+        callAgent(agent, "getSubmission", [
+          submissionId
+        ]) as Promise<SubmissionView>,
+      (submission) =>
+        submission?.status === "completed" || submission?.status === "error",
+      { attempts: 60, delayMs: 500 }
+    );
+    expect(view?.status).toBe("completed");
+
+    const outcome = (await callAgent(
+      agent,
+      "getRecoveryOutcome"
+    )) as RecoveryOutcome;
+    expect(outcome).toEqual({
+      userMessages: 1,
+      assistantMessages: 1,
+      responseCount: 1
+    });
+
+    const log = (await callAgent(agent, "getStatusLog")) as string[];
+    expect(
+      log.filter((entry) => entry === `${submissionId}:completed`)
+    ).toHaveLength(1);
+  });
+
+  it("preserves completed successor evidence through foreign reclaim and a crash before ledger settlement", async () => {
+    const agent = "submission-terminal-reclaim";
+    const submissionId = "sub-terminal-reclaim";
+    wrangler = startWrangler();
+    await waitForReady();
+    await callAgent(agent, "startRecoveryAtLedgerGap", [submissionId]);
+    await pollUntil(
+      "successor completed before ledger settlement",
+      () => callAgent(agent, "isRecoveryAtLedgerGap") as Promise<boolean>,
+      (paused) => paused,
+      { attempts: 60, delayMs: 500 }
+    );
+    await expect(
+      callAgent(agent, "getSubmission", [submissionId])
+    ).resolves.toMatchObject({ status: "running" });
+    // The cutover discarded the stream rows and stamped the durable outcome;
+    // a foreign producer's reclaim cannot erase that fact.
+    await expect(
+      callAgent(agent, "reclaimDuringSubmissionGap", [submissionId])
+    ).resolves.toEqual({
+      streamStatus: null,
+      resultStatus: "completed"
+    });
+
+    wrangler = await restartWrangler(wrangler);
+    const settled = await pollUntil(
+      "startup terminal-stream settlement",
+      () =>
+        callAgent(agent, "getSubmission", [
+          submissionId
+        ]) as Promise<SubmissionView>,
+      (submission) => submission?.status !== "running"
+    );
+    expect(settled).toEqual({ status: "completed", error: null });
+    await expect(callAgent(agent, "getRecoveryOutcome")).resolves.toEqual({
+      userMessages: 1,
+      assistantMessages: 1,
+      responseCount: 1
+    });
+    await expect(callAgent(agent, "getStatusLog")).resolves.toEqual([
+      `${submissionId}:completed`
+    ]);
+    // Startup settled the ledger and cleared the stamp. Nothing leaks forever.
+    await expect(
+      callAgent(agent, "reclaimDuringSubmissionGap", [submissionId])
+    ).resolves.toEqual({
+      streamStatus: null,
+      resultStatus: null
+    });
+  });
+
+  it.each([
+    { mode: "abort", facet: false },
+    { mode: "output", facet: false },
+    { mode: "abort", facet: true },
+    { mode: "output", facet: true }
+  ] as const)(
+    "recovers the recorded $mode outcome after cutover (facet: $facet)",
+    async ({ mode, facet }) => {
+      const agent = `submission-cutover-${mode}-${facet}`;
+      const submissionId = `sub-cutover-${mode}`;
+      type CutoverView = {
+        paused: boolean;
+        status: string | null;
+        events: unknown[];
+        assistantMessages: number;
+      };
+      const inspect = () =>
+        callAgent(agent, "inspectSubmissionCutover", [
+          submissionId,
+          facet
+        ]) as Promise<CutoverView>;
+      wrangler = startWrangler();
+      await waitForReady();
+      await callAgent(agent, "startSubmissionAtCutover", [
+        submissionId,
+        mode,
+        facet
+      ]);
+      const before = await pollUntil(
+        "turn cutover before ledger settlement",
+        inspect,
+        (view) => view.paused,
+        { delayMs: 100 }
+      );
+      expect(before.status).toBe("running");
+      expect(before.events).toEqual([]);
+      expect(before.assistantMessages).toBe(mode === "abort" ? 1 : 0);
+
+      wrangler = await restartWrangler(wrangler);
+      const after = await pollUntil(
+        "recorded outcome delivered after restart",
+        inspect,
+        (view) => view.events.length > 0,
+        { delayMs: 200 }
+      );
+      expect(after.status).toBe(mode === "abort" ? "aborted" : "completed");
+      expect(after.events).toEqual([
+        mode === "abort"
+          ? { submissionId, status: "aborted" }
+          : {
+              submissionId,
+              status: "completed",
+              output: { greeting: "hello from a recovered workflow turn" }
+            }
+      ]);
+      expect(after.assistantMessages).toBe(before.assistantMessages);
+    }
+  );
 
   it("leaves a recoverable in-flight submission running and continues it to completion", async () => {
     const agent = "submission-recoverable";

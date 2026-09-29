@@ -1,8 +1,9 @@
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
-import { action, skills, Think } from "../../think";
+import { action, skills, Think, type ThinkSession } from "../../think";
 import { Agent } from "agents";
 import type {
+  Connection,
   AgentToolEventMessage,
   AgentToolLifecycleResult,
   AgentToolRunInfo,
@@ -17,6 +18,7 @@ import type {
   ChatResponseResult,
   SaveMessagesOptions,
   SaveMessagesResult,
+  ChatErrorClassification,
   ChatRecoveryConfig,
   ChatRecoveryContext,
   ChatRecoveryExhaustedContext,
@@ -42,16 +44,24 @@ import type {
   ActionAuthorizationContext,
   ActionAuthorizationDecision,
   StepContext,
-  ChunkContext
+  ChunkContext,
+  ActiveTurn,
+  CancelSubmissionResult,
+  ThinkModel
 } from "../../think";
+import type { MessengerContext } from "../../messengers";
 import {
+  CHAT_MESSAGE_TYPES,
+  CHAT_RECOVERY_TASK_NAME,
+  chatRecoveryTaskRunOptions,
   sanitizeMessage,
   enforceRowSizeLimit,
   StreamAccumulator
 } from "agents/chat";
-import type { ClientToolSchema } from "agents/chat";
+import type { ClientToolSchema, ResumableStream, TurnQueue } from "agents/chat";
 import type { Schedule } from "agents";
-import { Session } from "agents/experimental/memory/session";
+import type { Session } from "../../think";
+import type { ContextConfig } from "agents/context";
 import { z } from "zod";
 
 // ── Test result type ────────────────────────────────────────────
@@ -73,6 +83,99 @@ export type RpcJsonObject = Record<
   | null
   | ReadonlyArray<string | number | boolean | null>
 >;
+
+function recoveryTransportCountsForTest(
+  agent: Think,
+  callback: string
+): { tasks: number; schedules: number } {
+  const scheduled = agent.sql<{ count: number }>`
+    SELECT COUNT(*) AS count FROM cf_agents_jobs
+    WHERE capability = 'scheduler' AND fn = ${callback}
+  `;
+  const tasks = agent.sql<{ count: number }>`
+    SELECT COUNT(*) AS count FROM cf_agents_task_runs
+    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+      AND state IN ('pending', 'running', 'waiting')
+      AND json_extract(metadata, '$.callback') = ${callback}
+  `;
+  return {
+    tasks: tasks[0]?.count ?? 0,
+    schedules: scheduled[0]?.count ?? 0
+  };
+}
+
+function recoveryWorkCountForTest(agent: Think, callback: string): number {
+  const counts = recoveryTransportCountsForTest(agent, callback);
+  return counts.tasks + counts.schedules;
+}
+
+async function runQueuedRecoveryTaskForTest(
+  agent: Think,
+  callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
+): Promise<boolean> {
+  const rows = agent.sql<{ run_id: string }>`
+    SELECT run_id FROM cf_agents_task_runs
+    WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+      AND state IN ('pending', 'running', 'waiting')
+      AND json_extract(metadata, '$.callback') = ${callback}
+    ORDER BY created_at ASC
+    LIMIT 1
+  `;
+  const runId = rows[0]?.run_id;
+  if (!runId) return false;
+  const past = Date.now() - 1_000;
+  agent.sql`
+    UPDATE cf_agents_task_runs
+    SET next_at = ${past}, input = json_set(input, '$.delaySeconds', 0)
+    WHERE run_id = ${runId}
+  `;
+  agent.sql`
+    UPDATE cf_agents_task_steps SET next_at = ${past}
+    WHERE run_id = ${runId} AND kind = 'sleep'
+  `;
+  agent.sql`
+    UPDATE cf_agents_jobs SET time = ${past}
+    WHERE id = ${`task:${runId}`}
+  `;
+  await agent.alarm();
+  return true;
+}
+
+async function waitForThinkIdleForTest(agent: Think): Promise<void> {
+  await (
+    agent as unknown as { _turnQueue: { waitForIdle(): Promise<void> } }
+  )._turnQueue.waitForIdle();
+}
+
+async function runRecoveryWorkForTest(
+  agent: Think,
+  callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
+): Promise<void> {
+  if (await runQueuedRecoveryTaskForTest(agent, callback)) {
+    await waitForThinkIdleForTest(agent);
+    return;
+  }
+  const rows = agent.sql<{ payload: string }>`
+    SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+    WHERE capability = 'scheduler' AND fn = ${callback}
+    ORDER BY time ASC
+    LIMIT 1
+  `;
+  const payload = rows[0]?.payload;
+  if (!payload) {
+    await waitForThinkIdleForTest(agent);
+    return;
+  }
+  const host = agent as unknown as {
+    _chatRecoveryContinueDetached(data: unknown): Promise<void>;
+    _chatRecoveryRetryDetached(data: unknown): Promise<void>;
+  };
+  if (callback === "_chatRecoveryContinue") {
+    await host._chatRecoveryContinueDetached(JSON.parse(payload));
+  } else {
+    await host._chatRecoveryRetryDetached(JSON.parse(payload));
+  }
+}
 
 // ── Mock LanguageModel (v3 format) ──────────────────────────────
 
@@ -130,8 +233,17 @@ function captureModelCallSettings(options: unknown): CapturedModelCallSettings {
   };
 }
 
-function createMockModel(
-  response: string,
+/** Typed model-call subset used by prompt-sensitive test models. */
+export type MockModelCallOptions = {
+  prompt?: Array<{
+    role?: string;
+    content?: string | Array<{ type?: string; text?: string }>;
+  }>;
+};
+
+/** Create a streaming text model with static or prompt-derived output. */
+export function createMockModel(
+  response: string | ((callOptions: MockModelCallOptions) => string),
   options: MockModelOptions = {}
 ): LanguageModel {
   return {
@@ -142,8 +254,10 @@ function createMockModel(
     doGenerate() {
       throw new Error("doGenerate not implemented in mock");
     },
-    doStream(callOptions: unknown) {
+    doStream(callOptions: MockModelCallOptions) {
       options.onCall?.(captureModelCallSettings(callOptions));
+      const responseText =
+        typeof response === "function" ? response(callOptions) : response;
       _mockCallCount++;
       const callId = _mockCallCount;
       const stream = new ReadableStream({
@@ -153,7 +267,7 @@ function createMockModel(
           controller.enqueue({
             type: "text-delta",
             id: `t-${callId}`,
-            delta: response
+            delta: responseText
           });
           controller.enqueue({ type: "text-end", id: `t-${callId}` });
           controller.enqueue({
@@ -498,22 +612,78 @@ class TestCollectingCallback implements StreamCallback {
 // beforeTurn/onStepFinish/onChunk (instrumentation),
 // _transformInferenceResult (error injection).
 
+type GatewayCallForTest = {
+  kind: "run" | "gateway";
+  model: string | null;
+  gateway: GatewayOptions | null;
+};
+
+type TurnIdentityLogEntry = {
+  input: string;
+  requestId: string | null;
+  trigger: string | null;
+  hasAbortSignal: boolean;
+  activeRequestId: string | null;
+  activeTrigger: string | null;
+  messengerThreadId: string | null;
+  getMessengerThreadId: string | null;
+};
+
 export class ThinkTestAgent extends Think {
   private _response = "Hello from the assistant!";
+  private _nextSubAgentConnectionSendDelayMs = 0;
   private _chatErrorLog: string[] = [];
   private _errorConfig: {
     afterChunks: number;
     message: string;
+    inStream?: boolean;
+    /** Thrown (or handed to `onError` in-stream) instead of a plain error. */
+    error?: unknown;
+    /** Abort the turn right before it fails. */
+    abortFirst?: boolean;
   } | null = null;
+  // #2085: when set, only the first N inferences error (then the recovery
+  // continuation streams normally). `null` = every inference errors.
+  private _errorAttemptsRemaining: number | null = null;
   private _stripTextResponseForTest = false;
   private _stallAfterChunks: number | null = null;
   // #1626 stall-recovery: when set, only the first N inferences stall (then the
   // continuation streams normally). `null` = every inference stalls (the
   // original terminal-watchdog behavior).
   private _stallAttemptsRemaining: number | null = null;
+  // The stalling attempt streams only an internal final-answer tool call, which
+  // persistence strips, before it hangs.
+  private _stallWithFinalAnswerOnlyForTest = false;
   private _streamChunkDelayMs: number | null = null;
   private _agentToolOutputForTest = new Map<string, unknown>();
   private _responseLog: ChatResponseResult[] = [];
+  private _recoveryHookForTest: ChatRecoveryOptions | "throw" | null = null;
+  private _recoveryCallsForTest: Array<{
+    recoveryKind: ChatRecoveryContext["recoveryKind"];
+    attempt: number;
+    partialText: string;
+    recoveryData: string | null;
+    createdAt: number;
+  }> = [];
+  private _stashInBeforeTurnForTest: string | undefined;
+  private _turnIdentityLog: TurnIdentityLogEntry[] = [];
+
+  override async onChatRecovery(
+    ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    this._recoveryCallsForTest.push({
+      recoveryKind: ctx.recoveryKind,
+      attempt: ctx.attempt,
+      partialText: ctx.partialText,
+      recoveryData:
+        typeof ctx.recoveryData === "string" ? ctx.recoveryData : null,
+      createdAt: ctx.createdAt
+    });
+    if (this._recoveryHookForTest === "throw") {
+      throw new Error("recovery hook boom");
+    }
+    return this._recoveryHookForTest ?? {};
+  }
 
   override onChatError(error: unknown): unknown {
     const msg = error instanceof Error ? error.message : String(error);
@@ -528,6 +698,23 @@ export class ThinkTestAgent extends Think {
     progressBody: string;
     milestoneBody: string;
   } | null = null;
+
+  /** Delay the next root-owned sub-agent send to expose routing races. */
+  async delayNextSubAgentConnectionSendForTest(delayMs: number): Promise<void> {
+    this._nextSubAgentConnectionSendDelayMs = delayMs;
+  }
+
+  override async _cf_sendToSubAgentConnection(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void> {
+    if (this._nextSubAgentConnectionSendDelayMs > 0) {
+      const delayMs = this._nextSubAgentConnectionSendDelayMs;
+      this._nextSubAgentConnectionSendDelayMs = 0;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    await super._cf_sendToSubAgentConnection(connectionId, message);
+  }
 
   /** Slow the streamed turn so the parent tails it while it's still live. */
   async setStreamChunkDelayForTest(ms: number): Promise<void> {
@@ -562,6 +749,24 @@ export class ThinkTestAgent extends Think {
     this._progressInjection = { runId, progressBody, milestoneBody };
   }
 
+  /** Persist a milestone the way `reportProgress({ milestone })` does. */
+  persistAgentToolMilestoneForTest(
+    runId: string,
+    name: string,
+    data: unknown
+  ): number {
+    return (
+      this as unknown as {
+        _persistAgentToolMilestone(
+          runId: string,
+          name: string,
+          data: unknown,
+          at: number
+        ): number;
+      }
+    )._persistAgentToolMilestone(runId, name, data, Date.now());
+  }
+
   /**
    * Bounded-poll until the live child turn has bound its request id (written to
    * the child-run row at turn start) and opened its resumable stream, so a test
@@ -587,10 +792,20 @@ export class ThinkTestAgent extends Think {
     return null;
   }
 
+  private _failNextChunkRead = false;
+
+  failNextAgentToolChunkReadForTest(): void {
+    this._failNextChunkRead = true;
+  }
+
   override async getAgentToolChunks(
     runId: string,
     options?: { afterSequence?: number }
   ): Promise<AgentToolStoredChunk[]> {
+    if (this._failNextChunkRead) {
+      this._failNextChunkRead = false;
+      throw new Error("chunk read failed");
+    }
     const chunks = await super.getAgentToolChunks(runId, options);
 
     const race = this._attachRaceInjection;
@@ -690,6 +905,438 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /**
+   * Inspect a stale `running` child-run row (no live run, no recovery) with
+   * `reconcile: false`. Returns the reported and the stored status afterwards.
+   */
+  async inspectStaleRunReadOnlyForTest(): Promise<{
+    reported: string | undefined;
+    stored: string | undefined;
+  }> {
+    const runId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, status, started_at)
+      VALUES (${runId}, 'running', ${Date.now()})
+    `;
+    const inspection = await this.inspectAgentToolRun(runId, {
+      reconcile: false
+    });
+    return {
+      reported: inspection?.status,
+      stored: this["_readAgentToolChildRun"](runId)?.status
+    };
+  }
+
+  /**
+   * A child turn that streams error text, then an in-band error, and persists
+   * its assistant reply — but is "evicted" before `startAgentToolRun`'s
+   * finalizer seals the row `error`. Holds the finalizer at the point the turn
+   * returns, drops the run's in-memory state as an eviction would, then
+   * inspects (reconciling the stale `running` row).
+   */
+  async reconcileEvictedErroredRunForTest(): Promise<{
+    before: string | null;
+    assistantText: string;
+    inspection: Awaited<ReturnType<Think["inspectAgentToolRun"]>>;
+  }> {
+    const runId = crypto.randomUUID();
+    const self = this as unknown as {
+      _runProgrammaticMessagesTurn: (...args: unknown[]) => Promise<unknown>;
+    };
+    const original = self._runProgrammaticMessagesTurn;
+    let reached!: () => void;
+    let release!: () => void;
+    const reachedGate = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    self._runProgrammaticMessagesTurn = async (...args) => {
+      self._runProgrammaticMessagesTurn = original;
+      const result = await original.apply(this, args);
+      reached();
+      await released;
+      return result;
+    };
+    this._inBandErrorResponse = {
+      errorText: "model exploded",
+      textChunks: ["Sorry, something went wrong."]
+    };
+    try {
+      await this.startAgentToolRun("fail midway", { runId });
+      await reachedGate;
+      this["_agentToolAbortControllers"].delete(runId);
+      this["_agentToolLastErrors"].delete(runId);
+      this["_agentToolLiveSequences"].delete(runId);
+      this["_agentToolPreTurnAssistantIds"].delete(runId);
+      this["_agentToolRunsByRequestId"].clear();
+      const before = this["_readAgentToolChildRun"](runId)?.status ?? null;
+      const assistantText = this.messages
+        .filter((message) => message.role === "assistant")
+        .flatMap((message) => message.parts)
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("");
+      const inspection = await this.inspectAgentToolRun(runId);
+      return { before, assistantText, inspection };
+    } finally {
+      this._inBandErrorResponse = null;
+      release();
+    }
+  }
+
+  /**
+   * Post-restart cold-counter realign: seed a RUNNING run with a stored backlog
+   * 0..2, wipe the in-memory live sequence, tail after `afterSequence` (parent
+   * recovery passes the last stored index), then broadcast a new chunk. Returns
+   * the live counter after the drain and the forwarded chunk (null if dropped).
+   */
+  async coldCounterReattachForTest(afterSequence: number): Promise<{
+    liveSequenceAfterDrain: number | undefined;
+    postRestart: { sequence: number; body: string } | null;
+  }> {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    const streamId = this["_resumableStream"].start(requestId);
+    const backlog = ["a", "b", "c"].map((delta) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta })
+    );
+    for (const body of backlog) {
+      this["_resumableStream"].storeChunk(streamId, body);
+    }
+    this["_resumableStream"].flushBuffer();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, stream_id, status, started_at)
+      VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
+    `;
+    this["_agentToolLiveSequences"].delete(runId);
+
+    const stream = (await this.tailAgentToolRun(runId, {
+      afterSequence
+    })) as unknown as ReadableStream<Uint8Array>;
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const readLine = async (timeoutMs: number): Promise<string | null> => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const nl = buffer.indexOf("\n");
+        if (nl >= 0) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          if (line) return line;
+          continue;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return null;
+        const next = await Promise.race([
+          reader.read(),
+          new Promise<"timeout">((resolve) =>
+            setTimeout(() => resolve("timeout"), remaining)
+          )
+        ]);
+        if (next === "timeout" || next.done) return null;
+        buffer += decoder.decode(next.value, { stream: true });
+      }
+    };
+    for (let i = afterSequence + 1; i < backlog.length; i++) {
+      if ((await readLine(2000)) === null) break;
+    }
+    const deadline = Date.now() + 500;
+    while (
+      this["_agentToolLiveSequences"].get(runId) !== backlog.length &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const liveSequenceAfterDrain = this["_agentToolLiveSequences"].get(runId);
+
+    const postBody = JSON.stringify({
+      type: "text-delta",
+      id: "t",
+      delta: "post-restart"
+    });
+    this.broadcast(
+      JSON.stringify({
+        type: "cf_agent_use_chat_response",
+        id: requestId,
+        body: postBody,
+        done: false
+      })
+    );
+    const postLine = await readLine(500);
+    await reader.cancel();
+    return {
+      liveSequenceAfterDrain,
+      postRestart:
+        postLine === null
+          ? null
+          : (JSON.parse(postLine) as { sequence: number; body: string })
+    };
+  }
+
+  /**
+   * A warm run that streamed a chunk too large to store, then a tail
+   * re-attaching while a stored chunk is broadcast during its drain, followed
+   * by another oversized chunk and a stored one. Returns what the tail
+   * forwarded (oversized deltas summarized).
+   */
+  async skippedChunkReattachForTest(): Promise<
+    Array<{ sequence: number; delta: string; unstored: boolean }>
+  > {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    const streamId = this["_resumableStream"].start(requestId);
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, stream_id, status, started_at)
+      VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
+    `;
+    this["_agentToolLiveSequences"].set(runId, 0);
+    const broadcast = (body: string) =>
+      this.broadcast(
+        JSON.stringify({
+          type: "cf_agent_use_chat_response",
+          id: requestId,
+          body,
+          done: false
+        })
+      );
+    const send = (body: string) => {
+      this["_resumableStream"].storeChunk(streamId, body);
+      broadcast(body);
+    };
+    const delta = (value: string) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta: value });
+    const oversized = delta("x".repeat(1_900_000));
+
+    send(delta("a"));
+    send(delta("b"));
+    send(oversized);
+    this["_resumableStream"].storeChunk(streamId, delta("c"));
+    this["_resumableStream"].flushBuffer();
+
+    const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
+    broadcast(delta("c"));
+    const reader = (
+      (await tail) as unknown as ReadableStream<Uint8Array>
+    ).getReader();
+    send(oversized);
+    send(delta("d"));
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const deadline = Date.now() + 500;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), remaining)
+        )
+      ]);
+      if (next === "timeout" || next.done) break;
+      buffer += decoder.decode(next.value, { stream: true });
+    }
+    await reader.cancel();
+    this["_agentToolLiveSequences"].delete(runId);
+    return buffer
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const chunk = JSON.parse(line) as AgentToolStoredChunk;
+        const { delta: value } = JSON.parse(chunk.body) as { delta: string };
+        return {
+          sequence: chunk.sequence,
+          delta: value.length > 10 ? "<oversized>" : value,
+          unstored: chunk.unstoredId !== undefined
+        };
+      });
+  }
+
+  /**
+   * A running run with a cold live counter (as after a restart) and a stored
+   * backlog 0..2, tailed while the recovered turn stores and broadcasts a new
+   * chunk after the drain read its snapshot. Returns the forwarded sequences
+   * and the new chunk (null if dropped).
+   */
+  async broadcastDuringDrainForTest(): Promise<{
+    drained: number[];
+    postRestart: { sequence: number; body: string } | null;
+  }> {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    const streamId = this["_resumableStream"].start(requestId);
+    const backlog = ["a", "b", "c"].map((delta) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta })
+    );
+    for (const body of backlog) {
+      this["_resumableStream"].storeChunk(streamId, body);
+    }
+    this["_resumableStream"].flushBuffer();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, stream_id, status, started_at)
+      VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
+    `;
+    this["_agentToolLiveSequences"].delete(runId);
+
+    const self = this as unknown as {
+      getAgentToolChunks: (
+        runId: string,
+        options?: { afterSequence?: number }
+      ) => Promise<AgentToolStoredChunk[]>;
+    };
+    const original = self.getAgentToolChunks;
+    let reached!: () => void;
+    const afterSnapshot = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    self.getAgentToolChunks = async (id, options) => {
+      const chunks = await original.call(this, id, options);
+      reached();
+      await gate;
+      return chunks;
+    };
+
+    try {
+      const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
+      await afterSnapshot;
+      const postBody = JSON.stringify({
+        type: "text-delta",
+        id: "t",
+        delta: "post-restart"
+      });
+      this["_resumableStream"].storeChunk(streamId, postBody);
+      this.broadcast(
+        JSON.stringify({
+          type: "cf_agent_use_chat_response",
+          id: requestId,
+          body: postBody,
+          done: false
+        })
+      );
+      release();
+
+      const reader = (
+        (await tail) as unknown as ReadableStream<Uint8Array>
+      ).getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const deadline = Date.now() + 500;
+      for (;;) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        const next = await Promise.race([
+          reader.read(),
+          new Promise<"timeout">((resolve) =>
+            setTimeout(() => resolve("timeout"), remaining)
+          )
+        ]);
+        if (next === "timeout" || next.done) break;
+        buffer += decoder.decode(next.value, { stream: true });
+      }
+      await reader.cancel();
+      const chunks = buffer
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { sequence: number; body: string });
+      return {
+        drained: chunks
+          .filter((chunk) => chunk.body !== postBody)
+          .map((chunk) => chunk.sequence),
+        postRestart: chunks.find((chunk) => chunk.body === postBody) ?? null
+      };
+    } finally {
+      release();
+      self.getAgentToolChunks = original;
+      this["_agentToolLiveSequences"].delete(runId);
+    }
+  }
+
+  /**
+   * A warm run that already broadcast a progress frame, then a tail attaching
+   * while a progress frame and a chunk (stored before the attach) are
+   * broadcast during its drain. Returns every body the tail forwarded.
+   */
+  async progressDuringDrainForTest(): Promise<string[]> {
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    this["_ensureAgentToolChildRunTable"]();
+    const streamId = this["_resumableStream"].start(requestId);
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, stream_id, status, started_at)
+      VALUES (${runId}, ${requestId}, ${streamId}, 'running', ${Date.now()})
+    `;
+    this["_agentToolLiveSequences"].set(runId, 0);
+    const broadcast = (body: string) =>
+      this.broadcast(
+        JSON.stringify({
+          type: "cf_agent_use_chat_response",
+          id: requestId,
+          body,
+          done: false
+        })
+      );
+    const progress = (message: string) =>
+      JSON.stringify({
+        type: "data-agent-progress",
+        transient: true,
+        data: { message }
+      });
+
+    const stored = ["a", "b", "c"].map((delta) =>
+      JSON.stringify({ type: "text-delta", id: "t", delta })
+    );
+    for (const body of stored.slice(0, 2)) {
+      this["_resumableStream"].storeChunk(streamId, body);
+      broadcast(body);
+    }
+    broadcast(progress("before-attach"));
+    this["_resumableStream"].storeChunk(streamId, stored[2]);
+    this["_resumableStream"].flushBuffer();
+
+    const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
+    broadcast(progress("during-drain"));
+    broadcast(stored[2]);
+    const reader = (
+      (await tail) as unknown as ReadableStream<Uint8Array>
+    ).getReader();
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const deadline = Date.now() + 500;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), remaining)
+        )
+      ]);
+      if (next === "timeout" || next.done) break;
+      buffer += decoder.decode(next.value, { stream: true });
+    }
+    await reader.cancel();
+    this["_agentToolLiveSequences"].delete(runId);
+    return buffer
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => (JSON.parse(line) as { body: string }).body);
+  }
+
   private _beforeTurnLog: Array<{
     system: string;
     toolNames: string[];
@@ -699,9 +1346,15 @@ export class ThinkTestAgent extends Think {
   private _beforeTurnMessagesJson: string[] = [];
   private _capturedTurnChannels: string[] = [];
   private _capturedTurnMetadata: (Record<string, unknown> | undefined)[] = [];
+  private _beforeTurnThrowChannel: string | null = null;
 
   override configureChannels() {
     return {
+      web: {
+        kind: "web" as const,
+        ingress: { transport: "websocket" as const },
+        instructions: "WEB MODE"
+      },
       voice: {
         kind: "voice" as const,
         ingress: { transport: "voice" as const },
@@ -723,6 +1376,9 @@ export class ThinkTestAgent extends Think {
   private _turnConfigOverride: TurnConfig | null = null;
   private _stepConfigOverride: StepConfig | null = null;
   private _beforeStepAsyncDelayMs = 0;
+  private _beforeStepGate: Promise<void> | null = null;
+  private _releaseBeforeStepGate: (() => void) | null = null;
+  private _beforeStepGateEntered = false;
   private _lastModelCallSettings: CapturedModelCallSettings | null = null;
   private _reasoningResponse: { response: string; reasoning: string } | null =
     null;
@@ -745,7 +1401,9 @@ export class ThinkTestAgent extends Think {
     return this._agentToolOutputForTest.get(runId);
   }
 
-  override beforeTurn(ctx: TurnContext): TurnConfig | void {
+  override beforeTurn(
+    ctx: TurnContext
+  ): TurnConfig | void | Promise<TurnConfig | void> {
     this._beforeTurnLog.push({
       system: ctx.system,
       toolNames: Object.keys(ctx.tools),
@@ -753,13 +1411,290 @@ export class ThinkTestAgent extends Think {
       body: ctx.body as RpcJsonObject | undefined
     });
     this._beforeTurnMessagesJson.push(JSON.stringify(ctx.messages));
+    const lastUser = [...ctx.messages].reverse().find((m) => m.role === "user");
+    this._turnIdentityLog.push({
+      input: JSON.stringify(lastUser?.content ?? null),
+      requestId: ctx.requestId ?? null,
+      trigger: ctx.trigger ?? null,
+      hasAbortSignal: ctx.abortSignal instanceof AbortSignal,
+      activeRequestId: this.activeTurn?.requestId ?? null,
+      activeTrigger: this.activeTurn?.trigger ?? null,
+      messengerThreadId: ctx.messenger?.thread.id ?? null,
+      getMessengerThreadId: this.getMessengerContext()?.thread.id ?? null
+    });
     this._capturedTurnChannels.push(this.activeChannel?.channelId ?? "");
     this._capturedTurnMetadata.push(this.activeTurnMetadata);
+    if (
+      this._beforeTurnThrowChannel !== null &&
+      this.activeChannel?.channelId === this._beforeTurnThrowChannel
+    ) {
+      throw new Error(`beforeTurn failed on ${this._beforeTurnThrowChannel}`);
+    }
+    if (this._stashInBeforeTurnForTest !== undefined) {
+      this.stash(this._stashInBeforeTurnForTest);
+    }
+    const hold = this._messengerTurnHold;
+    if (hold) {
+      this._messengerTurnHold = undefined;
+      return this._holdMessengerTurn(hold);
+    }
     if (this._turnConfigOverride) return this._turnConfigOverride;
+  }
+
+  private _messengerTurnHold:
+    | { entered: () => void; release: Promise<void> }
+    | undefined;
+  private _heldMessengerThreadId: string | null = null;
+
+  private async _holdMessengerTurn(hold: {
+    entered: () => void;
+    release: Promise<void>;
+  }): Promise<TurnConfig | void> {
+    hold.entered();
+    await hold.release;
+    this._heldMessengerThreadId = this.getMessengerContext()?.thread.id ?? null;
+    if (this._turnConfigOverride) return this._turnConfigOverride;
+  }
+
+  async getHeldMessengerThreadIdForTest(): Promise<string | null> {
+    return this._heldMessengerThreadId;
   }
 
   async getCapturedTurnChannelsForTest(): Promise<string[]> {
     return this._capturedTurnChannels;
+  }
+
+  async getTurnIdentityLogForTest(): Promise<TurnIdentityLogEntry[]> {
+    return this._turnIdentityLog;
+  }
+
+  async getResponseRequestIdsForTest(): Promise<string[]> {
+    return this._responseLog.map((response) => response.requestId);
+  }
+
+  async getActiveTurnForTest(): Promise<ActiveTurn | null> {
+    return this.activeTurn ?? null;
+  }
+
+  private _gatewayForTest: GatewayOptions | undefined;
+  private _fakeAIBinding: Ai | undefined;
+  private _gatewayModels: string[] = [];
+
+  override getGateway(model: string): GatewayOptions | undefined {
+    this._gatewayModels.push(model);
+    return this._gatewayForTest;
+  }
+
+  override getAIBinding(): Ai {
+    if (this._missingAIBindingForTest) {
+      throw new Error("no AI binding in this test");
+    }
+    return this._fakeAIBinding ?? super.getAIBinding();
+  }
+
+  private _stringModelForTest: string | undefined;
+  private _missingAIBindingForTest = false;
+
+  /**
+   * The default model is a string with no AI binding to build it, and
+   * `beforeTurn` supplies its own model: the turn must not resolve the default.
+   */
+  async testChatWithBeforeTurnModelOverrideForTest(): Promise<{
+    result: TestChatResult;
+    gatewayModels: string[];
+  }> {
+    this._stringModelForTest = "@cf/meta/llama-3.1-8b-instruct";
+    this._missingAIBindingForTest = true;
+    this._gatewayModels = [];
+    this._turnConfigOverride = { model: createMockModel("from override") };
+    try {
+      const result = await this.testChat("override the model");
+      return { result, gatewayModels: this._gatewayModels };
+    } finally {
+      this._stringModelForTest = undefined;
+      this._missingAIBindingForTest = false;
+      this._turnConfigOverride = null;
+    }
+  }
+
+  async resolveModelWithAsyncGatewayForTest(): Promise<string> {
+    const gateway = Promise.resolve({ id: "async" });
+    this.getGateway = () => gateway as unknown as GatewayOptions;
+    try {
+      this.resolveModel("@cf/meta/llama-3.1-8b-instruct");
+      return "resolved";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      delete (this as { getGateway?: unknown }).getGateway;
+    }
+  }
+
+  /**
+   * #2321: a stamped `createdAt` must survive the recovery continuation that
+   * extends the interrupted assistant message. `continuationMetadata` is
+   * added by the continuation's writer on top of the original stamp.
+   */
+  async testRecoveryExtensionMetadataForTest(
+    continuationMetadata: Record<string, unknown> = { resumed: true }
+  ): Promise<{
+    assistantMessages: number;
+    metadata: string;
+    writerCalls: Array<{ createdAt: number; continuation: boolean }>;
+  }> {
+    const writerCalls: Array<{ createdAt: number; continuation: boolean }> = [];
+    this.messageMetadata = ({ part, continuation }) => {
+      if (part.type !== "start") return undefined;
+      const stamp = { createdAt: writerCalls.length + 1, continuation };
+      writerCalls.push(stamp);
+      return continuation ? { ...stamp, ...continuationMetadata } : stamp;
+    };
+    try {
+      const result = await this.testChatWithStallThenRecover(3, 50);
+      const assistant = (await this.getMessages()).filter(
+        (message) => message.role === "assistant"
+      );
+      return {
+        assistantMessages: result.assistantMessages,
+        metadata: JSON.stringify(assistant.at(-1)?.metadata ?? null),
+        writerCalls
+      };
+    } finally {
+      this.messageMetadata = undefined;
+    }
+  }
+
+  /**
+   * Resolve a string model against a fake AI binding and report what reached
+   * the binding: `run` options on the Workers AI path, or the gateway id on
+   * the catalog gateway path. The fake throws, so no response is parsed.
+   */
+  async resolveModelGatewayForTest(
+    model: string,
+    gateway: GatewayOptions | null
+  ): Promise<{ models: string[]; calls: GatewayCallForTest[] }> {
+    const calls = this._installFakeAIBindingForTest();
+    this._gatewayForTest = gateway ?? undefined;
+    this._gatewayModels = [];
+    const resolved = this.resolveModel(model) as unknown as {
+      doStream(options: { prompt: unknown[] }): Promise<unknown>;
+    };
+    await resolved
+      .doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }]
+      })
+      .catch(() => {});
+    return { models: this._gatewayModels, calls };
+  }
+
+  /** Resolve `model` without a fake binding and report the thrown message. */
+  async resolveModelErrorForTest(model: string): Promise<string | null> {
+    this._fakeAIBinding = undefined;
+    try {
+      this.resolveModel(model);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /** Whether `resolveModel` returns a `LanguageModel` object unchanged. */
+  async resolveModelPassesThroughObjectForTest(): Promise<boolean> {
+    const model = createMockModel("pass-through");
+    return this.resolveModel(model) === model;
+  }
+
+  /**
+   * Run a turn whose `beforeTurn` (or `beforeStep`) returns a string `model`
+   * and report what reached the fake AI binding. The fake throws, so the turn
+   * itself errors after the model is resolved and called.
+   */
+  async runTurnWithStringModelForTest(
+    hook: "beforeTurn" | "beforeStep",
+    model: string
+  ): Promise<{ models: string[]; calls: GatewayCallForTest[] }> {
+    const calls = this._installFakeAIBindingForTest();
+    this._gatewayForTest = undefined;
+    this._gatewayModels = [];
+    if (hook === "beforeTurn") {
+      this._turnConfigOverride = { model };
+    } else {
+      this._stepConfigOverride = { model };
+    }
+    try {
+      await this.runTurn({ input: "hi" });
+    } catch {
+      // The fake binding throws; only the resolved calls matter here.
+    } finally {
+      this._turnConfigOverride = null;
+      this._stepConfigOverride = null;
+    }
+    return { models: this._gatewayModels, calls };
+  }
+
+  private _installFakeAIBindingForTest(): GatewayCallForTest[] {
+    const calls: GatewayCallForTest[] = [];
+    this._fakeAIBinding = {
+      run: async (
+        runModel: string,
+        _inputs: unknown,
+        options?: { gateway?: GatewayOptions }
+      ) => {
+        calls.push({
+          kind: "run",
+          model: runModel,
+          gateway: options?.gateway ?? null
+        });
+        throw new Error("fake AI binding");
+      },
+      gateway: (id: string) => {
+        calls.push({ kind: "gateway", model: null, gateway: { id } });
+        return {
+          run: async () => {
+            throw new Error("fake AI gateway");
+          }
+        };
+      }
+    } as unknown as Ai;
+    return calls;
+  }
+
+  async runConcurrentMessengerTurnsForTest(): Promise<void> {
+    const context = (threadId: string): MessengerContext => ({
+      capabilities: {},
+      kind: "direct-message",
+      messengerId: "fake",
+      provider: "fake",
+      thread: {
+        id: threadId,
+        isDirectMessage: true,
+        providerThreadId: threadId
+      }
+    });
+    let entered!: () => void;
+    const enteredA = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    this._messengerTurnHold = {
+      entered,
+      release: new Promise<void>((resolve) => {
+        release = resolve;
+      })
+    };
+    const turnA = this.chatWithMessengerContext(
+      "from thread a",
+      new TestCollectingCallback(),
+      context("thread-a")
+    );
+    await enteredA;
+    const turnB = this.chatWithMessengerContext(
+      "from thread b",
+      new TestCollectingCallback(),
+      context("thread-b")
+    );
+    release();
+    await Promise.all([turnA, turnB]);
   }
 
   async getCapturedTurnMetadataForTest(): Promise<
@@ -824,8 +1759,49 @@ export class ThinkTestAgent extends Think {
     return this.getMessages();
   }
 
+  /**
+   * Queue continuations, in order, behind a held turn so none of them starts
+   * before the last is admitted.
+   */
+  async runQueuedContinuationsForTest(
+    channels: Array<string | undefined>
+  ): Promise<void> {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queue = (
+      this as unknown as {
+        _turnQueue: {
+          enqueue(id: string, fn: () => Promise<void>): Promise<unknown>;
+        };
+      }
+    )._turnQueue;
+    const blocker = queue.enqueue(crypto.randomUUID(), () => gate);
+    const runs: Promise<unknown>[] = [];
+    for (const channel of channels) {
+      runs.push(this.continueLastTurn(undefined, { channel }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    release();
+    await Promise.all([blocker, ...runs]);
+  }
+
+  async getAutoContinuationChannelForTest(): Promise<string | undefined> {
+    return (
+      this as unknown as { _channelForAutoContinuation(): string | undefined }
+    )._channelForAutoContinuation();
+  }
+
   async resetCapturedTurnChannelsForTest(): Promise<void> {
     this._capturedTurnChannels = [];
+  }
+
+  /** Make `beforeTurn` throw for turns on `channel` (null disables). */
+  async setBeforeTurnThrowChannelForTest(
+    channel: string | null
+  ): Promise<void> {
+    this._beforeTurnThrowChannel = channel;
   }
 
   async setTurnConfigOverride(config: TurnConfig | null): Promise<void> {
@@ -845,6 +1821,41 @@ export class ThinkTestAgent extends Think {
    */
   async setTurnConfigOutputText(): Promise<void> {
     this._turnConfigOverride = { output: Output.text(), activeTools: [] };
+  }
+
+  /** Like `setTurnConfigOutputText`, with an `Output.object` spec. */
+  async setTurnConfigOutputObject(): Promise<void> {
+    this._turnConfigOverride = {
+      output: Output.object({
+        schema: z.object({ answer: z.string() }),
+        name: "Answer"
+      }),
+      activeTools: []
+    };
+  }
+
+  /** Run a wait-mode turn and return its result fields. */
+  async runTurnWaitForTest(
+    input: string,
+    options?: { continuation?: boolean }
+  ): Promise<{
+    status: string;
+    error?: string;
+    outputJson?: string;
+    messageText?: string;
+  }> {
+    const result = await this.runTurn(
+      options?.continuation ? { continuation: true } : { input }
+    );
+    const text = result.message?.parts
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("");
+    return {
+      status: result.status,
+      ...(result.error !== undefined && { error: result.error }),
+      ...("output" in result && { outputJson: JSON.stringify(result.output) }),
+      ...(text !== undefined && { messageText: text })
+    };
   }
 
   /**
@@ -882,6 +1893,10 @@ export class ThinkTestAgent extends Think {
     if (this._beforeStepAsyncDelayMs > 0) {
       await new Promise((r) => setTimeout(r, this._beforeStepAsyncDelayMs));
     }
+    if (this._beforeStepGate) {
+      this._beforeStepGateEntered = true;
+      await this._beforeStepGate;
+    }
     if (this._stepConfigOverride) return this._stepConfigOverride;
   }
 
@@ -895,6 +1910,31 @@ export class ThinkTestAgent extends Think {
 
   async setBeforeStepAsyncDelay(ms: number): Promise<void> {
     this._beforeStepAsyncDelayMs = ms;
+  }
+
+  /**
+   * Arm a promise gate that parks the next `beforeStep` until released. Tests
+   * use it to hold a turn deterministically in flight — instead of racing a
+   * wall-clock delay — while they reset or cancel from outside the turn.
+   */
+  async holdBeforeStepForTest(): Promise<void> {
+    this._beforeStepGateEntered = false;
+    this._beforeStepGate = new Promise((resolve) => {
+      this._releaseBeforeStepGate = resolve;
+    });
+  }
+
+  /** Whether a turn is currently parked inside the armed `beforeStep` gate. */
+  async hasEnteredBeforeStepForTest(): Promise<boolean> {
+    return this._beforeStepGateEntered;
+  }
+
+  /** Release the parked turn (and disarm the gate for later steps). */
+  async releaseBeforeStepForTest(): Promise<void> {
+    const release = this._releaseBeforeStepGate;
+    this._beforeStepGate = null;
+    this._releaseBeforeStepGate = null;
+    release?.();
   }
 
   async resetTurnStateForTest(): Promise<void> {
@@ -978,7 +2018,14 @@ export class ThinkTestAgent extends Think {
     )
       return result;
 
-    const config = this._errorConfig;
+    let config = this._errorConfig;
+    if (config && this._errorAttemptsRemaining != null) {
+      if (this._errorAttemptsRemaining > 0) {
+        this._errorAttemptsRemaining--;
+      } else {
+        config = null;
+      }
+    }
     const stripText = this._stripTextResponseForTest;
     // Per-inference stall gating: if attempt-limited (#1626), only stall while
     // attempts remain (decrement here so the continuation inference streams).
@@ -991,10 +2038,25 @@ export class ThinkTestAgent extends Think {
       }
     }
     const stallAfter = willStall ? this._stallAfterChunks : null;
+    const stallPrefix: unknown[] =
+      willStall && this._stallWithFinalAnswerOnlyForTest
+        ? [
+            { type: "start" },
+            {
+              type: "tool-input-start",
+              toolCallId: "final-answer-1",
+              toolName: "think_final_answer"
+            }
+          ]
+        : [];
     const chunkDelayMs = this._streamChunkDelayMs;
+    const abortAll = () => this.cancelAllChats();
 
     return {
-      toUIMessageStream(options?: { sendReasoning?: boolean }) {
+      toUIMessageStream(options?: {
+        sendReasoning?: boolean;
+        onError?: (error: unknown) => string;
+      }) {
         // `StreamableResult.toUIMessageStream()` returns an `AsyncIterable`
         // (not a `ReadableStream`), so consume it via its async iterator
         // rather than `getReader()`.
@@ -1003,11 +2065,16 @@ export class ThinkTestAgent extends Think {
         )[Symbol.asyncIterator]();
         let chunkCount = 0;
         let shouldThrow = false;
+        let erroredInStream = false;
 
         const wrapped: AsyncIterable<unknown> = {
           [Symbol.asyncIterator]() {
             return {
               async next() {
+                const prefix = stallPrefix.shift();
+                if (prefix !== undefined) {
+                  return { done: false as const, value: prefix };
+                }
                 // Simulate a parked/hung provider: emit `stallAfter` chunks,
                 // then never resolve. The stall watchdog must abort the turn.
                 if (stallAfter != null && chunkCount >= stallAfter) {
@@ -1019,10 +2086,28 @@ export class ThinkTestAgent extends Think {
                 if (chunkDelayMs != null) {
                   await new Promise((r) => setTimeout(r, chunkDelayMs));
                 }
+                if (erroredInStream) {
+                  return { done: true as const, value: undefined };
+                }
                 while (true) {
                   if (shouldThrow && config) {
                     await iterator.return?.();
-                    throw new SimulatedChatError(config.message);
+                    if (config.abortFirst) abortAll();
+                    if (config.inStream) {
+                      erroredInStream = true;
+                      const errorText =
+                        config.error === undefined
+                          ? config.message
+                          : (options?.onError?.(config.error) ??
+                            config.message);
+                      return {
+                        done: false as const,
+                        value: { type: "error", errorText }
+                      };
+                    }
+                    throw (
+                      config.error ?? new SimulatedChatError(config.message)
+                    );
                   }
                   const { done, value } = await iterator.next();
                   if (done) return { done: true as const, value: undefined };
@@ -1075,6 +2160,72 @@ export class ThinkTestAgent extends Think {
     this._resumableStream.flushBuffer();
   }
 
+  /**
+   * Offer a live stream to the connection, which never ACKs, then end the
+   * stream with `close` and broadcast its done frame on the chat channel.
+   */
+  async testEndStreamOfferedWithoutAck(
+    requestId: string,
+    close: "finish" | "complete" | "error"
+  ): Promise<void> {
+    const streamId = this._resumableStream.start(requestId);
+    const [connection] = [...this.getConnections()];
+    if (!connection) {
+      throw new Error(
+        "ThinkTestAgent.testEndStreamOfferedWithoutAck requires a connection"
+      );
+    }
+    // SAFETY: This test-only method drives Think's private resume and
+    // broadcast paths with a real connection returned by this Agent instance.
+    const internals = this as unknown as {
+      _notifyStreamResuming(connection: Connection): void;
+      _broadcastChat(message: Record<string, unknown>): void;
+    };
+    internals._notifyStreamResuming(connection);
+    if (close === "finish") {
+      this._finishResumableStream(streamId);
+      this._resumableStream.finalizePending();
+    } else if (close === "complete") {
+      this._completeResumableStream(streamId);
+    } else {
+      this._errorResumableStream(streamId);
+    }
+    internals._broadcastChat({
+      type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+      id: requestId,
+      done: true,
+      body: ""
+    });
+  }
+
+  /** Emit the real resume notification followed by a terminal broadcast. */
+  async testSendStreamResumingBeforeTerminal(requestId: string): Promise<void> {
+    const streamId = this._resumableStream.start(requestId);
+    const [connection] = [...this.getConnections()];
+    if (!connection) {
+      throw new Error(
+        "ThinkTestAgent.testSendStreamResumingBeforeTerminal requires a connection"
+      );
+    }
+
+    // SAFETY: This test-only method drives Think's private resume path with a
+    // real connection returned by this Agent instance.
+    (
+      this as unknown as {
+        _notifyStreamResuming(connection: Connection): void;
+      }
+    )._notifyStreamResuming(connection);
+    this._resumableStream.complete(streamId);
+    this.broadcast(
+      JSON.stringify({
+        type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+        id: requestId,
+        done: true,
+        body: ""
+      })
+    );
+  }
+
   /** Pair with `testStartResumableStream` — clean up the simulated stream. */
   async testCompleteResumableStream(streamId: string): Promise<void> {
     this._resumableStream.complete(streamId);
@@ -1097,6 +2248,36 @@ export class ThinkTestAgent extends Think {
     )._recordTerminalChatStatus("interrupted", requestId, body);
   }
 
+  /**
+   * Stand in for a child restarted mid-run (#2298): a persisted in-flight
+   * agent-tool run with empty in-memory state, rebound to a recovery turn's
+   * request id, whose chunk is then broadcast.
+   */
+  async broadcastRecoveredAgentToolChunkForTest(
+    eventDelivery: "full" | "terminal"
+  ): Promise<void> {
+    const internals = this as unknown as {
+      _ensureAgentToolChildRunTable(): void;
+      _rebindAgentToolChildRunRequestId(requestId: string): void;
+    };
+    internals._ensureAgentToolChildRunTable();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, status, started_at, event_delivery)
+      VALUES (${crypto.randomUUID()}, 'pre-restart', 'running', ${Date.now()},
+        ${eventDelivery === "terminal" ? "terminal" : null})
+    `;
+    internals._rebindAgentToolChildRunRequestId("recovered-request");
+    this.broadcast(
+      JSON.stringify({
+        type: "cf_agent_use_chat_response",
+        id: "recovered-request",
+        body: JSON.stringify({ type: "text-delta", id: "t", delta: "hi" }),
+        done: false
+      })
+    );
+  }
+
   /** Read the durable terminal record (#1645) so a test can assert it is
    *  cleared when the conversation is cleared. */
   async getPendingChatTerminalForTest(): Promise<{
@@ -1111,13 +2292,7 @@ export class ThinkTestAgent extends Think {
   }
 
   async getLatestStreamStatusForTest(): Promise<string | null> {
-    const streams = this.sql<{ status: string }>`
-      SELECT status
-      FROM cf_ai_chat_stream_metadata
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    return streams[0]?.status ?? null;
+    return this._resumableStream.getAllStreamMetadata()[0]?.status ?? null;
   }
 
   async testChat(message: string): Promise<TestChatResult> {
@@ -1170,11 +2345,13 @@ export class ThinkTestAgent extends Think {
     if (path === "continue") {
       // A non-leaf `targetAssistantId` → benign "conversation_changed" skip
       // that still reaches the `finally`.
-      await this._chatRecoveryContinue({ targetAssistantId: "no-such-leaf" });
+      await this._chatRecoveryContinueDetached({
+        targetAssistantId: "no-such-leaf"
+      });
     } else {
       // No `recoveredRequestId` (avoids the pre-`try` early return) + a non-user
       // leaf (or empty transcript) → benign skip that still reaches `finally`.
-      await this._chatRecoveryRetry({});
+      await this._chatRecoveryRetryDetached({});
     }
     return { before, after: this._readChildRunStatusForTest(runId) };
   }
@@ -1337,29 +2514,9 @@ export class ThinkTestAgent extends Think {
     }
   }
 
-  /**
-   * Emit `afterChunks` chunks then hang the stream forever. With
-   * `chatStreamStallTimeoutMs` set, the inactivity watchdog should abort the
-   * turn and surface a terminal stream error instead of parking indefinitely.
-   */
-  async testChatWithStall(
-    afterChunks: number,
-    timeoutMs: number
-  ): Promise<TestChatResult> {
-    this._stallAfterChunks = afterChunks;
-    this.chatStreamStallTimeoutMs = timeoutMs;
-    // Assert the watchdog → TERMINAL behavior with recovery OFF. (With recovery
-    // on — the Think default — a stall now routes into bounded recovery; see
-    // `testChatWithStallThenRecover`.)
-    const prevRecovery = this.chatRecovery;
-    this.chatRecovery = false;
-    try {
-      return await this.testChat("trigger stall");
-    } finally {
-      this._stallAfterChunks = null;
-      this.chatStreamStallTimeoutMs = 0;
-      this.chatRecovery = prevRecovery;
-    }
+  /** The close outcome recorded on the request's latest chat stream. */
+  async getStreamOutcomeForTest(requestId: string): Promise<string | null> {
+    return this._resumableStream.getOutcome(requestId) ?? null;
   }
 
   /**
@@ -1370,6 +2527,30 @@ export class ThinkTestAgent extends Think {
    * scheduled-continue count, and the recovered transcript so a test can assert
    * the turn recovered. chatRecovery stays at its default (`true`).
    */
+  async armStallOnceForTest(
+    afterChunks: number,
+    timeoutMs: number
+  ): Promise<void> {
+    this._stallAfterChunks = afterChunks;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+  }
+
+  /** Run the queued stall continuation, then disarm the stall. */
+  async runStallContinuationForTest(): Promise<number> {
+    try {
+      const scheduled = recoveryWorkCountForTest(this, "_chatRecoveryContinue");
+      if (scheduled > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      }
+      return scheduled;
+    } finally {
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
   async testChatWithStallThenRecover(
     afterChunks: number,
     timeoutMs: number
@@ -1385,24 +2566,14 @@ export class ThinkTestAgent extends Think {
     this.chatStreamStallTimeoutMs = timeoutMs;
     try {
       const first = await this.testChat("trigger stall then recover");
-      const scheduled = this.sql<{ payload: string }>`
-        SELECT payload FROM cf_agents_schedules
-        WHERE callback = '_chatRecoveryContinue'
-        ORDER BY time ASC LIMIT 1
-      `;
-      const scheduledContinues =
-        this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE callback = '_chatRecoveryContinue'
-        `[0]?.count ?? 0;
-      // Drive the scheduled continuation — this inference streams normally (the
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
+      // Drive the queued continuation — this inference streams normally (the
       // stall budget is exhausted), so the turn completes.
-      if (scheduled[0]) {
-        await (
-          this as unknown as {
-            _chatRecoveryContinue(d: unknown): Promise<void>;
-          }
-        )._chatRecoveryContinue(JSON.parse(scheduled[0].payload));
+      if (scheduledContinues > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
       }
 
       const messages = await this.getMessages();
@@ -1431,6 +2602,631 @@ export class ThinkTestAgent extends Think {
   }
 
   /**
+   * Stall the first inference after `afterChunks` chunks, then report what
+   * recovery did: which callback it scheduled, what `onChatRecovery` saw, and
+   * (after running the scheduled work) the final transcript. `recovery` is what
+   * `onChatRecovery` returns, or `"throw"` to make it throw.
+   */
+  async testStallRecoveryForTest(options: {
+    afterChunks: number;
+    timeoutMs: number;
+    recovery?: ChatRecoveryOptions | "throw";
+    stash?: string;
+    finalAnswerOnly?: boolean;
+  }): Promise<{
+    first: TestChatResult;
+    scheduledContinues: number;
+    scheduledRetries: number;
+    recoveryCalls: ThinkTestAgent["_recoveryCallsForTest"];
+    rolesAfterStall: string[];
+    finalRoles: string[];
+    finalAssistantText: string;
+    finalStreamingParts: number;
+  }> {
+    this._stallAfterChunks = options.afterChunks;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = options.timeoutMs;
+    this._recoveryHookForTest = options.recovery ?? null;
+    this._recoveryCallsForTest = [];
+    this._stashInBeforeTurnForTest = options.stash;
+    this._stallWithFinalAnswerOnlyForTest = options.finalAnswerOnly ?? false;
+    try {
+      const first = await this.testChat("stall recovery");
+      const rolesAfterStall = (await this.getMessages()).map((m) => m.role);
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
+      const scheduledRetries = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryRetry"
+      );
+      this._stashInBeforeTurnForTest = undefined;
+      if (scheduledContinues > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      }
+      if (scheduledRetries > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
+      }
+      const messages = await this.getMessages();
+      const finalAssistant = messages
+        .filter((m) => m.role === "assistant")
+        .at(-1);
+      return {
+        first,
+        scheduledContinues,
+        scheduledRetries,
+        recoveryCalls: this._recoveryCallsForTest,
+        rolesAfterStall,
+        finalRoles: messages.map((m) => m.role),
+        finalAssistantText: (finalAssistant?.parts ?? [])
+          .map((p) => (p.type === "text" ? p.text : ""))
+          .join(""),
+        finalStreamingParts: (finalAssistant?.parts ?? []).filter(
+          (p) => "state" in p && p.state === "streaming"
+        ).length
+      };
+    } finally {
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
+      this.chatStreamStallTimeoutMs = 0;
+      this._recoveryHookForTest = null;
+      this._stashInBeforeTurnForTest = undefined;
+      this._stallWithFinalAnswerOnlyForTest = false;
+    }
+  }
+
+  /** Stall the next inference after `afterChunks` chunks (one attempt only). */
+  /**
+   * #2085: the first inference fails after `afterChunks` chunks (thrown, or as
+   * an in-stream error chunk), and `classifyChatError` returns
+   * `classification` for every error. Pair with
+   * {@link runScheduledRecoveryForTest}, which reads the scheduled delay and
+   * clears this setup.
+   */
+  async armTransientErrorForTest(options: {
+    classification: ChatErrorClassification | undefined;
+    inStream?: boolean;
+    afterChunks?: number;
+    message?: string;
+  }): Promise<void> {
+    this._errorConfig = {
+      afterChunks: options.afterChunks ?? 2,
+      message: options.message ?? "upstream connection reset",
+      inStream: options.inStream
+    };
+    this._errorAttemptsRemaining = 1;
+    this.classifyChatError = () => options.classification;
+  }
+
+  async testChatWithTransientErrorForTest(
+    options: Parameters<ThinkTestAgent["armTransientErrorForTest"]>[0]
+  ): Promise<{
+    first: TestChatResult;
+    scheduledContinues: number;
+    scheduledRetries: number;
+    delaySeconds: number | null;
+    assistantMessages: number;
+    finalAssistantText: string;
+  }> {
+    await this.armTransientErrorForTest(options);
+    const first = await this.testChat("trigger transient error");
+    const recovered = await this.runScheduledRecoveryForTest();
+    const assistant = (await this.getMessages()).filter(
+      (m) => m.role === "assistant"
+    );
+    const finalAssistantText = (assistant.at(-1)?.parts ?? [])
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+    return {
+      first,
+      scheduledContinues: recovered.scheduledContinues,
+      scheduledRetries: recovered.scheduledRetries,
+      delaySeconds: recovered.delaySeconds,
+      assistantMessages: assistant.length,
+      finalAssistantText
+    };
+  }
+
+  /**
+   * An in-stream error with reactive overflow on, classified by a hook that
+   * only answers `"transient"` the first time it is asked.
+   */
+  async testSingleStreamErrorClassificationForTest(): Promise<{
+    classifications: number;
+    error: string | undefined;
+    scheduledContinues: number;
+  }> {
+    await this.armTransientErrorForTest({
+      classification: "transient",
+      inStream: true
+    });
+    let classifications = 0;
+    this.classifyChatError = () =>
+      ++classifications === 1 ? "transient" : "fatal";
+    this.contextOverflow = { reactive: true };
+    try {
+      const first = await this.testChat("trigger transient error");
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
+      return { classifications, error: first.error, scheduledContinues };
+    } finally {
+      this.contextOverflow = undefined;
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
+  /** A submission whose first stream fails transiently, then recovers. */
+  async testTransientSubmissionForTest(): Promise<{
+    afterFailure: string | undefined;
+    final: string | undefined;
+    finalAssistantText: string;
+  }> {
+    await this.armTransientErrorForTest({
+      classification: "transient",
+      inStream: true
+    });
+    const submissionId = `transient-sub-${crypto.randomUUID()}`;
+    await this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: "trigger transient error" }]
+        }
+      ],
+      { submissionId }
+    );
+    const settle = async (done: () => boolean) => {
+      const deadline = Date.now() + 5_000;
+      while (!done() && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+    await settle(
+      () =>
+        recoveryWorkCountForTest(this, "_chatRecoveryContinue") +
+          recoveryWorkCountForTest(this, "_chatRecoveryRetry") >
+        0
+    );
+    await waitForThinkIdleForTest(this);
+    const afterFailure = (await this.inspectSubmission(submissionId))?.status;
+    await this.runScheduledRecoveryForTest();
+    let final: string | undefined;
+    await settle(() => false);
+    final = (await this.inspectSubmission(submissionId))?.status;
+    const finalAssistantText = (
+      (await this.getMessages()).filter((m) => m.role === "assistant").at(-1)
+        ?.parts ?? []
+    )
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+    return { afterFailure, final, finalAssistantText };
+  }
+
+  /** Fail the turn and `failures - 1` recoveries fast; collect each delay. */
+  async collectTransientBackoffForTest(failures: number): Promise<{
+    delays: Array<number | null>;
+    keyed: boolean[];
+    incidentStatuses: string[];
+    finalRoles: string[];
+  }> {
+    await this.armTransientErrorForTest({
+      classification: "transient",
+      inStream: true
+    });
+    this._errorAttemptsRemaining = failures;
+    await this.testChat("trigger transient error");
+    const delays: Array<number | null> = [];
+    const keyed: boolean[] = [];
+    const incidentStatuses: string[] = [];
+    for (let i = 0; i <= failures; i++) {
+      const continues = recoveryWorkCountForTest(this, "_chatRecoveryContinue");
+      const retries = recoveryWorkCountForTest(this, "_chatRecoveryRetry");
+      if (continues === 0 && retries === 0) break;
+      const pending = this.sql<{
+        delay: number | null;
+        idempotency_key: string | null;
+      }>`
+        SELECT json_extract(input, '$.delaySeconds') AS delay, idempotency_key
+        FROM cf_agents_task_runs
+        WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+          AND state IN ('pending', 'waiting')
+        ORDER BY created_at DESC
+        LIMIT 1
+      `[0];
+      delays.push(pending?.delay ?? null);
+      keyed.push(pending?.idempotency_key != null);
+      await runRecoveryWorkForTest(
+        this,
+        continues > 0 ? "_chatRecoveryContinue" : "_chatRecoveryRetry"
+      );
+      const incidents = await this.ctx.storage.list<{ status: string }>({
+        prefix: "cf:chat-recovery:incident:"
+      });
+      incidentStatuses.push(
+        [...incidents.values()].map((incident) => incident.status).join(",") ||
+          "none"
+      );
+    }
+    this._errorConfig = null;
+    this._errorAttemptsRemaining = null;
+    Reflect.deleteProperty(this, "classifyChatError");
+    return {
+      delays,
+      keyed,
+      incidentStatuses,
+      finalRoles: (await this.getMessages()).map((m) => m.role)
+    };
+  }
+
+  async armStallForTest(afterChunks: number, timeoutMs: number): Promise<void> {
+    this._stallAfterChunks = afterChunks;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+  }
+
+  async runScheduledRecoveryForTest(): Promise<{
+    scheduledContinues: number;
+    scheduledRetries: number;
+    delaySeconds: number | null;
+    finalRoles: string[];
+  }> {
+    const delaySeconds =
+      this.sql<{ delay: number | null }>`
+        SELECT json_extract(input, '$.delaySeconds') AS delay
+        FROM cf_agents_task_runs
+        WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        ORDER BY created_at DESC
+        LIMIT 1
+      `[0]?.delay ?? null;
+    const scheduledContinues = recoveryWorkCountForTest(
+      this,
+      "_chatRecoveryContinue"
+    );
+    const scheduledRetries = recoveryWorkCountForTest(
+      this,
+      "_chatRecoveryRetry"
+    );
+    if (scheduledContinues > 0) {
+      await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+    }
+    if (scheduledRetries > 0) {
+      await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
+    }
+    this._stallAfterChunks = null;
+    this._stallAttemptsRemaining = null;
+    this.chatStreamStallTimeoutMs = 0;
+    this._errorConfig = null;
+    this._errorAttemptsRemaining = null;
+    Reflect.deleteProperty(this, "classifyChatError");
+    return {
+      scheduledContinues,
+      scheduledRetries,
+      delaySeconds,
+      finalRoles: (await this.getMessages()).map((m) => m.role)
+    };
+  }
+
+  private async _recoveryIncidentsForTest(): Promise<
+    Array<{
+      status: string;
+      reason?: string;
+      requestId: string;
+      recoveryRootRequestId?: string;
+      transientRetries?: number;
+    }>
+  > {
+    const incidents = await this.ctx.storage.list<{
+      status: string;
+      reason?: string;
+      requestId: string;
+      recoveryRootRequestId?: string;
+      transientRetries?: number;
+    }>({ prefix: "cf:chat-recovery:incident:" });
+    return [...incidents.values()];
+  }
+
+  /**
+   * The stream finishes, then persisting its message fails, under a
+   * classifier that calls every error transient. The failure is past the
+   * stream, so it must stay terminal (a retry would re-run a finished turn).
+   */
+  async testPostStreamPersistFailureForTest(): Promise<{
+    first: TestChatResult;
+    scheduled: number;
+    responses: number;
+    status: string | undefined;
+    streamStates: string[];
+  }> {
+    this.classifyChatError = () => "transient";
+    const self = this as unknown as {
+      _persistAssistantMessageWithCutover(...args: unknown[]): Promise<void>;
+    };
+    const original = self._persistAssistantMessageWithCutover;
+    self._persistAssistantMessageWithCutover = async () => {
+      self._persistAssistantMessageWithCutover = original;
+      throw new Error("simulated persist failure");
+    };
+    this._responseLog = [];
+    const rpcStatus = this._captureRpcTurnStatusForTest();
+    try {
+      const first = await this.testChat("persist fails after the stream");
+      return {
+        first,
+        scheduled:
+          recoveryWorkCountForTest(this, "_chatRecoveryContinue") +
+          recoveryWorkCountForTest(this, "_chatRecoveryRetry"),
+        responses: this._responseLog.length,
+        status: rpcStatus.read(),
+        streamStates: this.sql<{ state: string }>`
+          SELECT state FROM cf_agents_streams
+        `.map((row) => row.state)
+      };
+    } finally {
+      rpcStatus.restore();
+      self._persistAssistantMessageWithCutover = original;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
+  /**
+   * The terminal-status write inside the response hook throws once, before
+   * `onChatResponse` runs. Returns what the live turn delivered, then the
+   * responses after a startup replay of owed hooks.
+   */
+  async testResponseHookBookkeepingFailureForTest(): Promise<{
+    first: TestChatResult;
+    status: string | undefined;
+    liveResponses: string[];
+    replayedResponses: string[];
+  }> {
+    const self = this as unknown as {
+      _recordTerminalChatStatus(...args: unknown[]): Promise<void>;
+      _replayPendingResponseHooks(): Promise<void>;
+    };
+    const original = self._recordTerminalChatStatus;
+    self._recordTerminalChatStatus = async () => {
+      self._recordTerminalChatStatus = original;
+      throw new Error("simulated terminal-status write failure");
+    };
+    this._responseLog = [];
+    const rpcStatus = this._captureRpcTurnStatusForTest();
+    try {
+      const first = await this.testChat("hook bookkeeping fails");
+      const liveResponses = this._responseLog.map((r) => r.status);
+      await self._replayPendingResponseHooks();
+      return {
+        first,
+        status: rpcStatus.read(),
+        liveResponses,
+        replayedResponses: this._responseLog.map((r) => r.status)
+      };
+    } finally {
+      rpcStatus.restore();
+      self._recordTerminalChatStatus = original;
+    }
+  }
+
+  /** Record the status the RPC stream consumer returns for the next turn. */
+  private _captureRpcTurnStatusForTest(): {
+    read(): string | undefined;
+    restore(): void;
+  } {
+    const self = this as unknown as {
+      _streamResultToRpcCallback(
+        ...args: unknown[]
+      ): Promise<{ status: string }>;
+    };
+    const original = self._streamResultToRpcCallback;
+    let status: string | undefined;
+    self._streamResultToRpcCallback = async (...args) => {
+      const result = await original.apply(this, args);
+      status = result.status;
+      return result;
+    };
+    return {
+      read: () => status,
+      restore: () => {
+        self._streamResultToRpcCallback = original;
+      }
+    };
+  }
+
+  /**
+   * One transient-classified failure with a custom setup: `error` is the
+   * failure itself (thrown, or given to the stream's `onError` in-stream),
+   * `abortFirst` aborts the turn right before it fails, and
+   * `failIncidentBegin` makes routing into recovery throw.
+   */
+  async testTransientScenarioForTest(options: {
+    classification: "transient" | "rate_limit" | "structural";
+    inStream: boolean;
+    error?: "api-call-503" | "code-update-reset" | "storage-reset";
+    retryAfter?: string;
+    abortFirst?: boolean;
+    failIncidentBegin?: boolean;
+  }): Promise<{
+    first: TestChatResult;
+    scheduled: number;
+    delaySeconds: number | null;
+    classified: string[];
+  }> {
+    let error: unknown;
+    if (options.error === "api-call-503") {
+      error = Object.assign(new Error("Service Unavailable"), {
+        name: "AI_APICallError",
+        statusCode: 503,
+        isRetryable: true,
+        ...(options.retryAfter
+          ? { responseHeaders: { "retry-after": options.retryAfter } }
+          : {})
+      });
+    } else if (options.error === "code-update-reset") {
+      error = new Error("Durable Object reset because its code was updated.");
+    } else if (options.error === "storage-reset") {
+      error = new Error(
+        "Internal error in Durable Object storage caused object to be reset."
+      );
+    }
+    await this.armTransientErrorForTest({
+      classification: undefined,
+      inStream: options.inStream
+    });
+    if (this._errorConfig) {
+      this._errorConfig.error = error;
+      this._errorConfig.abortFirst = options.abortFirst;
+    }
+    const classified: string[] = [];
+    this.classifyChatError = (err: unknown) => {
+      classified.push(
+        err instanceof Error ? err.name : typeof err === "string" ? err : "?"
+      );
+      if (options.classification !== "structural") {
+        return options.classification;
+      }
+      // A structural classifier: needs the provider error object, not text.
+      return typeof err === "object" &&
+        err !== null &&
+        "statusCode" in err &&
+        err.statusCode === 503
+        ? "transient"
+        : "fatal";
+    };
+    const self = this as unknown as {
+      _beginChatRecoveryIncident(...args: unknown[]): Promise<unknown>;
+    };
+    if (options.failIncidentBegin) {
+      self._beginChatRecoveryIncident = async () => {
+        throw new Error("incident write failed");
+      };
+    }
+    try {
+      const first = await this.testChat("trigger transient scenario");
+      const delaySeconds =
+        this.sql<{ delay: number | null }>`
+          SELECT json_extract(input, '$.delaySeconds') AS delay
+          FROM cf_agents_task_runs
+          WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+          ORDER BY created_at DESC
+          LIMIT 1
+        `[0]?.delay ?? null;
+      return {
+        first,
+        scheduled:
+          recoveryWorkCountForTest(this, "_chatRecoveryContinue") +
+          recoveryWorkCountForTest(this, "_chatRecoveryRetry"),
+        delaySeconds,
+        classified
+      };
+    } finally {
+      Reflect.deleteProperty(this, "_beginChatRecoveryIncident");
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
+  /**
+   * A transient failure schedules a backed-off continuation; the user cancels
+   * the turn during the backoff. The scheduled continuation must not run.
+   */
+  async testCancelDuringBackoffForTest(): Promise<{
+    textBeforeCancel: string;
+    finalText: string;
+    incident: { status: string; reason?: string } | undefined;
+  }> {
+    await this.armTransientErrorForTest({
+      classification: "transient",
+      inStream: true
+    });
+    const assistantText = async () =>
+      (
+        (await this.getMessages()).filter((m) => m.role === "assistant").at(-1)
+          ?.parts ?? []
+      )
+        .map((p) => (p.type === "text" ? p.text : ""))
+        .join("");
+    try {
+      await this.testChat("trigger transient error");
+      const textBeforeCancel = await assistantText();
+      const [scheduled] = await this._recoveryIncidentsForTest();
+      this.cancelChat(
+        scheduled?.recoveryRootRequestId ?? scheduled?.requestId ?? ""
+      );
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        const [incident] = await this._recoveryIncidentsForTest();
+        if (incident?.status !== "scheduled") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+      const [incident] = await this._recoveryIncidentsForTest();
+      return {
+        textBeforeCancel,
+        finalText: await assistantText(),
+        incident: incident && {
+          status: incident.status,
+          reason: incident.reason
+        }
+      };
+    } finally {
+      this._errorConfig = null;
+      this._errorAttemptsRemaining = null;
+      Reflect.deleteProperty(this, "classifyChatError");
+    }
+  }
+
+  /**
+   * Every inference streams a little, then stalls. Each attempt makes
+   * progress, so only the transient counter bounds the loop. Returns how many
+   * recoveries ran before nothing more was scheduled.
+   */
+  async testRepeatedStallAfterProgressForTest(maxRounds: number): Promise<{
+    rounds: number;
+    scheduledAtEnd: number;
+    statuses: string[];
+  }> {
+    this._stallAfterChunks = 3;
+    this._stallAttemptsRemaining = null;
+    this.chatStreamStallTimeoutMs = 50;
+    try {
+      await this.testChat("stall after progress, repeatedly");
+      let rounds = 0;
+      for (; rounds < maxRounds; rounds++) {
+        const continues = recoveryWorkCountForTest(
+          this,
+          "_chatRecoveryContinue"
+        );
+        const retries = recoveryWorkCountForTest(this, "_chatRecoveryRetry");
+        if (continues === 0 && retries === 0) break;
+        await runRecoveryWorkForTest(
+          this,
+          continues > 0 ? "_chatRecoveryContinue" : "_chatRecoveryRetry"
+        );
+      }
+      return {
+        rounds,
+        scheduledAtEnd:
+          recoveryWorkCountForTest(this, "_chatRecoveryContinue") +
+          recoveryWorkCountForTest(this, "_chatRecoveryRetry"),
+        statuses: (await this._recoveryIncidentsForTest()).map(
+          (incident) => incident.status
+        )
+      };
+    } finally {
+      this._stallAfterChunks = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
+  /**
    * #1626 review #3: `TurnConfig.chatStreamStallTimeoutMs` (returned from
    * `beforeTurn`) overrides the instance-level timeout for a SINGLE turn. Here
    * the instance watchdog is OFF (`0`) but the per-turn override arms it — so a
@@ -1449,22 +3245,12 @@ export class ThinkTestAgent extends Think {
     this._stallAttemptsRemaining = 1;
     try {
       const first = await this.testChat("per-turn stall override");
-      const scheduled = this.sql<{ payload: string }>`
-        SELECT payload FROM cf_agents_schedules
-        WHERE callback = '_chatRecoveryContinue'
-        ORDER BY time ASC LIMIT 1
-      `;
-      const scheduledContinues =
-        this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE callback = '_chatRecoveryContinue'
-        `[0]?.count ?? 0;
-      if (scheduled[0]) {
-        await (
-          this as unknown as {
-            _chatRecoveryContinue(d: unknown): Promise<void>;
-          }
-        )._chatRecoveryContinue(JSON.parse(scheduled[0].payload));
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
+      if (scheduledContinues > 0) {
+        await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
       }
       const messages = await this.getMessages();
       const assistant = messages.filter((m) => m.role === "assistant");
@@ -1550,11 +3336,10 @@ export class ThinkTestAgent extends Think {
       const coalesceTimerArmedAfterStall =
         internal._autoContinuation._timer !== null;
       const streamingAssistantCleared = internal._streamingAssistant === null;
-      const scheduledContinues =
-        this.sql<{ count: number }>`
-          SELECT COUNT(*) as count FROM cf_agents_schedules
-          WHERE callback = '_chatRecoveryContinue'
-        `[0]?.count ?? 0;
+      const scheduledContinues = recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      );
       return {
         firstError: first.error,
         scheduledContinues,
@@ -1853,7 +3638,8 @@ export class ThinkTestAgent extends Think {
     this._reasoningResponse = { response, reasoning };
   }
 
-  override getModel(): LanguageModel {
+  override getModel(): ThinkModel {
+    if (this._stringModelForTest) return this._stringModelForTest;
     if (this._inBandErrorResponse) {
       return createInBandErrorMockModel(
         this._inBandErrorResponse.errorText,
@@ -2064,6 +3850,25 @@ export class ThinkTestAgent extends Think {
   async getLastBeforeTurnSystem(): Promise<string | null> {
     const log = this._beforeTurnLog;
     return log.length > 0 ? log[log.length - 1].system : null;
+  }
+
+  /** Insert a fiber-ledger row so `_checkRunFibers` finds it interrupted. */
+  async insertInterruptedFiber(
+    name: string,
+    snapshot?: unknown
+  ): Promise<void> {
+    const id = `fiber-${crypto.randomUUID()}`;
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
+  }
+
+  /** Drive this facet's own fiber-recovery scan, exactly as a real wake would. */
+  async triggerFiberRecovery(): Promise<void> {
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
   }
 }
 
@@ -2437,7 +4242,8 @@ export class ThinkAgentToolParent extends Agent {
     progressBody: string,
     milestoneBody: string,
     chunkDelayMs: number,
-    runId = crypto.randomUUID()
+    runId = crypto.randomUUID(),
+    eventDelivery?: "full" | "terminal"
   ): Promise<{ result: RunAgentToolResult; events: AgentToolEventMessage[] }> {
     this.events = [];
     this.finishes = [];
@@ -2448,9 +4254,54 @@ export class ThinkAgentToolParent extends Agent {
       runId,
       parentToolCallId: "think-tool-call",
       input,
-      inputPreview: input
+      inputPreview: input,
+      ...(eventDelivery ? { eventDelivery } : {})
     });
     return { result, events: this.events };
+  }
+
+  async persistChildMilestoneForTest(
+    runId: string,
+    name: string,
+    data: unknown
+  ): Promise<number> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    return child.persistAgentToolMilestoneForTest(runId, name, data);
+  }
+
+  async failNextChildChunkReadForTest(runId: string): Promise<void> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.failNextAgentToolChunkReadForTest();
+  }
+
+  /** Replay this parent's agent-tool events to a fresh connection. */
+  async replayAgentToolEventsForTest(): Promise<AgentToolEventMessage[]> {
+    const sent: AgentToolEventMessage[] = [];
+    const connection = {
+      id: "replay-probe",
+      send(body: string) {
+        sent.push(JSON.parse(body) as AgentToolEventMessage);
+      }
+    };
+    await (
+      this as unknown as {
+        _replayAgentToolRuns(connection: unknown): Promise<void>;
+      }
+    )._replayAgentToolRuns(connection);
+    return sent;
+  }
+
+  async runThinkChildDetachedTerminalForTest(): Promise<string | null> {
+    try {
+      await this.runAgentTool(ThinkTestAgent, {
+        input: "detached terminal",
+        detached: true,
+        eventDelivery: "terminal"
+      });
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   /**
@@ -2641,6 +4492,25 @@ export class ThinkAgentToolParent extends Agent {
       inspection,
       status: this.getParentAgentToolStatusForTest(runId)
     };
+  }
+
+  /**
+   * A parent that attaches only after the child completed must still find
+   * the child's stored chunks: the child's cutover keeps its rows for the
+   * parent, which the child's next `start()` reclaims.
+   */
+  async readCompletedChildChunksForTest(
+    input: string,
+    runId = crypto.randomUUID()
+  ): Promise<{ status: string; chunks: number }> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.startAgentToolRun(input, { runId });
+    const inspection = await this.waitForTerminalInspectionForTest(
+      child,
+      runId
+    );
+    const chunks = await child.getAgentToolChunks(runId);
+    return { status: inspection.status, chunks: chunks.length };
   }
 
   /**
@@ -3216,13 +5086,14 @@ export class ThinkPropsTestAgent extends Think<
 export class ThinkSessionTestAgent extends Think {
   private _response = "Hello from session agent!";
 
-  override configureSession(session: Session) {
-    return session
-      .withContext("memory", {
+  override configureContext(): ContextConfig[] {
+    return [
+      {
+        label: "memory",
         description: "Important facts learned during conversation.",
         maxTokens: 2000
-      })
-      .withCachedPrompt();
+      }
+    ];
   }
 
   override getModel(): LanguageModel {
@@ -3249,50 +5120,50 @@ export class ThinkSessionTestAgent extends Think {
   }
 
   async getContextBlockContent(label: string): Promise<string | null> {
-    const block = this.session.getContextBlock(label);
+    const block = this.context.getBlock(label);
     return block?.content ?? null;
   }
 
   async getSystemPromptSnapshot(): Promise<string> {
-    return this.session.freezeSystemPrompt();
+    return this.context.freezeSystemPrompt();
   }
 
   async setContextBlock(label: string, content: string): Promise<void> {
-    await this.session.replaceContextBlock(label, content);
+    await this.context.setBlock(label, content);
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const frozenPrompt = await this.session.freezeSystemPrompt();
+    const frozenPrompt = await this.context.freezeSystemPrompt();
     return frozenPrompt || this.getSystemPrompt();
   }
 
   async addDynamicContext(label: string, description?: string): Promise<void> {
-    await this.session.addContext(label, { description });
+    await this.context.addBlock({ label, description });
   }
 
   async removeDynamicContext(label: string): Promise<boolean> {
-    return this.session.removeContext(label);
+    return this.context.removeBlock(label);
   }
 
   async refreshPrompt(): Promise<string> {
-    return this.session.refreshSystemPrompt();
+    return this.context.refreshSystemPrompt();
   }
 
   async getContextLabels(): Promise<string[]> {
-    return this.session.getContextBlocks().map((b) => b.label);
+    return this.context.getBlocks().map((b) => b.label);
   }
 
   async getSessionToolNames(): Promise<string[]> {
-    const tools = await this.session.tools();
+    const tools = await this.context.tools();
     return Object.keys(tools);
   }
 
   async getContextBlockDetails(
     label: string
-  ): Promise<{ writable: boolean; isSkill: boolean } | null> {
-    const block = this.session.getContextBlock(label);
+  ): Promise<{ writable: boolean; isSearchable: boolean } | null> {
+    const block = this.context.getBlock(label);
     if (!block) return null;
-    return { writable: block.writable, isSkill: block.isSkill };
+    return { writable: block.writable, isSearchable: block.isSearchable };
   }
 
   async hostSetContext(label: string, content: string): Promise<void> {
@@ -3345,18 +5216,86 @@ export class ThinkSystemPromptSkillsWarningAgent extends Think {
   }
 }
 
+// Repro for #2165: Agent's context wrapper writes inherited methods onto the
+// concrete prototype. A skills-enabled subclass that keeps Think's default
+// system prompt must not be mistaken for an override.
+function mapReadingSkills() {
+  return [
+    skills.fromManifest({
+      id: "default-prompt-test-skills",
+      fingerprint: "v1",
+      skills: [
+        {
+          name: "map-reading",
+          description: "How to read a map.",
+          body: "Check the scale before measuring distance."
+        }
+      ]
+    })
+  ];
+}
+
+export class ThinkDefaultSystemPromptSkillsAgent extends ThinkSessionTestAgent {
+  override getSkills() {
+    return mapReadingSkills();
+  }
+}
+
+class ThinkInheritedSystemPromptAgent extends ThinkSessionTestAgent {
+  override getSystemPrompt(): string {
+    return "You are an experienced cartographer.";
+  }
+}
+
+export class ThinkInheritedSystemPromptSkillsAgent extends ThinkInheritedSystemPromptAgent {
+  override getSkills() {
+    return mapReadingSkills();
+  }
+}
+
+export class ThinkSystemPromptFieldSkillsAgent extends ThinkSessionTestAgent {
+  override getSkills() {
+    return mapReadingSkills();
+  }
+
+  override getSystemPrompt = () => "You are an experienced cartographer.";
+}
+
+class ThinkClassifierTestAgent extends ThinkSessionTestAgent {
+  override contextOverflow = { reactive: true };
+
+  override getModel(): LanguageModel {
+    return createInBandErrorMockModel("prompt is too long");
+  }
+}
+
+export class ThinkMissingClassifierWarningAgent extends ThinkClassifierTestAgent {}
+
+export class ThinkClassifierMethodAgent extends ThinkClassifierTestAgent {
+  override classifyChatError(): undefined {
+    return undefined;
+  }
+}
+
+export class ThinkInheritedClassifierAgent extends ThinkClassifierMethodAgent {}
+
+export class ThinkClassifierFieldAgent extends ThinkClassifierTestAgent {
+  override classifyChatError = () => undefined;
+}
+
 // ── ThinkAsyncConfigSessionAgent ─────────────────────────────
 // Tests async configureSession — simulates reading config before setup.
 
 export class ThinkAsyncConfigSessionAgent extends Think {
-  override async configureSession(session: Session): Promise<Session> {
+  override async configureContext(): Promise<ContextConfig[]> {
     await new Promise((resolve) => setTimeout(resolve, 10));
-    return session
-      .withContext("memory", {
+    return [
+      {
+        label: "memory",
         description: "Async-configured memory block.",
         maxTokens: 1000
-      })
-      .withCachedPrompt();
+      }
+    ];
   }
 
   override getModel(): LanguageModel {
@@ -3379,16 +5318,16 @@ export class ThinkAsyncConfigSessionAgent extends Think {
   }
 
   async getContextBlockContent(label: string): Promise<string | null> {
-    const block = this.session.getContextBlock(label);
+    const block = this.context.getBlock(label);
     return block?.content ?? null;
   }
 
   async setContextBlock(label: string, content: string): Promise<void> {
-    await this.session.replaceContextBlock(label, content);
+    await this.context.setBlock(label, content);
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const frozenPrompt = await this.session.freezeSystemPrompt();
+    const frozenPrompt = await this.context.freezeSystemPrompt();
     return frozenPrompt || this.getSystemPrompt();
   }
 }
@@ -3467,14 +5406,15 @@ type ConfigInSessionConfig = {
 };
 
 export class ThinkConfigInSessionAgent extends Think<Cloudflare.Env> {
-  override configureSession(session: Session) {
+  override configureContext(): ContextConfig[] {
     const persona =
       this.getConfig<ConfigInSessionConfig>()?.persona || "default persona";
-    return session
-      .withContext("memory", {
+    return [
+      {
+        label: "memory",
         description: `Agent persona: ${persona}`
-      })
-      .withCachedPrompt();
+      }
+    ];
   }
 
   override getModel(): LanguageModel {
@@ -3509,7 +5449,11 @@ export class ThinkConfigInSessionAgent extends Think<Cloudflare.Env> {
 // Extends Think with tools configured for tool integration testing.
 // Uses a mock model that calls the "echo" tool on first invocation.
 
-function createToolCallingMockModel(): LanguageModel {
+/** Create a two-step model that calls `echo` before its final text answer. */
+export function createToolCallingMockModel(
+  toolInput = JSON.stringify({ message: "hello" }),
+  onPrompt?: (prompt: string) => void
+): LanguageModel {
   let callCount = 0;
   return {
     specificationVersion: "v3",
@@ -3522,6 +5466,7 @@ function createToolCallingMockModel(): LanguageModel {
     doStream(options: Record<string, unknown>) {
       callCount++;
       const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      onPrompt?.(JSON.stringify(messages));
       const hasToolResult = messages.some(
         (m: unknown) =>
           typeof m === "object" &&
@@ -3540,7 +5485,7 @@ function createToolCallingMockModel(): LanguageModel {
             controller.enqueue({
               type: "tool-input-delta",
               id: "tc1",
-              delta: JSON.stringify({ message: "hello" })
+              delta: toolInput
             });
             controller.enqueue({ type: "tool-input-end", id: "tc1" });
             // v3 spec also requires an explicit `tool-call` chunk so the
@@ -3549,7 +5494,7 @@ function createToolCallingMockModel(): LanguageModel {
               type: "tool-call",
               toolCallId: "tc1",
               toolName: "echo",
-              input: JSON.stringify({ message: "hello" })
+              input: toolInput
             });
             controller.enqueue({
               type: "finish",
@@ -3647,8 +5592,12 @@ function createAttachReplyMockModel(): LanguageModel {
 
 // Calls the `pauseAction` durable-pause action on the first model step, then
 // emits text on every later step (within the parking turn and on the
-// connection-independent continuation after approval).
-function createDurablePauseMockModel(): LanguageModel {
+// connection-independent continuation after approval). While the latest tool
+// result is still paused, that text (and a reasoning part) describes the
+// pending state, as a real model would.
+function createDurablePauseMockModel(
+  onPrompt?: (prompt: string) => void
+): LanguageModel {
   let callCount = 0;
   return {
     specificationVersion: "v3",
@@ -3661,21 +5610,40 @@ function createDurablePauseMockModel(): LanguageModel {
     doStream(options: Record<string, unknown>) {
       callCount++;
       const messages = (options as { prompt?: unknown[] }).prompt ?? [];
-      const hasToolResult = messages.some(
+      onPrompt?.(JSON.stringify(messages));
+      const toolMessages = messages.filter(
         (m: unknown) =>
           typeof m === "object" &&
           m !== null &&
           (m as Record<string, unknown>).role === "tool"
       );
+      const hasToolResult = toolMessages.length > 0;
+      const pausePending = JSON.stringify(toolMessages.at(-1) ?? "").includes(
+        '"status":"paused"'
+      );
       // Only park when a user explicitly asked for it on this turn — so a
-      // post-resolution continuation (driven by a system note, no fresh user
-      // ask) responds with text instead of re-parking.
-      const userAskedToPause = messages.some((m: unknown) => {
+      // post-resolution continuation (driven by provider-projected framework
+      // context, not a fresh user ask) responds with text instead of re-parking.
+      const hasExecutionOutcomeContext = messages.some((m: unknown) => {
         if (typeof m !== "object" || m === null) return false;
         const mm = m as Record<string, unknown>;
         if (mm.role !== "user") return false;
-        return JSON.stringify(mm.content ?? "").includes("pauseAction");
+        const content = JSON.stringify(mm.content ?? "");
+        return (
+          content.includes("[execute tool]") ||
+          content.includes("[durable action]")
+        );
       });
+      const userAskedToPause =
+        !hasExecutionOutcomeContext &&
+        messages.some((m: unknown) => {
+          if (typeof m !== "object" || m === null) return false;
+          const mm = m as Record<string, unknown>;
+          return (
+            mm.role === "user" &&
+            JSON.stringify(mm.content ?? "").includes("pauseAction")
+          );
+        });
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
@@ -3704,11 +5672,23 @@ function createDurablePauseMockModel(): LanguageModel {
             });
           } else {
             const id = `dp-text-${callCount}`;
+            if (pausePending) {
+              const reasoningId = `dp-reasoning-${callCount}`;
+              controller.enqueue({ type: "reasoning-start", id: reasoningId });
+              controller.enqueue({
+                type: "reasoning-delta",
+                id: reasoningId,
+                delta: "The action is waiting for approval."
+              });
+              controller.enqueue({ type: "reasoning-end", id: reasoningId });
+            }
             controller.enqueue({ type: "text-start", id });
             controller.enqueue({
               type: "text-delta",
               id,
-              delta: "acknowledged"
+              delta: pausePending
+                ? "Once approved, the change will be applied."
+                : "acknowledged"
             });
             controller.enqueue({ type: "text-end", id });
             controller.enqueue({
@@ -3813,6 +5793,136 @@ export class ThinkToolsTestAgent extends Think {
         0
       )
     });
+    if (this._approveParkedInNextStepForTest && ctx.stepNumber > 0) {
+      this._approveParkedInNextStepForTest = false;
+      const [pending] = this._listActionPendingRowsForTest();
+      if (pending) void this.approveExecution(pending.execution_id);
+    }
+    if (this._rejectParkedInNextStepForTest && ctx.stepNumber > 0) {
+      const options = this._rejectParkedInNextStepForTest;
+      this._rejectParkedInNextStepForTest = null;
+      const [pending] = this._listActionPendingRowsForTest();
+      if (pending) {
+        void this.rejectExecution(
+          pending.execution_id,
+          "not now",
+          options
+        ).catch(() => {});
+      }
+    }
+  }
+
+  private _approveParkedInNextStepForTest = false;
+  private _rejectParkedInNextStepForTest: { autoContinue?: boolean } | null =
+    null;
+
+  /** Reject the parked action from `beforeStep` of the step after it parks. */
+  async rejectParkedInNextStepForTest(options: {
+    autoContinue?: boolean;
+  }): Promise<void> {
+    this._rejectParkedInNextStepForTest = options;
+  }
+
+  /**
+   * Approve the parked action from `beforeStep` of the step after it parks,
+   * so the outcome lands while the parking turn is still streaming.
+   */
+  async approveParkedInNextStepForTest(): Promise<void> {
+    this._approveParkedInNextStepForTest = true;
+  }
+
+  /** Keep a resolved pause's connectionless continuation from running. */
+  async holdConnectionlessContinuationForTest(): Promise<void> {
+    (
+      this as unknown as { _queueConnectionlessContinuation(): Promise<void> }
+    )._queueConnectionlessContinuation = () => Promise.resolve();
+  }
+
+  /** Skip the next resolved-pause drop, as a restart right before it would. */
+  async skipNextResolvedPauseDropForTest(): Promise<void> {
+    const self = this as unknown as {
+      _dropGenerationAfterResolvedPause(toolCallId: string): Promise<void>;
+    };
+    const original = self._dropGenerationAfterResolvedPause;
+    self._dropGenerationAfterResolvedPause = async () => {
+      self._dropGenerationAfterResolvedPause = original;
+    };
+  }
+
+  /** Skip the next transcript tool update, as a restart right before it would. */
+  async skipNextToolUpdateForTest(): Promise<void> {
+    const self = this as unknown as {
+      _applyToolUpdateToMessages(update: unknown): Promise<void>;
+    };
+    const original = self._applyToolUpdateToMessages;
+    self._applyToolUpdateToMessages = async () => {
+      self._applyToolUpdateToMessages = original;
+    };
+  }
+
+  /** Keep only the newest `count` messages in memory, as a windowed hydration. */
+  async windowCachedMessagesForTest(count: number): Promise<void> {
+    const self = this as unknown as {
+      _cachedMessages: UIMessage[];
+      _cacheCoversActivePath: boolean;
+    };
+    self._cachedMessages = self._cachedMessages.slice(-count);
+    self._cacheCoversActivePath = false;
+  }
+
+  /** Reconcile and persist a client transcript, as a chat request does. */
+  async persistClientMessagesForTest(messages: UIMessage[]): Promise<void> {
+    await (
+      this as unknown as {
+        _reconcileAndPersistIncoming(
+          messages: UIMessage[],
+          options: {
+            requestId: string;
+            isRegeneration: boolean;
+            isCurrent: () => boolean;
+          }
+        ): Promise<unknown>;
+      }
+    )._reconcileAndPersistIncoming(messages, {
+      requestId: crypto.randomUUID(),
+      isRegeneration: false,
+      isCurrent: () => true
+    });
+  }
+
+  async getDurableMessagesForTest(): Promise<UIMessage[]> {
+    return (await this.session.getHistory()) as UIMessage[];
+  }
+
+  /** Fail the next storage read of `key`. */
+  async failNextStorageGetForTest(key: string): Promise<void> {
+    const storage = this.ctx.storage as unknown as {
+      get(key: string): Promise<unknown>;
+    };
+    const get = storage.get.bind(storage);
+    storage.get = async (requested: string) => {
+      if (requested !== key) return get(requested);
+      storage.get = get;
+      throw new Error("simulated storage read failure");
+    };
+  }
+
+  /** Drop in-memory deferred-pause state, as an eviction would. */
+  async forgetDeferredResolvedPausesForTest(): Promise<void> {
+    const state = this as unknown as {
+      _deferredResolvedPauses: Map<string, unknown>;
+      _deferredResolvedPausesLoad: Promise<void> | undefined;
+    };
+    state._deferredResolvedPauses.clear();
+    state._deferredResolvedPausesLoad = undefined;
+  }
+
+  private _listActionPendingRowsForTest(): Array<{ execution_id: string }> {
+    return (
+      this as unknown as {
+        _listActionPendingRows: () => Array<{ execution_id: string }>;
+      }
+    )._listActionPendingRows();
   }
 
   async getBeforeStepLog(): Promise<
@@ -3827,7 +5937,19 @@ export class ThinkToolsTestAgent extends Think {
 
   override getModel(): LanguageModel {
     if (this._useAttachReplyAction) return createAttachReplyMockModel();
-    if (this._useDurablePauseAction) return createDurablePauseMockModel();
+    if (this._useDurablePauseAction) {
+      return createDurablePauseMockModel((prompt) =>
+        this._durablePausePrompts.push(prompt)
+      );
+    }
+    if (this._repairToolCalls) {
+      return createToolCallingMockModel('```json\n{"message":"repaired"}\n```');
+    }
+    if (this._echoExecuteMode === "validated-output") {
+      return createToolCallingMockModel(undefined, (prompt) =>
+        this._toolPrompts.push(prompt)
+      );
+    }
     return createToolCallingMockModel();
   }
 
@@ -3905,6 +6027,31 @@ export class ThinkToolsTestAgent extends Think {
             this._echoExecuteCount++;
             return `echo: ${message}`;
           }
+        })
+      };
+    }
+    if (mode === "validated-output") {
+      const outputSchema = z.object({
+        rows: z.array(z.object({ id: z.string(), title: z.string() }))
+      });
+      return {
+        echo: tool({
+          description: "List rows",
+          inputSchema: z.object({ message: z.string() }),
+          outputSchema,
+          execute: async () => {
+            this._echoExecuteCount++;
+            return {
+              rows: Array.from({ length: 40 }, (_, i) => ({
+                id: `row-${i}`,
+                title: `Row ${i} `.padEnd(60, "x")
+              }))
+            };
+          },
+          toModelOutput: ({ output }) => ({
+            type: "json",
+            value: outputSchema.parse(output)
+          })
         })
       };
     }
@@ -4129,7 +6276,9 @@ export class ThinkToolsTestAgent extends Think {
     | "sync-iterable"
     | "async-generator"
     | "needs-approval"
-    | "add-messages" = "default";
+    | "add-messages"
+    | "validated-output" = "default";
+  private _toolPrompts: string[] = [];
 
   /** Counts how many times the `echo` tool's `execute` actually runs. */
   private _echoExecuteCount = 0;
@@ -4169,6 +6318,7 @@ export class ThinkToolsTestAgent extends Think {
     | "permission-noop"
     | "attach-then-throw" = "two";
   private _useDurablePauseAction = false;
+  private _durablePausePrompts: string[] = [];
   private _durablePauseApproval: boolean | "predicate-hello" | undefined =
     undefined;
   private _durablePauseIdempotencyKey: string | null = null;
@@ -4192,8 +6342,14 @@ export class ThinkToolsTestAgent extends Think {
       | "async-generator"
       | "needs-approval"
       | "add-messages"
+      | "validated-output"
   ): Promise<void> {
     this._echoExecuteMode = mode;
+  }
+
+  /** Model prompts recorded in `validated-output` mode, as JSON. */
+  async getToolPrompts(): Promise<string[]> {
+    return this._toolPrompts;
   }
 
   /** How many times the `echo` tool's `execute` body actually ran. */
@@ -4253,6 +6409,22 @@ export class ThinkToolsTestAgent extends Think {
 
   async clearResponseLogForTest(): Promise<void> {
     this._responseLog.length = 0;
+  }
+
+  async getResponseStatusesForTest(): Promise<
+    Array<Pick<ChatResponseResult, "status" | "continuation" | "error">>
+  > {
+    return this._responseLog.map(({ status, continuation, error }) => ({
+      status,
+      continuation,
+      error
+    }));
+  }
+
+  private _failContinuationBeforeStream = false;
+
+  async failContinuationBeforeStreamForTest(): Promise<void> {
+    this._failContinuationBeforeStream = true;
   }
 
   async mutateLastResponseAttachmentForTest(): Promise<void> {
@@ -4416,8 +6588,43 @@ export class ThinkToolsTestAgent extends Think {
     this._useDurablePauseAction = false;
   }
 
+  async getDurablePauseModelCallCount(): Promise<number> {
+    return this._durablePausePrompts.length;
+  }
+
+  async waitUntilStableForTest(): Promise<boolean> {
+    return this.waitUntilStable({ timeout: 5_000 });
+  }
+
   async getDurablePauseExecCount(): Promise<number> {
     return this._durablePauseExecCount;
+  }
+
+  /** The serialized prompt of every durable-pause model call, in order. */
+  async getDurablePausePromptsForTest(): Promise<string[]> {
+    return this._durablePausePrompts;
+  }
+
+  async appendMessagesForTest(messages: UIMessage[]): Promise<void> {
+    for (const message of messages) {
+      await this.appendMessageToHistory(message);
+    }
+  }
+
+  /** Simulate compaction removing a durable-pause action's tool part. */
+  async stripDurablePausePartsForTest(): Promise<void> {
+    for (const message of this.messages) {
+      if (message.role !== "assistant") continue;
+      const remaining = message.parts.filter(
+        (part) => part.type !== "tool-pauseAction"
+      );
+      if (remaining.length === message.parts.length) continue;
+      const parts: UIMessage["parts"] =
+        remaining.length > 0
+          ? remaining
+          : [{ type: "text", text: "(summarized)" }];
+      await this.updateMessageInHistory({ ...message, parts });
+    }
   }
 
   /** Compile tools and directly invoke the durable-pause action to park it. */
@@ -4469,9 +6676,10 @@ export class ThinkToolsTestAgent extends Think {
 
   async rejectExecutionForTest(
     executionId: string,
-    reason?: string
+    reason?: string,
+    options?: { autoContinue?: boolean }
   ): Promise<unknown> {
-    return this.rejectExecution(executionId, reason);
+    return this.rejectExecution(executionId, reason, options);
   }
 
   async approveExecutionTwiceForTest(executionId: string): Promise<unknown[]> {
@@ -4588,8 +6796,26 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   private _turnStopCondition: TurnConfig["stopWhen"];
+  private _repairToolCalls = false;
 
-  override beforeTurn(): TurnConfig | void {
+  /** Enables deterministic malformed tool-call repair inside the test agent. */
+  async enableToolCallRepairForTest(): Promise<void> {
+    this._repairToolCalls = true;
+  }
+
+  override beforeTurn(ctx: TurnContext): TurnConfig | void {
+    if (ctx.continuation && this._failContinuationBeforeStream) {
+      throw new Error("continuation failed before streaming");
+    }
+    if (this._repairToolCalls) {
+      return {
+        stopWhen: this._turnStopCondition,
+        repairToolCall: async ({ toolCall }) => ({
+          ...toolCall,
+          input: JSON.stringify({ message: "repaired" })
+        })
+      };
+    }
     if (this._turnStopCondition) {
       return { stopWhen: this._turnStopCondition };
     }
@@ -4734,42 +6960,32 @@ export class ThinkToolsTestAgent extends Think {
     `;
   }
 
-  async triggerFiberRecovery(): Promise<void> {
+  async triggerFiberRecovery(): Promise<{
+    scheduledContinueCount: number;
+    scheduledRetryCount: number;
+  }> {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
+    // Read recovery state synchronously inside the same invocation: an
+    // immediate alarm may consume it after this RPC releases the object.
+    return {
+      scheduledContinueCount: recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      ),
+      scheduledRetryCount: recoveryWorkCountForTest(this, "_chatRecoveryRetry")
+    };
   }
 
   async getScheduledChatRecoveryCountForTest(
     callback = "_chatRecoveryContinue"
   ): Promise<number> {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_schedules WHERE callback = ${callback}
-    `;
-    return rows[0]?.count ?? 0;
+    return recoveryWorkCountForTest(this, callback);
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryRetry'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await (
-      this as unknown as {
-        _chatRecoveryRetry(d: {
-          targetUserId?: string;
-          lastBody?: Record<string, unknown>;
-        }): Promise<void>;
-      }
-    )._chatRecoveryRetry(
-      JSON.parse(rows[0].payload) as {
-        targetUserId?: string;
-        lastBody?: Record<string, unknown>;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
   }
 
   async insertInterruptedStream(
@@ -4779,42 +6995,27 @@ export class ThinkToolsTestAgent extends Think {
     status: "streaming" | "completed" | "error" = "streaming"
   ): Promise<void> {
     const now = Date.now();
+    const state = status === "error" ? "errored" : status;
+    const closedAt = state === "streaming" ? null : now;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${now})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
+              ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
-    for (const chunk of chunks) {
-      const chunkId = `${streamId}-${chunk.index}`;
+    if (chunks.length > 0) {
+      const body = chunks.map((c) => JSON.stringify(c.body)).join(",");
       this.sql`
-        INSERT INTO cf_ai_chat_stream_chunks (id, stream_id, chunk_index, body, created_at)
-        VALUES (${chunkId}, ${streamId}, ${chunk.index}, ${chunk.body}, ${now})
+        INSERT INTO cf_agents_stream_blocks
+          (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+        VALUES (${streamId}, 0, ${chunks[0].index}, ${chunks[chunks.length - 1].index + 1},
+                ${body}, ${now}, ${now})
       `;
     }
   }
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryContinue'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await (
-      this as unknown as {
-        _chatRecoveryContinue(d: {
-          targetAssistantId?: string;
-          lastBody?: Record<string, unknown> | null;
-          lastClientTools?: ClientToolSchema[] | null;
-        }): Promise<void>;
-      }
-    )._chatRecoveryContinue(
-      JSON.parse(rows[0].payload) as {
-        targetAssistantId?: string;
-        lastBody?: Record<string, unknown> | null;
-        lastClientTools?: ClientToolSchema[] | null;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
   }
 
   async getActiveFibers(): Promise<Array<{ id: string; name: string }>> {
@@ -4827,11 +7028,47 @@ export class ThinkToolsTestAgent extends Think {
 // ── ThinkProgrammaticTestAgent ──────────────────────────────
 // Tests saveMessages, continueLastTurn, and body persistence.
 
+/**
+ * A `continueLastTurn` override that delegates to `super`, optionally after a
+ * delay or replacing the status it returns.
+ */
+export class ThinkContinueOverrideTestAgent extends ThinkTestAgent {
+  private _delayBeforeSuperMs = 0;
+  private _forcedStatus: SaveMessagesResult["status"] | null = null;
+
+  async configureContinueOverrideForTest(options: {
+    delayBeforeSuperMs?: number;
+    forcedStatus?: SaveMessagesResult["status"];
+  }): Promise<void> {
+    this._delayBeforeSuperMs = options.delayBeforeSuperMs ?? 0;
+    this._forcedStatus = options.forcedStatus ?? null;
+  }
+
+  protected override async continueLastTurn(
+    body?: Record<string, unknown>,
+    options?: SaveMessagesOptions
+  ): Promise<SaveMessagesResult> {
+    if (this._delayBeforeSuperMs > 0) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, this._delayBeforeSuperMs)
+      );
+    }
+    const result = await super.continueLastTurn(body, options);
+    return this._forcedStatus
+      ? { ...result, status: this._forcedStatus }
+      : result;
+  }
+}
+
 export class ThinkProgrammaticTestAgent extends Think {
   protected static override submissionRecoveryStaleMs = 15 * 60 * 1000;
 
   private _responseLog: ChatResponseResult[] = [];
   private _submissionLog: ThinkSubmissionInspection[] = [];
+  private _submissionSettlementRows = new Map<
+    string,
+    Record<string, string | number | null>
+  >();
   private _workflowEventLog: Array<{
     workflowName: string;
     workflowId: string;
@@ -4841,7 +7078,10 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _capturedTurnContexts: Array<{
     continuation?: boolean;
     body?: RpcJsonObject;
+    channel?: string;
   }> = [];
+  private _waitInSubmissionStatusHook = false;
+  private _submissionStatusHookWaits: string[] = [];
   private _delayedChunks: { chunks: string[]; delayMs: number } | null = null;
   private _throwBeforeTurnError: string | null = null;
   private _submissionStatusDelayMs = 0;
@@ -4854,6 +7094,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     | "submit"
     | "addMessages"
     | "detachedNotify"
+    | "submitThenWait"
     | null = null;
   private _nestedAdmissionAttempted = false;
   private _nestedAdmissionSucceeded = false;
@@ -4888,7 +7129,12 @@ export class ThinkProgrammaticTestAgent extends Think {
         cause: new Error(message)
       });
     }
-    return super.continueLastTurn(body, options);
+    const result = await super.continueLastTurn(body, options);
+    return {
+      requestId: result.requestId,
+      status: result.status,
+      ...(result.error !== undefined && { error: result.error })
+    };
   }
 
   override getModel(): LanguageModel {
@@ -4939,6 +7185,44 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
+    // Capture the real cutover, BEFORE the submission finalizer writes its
+    // ledger outcome. Tests restore exactly this durable crash-window row.
+    const row = this.sql<Record<string, string | number | null>>`
+      SELECT * FROM cf_think_submissions
+      WHERE request_id = ${result.requestId} AND status = 'running'
+    `[0];
+    if (row) this._submissionSettlementRows.set(result.requestId, row);
+  }
+
+  /** Abort the request (not cancelSubmission), after it starts streaming. */
+  async abortSubmissionRequestForTest(requestId: string): Promise<void> {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (this._resumableStream.latestActiveStreamInfoForRequest(requestId)) {
+        this.abortRequest(requestId);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error("Submission request never started streaming");
+  }
+
+  /** Replay startup against the row captured before normal ledger settlement. */
+  async recoverSubmissionSettlementForTest(requestId: string): Promise<void> {
+    await this.drainSubmissionsForTest();
+    await this.drainWorkflowNotificationsForTest();
+    const row = this._submissionSettlementRows.get(requestId);
+    if (!row) throw new Error("Submission settlement snapshot missing");
+    const columns = Object.keys(row);
+    // Column names and values come only from SELECT * on our own SQLite table.
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_think_submissions (${columns.join(", ")})
+       VALUES (${columns.map(() => "?").join(", ")})`,
+      ...Object.values(row)
+    );
+    this._workflowEventLog = [];
+    this._submissionLog = [];
+    await this.recoverSubmissionsForTest();
+    await this.drainWorkflowNotificationsForTest();
   }
 
   override async sendWorkflowEvent(
@@ -4962,15 +7246,41 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
     }
     this._submissionLog.push(result);
+    if (
+      this._waitInSubmissionStatusHook &&
+      ["completed", "aborted", "skipped", "error"].includes(result.status)
+    ) {
+      try {
+        const waited = await this.waitForSubmission(result.submissionId, {
+          timeoutMs: 100
+        });
+        this._submissionStatusHookWaits.push(`resolved:${waited?.status}`);
+      } catch (error) {
+        this._submissionStatusHookWaits.push(
+          `error:${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+  }
+
+  /** Call `waitForSubmission` from `onSubmissionStatus` on terminal statuses. */
+  async waitInSubmissionStatusHookForTest(): Promise<void> {
+    this._waitInSubmissionStatusHook = true;
+  }
+
+  async getSubmissionStatusHookWaitsForTest(): Promise<string[]> {
+    return this._submissionStatusHookWaits;
   }
 
   override async beforeTurn(ctx: TurnContext): Promise<void> {
     if (this._throwBeforeTurnError) {
       throw new Error(this._throwBeforeTurnError);
     }
+    const channel = this.activeTurn?.channel;
     this._capturedTurnContexts.push({
       continuation: ctx.continuation,
-      body: ctx.body as RpcJsonObject | undefined
+      body: ctx.body as RpcJsonObject | undefined,
+      ...(channel !== undefined && { channel })
     });
     if (this._nestedAdmissionMode && !this._nestedAdmissionAttempted) {
       this._nestedAdmissionAttempted = true;
@@ -5018,6 +7328,13 @@ export class ThinkProgrammaticTestAgent extends Think {
           notifySource: "nested-detached-source"
         });
         return;
+      case "submitThenWait": {
+        const submitted = await this.runTurn({ mode: "submit", input: msg });
+        await this.waitForSubmission(submitted.submissionId, {
+          timeoutMs: 200
+        });
+        return;
+      }
     }
   }
 
@@ -5245,6 +7562,20 @@ export class ThinkProgrammaticTestAgent extends Think {
     this._workflowEventFailuresRemaining = count;
   }
 
+  private readonly _serverErrorLog: string[] = [];
+
+  override onError(connectionOrError: unknown, error?: unknown): void {
+    const theError = error ?? connectionOrError;
+    this._serverErrorLog.push(
+      theError instanceof Error ? theError.message : String(theError)
+    );
+  }
+
+  /** Messages of every error reported through `onError`. */
+  async getErrorsForTest(): Promise<string[]> {
+    return this._serverErrorLog;
+  }
+
   async getWorkflowEventsForTest(): Promise<
     Array<{
       workflowName: string;
@@ -5291,6 +7622,15 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async testRunTurnWait(options: RunTurnWait): Promise<TurnResult> {
     return this.runTurn(options);
+  }
+
+  async testRunTurnWaitError(options: RunTurnWait): Promise<string | null> {
+    try {
+      await this.runTurn(options);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   async testRunTurnWaitString(text: string): Promise<TurnResult> {
@@ -5446,37 +7786,42 @@ export class ThinkProgrammaticTestAgent extends Think {
   }> {
     const submissionId = `alarm-owned-${crypto.randomUUID()}`;
     const internal = this as unknown as {
-      _cf_executingScheduleRowId?: string;
-      _drainSubmissions(): Promise<void>;
-      _scheduleSubmissionDrain(): Promise<void>;
+      _cfRunSubmission(payload: { submissionId: string }): Promise<void>;
+      _executeSubmission(row: unknown): Promise<void>;
+      _queueSubmissionRun(submissionId: string): Promise<void>;
     };
-    const originalDrain = internal._drainSubmissions;
+    const originalRun = internal._cfRunSubmission;
+    const originalExecute = internal._executeSubmission;
     let alarmDrainCalls = 0;
     let inlineDrainCalls = 0;
-    internal._drainSubmissions = async () => {
-      if (internal._cf_executingScheduleRowId === undefined) {
-        inlineDrainCalls += 1;
-      } else {
-        alarmDrainCalls += 1;
-      }
+
+    // Probe the two entrypoints directly. The queue callback is the
+    // alarm-owned path; _executeSubmission is the private inline worker,
+    // which submitMessages must never reach on its own.
+    internal._cfRunSubmission = async () => {
+      alarmDrainCalls += 1;
+    };
+    internal._executeSubmission = async () => {
+      inlineDrainCalls += 1;
     };
 
     try {
       const submission = await this.testSubmitMessages("alarm owned", {
         submissionId
       });
-      // A DO alarm may interleave while this RPC awaits. The base Agent sets
-      // _cf_executingScheduleRowId only around an awaited schedule callback,
-      // which distinguishes the correct owner from the old inline starter.
-      for (let attempt = 0; attempt < 20 && alarmDrainCalls === 0; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      // The run is delivered by a platform-scheduled alarm whose firing
+      // latency is not bounded by our timer ticks — give it a generous (~5s)
+      // deadline; the happy path still exits on the first tick after it fires.
+      for (let attempt = 0; attempt < 200 && alarmDrainCalls === 0; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
       }
       return { alarmDrainCalls, inlineDrainCalls, submission };
     } finally {
-      internal._drainSubmissions = originalDrain;
-      // The probe's no-op alarm consumed its schedule row while leaving the
-      // submission pending. Re-arm the real drain for the eventual assertion.
-      await internal._scheduleSubmissionDrain();
+      internal._cfRunSubmission = originalRun;
+      internal._executeSubmission = originalExecute;
+      // The probe's no-op callback consumed the queue item while leaving the
+      // submission pending. Re-queue the real run for the eventual assertion.
+      await internal._queueSubmissionRun(submissionId);
     }
   }
 
@@ -5501,6 +7846,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     submissionId?: string;
     metadata?: Record<string, unknown>;
     messageTexts?: string[];
+    channel?: string;
   }): Promise<{
     submission: ThinkSubmissionInspection | null;
     messages: UIMessage[];
@@ -5550,7 +7896,8 @@ export class ThinkProgrammaticTestAgent extends Think {
         })),
         {
           submissionId,
-          metadata: options?.metadata
+          metadata: options?.metadata,
+          channel: options?.channel
         }
       );
 
@@ -5631,12 +7978,38 @@ export class ThinkProgrammaticTestAgent extends Think {
   async cancelSubmissionForTest(
     submissionId: string,
     reason?: string
-  ): Promise<void> {
-    await this.cancelSubmission(submissionId, reason);
+  ): Promise<CancelSubmissionResult> {
+    return this.cancelSubmission(submissionId, reason);
+  }
+
+  async waitForSubmissionForTest(
+    submissionId: string,
+    options?: { timeoutMs?: number }
+  ): Promise<ThinkSubmissionInspection | null> {
+    return this.waitForSubmission(submissionId, options);
   }
 
   async deleteSubmissionForTest(submissionId: string): Promise<boolean> {
     return this.deleteSubmission(submissionId);
+  }
+
+  async markSubmissionRunningHereForTest(submissionId: string): Promise<void> {
+    (
+      this as unknown as {
+        _submissionAbortControllers: Map<string, AbortController>;
+      }
+    )._submissionAbortControllers.set(submissionId, new AbortController());
+  }
+
+  async setSubmissionRowStatusForTest(
+    submissionId: string,
+    status: ThinkSubmissionStatus
+  ): Promise<void> {
+    this.sql`
+      UPDATE cf_think_submissions
+      SET status = ${status}, completed_at = ${Date.now()}
+      WHERE submission_id = ${submissionId}
+    `;
   }
 
   async deleteSubmissionsForTest(options?: {
@@ -5647,14 +8020,74 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.deleteSubmissions(options);
   }
 
+  /**
+   * Queue a run for every pending submission (rows inserted directly by a
+   * test have none) and wait until the alarm loop has run them all.
+   */
   async drainSubmissionsForTest(): Promise<void> {
-    await this._drainThinkSubmissions();
+    await (
+      this as unknown as { _queuePendingSubmissionRuns: () => Promise<void> }
+    )._queuePendingSubmissionRuns();
+    await this._waitForQueueDrainForTest("_cfRunSubmission");
+  }
+
+  private async _waitForQueueDrainForTest(
+    callback: string,
+    timeoutMs = 10_000
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      // Queue items and any scheduled retries of the same callback.
+      const pending = this.sql<{ c: number }>`
+        SELECT COUNT(*) AS c FROM cf_agents_jobs WHERE fn = ${callback}
+      `[0]?.c;
+      if (!pending) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`queued ${callback} items did not drain in time`);
   }
 
   async recoverSubmissionsForTest(): Promise<void> {
     await (
       this as unknown as { _recoverSubmissionsOnStart: () => Promise<void> }
     )._recoverSubmissionsOnStart();
+  }
+
+  /** Emulate an upgrade from the table definition without cutover columns. */
+  async useLegacySubmissionSchemaForTest(): Promise<void> {
+    this.ctx.storage.sql.exec(
+      "ALTER TABLE cf_think_submissions DROP COLUMN result_status"
+    );
+    this.ctx.storage.sql.exec(
+      "ALTER TABLE cf_think_submissions DROP COLUMN output_json"
+    );
+    // SAFETY: startup's once-per-isolate DDL guard is reset to model a new isolate.
+    (
+      this as unknown as { _submissionTableEnsured: boolean }
+    )._submissionTableEnsured = false;
+  }
+
+  /** Seed legacy terminal evidence or an overflow attempt awaiting its retry. */
+  async seedSubmissionStreamForTest(
+    requestId: string,
+    status: "completed" | "error" | "retry"
+  ): Promise<void> {
+    const streamId = this._startResumableStream(requestId);
+    if (status === "error") this._errorResumableStream(streamId, requestId);
+    else this._completeResumableStream(streamId);
+    if (status === "retry") {
+      this
+        .sql`UPDATE cf_think_submissions SET result_status = 'retry' WHERE request_id = ${requestId}`;
+    }
+  }
+
+  /** Model an accepted retry that crashes before opening its successor stream. */
+  async moveSubmissionRequestForTest(
+    submissionId: string,
+    requestId: string
+  ): Promise<void> {
+    this
+      .sql`UPDATE cf_think_submissions SET request_id = ${requestId} WHERE submission_id = ${submissionId}`;
   }
 
   async resetTurnStateForTest(): Promise<void> {
@@ -5671,8 +8104,34 @@ export class ThinkProgrammaticTestAgent extends Think {
     });
   }
 
+  /** Leave stored chunks for `requestId`, then persist them as recovery does. */
+  async persistOrphanedStreamForTest(
+    requestId: string,
+    messageId: string
+  ): Promise<void> {
+    const internals = this as unknown as {
+      _resumableStream: {
+        start(requestId: string): string;
+        storeChunk(streamId: string, body: string): unknown;
+      };
+      _persistOrphanedStream(streamId: string): Promise<void>;
+    };
+    const streamId = internals._resumableStream.start(requestId);
+    for (const chunk of [
+      { type: "start", messageId },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "recovered" },
+      { type: "text-end", id: "t1" }
+    ]) {
+      internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+    }
+    await internals._persistOrphanedStream(streamId);
+  }
+
   async continueRecoveredChatForTest(requestId: string): Promise<void> {
-    await this._chatRecoveryContinue({ recoveredRequestId: requestId });
+    await this._chatRecoveryContinueDetached({
+      recoveredRequestId: requestId
+    });
   }
 
   /**
@@ -5685,7 +8144,9 @@ export class ThinkProgrammaticTestAgent extends Think {
     requestId: string
   ): Promise<string | null> {
     try {
-      await this._chatRecoveryContinue({ recoveredRequestId: requestId });
+      await this._chatRecoveryContinueDetached({
+        recoveredRequestId: requestId
+      });
       return null;
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
@@ -5696,7 +8157,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     requestId: string,
     delayMs: number
   ): Promise<void> {
-    const continuation = this._chatRecoveryContinue({
+    const continuation = this._chatRecoveryContinueDetached({
       recoveredRequestId: requestId
     });
     await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -5711,6 +8172,108 @@ export class ThinkProgrammaticTestAgent extends Think {
       { recoveredRequestId: requestId },
       { idempotent: true }
     );
+  }
+
+  /** Seed one pending recovered retry through the selected production transport. */
+  async scheduleRecoveredRetryForTest(
+    requestId: string,
+    transport: "tasks" | "legacy-schedule"
+  ): Promise<void> {
+    const data = { recoveredRequestId: requestId };
+    if (transport === "legacy-schedule") {
+      await this.schedule(60, "_chatRecoveryRetry", data, {
+        idempotent: true
+      });
+      return;
+    }
+    const input = {
+      callback: "_chatRecoveryRetry" as const,
+      data,
+      delaySeconds: 60
+    };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, "redefer")
+    );
+  }
+
+  /** Mark matching Task attempts terminal without removing their metadata. */
+  async markScheduledRecoveryTaskTerminalForTest(
+    requestId: string
+  ): Promise<void> {
+    this.sql`
+      UPDATE cf_agents_task_runs
+      SET state = 'completed', next_at = NULL
+      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        AND json_extract(metadata, '$.recoveredRequestId') = ${requestId}
+    `;
+  }
+
+  /** Deliver the pending retry through the production recovery callback. */
+  async runScheduledRecoveryRetryForTest(): Promise<void> {
+    await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
+  }
+
+  async runScheduledRecoveryContinueForTest(): Promise<void> {
+    await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
+  }
+
+  async persistTestMessage(msg: UIMessage): Promise<void> {
+    await this.session.appendMessage(msg);
+  }
+
+  /**
+   * Leave the turn `requestId` as a crash does: its chat fiber row and an
+   * open stream holding `chunks`, then run startup fiber recovery.
+   */
+  async interruptChatTurnForTest(input: {
+    requestId: string;
+    latestMessageId: string;
+    latestMessageRole: "user" | "assistant";
+    latestUserMessageId: string;
+    chunks: Array<Record<string, unknown>>;
+  }): Promise<{ scheduledContinueCount: number; scheduledRetryCount: number }> {
+    const internals = this as unknown as {
+      _resumableStream: {
+        start(requestId: string): string;
+        storeChunk(streamId: string, body: string): unknown;
+        flushBuffer(): void;
+      };
+      _checkRunFibers(): Promise<void>;
+    };
+    const streamId = internals._resumableStream.start(input.requestId);
+    for (const chunk of input.chunks) {
+      internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+    }
+    internals._resumableStream.flushBuffer();
+    const snapshot = {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: input.requestId,
+        continuation: false,
+        latestMessageId: input.latestMessageId,
+        latestMessageRole: input.latestMessageRole,
+        latestUserMessageId: input.latestUserMessageId,
+        startedAt: Date.now()
+      },
+      user: null
+    };
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${`fiber-${crypto.randomUUID()}`},
+              ${`${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${input.requestId}`},
+              ${JSON.stringify(snapshot)}, ${Date.now()})
+    `;
+    await internals._checkRunFibers();
+    return {
+      scheduledContinueCount: recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      ),
+      scheduledRetryCount: recoveryWorkCountForTest(this, "_chatRecoveryRetry")
+    };
   }
 
   async insertSubmissionForTest(options: {
@@ -5763,16 +8326,9 @@ export class ThinkProgrammaticTestAgent extends Think {
     `;
   }
 
-  async recoverWorkflowNotificationsForTest(): Promise<void> {
-    (
-      this as unknown as { _recoverWorkflowNotifications: () => void }
-    )._recoverWorkflowNotifications();
-  }
-
+  /** Wait until the alarm loop has delivered every queued workflow notification. */
   async drainWorkflowNotificationsForTest(): Promise<void> {
-    await (
-      this as unknown as { _drainWorkflowNotifications: () => Promise<void> }
-    )._drainWorkflowNotifications();
+    await this._waitForQueueDrainForTest("_cfDeliverWorkflowNotification");
   }
 
   async insertWorkflowNotificationForTest(options: {
@@ -5782,74 +8338,59 @@ export class ThinkProgrammaticTestAgent extends Think {
     workflowId?: string;
     eventType?: string;
     payload?: unknown;
+    firstFailedAt?: number;
   }): Promise<void> {
-    (
-      this as unknown as { _ensureWorkflowNotificationTable: () => void }
-    )._ensureWorkflowNotificationTable();
-    const now = Date.now();
-    this.sql`
-      INSERT INTO cf_think_workflow_notifications (
-        notification_id, submission_id, workflow_name, workflow_id, event_type,
-        payload_json, attempts, last_error, created_at, updated_at, delivered_at
-      )
-      VALUES (
-        ${options.notificationId},
-        ${options.submissionId},
-        ${options.workflowName ?? "TEST_WORKFLOW"},
-        ${options.workflowId ?? "workflow-1"},
-        ${options.eventType ?? "think-prompt-test"},
-        ${JSON.stringify(options.payload ?? { submissionId: options.submissionId, status: "error" })},
-        0,
-        NULL,
-        ${now},
-        ${now},
-        NULL
-      )
-    `;
+    await this.queue(
+      "_cfDeliverWorkflowNotification",
+      {
+        workflowName: options.workflowName ?? "TEST_WORKFLOW",
+        workflowId: options.workflowId ?? "workflow-1",
+        event: {
+          type: options.eventType ?? "think-prompt-test",
+          payload: options.payload ?? {
+            submissionId: options.submissionId,
+            status: "error"
+          }
+        },
+        ...(options.firstFailedAt !== undefined && {
+          firstFailedAt: options.firstFailedAt
+        })
+      },
+      // Same policy as production pushes: no in-process retries.
+      { id: options.notificationId, retry: { maxAttempts: 1 } }
+    );
   }
 
   async listWorkflowNotificationsForTest(): Promise<
     Array<{
       notificationId: string;
-      submissionId: string;
       workflowName: string;
       workflowId: string;
       eventType: string;
-      payloadJson: string;
-      attempts: number;
-      lastError: string | null;
-      deliveredAt: number | null;
+      payload: unknown;
     }>
   > {
-    (
-      this as unknown as { _ensureWorkflowNotificationTable: () => void }
-    )._ensureWorkflowNotificationTable();
-    return this.sql<{
-      notification_id: string;
-      submission_id: string;
-      workflow_name: string;
-      workflow_id: string;
-      event_type: string;
-      payload_json: string;
-      attempts: number;
-      last_error: string | null;
-      delivered_at: number | null;
-    }>`
-      SELECT notification_id, submission_id, workflow_name, workflow_id,
-             event_type, payload_json, attempts, last_error, delivered_at
-      FROM cf_think_workflow_notifications
-      ORDER BY created_at ASC, notification_id ASC
-    `.map((row) => ({
-      notificationId: row.notification_id,
-      submissionId: row.submission_id,
-      workflowName: row.workflow_name,
-      workflowId: row.workflow_id,
-      eventType: row.event_type,
-      payloadJson: row.payload_json,
-      attempts: row.attempts,
-      lastError: row.last_error,
-      deliveredAt: row.delivered_at
-    }));
+    const items = this.sql<{ id: string; payload: string }>`
+      SELECT id, payload FROM cf_agents_jobs
+      WHERE capability = 'queue' AND fn = '_cfDeliverWorkflowNotification'
+      ORDER BY time ASC
+    `;
+    return items.map((row) => {
+      const envelope = JSON.parse(row.payload) as {
+        payload: {
+          workflowName: string;
+          workflowId: string;
+          event: { type: string; payload?: unknown };
+        };
+      };
+      return {
+        notificationId: row.id,
+        workflowName: envelope.payload.workflowName,
+        workflowId: envelope.payload.workflowId,
+        eventType: envelope.payload.event.type,
+        payload: envelope.payload.event.payload
+      };
+    });
   }
 
   async insertMalformedSubmissionForTest(options: {
@@ -5902,6 +8443,20 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async testContinueLastTurn(): Promise<SaveMessagesResult> {
     return this.continueLastTurn();
+  }
+
+  private _streamStartContinuations: boolean[] = [];
+
+  protected override _startResumableStream(
+    requestId: string,
+    options?: { messageId?: string; continuation?: boolean }
+  ): string {
+    this._streamStartContinuations.push(options?.continuation ?? false);
+    return super._startResumableStream(requestId, options);
+  }
+
+  async getStreamStartContinuationsForTest(): Promise<boolean[]> {
+    return this._streamStartContinuations;
   }
 
   async testContinueLastTurnWithBody(
@@ -6035,6 +8590,46 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.getMessages();
   }
 
+  /** Inspect a submission's stream evidence through the real resume handshake. */
+  async inspectSubmissionStreamEvidenceForTest(requestId: string): Promise<{
+    streamStatus: string | null;
+    resultStatus: string | null;
+    hasActiveStream: boolean;
+    hasActiveRequestStream: boolean;
+    resumeFrames: Array<{ type: string; reason?: string }>;
+  }> {
+    const resumeFrames: Array<{ type: string; reason?: string }> = [];
+    const connection = {
+      id: "submission-evidence-probe",
+      readyState: WebSocket.OPEN,
+      send(message: string) {
+        resumeFrames.push(JSON.parse(message));
+      }
+    };
+    // SAFETY: the real resume driver only needs this open connection's id and
+    // send method on its idle path; the private host method has this signature.
+    const host = this as unknown as {
+      _handleStreamResumeRequest(target: typeof connection): Promise<void>;
+    };
+    await host._handleStreamResumeRequest(connection);
+    return {
+      streamStatus:
+        this._resumableStream.latestStreamInfoForRequest(requestId)?.status ??
+        null,
+      resultStatus:
+        this.sql<{ result_status: string | null }>`
+          SELECT result_status FROM cf_think_submissions
+          WHERE request_id = ${requestId}
+          LIMIT 1
+        `[0]?.result_status ?? null,
+      hasActiveStream: this._resumableStream.hasActiveStream(),
+      hasActiveRequestStream:
+        this._resumableStream.latestActiveStreamInfoForRequest(requestId) !==
+        null,
+      resumeFrames
+    };
+  }
+
   async getResponseLog(): Promise<ChatResponseResult[]> {
     return this._responseLog;
   }
@@ -6048,7 +8643,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   async getCapturedOptions(): Promise<
-    Array<{ continuation?: boolean; body?: RpcJsonObject }>
+    Array<{ continuation?: boolean; body?: RpcJsonObject; channel?: string }>
   > {
     return this._capturedTurnContexts;
   }
@@ -6458,6 +9053,111 @@ export class ThinkRecoveryTestAgent extends Think {
   // `metadata.channel` stamp survives.
   private _capturedTurnChannels: string[] = [];
   private _capturedTurnSystems: string[] = [];
+  private _chatResponses: Array<{
+    requestId: string;
+    status: string;
+    messageId: string;
+    recovered?: boolean;
+  }> = [];
+  private _turnAtReset: { requestId: string; userMessageId?: string } | null =
+    null;
+
+  override onChatResponse(result: ChatResponseResult): void {
+    this._chatResponses.push({
+      requestId: result.requestId,
+      status: result.status,
+      messageId: result.message.id,
+      ...(result.recovered !== undefined && { recovered: result.recovered })
+    });
+  }
+
+  async getChatResponsesForTest(): Promise<
+    Array<{
+      requestId: string;
+      status: string;
+      messageId: string;
+      recovered?: boolean;
+    }>
+  > {
+    return this._chatResponses;
+  }
+
+  /**
+   * Skip the next response hook, as a Durable Object reset right after the
+   * assistant message is persisted would.
+   */
+  async resetBeforeNextResponseHookForTest(): Promise<void> {
+    const self = this as unknown as {
+      _fireResponseHook(result: ChatResponseResult): Promise<void>;
+    };
+    const original = self._fireResponseHook;
+    self._fireResponseHook = async (result) => {
+      self._fireResponseHook = original;
+      this._turnAtReset = {
+        requestId: result.requestId,
+        userMessageId: this.messages
+          .filter((message) => message.role === "user")
+          .at(-1)?.id
+      };
+    };
+    const marker = this as unknown as {
+      _forgetPendingResponseHook(requestId: string): Promise<void>;
+      _responseHooksInFlight: Set<string>;
+    };
+    const forget = marker._forgetPendingResponseHook;
+    marker._forgetPendingResponseHook = async () => {
+      marker._forgetPendingResponseHook = forget;
+      marker._responseHooksInFlight.clear();
+    };
+  }
+
+  /** Re-create the chat fiber the reset left behind, then wake recovery. */
+  async recoverFromResetForTest(): Promise<void> {
+    await this.restoreFiberFromResetForTest();
+    await this.triggerFiberRecovery();
+  }
+
+  /** Re-create the chat fiber the reset left behind, without recovering it. */
+  async restoreFiberFromResetForTest(): Promise<void> {
+    const turn = this._turnAtReset;
+    if (!turn) throw new Error("no reset captured");
+    this._turnAtReset = null;
+    await this.insertInterruptedFiber(
+      `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${turn.requestId}`,
+      {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: turn.requestId,
+          continuation: false,
+          latestMessageId: turn.userMessageId,
+          latestMessageRole: "user",
+          latestUserMessageId: turn.userMessageId,
+          startedAt: Date.now()
+        },
+        user: null
+      }
+    );
+  }
+
+  /** Fail the next final assistant-message persist, as a storage error would. */
+  async failNextAssistantPersistForTest(): Promise<void> {
+    const self = this as unknown as {
+      _persistAssistantMessageWithCutover(...args: unknown[]): Promise<void>;
+    };
+    const original = self._persistAssistantMessageWithCutover;
+    self._persistAssistantMessageWithCutover = async () => {
+      self._persistAssistantMessageWithCutover = original;
+      throw new Error("simulated persist failure");
+    };
+  }
+
+  /** Replay owed response hooks, as the startup durable-work step does. */
+  async replayPendingResponseHooksForTest(): Promise<void> {
+    await (
+      this as unknown as { _replayPendingResponseHooks(): Promise<void> }
+    )._replayPendingResponseHooks();
+  }
 
   // A single per-channel policy (voice) so recovery tests can assert that a
   // recovered turn re-resolves the channel from the persisted user message and
@@ -6691,10 +9391,14 @@ export class ThinkRecoveryTestAgent extends Think {
    *  partial. The recovery budget keys off this counter (not the live message
    *  count), so this is how a test marks "the turn advanced". */
   async bumpRecoveryProgressForTest(): Promise<void> {
-    const self = this as unknown as {
-      _bumpChatRecoveryProgress(): Promise<void>;
-    };
-    await self._bumpChatRecoveryProgress();
+    // One explicit credit — the same unit a flushed segment or a forwarded
+    // child chunk adds to the derived marker.
+    this._resumableStream.creditProgress();
+  }
+
+  /** The recovery progress marker as the engine would read it now. */
+  async readProgressMarkerForTest(): Promise<number> {
+    return this._resumableStream.progressMarker();
   }
 
   /** Simulate compaction collapsing the transcript by dropping all assistant
@@ -6732,7 +9436,7 @@ export class ThinkRecoveryTestAgent extends Think {
       self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
     const rawCount = (): number => {
       const rows = this.sql<{ count: number }>`
-        SELECT COUNT(*) as count FROM cf_ai_chat_stream_chunks
+        SELECT COALESCE(MAX(seq_to), 0) as count FROM cf_agents_stream_blocks
         WHERE stream_id = ${streamId}
       `;
       return rows[0]?.count ?? 0;
@@ -6770,7 +9474,7 @@ export class ThinkRecoveryTestAgent extends Think {
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
     const read = async (): Promise<number> =>
-      (await this.ctx.storage.get<number>("cf:chat-recovery:progress")) ?? 0;
+      this._resumableStream.progressMarker();
 
     const start = await read();
     const streamId = self._resumableStream.start("req-progress-immunity");
@@ -6822,7 +9526,7 @@ export class ThinkRecoveryTestAgent extends Think {
     };
     self._lastAgentToolStreamProgressAt = 0;
     const read = async (): Promise<number> =>
-      (await this.ctx.storage.get<number>("cf:chat-recovery:progress")) ?? 0;
+      this._resumableStream.progressMarker();
     const start = await read();
     const bodies = Array.from({ length: chunks }, (_, i) => ({
       body: `chunk-${i}`
@@ -6865,7 +9569,6 @@ export class ThinkRecoveryTestAgent extends Think {
     error?: string;
   }> {
     this._rejectPrefill = true;
-    this.chatRecovery = false;
     const result = await this.continueLastTurn();
     return {
       status: result.status,
@@ -6902,15 +9605,14 @@ export class ThinkRecoveryTestAgent extends Think {
   /**
    * Drive a real chat request through `_handleChatRequest` that fails before
    * the stream starts (a `beforeTurn` throw stands in for a message
-   * reconciliation/persist failure). Recovery is disabled so the error reaches
-   * the outer catch instead of being intercepted by the recovery fiber.
+   * reconciliation or persistence failure). The recovery fiber must propagate
+   * the error to the outer request handler.
    */
   async simulatePreStreamChatFailureForTest(input: {
     requestId: string;
     userText: string;
     error: string;
   }): Promise<void> {
-    this.chatRecovery = false;
     this._throwBeforeTurnMessage = input.error;
     const connection = { id: "c-prestream", send() {} };
     const event = {
@@ -7145,13 +9847,14 @@ export class ThinkRecoveryTestAgent extends Think {
             requestId: string;
             streamId: string;
             partialParts: unknown[];
-            targetAssistantId?: string;
+            persistPartial: () => Promise<string | undefined>;
           }): Promise<string>;
         }
       )._routeStallToBoundedRecovery({
         requestId,
         streamId: "stall-stream",
-        partialParts: []
+        partialParts: [],
+        persistPartial: async () => undefined
       });
     } finally {
       (
@@ -7202,6 +9905,7 @@ export class ThinkRecoveryTestAgent extends Think {
     seedRunningSubmission?: boolean;
     maxAttempts?: number;
     terminalMessage?: string;
+    seedMessengerDelivery?: boolean;
   }): Promise<{
     threw: boolean;
     exhaustedContexts: number;
@@ -7209,6 +9913,7 @@ export class ThinkRecoveryTestAgent extends Think {
     terminalBroadcast: string | undefined;
     incidentStatus: string | undefined;
     submissionStatus: string | null;
+    messengerOutcome?: string | null;
   }> {
     const maxAttempts = input.maxAttempts ?? 5;
     const terminalMessage =
@@ -7246,6 +9951,15 @@ export class ThinkRecoveryTestAgent extends Think {
           ${JSON.stringify([])}, NULL, NULL, ${now}, ${now}, ${now}, NULL
         )
       `;
+    }
+
+    const messengerKey = `cf_think_messenger_recovery:${begun.incidentId}`;
+    if (input.seedMessengerDelivery) {
+      await this.ctx.storage.put(messengerKey, {
+        messengerId: "fake",
+        threadId: "fake:thread",
+        partialText: ""
+      });
     }
 
     let terminalBroadcast: string | undefined;
@@ -7326,7 +10040,16 @@ export class ThinkRecoveryTestAgent extends Think {
       exhaustedReason: captured[0]?.reason,
       terminalBroadcast,
       incidentStatus: [...incidents.values()][0]?.status,
-      submissionStatus: submissionRows[0]?.status ?? null
+      submissionStatus: submissionRows[0]?.status ?? null,
+      ...(input.seedMessengerDelivery && {
+        messengerOutcome: await new Promise((resolve) =>
+          setTimeout(resolve, 50)
+        ).then(
+          async () =>
+            (await this.ctx.storage.get<{ outcome?: string }>(messengerKey))
+              ?.outcome ?? null
+        )
+      })
     };
   }
 
@@ -7468,17 +10191,7 @@ export class ThinkRecoveryTestAgent extends Think {
     chunkCount: number;
     text: string;
   } | null> {
-    const streams = this.sql<{
-      id: string;
-      request_id: string;
-      status: "streaming" | "completed" | "error";
-    }>`
-      SELECT id, request_id, status
-      FROM cf_ai_chat_stream_metadata
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    const stream = streams[0];
+    const stream = this._resumableStream.getAllStreamMetadata()[0] ?? null;
     if (!stream) return null;
 
     // Use ResumableStream.getStreamChunks so packed segment rows are unpacked
@@ -7507,7 +10220,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
     return {
       requestId: stream.request_id,
-      status: stream.status,
+      status: stream.status as "streaming" | "completed" | "error",
       chunkCount: chunks.length,
       text
     };
@@ -7543,40 +10256,42 @@ export class ThinkRecoveryTestAgent extends Think {
     targetUserId?: string;
     lastBody?: Record<string, unknown>;
   }): Promise<void> {
-    await this._chatRecoveryRetry(options);
+    await this._chatRecoveryRetryDetached(options);
   }
 
   async runScheduledRecoveryRetryForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryRetry'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await this._chatRecoveryRetry(
-      JSON.parse(rows[0].payload) as {
-        targetUserId?: string;
-        lastBody?: Record<string, unknown>;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryRetry");
+  }
+
+  /**
+   * Look up origin ids for the recovery successor from inside an open recovery
+   * scope, and for an unrelated request concurrently from outside it (#2280).
+   */
+  async probeRecoveryOriginScopeForTest(ids: string[]): Promise<{
+    successor: string[] | undefined;
+    unrelated: string[] | undefined;
+  }> {
+    const self = this as unknown as {
+      _chatRecoveryOriginIdsScope: {
+        run<R>(store: string[], fn: () => R): R;
+      };
+      _originMessageIdsFor(requestId: string): string[] | undefined;
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const scoped = self._chatRecoveryOriginIdsScope.run(ids, async () => {
+      await gate;
+      return self._originMessageIdsFor("successor");
+    });
+    const unrelated = self._originMessageIdsFor("unrelated");
+    release();
+    return { successor: await scoped, unrelated };
   }
 
   async runScheduledRecoveryContinueForTest(): Promise<void> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryContinue'
-      ORDER BY time ASC
-      LIMIT 1
-    `;
-    if (!rows[0]) return;
-    await this._chatRecoveryContinue(
-      JSON.parse(rows[0].payload) as {
-        targetAssistantId?: string;
-        lastBody?: Record<string, unknown> | null;
-        lastClientTools?: ClientToolSchema[] | null;
-      }
-    );
+    await runRecoveryWorkForTest(this, "_chatRecoveryContinue");
   }
 
   async setRequestContextForTest(
@@ -7626,15 +10341,21 @@ export class ThinkRecoveryTestAgent extends Think {
     status: "streaming" | "completed" | "error" = "streaming"
   ): Promise<void> {
     const now = Date.now();
+    const state = status === "error" ? "errored" : status;
+    const closedAt = state === "streaming" ? null : now;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${now})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
+              ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
-    for (const chunk of chunks) {
-      const chunkId = `${streamId}-${chunk.index}`;
+    if (chunks.length > 0) {
+      const body = chunks.map((c) => JSON.stringify(c.body)).join(",");
       this.sql`
-        INSERT INTO cf_ai_chat_stream_chunks (id, stream_id, chunk_index, body, created_at)
-        VALUES (${chunkId}, ${streamId}, ${chunk.index}, ${chunk.body}, ${now})
+        INSERT INTO cf_agents_stream_blocks
+          (stream_id, block, seq_from, seq_to, body, created_at, updated_at)
+        VALUES (${streamId}, 0, ${chunks[0].index}, ${chunks[chunks.length - 1].index + 1},
+                ${body}, ${now}, ${now})
       `;
     }
   }
@@ -7642,12 +10363,7 @@ export class ThinkRecoveryTestAgent extends Think {
   async getScheduledChatRecoveryCountForTest(
     callback = "_chatRecoveryContinue"
   ): Promise<number> {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count
-      FROM cf_agents_schedules
-      WHERE callback = ${callback}
-    `;
-    return rows[0]?.count ?? 0;
+    return recoveryWorkCountForTest(this, callback);
   }
 
   /** Insert a stream-metadata row aged `ageMs` in the past (for cleanup tests). */
@@ -7659,18 +10375,18 @@ export class ThinkRecoveryTestAgent extends Think {
   ): Promise<void> {
     const createdAt = Date.now() - ageMs;
     const completedAt = status === "streaming" ? null : createdAt + 1000;
+    const state = status === "error" ? "errored" : status;
     this.sql`
-      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at, completed_at)
-      VALUES (${streamId}, ${requestId}, ${status}, ${createdAt}, ${completedAt})
+      INSERT INTO cf_agents_streams
+        (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
+              0, ${createdAt}, ${completedAt ?? createdAt}, ${completedAt})
     `;
   }
 
-  /** Status of a single stream-metadata row, or null if absent. */
+  /** Status of a single stream row, or null if absent. */
   async getStreamStatusForTest(streamId: string): Promise<string | null> {
-    const rows = this.sql<{ status: string }>`
-      SELECT status FROM cf_ai_chat_stream_metadata WHERE id = ${streamId}
-    `;
-    return rows[0]?.status ?? null;
+    return this._resumableStream.getStreamMetadata(streamId)?.status ?? null;
   }
 
   /** Append a chunk to a stream dated `ageMs` in the past (last-activity sweep). */
@@ -7696,11 +10412,9 @@ export class ThinkRecoveryTestAgent extends Think {
     )._startResumableStream(requestId);
   }
 
-  /** Invoke the alarm-driven cleanup callback directly. */
-  async runStreamCleanupForTest(): Promise<void> {
-    await (
-      this as unknown as { _cleanupStreamBuffers(): Promise<void> }
-    )._cleanupStreamBuffers();
+  /** Reclaim leftover streams now, as the next stream start does. */
+  async runStreamCleanupForTest(nowMs?: number): Promise<number> {
+    return this._resumableStream.reclaim(nowMs);
   }
 
   /** Finish a stream via the cleanup-arming wrapper (mirrors a real turn end). */
@@ -7708,43 +10422,6 @@ export class ThinkRecoveryTestAgent extends Think {
     (
       this as unknown as { _completeResumableStream(id: string): void }
     )._completeResumableStream(streamId);
-  }
-
-  /** Arm the cleanup alarm without finishing a stream (leaves no new buffer). */
-  async armStreamCleanupForTest(): Promise<void> {
-    await (
-      this as unknown as { _ensureStreamCleanupScheduled(): Promise<void> }
-    )._ensureStreamCleanupScheduled();
-  }
-
-  /**
-   * The delay (seconds) of the pending cleanup schedule, or null if none.
-   * Locks the arming interval (STREAM_CLEANUP_DELAY_SECONDS) so a regression
-   * that lengthens it back toward the old 24h leak window is caught.
-   */
-  async streamCleanupScheduleDelaySecondsForTest(): Promise<number | null> {
-    const rows = this.sql<{ delayInSeconds: number | null }>`
-      SELECT delayInSeconds
-      FROM cf_agents_schedules
-      WHERE callback = '_cleanupStreamBuffers'
-      LIMIT 1
-    `;
-    return rows[0]?.delayInSeconds ?? null;
-  }
-
-  /**
-   * Backdate any pending cleanup schedule so it is due, then run the REAL
-   * `alarm()` handler. This exercises the production path where `alarm()`
-   * deletes the fired one-shot row after the callback returns — so a re-arm
-   * must create a fresh row to survive (the idempotent-reschedule footgun).
-   */
-  async fireDueCleanupAlarmForTest(): Promise<void> {
-    this.sql`
-      UPDATE cf_agents_schedules
-      SET time = ${Math.floor(Date.now() / 1000) - 1}
-      WHERE callback = '_cleanupStreamBuffers'
-    `;
-    await this.alarm();
   }
 
   async insertInterruptedFiber(
@@ -7758,10 +10435,31 @@ export class ThinkRecoveryTestAgent extends Think {
     `;
   }
 
-  async triggerFiberRecovery(): Promise<void> {
+  async triggerFiberRecovery(): Promise<{
+    scheduledContinueCount: number;
+    scheduledRetryCount: number;
+  }> {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
+    // Read recovery state synchronously inside the same invocation: an
+    // immediate alarm may consume it after this RPC releases the object.
+    return {
+      scheduledContinueCount: recoveryWorkCountForTest(
+        this,
+        "_chatRecoveryContinue"
+      ),
+      scheduledRetryCount: recoveryWorkCountForTest(this, "_chatRecoveryRetry")
+    };
+  }
+
+  async triggerFiberRecoveryWithTransportForTest(
+    callback: string
+  ): Promise<{ tasks: number; schedules: number }> {
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
+    return recoveryTransportCountsForTest(this, callback);
   }
 
   async persistTestMessage(msg: UIMessage): Promise<void> {
@@ -7820,6 +10518,94 @@ export class ThinkRecoveryTestAgent extends Think {
         _rebindAgentToolChildRunRequestId(requestId: string): void;
       }
     )._rebindAgentToolChildRunRequestId(requestId);
+  }
+
+  /**
+   * Seed a chat-turn fiber row for `requestId` (settled when `completed`) and
+   * report whether the recoverable-turn checks count it as recovery evidence.
+   */
+  async chatTurnFiberEvidenceForTest(
+    requestId: string,
+    completed: boolean
+  ): Promise<{ recoverable: boolean; freshEvidence: boolean }> {
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at, completed_at)
+      VALUES (
+        ${`fiber-${crypto.randomUUID()}`},
+        ${`${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`},
+        ${null}, ${now}, ${completed ? now : null}
+      )
+    `;
+    const self = this as unknown as {
+      _hasRecoverableChatTurn(requestId: string): boolean;
+      _hasFreshRecoverableSubmissionEvidence(row: {
+        request_id: string;
+      }): boolean;
+    };
+    return {
+      recoverable: self._hasRecoverableChatTurn(requestId),
+      freshEvidence: self._hasFreshRecoverableSubmissionEvidence({
+        request_id: requestId
+      })
+    };
+  }
+
+  /**
+   * Seed an in-flight child-run row in a table created by an older release
+   * (no `event_delivery` column), with this isolate's ensure not yet run — a
+   * fresh isolate after upgrade whose first child-run access is recovery.
+   */
+  async seedLegacyAgentToolChildRunForTest(
+    runId: string,
+    requestId: string
+  ): Promise<void> {
+    this.sql`
+      CREATE TABLE cf_agent_tool_child_runs (
+        run_id TEXT PRIMARY KEY,
+        request_id TEXT,
+        stream_id TEXT,
+        status TEXT NOT NULL,
+        summary TEXT,
+        error_message TEXT,
+        started_at INTEGER NOT NULL,
+        completed_at INTEGER
+      )
+    `;
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, request_id, status, started_at)
+      VALUES (${runId}, ${requestId}, 'running', ${Date.now()})
+    `;
+  }
+
+  /**
+   * Seed an in-flight `eventDelivery: "terminal"` child-run row, rebind it the
+   * way a recovered turn does, then finalize it the way a settled recovered
+   * turn does. Returns whether the run is still in the terminal-only set.
+   */
+  async terminalOnlyRunAfterRecoveredTurnForTest(
+    runId: string,
+    requestId: string
+  ): Promise<{ afterRebind: boolean; afterFinalize: boolean }> {
+    const self = this as unknown as {
+      _ensureAgentToolChildRunTable(): void;
+      _rebindAgentToolChildRunRequestId(requestId: string): void;
+      _finalizeAgentToolChildRunTailers(runId: string): void;
+      _agentToolTerminalOnlyRuns: Set<string>;
+    };
+    self._ensureAgentToolChildRunTable();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs
+        (run_id, request_id, status, started_at, event_delivery)
+      VALUES (${runId}, 'old-req', 'running', ${Date.now()}, 'terminal')
+    `;
+    self._rebindAgentToolChildRunRequestId(requestId);
+    const afterRebind = self._agentToolTerminalOnlyRuns.has(runId);
+    self._finalizeAgentToolChildRunTailers(runId);
+    return {
+      afterRebind,
+      afterFinalize: self._agentToolTerminalOnlyRuns.has(runId)
+    };
   }
 
   /** Whether this facet has a `cf_agent_tool_child_runs` table at all. */
@@ -7891,8 +10677,418 @@ export class ThinkRecoveryTestAgent extends Think {
     return super.waitUntilStable(options);
   }
 
-  /** Seed a `running` durable submission keyed by `requestId` (== submission id). */
-  async seedRunningSubmissionForTest(requestId: string): Promise<void> {
+  /**
+   * Gate real recovery work at each ownership boundary and run startup ledger
+   * reconciliation there. Only the seed is synthetic; Tasks and turns are real.
+   */
+  async reproduceSubmissionRecoveryHandoffGapForTest(
+    recoveryKind: "retry" | "continue",
+    pauseAt:
+      | "before-acceptance"
+      | "after-acceptance"
+      | "before-completion"
+      | "after-terminal-foreign-stream"
+      | "after-foreign-turn" = "before-acceptance",
+    streamOutcome: "completed" | "error" = "completed"
+  ): Promise<{
+    duringHandoff: string | null;
+    afterCompletion: string | null;
+    requestRebound: boolean;
+    handoffSignals: number;
+    activeChatTasks: number;
+    activeRecoveryTasks: number;
+    terminalStatuses: string[];
+    responseCount: number;
+    error: string | null;
+    foreignTurn?: {
+      submissionId: string;
+      requestId: string;
+      status: string;
+      requestIdAfterForeignTurn: string | null;
+      recoverySettledAfterForeignTurn: boolean;
+      successorQueuedBehindBlocker: boolean;
+      requestIdAtSuccessorAcceptance: string | null;
+      completedRequestId: string | null;
+      responseRequestIds: string[];
+      terminalRequestIds: Array<string | null>;
+    };
+  }> {
+    const submissionId = `handoff-${recoveryKind}-${crypto.randomUUID()}`;
+    const userMessage: UIMessage = {
+      id: `user-${submissionId}`,
+      role: "user",
+      parts: [{ type: "text", text: "Recover this submission" }]
+    };
+    await this.session.appendMessage(userMessage);
+    let targetAssistantId: string | undefined;
+    if (recoveryKind === "continue") {
+      targetAssistantId = `assistant-${submissionId}`;
+      await this.session.appendMessage({
+        id: targetAssistantId,
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial" }]
+      });
+    }
+
+    // SAFETY: this inert fixture reaches Think's private startup/bookkeeping
+    // seams without exposing production test hooks. These are their signatures.
+    const internals = this as unknown as {
+      _turnQueue: TurnQueue;
+      _ensureSubmissionTable(): void;
+      _updateChatRecoveryIncident(
+        incidentId: string | undefined,
+        status: string,
+        reason?: string
+      ): Promise<void>;
+    };
+    internals._ensureSubmissionTable();
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_think_submissions (
+        submission_id, idempotency_key, request_id, stream_id, status,
+        messages_json, metadata_json, error_message, created_at,
+        messages_applied_at, started_at, completed_at
+      ) VALUES (
+        ${submissionId}, NULL, ${submissionId}, NULL, 'running',
+        ${JSON.stringify([userMessage])}, NULL, NULL, ${now},
+        ${now}, ${now}, NULL
+      )
+    `;
+
+    const callback =
+      recoveryKind === "retry"
+        ? ("_chatRecoveryRetry" as const)
+        : ("_chatRecoveryContinue" as const);
+    const data = {
+      incidentId: `incident-${submissionId}`,
+      originalRequestId: submissionId,
+      recoveredRequestId: submissionId,
+      ...(recoveryKind === "retry"
+        ? { targetUserId: userMessage.id }
+        : { targetAssistantId })
+    };
+    if (recoveryKind === "retry") {
+      await this.preScheduleRecoveryRetryForTest(data);
+    } else {
+      await this.preScheduleRecoveryContinueForTest(data);
+    }
+
+    const createGate = () => {
+      let resolve = () => {};
+      const promise = new Promise<void>((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    };
+    const paused = createGate();
+    const release = createGate();
+    const terminal = createGate();
+    const detachedFinished = createGate();
+    const successorQueued = createGate();
+    const releaseQueueBlocker = createGate();
+    const queue = internals._turnQueue;
+    const enqueue = queue.enqueue.bind(queue);
+    const pause = async () => {
+      paused.resolve();
+      await release.promise;
+    };
+    const session = this.session;
+    const getLatestLeaf = session.getLatestLeaf.bind(session);
+    const beforeStep = this.beforeStep.bind(this);
+    const updateIncident = internals._updateChatRecoveryIncident.bind(this);
+    const onSubmissionStatus = this.onSubmissionStatus.bind(this);
+    const onChatResponse = this.onChatResponse.bind(this);
+    const getModel = this.getModel.bind(this);
+    const retryDetached = this._chatRecoveryRetryDetached.bind(this);
+    const continueDetached = this._chatRecoveryContinueDetached.bind(this);
+    let handoffSignals = 0;
+    let responseCount = 0;
+    const terminalStatuses: string[] = [];
+    const responseRequestIds: string[] = [];
+    const terminalRequestIds: Array<string | null> = [];
+    let requestIdAtSuccessorAcceptance: string | null = null;
+    const readSubmissionRequestId = () =>
+      this.sql<{ request_id: string }>`
+        SELECT request_id FROM cf_think_submissions
+        WHERE submission_id = ${submissionId}
+      `[0]?.request_id ?? null;
+    const beforeAcceptance =
+      pauseAt === "before-acceptance" || pauseAt === "after-foreign-turn";
+    let latestLeafReads = 0;
+    session.getLatestLeaf = async () => {
+      const leaf = await getLatestLeaf();
+      latestLeafReads++;
+      if (beforeAcceptance && latestLeafReads === 2) {
+        await pause();
+      }
+      return leaf;
+    };
+    this.beforeStep = async (ctx) => {
+      if (pauseAt === "after-acceptance") await pause();
+      if (pauseAt === "after-foreign-turn" && responseCount === 1) {
+        requestIdAtSuccessorAcceptance = readSubmissionRequestId();
+      }
+      return beforeStep(ctx);
+    };
+    internals._updateChatRecoveryIncident = async (id, status, reason) => {
+      // The successor Task has been removed, but ledger completion has not
+      // started. This is the exact terminal-stream / ledger handoff window.
+      if (
+        (pauseAt === "before-completion" ||
+          pauseAt === "after-terminal-foreign-stream") &&
+        id === data.incidentId &&
+        (status === "completed" || status === "failed")
+      ) {
+        await pause();
+      }
+      return updateIncident(id, status, reason);
+    };
+    this.onSubmissionStatus = async (submission) => {
+      await onSubmissionStatus(submission);
+      if (
+        submission.submissionId === submissionId &&
+        submission.status !== "running"
+      ) {
+        terminalStatuses.push(submission.status);
+        terminalRequestIds.push(submission.requestId ?? null);
+        terminal.resolve();
+      }
+    };
+    this.onChatResponse = async (result) => {
+      responseCount++;
+      responseRequestIds.push(result.requestId);
+      await onChatResponse(result);
+    };
+    if (streamOutcome === "error") {
+      this.getModel = () => createInBandErrorMockModel("handoff stream error");
+    }
+    this._chatRecoveryRetryDetached = async (input, onTurnStarted) => {
+      try {
+        await retryDetached(input, () => {
+          handoffSignals++;
+          onTurnStarted?.();
+        });
+      } finally {
+        detachedFinished.resolve();
+      }
+    };
+    this._chatRecoveryContinueDetached = async (input, onTurnStarted) => {
+      try {
+        await continueDetached(input, () => {
+          handoffSignals++;
+          onTurnStarted?.();
+        });
+      } finally {
+        detachedFinished.resolve();
+      }
+    };
+
+    let recoverySettled = false;
+    const recoveryWork = runQueuedRecoveryTaskForTest(this, callback).then(
+      (result) => {
+        recoverySettled = true;
+        return result;
+      }
+    );
+    try {
+      await paused.promise;
+      // This turn originates outside the paused successor's async context. Let
+      // it finish before resuming the successor's pre-admission leaf read.
+      const foreignResult =
+        pauseAt === "after-foreign-turn"
+          ? await this.saveMessages([
+              {
+                id: `foreign-${submissionId}`,
+                role: "user",
+                parts: [{ type: "text", text: "An unrelated turn" }]
+              }
+            ])
+          : undefined;
+      // On the broken implementation the foreign acceptance releases recovery;
+      // await its settlement explicitly rather than depending on microtask order.
+      if (foreignResult && handoffSignals > 0) await recoveryWork;
+      const recoverySettledAfterForeignTurn = recoverySettled;
+      // Once accepted, explicitly wait for the predecessor to settle so the
+      // successor alone must protect the row. Before acceptance the signal
+      // count proves the predecessor has NOT been told to hand off.
+      if (!beforeAcceptance) await recoveryWork;
+      const handoffSignalsAtPause = handoffSignals;
+      const activeRecoveryTasks = recoveryWorkCountForTest(this, callback);
+      const chatTasks = this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_task_runs
+        WHERE definition = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME}
+          AND state IN ('pending', 'running', 'waiting', 'recovering')
+      `;
+      const row = this.sql<{ request_id: string }>`
+        SELECT request_id FROM cf_think_submissions
+        WHERE submission_id = ${submissionId}
+      `[0];
+      if (pauseAt === "after-terminal-foreign-stream") {
+        // A foreign producer invokes reclaim after the successor's cutover,
+        // while the recovery callback is still paused before ledger settlement.
+        // SAFETY: the fixture accesses the existing private stream adapter.
+        const { _resumableStream } = this as unknown as {
+          _resumableStream: ResumableStream;
+        };
+        const foreignStream = _resumableStream.start("foreign-terminal-gap");
+        _resumableStream.complete(foreignStream);
+      }
+      await this.recoverSubmissionsOnStartForTest();
+      // Repeated reconciliation must not duplicate terminal notifications.
+      await this.recoverSubmissionsOnStartForTest();
+      const duringHandoff = await this.getSubmissionStatusForTest(submissionId);
+
+      // Occupy the real admission queue outside the successor's async context.
+      // Waiting behind this entry must preserve the successor's acceptance
+      // context, even though the predecessor releases it from a foreign context.
+      const blockerId = `queue-blocker-${submissionId}`;
+      const queueBlocker = foreignResult
+        ? enqueue(blockerId, () => releaseQueueBlocker.promise)
+        : undefined;
+      if (foreignResult) {
+        queue.enqueue = (requestId, fn, options) => {
+          const result = enqueue(requestId, fn, options);
+          successorQueued.resolve();
+          return result;
+        };
+      }
+      release.resolve();
+      let successorQueuedBehindBlocker = false;
+      if (foreignResult) {
+        await successorQueued.promise;
+        successorQueuedBehindBlocker =
+          queue.activeRequestId === blockerId && queue.queuedCount() === 2;
+        releaseQueueBlocker.resolve();
+        await queueBlocker;
+      }
+      await recoveryWork;
+      await terminal.promise;
+      await detachedFinished.promise;
+      const afterCompletion =
+        await this.getSubmissionStatusForTest(submissionId);
+      const completed = this.sql<{ error_message: string | null }>`
+        SELECT error_message FROM cf_think_submissions
+        WHERE submission_id = ${submissionId}
+      `[0];
+      return {
+        duringHandoff,
+        afterCompletion,
+        requestRebound: row?.request_id !== submissionId,
+        handoffSignals: handoffSignalsAtPause,
+        activeChatTasks: chatTasks[0]?.count ?? 0,
+        activeRecoveryTasks,
+        terminalStatuses,
+        responseCount,
+        error: completed?.error_message ?? null,
+        ...(foreignResult && {
+          foreignTurn: {
+            submissionId,
+            requestId: foreignResult.requestId,
+            status: foreignResult.status,
+            requestIdAfterForeignTurn: row?.request_id ?? null,
+            recoverySettledAfterForeignTurn,
+            successorQueuedBehindBlocker,
+            requestIdAtSuccessorAcceptance,
+            completedRequestId: readSubmissionRequestId(),
+            responseRequestIds,
+            terminalRequestIds
+          }
+        })
+      };
+    } finally {
+      release.resolve();
+      releaseQueueBlocker.resolve();
+      queue.enqueue = enqueue;
+      session.getLatestLeaf = getLatestLeaf;
+      this.beforeStep = beforeStep;
+      internals._updateChatRecoveryIncident = updateIncident;
+      this.onSubmissionStatus = onSubmissionStatus;
+      this.onChatResponse = onChatResponse;
+      this.getModel = getModel;
+      this._chatRecoveryRetryDetached = retryDetached;
+      this._chatRecoveryContinueDetached = continueDetached;
+    }
+  }
+
+  /** Exercise the facet legacy-fiber branch without requiring facet routing. */
+  async facetRecoveryAcceptanceForTest(): Promise<{
+    acceptedBeforeCompletion: boolean;
+    durableAtAcceptance: boolean;
+  }> {
+    // SAFETY: these private methods are the real acceptance and fiber seams;
+    // overriding only the path selects the facet engine in this inert fixture.
+    const internals = this as unknown as {
+      _runRecoveredTurnAfterAcceptance<T>(
+        row: null,
+        onAccepted: () => void,
+        run: () => Promise<T>
+      ): Promise<T>;
+      _runChatRecoveryFiber<T>(
+        requestId: string,
+        continuation: boolean,
+        run: () => Promise<T>
+      ): Promise<T>;
+    };
+    Object.defineProperty(this, "parentPath", {
+      configurable: true,
+      value: [{ className: "ThinkRecoveryTestAgent", name: "parent" }]
+    });
+    let accepted = false;
+    let durableAtAcceptance = false;
+    const requestId = crypto.randomUUID();
+    try {
+      return await internals._runRecoveredTurnAfterAcceptance(
+        null,
+        () => {
+          accepted = true;
+          durableAtAcceptance = this.sql<{ snapshot: string | null }>`
+            SELECT snapshot FROM cf_agents_runs
+            WHERE name = ${ThinkRecoveryTestAgent.CHAT_FIBER_NAME + ":" + requestId}
+          `.some((row) => row.snapshot !== null);
+        },
+        () =>
+          internals._runChatRecoveryFiber(requestId, false, async () => ({
+            acceptedBeforeCompletion: accepted,
+            durableAtAcceptance
+          }))
+      );
+    } finally {
+      Reflect.deleteProperty(this, "parentPath");
+    }
+  }
+
+  /** A subclass can settle recovery without accepting a successor Task. */
+  async recoverSubmissionWithoutSuccessorForTest(): Promise<{
+    status: string | null;
+    activeRecoveryTasks: number;
+  }> {
+    const submissionId = `no-successor-${crypto.randomUUID()}`;
+    await this.seedRunningSubmissionForTest(submissionId);
+    const continueLastTurn = this.continueLastTurn.bind(this);
+    this.continueLastTurn = async () => ({ requestId: "", status: "skipped" });
+    try {
+      await this.preScheduleRecoveryContinueForTest({
+        recoveredRequestId: submissionId,
+        originalRequestId: submissionId
+      });
+      await runQueuedRecoveryTaskForTest(this, "_chatRecoveryContinue");
+      return {
+        status: await this.getSubmissionStatusForTest(submissionId),
+        activeRecoveryTasks: recoveryWorkCountForTest(
+          this,
+          "_chatRecoveryContinue"
+        )
+      };
+    } finally {
+      this.continueLastTurn = continueLastTurn;
+    }
+  }
+
+  /** Seed a running submission, optionally already rebound to a successor. */
+  async seedRunningSubmissionForTest(
+    requestId: string,
+    submissionId = requestId
+  ): Promise<void> {
     (
       this as unknown as { _ensureSubmissionTable(): void }
     )._ensureSubmissionTable();
@@ -7903,7 +11099,7 @@ export class ThinkRecoveryTestAgent extends Think {
         messages_json, metadata_json, error_message, created_at,
         messages_applied_at, started_at, completed_at
       ) VALUES (
-        ${requestId}, NULL, ${requestId}, NULL, 'running',
+        ${submissionId}, NULL, ${requestId}, NULL, 'running',
         '[]', NULL, NULL, ${now}, ${now}, ${now}, NULL
       )
     `;
@@ -7946,13 +11142,81 @@ export class ThinkRecoveryTestAgent extends Think {
     )._chatRecoveryRetry(data);
   }
 
+  /** Exercise platform failure ownership on either side of model handoff. */
+  async testRecoveryDispatchHandoffForTest(options: {
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry";
+    phase: "before" | "after";
+  }): Promise<{ threw: boolean; tasks: number; schedules: number }> {
+    const data = { incidentId: crypto.randomUUID() };
+    if (options.callback === "_chatRecoveryContinue") {
+      await this.preScheduleRecoveryContinueForTest(data);
+    } else {
+      await this.preScheduleRecoveryRetryForTest(data);
+    }
+
+    type ContinueData = Parameters<Think["_chatRecoveryContinue"]>[0];
+    type RetryData = Parameters<Think["_chatRecoveryRetry"]>[0];
+    const host = this as unknown as {
+      _chatRecoveryContinueDetached(
+        data?: ContinueData,
+        onTurnStarted?: () => void
+      ): Promise<void>;
+      _chatRecoveryRetryDetached(
+        data?: RetryData,
+        onTurnStarted?: () => void
+      ): Promise<void>;
+    };
+    const originalContinue = host._chatRecoveryContinueDetached.bind(this);
+    const originalRetry = host._chatRecoveryRetryDetached.bind(this);
+    const fail = async (onTurnStarted?: () => void): Promise<never> => {
+      if (options.phase === "after") {
+        onTurnStarted?.();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      throw new Error("Network connection lost.");
+    };
+    host._chatRecoveryContinueDetached = (_data, onTurnStarted) =>
+      fail(onTurnStarted);
+    host._chatRecoveryRetryDetached = (_data, onTurnStarted) =>
+      fail(onTurnStarted);
+
+    let threw = false;
+    try {
+      if (options.callback === "_chatRecoveryContinue") {
+        await this._chatRecoveryContinue(data);
+      } else {
+        await this._chatRecoveryRetry(data);
+      }
+    } catch (error) {
+      threw =
+        error instanceof Error &&
+        error.message.includes("Network connection lost");
+    } finally {
+      host._chatRecoveryContinueDetached = originalContinue;
+      host._chatRecoveryRetryDetached = originalRetry;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return {
+      threw,
+      ...recoveryTransportCountsForTest(this, options.callback)
+    };
+  }
+
   /** Retry-path twin of `preScheduleRecoveryContinueForTest`. */
   async preScheduleRecoveryRetryForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    await this.schedule(60, "_chatRecoveryRetry", data, {
-      idempotent: false
-    });
+    const input = {
+      callback: "_chatRecoveryRetry" as const,
+      data,
+      delaySeconds: 60
+    };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, "redefer")
+    );
   }
 
   async getIncidentAttemptForTest(incidentId: string): Promise<{
@@ -7974,17 +11238,20 @@ export class ThinkRecoveryTestAgent extends Think {
       : null;
   }
 
-  /**
-   * Pre-insert a matching `_chatRecoveryContinue` schedule row to simulate the
-   * not-yet-deleted one-shot row that `alarm()` is executing — so a reschedule
-   * with `idempotent: true` would (incorrectly) dedup onto it.
-   */
+  /** Pre-insert a recovery Task representing the current dispatch. */
   async preScheduleRecoveryContinueForTest(
     data: Record<string, unknown>
   ): Promise<void> {
-    await this.schedule(60, "_chatRecoveryContinue", data, {
-      idempotent: false
-    });
+    const input = {
+      callback: "_chatRecoveryContinue" as const,
+      data,
+      delaySeconds: 60
+    };
+    await this.tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
+      CHAT_RECOVERY_TASK_NAME,
+      input,
+      chatRecoveryTaskRunOptions(input, "redefer")
+    );
   }
 
   async getScheduledChatRecoveryPayloadForTest(
@@ -7995,14 +11262,24 @@ export class ThinkRecoveryTestAgent extends Think {
     // `payload` as `never`. The scheduled payload only needs its recovery-link
     // fields exposed for assertions.
   ): Promise<{ recoveredRequestId?: string; requestId?: string } | null> {
-    const rows = this.sql<{ payload: string }>`
-      SELECT payload FROM cf_agents_schedules
-      WHERE callback = ${callback}
+    const taskRows = this.sql<{ payload: string }>`
+      SELECT json_extract(input, '$.data') AS payload
+      FROM cf_agents_task_runs
+      WHERE definition = ${CHAT_RECOVERY_TASK_NAME}
+        AND state IN ('pending', 'running', 'waiting')
+        AND json_extract(metadata, '$.callback') = ${callback}
+      ORDER BY created_at ASC
+      LIMIT 1
+    `;
+    const scheduledRows = this.sql<{ payload: string }>`
+      SELECT json_extract(payload, '$.payload') AS payload FROM cf_agents_jobs
+      WHERE capability = 'scheduler' AND fn = ${callback}
       ORDER BY time ASC
       LIMIT 1
     `;
-    return rows[0]
-      ? (JSON.parse(rows[0].payload) as {
+    const payload = taskRows[0]?.payload ?? scheduledRows[0]?.payload;
+    return payload
+      ? (JSON.parse(payload) as {
           recoveredRequestId?: string;
           requestId?: string;
         })
@@ -8011,11 +11288,14 @@ export class ThinkRecoveryTestAgent extends Think {
 }
 
 // ── ThinkNonRecoveryTestAgent ───────────────────────────────
-// Same as ThinkRecoveryTestAgent but with chatRecovery = false.
+// Simulates previously compiled JavaScript that set chatRecovery = false.
 
 export class ThinkNonRecoveryTestAgent extends Think {
-  override chatRecovery = false;
+  // @ts-expect-error `false` is no longer accepted, but stale JavaScript must
+  // still take the always-on durable recovery path.
+  override chatRecovery: ChatRecoveryConfig = false;
   private _turnCallCount = 0;
+  private _stashSucceeded = false;
 
   override getModel(): LanguageModel {
     return createMockModel("Continued response.");
@@ -8023,6 +11303,8 @@ export class ThinkNonRecoveryTestAgent extends Think {
 
   override beforeTurn(_ctx: TurnContext): void {
     this._turnCallCount++;
+    this.stash({ source: "legacy-false-config" });
+    this._stashSucceeded = true;
   }
 
   async testChat(message: string): Promise<TestChatResult> {
@@ -8048,6 +11330,10 @@ export class ThinkNonRecoveryTestAgent extends Think {
 
   async getTurnCallCount(): Promise<number> {
     return this._turnCallCount;
+  }
+
+  async getStashSucceeded(): Promise<boolean> {
+    return this._stashSucceeded;
   }
 }
 
@@ -8113,17 +11399,17 @@ export class ThinkOnStartHydrationFailureAgent extends Think {
       throw new Error("SQL query failed: out of memory: SQLITE_NOMEM");
     };
     const originalHistory = session.getHistory.bind(session);
-    session.getHistory = async (leafId?: string | null) => {
+    session.getHistory = async (options) => {
       failFirstRead();
-      return originalHistory(leafId);
+      return originalHistory(options);
     };
     const originalRecent = session.getRecentHistory.bind(session);
     session.getRecentHistory = async (
       maxContentBytes: number,
-      minRecentMessages?: number
+      options?: Parameters<typeof originalRecent>[1]
     ) => {
       failFirstRead();
-      return originalRecent(maxContentBytes, minRecentMessages);
+      return originalRecent(maxContentBytes, options);
     };
     return session;
   }
@@ -8233,6 +11519,112 @@ export class ThinkWindowedHydrationAgent extends Think {
     return (await this.syncMessagesFromStorage()).length;
   }
 
+  /**
+   * Growth the refresh never measured: a tool result that enlarges a cached
+   * message, and an append whose text is multibyte. Both must be charged in
+   * bytes against the 64 KB budget, so the cache stops claiming to cover the
+   * path even though nothing was re-read.
+   */
+  async growCachePastBudgetForTest(): Promise<{
+    coversAfterSync: boolean;
+    coversAfterUpdate: boolean;
+    coversAfterMultibyteAppend: boolean;
+  }> {
+    const internal = this as unknown as {
+      _applyToolResult(toolCallId: string, output: unknown): Promise<void>;
+      _cacheCoversActivePath: boolean;
+    };
+    await this.session.appendMessage({
+      id: "grow-user",
+      role: "user",
+      parts: [{ type: "text", text: "run it" }]
+    });
+    await this.session.appendMessage({
+      id: "grow-assistant",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-grow",
+          toolName: "client_action",
+          state: "input-available",
+          input: {}
+        }
+      ]
+    } as unknown as UIMessage);
+    await this.syncMessagesFromStorage();
+    const coversAfterSync = internal._cacheCoversActivePath;
+
+    // A 70 KB result on a message the cache already holds: an update, not an
+    // append, and alone larger than the budget.
+    await internal._applyToolResult("tc-grow", "y".repeat(70_000));
+    const coversAfterUpdate = internal._cacheCoversActivePath;
+
+    // Reset by refreshing (the update re-windows), then grow by an append
+    // of 40 000 two-byte characters: 40 KB of string length, 80 KB stored.
+    await this.session.clearMessages();
+    await this.syncMessagesFromStorage();
+    await this.session.appendMessage({
+      id: "grow-multibyte",
+      role: "user",
+      parts: [{ type: "text", text: "é".repeat(40_000) }]
+    });
+    const coversAfterMultibyteAppend = internal._cacheCoversActivePath;
+
+    return { coversAfterSync, coversAfterUpdate, coversAfterMultibyteAppend };
+  }
+
+  /**
+   * A tool result whose owner has fallen outside the hydration window. The
+   * live cache cannot name the row, so the apply must fall back to storage —
+   * and still land: the row is updated even though `this.messages` never
+   * held it.
+   */
+  async applyToolResultOutsideWindowForTest(): Promise<{
+    inCache: boolean;
+    cacheCoversPath: boolean;
+    storedState: string | undefined;
+  }> {
+    await this.session.appendMessage({
+      id: "old-owner",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-old",
+          toolName: "client_action",
+          state: "input-available",
+          input: { action: "late" }
+        }
+      ]
+    } as unknown as UIMessage);
+    // Four 30KB messages push the owner past the 64KB window.
+    for (let i = 0; i < 4; i++) {
+      await this.session.appendMessage({
+        id: `after-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `after ${i} ${"y".repeat(30_000)}` }]
+      });
+    }
+    await this.syncMessagesFromStorage();
+    const inCache = this.messages.some((m) => m.id === "old-owner");
+    const internal = this as unknown as {
+      _applyToolResult(toolCallId: string, output: unknown): Promise<void>;
+      _cacheCoversActivePath: boolean;
+    };
+    await internal._applyToolResult("tc-old", "late result");
+    const stored = await this.session.getMessage("old-owner");
+    const part = stored?.parts.find(
+      (candidate) =>
+        (candidate as { toolCallId?: string }).toolCallId === "tc-old"
+    ) as { state?: string } | undefined;
+    return {
+      inCache,
+      cacheCoversPath: internal._cacheCoversActivePath,
+      storedState: part?.state
+    };
+  }
+
   async testChat(message: string): Promise<TestChatResult> {
     const cb = new TestCollectingCallback();
     await this.chat(message, cb);
@@ -8247,7 +11639,18 @@ export class ThinkWindowedHydrationAgent extends Think {
 
 // ── Media eviction agents (#1710, step 3) ───────────────────────
 
-const BIG_MEDIA_CHARS = 12_000;
+/**
+ * A payload the message row CAN hold, so it stays inline as a `data:` URL.
+ * Think's eviction has to decode it in place.
+ */
+const BIG_MEDIA_CHARS = 16_000;
+
+/**
+ * A payload the message row CANNOT hold, so Sessions splits the message
+ * across continuation rows. The part is still an inline `data:` URL, so
+ * eviction decodes it exactly as it does a small one.
+ */
+export const POINTER_MEDIA_CHARS = 1_600_000;
 
 /**
  * Eviction disabled by default so tests can seed deterministically, then
@@ -8255,7 +11658,9 @@ const BIG_MEDIA_CHARS = 12_000;
  */
 export class ThinkMediaEvictionAgent extends Think {
   override mediaEviction: MediaEvictionConfig | boolean = false;
-
+  // A step of 1 moves the eviction cutoff with every message, so these
+  // six-message fixtures age `m0`/`m1` without growing to a full step.
+  override truncationStep = 1;
   override getModel(): LanguageModel {
     return createMockModel("media eviction agent response");
   }
@@ -8267,43 +11672,16 @@ export class ThinkMediaEvictionAgent extends Think {
   }
 
   /**
-   * Frames broadcast by Session status updates (`cf_agent_session`) — the
-   * side effect of a PUBLIC `updateMessage`. Eviction rewrites rows via the
-   * silent maintenance path (`internal_rewriteMessage`), which must NOT add
-   * to this count (each status emit also runs a full-history token
-   * estimate, reintroducing the memory pressure eviction removes).
-   */
-  private _sessionStatusBroadcasts = 0;
-
-  override broadcast(
-    message: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): void {
-    if (typeof message === "string") {
-      try {
-        const parsed = JSON.parse(message) as { type?: string };
-        if (parsed.type === "cf_agent_session") {
-          this._sessionStatusBroadcasts++;
-        }
-      } catch {
-        // non-JSON frame — not a session status broadcast
-      }
-    }
-    super.broadcast(message, without);
-  }
-
-  async getSessionStatusBroadcastsForTest(): Promise<number> {
-    return this._sessionStatusBroadcasts;
-  }
-
-  /**
    * Seed: 2 aged messages with oversized media (a data-URL file part and a
-   * tool output with a nested big string) + 4 small filler messages. The
+   * tool output with a nested data-URL string) + 4 small filler messages. The
    * eviction cutoff clamps `keepRecentMessages` to the model's read-time
    * window (4), so with 6 seeded messages the 2 media messages are aged
    * and the 4 fillers are protected.
    */
-  async seedMediaHistoryForTest(prefix = "m"): Promise<void> {
+  async seedMediaHistoryForTest(
+    prefix = "m",
+    mediaChars = BIG_MEDIA_CHARS
+  ): Promise<void> {
     await this.appendMessageToHistory({
       id: `${prefix}0`,
       role: "user",
@@ -8312,7 +11690,7 @@ export class ThinkMediaEvictionAgent extends Think {
         {
           type: "file",
           mediaType: "image/png",
-          url: `data:image/png;base64,${"A".repeat(BIG_MEDIA_CHARS)}`
+          url: `data:image/png;base64,${"A".repeat(mediaChars)}`
         }
       ]
     } as UIMessage);
@@ -8327,7 +11705,9 @@ export class ThinkMediaEvictionAgent extends Think {
           input: {},
           output: {
             mediaType: "image/png",
-            data: "B".repeat(BIG_MEDIA_CHARS),
+            // A screenshot is media wherever a tool put it: eviction finds
+            // a nested `data:` URL or pointer just as readily.
+            data: `data:image/png;base64,${"B".repeat(mediaChars)}`,
             note: "small structured field"
           }
         }
@@ -8347,28 +11727,403 @@ export class ThinkMediaEvictionAgent extends Think {
     }
   }
 
+  /**
+   * An append that lands while a pass is running. The pass read its
+   * candidates before the append, so it cannot evict what the append aged;
+   * the request must survive the pass and run afterwards. Seeds two aged
+   * media rows, starts a pass, and while it runs appends a third media
+   * message plus the fillers that age it. Returns what the first pass
+   * evicted (the two it saw) and the id the follow-up pass must handle.
+   */
+  async appendDuringPassForTest(): Promise<{
+    firstPassMessages: number;
+    lateId: string;
+  }> {
+    await this.seedMediaHistoryForTest("m");
+    this.mediaEviction = { keepRecentMessages: 2, minPartBytes: 10_000 };
+    const pass = this._evictAgedMediaBestEffort();
+    // Let the pass read its row stats and enter its first eviction write.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await this.appendMessageToHistory({
+      id: "late-media",
+      role: "user",
+      parts: [
+        { type: "text", text: "one more" },
+        {
+          type: "file",
+          mediaType: "image/png",
+          url: `data:image/png;base64,${"C".repeat(BIG_MEDIA_CHARS)}`
+        }
+      ]
+    } as UIMessage);
+    for (let i = 0; i < 4; i++) {
+      await this.appendMessageToHistory({
+        id: `late-${i}`,
+        role: i % 2 === 0 ? "assistant" : "user",
+        parts: [{ type: "text", text: `late ${i}` }]
+      } as UIMessage);
+    }
+    const first = await pass;
+    return { firstPassMessages: first?.messages ?? 0, lateId: "late-media" };
+  }
+
+  /** One bounded Think-owned eviction pass. */
   async runEvictionForTest(): Promise<{
     messages: number;
     parts: number;
     bytes: number;
-    externalizedBytes: number;
+    backlogRemains: boolean;
   } | null> {
     return this._evictAgedMediaBestEffort();
+  }
+
+  /**
+   * This class does NOT override `hydrationByteBudget`, so this reads the
+   * framework default.
+   */
+  async getHydrationBudgetForTest(): Promise<number> {
+    return this.hydrationByteBudget;
+  }
+
+  /** Re-run the budgeted cache refresh (a windowed read schedules eviction). */
+  async resyncForTest(): Promise<number> {
+    return (await this.syncMessagesFromStorage()).length;
   }
 
   async getStoredMessageForTest(id: string): Promise<UIMessage | null> {
     return (await this.session.getMessage(id)) as UIMessage | null;
   }
 
-  async readWorkspaceFileForTest(path: string): Promise<string | null> {
-    return this.workspace.readFile(path);
+  /** Continuation rows the object currently holds. */
+  async getContinuationRowCountForTest(): Promise<number> {
+    return (
+      this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM cf_agents_session_message_chunks
+    `[0]?.count ?? 0
+    );
+  }
+
+  /** The workspace file an eviction marker points at. */
+  async readEvictedFileForTest(path: string): Promise<{
+    byteLength: number;
+    mimeType: string | null;
+    firstBytes: number[];
+    allSame: boolean;
+  } | null> {
+    const bytes = await this.workspace.readFileBytes(path);
+    if (bytes === null) return null;
+    const stat = await this.workspace.stat(path);
+    const first = bytes[0] ?? 0;
+    return {
+      byteLength: bytes.byteLength,
+      mimeType: stat?.mimeType ?? null,
+      firstBytes: Array.from(bytes.slice(0, 4)),
+      allSame: bytes.every((b) => b === first)
+    };
+  }
+
+  /** What the model would see for a message: the reconstructed parts. */
+  async getModelVisibleTextForTest(id: string): Promise<string> {
+    return JSON.stringify(await this.session.getMessage(id));
   }
 }
 
-/** Eviction enabled with tiny thresholds — exercises the background pass. */
+/**
+ * A hydration budget small enough that any seeded transcript boots windowed.
+ * A truncated read is the trigger that schedules the background eviction
+ * pass, so this agent exercises that path end to end.
+ */
 export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
-  override mediaEviction: MediaEvictionConfig = {
-    keepRecentMessages: 2,
-    minPartBytes: 10_000
-  };
+  override hydrationByteBudget = 1024;
+
+  /**
+   * Media that a pass had to protect, then aged by appends alone. The first
+   * pass on the windowed cache finds nothing aged and records that; the
+   * appends that follow never refresh the hydration snapshot, so only the
+   * append count can re-arm the pass. Seeds two fillers and two media
+   * messages (the media newest, so protected), refreshes so the cache is
+   * windowed, then appends four fillers to age the media.
+   */
+  async ageProtectedMediaByAppendsForTest(): Promise<string[]> {
+    const media = `data:image/png;base64,${"A".repeat(16_000)}`;
+    for (let i = 0; i < 2; i++) {
+      await this.appendMessageToHistory({
+        id: `pre-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `filler ${i}` }]
+      } as UIMessage);
+    }
+    for (let i = 0; i < 2; i++) {
+      await this.appendMessageToHistory({
+        id: `media-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [
+          { type: "text", text: `shot ${i}` },
+          { type: "file", mediaType: "image/png", url: media }
+        ]
+      } as UIMessage);
+    }
+    await this.syncMessagesFromStorage();
+    // Let the refresh's pass run and record nothing aged.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    for (let i = 0; i < 4; i++) {
+      await this.appendMessageToHistory({
+        id: `post-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `later ${i}` }]
+      } as UIMessage);
+    }
+    return ["media-0", "media-1"];
+  }
+
+  /**
+   * Appends that land while a FRUITLESS pass is running on the windowed
+   * cache. The pass records what it saw when it ends; the appends that
+   * arrived meanwhile must count toward re-arming it, or the request they
+   * left pending is suppressed until as many appends again. The pass is
+   * held open by slowing its row-stats read.
+   */
+  async appendDuringFruitlessPassForTest(): Promise<{
+    ids: string[];
+    runningAtAppend: boolean;
+    firstPassMessages: number;
+  }> {
+    const media = `data:image/png;base64,${"D".repeat(16_000)}`;
+    for (let i = 0; i < 2; i++) {
+      await this.appendMessageToHistory({
+        id: `fpre-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `filler ${i}` }]
+      } as UIMessage);
+    }
+    for (let i = 0; i < 2; i++) {
+      await this.appendMessageToHistory({
+        id: `fmedia-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [
+          { type: "text", text: `shot ${i}` },
+          { type: "file", mediaType: "image/png", url: media }
+        ]
+      } as UIMessage);
+    }
+    await this.syncMessagesFromStorage();
+    // The refresh's own pass runs and records nothing aged.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    // Hold the next pass open AFTER its row-stats read, so it finishes
+    // fruitless on stats that predate the appends below.
+    const session = this.session as unknown as {
+      getHistoryRowStats: (...args: unknown[]) => Promise<unknown>;
+    };
+    const stats = session.getHistoryRowStats.bind(session);
+    session.getHistoryRowStats = async (...args: unknown[]) => {
+      const rows = await stats(...args);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return rows;
+    };
+    const internal = this as unknown as { _mediaEvictionRunning: boolean };
+    const pass = this._evictAgedMediaBestEffort();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const runningAtAppend = internal._mediaEvictionRunning;
+    for (let i = 0; i < 4; i++) {
+      await this.appendMessageToHistory({
+        id: `fpost-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `later ${i}` }]
+      } as UIMessage);
+    }
+    const result = await pass;
+    return {
+      ids: ["fmedia-0", "fmedia-1"],
+      runningAtAppend,
+      firstPassMessages: result?.messages ?? 0
+    };
+  }
+}
+
+// ── Pointer-inflation hydration (#1710) ─────────────────────────
+
+/**
+ * Over the row budget, so every seeded row stores a pointer:
+ * 1_600_000 base64 chars decode to 1_200_000 bytes.
+ */
+export const PTR_MEDIA_CHARS = 1_600_000;
+
+/**
+ * Every seeded row overflows the row budget, so it is chunked out on the
+ * WRITE path: its stored bytes are ~a few hundred while the attachment it
+ * points at inflates back to 1.2 MB. A budget that counted only stored
+ * bytes would hydrate all ten rows (~2KB) and blow past its own ceiling on
+ * reconstruction; a budget that counts the reconstructed attachment bytes
+ * hydrates a window instead.
+ */
+export class ThinkPointerHydrationAgent extends Think {
+  override hydrationByteBudget = 64 * 1024;
+  // Storage-level offload only: this agent is about hydration accounting, so
+  // Think's context-window eviction stays off and the payloads stay stored.
+  override mediaEviction: MediaEvictionConfig | boolean = false;
+
+  override async configureSession(session: Session): Promise<Session> {
+    const existing = await session.getHistory();
+    if (existing.length === 0) {
+      for (let i = 0; i < 10; i++) {
+        await session.appendMessage({
+          id: `ptr-${i}`,
+          role: i % 2 === 0 ? "user" : "assistant",
+          parts: [
+            { type: "text", text: `ptr ${i}` },
+            {
+              type: "file",
+              mediaType: "image/png",
+              // Distinct per row: content-addressed storage must not
+              // dedupe ten rows down to one blob.
+              url: `data:image/png;base64,${String.fromCharCode(65 + i).repeat(
+                PTR_MEDIA_CHARS
+              )}`
+            }
+          ]
+        });
+      }
+    }
+    return session;
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel("pointer hydration agent response");
+  }
+
+  async getHydrationInfoForTest(): Promise<{
+    truncated: boolean;
+    totalContentBytes: number;
+    hydratedMessages: number;
+  } | null> {
+    return this._lastHydration;
+  }
+
+  async getCachedMessageIdsForTest(): Promise<string[]> {
+    return this.messages.map((m) => m.id);
+  }
+
+  async getFullHistoryIdsForTest(): Promise<string[]> {
+    return (await this.session.getHistory()).map((m) => m.id);
+  }
+
+  /** Stored bytes of the whole path — the on-disk footprint. */
+  async getStoredPathBytesForTest(): Promise<number> {
+    const stats = await this.session.getHistoryRowStats();
+    return stats.reduce((sum, row) => sum + row.bytes, 0);
+  }
+
+  /** The `data:` URLs the hydrated window reconstructed, in cache order. */
+  async getCachedFileUrlsForTest(): Promise<string[]> {
+    return this.messages.map(
+      (m) =>
+        (m.parts.find((p) => p.type === "file") as { url?: string } | undefined)
+          ?.url ?? ""
+    );
+  }
+}
+
+/**
+ * A subclass written against the pre-Sessions Think API: context declared
+ * through `configureSession(session).withContext(...)`, the context
+ * accessors read off `this.session`, and the positional `appendMessage` /
+ * `getHistory` forms. Every call here must keep compiling and behaving.
+ */
+export class ThinkLegacySessionApiAgent extends Think {
+  private _response = "Hello from legacy session agent!";
+  private _compactionErrors: string[] = [];
+
+  override configureSession(session: ThinkSession): ThinkSession {
+    return session
+      .withContext("soul", {
+        provider: { get: async () => "You are a legacy-configured agent." }
+      })
+      .withContext("memory", {
+        description: "Important facts learned during conversation.",
+        maxTokens: 2000
+      })
+      .withCachedPrompt()
+      .onCompaction(async () => {
+        throw new Error("summarizer down");
+      })
+      .onCompactionError((error) => {
+        this._compactionErrors.push(
+          error instanceof Error ? error.message : String(error)
+        );
+      });
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel(this._response);
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
+    };
+  }
+
+  async legacyBlockLabels(): Promise<string[]> {
+    return this.session.getContextBlocks().map((block) => block.label);
+  }
+
+  async legacyBlockContent(label: string): Promise<string | null> {
+    return this.session.getContextBlock(label)?.content ?? null;
+  }
+
+  async legacyReplaceBlock(label: string, content: string): Promise<void> {
+    await this.session.replaceContextBlock(label, content);
+  }
+
+  async legacyFreezeSystemPrompt(): Promise<string> {
+    return this.session.freezeSystemPrompt();
+  }
+
+  async legacyAddAndRemoveContext(label: string): Promise<boolean> {
+    await this.session.addContext(label, { description: "Dynamic block" });
+    await this.session.refreshSystemPrompt();
+    return this.session.removeContext(label);
+  }
+
+  async legacyToolNames(): Promise<string[]> {
+    return Object.keys(await this.session.tools());
+  }
+
+  /** Positional `appendMessage(message, parentId)` and `getHistory(leafId)`. */
+  async legacyPositionalWrites(): Promise<{
+    rootLength: number;
+    branchLength: number;
+  }> {
+    const text = (id: string, content: string): UIMessage => ({
+      id,
+      role: "user",
+      parts: [{ type: "text", text: content }]
+    });
+    await this.session.appendMessage(text("legacy-root", "root"), null);
+    await this.session.appendMessage(text("legacy-a", "a"), "legacy-root");
+    await this.session.appendMessage(text("legacy-b", "b"), "legacy-root");
+    const branch = await this.session.getHistory("legacy-a");
+    const root = await this.session.getHistory(null);
+    return { rootLength: root.length, branchLength: branch.length };
+  }
+
+  /** `getRecentHistory(budget, minRecentMessages)` still accepts two args. */
+  async legacyRecentHistoryLength(): Promise<number> {
+    const recent = await this.session.getRecentHistory(1024 * 1024, 4);
+    return recent.messages.length;
+  }
+
+  async legacyCompact(): Promise<{
+    result: unknown;
+    errors: string[];
+  }> {
+    const result = await this.session.compact();
+    return { result, errors: [...this._compactionErrors] };
+  }
 }

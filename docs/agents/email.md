@@ -419,21 +419,10 @@ When your agent sends emails and expects replies, use secure reply routing to pr
 
 ### Setup
 
-1. Add a secret to your `wrangler.jsonc`:
-
-```jsonc
-// wrangler.jsonc
-{
-  "vars": {
-    "EMAIL_SECRET": "change-me-in-production"
-  }
-}
-```
-
-For production, use Wrangler secrets instead:
+1. Store the signing key as a Wrangler secret. Do not put it in `vars` or commit it to source control:
 
 ```bash
-wrangler secret put EMAIL_SECRET
+pnpm exec wrangler secret put EMAIL_SECRET
 ```
 
 2. Use the combined resolver pattern:

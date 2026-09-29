@@ -428,6 +428,49 @@ describe("SubAgent", () => {
     ]);
   });
 
+  it("should queue background work from a sub-agent and execute inside the child", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    // Pushing from the facet routes the item to the root, which owns the
+    // physical alarm; the root row records the facet as its owner.
+    const itemId = await agent.subAgentQueue("queue-child", "hello");
+    const rows = await agent.rootQueueRows();
+    const row = rows.find((r) => r.id === itemId);
+    expect(row?.callback).toBe("queuedCallback");
+    expect(row?.ownerPath).toContain("CounterSubAgent");
+
+    // The item is due immediately; the platform alarm auto-fires and the
+    // root routes the dispatch back into the facet.
+    const deadline = Date.now() + 5_000;
+    let log = await agent.subAgentScheduleLog("queue-child");
+    while (log.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      log = await agent.subAgentScheduleLog("queue-child");
+    }
+    expect(log).toEqual([
+      {
+        value: "hello",
+        agentName: "queue-child",
+        currentAgentName: "queue-child",
+        parentClass: "TestSubAgentParent",
+        scheduleId: itemId,
+        callback: "queuedCallback"
+      }
+    ]);
+    expect(await agent.rootQueueRows()).toEqual([]);
+  });
+
+  it("deleteSubAgent removes the sub-agent's pending queue items from the root", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const { beforeDelete, afterDelete } =
+      await agent.subAgentQueueThenDelete("queue-orphan-child");
+    expect(beforeDelete).toHaveLength(1);
+    expect(afterDelete).toEqual([]);
+  });
+
   it("should keep sub-agent interval schedules recurring and idempotent", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
@@ -1029,6 +1072,33 @@ describe("SubAgent", () => {
     await expectRootKeepAliveRefCount(agent, 0);
   });
 
+  it.each([
+    ["succeeded", false],
+    ["failed", true]
+  ])(
+    "keeps the root facet-run lease until a %s sub-agent fiber's leftover row is gone (#2305)",
+    async (_outcome, failBody) => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+      await expect(
+        agent.subAgentRunFiberWithFailingCleanup(
+          "cleanup-child",
+          "done",
+          failBody
+        )
+      ).resolves.toBe("done");
+      expect(await agent.subAgentRunningFiberCount("cleanup-child")).toBe(1);
+      expect(await agent.facetRunRows()).toHaveLength(1);
+
+      await runDurableObjectAlarm(agent);
+
+      expect(await agent.subAgentRunningFiberCount("cleanup-child")).toBe(0);
+      expect(await agent.facetRunRows()).toEqual([]);
+      expect(await agent.subAgentRecoveredFibers("cleanup-child")).toEqual([]);
+    }
+  );
+
   it("holds root keepAlive and facet-run leases for managed sub-agent fibers", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
@@ -1089,6 +1159,50 @@ describe("SubAgent", () => {
         snapshot: { value: "checkpoint" }
       })
     ]);
+  });
+
+  it("leaves host jobs to the root while a sub-agent's fiber recovery is pending (#2299)", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertSubAgentInterruptedFiber(
+      "orphan-wake-child",
+      "fiber-orphan-wake-1",
+      "recovery-throws"
+    );
+
+    // Startup recovery throws, so the orphaned row survives the wake. The
+    // root's facet-run lease owns the retry; the facet queues nothing.
+    await expect(
+      agent.subAgentLocalJobIdsAfterRestart("orphan-wake-child")
+    ).resolves.toEqual([]);
+    expect(await agent.subAgentRunningFiberCount("orphan-wake-child")).toBe(1);
+    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
+      "fiber-orphan-wake-1"
+    );
+  });
+
+  it("drops host jobs an earlier release left in a sub-agent's queue (#2299)", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.subAgentInsertStaleHostJob(
+      "stale-jobs-child",
+      "cf:housekeeping",
+      "housekeeping"
+    );
+    await agent.subAgentInsertStaleHostJob(
+      "stale-jobs-child",
+      "cf:keep-alive",
+      "keepAlive"
+    );
+
+    await expect(
+      agent.subAgentLocalJobIdsAfterRestart("stale-jobs-child")
+    ).resolves.toEqual([]);
+    await expect(
+      agent.subAgentIncrement("stale-jobs-child", "c")
+    ).resolves.toBe(1);
   });
 
   it("applies managed sub-agent fiber recovery outcomes from the child", async () => {
@@ -1515,6 +1629,39 @@ describe("SubAgent", () => {
         "hello from facet"
       );
       expect(error).toBe("");
+    });
+
+    it("routes a fresh-context facet broadcast through the root", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const ws = await connectWS(
+        `/agents/test-sub-agent-parent/${parentName}/sub/broadcast-sub-agent/${childName}`
+      );
+      try {
+        await waitForJsonMessage<{ type: MessageType }>(
+          ws,
+          (data) => data.type === MessageType.CF_AGENT_STATE
+        );
+
+        const expected = {
+          type: "fresh-context-facet-broadcast",
+          value: crypto.randomUUID()
+        };
+        const received = waitForJsonMessage<typeof expected>(
+          ws,
+          (data) => data.type === expected.type && data.value === expected.value
+        );
+
+        const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+        await parent.subAgentRelayBroadcastFromFreshContext(
+          childName,
+          JSON.stringify(expected)
+        );
+
+        await expect(received).resolves.toEqual(expected);
+      } finally {
+        ws.close();
+      }
     });
 
     it("should persist state when setState is called in a sub-agent", async () => {

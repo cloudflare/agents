@@ -5,6 +5,7 @@ import type {
   FiberRecoveryResult
 } from "agents";
 import { getAgentByName } from "agents";
+import { Chat } from "chat";
 import type { Adapter } from "chat";
 import { describe, expect, it } from "vitest";
 import {
@@ -25,13 +26,14 @@ import {
   parseMessengerReplySnapshot,
   serializableMessengerEvent,
   TextStreamCallback,
-  textDeltaFromStreamChunk,
   ThinkMessengerRuntime,
   toMessengerAttachment,
   toMessengerUserMessage,
   type MessengerEvent,
+  type MessengerMessage,
   type MessengerThinkHost
 } from "../messengers";
+import { mentionsBot, withMessengerQueueTtl } from "../messengers/chat-sdk";
 import telegramMessenger, {
   isExpectedTelegramFinalEditNoop,
   isTelegramIgnorableDeliveryError,
@@ -289,6 +291,202 @@ describe("think messengers core", () => {
         ].join("\n")
       }
     ]);
+  });
+
+  describe("messages folded by the concurrency strategy (#2312)", () => {
+    const ada = { fullName: "Ada Lovelace", userId: "u-ada", userName: "ada" };
+    const bob = { fullName: "Bob Babbage", userId: "u-bob", userName: "bob" };
+
+    function line(
+      id: string,
+      text: string,
+      author = ada,
+      attachments: MessengerMessage["attachments"] = []
+    ): MessengerMessage {
+      return { attachments, author, id, providerMessageId: id, text };
+    }
+
+    function burst(
+      skipped: MessengerMessage[],
+      message: MessengerMessage,
+      isDirectMessage = false
+    ): MessengerEvent {
+      return {
+        ...baseEvent,
+        message,
+        skipped,
+        thread: { ...baseEvent.thread, isDirectMessage }
+      };
+    }
+
+    function text(event: MessengerEvent) {
+      return toMessengerUserMessage(event).parts;
+    }
+
+    it("carries skipped messages on the event, oldest first, resolving self-mentions in each", () => {
+      const [definition] = normalizeMessengers({
+        slack: chatSdkMessenger({
+          adapter: fakeAdapter({ botUserId: "U0BD9EYL52S" }),
+          provider: "slack",
+          userName: "think_bot",
+          verifyWebhook: false
+        })
+      });
+
+      const event = defaultChatSdkEvent(definition!, {
+        eventKind: "mention",
+        message: fakeMessage("and keep it short"),
+        skipped: [
+          fakeMessage("<@U0BD9EYL52S> summarize the thread"),
+          fakeMessage("for me")
+        ],
+        thread: fakeThread("slack:C123")
+      });
+
+      expect(event.skipped?.map((entry) => entry.text)).toEqual([
+        "@think_bot summarize the thread",
+        "for me"
+      ]);
+      expect(event.message?.text).toBe("and keep it short");
+    });
+
+    it("leaves `skipped` off the event when nothing was folded", () => {
+      const [definition] = normalizeMessengers({
+        slack: chatSdkMessenger({
+          adapter: fakeAdapter(),
+          provider: "slack",
+          userName: "think_bot",
+          verifyWebhook: false
+        })
+      });
+
+      const event = defaultChatSdkEvent(definition!, {
+        eventKind: "mention",
+        message: fakeMessage("hello"),
+        skipped: [],
+        thread: fakeThread("slack:C123")
+      });
+
+      expect("skipped" in event).toBe(false);
+    });
+
+    it("renders one sender's burst under a single speaker label", () => {
+      const event = burst(
+        [line("1", "summarize the thread"), line("2", "for me")],
+        line("3", "and keep it short")
+      );
+
+      expect(text(event)).toEqual([
+        {
+          type: "text",
+          text: "Ada Lovelace: summarize the thread\nfor me\nand keep it short"
+        }
+      ]);
+    });
+
+    it("keeps each speaker's own label when a burst mixes senders", () => {
+      const event = burst(
+        [line("1", "is the deploy done?", bob), line("2", "hold on", ada)],
+        line("3", "@think_bot what changed?", ada)
+      );
+
+      expect(text(event)).toEqual([
+        {
+          type: "text",
+          text: "Bob Babbage: is the deploy done?\nAda Lovelace: hold on\n@think_bot what changed?"
+        }
+      ]);
+    });
+
+    it("renders a direct-message burst without speaker labels", () => {
+      const event = burst(
+        [line("1", "summarize the thread"), line("2", "for me")],
+        line("3", "and keep it short"),
+        true
+      );
+
+      expect(text(event)).toEqual([
+        {
+          type: "text",
+          text: "summarize the thread\nfor me\nand keep it short"
+        }
+      ]);
+    });
+
+    it("lists attachments from skipped messages before the answered message's own", () => {
+      const photo = { mediaType: "image/jpeg", name: "photo.jpg" };
+      const notes = { mediaType: "text/plain", name: "notes.txt" };
+      const event = burst(
+        [line("1", "", ada, [photo])],
+        line("2", "what is this?", ada, [notes]),
+        true
+      );
+
+      expect(text(event)).toEqual([
+        {
+          type: "text",
+          text: [
+            "what is this?",
+            "",
+            "Attachments:",
+            "- photo.jpg (image/jpeg)",
+            "- notes.txt (text/plain)"
+          ].join("\n")
+        }
+      ]);
+    });
+
+    it("drops an attachment-only run's empty speaker line", () => {
+      const event = burst(
+        [line("1", "", bob, [{ name: "chart.png" }])],
+        line("2", "thoughts?", ada)
+      );
+
+      expect(text(event)[0]).toEqual({
+        type: "text",
+        text: "Ada Lovelace: thoughts?\n\nAttachments:\n- chart.png"
+      });
+    });
+
+    it("keeps the answered message's id so idempotency is unchanged", () => {
+      const event = burst([line("1", "first")], line("2", "second"));
+
+      expect(toMessengerUserMessage(event).id).toBe("telegram:2");
+      expect(idempotencyKeyForEvent(event)).toBe(
+        idempotencyKeyForEvent({ ...event, skipped: undefined })
+      );
+    });
+
+    it("serializes skipped messages without live-only fields", () => {
+      const event = burst(
+        [
+          {
+            ...line("1", "first", ada, [
+              {
+                fetch: () => Promise.resolve(new ArrayBuffer(0)),
+                fetchMetadata: { fileId: "f1" },
+                name: "a.png",
+                raw: {}
+              }
+            ]),
+            raw: { platform: "payload" }
+          }
+        ],
+        line("2", "second")
+      );
+
+      const cloned = JSON.parse(
+        JSON.stringify(serializableMessengerEvent(event))
+      );
+
+      expect(cloned.skipped).toHaveLength(1);
+      expect(cloned.skipped[0].raw).toBeUndefined();
+      expect(cloned.skipped[0].text).toBe("first");
+      expect(cloned.skipped[0].attachments[0]).toEqual({
+        fetchMetadata: { fileId: "f1" },
+        name: "a.png"
+      });
+    });
   });
 
   it("prefixes channel messages with the default fullName cascade", () => {
@@ -627,6 +825,181 @@ describe("think messengers core", () => {
     expect(attachment.raw).toBeDefined();
   });
 
+  describe("attachment fetch", () => {
+    function fetched(fetchData: () => Promise<unknown>) {
+      return toMessengerAttachment({
+        // `chat@4.31` types this as `Promise<Buffer>`; later releases inside
+        // the declared range widen it to `Promise<Buffer | ArrayBuffer>`.
+        fetchData: fetchData as () => Promise<Buffer>,
+        mimeType: "text/plain",
+        name: "hi.txt",
+        type: "file"
+      }).fetch?.();
+    }
+
+    it("copies only a Buffer view's own bytes out of its backing store", async () => {
+      const pool = new Uint8Array([0, 0, 104, 105, 0, 0]);
+      const data = await fetched(() =>
+        Promise.resolve(Buffer.from(pool.buffer, 2, 2))
+      );
+
+      expect(data).toBeInstanceOf(ArrayBuffer);
+      expect(new TextDecoder().decode(data)).toBe("hi");
+      pool[2] = 0;
+      expect(new TextDecoder().decode(data)).toBe("hi");
+    });
+
+    it("returns an ArrayBuffer from the adapter unchanged", async () => {
+      const bytes = new TextEncoder().encode("hello").buffer;
+      const data = await fetched(() => Promise.resolve(bytes));
+
+      expect(data).toBe(bytes);
+      expect(new TextDecoder().decode(data)).toBe("hello");
+    });
+
+    it.skipIf(typeof SharedArrayBuffer === "undefined")(
+      "copies a view backed by a SharedArrayBuffer instead of dropping it",
+      async () => {
+        const shared = new Uint8Array(new SharedArrayBuffer(3));
+        shared.set([104, 105, 33]);
+        const data = await fetched(() => Promise.resolve(shared));
+
+        expect(data).toBeInstanceOf(ArrayBuffer);
+        expect(new TextDecoder().decode(data)).toBe("hi!");
+      }
+    );
+
+    it("returns an empty ArrayBuffer when the adapter resolves nothing", async () => {
+      const data = await fetched(() => Promise.resolve(undefined));
+
+      expect(data).toBeInstanceOf(ArrayBuffer);
+      expect(data?.byteLength).toBe(0);
+    });
+
+    it("returns a view's own buffer without copying when the view spans all of it", async () => {
+      const bytes = new TextEncoder().encode("whole");
+      const data = await fetched(() => Promise.resolve(bytes));
+
+      expect(data).toBe(bytes.buffer);
+    });
+  });
+
+  describe("inline attachment data", () => {
+    function inline(data: unknown) {
+      return toMessengerAttachment({
+        data: data as Buffer,
+        mimeType: "text/plain",
+        name: "hi.txt",
+        type: "file"
+      });
+    }
+
+    it("maps Buffer data and fetches it when the adapter has no fetchData", async () => {
+      const attachment = inline(Buffer.from("hi"));
+
+      expect(new TextDecoder().decode(attachment.data)).toBe("hi");
+      expect(new TextDecoder().decode(await attachment.fetch?.())).toBe("hi");
+    });
+
+    it("maps ArrayBuffer and Uint8Array data", async () => {
+      const buffer = new TextEncoder().encode("ab").buffer;
+      expect(inline(buffer).data).toBe(buffer);
+      expect(
+        new TextDecoder().decode(inline(new TextEncoder().encode("cd")).data)
+      ).toBe("cd");
+    });
+
+    it("fetches Blob data through arrayBuffer()", async () => {
+      const attachment = inline(new Blob(["blob"]));
+
+      expect(attachment.data).toBeUndefined();
+      expect(new TextDecoder().decode(await attachment.fetch?.())).toBe("blob");
+    });
+
+    it("prefers the adapter's fetchData over inline data", async () => {
+      const attachment = toMessengerAttachment({
+        data: Buffer.from("inline"),
+        fetchData: () => Promise.resolve(Buffer.from("fetched")),
+        mimeType: "text/plain",
+        name: "hi.txt",
+        type: "file"
+      });
+
+      expect(new TextDecoder().decode(await attachment.fetch?.())).toBe(
+        "fetched"
+      );
+    });
+  });
+
+  it("keeps raw payloads and attachment bytes out of persisted message metadata", () => {
+    const event: MessengerEvent = {
+      ...baseEvent,
+      raw: { payload: "raw-event" },
+      message: {
+        ...baseEvent.message!,
+        attachments: [
+          {
+            data: new ArrayBuffer(4),
+            fetch: () => Promise.resolve(new ArrayBuffer(4)),
+            mediaType: "text/plain",
+            name: "notes.txt",
+            raw: { payload: "raw-file" }
+          }
+        ],
+        raw: { payload: "raw-message" }
+      },
+      skipped: [
+        {
+          ...baseEvent.message!,
+          id: "message-0",
+          raw: { payload: "raw-skipped" }
+        }
+      ]
+    };
+
+    const metadata = JSON.stringify(toMessengerUserMessage(event).metadata);
+
+    expect(metadata).not.toContain("raw-");
+    expect(metadata).not.toContain('"data"');
+    expect(metadata).toContain("notes.txt");
+  });
+
+  it("detects mentions on messages the adapter did not flag", () => {
+    const definition = {
+      adapter: fakeAdapter({ botUserId: "U123" } as Partial<Adapter>),
+      userName: "fake_bot"
+    };
+
+    expect(mentionsBot(definition, { text: "hey @Fake_Bot, status?" })).toBe(
+      true
+    );
+    expect(mentionsBot(definition, { text: "ping <@U123>" })).toBe(true);
+    expect(mentionsBot(definition, { text: "ping @U123" })).toBe(true);
+    expect(mentionsBot(definition, { text: "no mention here" })).toBe(false);
+    expect(
+      mentionsBot(definition, { isMention: true, text: "no mention here" })
+    ).toBe(true);
+  });
+
+  it("gives queued messages a TTL that outlasts a slow turn", () => {
+    const thirtyMinutes = 30 * 60 * 1000;
+
+    expect(withMessengerQueueTtl("queue")).toEqual({
+      queueEntryTtlMs: thirtyMinutes,
+      strategy: "queue"
+    });
+    expect(
+      withMessengerQueueTtl({ debounceMs: 10, strategy: "burst" })
+    ).toEqual({
+      debounceMs: 10,
+      queueEntryTtlMs: thirtyMinutes,
+      strategy: "burst"
+    });
+    expect(
+      withMessengerQueueTtl({ queueEntryTtlMs: 5, strategy: "queue" })
+    ).toEqual({ queueEntryTtlMs: 5, strategy: "queue" });
+  });
+
   it("leaves attachment id undefined when fetchMetadata has no known id key", () => {
     const attachment = toMessengerAttachment({
       fetchMetadata: { region: "us-east" },
@@ -746,13 +1119,622 @@ describe("think messengers core", () => {
     expect(resolved).toEqual([{ status: "completed" }]);
   });
 
-  it("extracts streamed text deltas", () => {
-    expect(
-      textDeltaFromStreamChunk(
-        JSON.stringify({ type: "text-delta", delta: "hello" })
-      )
-    ).toBe("hello");
-    expect(textDeltaFromStreamChunk("{")).toBeNull();
+  describe("streamed replies on adapters without native streaming", () => {
+    function recordingRuntime(
+      overrides: Partial<Adapter> = {},
+      deltas = ["Hello", " there"],
+      beforeDelivery?: () => void
+    ) {
+      const calls: Array<{ kind: "post" | "edit"; text: string }> = [];
+      const text = (message: unknown) =>
+        typeof message === "string"
+          ? message
+          : String((message as { markdown?: string }).markdown);
+      const host: MessengerThinkHost = {
+        ...fakeHost([]),
+        chat(_message, callback) {
+          for (const delta of deltas) {
+            callback.onEvent(JSON.stringify({ type: "text-delta", delta }));
+          }
+          return Promise.resolve();
+        }
+      };
+      const runtime = new ThinkMessengerRuntime(
+        {
+          fake: chatSdkMessenger({
+            adapter: fakeAdapter({
+              editMessage(threadId, _messageId, message) {
+                calls.push({ kind: "edit", text: text(message) });
+                return Promise.resolve({ id: "reply", raw: {}, threadId });
+              },
+              postMessage(threadId, message) {
+                calls.push({ kind: "post", text: text(message) });
+                return Promise.resolve({ id: "reply", raw: {}, threadId });
+              },
+              startTyping() {
+                return Promise.resolve();
+              },
+              ...overrides
+            }),
+            conversation: async () => {
+              await Promise.resolve();
+              beforeDelivery?.();
+              return { target: "self" as const };
+            },
+            provider: "fake",
+            userName: "fake_bot",
+            verifyWebhook: false
+          })
+        },
+        host
+      );
+      runtime.initialize();
+      return { calls, runtime };
+    }
+
+    function answerReply(runtime: ThinkMessengerRuntime) {
+      const event: MessengerEvent = {
+        ...baseEvent,
+        messengerId: "fake",
+        provider: "fake",
+        thread: {
+          ...baseEvent.thread,
+          id: "fake:thread",
+          providerThreadId: "fake:thread"
+        }
+      };
+      return runtime.handleFiberRecovery({
+        createdAt: Date.now(),
+        id: "fiber-1",
+        name: MESSENGER_REPLY_FIBER_NAME,
+        recoveryReason: "interrupted",
+        snapshot: messengerReplySnapshot("accepted", event, {
+          _type: "chat:Thread",
+          adapterName: "fake",
+          channelId: "fake:thread",
+          id: "fake:thread",
+          isDM: false
+        })
+      } satisfies FiberRecoveryContext);
+    }
+
+    it("posts real reply text first instead of a `...` placeholder (#2310)", async () => {
+      const { calls, runtime } = recordingRuntime();
+
+      await expect(answerReply(runtime)).resolves.toBe(true);
+
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls[0].kind).toBe("post");
+      expect(calls[0].text).toContain("Hello");
+      expect(calls.map((call) => call.text)).not.toContain("...");
+      expect(calls.at(-1)?.text).toBe("Hello there");
+    });
+
+    it("posts the empty-response text, not a blank message, when a turn produces no text", async () => {
+      const { calls, runtime } = recordingRuntime({}, []);
+
+      await expect(answerReply(runtime)).resolves.toBe(true);
+
+      expect(calls).toEqual([{ kind: "post", text: EMPTY_MESSENGER_RESPONSE }]);
+    });
+
+    it("recovers a reply through its own adapter after another runtime registered its Chat", async () => {
+      const { calls, runtime } = recordingRuntime();
+      const other = recordingRuntime();
+      await expect(answerReply(other.runtime)).resolves.toBe(true);
+      other.calls.length = 0;
+
+      await expect(answerReply(runtime)).resolves.toBe(true);
+
+      expect(calls.at(-1)?.text).toBe("Hello there");
+      expect(other.calls).toEqual([]);
+    });
+
+    it("keeps its own adapter when another runtime registers its Chat mid-recovery", async () => {
+      let other: ReturnType<typeof recordingRuntime> | undefined;
+      const { calls, runtime } = recordingRuntime({}, undefined, () => {
+        other = recordingRuntime();
+      });
+
+      await expect(answerReply(runtime)).resolves.toBe(true);
+
+      expect(other).toBeDefined();
+      expect(calls.at(-1)?.text).toBe("Hello there");
+      expect(other?.calls).toEqual([]);
+    });
+
+    it("posts a live webhook reply's text first instead of a `...` placeholder (#2310)", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        "placeholder-live"
+      );
+
+      const response = await agent.fetch(
+        "https://example.com/messengers/fake/webhook",
+        {
+          body: JSON.stringify({
+            id: "m1",
+            text: "hello",
+            threadId: "fake:dm-1"
+          }),
+          method: "POST"
+        }
+      );
+      await expect(response.text()).resolves.toBe("ok");
+
+      const calls = await agent.getAdapterCalls();
+      expect(calls[0]).toEqual({ kind: "post", content: "Got" });
+      expect(calls.map((call) => call.content)).not.toContain("...");
+      expect(calls.at(-1)?.content).toBe("Got it");
+    });
+
+    it("leaves native streaming untouched", async () => {
+      const streamed: string[] = [];
+      const { calls, runtime } = recordingRuntime({
+        async stream(threadId, textStream) {
+          for await (const chunk of textStream) {
+            streamed.push(typeof chunk === "string" ? chunk : "");
+          }
+          return { id: "native", raw: {}, threadId };
+        }
+      });
+
+      await expect(answerReply(runtime)).resolves.toBe(true);
+
+      expect(streamed.join("")).toBe("Hello there");
+      expect(calls).toEqual([]);
+    });
+  });
+
+  describe("recovered replies reach the thread (#2106)", () => {
+    async function sendAndSettle(name: string, expectedLast: string) {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        name
+      );
+      const response = await agent.fetch(
+        "https://example.com/messengers/fake/webhook",
+        {
+          body: JSON.stringify({
+            id: "m1",
+            text: "hello",
+            threadId: "fake:dm-recover"
+          }),
+          method: "POST"
+        }
+      );
+      await expect(response.text()).resolves.toBe("ok");
+      const deadline = Date.now() + 10_000;
+      let posted: string[] = [];
+      while (Date.now() < deadline) {
+        posted = (await agent.getAdapterCalls()).map((call) => call.content);
+        if (posted.at(-1) === expectedLast) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return (await agent.getAdapterCalls()).map((call) => call.content);
+    }
+
+    it.each(["self", "thread"])(
+      "posts the recovered answer instead of the apology (conversation: %s)",
+      async (mode) => {
+        const posted = await sendAndSettle(
+          `recover-${mode}-${crypto.randomUUID()}`,
+          "it"
+        );
+
+        expect(posted).toEqual(["Got", "it"]);
+        expect(posted).not.toContain(INTERRUPTED_MESSENGER_RESPONSE);
+      }
+    );
+
+    it("posts every recovered attempt's text after a second interruption", async () => {
+      const posted = await sendAndSettle(
+        `recover-twice-${crypto.randomUUID()}`,
+        "it was successful"
+      );
+
+      expect(posted).toEqual(["Got", "it was successful"]);
+    }, 20_000);
+
+    it("posts the recovered reply, not a newer message, to the thread", async () => {
+      const posted = await sendAndSettle(
+        `recover-later-${crypto.randomUUID()}`,
+        "it"
+      );
+
+      expect(posted).toEqual(["Got", "it"]);
+    });
+
+    it("stores the reply outcome before recovery reports completion", async () => {
+      const name = `recover-self-${crypto.randomUUID()}`;
+      await sendAndSettle(name, "it");
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        name
+      );
+
+      expect(await agent.getStagedOutcomeAtCompletionForTest()).toBe(
+        "completed"
+      );
+    });
+
+    it("keeps a pending reply on start while its incident is still recovering", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `orphan-active-${crypto.randomUUID()}`
+      );
+
+      expect(
+        await agent.replayOrphanedMessengerDeliveryForTest({
+          activeIncident: true
+        })
+      ).toBe(false);
+      expect(await agent.getAdapterCalls()).toEqual([]);
+    });
+
+    it("apologizes on start for a pending reply whose incident is gone", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `orphan-${crypto.randomUUID()}`
+      );
+
+      expect(await agent.replayOrphanedMessengerDeliveryForTest()).toBe(true);
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content)
+      ).toEqual([INTERRUPTED_MESSENGER_RESPONSE]);
+    });
+
+    it("posts the empty-response text when recovery completes without text", async () => {
+      const posted = await sendAndSettle(
+        `recover-empty-${crypto.randomUUID()}`,
+        EMPTY_MESSENGER_RESPONSE
+      );
+
+      expect(posted.at(-1)).toBe(EMPTY_MESSENGER_RESPONSE);
+      expect(
+        posted.filter((text) => text === EMPTY_MESSENGER_RESPONSE)
+      ).toHaveLength(1);
+      expect(posted).not.toContain(INTERRUPTED_MESSENGER_RESPONSE);
+    });
+
+    it("posts the apology once when recovery is exhausted", async () => {
+      const posted = await sendAndSettle(
+        `recover-exhaust-${crypto.randomUUID()}`,
+        INTERRUPTED_MESSENGER_RESPONSE
+      );
+
+      expect(posted).toEqual(["Got", INTERRUPTED_MESSENGER_RESPONSE]);
+    });
+
+    it("resumes a multi-post recovered reply after its last checkpoint", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `split-replay-${crypto.randomUUID()}`
+      );
+      const result = await agent.deliverSettledRecoveryForTest({
+        text: "one|two|three",
+        posted: 1,
+        replay: true
+      });
+
+      expect(result.pending).toBeUndefined();
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content)
+      ).toEqual(["two", "three"]);
+    });
+
+    it("retries a recovered reply whose live delivery fails, never re-sending a rejected post", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `split-live-${crypto.randomUUID()}`
+      );
+      const result = await agent.deliverSettledRecoveryForTest({
+        text: "one|two|three",
+        failPost: "two"
+      });
+
+      expect(result.retry?.attempts).toBe(1);
+      expect(result.pending?.posted).toBe(2);
+      expect(result.retry).toBeDefined();
+      if (!result.retry) return;
+      expect(await agent.runMessengerRecoveryRetryForTest(result.retry)).toBe(
+        true
+      );
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content)
+      ).toEqual(["one", "three"]);
+    });
+
+    it("posts each chunk once when overlapping deliveries share a recovered reply", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `split-overlap-${crypto.randomUUID()}`
+      );
+
+      expect(
+        await agent.deliverRecoveryConcurrentlyForTest("one|two|three")
+      ).toBe(true);
+      expect(
+        (await agent.getAdapterCalls()).map((call) => call.content)
+      ).toEqual(["one", "two", "three"]);
+    });
+  });
+
+  describe("burst replies end to end (#2312)", () => {
+    type Webhook = import("./agents/messengers").FakeMessengerWebhook;
+
+    async function sendBurst(name: string, webhooks: Webhook[]) {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        name
+      );
+      const res = await agent.fetch(
+        "https://example.com/messengers/fake/webhook",
+        { body: JSON.stringify({ burst: webhooks }), method: "POST" }
+      );
+      await res.text();
+      return agent;
+    }
+
+    it("answers a direct-message burst once, with every line in order", async () => {
+      const agent = await sendBurst("burst-dm", [
+        { id: "b1", text: "summarize the thread", threadId: "fake:dm-burst" },
+        { id: "b2", text: "for me", threadId: "fake:dm-burst" },
+        { id: "b3", text: "and keep it short", threadId: "fake:dm-burst" }
+      ]);
+
+      expect(await agent.getRecorded("prompt")).toEqual([
+        "summarize the thread\nfor me\nand keep it short"
+      ]);
+      expect(await agent.getRecorded("post")).toEqual(["Got"]);
+    });
+
+    it("answers the first message at once under a configured queue strategy (#2313)", async () => {
+      const agent = await sendBurst("queue-dm", [
+        { id: "q1", text: "summarize the thread", threadId: "fake:dm-queue" },
+        { id: "q2", text: "for me", threadId: "fake:dm-queue" },
+        { id: "q3", text: "and keep it short", threadId: "fake:dm-queue" }
+      ]);
+
+      const prompts = await agent.getRecorded("prompt");
+      expect(prompts[0]).toBe("summarize the thread");
+      expect(prompts.flatMap((prompt) => prompt.split("\n")).sort()).toEqual([
+        "and keep it short",
+        "for me",
+        "summarize the thread"
+      ]);
+      expect(await agent.getRecorded("post")).toHaveLength(prompts.length);
+    });
+
+    it("keeps each sender's label when a group burst mixes senders", async () => {
+      const bob = { fullName: "Bob", userId: "user-bob" };
+      const ada = { fullName: "Ada", userId: "user-ada" };
+      const agent = await sendBurst("burst-group", [
+        {
+          author: bob,
+          id: "g1",
+          isMention: true,
+          text: "@fake_bot is the deploy done?",
+          threadId: "fake:group"
+        },
+        {
+          author: ada,
+          id: "g2",
+          isMention: true,
+          text: "@fake_bot what changed?",
+          threadId: "fake:group"
+        }
+      ]);
+
+      expect(await agent.getRecorded("prompt")).toEqual([
+        "Bob: @fake_bot is the deploy done?\nAda: @fake_bot what changed?"
+      ]);
+    });
+
+    it("answers a subscribed-thread burst whose mention is not the newest message", async () => {
+      const threadId = "fake:group-subscribed";
+      const agent = await sendBurst("burst-subscribed", [
+        { id: "s0", isMention: true, text: "@fake_bot hi", threadId }
+      ]);
+      const res = await agent.fetch(
+        "https://example.com/messengers/fake/webhook",
+        {
+          body: JSON.stringify({
+            burst: [
+              {
+                id: "s1",
+                isMention: true,
+                text: "@fake_bot deploy status?",
+                threadId
+              },
+              { id: "s2", text: "please keep it short", threadId }
+            ]
+          }),
+          method: "POST"
+        }
+      );
+      await res.text();
+
+      expect(await agent.getRecorded("prompt")).toEqual([
+        "Ada: @fake_bot hi",
+        "Ada: @fake_bot deploy status?\nplease keep it short"
+      ]);
+    });
+
+    it("finds a skipped mention the adapter did not flag (#2325)", async () => {
+      const threadId = "fake:group-unflagged";
+      const agent = await sendBurst("burst-unflagged", [
+        { id: "u0", isMention: true, text: "@fake_bot hi", threadId }
+      ]);
+      const res = await agent.fetch(
+        "https://example.com/messengers/fake/webhook",
+        {
+          body: JSON.stringify({
+            burst: [
+              { id: "u1", text: "@fake_bot deploy status?", threadId },
+              { id: "u2", text: "please keep it short", threadId }
+            ]
+          }),
+          method: "POST"
+        }
+      );
+      await res.text();
+
+      expect(await agent.getRecorded("prompt")).toEqual([
+        "Ada: @fake_bot hi",
+        "Ada: @fake_bot deploy status?\nplease keep it short"
+      ]);
+    });
+
+    it("answers and subscribes an unsubscribed-thread burst whose mention is not the newest message (#2325)", async () => {
+      const threadId = "fake:group-unsubscribed";
+      const agent = await sendBurst("burst-unsubscribed", [
+        { id: "n1", text: "@fake_bot deploy status?", threadId },
+        { id: "n2", text: "please keep it short", threadId }
+      ]);
+
+      expect(await agent.getRecorded("prompt")).toEqual([
+        "Ada: @fake_bot deploy status?\nplease keep it short"
+      ]);
+      expect(await agent.isSubscribedForTest(threadId)).toBe(true);
+    });
+
+    it("keeps the thread locked through a turn that outlives the lock TTL", async () => {
+      const threadId = "fake:dm-slow";
+      const send = (id: string, text: string) =>
+        agent
+          .fetch("https://example.com/messengers/fake/webhook", {
+            body: JSON.stringify({ id, text, threadId }),
+            method: "POST"
+          })
+          .then((res) => res.text());
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `slow-dm-${crypto.randomUUID()}`
+      );
+      const first = send("l1", "first");
+      for (let i = 0; i < 100; i++) {
+        if ((await agent.getModelLog()).length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      // Past the 1s lock TTL, well inside the 4s first turn.
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await send("l2", "second");
+      // Queued behind the running turn, not handled under a lock of its own.
+      expect(await agent.queueDepthForTest(threadId)).toBe(1);
+      await first;
+
+      expect(await agent.getModelLog()).toEqual([
+        { content: "first", kind: "prompt" },
+        { content: "first", kind: "stream-end" },
+        { content: "second", kind: "prompt" },
+        { content: "second", kind: "stream-end" }
+      ]);
+    }, 30_000);
+
+    it("finds the private Chat SDK queue methods the recovery drain relies on", () => {
+      // The drain feature-checks these at runtime and silently skips when a
+      // `chat` release drops or renames them; this fails the upgrade instead.
+      const internals = Chat.prototype as unknown as Record<string, unknown>;
+      expect(typeof internals.getLockKey).toBe("function");
+      expect(typeof internals.drainQueue).toBe("function");
+      expect((internals.getLockKey as () => unknown).length).toBe(2);
+      expect((internals.drainQueue as () => unknown).length).toBe(4);
+    });
+
+    it("drains messages queued behind a reply recovered after a restart", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        "drain-after-recovery"
+      );
+      await agent.recoverWithQueuedFollowUpForTest();
+
+      let prompts: string[] = [];
+      for (let i = 0; i < 50 && prompts.length < 2; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        prompts = await agent.getRecorded("prompt");
+      }
+      expect(prompts).toEqual(["hello", "follow up"]);
+    });
+
+    it("keeps queued messages behind a recovered reply that will be retried", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        "drain-after-retried-recovery"
+      );
+      expect(
+        await agent.recoverWithQueuedFollowUpForTest({
+          failPost: true,
+          retried: true,
+          stage: "streaming"
+        })
+      ).toBe("post failed");
+
+      let prompts: string[] = [];
+      for (let i = 0; i < 15 && prompts.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        prompts = await agent.getRecorded("prompt");
+      }
+      expect(prompts).toEqual([]);
+      expect(await agent.queueDepthForTest("fake:dm-recovered")).toBe(1);
+
+      expect(
+        await agent.recoverWithQueuedFollowUpForTest({
+          enqueue: false,
+          stage: "streaming"
+        })
+      ).toBeNull();
+      let posts: string[] = [];
+      for (let i = 0; i < 50 && posts.length < 2; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        posts = await agent.getRecorded("post");
+      }
+      expect(await agent.getRecorded("prompt")).toEqual(["follow up"]);
+      expect(posts[0]).toBe(INTERRUPTED_MESSENGER_RESPONSE);
+      expect(posts).toHaveLength(2);
+    });
+
+    it("drains queued messages once a failed recovery is not retried", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        "drain-after-failed-recovery"
+      );
+      expect(
+        await agent.recoverWithQueuedFollowUpForTest({
+          failPost: true,
+          stage: "streaming"
+        })
+      ).toBe("post failed");
+
+      let prompts: string[] = [];
+      for (let i = 0; i < 50 && prompts.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        prompts = await agent.getRecorded("prompt");
+      }
+      expect(prompts).toEqual(["follow up"]);
+    });
+  });
+
+  it("separates text segments across tool-call boundaries (#1841)", async () => {
+    const callback = new TextStreamCallback();
+
+    for (const chunk of [
+      { type: "text-delta", id: "before", delta: "Before." },
+      { type: "tool-call", toolCallId: "tool", toolName: "example" },
+      { type: "tool-result", toolCallId: "tool", toolName: "example" },
+      { type: "text-delta", id: "after", delta: "After." }
+    ]) {
+      callback.onEvent(JSON.stringify(chunk));
+    }
+    callback.close();
+
+    await expect(collectText(callback.stream())).resolves.toEqual([
+      "Before.",
+      " ",
+      "After."
+    ]);
+    expect(callback.textSoFar()).toBe("Before. After.");
   });
 
   it("streams visible text while retaining overflow", async () => {
@@ -855,6 +1837,333 @@ describe("think messengers core", () => {
     // answer; this surface won't receive it).
     expect(stages).toContain("completed");
   });
+
+  describe("typing indicator (#2324)", () => {
+    const sleep = (ms: number) =>
+      new Promise((resolve) => setTimeout(resolve, ms));
+
+    function deliver(
+      startTyping: () => Promise<void>,
+      chat: (callback: TextStreamCallback) => Promise<void> = async (
+        callback
+      ) => {
+        await sleep(60);
+        callback.onEvent(JSON.stringify({ type: "text-delta", delta: "hi" }));
+      },
+      log: string[] = []
+    ) {
+      const posts: string[] = [];
+      const delivered = deliverMessengerReply({
+        event: baseEvent,
+        policy: { typingRefreshMs: 10 },
+        surface: {
+          async post(message) {
+            log.push("post");
+            if (isAsyncIterable(message)) {
+              posts.push(...(await collectText(message)));
+              return;
+            }
+            posts.push(
+              typeof message === "string" ? message : message.markdown
+            );
+          },
+          startTyping
+        },
+        target: {
+          cancelChat() {
+            return Promise.resolve(false);
+          },
+          chat: (_message, callback) =>
+            chat(callback as unknown as TextStreamCallback)
+        }
+      });
+      return { delivered, posts };
+    }
+
+    it("still runs the turn when the typing indicator fails", async () => {
+      const { delivered, posts } = deliver(() =>
+        Promise.reject(new Error("typing unavailable"))
+      );
+      await delivered;
+
+      expect(posts).toEqual(["hi"]);
+    });
+
+    it("refreshes until the first text, then stops", async () => {
+      let typing = 0;
+      const { delivered } = deliver(() => {
+        typing++;
+        return Promise.resolve();
+      });
+      await delivered;
+      const afterTurn = typing;
+      await sleep(50);
+
+      expect(afterTurn).toBeGreaterThan(1);
+      expect(typing).toBe(afterTurn);
+    });
+
+    it("stops refreshing when the turn fails", async () => {
+      let typing = 0;
+      const { delivered, posts } = deliver(
+        () => {
+          typing++;
+          return Promise.resolve();
+        },
+        async () => {
+          await sleep(30);
+          throw new Error("model failed");
+        }
+      );
+      await delivered;
+      const afterTurn = typing;
+      await sleep(50);
+
+      expect(typing).toBe(afterTurn);
+      expect(posts).toEqual([ERROR_MESSENGER_RESPONSE]);
+    });
+
+    it("never overlaps slow typing requests or lets one land after the first post", async () => {
+      const log: string[] = [];
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const { delivered, posts } = deliver(
+        async () => {
+          inFlight++;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          log.push("typing:start");
+          await sleep(25);
+          log.push("typing:end");
+          inFlight--;
+        },
+        undefined,
+        log
+      );
+      await delivered;
+      await sleep(50);
+
+      expect(posts).toEqual(["hi"]);
+      expect(maxInFlight).toBe(1);
+      const firstPost = log.indexOf("post");
+      expect(firstPost).toBeGreaterThan(0);
+      expect(log.slice(firstPost).filter((e) => e !== "post")).toEqual([]);
+    });
+
+    it.each(["first", "refresh"] as const)(
+      "still posts the reply when the %s typing request never settles",
+      async (stalled) => {
+        let calls = 0;
+        const { delivered, posts } = deliver(() => {
+          calls++;
+          return stalled === "first" || calls > 1
+            ? new Promise<void>(() => {})
+            : Promise.resolve();
+        });
+        await delivered;
+
+        expect(posts).toEqual(["hi"]);
+      }
+    );
+  });
+
+  it("posts only the apology, never an empty stream, when an interrupted turn has no text", async () => {
+    const posts: string[] = [];
+
+    await deliverMessengerReply({
+      event: baseEvent,
+      surface: {
+        post(message) {
+          posts.push(
+            isAsyncIterable(message)
+              ? "<stream>"
+              : typeof message === "string"
+                ? message
+                : message.markdown
+          );
+          return Promise.resolve();
+        }
+      },
+      target: {
+        cancelChat() {
+          return Promise.resolve(false);
+        },
+        chat(_message, callback) {
+          callback.onInterrupted?.();
+          return Promise.resolve();
+        }
+      }
+    });
+
+    expect(posts).toEqual([INTERRUPTED_MESSENGER_RESPONSE]);
+  });
+
+  it("skips the apology when the target delivers the recovered reply itself (#2106)", async () => {
+    const posts: string[] = [];
+    const stages: string[] = [];
+
+    await deliverMessengerReply({
+      event: baseEvent,
+      fiber: {
+        stash(snapshot: unknown) {
+          stages.push(
+            parseMessengerReplySnapshot(snapshot)?.stage ?? "unknown"
+          );
+        }
+      } as unknown as FiberContext,
+      surface: {
+        async post(message) {
+          if (isAsyncIterable(message)) {
+            posts.push(...(await collectText(message)));
+            return;
+          }
+          posts.push(typeof message === "string" ? message : message.markdown);
+        }
+      },
+      target: {
+        cancelChat() {
+          return Promise.resolve(false);
+        },
+        chat(_message, callback) {
+          callback.onStart({ requestId: "req-recovering" });
+          callback.onEvent(
+            JSON.stringify({ type: "text-delta", delta: "partial answer" })
+          );
+          callback.onInterrupted?.({ deliversRecoveredReply: true });
+          return Promise.resolve();
+        }
+      }
+    });
+
+    expect(posts).toEqual(["partial answer"]);
+    expect(stages.at(-1)).toBe("completed");
+  });
+
+  it("reposts the partial when the stream post rejected before the target delivers the rest (#2106)", async () => {
+    const posts: string[] = [];
+
+    await deliverMessengerReply({
+      event: baseEvent,
+      fiber: { stash() {} } as unknown as FiberContext,
+      policy: { splitText: (text) => (text ? [text] : []) },
+      surface: {
+        async post(message) {
+          if (isAsyncIterable(message)) {
+            await collectText(message);
+            throw new Error("provider rejected the stream");
+          }
+          posts.push(typeof message === "string" ? message : message.markdown);
+        }
+      },
+      target: {
+        cancelChat() {
+          return Promise.resolve(false);
+        },
+        chat(_message, callback) {
+          callback.onStart({ requestId: "req-recovering" });
+          callback.onEvent(
+            JSON.stringify({ type: "text-delta", delta: "partial answer" })
+          );
+          callback.onInterrupted?.({ deliversRecoveredReply: true });
+          return Promise.resolve();
+        }
+      }
+    });
+
+    expect(posts).toEqual(["partial answer"]);
+  });
+
+  it("posts text past the visible limit before the target delivers the rest (#2106)", async () => {
+    const posts: string[] = [];
+
+    await deliverMessengerReply({
+      event: baseEvent,
+      fiber: { stash() {} } as unknown as FiberContext,
+      policy: {
+        visibleSoftLimit: 7,
+        splitText: (text) => (text ? [text] : [])
+      },
+      surface: {
+        async post(message) {
+          if (isAsyncIterable(message)) {
+            posts.push((await collectText(message)).join(""));
+            return;
+          }
+          posts.push(typeof message === "string" ? message : message.markdown);
+        }
+      },
+      target: {
+        cancelChat() {
+          return Promise.resolve(false);
+        },
+        chat(_message, callback) {
+          callback.onStart({ requestId: "req-recovering" });
+          callback.onEvent(
+            JSON.stringify({ type: "text-delta", delta: "partial answer" })
+          );
+          callback.onInterrupted?.({ deliversRecoveredReply: true });
+          return Promise.resolve();
+        }
+      }
+    });
+
+    expect(posts.join("")).toBe("partial answer");
+    expect(posts).toHaveLength(2);
+  });
+
+  it.each([
+    ["interrupted", INTERRUPTED_MESSENGER_RESPONSE],
+    ["failed after text", INTERRUPTED_MESSENGER_RESPONSE],
+    ["failed before text", ERROR_MESSENGER_RESPONSE]
+  ])(
+    "checkpoints completed before posting the terminal reply when %s (#1842)",
+    async (outcome, reply) => {
+      const log: string[] = [];
+
+      await deliverMessengerReply({
+        event: baseEvent,
+        fiber: {
+          stash(snapshot: unknown) {
+            log.push(
+              `stage:${parseMessengerReplySnapshot(snapshot)?.stage ?? "unknown"}`
+            );
+          }
+        } as unknown as FiberContext,
+        surface: {
+          async post(message) {
+            if (isAsyncIterable(message)) {
+              await collectText(message);
+              return;
+            }
+            log.push(
+              `post:${typeof message === "string" ? message : message.markdown}`
+            );
+          }
+        },
+        target: {
+          cancelChat() {
+            return Promise.resolve(false);
+          },
+          chat(_message, callback) {
+            callback.onStart({ requestId: "req-terminal" });
+            if (outcome !== "failed before text") {
+              callback.onEvent(
+                JSON.stringify({ type: "text-delta", delta: "partial" })
+              );
+            }
+            if (outcome === "interrupted") {
+              callback.onInterrupted?.();
+              return Promise.resolve();
+            }
+            return Promise.reject(new Error("model failed"));
+          }
+        }
+      });
+
+      const completed = log.indexOf("stage:completed");
+      expect(completed).toBeGreaterThanOrEqual(0);
+      expect(log.indexOf(`post:${reply}`)).toBeGreaterThan(completed);
+    }
+  );
 
   it("delivers successful replies with active messenger context and overflow chunks", async () => {
     const posts: string[] = [];
@@ -1132,6 +2441,9 @@ function fakeHost(resolved: FiberRecoveryResult[]): MessengerThinkHost {
     },
     startFiber() {
       throw new Error("startFiber is not used by this test");
+    },
+    _runMessengerReplyTask() {
+      throw new Error("_runMessengerReplyTask is not used by this test");
     },
     subAgent() {
       throw new Error("subAgent is not used by this test");

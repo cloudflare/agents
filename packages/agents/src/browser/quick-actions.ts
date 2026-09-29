@@ -60,7 +60,7 @@ export type QuickActionExtractInput = QuickActionPage & {
   /** Natural-language instruction for what to extract. */
   prompt?: string;
   /** A JSON Schema describing the desired output shape. */
-  response_format?: { type: "json_schema"; schema: unknown };
+  response_format?: { type: "json_schema"; json_schema: unknown };
   /** Bring-your-own model(s), tried in order, for extraction. */
   custom_ai?: { model: string; authorization: string }[];
 };

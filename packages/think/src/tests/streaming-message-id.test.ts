@@ -14,7 +14,7 @@
  */
 
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
 
@@ -95,30 +95,43 @@ function runTurnAndCollectStartChunks(
 }
 
 describe("Think — streaming assistant message-id alignment", () => {
-  it("stamps the persisted assistant id onto a new turn's start chunk", async () => {
-    const room = crypto.randomUUID();
-    const agent = await getAgentByName(env.ThinkClientToolsAgent, room);
-    await agent.setTextOnlyMode(true);
-    const ws = await connectWS(room);
+  it(
+    "stamps the persisted assistant id onto a new turn's start chunk",
+    {
+      timeout: 15_000
+    },
+    async () => {
+      const room = crypto.randomUUID();
+      const agent = await getAgentByName(env.ThinkClientToolsAgent, room);
+      await agent.setTextOnlyMode(true);
+      const ws = await connectWS(room);
 
-    const startChunks = await runTurnAndCollectStartChunks(ws, "hello");
+      const startChunks = await runTurnAndCollectStartChunks(ws, "hello");
 
-    // A single (non-continuation) turn streams exactly one start chunk.
-    expect(startChunks).toHaveLength(1);
-    const start = startChunks[0];
+      // A single (non-continuation) turn streams exactly one start chunk.
+      expect(startChunks).toHaveLength(1);
+      const start = startChunks[0];
 
-    // The provider emits no id, so Think must have stamped one.
-    expect(typeof start.messageId).toBe("string");
-    expect(start.messageId).toBeTruthy();
+      // The provider emits no id, so Think must have stamped one.
+      expect(typeof start.messageId).toBe("string");
+      expect(start.messageId).toBeTruthy();
 
-    // And it must equal the id the assistant turn was persisted under, so the
-    // client streams and reconciles against a single message.
-    await new Promise((r) => setTimeout(r, 200));
-    const messages = (await agent.getMessages()) as UIMessage[];
-    const assistant = messages.find((m) => m.role === "assistant");
-    expect(assistant).toBeDefined();
-    expect(start.messageId).toBe(assistant?.id);
+      // And it must equal the id the assistant turn was persisted under, so the
+      // client streams and reconciles against a single message. The `done`
+      // broadcast lands BEFORE the assistant message is durably persisted, so
+      // poll for the persisted row instead of betting on a fixed sleep.
+      const assistant = await vi.waitFor(
+        async () => {
+          const messages = (await agent.getMessages()) as UIMessage[];
+          const persisted = messages.find((m) => m.role === "assistant");
+          expect(persisted).toBeDefined();
+          return persisted;
+        },
+        { timeout: 8000, interval: 25 }
+      );
+      expect(start.messageId).toBe(assistant?.id);
 
-    ws.close(1000);
-  });
+      ws.close(1000);
+    }
+  );
 });

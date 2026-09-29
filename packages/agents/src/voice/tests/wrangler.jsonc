@@ -1,0 +1,74 @@
+{
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module",
+    "enable_nodejs_v8_module",
+    "enable_nodejs_process_v2"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "TestVoiceAgent",
+        "name": "TestVoiceAgent"
+      },
+      {
+        "class_name": "TestDiagnosticVoiceAgent",
+        "name": "TestDiagnosticVoiceAgent"
+      },
+      {
+        "class_name": "TestEmptyResponseVoiceAgent",
+        "name": "TestEmptyResponseVoiceAgent"
+      },
+      {
+        "class_name": "TestContextVoiceAgent",
+        "name": "TestContextVoiceAgent"
+      },
+      {
+        "class_name": "TestAiSdkFullStreamVoiceAgent",
+        "name": "TestAiSdkFullStreamVoiceAgent"
+      },
+      {
+        "class_name": "TestAiSdkTextStreamVoiceAgent",
+        "name": "TestAiSdkTextStreamVoiceAgent"
+      },
+      {
+        "class_name": "TestPcm24kVoiceAgent",
+        "name": "TestPcm24kVoiceAgent"
+      },
+      {
+        "class_name": "TestVoiceInputAgent",
+        "name": "TestVoiceInputAgent"
+      },
+      {
+        "class_name": "TestDiagnosticVoiceInputAgent",
+        "name": "TestDiagnosticVoiceInputAgent"
+      },
+      {
+        "class_name": "TestRejectCallVoiceInputAgent",
+        "name": "TestRejectCallVoiceInputAgent"
+      }
+    ]
+  },
+  "main": "worker.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": [
+        "TestVoiceAgent",
+        "TestDiagnosticVoiceAgent",
+        "TestEmptyResponseVoiceAgent",
+        "TestContextVoiceAgent",
+        "TestAiSdkFullStreamVoiceAgent",
+        "TestAiSdkTextStreamVoiceAgent",
+        "TestPcm24kVoiceAgent",
+        "TestVoiceInputAgent",
+        "TestDiagnosticVoiceInputAgent",
+        "TestRejectCallVoiceInputAgent"
+      ],
+      "tag": "v1"
+    }
+  ]
+}

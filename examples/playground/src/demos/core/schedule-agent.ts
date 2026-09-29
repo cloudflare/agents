@@ -23,10 +23,11 @@ export class ScheduleAgent extends Agent<Env, ScheduleAgentState> {
     intervalSeconds: number,
     label: string
   ): Promise<string> {
-    const schedule = await this.schedule(intervalSeconds, "onRecurringTask", {
-      label,
-      recurring: true
-    });
+    const schedule = await this.scheduleEvery(
+      intervalSeconds,
+      "onRecurringTask",
+      { label }
+    );
     return schedule.id;
   }
 

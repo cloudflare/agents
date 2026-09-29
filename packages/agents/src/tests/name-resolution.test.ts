@@ -10,15 +10,11 @@ import type { McpAgent } from "../mcp";
 // https://developers.cloudflare.com/changelog/post/2026-03-15-durable-object-id-name/
 // https://developers.cloudflare.com/durable-objects/api/id/#name
 //
-// These tests pin that behavior: a cold-woken agent whose first-ever entry
-// point is a native DO RPC call resolves this.name purely from ctx.id.name,
-// with NO __ps_name seeding and no setName() bootstrap. (The "Cold Wake
-// Initialization" tests in mcp/transports/rpc.test.ts still seed __ps_name,
-// but they address via idFromName(), so under the current runtime the seed
-// is inert — the legacy fallback paths it would feed are pinned upstream in
-// partyserver's own test suite, not here.)
+// These tests pin that behavior: a cold-woken Agent whose first-ever entry
+// point is native DO RPC resolves this.name directly from ctx.id.name, without
+// storage writes or a naming bootstrap RPC.
 describe("this.name resolution from ctx.id.name", () => {
-  it("resolves this.name on a cold agent addressed via idFromName(), without __ps_name seeding", async () => {
+  it("resolves this.name on a cold agent addressed via idFromName()", async () => {
     // The "rpc:" prefix is load-bearing: McpAgent parses this.name as
     // `${transport}:${sessionId}`, and handleMcpMessage requires the RPC
     // transport.
@@ -38,7 +34,7 @@ describe("this.name resolution from ctx.id.name", () => {
     expect(name).toBe(doName);
   });
 
-  it("resolves this.name on a cold agent addressed via getByName(), without __ps_name seeding", async () => {
+  it("resolves this.name on a cold agent addressed via getByName()", async () => {
     const doName = `rpc:ctx-id-name-${crypto.randomUUID()}`;
     const stub = env.MCP_OBJECT.getByName(
       doName

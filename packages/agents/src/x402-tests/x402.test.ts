@@ -15,6 +15,7 @@ const mockResourceServer = {
 };
 
 const mockPaymentClient = {
+  onBeforePaymentCreation: vi.fn(),
   registerPolicy: vi.fn(),
   createPaymentPayload: vi.fn()
 };
@@ -46,7 +47,7 @@ import {
   withX402Client,
   type X402Config,
   type X402ClientConfig
-} from "../mcp/x402";
+} from "../mcp/client/x402";
 
 // Helper: create a minimal McpServer mock
 // We avoid naming anything `_registeredTools` since McpServer has a private field
@@ -108,35 +109,6 @@ const mockSigner = {
   address: "0xClientAddress",
   signTypedData: vi.fn()
 };
-
-describe("deprecation warnings", () => {
-  it("warns once for each x402 wrapper", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    try {
-      withX402(createMockMcpServer(), defaultServerConfig);
-      withX402(createMockMcpServer(), defaultServerConfig);
-      withX402Client(createMockMcpClient(), {
-        account: mockSigner as unknown as X402ClientConfig["account"]
-      });
-      withX402Client(createMockMcpClient(), {
-        account: mockSigner as unknown as X402ClientConfig["account"]
-      });
-
-      expect(warn).toHaveBeenCalledTimes(2);
-      expect(warn.mock.calls.map(([message]) => String(message))).toEqual([
-        expect.stringMatching(
-          /withX402\(\) is deprecated and feature-frozen.*Monetization Gateway.*blog\.cloudflare\.com\/monetization-gateway/
-        ),
-        expect.stringMatching(
-          /withX402Client\(\) is deprecated and feature-frozen.*Monetization Gateway.*blog\.cloudflare\.com\/monetization-gateway/
-        )
-      ]);
-    } finally {
-      warn.mockRestore();
-    }
-  });
-});
 
 // =============================================================
 // normalizeNetwork
@@ -839,44 +811,23 @@ describe("withX402Client", () => {
     expect(decoded.scheme).toBe("exact");
   });
 
-  it("respects maxPaymentValue cap", async () => {
-    const client = createMockMcpClient();
-    const originalCallTool = client.callTool;
-
-    originalCallTool.mockResolvedValueOnce({
-      isError: true,
-      _meta: {
-        "x402/error": {
-          x402Version: 2,
-          error: "PAYMENT_REQUIRED",
-          resource: {
-            url: "x402://expensive",
-            description: "expensive",
-            mimeType: "application/json"
-          },
-          accepts: [
-            {
-              ...samplePaymentRequirements[0],
-              amount: "999999999" // Way over the default cap
-            }
-          ]
-        }
-      },
-      content: [{ type: "text", text: "payment required" }]
-    });
-
-    const augmented = withX402Client(client, {
+  it("registers a before-payment hook that enforces maxPaymentValue", async () => {
+    withX402Client(createMockMcpClient(), {
       account: mockSigner as unknown as X402ClientConfig["account"],
-      maxPaymentValue: BigInt(100000) // 0.10 USDC
+      maxPaymentValue: 100n
     });
-
-    const result = await augmented.callTool(null, { name: "expensive-tool" });
-
-    expect(result.isError).toBe(true);
-    const content = result.content as Array<{ text: string }>;
-    expect(content[0].text).toContain("Payment exceeds client cap");
-    // Should NOT have retried
-    expect(originalCallTool).toHaveBeenCalledOnce();
+    const [hook] =
+      mockPaymentClient.onBeforePaymentCreation.mock.calls.at(-1) ?? [];
+    expect(hook).toBeTypeOf("function");
+    const run = (amount: string) =>
+      hook({
+        paymentRequired: {},
+        selectedRequirements: { ...samplePaymentRequirements[0], amount }
+      });
+    await expect(run("100")).resolves.toBeUndefined();
+    await expect(run("101")).rejects.toThrow(
+      "Payment exceeds client cap: 101 > 100"
+    );
   });
 
   it("respects confirmation callback declining payment", async () => {
@@ -973,19 +924,59 @@ describe("withX402Client", () => {
       content: [{ type: "text", text: "payment required" }]
     });
 
-    mockPaymentClient.createPaymentPayload.mockRejectedValue(
-      new Error("signing failed")
-    );
-
     const augmented = withX402Client(client, {
       account: mockSigner as unknown as X402ClientConfig["account"]
     });
+    // Selection succeeds and runs the cap hook; signing then fails.
+    const [hook] =
+      mockPaymentClient.onBeforePaymentCreation.mock.calls.at(-1) ?? [];
+    mockPaymentClient.createPaymentPayload.mockImplementationOnce(
+      async (paymentRequired: { accepts: unknown[] }) => {
+        await hook({
+          paymentRequired,
+          selectedRequirements: paymentRequired.accepts[0]
+        });
+        throw new Error("signing failed");
+      }
+    );
 
     const result = await augmented.callTool(null, { name: "test-tool" });
 
     expect(result.isError).toBe(true);
     const content = result.content as Array<{ text: string }>;
     expect(content[0].text).toBe("Failed to create payment payload");
+  });
+
+  it("returns the original 402 result when selection finds nothing to sign", async () => {
+    const client = createMockMcpClient();
+    const paymentRequired = {
+      isError: true,
+      _meta: {
+        "x402/error": {
+          x402Version: 2,
+          error: "PAYMENT_REQUIRED",
+          resource: {
+            url: "x402://test",
+            description: "test",
+            mimeType: "application/json"
+          },
+          accepts: samplePaymentRequirements
+        }
+      },
+      content: [{ type: "text", text: "payment required" }]
+    };
+    client.callTool.mockResolvedValueOnce(paymentRequired);
+    // Selection fails before any hook runs.
+    mockPaymentClient.createPaymentPayload.mockRejectedValueOnce(
+      new Error("No network/scheme registered")
+    );
+
+    const augmented = withX402Client(client, {
+      account: mockSigner as unknown as X402ClientConfig["account"]
+    });
+    const result = await augmented.callTool(null, { name: "test-tool" });
+
+    expect(result).toEqual(paymentRequired);
   });
 
   it("registers a network preference policy when network is provided", () => {

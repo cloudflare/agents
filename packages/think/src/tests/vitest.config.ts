@@ -29,10 +29,7 @@ export default defineConfig({
   test: {
     name: "workers",
     include: [path.join(testsDir, "**/*.test.ts")],
-    exclude: [
-      path.join(testsDir, "../e2e-tests/**"),
-      path.join(testsDir, "generated-entry/**")
-    ],
+    exclude: [path.join(testsDir, "../e2e-tests/**")],
     setupFiles: [path.join(testsDir, "setup.ts")],
     testTimeout: 10000,
     retry: 3,

@@ -1,6 +1,165 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
+import type { AgentToolEventMessage } from "../agent-tool-types";
+import {
+  agentToolEventDedupeKey,
+  applyAgentToolEvent,
+  createAgentToolEventState
+} from "../chat/agent-tools";
+
+const textStart = JSON.stringify({ type: "text-start", id: "t" });
+const textDelta = (delta: string) =>
+  JSON.stringify({ type: "text-delta", id: "t", delta });
+
+/** Reduce frames the way `useAgentToolEvents` does, deduping replay vs live. */
+function reduceClient(frames: AgentToolEventMessage[]) {
+  const seen = new Set<string>();
+  let state = createAgentToolEventState();
+  for (const frame of frames) {
+    const key = agentToolEventDedupeKey(frame);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    state = applyAgentToolEvent(state, frame);
+  }
+  return state;
+}
+
+function runText(
+  state: ReturnType<typeof createAgentToolEventState>,
+  runId: string
+): string {
+  return (state.runsById[runId]?.parts ?? [])
+    .map((part) => ("text" in part ? String(part.text) : ""))
+    .join("");
+}
+
+describe("agent-tool live/replay sequencing", () => {
+  it("replay after a mid-stream milestone neither duplicates nor drops text (#2364)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `replay-milestone-${crypto.randomUUID()}`
+    );
+    const runId = "run-milestone";
+    const { live, replay } = await agent.captureLiveAndReplayForTest({
+      runId,
+      chunkBodies: [textStart, textDelta("A"), textDelta("B"), textDelta("C")],
+      milestones: [{ beforeChunk: 2, name: "halfway" }]
+    });
+
+    // The client disconnects right after B, so it misses C live.
+    const cut = live.findIndex(
+      (frame) =>
+        frame.event.kind === "chunk" && frame.event.body === textDelta("B")
+    );
+    expect(cut).toBeGreaterThan(0);
+    const state = reduceClient([...live.slice(0, cut + 1), ...replay]);
+
+    expect(runText(state, runId)).toBe("ABC");
+    expect(state.runsById[runId]?.milestones).toHaveLength(1);
+    expect(state.runsById[runId]?.status).toBe("completed");
+  });
+
+  it("replay after a chunk too large to store neither duplicates nor drops text", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `replay-unstored-${crypto.randomUUID()}`
+    );
+    const runId = "run-unstored";
+    const { live, replay } = await agent.captureLiveAndReplayForTest({
+      runId,
+      chunkBodies: [textStart, textDelta("A"), textDelta("B"), textDelta("C")],
+      unstoredChunks: [{ beforeChunk: 2, body: textDelta("X") }]
+    });
+
+    // The client saw X live, then disconnects right after B and misses C.
+    const cut = live.findIndex(
+      (frame) =>
+        frame.event.kind === "chunk" && frame.event.body === textDelta("B")
+    );
+    expect(cut).toBeGreaterThan(0);
+    const state = reduceClient([...live.slice(0, cut + 1), ...replay]);
+
+    expect(runText(state, runId)).toBe("AXBC");
+    expect(state.runsById[runId]?.status).toBe("completed");
+  });
+
+  it("recovery re-attach numbers new chunks after the ones clients already saw", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `reattach-sequence-${crypto.randomUUID()}`
+    );
+    const runId = "run-reattach";
+    const { seen, recovery } = await agent.captureRecoveryReattachForTest({
+      runId,
+      storedChunkBodies: [textStart, textDelta("A")],
+      pendingChunkBodies: [textDelta("B")]
+    });
+
+    const state = reduceClient([...seen, ...recovery]);
+    expect(runText(state, runId)).toBe("AB");
+    expect(state.runsById[runId]?.status).toBe("completed");
+  });
+});
+
+describe("agent-tool connect-time replay", () => {
+  it("reads milestones without asking the child to reconcile its run", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `replay-read-only-${crypto.randomUUID()}`
+    );
+    const { kinds, inspectReconcile } = await agent.captureConnectReplayForTest(
+      { runId: "run-read-only", chunkBodies: [textStart] }
+    );
+
+    expect(kinds).toEqual(["started", "chunk", "chunk", "finished"]);
+    expect(inspectReconcile).toEqual([false]);
+  });
+
+  it(
+    "bounds replay when a child's inspection stalls",
+    { timeout: 20_000 },
+    async () => {
+      const agent = await getAgentByName(
+        env.TestAgentToolReplayAgent,
+        `replay-stalled-inspect-${crypto.randomUUID()}`
+      );
+      const { elapsedMs, kinds } = await agent.captureConnectReplayForTest({
+        runId: "run-stalled",
+        chunkBodies: [textStart],
+        inspectDelayMs: 8_000
+      });
+
+      expect(elapsedMs).toBeLessThan(5_000);
+      expect(kinds).toEqual(["started", "chunk", "finished"]);
+    }
+  );
+
+  it(
+    "bounds replay when resolving a child stalls and still replays later runs",
+    { timeout: 20_000 },
+    async () => {
+      const agent = await getAgentByName(
+        env.TestAgentToolReplayAgent,
+        `replay-stalled-resolve-${crypto.randomUUID()}`
+      );
+      const { elapsedMs, frames } =
+        await agent.captureConnectReplayWithStalledResolveForTest({
+          stalledRunId: "run-stalled-resolve",
+          healthyRunId: "run-healthy",
+          resolveDelayMs: 8_000
+        });
+
+      expect(elapsedMs).toBeLessThan(5_000);
+      const kindsFor = (runId: string) =>
+        frames
+          .filter((frame) => frame.event.runId === runId)
+          .map((frame) => frame.event.kind);
+      expect(kindsFor("run-stalled-resolve")).toEqual(["started", "finished"]);
+      expect(kindsFor("run-healthy")).toEqual(["started", "chunk", "finished"]);
+    }
+  );
+});
 
 /**
  * #1630 follow-up regression: the typed interrupted cause (`reason` /

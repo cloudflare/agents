@@ -4,9 +4,13 @@ This guide covers the changes needed when upgrading from AI SDK v5 to v6 with `@
 
 ## Installation
 
+Pin the v6-compatible majors so this migration does not also install AI SDK v7:
+
 ```bash
-npm install ai@latest @ai-sdk/react@latest @ai-sdk/openai@latest
+npm install ai@^6 @ai-sdk/react@^3 @ai-sdk/openai@^3
 ```
+
+The current `agents` and `@cloudflare/ai-chat` releases support both AI SDK v6 and v7. This guide covers v6 only.
 
 ## Breaking changes
 

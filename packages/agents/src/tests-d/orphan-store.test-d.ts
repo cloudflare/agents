@@ -3,26 +3,13 @@
  * that `@cloudflare/ai-chat` and `@cloudflare/think` route their recovery
  * persist through (`agents/chat`).
  *
- * The load-bearing claim is the prose one: `OrphanPersistStore` is the *write
- * subset* of `SessionProvider`. These assertions pin that so a drift in either
- * interface breaks the build rather than just a comment.
+ * The seam deliberately contains only the three operations recovery needs.
+ * These assertions pin its synchronous and asynchronous implementations.
  */
 
 import type { UIMessage } from "ai";
 import type { OrphanPersistStore } from "../chat/index";
-import type {
-  SessionMessage,
-  SessionProvider
-} from "../experimental/memory/session";
-
-// ── Subset claim ───────────────────────────────────────────────────
-
-// A `SessionProvider` is a structural superset of the orphan-persist write
-// subset, so it satisfies `OrphanPersistStore<SessionMessage>`. This is the
-// enforced version of "this IS the SessionProvider write-subset".
-declare const provider: SessionProvider;
-const asStore: OrphanPersistStore<SessionMessage> = provider;
-void asStore;
+import type { SessionMessage } from "../sessions";
 
 // ── Default instantiation (AI-SDK hosts) ───────────────────────────
 

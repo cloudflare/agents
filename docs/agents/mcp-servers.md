@@ -14,6 +14,12 @@ This guide covers the different ways to create MCP servers with the Agents SDK a
 - **`McpAgent`** is a retained, feature-frozen SDK v1 path for existing stateful deployments. New servers should use `createMcpHandler()`.
 - **Raw transport** gives you low-level control if the standard handler lifecycle is not suitable.
 
+`McpAgent` and the other retained SDK v1 registration APIs use the upstream
+Zod-based schema contract. Define their tool input and output schemas as Zod
+shapes; AI SDK flexible-schema adapters are not accepted. For a new MCP server
+that needs Standard Schema support, use `@modelcontextprotocol/server` v2 with
+`createMcpHandler()`.
+
 ## Stateless MCP Server with `createMcpHandler()`
 
 The simplest way to create an MCP server. Install the exact SDK v2 server peer, then use the isolated server entry point so legacy Agents transports and MCP clients stay out of your Worker bundle:
@@ -72,7 +78,11 @@ createMcpHandler(() => createServer(), {
 });
 ```
 
-All upstream SDK v2 handler options pass through. Use `createLegacyMcpHandler` for WorkerTransport, storage, session, and event-store options.
+`createMcpHandler` supports upstream SDK v2 handler options except `bus`, which is not exposed by the Agents SDK. Supplying `bus` throws a `TypeError`.
+
+To publish change events, use the returned handler's `notify` methods, such as `handler.notify.toolsChanged()`. Create the handler once at module scope and reuse it for requests and notifications. Notifications are isolate-local: they do not reach subscriptions in other Worker isolates. See the [handler notification API](https://developers.cloudflare.com/agents/model-context-protocol/apis/handler-api/#publish-list-and-resource-changes) for the available methods.
+
+Use `createLegacyMcpHandler` for SDK v1 WorkerTransport, storage, session, and event-store options. The SDK v2 `bus` option is not available on that handler either.
 
 The handler validates every present `Origin` header before serving the request. It rejects malformed, opaque, and non-HTTP origins. Requests without `Origin` remain valid for non-browser MCP clients.
 

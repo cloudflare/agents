@@ -10,9 +10,12 @@ import { tool } from "ai";
 import { z } from "zod";
 import { Think } from "../../think";
 import type {
+  ChatErrorContext,
   ChatResponseResult,
   MessageConcurrency,
-  StreamCallback
+  StreamCallback,
+  TurnConfig,
+  TurnContext
 } from "../../think";
 import { StreamAccumulator, type ClientToolSchema } from "agents/chat";
 
@@ -91,7 +94,9 @@ function createClientToolMockModel(): LanguageModel {
 // invocation it emits plain text.
 function createSlowClientToolMockModel(
   delayMs: number,
-  trailingGaps: number
+  trailingGaps: number,
+  finishReason: "tool-calls" | "stop" = "tool-calls",
+  onPrompt?: (prompt: unknown[]) => void
 ): LanguageModel {
   let callCount = 0;
   return {
@@ -105,6 +110,7 @@ function createSlowClientToolMockModel(
     doStream(options: Record<string, unknown>) {
       callCount++;
       const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      onPrompt?.(messages);
       const hasToolResult = messages.some(
         (m: unknown) =>
           typeof m === "object" &&
@@ -156,7 +162,7 @@ function createSlowClientToolMockModel(
             controller.enqueue({ type: "text-end", id: "t-trail" });
             controller.enqueue({
               type: "finish",
-              finishReason: "tool-calls",
+              finishReason,
               usage: { inputTokens: 10, outputTokens: 5 }
             });
           } else {
@@ -381,6 +387,93 @@ function createServerApprovalToolMockModel(): LanguageModel {
               }
             });
           }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+/**
+ * #2185: one assistant turn that first calls a server tool that runs, then, in
+ * a later step of the same turn, calls the approval tool, so both parts land in
+ * one assistant message.
+ */
+function createSequentialApprovalMockModel(): LanguageModel {
+  const usage = {
+    inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 5, text: 5, reasoning: 0 }
+  };
+  const toolResultNames = (prompt: unknown[]): string[] =>
+    prompt.flatMap((message) => {
+      const record = message as { role?: string; content?: unknown };
+      if (record.role !== "tool" || !Array.isArray(record.content)) return [];
+      return record.content.map(
+        (part) => (part as { toolName?: string }).toolName ?? ""
+      );
+    });
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-sequential-approval-model",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream(options: Record<string, unknown>) {
+      const results = toolResultNames(
+        (options as { prompt?: unknown[] }).prompt ?? []
+      );
+      const call = (toolCallId: string, toolName: string, input: unknown) => [
+        { type: "tool-input-start", id: toolCallId, toolName },
+        {
+          type: "tool-input-delta",
+          id: toolCallId,
+          delta: JSON.stringify(input)
+        },
+        { type: "tool-input-end", id: toolCallId },
+        {
+          type: "tool-call",
+          toolCallId,
+          toolName,
+          input: JSON.stringify(input)
+        }
+      ];
+      const chunks: Array<Record<string, unknown>> = results.includes(
+        "updateTrigger"
+      )
+        ? [
+            { type: "text-start", id: "t-done" },
+            { type: "text-delta", id: "t-done", delta: "Trigger updated" },
+            { type: "text-end", id: "t-done" },
+            {
+              type: "finish",
+              finishReason: { unified: "stop", raw: undefined },
+              usage
+            }
+          ]
+        : results.includes("lookupTrigger")
+          ? [
+              ...call("tc-seq-approval", "updateTrigger", { enabled: true }),
+              {
+                type: "finish",
+                finishReason: { unified: "tool-calls", raw: undefined },
+                usage
+              }
+            ]
+          : [
+              ...call("tc-seq-lookup", "lookupTrigger", {}),
+              {
+                type: "finish",
+                finishReason: { unified: "tool-calls", raw: undefined },
+                usage
+              }
+            ];
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          for (const chunk of chunks) controller.enqueue(chunk);
           controller.close();
         }
       });
@@ -663,17 +756,64 @@ function createTextOnlyMockModel(): LanguageModel {
   } as LanguageModel;
 }
 
+/**
+ * Sums billed rows over a window of SQLite statements, the unit a Durable
+ * Object is charged for. Mirrors the Sessions bench harness in `agents`: every
+ * cursor's counters settle once it has been consumed, so the sum is taken
+ * when the window closes.
+ */
+class BilledRowsForTest {
+  #cursors: { readonly rowsWritten: number; readonly rowsRead: number }[] = [];
+  #active = false;
+
+  constructor(sql: SqlStorage) {
+    const exec = sql.exec.bind(sql);
+    (sql as { exec: SqlStorage["exec"] }).exec = ((
+      query: string,
+      ...params: unknown[]
+    ) => {
+      const cursor = exec(query, ...(params as never[]));
+      if (this.#active) this.#cursors.push(cursor);
+      return cursor;
+      // SAFETY: the wrapper forwards every argument and the cursor unchanged.
+    }) as SqlStorage["exec"];
+  }
+
+  start(): void {
+    this.#cursors = [];
+    this.#active = true;
+  }
+
+  stop(): { rowsRead: number; rowsWritten: number } {
+    this.#active = false;
+    let rowsRead = 0;
+    let rowsWritten = 0;
+    for (const cursor of this.#cursors) {
+      rowsRead += cursor.rowsRead;
+      rowsWritten += cursor.rowsWritten;
+    }
+    this.#cursors = [];
+    return { rowsRead, rowsWritten };
+  }
+}
+
+export type BilledRowsResult = { rowsRead: number; rowsWritten: number };
+
 export class ThinkClientToolsAgent extends Think {
+  readonly #billed = new BilledRowsForTest(this.ctx.storage.sql);
   private _useTextOnly = false;
   private _useSlowStream = false;
   private _useSlowClientToolStream = false;
   private _slowClientToolDelayMs = 30;
   private _slowClientToolGaps = 12;
+  private _slowClientToolFinishReason: "tool-calls" | "stop" = "tool-calls";
+  private _slowClientToolPromptTails: string[] = [];
   private _useMidStreamParallelToolStream = false;
   private _midStreamParallelGapMs = 40;
   private _midStreamParallelGapsBeforeSlow = 20;
   private _midStreamParallelGapsAfterSlow = 10;
   private _useServerApprovalTool = false;
+  private _useSequentialApprovalTool = false;
   private _serverApprovalToolExecutions = 0;
   private _serverApprovalToolFails = false;
   private _useExecutableClientTool = false;
@@ -683,17 +823,86 @@ export class ThinkClientToolsAgent extends Think {
   private _slowChunkCount = 4;
   private _responseLog: ChatResponseResult[] = [];
   private _lastTurnToolNames: string[] = [];
+  private _stampMetadata = false;
+  private _failContinuationBeforeStream = false;
+  private _chatErrorLog: ChatErrorContext[] = [];
 
-  override beforeTurn(ctx: { tools: ToolSet }): void {
+  override onChatError(error: unknown, ctx: ChatErrorContext): unknown {
+    this._chatErrorLog.push(ctx);
+    return error;
+  }
+
+  async setFailContinuationBeforeStream(value: boolean): Promise<void> {
+    this._failContinuationBeforeStream = value;
+  }
+
+  async getChatErrorLog(): Promise<ChatErrorContext[]> {
+    return this._chatErrorLog;
+  }
+
+  override beforeTurn(ctx: TurnContext): TurnConfig | void {
     this._lastTurnToolNames = Object.keys(ctx.tools);
+    if (ctx.continuation && this._failContinuationBeforeStream) {
+      throw new Error("continuation failed before streaming");
+    }
+    if (this._stampMetadata) {
+      // Per-turn write path (`TurnConfig.messageMetadata`) for issue #1873.
+      // `createdAt` on `start` and `source` on `finish` prove the two are
+      // shallow-merged; `scope: "turn"` distinguishes this from the
+      // instance-level writer below. `continued` shows `beforeTurn` resolved the
+      // writer again for an auto-continuation turn.
+      return {
+        messageMetadata: ({ part }) => {
+          if (part.type === "start") {
+            return ctx.continuation
+              ? { continued: true }
+              : { createdAt: 1_700_000_000_000, scope: "turn" };
+          }
+          if (part.type === "finish") return { source: "server" };
+          return undefined;
+        }
+      };
+    }
+  }
+
+  async setMessageMetadataMode(value: boolean): Promise<void> {
+    this._stampMetadata = value;
+  }
+
+  // Instance-level default writer (`this.messageMetadata`), which applies to
+  // every turn without a `beforeTurn` override. `scope: "instance"` lets the
+  // precedence test confirm the per-turn config wins when both are set.
+  async setInstanceMessageMetadataMode(value: boolean): Promise<void> {
+    this.messageMetadata = value
+      ? ({ part }) =>
+          part.type === "start"
+            ? { createdAt: 1_600_000_000_000, scope: "instance" }
+            : undefined
+      : undefined;
   }
 
   async getLastTurnToolNames(): Promise<string[]> {
     return this._lastTurnToolNames;
   }
 
-  override onChatResponse(result: ChatResponseResult): void {
+  private _responseHookGate: Promise<void> | undefined;
+  private _releaseResponseHook: (() => void) | undefined;
+
+  /** While set, `onChatResponse` does not return until it is cleared. */
+  async setStallResponseHook(value: boolean): Promise<void> {
+    if (value) {
+      this._responseHookGate = new Promise((resolve) => {
+        this._releaseResponseHook = resolve;
+      });
+      return;
+    }
+    this._releaseResponseHook?.();
+    this._responseHookGate = undefined;
+  }
+
+  override async onChatResponse(result: ChatResponseResult): Promise<void> {
     this._responseLog.push(result);
+    await this._responseHookGate;
   }
 
   async getResponseLog(): Promise<ChatResponseResult[]> {
@@ -718,7 +927,12 @@ export class ThinkClientToolsAgent extends Think {
     if (this._useSlowClientToolStream)
       return createSlowClientToolMockModel(
         this._slowClientToolDelayMs,
-        this._slowClientToolGaps
+        this._slowClientToolGaps,
+        this._slowClientToolFinishReason,
+        (prompt) => {
+          const last = prompt.at(-1) as { role?: string } | undefined;
+          this._slowClientToolPromptTails.push(last?.role ?? "");
+        }
       );
     if (this._useMidStreamParallelToolStream)
       return createMidStreamParallelToolModel(
@@ -727,12 +941,28 @@ export class ThinkClientToolsAgent extends Think {
         this._midStreamParallelGapsAfterSlow
       );
     if (this._useTextOnly) return createTextOnlyMockModel();
+    if (this._useSequentialApprovalTool)
+      return createSequentialApprovalMockModel();
     if (this._useServerApprovalTool) return createServerApprovalToolMockModel();
     return createClientToolMockModel();
   }
 
   override getTools(): ToolSet {
+    if (this._useSequentialApprovalTool) {
+      return {
+        lookupTrigger: tool({
+          description: "Read the trigger",
+          inputSchema: z.object({}),
+          execute: async () => ({ enabled: false })
+        }),
+        ...this._serverApprovalTools()
+      };
+    }
     if (!this._useServerApprovalTool) return {};
+    return this._serverApprovalTools();
+  }
+
+  private _serverApprovalTools(): ToolSet {
     return {
       updateTrigger: tool({
         description: "Enable or disable a trigger",
@@ -761,6 +991,10 @@ export class ThinkClientToolsAgent extends Think {
     this._useServerApprovalTool = value;
   }
 
+  async setSequentialApprovalToolMode(value: boolean): Promise<void> {
+    this._useSequentialApprovalTool = value;
+  }
+
   async getServerApprovalToolExecutions(): Promise<number> {
     return this._serverApprovalToolExecutions;
   }
@@ -782,11 +1016,20 @@ export class ThinkClientToolsAgent extends Think {
   async setSlowClientToolStreamMode(
     enabled: boolean,
     delayMs?: number,
-    trailingGaps?: number
+    trailingGaps?: number,
+    finishReason?: "tool-calls" | "stop"
   ): Promise<void> {
     this._useSlowClientToolStream = enabled;
     if (delayMs !== undefined) this._slowClientToolDelayMs = delayMs;
     if (trailingGaps !== undefined) this._slowClientToolGaps = trailingGaps;
+    if (finishReason !== undefined) {
+      this._slowClientToolFinishReason = finishReason;
+    }
+  }
+
+  /** Role of the last prompt message of each slow client-tool model call. */
+  async getSlowClientToolPromptTailsForTest(): Promise<string[]> {
+    return this._slowClientToolPromptTails;
   }
 
   async setMidStreamParallelToolMode(
@@ -999,6 +1242,113 @@ export class ThinkClientToolsAgent extends Think {
   }
 
   /**
+   * Persist a `transcript`-message conversation of small text messages, with
+   * the assistant message two before the leaf owning the client tool call
+   * `tc-measure` (where an approved tool's result landing in a continuation
+   * would find its owner), and leave the live cache current.
+   */
+  private async _seedMeasuredTranscript(transcript: number): Promise<string> {
+    const ownerId = `m-${transcript - 3}`;
+    for (let i = 0; i < transcript; i++) {
+      const id = `m-${i}`;
+      await this.session.appendMessage(
+        id === ownerId
+          ? ({
+              id,
+              role: "assistant",
+              parts: [
+                {
+                  type: "tool-client_action",
+                  toolCallId: "tc-measure",
+                  toolName: "client_action",
+                  state: "input-available",
+                  input: { action: "measure" }
+                }
+              ]
+            } as unknown as UIMessage)
+          : {
+              id,
+              role: i % 2 === 0 ? "user" : "assistant",
+              parts: [{ type: "text", text: `${i} ${"x".repeat(120)}` }]
+            }
+      );
+    }
+    await this.syncMessagesFromStorage();
+    return ownerId;
+  }
+
+  /**
+   * Billed rows for one client tool result applied to a persisted message on
+   * a transcript `transcript` messages long. Read from the same transcript
+   * at two lengths, the counts must match: the apply resolves its one target
+   * row from memory and reads that row alone.
+   */
+  async measureToolUpdateRowsForTest(
+    transcript: number
+  ): Promise<
+    BilledRowsResult & { state: string | undefined; cacheCoversPath: boolean }
+  > {
+    const ownerId = await this._seedMeasuredTranscript(transcript);
+    const internal = this as unknown as {
+      _applyToolResult(toolCallId: string, output: unknown): Promise<void>;
+      _cacheCoversActivePath: boolean;
+    };
+    this.#billed.start();
+    await internal._applyToolResult("tc-measure", "measured");
+    const billed = this.#billed.stop();
+    const stored = await this.session.getMessage(ownerId);
+    const part = stored?.parts.find(
+      (candidate) =>
+        (candidate as { toolCallId?: string }).toolCallId === "tc-measure"
+    ) as { state?: string } | undefined;
+    return {
+      ...billed,
+      state: part?.state,
+      cacheCoversPath: internal._cacheCoversActivePath
+    };
+  }
+
+  /**
+   * Billed rows for a turn start whose client echoes the whole server
+   * transcript plus one new user message — the shape every `useAgentChat`
+   * request has. Only the new message may touch storage.
+   */
+  async measureTurnStartRowsForTest(
+    transcript: number
+  ): Promise<BilledRowsResult & { persisted: boolean; cached: number }> {
+    await this._seedMeasuredTranscript(transcript);
+    const internal = this as unknown as {
+      _reconcileAndPersistIncoming(
+        incoming: UIMessage[],
+        options: {
+          requestId: string;
+          isRegeneration: boolean;
+          isCurrent: () => boolean;
+        }
+      ): Promise<{ branchParentId: string | undefined } | null>;
+    };
+    const echoed = this.messages.map(
+      (message) => JSON.parse(JSON.stringify(message)) as UIMessage
+    );
+    const incoming: UIMessage[] = [
+      ...echoed,
+      { id: "new-user", role: "user", parts: [{ type: "text", text: "next" }] }
+    ];
+    this.#billed.start();
+    const result = await internal._reconcileAndPersistIncoming(incoming, {
+      requestId: "measure",
+      isRegeneration: false,
+      isCurrent: () => true
+    });
+    const billed = this.#billed.stop();
+    return {
+      ...billed,
+      persisted: result !== null,
+      cached: this.messages.length
+    };
+  }
+
+  /**
    * Drives two overlapping read-modify-write applies through the
    * interaction-apply queue (#1649). Each apply reads a shared counter, yields
    * across an async gap, then writes `read + 1`. Without serialization both
@@ -1170,6 +1520,38 @@ export class ThinkClientToolsAgent extends Think {
       internal._interactionApplyTail = Promise.resolve();
       internal._autoContinuation.reset();
     }
+  }
+
+  /**
+   * Drive the sub-agent RPC `chat()` entry point and return the streamed
+   * chunks plus the persisted assistant message's metadata (#1873).
+   */
+  async runChatForMetadata(message: string): Promise<{
+    startMetadataJson: string | undefined;
+    metadataJson: string | undefined;
+  }> {
+    const events: Array<Record<string, unknown>> = [];
+    let error: string | undefined;
+    await this.chat(message, {
+      onStart() {},
+      onEvent(json: string) {
+        events.push(JSON.parse(json) as Record<string, unknown>);
+      },
+      onDone() {},
+      onError(e: string) {
+        error = e;
+      }
+    });
+    if (error) throw new Error(error);
+    const messages = (await this.getMessages()) as UIMessage[];
+    const assistant = [...messages]
+      .reverse()
+      .find((m) => m.role === "assistant");
+    const start = events.find((e) => e.type === "start");
+    return {
+      startMetadataJson: JSON.stringify(start?.messageMetadata),
+      metadataJson: JSON.stringify(assistant?.metadata)
+    };
   }
 
   /**

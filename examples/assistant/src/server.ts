@@ -6,7 +6,14 @@
  * gate that forwards each user to their `AssistantDirectory`.
  */
 
-import { getAgentByName } from "agents";
+import {
+  camelCaseToKebabCase,
+  getAgentByName,
+  routeSubAgentRequest
+} from "agents";
+import { CodemodeRuntime } from "@cloudflare/codemode";
+import { AssistantDirectory } from "../agents/assistant/agent";
+import { MyAssistant } from "../agents/assistant/agents/my-assistant/agent";
 import {
   createUnauthorizedResponse,
   getGitHubUserFromRequest,
@@ -15,7 +22,8 @@ import {
   handleLogout
 } from "./auth";
 import type { GitHubUser } from "./auth";
-import type { AssistantDirectory } from "../agents/assistant/agent";
+
+export { AssistantDirectory, CodemodeRuntime, MyAssistant };
 
 /**
  * Local-dev escape hatch: set `DEV_USER=yourname` in `.env.local` (gitignored)
@@ -27,15 +35,8 @@ function getDevUser(env: Env): GitHubUser | null {
   return { id: 0, login: env.DEV_USER, name: env.DEV_USER, avatarUrl: "" };
 }
 
-type ThinkAppContext = {
-  router: {
-    routeSubAgent(
-      request: Request,
-      parent: { fetch(request: Request): Promise<Response> },
-      options: { parent: string }
-    ): Promise<Response>;
-  };
-};
+const SUB_AGENT_SEGMENT = camelCaseToKebabCase(MyAssistant.name);
+const SUB_AGENT_PREFIX = `/chat/sub/${SUB_AGENT_SEGMENT}/`;
 
 function createJsonResponse(body: unknown, init?: ResponseInit) {
   const headers = new Headers(init?.headers);
@@ -44,12 +45,7 @@ function createJsonResponse(body: unknown, init?: ResponseInit) {
 }
 
 export default {
-  async fetch(
-    request: Request,
-    env: Env,
-    _ctx: ExecutionContext,
-    think?: ThinkAppContext
-  ) {
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
     const url = new URL(request.url);
 
     try {
@@ -89,22 +85,21 @@ export default {
           return createUnauthorizedResponse(request);
         }
 
-        if (!think?.router) {
-          return new Response(
-            "Assistant chat routing requires the Think generated Worker entry. " +
-              'Make sure wrangler.jsonc uses "main": "virtual:think/entry", ' +
-              "rebuild @cloudflare/think after framework changes, and restart the dev server.",
-            { status: 500 }
-          );
-        }
-
         const directory = await getAgentByName(
           env.AssistantDirectory as DurableObjectNamespace<AssistantDirectory>,
           user.login
         );
-        return think.router.routeSubAgent(request, directory, {
-          parent: "assistant"
-        });
+
+        // Requests without a child segment belong to the directory itself
+        // (including `/chat` and `/chat/mcp-callback`).
+        if (url.pathname.startsWith(SUB_AGENT_PREFIX)) {
+          const childPath = url.pathname.slice(SUB_AGENT_PREFIX.length);
+          return routeSubAgentRequest(request, directory, {
+            fromPath: `/sub/${SUB_AGENT_SEGMENT}/${childPath}`
+          });
+        }
+
+        return directory.fetch(request);
       }
     } catch (error) {
       const message =
@@ -119,4 +114,4 @@ export default {
     // GitHub-authenticated `/chat*` gate.
     return new Response("Not found", { status: 404 });
   }
-};
+} satisfies ExportedHandler<Env>;
