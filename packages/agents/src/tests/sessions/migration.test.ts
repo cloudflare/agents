@@ -154,6 +154,43 @@ describe("Sessions legacy migration", () => {
     });
   });
 
+  it("hides a lifted overlay row and re-parents its child (#1984)", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      // An affected legacy session: the `c1` overlay was echoed back and
+      // stored under `m2`, and the next turn attached beneath it.
+      instance.seedLegacy([
+        ...legacySchema(),
+        ...legacyRows(),
+        `INSERT INTO assistant_messages
+          (id, session_id, parent_id, role, content, created_at)
+         VALUES ('compaction_c1', '', 'm2', 'assistant', ${sqlLiteral(
+           JSON.stringify(
+             message("compaction_c1", "first branch summary", "assistant")
+           )
+         )}, '2026-01-02 03:06:00')`,
+        `INSERT INTO assistant_messages
+          (id, session_id, parent_id, role, content, created_at)
+         VALUES ('m4', '', 'compaction_c1', 'user', ${sqlLiteral(
+           JSON.stringify(message("m4", "after the echo", "user"))
+         )}, '2026-01-02 03:06:01')`
+      ]);
+
+      const session = instance.sessions.session();
+      const history = await session.getHistory();
+      expect(history.map((item) => item.id)).toEqual(["compaction_c1", "m4"]);
+      expect(history[0].parts[0].text).toBe("first branch summary");
+      expect((await session.getBranches("m2")).map((m) => m.id)).toEqual([
+        "m4"
+      ]);
+      expect(await session.search("first branch summary")).toEqual([]);
+      expect(
+        (await session.search("after the echo")).map((hit) => hit.id)
+      ).toEqual(["m4"]);
+    });
+  });
+
   it("keeps a lifted source when a row did not copy faithfully", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
 

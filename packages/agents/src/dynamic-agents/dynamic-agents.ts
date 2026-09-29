@@ -426,6 +426,8 @@ export class DynamicAgentsInternal extends LifecycleCapability {
   async checkRunFibersAtPath(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<number> {
+    await this.#host.__unsafe_ensureInitialized();
+
     const selfPath = this.#host.selfPath;
     if (!this.#host._isSameAgentPathPrefix(selfPath, ownerPath)) {
       throw new Error(
@@ -1607,6 +1609,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     method: string,
     args: unknown[]
   ): Promise<unknown> {
+    await this.#host.__unsafe_ensureInitialized();
     const stub = await this.resolve(className, name);
     return await this.invokeStubMethod(stub, className, method, args);
   }
@@ -1622,6 +1625,7 @@ export class DynamicAgentsInternal extends LifecycleCapability {
     method: string,
     args: unknown[]
   ): Promise<unknown> {
+    await this.#host.__unsafe_ensureInitialized();
     const [self, next, ...rest] = path;
     if (!self) {
       throw new Error(`Sub-agent path invocation requires a non-empty path.`);

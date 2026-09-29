@@ -723,7 +723,9 @@ function createMultiStepExecutableClientToolMockModel(): LanguageModel {
   } as LanguageModel;
 }
 
-function createTextOnlyMockModel(): LanguageModel {
+function createTextOnlyMockModel(
+  onPrompt?: (prompt: unknown[]) => void
+): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -732,7 +734,8 @@ function createTextOnlyMockModel(): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented");
     },
-    doStream() {
+    doStream(options: Record<string, unknown>) {
+      onPrompt?.(options.prompt as unknown[]);
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
@@ -808,6 +811,7 @@ export class ThinkClientToolsAgent extends Think {
   private _slowClientToolGaps = 12;
   private _slowClientToolFinishReason: "tool-calls" | "stop" = "tool-calls";
   private _slowClientToolPromptTails: string[] = [];
+  private _textOnlyPrompts: unknown[][] = [];
   private _useMidStreamParallelToolStream = false;
   private _midStreamParallelGapMs = 40;
   private _midStreamParallelGapsBeforeSlow = 20;
@@ -940,7 +944,10 @@ export class ThinkClientToolsAgent extends Think {
         this._midStreamParallelGapsBeforeSlow,
         this._midStreamParallelGapsAfterSlow
       );
-    if (this._useTextOnly) return createTextOnlyMockModel();
+    if (this._useTextOnly)
+      return createTextOnlyMockModel((prompt) => {
+        this._textOnlyPrompts.push(prompt);
+      });
     if (this._useSequentialApprovalTool)
       return createSequentialApprovalMockModel();
     if (this._useServerApprovalTool) return createServerApprovalToolMockModel();
@@ -985,6 +992,11 @@ export class ThinkClientToolsAgent extends Think {
 
   async setTextOnlyMode(value: boolean): Promise<void> {
     this._useTextOnly = value;
+  }
+
+  /** The prompt of each text-only model call. */
+  async getTextOnlyPromptsForTest(): Promise<unknown[][]> {
+    return this._textOnlyPrompts;
   }
 
   async setServerApprovalToolMode(value: boolean): Promise<void> {
