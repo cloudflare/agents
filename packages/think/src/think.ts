@@ -217,7 +217,6 @@ import {
   toolPartHasSettledResult,
   persistReconstructedOrphan,
   reconcileMessages,
-  resolveToolMergeId,
   CHAT_RECOVERY_TASK_NAME,
   chatRecoveryTaskRunOptions,
   createChatRecoveryTaskDefinition,
@@ -544,12 +543,18 @@ function executionToolCallIn(
  * and reconciliation protects server results only from pre-output client
  * states. Keep the server's resolved part, and drop the pending-state text
  * after it as the resolution did.
+ *
+ * Providers may reuse a toolCallId across turns, so the resolution is taken
+ * only from the server row the message reconciled to; a pause still pending
+ * there stays pending. A resolution on any other row can belong to another
+ * turn.
  */
 function keepResolvedPauses(
   incoming: UIMessage[],
   serverMessages: readonly UIMessage[]
 ): UIMessage[] {
-  const resolved = new Map<string, UIMessage["parts"][number]>();
+  type Part = UIMessage["parts"][number];
+  const resolvedByMessage = new Map<string, Map<string, Part>>();
   for (const message of serverMessages) {
     if (message.role !== "assistant") continue;
     for (const part of message.parts) {
@@ -561,30 +566,36 @@ function keepResolvedPauses(
           record.state === "output-denied") &&
         !isPausedToolPart(record)
       ) {
-        resolved.set(record.toolCallId, part);
+        let own = resolvedByMessage.get(message.id);
+        if (!own) {
+          own = new Map();
+          resolvedByMessage.set(message.id, own);
+        }
+        own.set(record.toolCallId, part);
       }
     }
   }
-  if (resolved.size === 0) return incoming;
+  if (resolvedByMessage.size === 0) return incoming;
 
   return incoming.map((message) => {
     if (message.role !== "assistant") return message;
-    const stale = message.parts.flatMap((part) => {
+    const own = resolvedByMessage.get(message.id);
+    if (!own) return message;
+    const stale = new Map<string, Part>();
+    for (const part of message.parts) {
       const record = part as Record<string, unknown>;
-      return typeof record.toolCallId === "string" &&
-        isPausedToolPart(record) &&
-        resolved.has(record.toolCallId)
-        ? [record.toolCallId]
-        : [];
-    });
-    if (stale.length === 0) return message;
+      if (typeof record.toolCallId !== "string" || !isPausedToolPart(record)) {
+        continue;
+      }
+      const server = own.get(record.toolCallId);
+      if (server) stale.set(record.toolCallId, server);
+    }
+    if (stale.size === 0) return message;
     let parts = message.parts;
-    for (const toolCallId of stale) {
+    for (const [toolCallId, server] of stale) {
       parts = dropGenerationAfterToolCall(
         parts.map((part) =>
-          "toolCallId" in part && part.toolCallId === toolCallId
-            ? resolved.get(toolCallId)!
-            : part
+          "toolCallId" in part && part.toolCallId === toolCallId ? server : part
         ),
         toolCallId
       );
@@ -4861,6 +4872,7 @@ export class Think<
   private _agentToolRunsByRequestId = new Map<string, string | null>();
   private _submissionTableEnsured = false;
   private _declaredScheduledTasksTableEnsured = false;
+  private _warnedFacetScheduledTasksDisarmed = false;
   private _actionLedgerTableEnsured = false;
   private _actionPendingTableEnsured = false;
   private _submissionAbortControllers = new Map<string, AbortController>();
@@ -5716,6 +5728,29 @@ export class Think<
   /** Return code-declared scheduled tasks for this agent. */
   getScheduledTasks(): ThinkScheduledTasks | Promise<ThinkScheduledTasks> {
     return {};
+  }
+
+  /**
+   * Return which instances of this class arm the declared scheduled tasks.
+   *
+   * `"root"` (the default) arms them only on the top-level agent. Because
+   * `getScheduledTasks()` is usually a static code declaration, it returns the
+   * same tasks on every instance — so without this scope an agent that also
+   * has sub-agents would arm one private copy per live facet and dispatch each
+   * occurrence once per facet on top of the root (#1877).
+   *
+   * Return `"all"` to arm on facets as well. That is only correct when
+   * `getScheduledTasks()` genuinely varies per facet (for example when it
+   * reads per-facet state), since each facet then owns an independent
+   * schedule.
+   *
+   * The value must be stable across wakes. Reporting `"root"` on a facet that
+   * previously armed cancels its occurrences, so a scope that flickers with
+   * request-scoped or not-yet-loaded state will repeatedly tear down and
+   * re-create that facet's schedule.
+   */
+  getScheduledTasksScope(): "root" | "all" | Promise<"root" | "all"> {
+    return "root";
   }
 
   /**
@@ -8903,14 +8938,17 @@ export class Think<
   // ── Host bridge methods (called by HostBridgeLoopback via DO RPC) ──
 
   async _hostReadFile(path: string): Promise<string | null> {
+    await this.__unsafe_ensureInitialized();
     return (await this.workspace.readFile(path)) ?? null;
   }
 
   async _hostWriteFile(path: string, content: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     await this.workspace.writeFile(path, content);
   }
 
   async _hostDeleteFile(path: string): Promise<boolean> {
+    await this.__unsafe_ensureInitialized();
     try {
       await this.workspace.rm(path);
       return true;
@@ -8924,6 +8962,7 @@ export class Think<
   ): Promise<
     Array<{ name: string; type: string; size: number; path: string }>
   > {
+    await this.__unsafe_ensureInitialized();
     const entries = await this.workspace.readDir(dir);
     return entries.map((e) => ({
       name: e.name,
@@ -8934,17 +8973,20 @@ export class Think<
   }
 
   async _hostGetContext(label: string): Promise<string | null> {
+    await this.__unsafe_ensureInitialized();
     const block = this.context.getBlock(label);
     return block?.content ?? null;
   }
 
   async _hostSetContext(label: string, content: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     await this.context.setBlock(label, content);
   }
 
   async _hostGetMessages(
     limit?: number
   ): Promise<Array<{ id: string; role: string; content: string }>> {
+    await this.__unsafe_ensureInitialized();
     const history = this.messages;
     const sliced =
       limit !== undefined && limit !== null
@@ -8963,6 +9005,7 @@ export class Think<
   }
 
   async _hostSendMessage(content: string): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     const msg = {
       id: crypto.randomUUID(),
       role: "user" as const,
@@ -8979,6 +9022,7 @@ export class Think<
   async _hostGetSessionInfo(): Promise<{
     messageCount: number;
   }> {
+    await this.__unsafe_ensureInitialized();
     return {
       messageCount: this.messages.length
     };
@@ -11160,6 +11204,20 @@ export class Think<
     return stableHash(this.selfPath);
   }
 
+  /**
+   * Whether this instance arms the declared scheduled tasks.
+   *
+   * The root always arms. Facets only arm when the class opts in via
+   * `getScheduledTasksScope()`; see that hook for why root-only is the
+   * default (#1877). `parentPath` is hydrated before the reconcile step of
+   * `onStart` — persisted by `_cf_initAsFacet` on a facet's first boot, and
+   * restored from storage by the base agent on every later wake.
+   */
+  private async _declaredScheduledTasksArmedHere(): Promise<boolean> {
+    if (this.parentPath.length === 0) return true;
+    return (await this.getScheduledTasksScope()) === "all";
+  }
+
   private _declaredScheduleValidationError(
     rawSchedule: string,
     taskTimezone?: string,
@@ -11202,7 +11260,14 @@ export class Think<
   }
 
   private async _reconcileDeclaredScheduledTasks(): Promise<void> {
-    const tasks = await this._declaredScheduledTasksForNow();
+    // A facet that does not arm reconciles against an empty task set rather
+    // than skipping outright: the prune pass below then cancels and deletes
+    // any rows an earlier version armed here, so pre-existing duplicates heal
+    // on the next wake instead of firing forever (#1877).
+    const armed = await this._declaredScheduledTasksArmedHere();
+    const tasks = armed
+      ? await this._declaredScheduledTasksForNow()
+      : new Map<string, NormalizedDeclaredTask>();
     this._ensureDeclaredScheduledTasksTable();
     const ownerKey = this._declaredScheduleOwnerKey();
     const now = Date.now();
@@ -11317,6 +11382,48 @@ export class Think<
           AND task_id = ${row.task_id}
       `;
     }
+
+    if (!armed) await this._warnFacetScheduledTasksDisarmed(existing.length);
+  }
+
+  /**
+   * Warn once when a sub-agent declares tasks it will not arm.
+   *
+   * Two populations need this, and only one of them leaves a trace. A facet
+   * upgrading from the pre-#1877 default has rows to prune, so `armedCount`
+   * is non-zero. A facet declaring tasks for the first time under the root
+   * default never armed anything, so the only way to tell it apart from a
+   * class that declares nothing is to ask — otherwise its schedule is
+   * silently inert, which is the failure mode #1877 was filed about.
+   */
+  private async _warnFacetScheduledTasksDisarmed(
+    armedCount: number
+  ): Promise<void> {
+    if (this._warnedFacetScheduledTasksDisarmed) return;
+    let declaredCount = armedCount;
+    if (declaredCount === 0) {
+      try {
+        declaredCount = Object.keys(await this.getScheduledTasks()).length;
+      } catch {
+        // Only the warning depends on this; a declaration that throws still
+        // surfaces from whichever instance actually arms it.
+        return;
+      }
+    }
+    if (declaredCount === 0) return;
+    this._warnedFacetScheduledTasksDisarmed = true;
+    console.warn(
+      `[Think] Sub-agent "${this.name}" declares ${declaredCount} scheduled ` +
+        `task(s) that are not armed here. Declared tasks run on the root ` +
+        `agent only, so each occurrence fires once rather than once per live ` +
+        `sub-agent (#1877)` +
+        (armedCount > 0
+          ? `; the occurrences this sub-agent had already armed have been ` +
+            `cancelled`
+          : ``) +
+        `. Override getScheduledTasksScope() to return "all" if this class ` +
+        `intentionally declares per-sub-agent tasks.`
+    );
   }
 
   private async _scheduleDeclaredTaskOccurrence(
@@ -11394,6 +11501,12 @@ export class Think<
     ) {
       throw new Error("Invalid declared scheduled task payload");
     }
+
+    // A dispatch can reach a facet that no longer arms — either racing the
+    // reconcile that prunes its rows, or arriving before this wake got that
+    // far. Returning here keeps the `finally` below from re-arming the very
+    // occurrence the prune is trying to retire (#1877).
+    if (!(await this._declaredScheduledTasksArmedHere())) return;
 
     const row = this._readDeclaredScheduledTaskRow(payload.taskId);
     if (!row || row.schedule_hash !== payload.scheduleHash) return;
@@ -15704,7 +15817,6 @@ export class Think<
           if (!options.isCurrent()) return false;
           await this._persistIncomingMessage(
             msg,
-            serverMessages,
             serverMessagesById,
             options.channel
           );
@@ -15740,10 +15852,9 @@ export class Think<
   }
 
   /**
-   * Persist an incoming message after reconciliation. For assistant
-   * messages, also resolve their ID against any server-side row that
-   * already owns the same `toolCallId` so we update the existing row
-   * instead of inserting an orphan duplicate.
+   * Persist an incoming message after batch reconciliation has resolved
+   * assistant IDs (one-to-one against server rows) and merged any
+   * server-owned tool outputs.
    *
    * A message whose stored form is what the server already holds is skipped
    * outright. The client posts its whole transcript on every request, so
@@ -15757,14 +15868,11 @@ export class Think<
    */
   private async _persistIncomingMessage(
     msg: UIMessage,
-    serverMessages: readonly UIMessage[],
     serverMessagesById?: ReadonlyMap<string, UIMessage>,
     channel?: string
   ): Promise<void> {
-    const resolved =
-      msg.role === "assistant" ? resolveToolMergeId(msg, serverMessages) : msg;
-    const prior = serverMessagesById?.get(resolved.id);
-    const incoming = stripReservedMetadata(sanitizeMessage(resolved));
+    const prior = serverMessagesById?.get(msg.id);
+    const incoming = stripReservedMetadata(sanitizeMessage(msg));
     if (
       prior &&
       JSON.stringify(stripReservedMetadata(prior)) === JSON.stringify(incoming)
@@ -15777,7 +15885,7 @@ export class Think<
         ? { channel }
         : undefined;
     if (!reserved) {
-      await this._upsertMessageInHistory(resolved, undefined, "client");
+      await this._upsertMessageInHistory(msg, undefined, "client");
       return;
     }
     await this._upsertMessageInHistory(
@@ -19595,7 +19703,7 @@ export class Think<
     Array<Record<string, unknown>>
   > {
     const messages: Array<Record<string, unknown>> = [
-      { type: MSG_CHAT_MESSAGES, messages: this.messages }
+      { type: MSG_CHAT_MESSAGES, messages: this.messages, connect: true }
     ];
     // Replay an in-progress "recovering…" status so a client that connects
     // mid-recovery reads the turn as working rather than frozen (#1620). This

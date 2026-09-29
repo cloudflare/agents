@@ -134,6 +134,11 @@ describe("Think — onConnect broadcast policy", () => {
 
     expect(types).toContain(MSG_CHAT_MESSAGES);
     expect(types).not.toContain(MSG_STREAM_RESUMING);
+    // Marks the transcript as predating any sends the client buffered while
+    // disconnected, so `useAgentChat` keeps them (#1983).
+    expect(messages).toContainEqual(
+      expect.objectContaining({ type: MSG_CHAT_MESSAGES, connect: true })
+    );
 
     await closeWS(ws);
   });

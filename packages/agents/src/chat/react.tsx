@@ -651,6 +651,25 @@ function prependMissingHydratedMessages<ChatMessage extends UIMessage>(
   return [...missingHydratedMessages, ...currentMessages];
 }
 
+// Re-append the specific buffered sends a connect transcript omits, restoring
+// only the tracked ids (in local order).
+function restoreBufferedSends<ChatMessage extends UIMessage>(
+  snapshot: ChatMessage[],
+  local: readonly ChatMessage[],
+  bufferedIds: ReadonlySet<string>
+): ChatMessage[] {
+  if (bufferedIds.size === 0) {
+    return snapshot;
+  }
+
+  const snapshotIds = new Set(snapshot.map((message) => message.id));
+  const restored = local.filter(
+    (message) => bufferedIds.has(message.id) && !snapshotIds.has(message.id)
+  );
+
+  return restored.length === 0 ? snapshot : [...snapshot, ...restored];
+}
+
 /**
  * React hook for building AI chat interfaces using an Agent
  * @param options Chat options including the agent connection
@@ -1047,6 +1066,10 @@ export function useAgentChat<
    * Used by onAgentMessage to skip messages already handled by the transport.
    */
   const localRequestIdsRef = useRef<Set<string>>(new Set());
+  // Ids of sends the transport buffered (socket not OPEN when `send()` ran, so
+  // the server hasn't seen them). Consumed by the next transcript snapshot to
+  // rescue the optimistic messages from the reconnect replay.
+  const pendingBufferedSendIdsRef = useRef<Set<string>>(new Set());
   const pendingReplayResumeRequestIdsRef = useRef<Set<string>>(new Set());
   const replayHydratedAssistantMessageIdsRef = useRef<Set<string>>(new Set());
   /**
@@ -1079,6 +1102,11 @@ export function useAgentChat<
       agent: agentRef.current,
       activeRequestIds: localRequestIdsRef.current,
       cancelOnClientAbort,
+      onRequestBuffered: (messageId) => {
+        if (messageId) {
+          pendingBufferedSendIdsRef.current.add(messageId);
+        }
+      },
       prepareBody: async ({ messages: msgs, trigger, messageId }) => {
         // Start with the top-level body option (static or dynamic)
         let extraBody: Record<string, unknown> = {};
@@ -1624,6 +1652,7 @@ export function useAgentChat<
     fallbackAckedResumeRequestIdsRef.current.clear();
     replayHydratedAssistantMessageIdsRef.current.clear();
     protectedStreamingAssistantRef.current = null;
+    pendingBufferedSendIdsRef.current.clear();
     customTransport.appliedChunks.clear();
     turnErrorsRef.current.clear();
     pendingTurnEndsRef.current = [];
@@ -1636,6 +1665,9 @@ export function useAgentChat<
 
   const sendMessageWithStreamingProtection: typeof sendMessage = useCallback(
     async (message, options) => {
+      // Whether this send was buffered is detected at the real send site in the
+      // transport (via `onRequestBuffered`), not here — the socket can drop
+      // during the async request preparation between now and the actual send().
       const request = sendMessage(message, options);
 
       if (
@@ -2126,6 +2158,14 @@ export function useAgentChat<
           break;
 
         case MessageType.CF_AGENT_CHAT_MESSAGES: {
+          // One-shot, consumed outside the updater so a re-invoked updater
+          // sees the same ids. Only a connect transcript predates the buffered
+          // sends; any other snapshot (e.g. a `drop` rollback after a
+          // mid-stream reconnect) has already seen them and wins.
+          const bufferedSendIds = data.connect
+            ? new Set(pendingBufferedSendIdsRef.current)
+            : new Set<string>();
+          pendingBufferedSendIdsRef.current.clear();
           setMessages((currentMessages: ChatMessage[]) => {
             let next = preserveProtectedStreamingAssistant(
               data.messages,
@@ -2165,7 +2205,9 @@ export function useAgentChat<
                 next = observed.accumulator.mergeInto(next) as ChatMessage[];
               }
             }
-            return next;
+            // Rescue sends the transport buffered while the socket was down
+            // that the reconnect replay would otherwise drop.
+            return restoreBufferedSends(next, currentMessages, bufferedSendIds);
           });
           break;
         }

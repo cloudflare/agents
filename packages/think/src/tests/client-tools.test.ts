@@ -3427,7 +3427,7 @@ describe("Think — regeneration", () => {
     await donePromise;
     await delay(200);
 
-    const prompts = await agent.getTextOnlyPromptsForTest();
+    const prompts = await agent.getTextOnlyPromptTextsForTest();
     expect(prompts).toHaveLength(2);
     expect(prompts[1]).toEqual(prompts[0]);
     expect(prompts[1].map((m) => m.role)).toEqual(["system", "user"]);
@@ -3471,7 +3471,7 @@ describe("Think — regeneration", () => {
     await donePromise;
     await delay(200);
 
-    const prompts = await agent.getTextOnlyPromptsForTest();
+    const prompts = await agent.getTextOnlyPromptTextsForTest();
     expect(prompts).toHaveLength(4);
     const conversation = (prompt: typeof prompts[number]) =>
       prompt.slice(1).map((m) => `${m.role}: ${m.text}`);

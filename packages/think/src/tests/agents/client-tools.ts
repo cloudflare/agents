@@ -741,7 +741,7 @@ function promptMessageForTest(message: unknown): PromptMessageForTest {
 }
 
 function createTextOnlyMockModel(
-  onPrompt?: (prompt: PromptMessageForTest[]) => void
+  onPrompt?: (prompt: unknown[]) => void
 ): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -751,8 +751,8 @@ function createTextOnlyMockModel(
     doGenerate() {
       throw new Error("doGenerate not implemented");
     },
-    doStream(options: { prompt: unknown[] }) {
-      onPrompt?.(options.prompt.map(promptMessageForTest));
+    doStream(options: Record<string, unknown>) {
+      onPrompt?.(options.prompt as unknown[]);
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
@@ -822,13 +822,13 @@ export type BilledRowsResult = { rowsRead: number; rowsWritten: number };
 export class ThinkClientToolsAgent extends Think {
   readonly #billed = new BilledRowsForTest(this.ctx.storage.sql);
   private _useTextOnly = false;
-  private _textOnlyPrompts: PromptMessageForTest[][] = [];
   private _useSlowStream = false;
   private _useSlowClientToolStream = false;
   private _slowClientToolDelayMs = 30;
   private _slowClientToolGaps = 12;
   private _slowClientToolFinishReason: "tool-calls" | "stop" = "tool-calls";
   private _slowClientToolPromptTails: string[] = [];
+  private _textOnlyPrompts: unknown[][] = [];
   private _useMidStreamParallelToolStream = false;
   private _midStreamParallelGapMs = 40;
   private _midStreamParallelGapsBeforeSlow = 20;
@@ -962,9 +962,9 @@ export class ThinkClientToolsAgent extends Think {
         this._midStreamParallelGapsAfterSlow
       );
     if (this._useTextOnly)
-      return createTextOnlyMockModel((prompt) =>
-        this._textOnlyPrompts.push(prompt)
-      );
+      return createTextOnlyMockModel((prompt) => {
+        this._textOnlyPrompts.push(prompt);
+      });
     if (this._useSequentialApprovalTool)
       return createSequentialApprovalMockModel();
     if (this._useServerApprovalTool) return createServerApprovalToolMockModel();
@@ -1011,9 +1011,16 @@ export class ThinkClientToolsAgent extends Think {
     this._useTextOnly = value;
   }
 
-  /** The prompt of each text-only model call, oldest first. */
-  async getTextOnlyPromptsForTest(): Promise<PromptMessageForTest[][]> {
+  /** The prompt of each text-only model call. */
+  async getTextOnlyPromptsForTest(): Promise<unknown[][]> {
     return this._textOnlyPrompts;
+  }
+
+  /** Each text-only model call's prompt as role/text pairs, oldest first. */
+  async getTextOnlyPromptTextsForTest(): Promise<PromptMessageForTest[][]> {
+    return this._textOnlyPrompts.map((prompt) =>
+      prompt.map(promptMessageForTest)
+    );
   }
 
   async setServerApprovalToolMode(value: boolean): Promise<void> {

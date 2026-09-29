@@ -108,13 +108,12 @@ describe("Agent recovery after forced Durable Object eviction", () => {
 
     await evictDurableObject(stub);
 
-    expect(await agent.getExecutionLog()).not.toContain("executed:warm");
-    expect(await agent.getRunningFiberCount()).toBe(1);
-
-    await agent.triggerRecoveryCheck();
-
+    // The first native RPC initializes the reconstructed Agent and runs startup
+    // recovery before returning the recovered fibers.
     const recovered =
       (await agent.getRecoveredFibers()) as unknown as FiberRecoveryContext[];
+
+    expect(await agent.getExecutionLog()).not.toContain("executed:warm");
     expect(recovered).toEqual([
       expect.objectContaining({
         id: "evicted-fiber",
@@ -126,7 +125,7 @@ describe("Agent recovery after forced Durable Object eviction", () => {
     expect(await agent.getRunningFiberCount()).toBe(0);
   });
 
-  it("applies managed-fiber recovery on a fresh instance", async () => {
+  it("continues managed-fiber recovery through the first post-wake cycle", async () => {
     const stub = await getAgentByName(
       env.TestRunFiberAgent,
       uniqueName("evict-managed-fiber")
@@ -141,7 +140,9 @@ describe("Agent recovery after forced Durable Object eviction", () => {
 
     await evictDurableObject(stub);
 
-    expect(await agent.getRecoveredFibers()).toEqual([]);
+    // This first post-eviction RPC runs startup recovery before the method,
+    // then drives the follow-up housekeeping cycle that completes the managed
+    // recovery callback.
     await agent.simulateAlarmCycle();
 
     const recovered =
