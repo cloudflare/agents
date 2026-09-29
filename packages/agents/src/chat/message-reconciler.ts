@@ -3,9 +3,9 @@
  * with server state during persistence.
  *
  * Three strategies applied in order:
- * 1. Reconcile assistant IDs (exact match → toolCallId → content-key)
+ * 1. Reconcile assistant IDs (exact match → same tool call → content-key)
  * 2. Merge server-known tool outputs into the resolved message
- * 3. Per-message toolCallId dedup for persistence
+ * 3. Drop stale copies of assistants echoed in the same submit
  */
 
 import type { UIMessage } from "ai";
@@ -22,11 +22,15 @@ import type { UIMessage } from "ai";
  *    Outputs come from the server row the message resolved to. A call that
  *    row does not carry may merge only from a server row no incoming message
  *    claimed, and only when exactly one such row holds the same tool call.
+ * 3. Drops a stale copy of an assistant the same submit also echoes under its
+ *    stored ID (see {@link dropStaleToolCopies}).
  *
  * @param incoming - Messages from the client
  * @param serverMessages - Current server-side messages (source of truth)
  * @param sanitizeForContentKey - Function to sanitize a message before computing
- *   its content key (typically strips ephemeral provider metadata)
+ *   its content key or comparing its tool calls against stored rows
+ *   (typically the host's persistence sanitizer, so a tool input the host
+ *   truncates on write compares equal to its stored form)
  * @returns Reconciled messages ready for persistence
  */
 export function reconcileMessages(
@@ -39,7 +43,75 @@ export function reconcileMessages(
     serverMessages,
     sanitizeForContentKey
   );
-  return mergeServerToolOutputs(withReconciledAssistantIds, serverMessages);
+  return dropStaleToolCopies(
+    mergeServerToolOutputs(
+      withReconciledAssistantIds,
+      serverMessages,
+      sanitizeForContentKey
+    ),
+    serverMessages,
+    sanitizeForContentKey
+  );
+}
+
+/**
+ * Drop a stale client copy of an assistant that the same submit also echoes
+ * under its stored ID. Kept, the copy persists as a second row carrying the
+ * same toolCallIds and reaches the next prompt as a duplicate tool call, which
+ * providers that issue unique IDs reject.
+ *
+ * A message is dropped only when it claimed no server row, is not the last
+ * submitted message (a new call awaiting its result sits there), and consists
+ * solely of `step-start` parts and pending tool parts each matching the same
+ * call already settled on a server row this submit claimed. Anything else is
+ * kept.
+ */
+function dropStaleToolCopies(
+  reconciled: UIMessage[],
+  serverMessages: readonly UIMessage[],
+  sanitize?: (message: UIMessage) => UIMessage
+): UIMessage[] {
+  const reconciledIds = new Set(reconciled.map((msg) => msg.id));
+  const serverIds = new Set<string>();
+  const settledOnClaimed = new Map<string, Record<string, unknown>[]>();
+  for (const msg of serverMessages) {
+    serverIds.add(msg.id);
+    if (msg.role !== "assistant" || !reconciledIds.has(msg.id)) continue;
+    for (const part of msg.parts) {
+      const record = part as Record<string, unknown>;
+      if (!isResolvedToolPart(record)) continue;
+      const toolCallId = record.toolCallId as string;
+      const settled = settledOnClaimed.get(toolCallId);
+      if (settled) settled.push(record);
+      else settledOnClaimed.set(toolCallId, [record]);
+    }
+  }
+  if (settledOnClaimed.size === 0) return reconciled;
+
+  const lastIndex = reconciled.length - 1;
+  const kept = reconciled.filter((msg, index) => {
+    if (index === lastIndex) return true;
+    if (msg.role !== "assistant" || serverIds.has(msg.id)) return true;
+    const comparable = sanitize ? sanitize(msg) : msg;
+    let hasToolPart = false;
+    for (const part of comparable.parts) {
+      const record = part as Record<string, unknown>;
+      if (record.type === "step-start") continue;
+      if (
+        typeof record.toolCallId !== "string" ||
+        !(isPendingToolPart(record) || record.state === "input-streaming")
+      ) {
+        return true;
+      }
+      const settled = settledOnClaimed.get(record.toolCallId);
+      if (!settled?.some((candidate) => sameToolCall(candidate, record))) {
+        return true;
+      }
+      hasToolPart = true;
+    }
+    return !hasToolPart;
+  });
+  return kept.length === reconciled.length ? reconciled : kept;
 }
 
 /**
@@ -145,7 +217,8 @@ export function assistantContentKey(
 
 function mergeServerToolOutputs(
   incoming: UIMessage[],
-  serverMessages: readonly UIMessage[]
+  serverMessages: readonly UIMessage[],
+  sanitize?: (message: UIMessage) => UIMessage
 ): UIMessage[] {
   // Index resolved tool parts by message ID first, then toolCallId. Providers
   // may reuse toolCallIds across turns, so a conversation-wide index can merge
@@ -189,6 +262,7 @@ function mergeServerToolOutputs(
   return incoming.map((msg) => {
     if (msg.role !== "assistant") return msg;
     const ownResolvedParts = serverResolvedPartsByMessage.get(msg.id);
+    let comparableParts: Map<string, Record<string, unknown>> | undefined;
 
     let hasChanges = false;
     const updatedParts = msg.parts.map((part) => {
@@ -202,9 +276,15 @@ function mergeServerToolOutputs(
       // ambiguous leaves the part pending rather than risk attaching a result
       // to the wrong turn.
       const toolCallId = record.toolCallId as string;
-      const server =
-        ownResolvedParts?.get(toolCallId) ??
-        uniqueSameCall(unclaimedResolvedByToolCallId.get(toolCallId), record);
+      let server = ownResolvedParts?.get(toolCallId);
+      const candidates = unclaimedResolvedByToolCallId.get(toolCallId);
+      if (!server && candidates) {
+        comparableParts ??= toolPartsByCallId(sanitize ? sanitize(msg) : msg);
+        server = uniqueSameCall(
+          candidates,
+          comparableParts.get(toolCallId) ?? record
+        );
+      }
 
       if (server) {
         hasChanges = true;
@@ -261,7 +341,9 @@ function reconcileAssistantIds(
       return incomingMessage;
     }
 
-    const incomingToolParts = toolPartsByCallId(incomingMessage);
+    const incomingToolParts = toolPartsByCallId(
+      sanitize ? sanitize(incomingMessage) : incomingMessage
+    );
     if (incomingToolParts.size > 0) {
       for (let i = 0; i < serverMessages.length; i++) {
         if (claimedServerIndices.has(i)) continue;

@@ -468,6 +468,97 @@ describe("reconcileMessages — ID reconciliation", () => {
     expect(part.output).toBe("done");
   });
 
+  it("drops a stale copy of an echoed assistant so its toolCallId is not duplicated", () => {
+    const server = [
+      userMsg("u1", "first"),
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { q: "same" },
+        output: "done"
+      })
+    ];
+    const staleCopy = toolAssistantMsg("cli-copy", "tc1", "input-available", {
+      input: { q: "same" }
+    });
+    staleCopy.parts.unshift({
+      type: "step-start"
+    } as ChatMessage["parts"][number]);
+    const client = [...server, staleCopy, userMsg("u2", "second")];
+
+    const result = reconcileMessages(client, server);
+
+    expect(result.map((message) => message.id)).toEqual(["u1", "srv-a1", "u2"]);
+  });
+
+  it("keeps a copy that is not purely pending duplicates of settled calls", () => {
+    const server = [
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { q: "same" },
+        output: "done"
+      })
+    ];
+    const differentInput = toolAssistantMsg("cli-a", "tc1", "input-available", {
+      input: { q: "other" }
+    });
+    const withText = toolAssistantMsg("cli-b", "tc1", "input-available", {
+      input: { q: "same" }
+    });
+    withText.parts.push({
+      type: "text",
+      text: "extra"
+    } as ChatMessage["parts"][number]);
+    const client = [
+      ...server,
+      differentInput,
+      withText,
+      userMsg("u2", "second")
+    ];
+
+    const result = reconcileMessages(client, server);
+
+    expect(result.map((message) => message.id)).toEqual([
+      "srv-a1",
+      "cli-a",
+      "cli-b",
+      "u2"
+    ]);
+  });
+
+  it("compares tool inputs in the host's persisted form", () => {
+    // The host truncates this input on write, so the stored row differs from
+    // the client's full input until the client copy is sanitized the same way.
+    const truncate = (message: ChatMessage): ChatMessage => ({
+      ...message,
+      parts: message.parts.map((part) => {
+        const record = part as Record<string, unknown>;
+        const input = record.input as { code?: string } | undefined;
+        return typeof input?.code === "string"
+          ? ({
+              ...record,
+              input: { code: input.code.slice(0, 10) }
+            } as unknown as ChatMessage["parts"][number])
+          : part;
+      })
+    });
+    const full = "x".repeat(100);
+    const server = [
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { code: full.slice(0, 10) },
+        output: "done"
+      })
+    ];
+    const client = [
+      toolAssistantMsg("cli-a1", "tc1", "input-available", {
+        input: { code: full }
+      })
+    ];
+
+    expect(reconcileMessages(client, server)[0].id).toBe("cli-a1");
+    const result = reconcileMessages(client, server, truncate);
+    const part = result[0].parts[0] as Record<string, unknown>;
+    expect(result[0].id).toBe("srv-a1");
+    expect(part.state).toBe("output-available");
+  });
+
   it("ignores input key order when merging a result from another row", () => {
     const server = [
       toolAssistantMsg("srv-a1", "tc1", "output-available", {

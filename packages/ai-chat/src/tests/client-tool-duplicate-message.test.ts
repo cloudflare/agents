@@ -159,6 +159,119 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.close(1000);
   });
 
+  it("keeps a stale copy beside its echoed row out of storage and the prompt", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const toolCallId = "call_stale_copy";
+    const user: ChatMessage = {
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "Test" }]
+    };
+    const canonical: ChatMessage = {
+      id: "assistant-server",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-testTool",
+          toolCallId,
+          state: "output-available",
+          input: { q: "same" },
+          output: "done"
+        }
+      ] as ChatMessage["parts"]
+    };
+    await agentStub.persistMessages([user, canonical]);
+
+    await agentStub.persistMessages([
+      user,
+      canonical,
+      {
+        id: "assistant-stale-copy",
+        role: "assistant",
+        parts: [
+          { type: "step-start" },
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "input-available",
+            input: { q: "same" }
+          }
+        ] as ChatMessage["parts"]
+      },
+      {
+        id: "user-2",
+        role: "user",
+        parts: [{ type: "text", text: "Next" }]
+      }
+    ]);
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(messages.map((message) => message.id)).toEqual([
+      "user-1",
+      "assistant-server",
+      "user-2"
+    ]);
+    const modelMessages = await convertToModelMessages(messages);
+    const toolCallIds = modelMessages
+      .filter((message) => message.role === "assistant")
+      .flatMap((message) =>
+        Array.isArray(message.content) ? message.content : []
+      )
+      .filter((part) => part.type === "tool-call")
+      .map((part) => (part as { toolCallId: string }).toolCallId);
+    expect(toolCallIds).toEqual([toolCallId]);
+  });
+
+  it("reconciles an optimistic copy of a provider-executed tool whose stored input was truncated", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const toolCallId = "call_provider_truncated";
+    const user: ChatMessage = {
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "Run code" }]
+    };
+    const toolPart = {
+      type: "tool-code_execution",
+      toolCallId,
+      state: "output-available",
+      providerExecuted: true,
+      input: { code: "x".repeat(5_000) },
+      output: "done"
+    };
+
+    await agentStub.persistMessages([
+      user,
+      {
+        id: "assistant-server",
+        role: "assistant",
+        parts: [toolPart] as ChatMessage["parts"]
+      }
+    ]);
+    const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const storedInput = (stored[1].parts[0] as { input: { code: string } })
+      .input.code;
+    expect(storedInput).toContain("[truncated, original length: 5000]");
+
+    // The client still holds the full input, under its optimistic ID.
+    await agentStub.persistMessages([
+      user,
+      {
+        id: "assistant-optimistic",
+        role: "assistant",
+        parts: [toolPart] as ChatMessage["parts"]
+      }
+    ]);
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(
+      messages
+        .filter((message) => message.role === "assistant")
+        .map((message) => message.id)
+    ).toEqual(["assistant-server"]);
+  });
+
   it("reconciles client-generated ID with server ID for input-available state (#1094)", async () => {
     const room = crypto.randomUUID();
     const res = await exports.default.fetch(
