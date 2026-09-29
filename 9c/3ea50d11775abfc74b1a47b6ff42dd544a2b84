@@ -1,0 +1,21 @@
+packages/think/src/tests/client-tools.test.ts
+  s_b2b9b60652ef3b::t_aaa5ec5df727bc 3476
+.changeset/think-regenerate-from-parent.md
+  s_b2b9b60652ef3b::t_11a77c30cab0a7 1-5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9c3ea50d11775abfc74b1a47b6ff42dd544a2b84",
+  "prompts": {},
+  "sessions": {
+    "s_b2b9b60652ef3b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "116a35e7-e84f-4df0-b25d-8bdcbff2fca7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
