@@ -233,8 +233,8 @@ export class MyAgent extends Think<Env> {
         schedule: "every day at 09:00",
         timezone: "UTC",
         handler: async () => {
-          for (const { name } of this.listSubAgents(ChatAgent)) {
-            const chat = await this.subAgent(ChatAgent, name);
+          for (const { name } of this.listSubAgents(ChildAgent)) {
+            const chat = await this.subAgent(ChildAgent, name);
             await chat.submitMessages([
               {
                 id: crypto.randomUUID(),

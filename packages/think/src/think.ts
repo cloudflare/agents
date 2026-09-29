@@ -11200,7 +11200,6 @@ export class Think<
     const ownerKey = this._declaredScheduleOwnerKey();
     const now = Date.now();
     const existing = this._listDeclaredScheduledTaskRows();
-    if (!armed) await this._warnFacetScheduledTasksDisarmed(existing.length);
     const seen = new Set<string>();
 
     for (const [taskId, task] of tasks) {
@@ -11311,6 +11310,8 @@ export class Think<
           AND task_id = ${row.task_id}
       `;
     }
+
+    if (!armed) await this._warnFacetScheduledTasksDisarmed(existing.length);
   }
 
   /**
