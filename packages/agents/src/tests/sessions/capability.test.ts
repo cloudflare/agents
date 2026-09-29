@@ -451,6 +451,76 @@ describe("Sessions capability", () => {
     });
   });
 
+  it("hides an overlay row before a later compaction on a newest-first read", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      await session.appendMessage(text("m1", "question"));
+      await session.appendMessage(text("m2", "answer", "assistant"));
+      const first = await session.addCompaction("first summary", "m1", "m2");
+      const overlayId = `compaction_${first.id}`;
+      await session.importMessage(
+        text(overlayId, "first summary", "assistant"),
+        {
+          parentId: "m2",
+          createdAt: 3
+        }
+      );
+      await session.appendMessage(text("m3", "more"));
+      await session.appendMessage(text("m4", "reply", "assistant"));
+      await session.appendMessage(text("m5", "latest"));
+      await session.addCompaction("second summary", "m3", "m4");
+
+      // Reaching m4, a compaction's end, the newest-first walk replays the
+      // older prefix from path ids, where the stored echo sits between spans.
+      const forward = (await session.getHistory()).map((m) => m.id);
+      const backward = (
+        await collect(session.history({ newestFirst: true }))
+      ).map((m) => m.id);
+      expect(backward).toEqual([...forward].reverse());
+      expect(backward.filter((id) => id === overlayId)).toHaveLength(1);
+      expect(backward).toHaveLength(3);
+    });
+  });
+
+  it("re-derives the estimate at the walk cap when the path holds a hidden overlay row", async () => {
+    const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: SessionHarnessObject) => {
+      const session = instance.sessions.session();
+      let parentId: string | null = null;
+      let createdAt = 0;
+      const importNext = async (message: SessionMessage) => {
+        await session.importMessage(message, {
+          parentId,
+          createdAt: createdAt++
+        });
+        parentId = message.id;
+      };
+      for (let i = 0; i < 9_999; i++) await importNext(text(`cap-${i}`, "x"));
+      // A record spanning no stored rows: it hides the echo and nothing else.
+      const compaction = await session.addCompaction("s", "gone-a", "gone-b");
+      await importNext(text(`compaction_${compaction.id}`, "s", "assistant"));
+      await importNext(text("cap-9999", "x"));
+
+      const perRow = (await session.getHistoryRowStats())[0].tokenEstimate;
+      let compactions = 0;
+      session
+        .onCompaction(async () => {
+          compactions++;
+          return null;
+        })
+        .compactAfter(perRow * 10_000);
+
+      // The walk holds 10,001 stored rows, one hidden: 10,000 count, at the
+      // threshold. Each further append slides the window by a stored row,
+      // so a memo sized by visible rows would count one row too many.
+      await session.appendMessage(text("cap-10000", "x"));
+      expect(compactions).toBe(0);
+      await session.appendMessage(text("cap-10001", "x"));
+      expect(compactions).toBe(0);
+    });
+  }, 120_000);
+
   it("reports a capped path as truncated when it holds a hidden overlay row", async () => {
     const stub = env.SessionHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: SessionHarnessObject) => {

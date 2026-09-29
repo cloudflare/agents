@@ -75,6 +75,8 @@ function hasOverlayPrefix(id: string): boolean {
 /**
  * SQL twin of the hidden-overlay test for the row id in `idColumn` of the
  * session in `sessionExpr`. The record lookup runs only for prefixed ids.
+ * Both must be table-qualified: inside the lookup an unqualified `id` or
+ * `session_id` binds to the compactions table, not the row being tested.
  */
 function hiddenOverlayRowSql(idColumn: string, sessionExpr: string): string {
   const length = COMPACTION_PREFIX.length;
@@ -102,7 +104,10 @@ type PathTokens = {
   leafId: string | null;
   counted: Set<string>;
   total: number;
-  /** Rows the walk returned: the memo is only extended while under the path cap. */
+  /**
+   * Stored rows the walk visited, hidden overlay rows included, since the
+   * path cap counts those: the memo is only extended while under the cap.
+   */
   depth: number;
 };
 
@@ -611,7 +616,8 @@ export class SessionsCore {
           JOIN path p ON m.id = p.parent_id
           WHERE m.session_id = ? AND p.depth < ${MAX_PATH_DEPTH}
         )
-        SELECT id FROM path WHERE NOT ${hiddenOverlayRowSql("id", "?")}
+        SELECT path.id AS id FROM path
+        WHERE NOT ${hiddenOverlayRowSql("path.id", "?")}
         ORDER BY depth DESC`,
         [sessionId, leaf, sessionId, sessionId]
       )
@@ -927,7 +933,7 @@ export class SessionsCore {
     if (memo && memo.leafId === leafId)
       return Math.max(0, Math.ceil(memo.total));
 
-    const stats = this.pathRowStats(sessionId);
+    const { rows: stats, walked } = this.#pathRows(sessionId);
     const counted = new Set(stats.map((row) => row.id));
     let tokens = stats.reduce((sum, row) => sum + row.tokenEstimate, 0);
     for (const span of planOverlays(
@@ -944,7 +950,7 @@ export class SessionsCore {
       leafId,
       counted,
       total: tokens,
-      depth: stats.length
+      depth: walked
     });
     return Math.max(0, Math.ceil(tokens));
   }
