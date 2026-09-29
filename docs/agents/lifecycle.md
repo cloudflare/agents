@@ -433,7 +433,12 @@ async runTask(): Promise<void> {
 }
 ```
 
-Agent's internal RPC entry points already enforce this boundary.
+An `Agent` enforces this boundary for you. Its internal RPC entry points and
+the public `async` methods your subclass exposes over RPC start the lifecycle
+before they run, so a cold instance does not serve those calls against
+uninitialized state. Synchronous methods are never deferred; if one reads state
+that `onStart` sets up, make it `async` or call `await this.lifecycle.start()`
+in it.
 
 ## Object names
 
