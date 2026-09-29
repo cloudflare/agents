@@ -1,0 +1,49 @@
+design/AGENTS.md
+  s_546c940cc078c2::t_7d05d35a2a0240 75,77,79,82,93-94
+design/README.md
+  s_546c940cc078c2::t_ac48761aa24c4a 11,15
+design/chat-improvements.md
+  s_1d31f38d9e9b58::t_f399a8683118b0 1,3,7-9,11,13,15,17-26,28,30,32-39,41,43-48,50,52-54
+design/chat-shared-layer.md
+  s_24cf4601d364bc::t_04e8b122067fb5 16,34,38-39,45-50,58,63,65-67,71,75-76,91,97,99,101,103,136,142,240,352,359-362
+design/think-vs-aichat.md
+  s_1d31f38d9e9b58::t_fd85db31ef2183 3,7-9,16,18,26-36,40-49,53-62,66-74,82,88-89,95,100,102,106,108,110,118,123,128,132,146,150,155-160,165,167,169,171,174,176,178-179,183,185,187,189,191,194-199,204,206,210,212-219,221,223-230,234,236-238
+design/think.md
+  s_1d31f38d9e9b58::t_a96b605da1f845 3,5,7,11,13,17,20-22,25,27-28,30,32,34,36,38-47,49,51,53,55-61,63,65,67,69,71,73,75,77,79,81,83,87,89,91,93,95-111,113,115,117,119,121,125,127,131,135,137,141,143,145,147,149,151-154,156,158,160,162-166,170,174-187,191,193-196,198,200,202,204,206,208,210,212,214,216,218,220,222,224,228,230,232,234,238,240-243,247-260,268-274
+docs/think/index.md
+  s_24cf4601d364bc::t_c33dd38bdd9972 1037
+docs/think/multi-chat.md
+  s_1d31f38d9e9b58::t_57701bf7da72e0 1-606
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "29d0e2cc5a6b4883e3bf8cb64fe4ce5fca69ac7c",
+  "prompts": {},
+  "sessions": {
+    "s_1d31f38d9e9b58": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "0cec980c-597d-4bab-8316-79ae4d2c0891",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    },
+    "s_24cf4601d364bc": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "adf6173b-d603-4756-851b-74b83e660685",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    },
+    "s_546c940cc078c2": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "6878811d-dd3b-4eb0-8043-768a38bc1af8",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
