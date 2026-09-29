@@ -57,6 +57,55 @@ export class TestRunFiberAgent extends Agent {
     });
   }
 
+  async runWithFailingCleanup(value: string): Promise<string> {
+    this.sql`
+      CREATE TRIGGER fail_run_fiber_cleanup
+      BEFORE DELETE ON cf_agents_runs
+      WHEN OLD.name = 'cleanup-failure'
+      BEGIN
+        SELECT RAISE(FAIL, 'simulated fiber cleanup failure');
+      END
+    `;
+
+    try {
+      return await this.runFiber("cleanup-failure", async () => value);
+    } finally {
+      this.sql`DROP TRIGGER fail_run_fiber_cleanup`;
+    }
+  }
+
+  /** Returns the body's error message, caught here so it does not cross RPC. */
+  async runFailingWithFailingCleanup(
+    syncThrow = false
+  ): Promise<string | null> {
+    this.sql`
+      CREATE TRIGGER fail_run_fiber_cleanup
+      BEFORE DELETE ON cf_agents_runs
+      WHEN OLD.name = 'cleanup-failure-after-error'
+      BEGIN
+        SELECT RAISE(FAIL, 'simulated fiber cleanup failure');
+      END
+    `;
+
+    try {
+      await this.runFiber(
+        "cleanup-failure-after-error",
+        syncThrow
+          ? (): Promise<void> => {
+              throw new Error("body failed synchronously");
+            }
+          : async () => {
+              throw new Error("body failed");
+            }
+      );
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      this.sql`DROP TRIGGER fail_run_fiber_cleanup`;
+    }
+  }
+
   async runWithCheckpoint(steps: string[]): Promise<string[]> {
     return this.runFiber("checkpoint", async (ctx) => {
       const completed: string[] = [];
@@ -572,11 +621,6 @@ export class TestRunFiberAgent extends Agent {
     this.mcp._isRestored = false;
   }
 
-  /** Re-run the wrapped wake sequence: MCP restore → fiber recovery → onStart. */
-  async rerunWakeSequence(): Promise<void> {
-    await this.onStart();
-  }
-
   async getRecoveryMcpConnections(): Promise<Record<string, string[]>> {
     return this.recoveryMcpConnections;
   }
@@ -659,6 +703,70 @@ export class TestRunFiberAgent extends Agent {
     await this.insertInterruptedFiber(id, name, snapshot);
   }
 
+  /**
+   * A managed fiber whose body settled (`completed_at` on the run row) but
+   * whose ledger settle and run-row delete both failed.
+   */
+  async insertSettledManagedFiberWithRun(
+    id: string,
+    name: string
+  ): Promise<void> {
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_fibers
+        (fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+         error_message, created_at, started_at, completed_at)
+      VALUES
+        (${id}, ${`key:${id}`}, ${name}, 'running', NULL, NULL, NULL,
+         ${now}, ${now}, NULL)
+    `;
+    this.sql`
+      INSERT INTO cf_agents_runs
+        (id, name, snapshot, created_at, completed_at, outcome)
+      VALUES (${id}, ${name}, NULL, ${now}, ${now}, 'completed')
+    `;
+  }
+
+  /**
+   * Runs a managed fiber whose body throws while both its ledger settle write
+   * and its run-row delete fail, leaving only the run row's settlement stamp.
+   */
+  async runManagedFailingWithFailedSettle(fiberId: string): Promise<void> {
+    this.sql`
+      CREATE TRIGGER fail_managed_fiber_settle
+      BEFORE UPDATE OF status ON cf_agents_fibers
+      WHEN OLD.name = 'managed-settle-failure' AND NEW.status != 'running'
+      BEGIN
+        SELECT RAISE(FAIL, 'simulated ledger settle failure');
+      END
+    `;
+    this.sql`
+      CREATE TRIGGER fail_managed_fiber_cleanup
+      BEFORE DELETE ON cf_agents_runs
+      WHEN OLD.name = 'managed-settle-failure'
+      BEGIN
+        SELECT RAISE(FAIL, 'simulated fiber cleanup failure');
+      END
+    `;
+    try {
+      await this.startFiber(
+        "managed-settle-failure",
+        async () => {
+          throw new Error("managed body failed");
+        },
+        { fiberId }
+      );
+      await (
+        this as unknown as {
+          _managedFiberExecutions: Map<string, Promise<void>>;
+        }
+      )._managedFiberExecutions.get(fiberId);
+    } finally {
+      this.sql`DROP TRIGGER fail_managed_fiber_settle`;
+      this.sql`DROP TRIGGER fail_managed_fiber_cleanup`;
+    }
+  }
+
   async triggerRecoveryCheck(): Promise<void> {
     await (
       this as unknown as { _checkRunFibers(): Promise<void> }
@@ -678,17 +786,17 @@ export class TestRunFiberAgent extends Agent {
 
   /**
    * Run one housekeeping+reschedule cycle in the same order as `alarm()`
-   * (`_checkRunFibers` then `_scheduleNextAlarm`) and return the resulting
+   * (`_checkRunFibers` then `_syncHostJobs`) and return the resulting
    * armed alarm time (epoch ms) or null. Lets tests drive multi-pass recovery
    * deterministically without spawning a real process / waiting on timers.
    */
   async simulateAlarmCycle(): Promise<number | null> {
     const self = this as unknown as {
       _checkRunFibers(): Promise<void>;
-      _scheduleNextAlarm(): Promise<void>;
+      _syncHostJobs(): Promise<void>;
     };
     await self._checkRunFibers();
-    await self._scheduleNextAlarm();
+    await self._syncHostJobs();
     return this.ctx.storage.getAlarm();
   }
 }

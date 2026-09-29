@@ -2,6 +2,8 @@
 
 **Status:** experimental (`agents/browser`)
 
+> A named browser session layer (reattach-or-create sessions, restart signaling, a `BrowserSessions` lifecycle capability) is being built beneath this connector — see [browser-sessions.md](./browser-sessions.md). It is internal and not yet exported. Everything below is the shipping surface.
+
 ## Problem
 
 Agents need full Chrome DevTools Protocol access — navigation, DOM reads, screenshots, network inspection — without shipping a generated protocol bundle, without handing LLM-generated code a raw network capability, and with browser sessions that survive the pauses a durable agent naturally takes (approvals, hibernation, long waits).
@@ -10,7 +12,7 @@ Agents need full Chrome DevTools Protocol access — navigation, DOM reads, scre
 
 Browser access is a **codemode connector**. `BrowserConnector` (namespace `cdp`) plugs into a `CodemodeRuntime` — the durable execution facet from `@cloudflare/codemode` — so the model writes TypeScript against `cdp.*` inside the sandbox and every call is recorded in the runtime's abort-and-replay log:
 
-- `cdp.send(args)` issues a CDP command over a host-side WebSocket; `cdp.attachToTarget` attaches to a page target; `cdp.spec` queries the live protocol description (fetched from the browser, normalized, cached per binding).
+- `cdp.send(args)` issues a CDP command over a host-side WebSocket; `cdp.attachToTarget` attaches to a page target; `cdp.spec` queries the live protocol description (fetched from the browser, normalized, cached per binding). Normalization keeps parameters, return values, and type properties, and domain-qualifies every `$ref` so it matches a type's `name`.
 - `cdp.startSession` / `cdp.sessionInfo` / `cdp.closeSession` / `cdp.resetSession` manage session lifetime from inside the sandbox; `getDebugLog` / `clearDebugLog` aid debugging.
 - `cdp.getLiveViewUrl({ targetId?, mode? })` returns a [Live View](https://developers.cloudflare.com/browser-run/features/live-view/) link for a tab — a URL a human can open to watch and control the session in real time. The sandbox uses it for human-in-the-loop handoffs: surface the link, then make an approval-gated call so the run pauses (the codemode runtime's durable pause/approve) until the human is done. It's a `reexecute` read — the URL is ephemeral (~5 min) so it must never be pinned in the replay log.
 - The sandbox never holds the socket. It sees a typed RPC surface; the WebSocket, the Browser Rendering session, and all session bookkeeping stay on the host.
@@ -28,6 +30,10 @@ Sessions are acquired against the Browser Rendering binding's REST API (`browser
 - **one-shot** (default): a fresh session per codemode execution, stored under `cdp:exec:<executionId>`, torn down in the connector's `disposeExecution` when the execution reaches a terminal status.
 - **reuse**: a named session under `cdp:reuse:<key>`, shared across executions; cleaned only by explicit `closeSession` or `sweep()`.
 - **dynamic**: starts one-shot; the model can promote the session with `cdp.startSession()`, which moves it to the reuse keyspace so later executions continue in the same browser.
+
+Kitesurf can be selected through the session options, but it does not use this session state machine. A Kitesurf browser is the direct `/v1/devtools/browser?browser=kitesurf` WebSocket itself: there is no POST acquire, reconnectable session id, or delete-by-id lifecycle. The current connector keeps that socket only for the current pass and therefore exposes Kitesurf as one-shot: it rejects reuse, dynamic sessions, pause/resume, Live View, recording, and keep-alive rather than silently degrading those requests.
+
+That one-shot restriction is an Agents SDK policy, not proof that Kitesurf cannot preserve state across codemode calls. A future connector could pin the WebSocket in the owning Agent/Durable Object instance and route later executions through the same connection. Tabs, cookies, and page state would survive while that instance and socket remained alive. This would be a weaker, **connection-pinned** or **best-effort reuse** mode—not Browser Run's durable `reuse` mode—because it could not survive socket loss, Durable Object eviction or restart, deployment, or reconnect from storage. It would also need explicit ownership, idle cleanup, concurrency serialization, and loud failure semantics instead of silently opening a fresh browser after connection loss. Keeping the socket open could similarly span a short codemode pause, but not provide the durable long-wait guarantee of a reconnectable Browser Run session. Preserving the socket would not add Live View: Kitesurf exposes neither the session-scoped target routes nor the `Cloudflare.getLiveView` command needed to mint a Live View URL.
 
 Because `disposeExecution` fires only on terminal transitions — never on pause — a session survives an approval pause by design. The stage-1 `onPassEnd` hook closes the cached WebSocket and releases the per-execution lease at the end of every pass (including pauses); on resume the connector reconnects from the stored session id.
 

@@ -34,10 +34,18 @@ describe("agent-think run context", () => {
     expect(repoDirectory("owner/my repo")).toBe("/workspace/my-repo");
   });
 
-  it("rejects substituted targets and unsafe requester mentions", () => {
-    expect(() => validateRunTarget({ ...target, repo: "other/repo" })).toThrow(
-      "Invalid Cloudflare repository"
+  it("allows the scoped Repo Manager repository", () => {
+    expect(validateRunTarget({ ...target, repo: "scuffi/flue" }).repo).toBe(
+      "scuffi/flue"
     );
+  });
+
+  it("rejects substituted targets and unsafe requester mentions", () => {
+    for (const repo of ["scuffi/other", "Scuffi/flue", "other/repo"]) {
+      expect(() => validateRunTarget({ ...target, repo })).toThrow(
+        "Invalid Cloudflare repository"
+      );
+    }
     expect(() =>
       validateRunTarget({
         ...target,

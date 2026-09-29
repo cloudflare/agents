@@ -264,6 +264,17 @@ describe("AIChatAgent messageConcurrency", () => {
     await delay(50);
 
     expect(await agentStub.getStartedRequestIds()).toEqual(["req-drop-1"]);
+    const terminalFor = (requestId: string) =>
+      seenMessages.find(
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.id === requestId &&
+          message.done
+      );
+    expect(terminalFor("req-drop-2")).toMatchObject({
+      outcome: "skipped",
+      messageIds: ["user-1", "user-2"]
+    });
 
     const rollbackMessage = [...seenMessages]
       .reverse()
@@ -291,6 +302,7 @@ describe("AIChatAgent messageConcurrency", () => {
       );
 
     expect(userTexts).toEqual(["Hello"]);
+    expect(terminalFor("req-drop-1")).not.toHaveProperty("outcome");
 
     ws.close(1000);
   });
@@ -620,6 +632,11 @@ describe("AIChatAgent messageConcurrency", () => {
     await delay(20);
 
     const clearBroadcast = waitForChatClearBroadcast(observerWs);
+    // Listen for the skipped request's `done` BEFORE sending the clear: it
+    // goes to this socket while the clear broadcast goes to the observer's,
+    // and delivery order across two sockets is not something the protocol
+    // promises. Registering after the broadcast arrives can miss it.
+    const skippedDone = waitForDone(ws, "req-clear-2");
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_CHAT_CLEAR
@@ -627,7 +644,7 @@ describe("AIChatAgent messageConcurrency", () => {
     );
     await clearBroadcast;
 
-    await waitForDone(ws, "req-clear-2");
+    await skippedDone;
     await agentStub.waitForIdleForTest();
 
     expect(await agentStub.getStartedRequestIds()).toEqual(["req-clear-1"]);

@@ -5,6 +5,7 @@
   "experimentalSortPackageJson": false,
   "ignorePatterns": [
     "packages/agents/CHANGELOG.md",
+    "packages/channels/live-tests/snapshots",
     "site/agents/.astro",
     "**/routeTree.gen.ts",
     "**/think.d.ts"

@@ -43,7 +43,6 @@ function config(
   overrides: Partial<ResolvedChatRecoveryConfig> = {}
 ): ResolvedChatRecoveryConfig {
   return {
-    enabled: true,
     maxAttempts: DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
     stableTimeoutMs: 10_000,
     terminalMessage: DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
@@ -117,7 +116,6 @@ describe("chatRecoveryIncidentKey", () => {
 describe("resolveChatRecoveryConfig", () => {
   it("treats `true` as enabled with built-in defaults", () => {
     expect(resolveChatRecoveryConfig(true)).toMatchObject({
-      enabled: true,
       maxAttempts: DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
       noProgressTimeoutMs: DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS,
       maxRecoveryWork: DEFAULT_CHAT_RECOVERY_MAX_WORK,
@@ -126,12 +124,16 @@ describe("resolveChatRecoveryConfig", () => {
     });
   });
 
-  it("treats `false` as disabled", () => {
-    expect(resolveChatRecoveryConfig(false).enabled).toBe(false);
+  it("treats legacy JavaScript `false` as enabled defaults", () => {
+    // @ts-expect-error `false` is no longer accepted, but previously-compiled
+    // JavaScript must safely get durable recovery instead of the removed mode.
+    const resolved = resolveChatRecoveryConfig(false);
+    expect(resolved).not.toHaveProperty("enabled");
+    expect(resolved.maxAttempts).toBe(DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS);
   });
 
-  it("treats `undefined` as enabled (defaults)", () => {
-    expect(resolveChatRecoveryConfig(undefined).enabled).toBe(true);
+  it("treats `undefined` as enabled defaults", () => {
+    expect(resolveChatRecoveryConfig(undefined)).not.toHaveProperty("enabled");
   });
 
   it("clamps and floors numeric overrides", () => {
@@ -824,6 +826,35 @@ describe("evaluateChatRecoveryIncident", () => {
     expect(over.incident.attempt).toBe(1); // attempt cap untouched (reset on progress)
     expect(over.exhausted).toBe(true);
     expect(over.incident.reason).toBe("out_of_memory");
+  });
+
+  it("carries transientRetries forward and seals once it reaches maxAttempts", async () => {
+    const defaults = resolveChatRecoveryConfig(true);
+    const base = (await evaluate()).incident;
+    const existing = {
+      ...base,
+      attempt: 1,
+      lastProgressAt: T0
+    };
+
+    const within = await evaluate({
+      existing: { ...existing, transientRetries: defaults.maxAttempts - 1 },
+      config: defaults,
+      currentProgress: 5,
+      now: T0 + CHAT_RECOVERY_ALARM_DEBOUNCE_MS - 1
+    });
+    expect(within.exhausted).toBe(false);
+    expect(within.incident.transientRetries).toBe(defaults.maxAttempts - 1);
+
+    const over = await evaluate({
+      existing: { ...existing, transientRetries: defaults.maxAttempts },
+      config: defaults,
+      currentProgress: 6,
+      now: T0 + CHAT_RECOVERY_ALARM_DEBOUNCE_MS - 1
+    });
+    expect(over.incident.attempt).toBe(1);
+    expect(over.exhausted).toBe(true);
+    expect(over.incident.reason).toBe("max_attempts_exceeded");
   });
 
   it("does not seal on OOM while a client interaction is pending", async () => {

@@ -13,8 +13,8 @@
  * `continueLastTurn`, durable submissions, the `_chatRecoveryContinue` alarm).
  * It is intentionally LLM-free and deterministic: `getModel()` returns a mock
  * model that streams one chunk per second for a configurable duration, so a
- * deploy reliably lands mid-turn. `chatRecovery` is enabled, so an interrupted
- * turn is wrapped in a durable fiber and continued via the alarm-scheduled
+ * deploy reliably lands mid-turn. Every turn runs in a durable recovery fiber,
+ * so an interrupted turn is continued via the alarm-scheduled
  * `_chatRecoveryContinue`.
  *
  * Error visibility is the point of this file. We capture BOTH error hooks:
@@ -460,7 +460,6 @@ function createSingleTaskMockModel(): LanguageModel {
  */
 export class DeployChurnSubAgentChild extends Think<Env> {
   static options = { keepAliveIntervalMs: 5_000 };
-  override chatRecovery = true;
   override maxSteps = 500;
   private _ledgerReady = false;
 

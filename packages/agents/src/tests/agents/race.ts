@@ -4,7 +4,6 @@ import { Agent, type Connection, type WSMessage } from "../../index.ts";
 // then echoes whether the tag was observed in onMessage
 export class TestRaceAgent extends Agent {
   initialState = { hello: "world" };
-  static options = { hibernate: true };
 
   async onConnect(conn: Connection<{ tagged: boolean }>) {
     // Simulate real async setup to widen the window a bit

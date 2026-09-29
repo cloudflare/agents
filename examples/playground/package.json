@@ -12,7 +12,6 @@
     "@cloudflare/ai-chat": "*",
     "@cloudflare/codemode": "*",
     "@cloudflare/kumo": "^2.6.0",
-    "@cloudflare/voice": "*",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@modelcontextprotocol/server": "2.0.0",
     "@phosphor-icons/react": "^2.1.10",
@@ -28,7 +27,7 @@
     "shiki": "^4.3.0",
     "streamdown": "^2.5.0",
     "workers-ai-provider": "^4.0.0",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.48.0",

@@ -28,6 +28,12 @@ This project incorporates code and inspiration from the following open source pr
    - Copyright: Telnyx
    - Note: Portions of @cloudflare/voice-telnyx are adapted from @telnyx/voice-cloudflare.
 
+6. PartyServer
+   - License: ISC License
+   - Repository: https://github.com/cloudflare/partykit/tree/main/packages/partyserver
+   - Copyright: 2024 Sunil Pai <spai@cloudflare.com>
+   - Note: The Agents SDK vendors and adapts PartyServer's Durable Object server implementation.
+
 The original licenses and copyright notices from these projects are preserved and should be included with any distribution of this software.
 
 For a complete list of third-party licenses, see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

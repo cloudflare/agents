@@ -6,29 +6,47 @@ The core Agents SDK, published to npm as `agents`. This is the most complex pack
 
 Each export maps to a public entry point that users `import` from. These are the boundaries of the public API — changes here need a changeset.
 
-| Import path                  | Source file(s)               | Purpose                                                                      |
-| ---------------------------- | ---------------------------- | ---------------------------------------------------------------------------- |
-| `agents`                     | `src/index.ts`               | Agent base class, routing, connections, RPC, state, scheduling, SQL          |
-| `agents/client`              | `src/client.ts`              | Browser/Node WebSocket client (`AgentClient`) via partysocket                |
-| `agents/react`               | `src/react.tsx`              | `useAgent` React hook, state sync, RPC from components                       |
-| `agents/chat`                | `src/chat/index.ts`          | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think` |
-| `agents/mcp`                 | `src/mcp/index.ts`           | Compatibility barrel plus retained legacy `McpAgent`/transport APIs          |
-| `agents/mcp/server`          | `src/mcp/server.ts`          | Isolated Agents wrapper for SDK v2 stateless servers                         |
-| `agents/mcp/client`          | `src/mcp/client.ts`          | MCP client manager (connect to remote MCP servers from an Agent)             |
-| `agents/x402`                | `src/mcp/x402.ts`            | Deprecated and feature-frozen x402 integration for MCP                       |
-| `agents/email`               | `src/email.ts`               | Email routing, resolvers, header signing                                     |
-| `agents/workflows`           | `src/workflows.ts`           | `AgentWorkflow` — Workflows integrated with Agents                           |
-| `agents/schedule`            | `src/schedule.ts`            | Scheduling types                                                             |
-| `agents/observability`       | `src/observability/index.ts` | Observability event types and emitters                                       |
-| `agents/ai-chat-agent`       | `src/ai-chat-agent.ts`       | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                          |
-| `agents/ai-react`            | `src/ai-react.tsx`           | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                         |
-| `agents/tsconfig`            | `agents.tsconfig.json`       | Shared TypeScript config for all projects in the repo                        |
-| `agents/vite`                | `src/vite.ts`                | Vite plugin — decorator transforms and the `agents:skills` import transform  |
-| `agents/skills`              | `src/skills/index.ts`        | Framework-agnostic Agent Skills engine — sources, `SkillRegistry`, runner    |
-| `agents/experimental/webmcp` | `src/experimental/webmcp.ts` | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`      |
-| `agents/browser`             | `src/browser/index.ts`       | Browser Run helpers — CDP sessions, connector, Quick Action primitives       |
-| `agents/browser/ai`          | `src/browser/ai.ts`          | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools` |
-| `agents/browser/tanstack-ai` | `src/browser/tanstack-ai.ts` | TanStack AI browser tool (`browser_execute`)                                 |
+| Import path                   | Source file(s)                | Purpose                                                                      |
+| ----------------------------- | ----------------------------- | ---------------------------------------------------------------------------- |
+| `agents`                      | `src/index.ts`                | Agent base class, routing, connections, RPC, state, scheduling, SQL          |
+| `agents/client`               | `src/client.ts`               | Browser/Node WebSocket client (`AgentClient`) via partysocket                |
+| `agents/lifecycle`            | `src/lifecycle/index.ts`      | Composable Durable Object lifecycle and hibernating connections              |
+| `agents/react`                | `src/react.tsx`               | `useAgent` React hook, state sync, RPC from components                       |
+| `agents/chat`                 | `src/chat/index.ts`           | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think` |
+| `agents/chat/transport`       | `src/chat/transport.ts`       | Framework-neutral WebSocket chat transport for AI SDK clients                |
+| `agents/mcp`                  | `src/mcp/index.ts`            | Compatibility barrel plus retained legacy `McpAgent`/transport APIs          |
+| `agents/mcp/server`           | `src/mcp/server/index.ts`     | Isolated Agents wrapper for SDK v2 stateless servers                         |
+| `agents/mcp/client`           | `src/mcp/client/index.ts`     | MCP client manager (connect to remote MCP servers from an Agent)             |
+| `agents/email`                | `src/email.ts`                | Email routing, resolvers, header signing                                     |
+| `agents/workflows`            | `src/workflows.ts`            | `AgentWorkflow` — Workflows integrated with Agents                           |
+| `agents/schedule`             | `src/schedule.ts`             | Deprecated scheduling-parser compatibility entry point                       |
+| `agents/schedules`            | `src/schedules/index.ts`      | Dependency-light Lifecycle Scheduler primitive and runtime types             |
+| `agents/schedules/parser`     | `src/schedules/parser.ts`     | Zod-based natural-language scheduling prompt and schema helpers              |
+| `agents/observability`        | `src/observability/index.ts`  | Observability event types and emitters                                       |
+| `agents/ai-chat-agent`        | `src/ai-chat-agent.ts`        | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                          |
+| `agents/ai-react`             | `src/ai-react.tsx`            | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                         |
+| `agents/tsconfig`             | `agents.tsconfig.json`        | Shared TypeScript config for all projects in the repo                        |
+| `agents/vite`                 | `src/vite.ts`                 | Vite plugin — decorator transforms and the `agents:skills` import transform  |
+| `agents/skills`               | `src/skills/index.ts`         | Framework-agnostic Agent Skills engine — sources, `SkillRegistry`, runner    |
+| `agents/experimental/webmcp`  | `src/experimental/webmcp.ts`  | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`      |
+| `agents/browser`              | `src/browser/index.ts`        | Browser Run helpers — CDP sessions, connector, Quick Action primitives       |
+| `agents/browser/ai`           | `src/browser/ai.ts`           | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools` |
+| `agents/browser/tanstack-ai`  | `src/browser/tanstack-ai.ts`  | TanStack AI browser tool (`browser_execute`)                                 |
+| `agents/voice`                | `src/voice/index.ts`          | Voice server mixins, contracts, Workers AI providers, text, and SFU helpers  |
+| `agents/voice/types`          | `src/voice/types.ts`          | Dependency-light Voice protocol and provider contracts                       |
+| `agents/voice/client`         | `src/voice/client.ts`         | Framework-neutral browser Voice client                                       |
+| `agents/voice/react`          | `src/voice/react.tsx`         | React Voice hooks                                                            |
+| `agents/voice/errors`         | `src/voice/errors.ts`         | Provider error and logging helpers                                           |
+| `agents/voice/workers-ai`     | `src/voice/workers-ai.ts`     | Workers AI speech providers                                                  |
+| `agents/voice/sfu`            | `src/voice/sfu.ts`            | Realtime SFU and audio conversion helpers                                    |
+| `agents/voice/text`           | `src/voice/text.ts`           | Sentence and streamed-text helpers                                           |
+| `agents/channels`             | `src/channels/index.ts`       | Transport-neutral messaging contracts and host                               |
+| `agents/channels/email`       | `src/channels/email.ts`       | Workers Email adapter and MIME ingress                                       |
+| `agents/channels/slack`       | `src/channels/slack.ts`       | Slack adapter                                                                |
+| `agents/channels/telegram`    | `src/channels/telegram.ts`    | Telegram adapter                                                             |
+| `agents/channels/voice`       | `src/channels/voice.ts`       | Output-only browser Voice adapter                                            |
+| `agents/channels/ai-sdk`      | `src/channels/ai-sdk.ts`      | AI SDK tool and stream adapters                                              |
+| `agents/channels/tanstack-ai` | `src/channels/tanstack-ai.ts` | TanStack AI tool adapter                                                     |
 
 The `agents:skills` virtual-module types ship from `skills-module.d.ts` (referenced from the built `dist/index.d.ts`); `@cloudflare/think` consumes `agents/skills` and `@cloudflare/ai-chat` can too.
 
@@ -42,11 +60,19 @@ src/
   sub-routing.ts        # Nested /sub/... routing helpers + getSubAgentByName
   email.ts              # Email routing utilities
   workflows.ts          # AgentWorkflow base class
-  schedule.ts           # Scheduling types and helpers
+  schedule.ts           # Deprecated parser compatibility re-export
+  schedules/            # Scheduler capability, runtime types, and parsing helpers
   serializable.ts       # RPC serialization types
   types.ts              # Shared message type enums
   utils.ts              # Helpers (camelCaseToKebabCase, etc.)
-  internal_context.ts   # AsyncLocalStorage context for getCurrentAgent()
+  internal_context.ts   # Agent compatibility re-export of lifecycle host context
+  agent-routing.ts      # Agent URL routing, named lookup, CORS, placement, retries
+
+  lifecycle/            # Public Durable Object lifecycle composition
+    index.ts            # Intentionally small public lifecycle surface
+    current-agent.ts    # LifecycleObject host context and getCurrentAgent()
+    durable-object-lifecycle.ts # Runtime handlers and capabilities
+    connection.ts       # Hibernating WebSocket connection management
 
   chat/                 # Shared chat toolkit (mostly for sibling packages)
     index.ts            # Barrel for shared chat primitives
@@ -58,34 +84,40 @@ src/
 
   mcp/                  # MCP (Model Context Protocol) subsystem
     index.ts            # Compatibility barrel; public legacy imports stay stable
-    server.ts           # Isolated SDK v2 stateless server entry
-    handler-stateless.ts # SDK v2 Worker wrapper (Stateless + Legacy compatibility)
-    handler-legacy-compat.ts # SDK v2 transport for Legacy compatibility
-    handler-compat.ts   # v1/v2 compatibility overload retained on agents/mcp
-    legacy-agent.ts     # Deprecated SDK v1 McpAgent implementation
-    handler-legacy.ts   # Explicit SDK v1 handler
-    transport.ts        # McpAgent SSE + Streamable HTTP transports
-    client.ts           # MCPClientManager for connecting to remote MCP servers
-    client-connection.ts
-    client-storage.ts
-    client-transports.ts
-    do-oauth-client-provider.ts
-    x402.ts             # x402 payment protocol for MCP
-    types.ts
-    utils.ts
-    errors.ts
-    auth-context.ts
-    worker-transport.ts
+    types.ts            # Shared MCP types
+    rpc.ts              # RPC transports shared by client + server
+    abort.ts            # Shared abort/race helper
+    client/             # MCP client submodule (agents/mcp/client)
+      index.ts          # MCPClientManager for connecting to remote MCP servers
+      connection.ts
+      rpc.ts            # Persisted RPC binding restoration
+      storage.ts
+      catalog.ts
+      invoker.ts
+      runtime.ts
+      transports.ts
+      errors.ts
+      do-oauth-client-provider.ts
+      x402.ts           # x402 payment protocol for MCP
+    server/             # MCP server submodule (agents/mcp/server)
+      index.ts          # Isolated SDK v2 stateless server entry
+      handler-stateless.ts # SDK v2 Worker wrapper (Stateless + Legacy compatibility)
+      handler-legacy-compat.ts # SDK v2 transport for Legacy compatibility
+      handler-compat.ts # v1/v2 compatibility overload retained on agents/mcp
+      legacy-agent.ts   # Deprecated SDK v1 McpAgent implementation
+      handler-legacy.ts # Explicit SDK v1 handler
+      transport.ts      # McpAgent SSE + Streamable HTTP transports
+      worker-transport.ts
+      auth-context.ts
+      event-store.ts
+      sse-keepalive.ts
+      utils.ts
 
   observability/        # Observability event system
     index.ts
     base.ts
     agent.ts            # Agent-level events
     mcp.ts              # MCP-level events
-
-  cli/                  # `npx agents` CLI
-    index.ts
-    create.ts
 
   codemode/             # Experimental code generation
     ai.ts
@@ -113,6 +145,9 @@ src/
     ai.ts               # createBrowserTools + createQuickActionTools (AI SDK)
     tanstack-ai.ts      # createBrowserTools for TanStack AI
 
+  voice/                # Voice server, client, React, provider, SFU, and text entries
+  channels/             # Messaging core, provider adapters, and AI framework adapters
+
   core/                 # Internal utilities
     events.ts           # DisposableStore
 ```
@@ -139,26 +174,59 @@ Multiple separate test suites, each with its own vitest config:
 ### Workers tests (`src/tests/`)
 
 ```bash
-pnpm run test:workers   # or: vitest -r src/tests
+pnpm run test:workers   # or: pnpm exec vitest -r src/tests
 ```
 
 Runs inside the Workers runtime via `@cloudflare/vitest-pool-workers`. Uses a `wrangler.jsonc` to configure Durable Object bindings, queues, workflows, etc. Tests cover: state, scheduling, sub-agent routing, callable methods, WebSocket message handling, email routing, MCP protocol, workflows.
 
+### Lifecycle and capability tests (`src/tests/lifecycle/`, `src/tests/capabilities/`)
+
+Part of the shared workers project — there is no separate Lifecycle vitest
+project or wrangler config. `src/tests/lifecycle/` holds one test file per
+Lifecycle functionality: runtime handlers, startup (including failure retry),
+alarm arbitration, capability events, capability routing, host context,
+hibernating WebSockets, identity, and disposal. Capability contract tests
+mirror their source module (`src/tests/schedules/capability.test.ts`,
+`src/tests/mcp/client-capability.test.ts`) and drive real harness Durable
+Objects defined one-per-capability in `src/tests/capabilities/` — see
+`src/tests/capabilities/AGENTS.md` for the pattern.
+
 ### React tests (`src/react-tests/`)
 
 ```bash
-pnpm run test:react     # or: vitest -r src/react-tests
+pnpm run test:react     # or: pnpm exec vitest -r src/react-tests
 ```
 
 Runs in **Playwright (Chromium, headless)** via `vitest-browser-react`. A global setup script starts a miniflare worker on port 18787. Tests cover: `useAgent` hook, cache invalidation, cache TTL, state sync.
 
-### CLI tests (`src/cli-tests/`)
+### Voice tests (`src/voice/tests/`, `src/voice/react-tests/`)
 
 ```bash
-pnpm run test:cli       # or: vitest -r src/cli-tests
+pnpm run test:voice:workers
+pnpm run test:voice:react
 ```
 
-Plain Node.js environment. Tests the `npx agents` CLI.
+The Worker project covers the server mixins, provider contracts, wire protocol,
+and eviction behavior. The browser project covers the React hooks.
+
+### Channels tests (`src/channels/__tests__/`)
+
+```bash
+pnpm run test:channels
+pnpm run test:channels:live # opt-in, requires provider credentials
+```
+
+The deterministic suite covers the core and provider adapters. Live delivery
+checks are serial and stay outside the default test target.
+
+### Node tests (`src/node-tests/`)
+
+```bash
+pnpm run test:node      # or: pnpm exec vitest --project node
+```
+
+Plain Node.js tests for package entry-point bundle isolation and the Vite skills
+plugin.
 
 ### WebMCP tests (`src/webmcp-tests/`)
 
@@ -171,7 +239,7 @@ Runs in **Playwright (Chromium, headless)** via `@vitest/browser-playwright`. Te
 ### x402 tests (`src/x402-tests/`)
 
 ```bash
-pnpm run test:x402     # or: vitest --project x402
+pnpm run test:x402     # or: pnpm exec vitest --project x402
 ```
 
 Focused tests for the x402 payment / auth integration.
@@ -192,7 +260,7 @@ Chromium — run it locally when touching `src/browser/`.
 ### Chat primitive tests (`src/chat/__tests__/`)
 
 ```bash
-vitest --project chat
+pnpm exec vitest --project chat
 ```
 
 Low-level tests for shared chat primitives in `src/chat/` (turn queue,
@@ -203,13 +271,14 @@ resumable streams, sanitization, etc.). These back both
 
 Files ending in `.test-d.ts`. These use `expectTypeOf` / `assertType` to verify TypeScript types at compile time. They're checked by the typecheck script, not by vitest directly.
 
-### E2E tests (`src/e2e/`)
+### E2E tests (`src/e2e-tests/`)
 
 ```bash
-pnpm run test:e2e       # or: vitest run src/e2e/e2e.test.ts
+pnpm run test:e2e       # or: pnpm exec vitest run -c src/e2e-tests/vitest.config.ts
 ```
 
-End-to-end tests that start real workers and test MCP server flows.
+End-to-end tests that start real workers and exercise managed-fiber and facet
+recovery across process termination.
 
 ### Evals (`evals/`)
 
@@ -221,20 +290,24 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 
 ## Key architecture notes
 
-- **Agent extends partyserver's `Server`** — Durable Object lifecycle, WebSocket hibernation, and connection management come from `partyserver`. The Agent class adds state sync, RPC, scheduling, SQL, MCP client, email, and workflows on top.
+- **Agent directly extends `DurableObject` and composes `Lifecycle`** — the lifecycle installs request, alarm, and always-hibernating WebSocket entry points. Agent adds state sync, RPC, scheduling, SQL, MCP client, email, and workflows.
 - **State sync is bidirectional** — `this.setState()` on the server broadcasts to all connected clients; `agent.setState()` from the client sends to the server. Both directions use the same message format (`MessageType.CF_AGENT_STATE`).
-- **RPC is reflection-based** — public methods on Agent subclasses are automatically callable from clients via `agent.call("methodName", ...args)`. Serialization constraints are enforced by the `Serializable` type system (`src/serializable.ts`).
+- **Client RPC is decorator-gated** — methods on Agent subclasses must use `@callable()` before clients can invoke them through `agent.call("methodName", args)` or `agent.stub.methodName(...)`. Serialization constraints are enforced by the `Serializable` type system (`src/serializable.ts`).
 - **Sub-agents are facets** — `subAgent(Cls, name)` creates or resolves a child DO colocated on the same machine. Clients reach a child via `/agents/{parent}/{name}/sub/{child}/{name}` and `useAgent({ sub: [...] })`. Parents gate access with `onBeforeSubAgent`; children reach their parent with `parentAgent(Cls)` or `parentPath`.
-- **Scheduling uses cron-schedule** — `this.schedule()` accepts delays, Dates, or cron strings. Schedules persist in SQLite and survive hibernation.
-- **MCP has separate package boundaries** — `mcp/server.ts` is the Stateless Worker wrapper; `mcp/client.ts` connects Agents to external servers; `mcp/index.ts` is a compatibility barrel for retained Legacy APIs whose implementation lives in `mcp/legacy-agent.ts`.
+- **Lifecycle owns the job queue and the physical alarm** — capabilities and the host push jobs (`capability` + `fn` + due time + payload) into the `cf_agents_jobs` table; Lifecycle drives due jobs as an alarm event loop with retry, deferral, and the memory-limit circuit breaker, and derives the physical alarm from queue state. Queue mutations re-arm automatically. Each capability keeps its own durable state rather than depending on Scheduler.
+- **Scheduling uses cron-schedule** — `Scheduler` is the vocabulary over the job queue: it validates schedules, resolves named callbacks, and pushes jobs whose `fn` is the callback name. `Agent` installs the same primitive and delegates `this.schedule()` and related APIs to it. Schedules persist in SQLite and survive hibernation.
+- **MCP has separate package boundaries** — `mcp/server/index.ts` is the Stateless Worker wrapper; `mcp/client/index.ts` connects Agents to external servers; `mcp/index.ts` is a compatibility barrel for retained Legacy APIs whose implementation lives in `mcp/server/legacy-agent.ts`.
+- **Telemetry has an independent schema version** — `instrumentation_scope.version` is hardcoded to `"1"`; it is not the package version. Notify Workers Observability and any other downstream consumers before bumping it.
 
 ## Boundaries
 
 - Every new public export needs: an entry in `package.json` `exports`, a build entry in `scripts/build.ts`, and a changeset
 - `src/index.ts` is very large (~6000 lines) — be surgical with edits, understand the full context before changing
 - `agents/chat` is published and versioned, but treat it as a sibling-package support layer first, not a broad user-facing surface. Prefer documenting `@cloudflare/ai-chat` / `@cloudflare/think` directly unless a primitive is intentionally shared.
-- The `partyserver`/`partysocket` dependency is foundational — don't try to replace it
+- The lifecycle substrate is vendored under `src/lifecycle` and ISC-attributed. Keep `agents/lifecycle` small: no alternate WebSocket modes, speculative phases, or second Durable Object base class.
 - Peer dependencies (`ai`, `@ai-sdk/*`, `react`, `zod`) are optional — guard usage with runtime checks or separate entry points
+- Keep Voice and Channels out of `src/index.ts`; their explicit subpaths protect core imports from browser, React, provider, and MIME code
+- Keep Channels adapters out of `src/channels/index.ts`; import internal Voice and chat helpers through relative paths rather than package self-imports
 
 ## Related
 

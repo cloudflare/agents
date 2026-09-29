@@ -382,6 +382,83 @@ describe("onChatResponse with continuation", () => {
 
     ws.close(1000);
   });
+
+  it.each([
+    ["onChatMessage throws", "throw" as const],
+    ["the response body cannot be read", "locked-body" as const]
+  ])(
+    "reports an auto-continuation that fails before streaming when %s (#2381)",
+    async (_case, failure) => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectContinuationAgent(room);
+
+      const initialDone = waitForDone(ws, "req-init");
+      sendChatRequest(ws, "req-init", [userMessage]);
+      expect(await initialDone).toBe(true);
+
+      const agentStub = await getAgentByName(
+        env.ResponseContinuationAgent,
+        room
+      );
+      await agentStub.persistMessages([
+        ...((await agentStub.getPersistedMessages()) as ChatMessage[]),
+        {
+          id: "assistant-tool",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-testTool",
+              toolCallId: "call_cont_fail",
+              state: "input-available",
+              input: { query: "test" }
+            }
+          ] as ChatMessage["parts"]
+        }
+      ]);
+      await agentStub.setFailContinuation(failure);
+      const expectedError =
+        failure === "throw"
+          ? "continuation failed before streaming"
+          : expect.any(String);
+
+      const terminal = new Promise<Record<string, unknown>>((resolve) => {
+        ws.addEventListener("message", function handler(e: MessageEvent) {
+          const data = JSON.parse(e.data as string);
+          if (isUseChatResponseMessage(data) && data.done) {
+            ws.removeEventListener("message", handler);
+            resolve(data);
+          }
+        });
+      });
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_tool_result",
+          toolCallId: "call_cont_fail",
+          toolName: "testTool",
+          output: { result: "success" },
+          autoContinue: true
+        })
+      );
+      expect(await terminal).toMatchObject({
+        error: true,
+        continuation: true,
+        body: expectedError
+      });
+      await new Promise((r) => setTimeout(r, 300));
+
+      const results =
+        (await agentStub.getChatResponseResults()) as ChatResponseResult[];
+      expect(results).toHaveLength(2);
+      expect(results[1]).toMatchObject({
+        continuation: true,
+        status: "error",
+        error: expectedError,
+        message: { id: "assistant-tool" }
+      });
+
+      ws.close(1000);
+    }
+  );
 });
 
 describe("onChatResponse error resilience", () => {

@@ -1,7 +1,7 @@
 {
   "name": "@cloudflare/voice",
-  "version": "0.3.5",
-  "description": "Voice pipeline for Cloudflare Agents — STT, TTS, VAD, streaming, and SFU utilities",
+  "version": "0.5.0",
+  "description": "Compatibility package for the Agents SDK voice exports",
   "repository": {
     "directory": "packages/voice",
     "type": "git",
@@ -11,15 +11,11 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "peerDependencies": {
-    "agents": ">=0.17.1 <1.0.0",
-    "partysocket": "^1.0.0",
+    "agents": ">=0.23.0 <2.0.0",
     "react": "^19.0.0"
   },
   "peerDependenciesMeta": {
     "react": {
-      "optional": true
-    },
-    "partysocket": {
       "optional": true
     }
   },
@@ -34,6 +30,11 @@
       "import": "./dist/voice-client.js",
       "require": "./dist/voice-client.js"
     },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "import": "./dist/errors.js",
+      "require": "./dist/errors.js"
+    },
     "./react": {
       "types": "./dist/voice-react.d.ts",
       "import": "./dist/voice-react.js",
@@ -47,9 +48,7 @@
   ],
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "test": "vitest --run",
-    "test:workers": "vitest --project voice-workers",
-    "test:react": "vitest --project voice-react"
+    "test": "vitest --run"
   },
   "keywords": [
     "cloudflare",
@@ -67,6 +66,7 @@
   "publishConfig": {
     "access": "public"
   },
+  "sideEffects": false,
   "nx": {
     "targets": {
       "build": {
@@ -82,5 +82,8 @@
         ]
       }
     }
+  },
+  "devDependencies": {
+    "agents": "workspace:*"
   }
 }

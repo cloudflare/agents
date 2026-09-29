@@ -1,14 +1,6 @@
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { build } from "tsdown";
-import { build as viteBuild } from "vite";
 import { copyPackageDocs } from "../../../scripts/copy-package-docs";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
-
-const packageRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  ".."
-);
 
 async function main() {
   await build({
@@ -19,9 +11,7 @@ async function main() {
       "src/think.ts",
       "src/workflows.ts",
       "src/extensions/index.ts",
-      "src/framework/index.ts",
       "src/react.tsx",
-      "src/server-entry.ts",
       "src/messengers/index.ts",
       "src/messengers/telegram.ts",
       "src/tools/workspace.ts",
@@ -29,9 +19,7 @@ async function main() {
       "src/tools/execute.ts",
       "src/tools/extensions.ts",
       "src/tools/browser.ts",
-      "src/tools/sandbox.ts",
-      "src/cli/index.ts",
-      "src/vite.ts"
+      "src/tools/sandbox.ts"
     ],
     deps: {
       skipNodeModulesBundle: true,
@@ -44,15 +32,6 @@ async function main() {
 
   // then run oxfmt on the generated .d.ts files
   formatDeclarationFiles();
-
-  // Build the Think Studio SPA into dist/studio. The app's deps (react, vite,
-  // kumo, ai-chat, …) are build-time devDependencies; only the prebuilt static
-  // bundle ships, and the `think studio` runtime serves it with `node:http`.
-  await viteBuild({
-    root: path.join(packageRoot, "studio"),
-    configFile: path.join(packageRoot, "studio/vite.config.ts"),
-    logLevel: "warn"
-  });
 
   copyPackageDocs(import.meta.url, "think");
 

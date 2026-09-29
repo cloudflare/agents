@@ -1,7 +1,7 @@
 /**
  * Tests for two storage optimizations:
  *
- * 1. Schema version gating (cf_schema_version row in cf_agents_state)
+ * 1. Schema version gating (cf_agents:schema_version KV key)
  *    - Constructor DDL is skipped on established DOs whose schema is current.
  *    - Fresh DOs (no version row) run all migrations and stamp the version.
  *
@@ -14,6 +14,7 @@
  */
 
 import { env } from "cloudflare:workers";
+import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
 
@@ -47,47 +48,90 @@ const EXPECTED_SCHEMA_DDL = [
           started_at INTEGER,
           completed_at INTEGER
         )`,
+  `CREATE TABLE cf_agents_jobs (
+        id TEXT PRIMARY KEY NOT NULL,
+        capability TEXT NOT NULL,
+        fn TEXT NOT NULL,
+        time INTEGER NOT NULL,
+        payload TEXT,
+        retry_options TEXT,
+        singleflight INTEGER NOT NULL DEFAULT 0,
+        hung_timeout_seconds INTEGER,
+        exclusive INTEGER NOT NULL DEFAULT 0,
+        recovery_loop INTEGER NOT NULL DEFAULT 0,
+        running INTEGER NOT NULL DEFAULT 0,
+        execution_started_at INTEGER,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_mcp_servers (
-            id TEXT PRIMARY KEY NOT NULL,
-            name TEXT NOT NULL,
-            server_url TEXT NOT NULL,
-            callback_url TEXT NOT NULL,
-            client_id TEXT,
-            auth_url TEXT,
-            server_options TEXT
-          )`,
-  `CREATE TABLE cf_agents_queues (
-          id TEXT PRIMARY KEY NOT NULL,
-          payload TEXT,
-          callback TEXT,
-          created_at INTEGER DEFAULT (unixepoch())
-        , retry_options TEXT)`,
+      id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      server_url TEXT NOT NULL,
+      callback_url TEXT NOT NULL,
+      client_id TEXT,
+      auth_url TEXT,
+      server_options TEXT
+    )`,
   `CREATE TABLE cf_agents_runs (
           id TEXT PRIMARY KEY NOT NULL,
           name TEXT NOT NULL,
           snapshot TEXT,
-          created_at INTEGER NOT NULL
-        )`,
-  `CREATE TABLE cf_agents_schedules (
-          id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-          callback TEXT,
-          payload TEXT,
-          type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
-          time INTEGER,
-          delayInSeconds INTEGER,
-          cron TEXT,
-          intervalSeconds INTEGER,
-          running INTEGER DEFAULT 0,
-          created_at INTEGER DEFAULT (unixepoch()),
-          execution_started_at INTEGER,
-          retry_options TEXT,
-          owner_path TEXT,
-          owner_path_key TEXT
+          created_at INTEGER NOT NULL,
+          completed_at INTEGER,
+          outcome TEXT,
+          error_message TEXT
         )`,
   `CREATE TABLE cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,
         state TEXT
       )`,
+  // The Tasks capability creates its tables during Lifecycle startup (its own
+  // version key gates the migration), so they are part of a started Agent's
+  // canonical schema even though the Agent constructor does not create them.
+  `CREATE TABLE cf_agents_task_runs (
+        run_id TEXT PRIMARY KEY,
+        definition TEXT NOT NULL,
+        input TEXT,
+        state TEXT NOT NULL CHECK (state IN (
+          'pending', 'running', 'waiting',
+          'completed', 'failed', 'cancelled'
+        )),
+        result TEXT,
+        error_name TEXT,
+        error_message TEXT,
+        status_message TEXT,
+        metadata TEXT,
+        idempotency_key TEXT UNIQUE,
+        retain INTEGER NOT NULL DEFAULT 1,
+        attempt INTEGER NOT NULL DEFAULT 0,
+        generation TEXT,
+        next_at INTEGER,
+        wait_reason TEXT,
+        cancel_requested INTEGER NOT NULL DEFAULT 0,
+        cancel_reason TEXT,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        settled_at INTEGER
+      ) WITHOUT ROWID`,
+  `CREATE TABLE cf_agents_task_steps (
+        run_id TEXT NOT NULL,
+        step_name TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('do', 'sleep')),
+        state TEXT NOT NULL CHECK (state IN (
+          'running', 'waiting', 'completed', 'failed'
+        )),
+        result TEXT,
+        error_name TEXT,
+        error_message TEXT,
+        attempt INTEGER NOT NULL DEFAULT 0,
+        next_at INTEGER,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        completed_at INTEGER,
+        PRIMARY KEY (run_id, step_name)
+      ) WITHOUT ROWID`,
   `CREATE TABLE cf_agents_workflows (
           id TEXT PRIMARY KEY NOT NULL,
           workflow_id TEXT NOT NULL UNIQUE,
@@ -106,7 +150,7 @@ const EXPECTED_SCHEMA_DDL = [
         )`
 ];
 
-const EXPECTED_SCHEMA_VERSION = 11;
+const EXPECTED_SCHEMA_VERSION = 14;
 
 describe("schema DDL snapshot", () => {
   it("should match the expected DDL for the current schema version", async () => {
@@ -139,8 +183,7 @@ describe("schema version gating", () => {
     );
 
     expect(await agent.tableExists("cf_agents_state")).toBe(true);
-    expect(await agent.tableExists("cf_agents_queues")).toBe(true);
-    expect(await agent.tableExists("cf_agents_schedules")).toBe(true);
+    expect(await agent.tableExists("cf_agents_jobs")).toBe(true);
     expect(await agent.tableExists("cf_agents_workflows")).toBe(true);
     expect(await agent.tableExists("cf_agents_mcp_servers")).toBe(true);
     expect(await agent.tableExists("cf_agents_runs")).toBe(true);
@@ -201,13 +244,35 @@ describe("schema version gating", () => {
     const idsBefore = await agent.getStateRowIds();
     expect(idsBefore).toContain("cf_state_was_changed");
 
-    // Reset version so _ensureSchema() enters the migration block
-    await agent.resetSchemaVersion();
-    await agent.runSchemaMigration();
+    // Re-run the State capability's migration, which owns the table
+    await agent.runStateMigration();
 
     // wasChanged row should be cleaned up
     const idsAfter = await agent.getStateRowIds();
     expect(idsAfter).not.toContain("cf_state_was_changed");
+  });
+
+  it("should move a legacy schema-version row into the KV key", async () => {
+    const name = `legacy-version-row-${crypto.randomUUID()}`;
+    const agent = await getAgentByName(env.TestStateAgent, name);
+    await agent.updateState({ count: 7, items: [], lastUpdated: null });
+
+    // Simulate a DO whose version lives as a row in cf_agents_state
+    await agent.insertLegacySchemaVersionRow(3);
+    expect(await agent.getSchemaVersion()).toBe(0);
+    expect(await agent.getStateRowIds()).toContain("cf_schema_version");
+
+    await agent.runSchemaMigration();
+
+    // Version is read from the row, migrated forward, and stored in KV
+    expect(await agent.getSchemaVersion()).toBe(EXPECTED_SCHEMA_VERSION);
+    // The row is gone: the State capability is the table's only writer
+    expect(await agent.getStateRowIds()).toEqual(["cf_state_row_id"]);
+    expect(await agent.getState()).toEqual({
+      count: 7,
+      items: [],
+      lastUpdated: null
+    });
   });
 
   it("should be idempotent when schema version is already current", async () => {
@@ -419,7 +484,7 @@ describe("single-row state optimization", () => {
       await agent.insertCorruptedState();
 
       // Access state — should trigger parse error and recover
-      const state = await agent.getStateAfterCorruption();
+      const state = await agent.getState();
 
       expect(state).toEqual({
         count: 0,
@@ -438,7 +503,7 @@ describe("single-row state optimization", () => {
       await agent.insertCorruptedState();
 
       // Access state — should return undefined and clear the corrupted row
-      const state = await agent.getStateAfterCorruption();
+      const state = await agent.getState();
       expect(state).toBeUndefined();
 
       // Corrupted row should be cleaned up
@@ -451,9 +516,10 @@ describe("single-row state optimization", () => {
       const agent = await getAgentByName(env.TestStateAgent, name);
 
       await agent.insertCorruptedState();
-      await agent.getStateAfterCorruption();
+      await agent.getState();
+      await evictDurableObject(agent);
 
-      // Get new stub — should read the recovered state, not corrupted data
+      // A fresh instance should read the recovered state, not corrupted data.
       const agent2 = await getAgentByName(env.TestStateAgent, name);
       const state = await agent2.getState();
 
@@ -506,9 +572,8 @@ describe("single-row state optimization", () => {
       });
       await agent.insertLegacyWasChangedRow();
 
-      // Reset version so _ensureSchema() enters the migration block
-      await agent.resetSchemaVersion();
-      await agent.runSchemaMigration();
+      // Re-run the State capability's migration, which owns the table
+      await agent.runStateMigration();
 
       const ids = await agent.getStateRowIds();
       expect(ids).not.toContain("cf_state_was_changed");
@@ -569,9 +634,8 @@ describe("single-row state optimization", () => {
       expect(idsBefore).toContain("cf_state_was_changed");
       expect(idsBefore).not.toContain("cf_state_row_id");
 
-      // Migration cleans up the orphan
-      await agent.resetSchemaVersion();
-      await agent.runSchemaMigration();
+      // The State capability's migration cleans up the orphan
+      await agent.runStateMigration();
 
       const idsAfter = await agent.getStateRowIds();
       expect(idsAfter).not.toContain("cf_state_was_changed");

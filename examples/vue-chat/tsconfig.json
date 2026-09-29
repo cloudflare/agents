@@ -1,0 +1,4 @@
+{
+  "extends": "agents/tsconfig",
+  "include": ["env.d.ts", "src/**/*.ts", "src/**/*.vue", "vite.config.ts"]
+}

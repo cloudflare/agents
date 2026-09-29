@@ -7,6 +7,7 @@ Think owns the `streamText` call and provides hooks at each stage of the chat tu
 | Hook                             | When it fires                                               | Return                            | Async |
 | -------------------------------- | ----------------------------------------------------------- | --------------------------------- | ----- |
 | `configureSession(session)`      | Once during `onStart`                                       | `Session`                         | yes   |
+| `configureContext()`             | Once during `onStart`                                       | `ContextConfig[]`                 | yes   |
 | `beforeTurn(ctx)`                | Before `streamText`                                         | `TurnConfig` or void              | yes   |
 | `beforeStep(ctx)`                | Before each model step                                      | `StepConfig` or void              | yes   |
 | `beforeToolCall(ctx)`            | When model calls a tool                                     | `ToolCallDecision` or void        | yes   |
@@ -23,6 +24,7 @@ For a turn with two tool calls:
 
 ```
 configureSession()          ← once at startup, not per-turn
+configureContext()          ← once at startup, not per-turn
       │
 beforeTurn()                ← inspect assembled context, override model/tools/prompt
       │
@@ -53,7 +55,7 @@ onChatResponse()            ← message persisted, turn lock released
 
 ## configureSession
 
-Called once during Durable Object initialization (`onStart`). Configure the Session with context blocks, compaction, search, and skills.
+Called once during Durable Object initialization (`onStart`). Configures the default session handle: compaction and search. Prompt context is declared by [`configureContext`](#configurecontext) instead.
 
 ```typescript
 configureSession(session: Session): Session | Promise<Session>
@@ -61,7 +63,7 @@ configureSession(session: Session): Session | Promise<Session>
 
 ```typescript
 import { Think, Session } from "@cloudflare/think";
-import { createCompactFunction } from "agents/experimental/memory/utils/compaction-helpers";
+import { createCompactFunction } from "agents/sessions";
 import { generateText } from "ai";
 
 export class MyAgent extends Think<Env> {
@@ -71,28 +73,62 @@ export class MyAgent extends Think<Env> {
 
   configureSession(session: Session) {
     return session
-      .withContext("soul", {
-        provider: { get: async () => "You are a helpful coding assistant." }
-      })
-      .withContext("memory", {
-        description: "Learned facts about the user.",
-        maxTokens: 1100
-      })
       .onCompaction(
         createCompactFunction({
           summarize: (prompt) =>
             generateText({ model: this.resolveModel(), prompt }).then(
               (r) => r.text
-            )
+            ),
+          keepRecentTokens: 20_000
         })
       )
-      .compactAfter(100_000)
-      .withCachedPrompt();
+      .compactAfter(100_000);
   }
 }
 ```
 
-When `configureSession` adds context blocks, Think builds the system prompt from those blocks instead of using `getSystemPrompt()`. See the [Sessions documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for the full API.
+The handle also accepts the 0.17 `withContext()` / `withCachedPrompt()` chain and the positional `appendMessage(message, parentId)` form, so an existing override keeps working; see [Upgrading from 0.17](./index.md#upgrading-from-017).
+
+`createCompactFunction` takes exactly two options: `summarize`, which calls the model with a prompt and returns its text, and `keepRecentTokens`, the token budget for the recent tail kept verbatim (default `20_000`). `compactAfter(threshold)` gates on the O(1) token estimate Sessions stamps on each row. See the [Sessions documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for the full API.
+
+---
+
+## configureContext
+
+Called once during Durable Object initialization (`onStart`). Declares the prompt context blocks for this agent.
+
+```typescript
+configureContext(): ContextConfig[] | Promise<ContextConfig[]>
+```
+
+```typescript
+import { Think } from "@cloudflare/think";
+import type { ContextConfig } from "agents/context";
+
+export class MyAgent extends Think<Env> {
+  getModel() {
+    /* ... */
+  }
+
+  configureContext(): ContextConfig[] {
+    return [
+      {
+        label: "soul",
+        provider: { get: async () => "You are a helpful coding assistant." }
+      },
+      {
+        label: "memory",
+        description: "Learned facts about the user.",
+        maxTokens: 1100
+      }
+    ];
+  }
+}
+```
+
+A block declared without a `provider` is auto-wired to durable per-agent SQLite, so `memory` above is writable through the `set_context` tool with no extra wiring. When context blocks are configured, Think builds the system prompt from those blocks instead of using `getSystemPrompt()`. The frozen system prompt is always persisted, so a cold wake reuses the exact prompt string the model already cached.
+
+The assembled blocks are available as `this.context` once the Lifecycle has started. See the [Context documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) for providers, tools, and frozen-prompt behavior.
 
 ---
 
@@ -106,44 +142,66 @@ beforeTurn(ctx: TurnContext): TurnConfig | void | Promise<TurnConfig | void>
 
 ### TurnContext
 
-| Field          | Type                      | Description                                                              |
-| -------------- | ------------------------- | ------------------------------------------------------------------------ |
-| `system`       | `string`                  | Assembled system prompt (from context blocks or `getSystemPrompt()`)     |
-| `messages`     | `ModelMessage[]`          | Assembled model messages (truncated)                                     |
-| `tools`        | `ToolSet`                 | Merged tool set (workspace + getTools + session + MCP + client + caller) |
-| `model`        | `LanguageModel`           | The resolved model (a string from `getModel()` is already resolved here) |
-| `continuation` | `boolean`                 | Whether this is a continuation turn (auto-continue after tool result)    |
-| `body`         | `Record<string, unknown>` | Custom body fields from the client request                               |
+| Field          | Type                            | Description                                                              |
+| -------------- | ------------------------------- | ------------------------------------------------------------------------ |
+| `system`       | `string`                        | Assembled system prompt (from context blocks or `getSystemPrompt()`)     |
+| `messages`     | `ModelMessage[]`                | Assembled model messages (truncated)                                     |
+| `tools`        | `ToolSet`                       | Merged tool set (workspace + getTools + context + MCP + client + caller) |
+| `model`        | `LanguageModel`                 | The resolved model (a string from `getModel()` is already resolved here) |
+| `continuation` | `boolean`                       | Whether this is a continuation turn (auto-continue after tool result)    |
+| `body`         | `Record<string, unknown>`       | Custom body fields from the client request                               |
+| `requestId`    | `string \| undefined`           | The request this turn runs for. See [Turn identity](#turn-identity)      |
+| `trigger`      | `TurnTrigger \| undefined`      | What admitted the turn: `"ws-chat"`, `"rpc"`, `"submission"`, and so on  |
+| `abortSignal`  | `AbortSignal \| undefined`      | Aborts when the turn is cancelled. Pass it to I/O the hook awaits        |
+| `messenger`    | `MessengerContext \| undefined` | The messenger thread this turn answers, fixed when the turn was admitted |
+
+### Turn identity
+
+Every turn has a request id. `beforePersist`, `beforeTurn`, `beforeToolCall`, `onChatResponse` and `onChatError` all receive the same id for the same turn, so state a subclass keeps for a turn can be keyed by it instead of by a shared field that a later turn could overwrite.
+
+Anywhere else inside a turn, such as a tool's `execute` or a helper called from a hook, read `this.activeTurn`. It returns `{ requestId, trigger, continuation, channel? }` for the running turn, and `undefined` outside a turn, including in work a turn schedules to run later.
+
+```typescript
+override async beforeTurn(ctx: TurnContext) {
+  console.log("turn", ctx.requestId, "admitted by", ctx.trigger);
+  const profile = await loadProfile({ signal: ctx.abortSignal });
+  return { system: `${ctx.system}\n\n${profile}` };
+}
+```
+
+A continuation turn, for example the one that runs after a tool approval, has its own request id rather than the id of the turn that asked for the approval.
 
 ### TurnConfig
 
 All fields are optional. Return only what you want to change.
 
-| Field                      | Type                                           | Description                                                                                                                                                                       |
-| -------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`                    | `ThinkModel`                                   | Override the model for this turn — a model id string or a `LanguageModel`                                                                                                         |
-| `system`                   | `string`                                       | Override the system prompt                                                                                                                                                        |
-| `messages`                 | `ModelMessage[]`                               | Override the assembled messages                                                                                                                                                   |
-| `tools`                    | `ToolSet`                                      | Extra tools to merge (additive)                                                                                                                                                   |
-| `activeTools`              | `string[]`                                     | Limit which tools the model can call                                                                                                                                              |
-| `toolChoice`               | `ToolChoice`                                   | Force a specific tool call                                                                                                                                                        |
-| `maxSteps`                 | `number`                                       | Override `maxSteps` for this turn                                                                                                                                                 |
-| `stopWhen`                 | `StopCondition \| StopCondition[]`             | Additional early-exit conditions                                                                                                                                                  |
-| `sendReasoning`            | `boolean`                                      | Send reasoning chunks for this turn                                                                                                                                               |
-| `maxOutputTokens`          | `number`                                       | Maximum tokens to generate                                                                                                                                                        |
-| `temperature`              | `number`                                       | Sampling temperature                                                                                                                                                              |
-| `topP`                     | `number`                                       | Nucleus sampling value                                                                                                                                                            |
-| `topK`                     | `number`                                       | Top-K sampling value                                                                                                                                                              |
-| `presencePenalty`          | `number`                                       | Presence penalty                                                                                                                                                                  |
-| `frequencyPenalty`         | `number`                                       | Frequency penalty                                                                                                                                                                 |
-| `stopSequences`            | `string[]`                                     | Stop generation sequences                                                                                                                                                         |
-| `seed`                     | `number`                                       | Sampling seed when supported                                                                                                                                                      |
-| `maxRetries`               | `number`                                       | Maximum retries for this turn                                                                                                                                                     |
-| `timeout`                  | `TimeoutConfiguration`                         | Timeout for this turn                                                                                                                                                             |
-| `chatStreamStallTimeoutMs` | `number`                                       | Override the stream-stall watchdog for this turn (`0` disables it); auto-resets after the turn. Useful for a turn with a known-slow tool — see [Think configuration](./index.md). |
-| `headers`                  | `Record<string, string>`                       | Additional provider request headers                                                                                                                                               |
-| `providerOptions`          | `Record<string, unknown>`                      | Provider-specific options                                                                                                                                                         |
-| `experimental_transform`   | `StreamTextTransform \| StreamTextTransform[]` | AI SDK stream transform(s) for this turn — inspect or rewrite stream parts (for example, emit `source` parts derived from tool results). Applied in order.                        |
+| Field                      | Type                                           | Description                                                                                                                                                                                                                     |
+| -------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`                    | `ThinkModel`                                   | Override the model for this turn — a model id string or a `LanguageModel`                                                                                                                                                       |
+| `system`                   | `string`                                       | Override the system prompt                                                                                                                                                                                                      |
+| `messages`                 | `ModelMessage[]`                               | Override the assembled messages                                                                                                                                                                                                 |
+| `tools`                    | `ToolSet`                                      | Extra tools to merge (additive)                                                                                                                                                                                                 |
+| `activeTools`              | `string[]`                                     | Limit which tools the model can call                                                                                                                                                                                            |
+| `toolChoice`               | `ToolChoice`                                   | Force a specific tool call                                                                                                                                                                                                      |
+| `maxSteps`                 | `number`                                       | Override `maxSteps` for this turn                                                                                                                                                                                               |
+| `stopWhen`                 | `StopCondition \| StopCondition[]`             | Additional early-exit conditions                                                                                                                                                                                                |
+| `sendReasoning`            | `boolean`                                      | Send reasoning chunks for this turn                                                                                                                                                                                             |
+| `messageMetadata`          | `MessageMetadataCallback`                      | Write server-authored metadata onto the assistant message this turn persists. Called per stream part; return JSON-serializable metadata from `start`/`finish` (shallow-merged). Overrides the instance-level `messageMetadata`. |
+| `maxOutputTokens`          | `number`                                       | Maximum tokens to generate                                                                                                                                                                                                      |
+| `temperature`              | `number`                                       | Sampling temperature                                                                                                                                                                                                            |
+| `topP`                     | `number`                                       | Nucleus sampling value                                                                                                                                                                                                          |
+| `topK`                     | `number`                                       | Top-K sampling value                                                                                                                                                                                                            |
+| `presencePenalty`          | `number`                                       | Presence penalty                                                                                                                                                                                                                |
+| `frequencyPenalty`         | `number`                                       | Frequency penalty                                                                                                                                                                                                               |
+| `stopSequences`            | `string[]`                                     | Stop generation sequences                                                                                                                                                                                                       |
+| `seed`                     | `number`                                       | Sampling seed when supported                                                                                                                                                                                                    |
+| `maxRetries`               | `number`                                       | Maximum retries for this turn                                                                                                                                                                                                   |
+| `timeout`                  | `TimeoutConfiguration`                         | Timeout for this turn                                                                                                                                                                                                           |
+| `chatStreamStallTimeoutMs` | `number`                                       | Override the stream-stall watchdog for this turn (`0` disables it); auto-resets after the turn. Useful for a turn with a known-slow tool — see [Think configuration](./index.md).                                               |
+| `headers`                  | `Record<string, string>`                       | Additional provider request headers                                                                                                                                                                                             |
+| `providerOptions`          | `Record<string, unknown>`                      | Provider-specific options                                                                                                                                                                                                       |
+| `repairToolCall`           | `ToolCallRepairFunction`                       | Repair a tool call that the AI SDK cannot parse or validate. The returned call is revalidated before execution.                                                                                                                 |
+| `experimental_transform`   | `StreamTextTransform \| StreamTextTransform[]` | AI SDK stream transform(s) for this turn — inspect or rewrite stream parts (for example, emit `source` parts derived from tool results). Applied in order.                                                                      |
 
 ### Examples
 
@@ -199,6 +257,29 @@ beforeTurn() {
 
 `stopWhen` is additive: Think sends both `stepCountIs(maxSteps)` and your condition(s) to the AI SDK, so the loop ends when either one matches. Stop conditions are functions, so they can be returned from a Think subclass's `beforeTurn`, but not from sandboxed extension `beforeTurn` hooks over RPC.
 
+Repair fenced JSON tool input before execution:
+
+````typescript
+import { InvalidToolInputError } from "ai";
+
+beforeTurn() {
+  return {
+    repairToolCall: async ({ toolCall, error }) => {
+      if (!InvalidToolInputError.isInstance(error)) return null;
+
+      const fencedJson = /^```(?:json)?\s*([\s\S]*?)\s*```$/.exec(
+        toolCall.input
+      );
+      if (!fencedJson?.[1]) return null;
+
+      return { ...toolCall, input: fencedJson[1] };
+    }
+  };
+}
+````
+
+The AI SDK invokes `repairToolCall` only for `NoSuchToolError` or `InvalidToolInputError`. Return a complete raw tool call, usually by preserving the original call and replacing its `input` JSON string, or return `null` when the call cannot be repaired. The SDK parses and schema-validates a returned call once before `beforeToolCall` and tool execution. Because the callback is a function, configure it from a Think subclass; sandboxed extensions cannot send it over RPC.
+
 Prune older tool calls from the model context with the AI SDK's [`pruneMessages`](https://ai-sdk.dev/):
 
 ```typescript
@@ -240,6 +321,25 @@ beforeTurn(ctx: TurnContext) {
   }
 }
 ```
+
+Stamp server-authored metadata on the assistant message this turn persists. The callback runs for every stream part and each non-`undefined` return is shallow-merged into the message's metadata, then broadcast to clients and persisted. An auto-continuation (for example, after a tool approval or client tool result) is its own turn: `beforeTurn` runs again with `ctx.continuation: true` and the continuation persists as a separate assistant message with its own metadata.
+
+```typescript
+beforeTurn(ctx: TurnContext) {
+  return {
+    messageMetadata: ({ part }) => {
+      if (part.type === "start") {
+        return { createdAt: Date.now(), continuation: ctx.continuation };
+      }
+      if (part.type === "finish") {
+        return { finishReason: part.finishReason };
+      }
+    }
+  };
+}
+```
+
+For metadata that applies to every turn, set the instance-level `messageMetadata` property on your `Think` subclass instead of returning it from `beforeTurn`. A `TurnConfig.messageMetadata` overrides it for one turn.
 
 Disable retries and apply a streaming timeout for a recovery turn:
 
@@ -411,6 +511,7 @@ beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void | Promise<ToolCall
 | `stepNumber`       | `number \| undefined`         | Index of the current step where this tool call occurs                       |
 | `messages`         | `ReadonlyArray<ModelMessage>` | Conversation messages visible at tool execution time                        |
 | `abortSignal`      | `AbortSignal \| undefined`    | Aborts if the turn is cancelled                                             |
+| `requestId?`       | `string`                      | Request id of the turn making the call. See [Turn identity](#turn-identity) |
 
 Pass an explicit `TOOLS` generic to get full input typing:
 
@@ -497,19 +598,20 @@ afterToolCall(ctx: ToolCallResultContext): void | Promise<void>
 
 `ToolCallResultContext<TOOLS>` is backed by the AI SDK's `OnToolCallFinishEvent<TOOLS>` (the parameter of `experimental_onToolCallFinish`). It spreads the originating `TypedToolCall<TOOLS>` at the top level, plus the per-call event extras and a discriminated outcome:
 
-| Field        | Type                                      | Description                                          |
-| ------------ | ----------------------------------------- | ---------------------------------------------------- |
-| `type`       | `"tool-call"`                             | Discriminator (carried over from the call)           |
-| `toolCallId` | `string`                                  | Unique id matching the originating `ToolCallContext` |
-| `toolName`   | `string`                                  | Name of the tool that was called                     |
-| `input`      | typed when `TOOLS` is passed              | Arguments the tool was called with                   |
-| `dynamic?`   | `boolean`                                 | `true` for runtime-registered tools                  |
-| `stepNumber` | `number \| undefined`                     | Index of the current step                            |
-| `messages`   | `ReadonlyArray<ModelMessage>`             | Conversation messages visible at tool execution time |
-| `durationMs` | `number`                                  | Wall-clock execution time of `execute`               |
-| `success`    | `boolean`                                 | Discriminator: `true` on success, `false` on failure |
-| `output`     | typed per tool (when `success` is `true`) | Whatever the tool's `execute` returned               |
-| `error`      | `unknown` (when `success` is `false`)     | Whatever was thrown from `execute`                   |
+| Field        | Type                                      | Description                                                                    |
+| ------------ | ----------------------------------------- | ------------------------------------------------------------------------------ |
+| `type`       | `"tool-call"`                             | Discriminator (carried over from the call)                                     |
+| `toolCallId` | `string`                                  | Unique id matching the originating `ToolCallContext`                           |
+| `toolName`   | `string`                                  | Name of the tool that was called                                               |
+| `input`      | typed when `TOOLS` is passed              | Arguments the tool was called with                                             |
+| `dynamic?`   | `boolean`                                 | `true` for runtime-registered tools                                            |
+| `stepNumber` | `number \| undefined`                     | Index of the current step                                                      |
+| `messages`   | `ReadonlyArray<ModelMessage>`             | Conversation messages visible at tool execution time                           |
+| `durationMs` | `number`                                  | Wall-clock execution time of `execute`                                         |
+| `requestId?` | `string`                                  | Request id of the turn that made the call. See [Turn identity](#turn-identity) |
+| `success`    | `boolean`                                 | Discriminator: `true` on success, `false` on failure                           |
+| `output`     | typed per tool (when `success` is `true`) | Whatever the tool's `execute` returned                                         |
+| `error`      | `unknown` (when `success` is `false`)     | Whatever was thrown from `execute`                                             |
 
 When you pass an explicit `TOOLS` generic, narrowing on `ctx.toolName` (together with `ctx.success`) narrows `ctx.output` to that tool's inferred output type. Dynamic tools (runtime-registered, MCP) stay `unknown`:
 
@@ -660,19 +762,22 @@ Called after a chat turn completes and the assistant message has been persisted.
 
 Fires for all turn completion paths that persist an assistant message: WebSocket, sub-agent RPC, `saveMessages()`, durable `submitMessages()` execution, `continueLastTurn()`, and auto-continuation.
 
+If the Durable Object resets after the assistant message is persisted but before the hook runs, Think fires the hook when the agent wakes, with `recovered: true` and the stored message. A reset while the hook itself is running can fire it again on wake, so make side effects in the hook idempotent (for example, keyed by `requestId`). A recovered hook runs outside the original turn, so it has no reply attachments and no channel context from that turn.
+
 ```typescript
 onChatResponse(result: ChatResponseResult): void | Promise<void>
 ```
 
 ### ChatResponseResult
 
-| Field          | Type                                  | Description                                |
-| -------------- | ------------------------------------- | ------------------------------------------ |
-| `message`      | `UIMessage`                           | The persisted assistant message            |
-| `requestId`    | `string`                              | Unique ID for this turn                    |
-| `continuation` | `boolean`                             | Whether this was a continuation turn       |
-| `status`       | `"completed" \| "error" \| "aborted"` | How the turn ended                         |
-| `error`        | `string?`                             | Error message (when `status` is `"error"`) |
+| Field          | Type                                  | Description                                                             |
+| -------------- | ------------------------------------- | ----------------------------------------------------------------------- |
+| `message`      | `UIMessage`                           | The persisted assistant message                                         |
+| `requestId`    | `string`                              | Unique ID for this turn                                                 |
+| `continuation` | `boolean`                             | Whether this was a continuation turn                                    |
+| `status`       | `"completed" \| "error" \| "aborted"` | How the turn ended                                                      |
+| `error`        | `string?`                             | Error message (when `status` is `"error"`)                              |
+| `recovered`    | `boolean?`                            | `true` when the hook is fired on wake for a turn interrupted by a reset |
 
 ### Examples
 
@@ -759,13 +864,19 @@ onChatError(error: unknown, ctx?: ChatErrorContext) {
 
 ## classifyChatError
 
-Called when an error occurs during a turn, **before** `onChatError`. Maps a raw provider error into a provider-agnostic category so Think can react without baking provider-specific strings into the framework — the same split as the `tokenCounter` you pass to `compactAfter()`. The app owns the mapping because it knows which provider and model it talks to.
+Called when an error occurs during a turn, **before** `onChatError`. Maps a raw provider error into a provider-agnostic category so Think can react without baking provider-specific strings into the framework. The app owns the mapping because it knows which provider and model it talks to.
 
 ```typescript
 classifyChatError(error: unknown, ctx?: ChatErrorContext): ChatErrorClassification | void
 ```
 
-`ChatErrorClassification` is `"context_overflow" | "rate_limit" | "transient" | "fatal" | "unknown"`. Today this hook drives **only** context-overflow recovery: Think calls it when a turn errors **and** `contextOverflow.reactive` is enabled (if reactive is off, it is not called). Returning `"context_overflow"` runs the compact-and-retry backstop (see [Context-window overflow recovery](./index.md#context-window-overflow-recovery)); if recovery cannot save the turn, that classification is surfaced on the terminal `onChatError` call via `ChatErrorContext.classification`. The other categories are reserved for future use — returning one today is a no-op (the turn terminalizes as usual) and is not forwarded to `onChatError`. Returning `void` (the default) keeps the existing terminal behavior.
+`ChatErrorClassification` is `"context_overflow" | "rate_limit" | "transient" | "fatal" | "unknown"`. Think calls this hook when a turn's stream errors, and reacts to the result:
+
+- `"context_overflow"` runs the compact-and-retry backstop when `contextOverflow.reactive` is enabled (see [Context-window overflow recovery](./index.md#context-window-overflow-recovery)). If recovery cannot save the turn, that classification is surfaced on the terminal `onChatError` call via `ChatErrorContext.classification`.
+- `"transient"` and `"rate_limit"` route the turn into bounded chat recovery, the same path as a stream stall. Think calls `onChatRecovery`, keeps the partial response (unless the hook returns `persist: false`), and schedules a continuation. The continuation waits 1 second on the first attempt and doubles on each later attempt, up to 30 seconds. Once `chatRecovery.maxAttempts` is spent, the turn ends with the configured terminal message and `onExhausted`, not the raw error.
+- `"fatal"`, `"unknown"`, and `void` (the default) keep the existing terminal behavior.
+
+If `contextOverflow.reactive` is enabled but neither your class nor a parent class overrides `classifyChatError` (as a method or a class field), Think logs a one-time warning and skips overflow recovery, since the default classifier never returns `"context_overflow"`.
 
 The argument may be an `Error`, an AI SDK `APICallError` (with `statusCode`/`responseBody`), or — for in-stream provider errors that surface as a stream error part rather than a throw — the error message string. Narrow accordingly. (Think confirms provider context-overflow errors always surface as in-stream error parts, never thrown exceptions out of `streamText`, so this hook sees them whether you read the `Error` or the string form.)
 
@@ -835,13 +946,13 @@ The handler receives `(snapshot, host)` — symmetric with tool `execute`. `host
 
 Snapshots are intentionally narrower than the subclass `Context` types — class instances, `AbortSignal`s, and other non-JSON-clonable values can't cross the Workers RPC boundary.
 
-| Hook             | Snapshot fields                                                                                              |
-| ---------------- | ------------------------------------------------------------------------------------------------------------ |
-| `beforeTurn`     | `{ system, toolNames, messageCount, continuation, body?, modelId }` — see `TurnContextSnapshot`              |
-| `beforeToolCall` | `{ toolName, toolCallId, input, stepNumber, dynamic? }`                                                      |
-| `afterToolCall`  | `{ toolName, toolCallId, input, stepNumber, durationMs, success, output? \| error?, dynamic? }`              |
-| `onStepFinish`   | `{ stepNumber, finishReason, text, reasoningText, toolCallCount, toolResultCount, usage, providerMetadata }` |
-| `onChunk`        | `{ type, text?, toolName?, toolCallId? }` — minimal because this fires per token                             |
+| Hook             | Snapshot fields                                                                                                       |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `beforeTurn`     | `{ system, toolNames, messageCount, continuation, body?, modelId, requestId?, trigger? }` — see `TurnContextSnapshot` |
+| `beforeToolCall` | `{ toolName, toolCallId, input, stepNumber, dynamic? }`                                                               |
+| `afterToolCall`  | `{ toolName, toolCallId, input, stepNumber, durationMs, success, output? \| error?, dynamic? }`                       |
+| `onStepFinish`   | `{ stepNumber, finishReason, text, reasoningText, toolCallCount, toolResultCount, usage, providerMetadata }`          |
+| `onChunk`        | `{ type, text?, toolName?, toolCallId? }` — minimal because this fires per token                                      |
 
 ### Return values
 

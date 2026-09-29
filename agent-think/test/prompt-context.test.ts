@@ -1,10 +1,10 @@
 import { env } from "cloudflare:test";
-import { getServerByName } from "partyserver";
+import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { AgentThinkPromptTestAgent } from "./worker";
 
 async function freshPromptAgent(name: string) {
-  return getServerByName(
+  return getAgentByName(
     env.AgentThinkPromptTestAgent as unknown as DurableObjectNamespace<AgentThinkPromptTestAgent>,
     name
   );

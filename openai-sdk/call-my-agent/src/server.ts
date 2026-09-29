@@ -9,7 +9,6 @@ import {
 
 export class MyAgent extends Agent {
   // don't use hibernation, the dependencies will manually add their own handlers
-  static options = { hibernate: false };
 
   async onConnect(connection: Connection, ctx: ConnectionContext) {
     if (ctx.request.url.includes("media-stream")) {

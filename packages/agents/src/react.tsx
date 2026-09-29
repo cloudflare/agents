@@ -17,11 +17,28 @@ import {
   createStubProxy,
   DEFAULT_CALL_TIMEOUT_MS,
   AgentConnectionError as AgentConnectionErrorCtor,
-  isTerminalCloseEvent
+  createCloseClassifier,
+  nativeCall,
+  NativeCallQueue,
+  splitCallOptions
 } from "./client";
+import {
+  boundCapnWebSocket,
+  type CapnWebSocket
+} from "./websockets/capnweb-socket";
+import {
+  CAPNWEB_TRANSPORT_QUERY,
+  CAPNWEB_TRANSPORT_VALUE,
+  type AgentTransport
+} from "./websockets/transport-protocol";
+import { buildSubAgentPathUnchecked } from "./sub-routing";
+import { SOCKET_ADDRESS_PENDING } from "./socket-address";
 import { camelCaseToKebabCase } from "./utils";
 import { MessageType } from "./types";
+
+export type { AgentTransport } from "./websockets/transport-protocol";
 import {
+  agentToolEventDedupeKey,
   applyAgentToolEvent,
   createAgentToolEventState,
   type AgentToolEventMessage,
@@ -41,6 +58,58 @@ interface CacheEntry {
 }
 
 const queryCache = new Map<string, CacheEntry>();
+
+type SocketDestination = {
+  host?: string;
+  basePath?: string;
+  party?: string;
+  prefix?: string;
+  room?: string;
+  path?: string;
+  protocol?: string;
+  protocols?: unknown;
+};
+
+function socketDestinationKey(options: SocketDestination): string {
+  return JSON.stringify([
+    options.host ?? null,
+    options.basePath ?? null,
+    options.party ?? null,
+    options.prefix ?? null,
+    options.room ?? null,
+    options.path ?? null,
+    options.protocol ?? null,
+    options.protocols ?? null
+  ]);
+}
+
+type ReadyEntry = {
+  promise: Promise<void>;
+  resolve: () => void;
+  resolved: boolean;
+};
+
+function createReadyEntry(): ReadyEntry {
+  let resolvePromise!: () => void;
+  const entry: ReadyEntry = {
+    promise: new Promise<void>((r) => {
+      resolvePromise = r;
+    }),
+    resolved: false,
+    resolve: () => {
+      entry.resolved = true;
+      resolvePromise();
+    }
+  };
+  return entry;
+}
+
+/** The host `usePartySocket` connects to when none is given. */
+function defaultSocketHost(): string {
+  return typeof window !== "undefined"
+    ? window.location.host
+    : "dummy-domain.com";
+}
 
 function createCacheKey(
   agentNamespace: string,
@@ -84,18 +153,10 @@ function buildSubPath(
   subChain: ReadonlyArray<{ agent: string; name: string }>,
   extraPath?: string
 ): string {
-  if (subChain.length === 0) return extraPath ?? "";
-  const parts = subChain.flatMap((step) => [
-    "sub",
-    camelCaseToKebabCase(step.agent),
-    encodeURIComponent(step.name)
-  ]);
-  const combined = parts.join("/");
-  if (extraPath) {
-    const trimmed = extraPath.startsWith("/") ? extraPath.slice(1) : extraPath;
-    return `${combined}/${trimmed}`;
-  }
-  return combined;
+  return buildSubAgentPathUnchecked(
+    subChain.map((step) => ({ className: step.agent, name: step.name })),
+    extraPath
+  );
 }
 
 function getCacheEntry(key: string): CacheEntry | undefined {
@@ -160,6 +221,17 @@ export type UseAgentOptions<State = unknown> = Omit<
      * useAgent({ agent: "UserAgent", basePath: "user" })
      */
     basePath?: string;
+    /**
+     * Wire the connection travels on. `"cf-websocket"` (default) is a
+     * hibernating WebSocket where `call()` sends JSON `rpc` frames.
+     * `"capnweb"` carries protocol frames over a Cap'n Web session whose
+     * root also serves the host's `callables` natively, so `call()` and
+     * `stub` invoke them directly and an `RpcTarget` result is a live stub.
+     * The Durable Object stays in memory while a capnweb connection is open.
+     * Identity, state, and reconnection behave the same on both.
+     * @experimental The `"capnweb"` transport is experimental.
+     */
+    transport?: AgentTransport;
     /** Query parameters - can be static object or async function */
     query?: QueryObject | (() => Promise<QueryObject>);
     /** Dependencies for async query caching */
@@ -344,8 +416,30 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     defaultCallTimeout,
     onConnectionError,
     shouldReconnectOnClose,
+    transport = "cf-websocket",
     ...restOptions
   } = options;
+  // PartySocket keeps reconnection, buffering, and backoff; the transport
+  // only swaps the socket class it instantiates. The bound subclass hands
+  // the hook each live Cap'n Web socket so `call()` can invoke natively.
+  const capnWebRef = useRef<CapnWebSocket | null>(null);
+  const transportRef = useRef(transport);
+  transportRef.current = transport;
+  // Native calls issued before the Cap'n Web socket is open wait here
+  // instead of degrading to JSON frames; flushed on open, rejected on a
+  // permanent close.
+  const nativeQueueRef = useRef(new NativeCallQueue());
+  const socketClass = useMemo(
+    () =>
+      transport === "capnweb"
+        ? {
+            WebSocket: boundCapnWebSocket((socket) => {
+              capnWebRef.current = socket;
+            })
+          }
+        : {},
+    [transport]
+  );
 
   const subChain = useMemo(
     () => (subOption ?? []).map((s) => ({ agent: s.agent, name: s.name })),
@@ -441,10 +535,14 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         pending.sentOn = socket;
       }
     }
+    const native =
+      transportRef.current === "capnweb" ? capnWebRef.current : null;
+    if (native) nativeQueueRef.current.flush(native);
   };
 
   /** Reject (and remove) every still-queued (never transmitted) call. */
   const rejectQueuedCalls = (reason: string) => {
+    nativeQueueRef.current.rejectAll(reason);
     const error = new Error(reason);
     for (const [id, pending] of pendingCallsRef.current) {
       if (pending.sentOn === null) {
@@ -577,21 +675,29 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   const connectionErrorAddressKeyRef = useRef<string | null>(null);
   const shouldReconnectOnCloseRef = useRef(shouldReconnectOnClose);
   shouldReconnectOnCloseRef.current = shouldReconnectOnClose;
-  const classifyReconnect = useCallback(
-    (event: CloseEvent) =>
-      (shouldReconnectOnCloseRef.current?.(event) ?? true) &&
-      !isTerminalCloseEvent(event),
-    []
+  const maxRetriesRef = useRef(restOptions.maxRetries);
+  maxRetriesRef.current = restOptions.maxRetries;
+  const [closeClassifier] = useState(() =>
+    createCloseClassifier({
+      socket: () => socketRef.current,
+      shouldReconnectOnClose: () => shouldReconnectOnCloseRef.current,
+      maxRetries: () => maxRetriesRef.current
+    })
   );
+  const classifyReconnect = closeClassifier.shouldReconnectOnClose;
 
   // Store identity in React state for reactivity. Seed with the
   // leaf's address — what the server will echo back in
   // `cf_agent_identity`.
-  const [identity, setIdentity] = useState({
+  // `destination` records which socket destination the identity came from,
+  // so an address change can stop exposing the previous agent's identity
+  // before the new socket reports its own.
+  const [identity, setIdentity] = useState(() => ({
     name: leafName,
     agent: camelCaseToKebabCase(leafAgent),
-    identified: false
-  });
+    identified: false,
+    destination: null as string | null
+  }));
 
   // Track previous identity for change detection
   const previousIdentityRef = useRef<{
@@ -600,26 +706,30 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   }>({ name: null, agent: null });
 
   // Ready promise - resolves when identity is received, resets on close
-  const readyRef = useRef<
-    { promise: Promise<void>; resolve: () => void } | undefined
-  >(undefined);
-
-  const resetReady = () => {
-    let resolve: () => void;
-    const promise = new Promise<void>((r) => {
-      resolve = r;
-    });
-    readyRef.current = { promise, resolve: resolve! };
+  // One entry per socket destination, so `ready` for a newly requested
+  // agent is not the previous agent's resolved promise.
+  const readyRef = useRef(new Map<string, ReadyEntry>());
+  const readyFor = (destination: string): ReadyEntry => {
+    let entry = readyRef.current.get(destination);
+    if (!entry) {
+      entry = createReadyEntry();
+      readyRef.current.set(destination, entry);
+    }
+    return entry;
   };
-
-  if (!readyRef.current) {
-    resetReady();
-  }
+  // A still-pending promise is kept, so a caller already awaiting it is
+  // resolved by the next identity rather than left on a replaced promise.
+  const resetReady = (destination: string) => {
+    if (readyRef.current.get(destination)?.resolved !== false) {
+      readyRef.current.set(destination, createReadyEntry());
+    }
+  };
 
   const mutableAgentRef = useRef<{
     agent: string;
     name: string;
     identified: boolean;
+    state: State | undefined;
   } | null>(null);
 
   // Combine the sub-agent chain with the user-provided `path`.
@@ -631,12 +741,20 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   );
 
   // If basePath is provided, use it directly; otherwise construct from agent/name
+  // The transport rides in the query too, so it is part of PartySocket's
+  // socket key: changing `transport` reconnects on the new wire.
+  const socketQuery =
+    transport === "capnweb"
+      ? { ...resolvedQuery, [CAPNWEB_TRANSPORT_QUERY]: CAPNWEB_TRANSPORT_VALUE }
+      : resolvedQuery;
+
   const socketOptions = options.basePath
     ? {
         basePath: options.basePath,
         path: combinedPath || undefined,
-        query: resolvedQuery,
+        query: socketQuery,
         ...restOptions,
+        ...socketClass,
         shouldReconnectOnClose: classifyReconnect
       }
     : {
@@ -644,8 +762,9 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         prefix: "agents",
         room: options.name || "default",
         path: combinedPath || undefined,
-        query: resolvedQuery,
+        query: socketQuery,
         ...restOptions,
+        ...socketClass,
         shouldReconnectOnClose: classifyReconnect
       };
 
@@ -658,18 +777,114 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // `name` prop changed while the call was waiting for a connection.
   // Credentials (query params) are deliberately excluded: a token
   // refresh doesn't change where calls go.
+  // The wire is part of the address: queued calls belong to a transport as
+  // much as to an instance, so switching `transport` rejects them rather
+  // than flushing a native call onto a JSON socket or vice versa.
   const addressKey = JSON.stringify([
     options.host ?? null,
     options.basePath ?? null,
     agentNamespace,
     options.name || "default",
-    combinedPath || null
+    combinedPath || null,
+    transport
   ]);
+  const destination = socketDestinationKey({
+    ...socketOptions,
+    host: socketOptions.host || defaultSocketHost()
+  });
+  // The seeded identity (before any identity message) belongs to the
+  // destination of the first render.
+  const seedDestinationRef = useRef(destination);
   const visibleConnectionError =
     connectionErrorAddressKeyRef.current === addressKey
       ? connectionError
       : null;
   connectionErrorRef.current = visibleConnectionError;
+
+  // Connect-sequence progress per socket: whether the state frame has
+  // landed, and an identity held back until it does.
+  const connectProgressRef = useRef(
+    new WeakMap<
+      PartySocket,
+      { stateSeen: boolean; pendingIdentity: [string, string] | null }
+    >()
+  );
+  const connectProgress = (socket: PartySocket | null) => {
+    if (!socket) return { stateSeen: false, pendingIdentity: null };
+    let progress = connectProgressRef.current.get(socket);
+    if (!progress) {
+      progress = { stateSeen: false, pendingIdentity: null };
+      connectProgressRef.current.set(socket, progress);
+    }
+    return progress;
+  };
+
+  const applyIdentity = (
+    newName: string,
+    newAgent: string,
+    identifiedSocket: PartySocket | null
+  ) => {
+    const oldName = previousIdentityRef.current.name;
+    const oldAgent = previousIdentityRef.current.agent;
+
+    const currentAgent = mutableAgentRef.current;
+    if (currentAgent) {
+      currentAgent.name = newName;
+      currentAgent.agent = newAgent;
+      currentAgent.identified = true;
+    }
+
+    // Update reactive state (triggers re-render)
+    const identifiedDestination = identifiedSocket
+      ? socketDestinationKey(identifiedSocket.partySocketOptions)
+      : null;
+    setIdentity({
+      name: newName,
+      agent: newAgent,
+      identified: true,
+      destination: identifiedDestination
+    });
+
+    // Resolve ready promise
+    if (identifiedDestination !== null) {
+      readyFor(identifiedDestination).resolve();
+    }
+
+    // Detect identity change on reconnect
+    if (
+      oldName !== null &&
+      oldAgent !== null &&
+      (oldName !== newName || oldAgent !== newAgent)
+    ) {
+      if (options.onIdentityChange) {
+        options.onIdentityChange(oldName, newName, oldAgent, newAgent);
+      } else {
+        const agentChanged = oldAgent !== newAgent;
+        const nameChanged = oldName !== newName;
+        let changeDescription = "";
+        if (agentChanged && nameChanged) {
+          changeDescription = `agent "${oldAgent}" → "${newAgent}", instance "${oldName}" → "${newName}"`;
+        } else if (agentChanged) {
+          changeDescription = `agent "${oldAgent}" → "${newAgent}"`;
+        } else {
+          changeDescription = `instance "${oldName}" → "${newName}"`;
+        }
+        console.warn(
+          `[agents] Identity changed on reconnect: ${changeDescription}. ` +
+            "This can happen with server-side routing (e.g., basePath with getAgentByName) " +
+            "where the instance is determined by auth/session. " +
+            "Provide onIdentityChange callback to handle this explicitly, " +
+            "or ignore if this is expected for your routing pattern."
+        );
+      }
+    }
+
+    // Track for next change detection
+    previousIdentityRef.current = { name: newName, agent: newAgent };
+
+    // Call onIdentity callback
+    options.onIdentity?.(newName, newAgent);
+  };
 
   const agent = usePartySocket({
     ...socketOptions,
@@ -695,63 +910,40 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
           return options.onMessage?.(message);
         }
         if (parsedMessage.type === MessageType.CF_AGENT_IDENTITY) {
-          const oldName = previousIdentityRef.current.name;
-          const oldAgent = previousIdentityRef.current.agent;
+          const identifiedSocket =
+            (message.target as PartySocket | null) ?? socketRef.current;
           const newName = parsedMessage.name as string;
           const newAgent = parsedMessage.agent as string;
-
-          const currentAgent = mutableAgentRef.current;
-          if (currentAgent) {
-            currentAgent.name = newName;
-            currentAgent.agent = newAgent;
-            currentAgent.identified = true;
+          const progress = connectProgress(identifiedSocket);
+          // The server flags an identity whose state frame is next, so
+          // `ready` never resolves with the stored state still missing.
+          if (parsedMessage.stateFollows === true && !progress.stateSeen) {
+            progress.pendingIdentity = [newName, newAgent];
+            return;
           }
-
-          // Update reactive state (triggers re-render)
-          setIdentity({ name: newName, agent: newAgent, identified: true });
-
-          // Resolve ready promise
-          readyRef.current?.resolve();
-
-          // Detect identity change on reconnect
-          if (
-            oldName !== null &&
-            oldAgent !== null &&
-            (oldName !== newName || oldAgent !== newAgent)
-          ) {
-            if (options.onIdentityChange) {
-              options.onIdentityChange(oldName, newName, oldAgent, newAgent);
-            } else {
-              const agentChanged = oldAgent !== newAgent;
-              const nameChanged = oldName !== newName;
-              let changeDescription = "";
-              if (agentChanged && nameChanged) {
-                changeDescription = `agent "${oldAgent}" → "${newAgent}", instance "${oldName}" → "${newName}"`;
-              } else if (agentChanged) {
-                changeDescription = `agent "${oldAgent}" → "${newAgent}"`;
-              } else {
-                changeDescription = `instance "${oldName}" → "${newName}"`;
-              }
-              console.warn(
-                `[agents] Identity changed on reconnect: ${changeDescription}. ` +
-                  "This can happen with server-side routing (e.g., basePath with getAgentByName) " +
-                  "where the instance is determined by auth/session. " +
-                  "Provide onIdentityChange callback to handle this explicitly, " +
-                  "or ignore if this is expected for your routing pattern."
-              );
-            }
-          }
-
-          // Track for next change detection
-          previousIdentityRef.current = { name: newName, agent: newAgent };
-
-          // Call onIdentity callback
-          options.onIdentity?.(newName, newAgent);
+          applyIdentity(newName, newAgent, identifiedSocket);
           return;
         }
         if (parsedMessage.type === MessageType.CF_AGENT_STATE) {
           setAgentState(parsedMessage.state as State);
-          options.onStateUpdate?.(parsedMessage.state as State, "server");
+          // Before `ready` can resolve below: a caller awaiting it reads
+          // the live object, not the next render.
+          if (mutableAgentRef.current) {
+            mutableAgentRef.current.state = parsedMessage.state as State;
+          }
+          const stateSocket =
+            (message.target as PartySocket | null) ?? socketRef.current;
+          try {
+            options.onStateUpdate?.(parsedMessage.state as State, "server");
+          } finally {
+            const progress = connectProgress(stateSocket);
+            progress.stateSeen = true;
+            const pending = progress.pendingIdentity;
+            if (pending) {
+              progress.pendingIdentity = null;
+              applyIdentity(pending[0], pending[1], stateSocket);
+            }
+          }
           return;
         }
         if (parsedMessage.type === MessageType.CF_AGENT_STATE_ERROR) {
@@ -812,7 +1004,9 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       const closedSocket =
         (event.target as PartySocket | null) ?? socketRef.current;
       const isCurrentSocket = closedSocket === socketRef.current;
-      const terminalClose = isTerminalCloseEvent(event);
+      const finalClose = closeClassifier.takeFinalClose();
+      if (closedSocket) connectProgressRef.current.delete(closedSocket);
+      const reconnecting = !!closedSocket?.shouldReconnect && !finalClose;
 
       // Calls transmitted on the closed socket can never receive their
       // response — reject them. Calls still queued (never transmitted)
@@ -820,20 +1014,22 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       // in flight on a *different* (newer) socket are untouched.
       if (closedSocket) {
         rejectCallsSentOn(closedSocket, "Connection closed");
-        if (isCurrentSocket && !closedSocket.shouldReconnect) {
+        if (isCurrentSocket && !reconnecting) {
           rejectQueuedCalls("Connection closed");
         }
       }
 
       if (isCurrentSocket) {
         // Reset ready state for next connection
-        resetReady();
+        if (closedSocket) {
+          resetReady(socketDestinationKey(closedSocket.partySocketOptions));
+        }
         if (mutableAgentRef.current) {
           mutableAgentRef.current.identified = false;
         }
         setIdentity((prev) => ({ ...prev, identified: false }));
 
-        if (closedSocket?.shouldReconnect) {
+        if (reconnecting) {
           // Pause reconnection for async queries until fresh query params are ready.
           if (isAsyncQuery) {
             setAwaitingQueryRefresh(true);
@@ -844,7 +1040,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
           setCacheInvalidatedAt(Date.now());
         }
 
-        if (!closedSocket?.shouldReconnect && terminalClose) {
+        if (finalClose) {
           const error = new AgentConnectionErrorCtor(event);
           connectionErrorAddressKeyRef.current = addressKey;
           setConnectionError(error);
@@ -870,6 +1066,14 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // Update the live-socket ref before anything below can use it.
   socketRef.current = agent;
 
+  // `usePartySocket` swaps in a socket for new options in an effect, so for
+  // at least one render after the destination changes (and for as long as
+  // the socket is disabled) `agent` still points at the previous one. Query
+  // params are not part of the destination: a token refresh reaches the
+  // same agent.
+  const socketAddressPending =
+    socketDestinationKey(agent.partySocketOptions) !== destination;
+
   // When `usePartySocket` replaces the socket object (connection options
   // changed — async query refresh, path change, enabled toggle, ...) the
   // old socket's event listeners are detached at the same commit, so its
@@ -880,11 +1084,21 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // socket opens.
   const prevSocketRef = useRef<PartySocket | null>(null);
   const prevAddressKeyRef = useRef(addressKey);
+  const prevDestinationRef = useRef(destination);
   useEffect(() => {
     const prev = prevSocketRef.current;
     prevSocketRef.current = agent;
     const prevAddress = prevAddressKeyRef.current;
     prevAddressKeyRef.current = addressKey;
+    const prevDestination = prevDestinationRef.current;
+    prevDestinationRef.current = destination;
+
+    // The caller chose the new destination, so the identity the new socket
+    // reports is not an identity change on reconnect. Options the
+    // destination ignores (`name` under `basePath`) keep the comparison.
+    if (prevDestination !== destination) {
+      previousIdentityRef.current = { name: null, agent: null };
+    }
 
     // Destination guard: if the agent address changed (different agent,
     // name, or path — not just refreshed credentials), calls that are
@@ -898,9 +1112,15 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       );
     }
 
+    // Pending entries stay: a caller may still await one, and returning to
+    // that destination must resolve the promise it already holds.
+    for (const [key, entry] of readyRef.current) {
+      if (key !== destination && entry.resolved) readyRef.current.delete(key);
+    }
+
     if (prev && prev !== agent) {
       rejectCallsSentOn(prev, "Connection closed");
-      resetReady();
+      resetReady(socketDestinationKey(agent.partySocketOptions));
       if (mutableAgentRef.current) {
         mutableAgentRef.current.identified = false;
       }
@@ -910,7 +1130,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     }
     // The helpers only touch refs; re-running on socket/address change is all we need.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agent, addressKey]);
+  }, [agent, addressKey, destination]);
 
   // Create the call method. Deliberately dependency-free: it routes
   // through refs, so even a stale `agent` reference captured by an old
@@ -921,6 +1141,38 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       args: unknown[] = [],
       options?: CallOptions | StreamOptions
     ): Promise<T> => {
+      // On the Cap'n Web transport, callables are native methods on the
+      // session root: invoke them directly so an RpcTarget result arrives
+      // as a live stub and chained calls pipeline. The JSON `rpc` frame
+      // below is the WebSocket wire's protocol.
+      if (transportRef.current === "capnweb") {
+        const native = capnWebRef.current;
+        const socket = socketRef.current;
+        if (native && socket?.readyState === WebSocket.OPEN) {
+          return nativeCall<T>(
+            native,
+            method,
+            args,
+            options,
+            defaultCallTimeoutRef.current
+          );
+        }
+        if (
+          socket &&
+          connectionErrorRef.current &&
+          socket.readyState === socket.CLOSED
+        ) {
+          return Promise.reject(new Error("Connection closed"));
+        }
+        // Connecting or between reconnects: hold the call as a native call
+        // rather than queueing a JSON frame that would change its meaning.
+        return nativeQueueRef.current.enqueue<T>(
+          method,
+          args,
+          options,
+          defaultCallTimeoutRef.current
+        );
+      }
       return new Promise((resolve, reject) => {
         const socket = socketRef.current;
         if (
@@ -935,16 +1187,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         const id = crypto.randomUUID();
         let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-        // Detect legacy format: { onChunk?, onDone?, onError? } vs new format: { timeout?, stream? }
-        const isLegacyFormat =
-          options &&
-          ("onChunk" in options || "onDone" in options || "onError" in options);
-        const streamOptions = isLegacyFormat
-          ? (options as StreamOptions)
-          : (options as CallOptions | undefined)?.stream;
-        const timeout = isLegacyFormat
-          ? undefined
-          : (options as CallOptions | undefined)?.timeout;
+        const { stream: streamOptions, timeout } = splitCallOptions(options);
 
         // Apply the default timeout as a backstop for non-streaming
         // calls so a lost response rejects instead of hanging forever.
@@ -1004,14 +1247,23 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     (socketRef.current ?? agent).send(
       JSON.stringify({ state: newState, type: MessageType.CF_AGENT_STATE })
     );
+    if (mutableAgentRef.current) mutableAgentRef.current.state = newState;
     setAgentState(newState);
     options.onStateUpdate?.(newState, "client");
   };
 
   agent.call = call;
-  // Use reactive identity state (updates on identity message)
-  agent.agent = identity.agent;
-  agent.name = identity.name;
+  // Use reactive identity state (updates on identity message). Once the
+  // address moves away from the one the identity came from, expose the new
+  // leaf until the new socket identifies. A `basePath` connection keeps the
+  // server-reported identity: the server owns its name.
+  const identityIsCurrent =
+    !!options.basePath ||
+    (identity.destination ?? seedDestinationRef.current) === destination;
+  agent.agent = identityIsCurrent
+    ? identity.agent
+    : camelCaseToKebabCase(leafAgent);
+  agent.name = identityIsCurrent ? identity.name : leafName;
   // Full root-first chain including the leaf. Computed from the
   // user-provided options — the server doesn't need to echo it
   // back because the client already knows. Write past the
@@ -1020,8 +1272,8 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   (
     agent as unknown as { path: ReadonlyArray<{ agent: string; name: string }> }
   ).path = fullPath;
-  agent.identified = identity.identified;
-  agent.ready = readyRef.current!.promise;
+  agent.identified = identityIsCurrent && identity.identified;
+  agent.ready = readyFor(destination).promise;
   agent.state = agentState;
   agent.connectionError = visibleConnectionError;
   mutableAgentRef.current = agent;
@@ -1029,7 +1281,12 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // (call is already stable via useCallback)
   const stub = useMemo(() => createStubProxy(call), [call]);
   agent.stub = stub;
+  (agent as { [SOCKET_ADDRESS_PENDING]?: boolean })[SOCKET_ADDRESS_PENDING] =
+    socketAddressPending;
   agent.getHttpUrl = () => {
+    // The previous socket's URL names the previous agent and carries its
+    // credentials.
+    if (socketAddressPending) return "";
     // TODO: upstream to partysocket — expose an HTTP URL property
     // @ts-expect-error accessing protected PartySocket internals
     const wsUrl: string = (agent._url as string | null) || agent._pkurl || "";
@@ -1059,14 +1316,6 @@ type AgentToolEventAgent = Pick<
   "addEventListener" | "removeEventListener"
 >;
 
-function agentToolDedupeKey(message: AgentToolEventMessage): string {
-  return [
-    message.parentToolCallId ?? "",
-    message.event.runId,
-    String(message.sequence)
-  ].join("\0");
-}
-
 export function useAgentToolEvents<
   Part extends AgentToolRunPart = AgentToolRunPart
 >(options: {
@@ -1094,7 +1343,7 @@ export function useAgentToolEvents<
         return;
       }
       if (message.type !== "agent-tool-event") return;
-      const key = agentToolDedupeKey(message);
+      const key = agentToolEventDedupeKey(message);
       if (seenRef.current.has(key)) return;
       seenRef.current.add(key);
       setState((prev) => applyAgentToolEvent<Part>(prev, message));

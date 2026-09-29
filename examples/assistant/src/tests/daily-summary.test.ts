@@ -11,7 +11,7 @@
  * ordering precondition the handler relies on. We don't drive the handler to
  * completion because that fans out into a child `saveMessages` -> turn, which
  * needs the `AI` binding (deliberately unbound here; see `wrangler.jsonc`).
- * The framework's own tests cover scheduled-task execution in detail.
+ * Think's own tests cover scheduled-task execution in detail.
  */
 
 import { env } from "cloudflare:workers";

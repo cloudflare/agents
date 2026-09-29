@@ -9,7 +9,6 @@ Related:
 - [`think.md`](./think.md) — Think's turn, streaming, session, and recovery model.
 - [`think-vs-aichat.md`](./think-vs-aichat.md) — relationship between Think and AIChatAgent.
 - [`../examples/agents-as-tools`](../examples/agents-as-tools) — empirical prototype for this RFC.
-- [`../wip/inline-sub-agent-events.md`](../wip/inline-sub-agent-events.md) — chronological worklog and discarded designs.
 - [cloudflare/agents#1377](https://github.com/cloudflare/agents/issues/1377) — user report that exposed the missing pattern.
 
 ## Summary

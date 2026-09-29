@@ -7,7 +7,7 @@ Related:
 
 - [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md) — the lower-layer recovery extraction this RFC must coordinate with
 - [think.md](./think.md) — Think design doc
-- [think-sessions.md](./think-sessions.md) — Session tree, compaction, FTS
+- [sessions.md](./sessions.md) — Session tree, compaction, FTS
 - [think-vs-aichat.md](./think-vs-aichat.md) — boundary with AIChatAgent
 - Strategy plan: `think_api_strategy` (the parent plan this RFC implements)
 
@@ -545,7 +545,7 @@ parentId)` (idempotent by id, `providers/agent.ts:245`) and
   flagged in the docs.
 - **Compaction + FTS:** appended messages are normal Session rows — they are
   FTS-indexed and subject to compaction like any other message
-  (see `think-sessions.md`). No special-casing.
+  (see `sessions.md`). No special-casing.
 - **No `replace` mode by default.** Whole-transcript replacement is far more
   dangerous in Think's tree/branching/compaction model than in AIChatAgent's
   flat array, so it is intentionally not the default and not part of v1. If a

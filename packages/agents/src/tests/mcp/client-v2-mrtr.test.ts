@@ -12,7 +12,7 @@ import {
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { MCPClientConnection } from "../../mcp/client-connection";
+import { MCPClientConnection } from "../../mcp/client/connection";
 import { MCPClientManager } from "../../mcp/client";
 
 function deferred<T>() {
