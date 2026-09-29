@@ -52,10 +52,12 @@ if (getCurrentAgent().agent !== this && !this.lifecycle.isStarted()) {
   lifecycle's own status; there is no second state machine on `Agent`.
 - **Calls from inside this Agent never start it.** `onStart`, lifecycle hooks
   and wrapped methods all run with this Agent as the current agent, so startup
-  calling its own public methods does not recurse. `lifecycle.start()` also
-  returns immediately while startup is running: startup holds the input gate, so
-  such a call can only come from startup itself (for example a capability
-  calling a host method).
+  calling its own public methods does not recurse. Independent `start()`
+  callers share the one in-flight startup and see its result, including a
+  failure. A `start()` made from inside that startup (for example a capability
+  calling an async host method) returns immediately; Lifecycle marks the
+  startup's async context with an `AsyncLocalStorage` scope to tell the two
+  apart, and ignores `props` passed while a startup is in flight.
 - **Synchronous methods stay synchronous.** Only functions that are `async` get
   the startup branch. A sync method keeps its return type on every path,
   including the one that wakes the instance, and a subclass constructor or field

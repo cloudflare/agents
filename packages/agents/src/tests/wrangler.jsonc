@@ -29,6 +29,10 @@
         "name": "RetryableStartObject"
       },
       {
+        "class_name": "ConcurrentStartObject",
+        "name": "ConcurrentStartObject"
+      },
+      {
         "class_name": "ScheduledLifecycleObject",
         "name": "ScheduledLifecycleObject"
       },
@@ -431,6 +435,7 @@
         "PlainLifecycleObject",
         "StatefulPlainObject",
         "RetryableStartObject",
+        "ConcurrentStartObject",
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",
         "SchedulerStartupWarnObject",
