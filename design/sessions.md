@@ -176,5 +176,5 @@ There is no ceiling and therefore no size error. A host that accepts arbitrary u
 ## Key decisions
 
 - [rfc-sessions.md](./rfc-sessions.md): capability, schema, ownership, and migration decision
-- [rfc-think-multi-session.md](./rfc-think-multi-session.md): parent directory plus one conversation Durable Object
+- [rfc-user-chat-durable-objects.md](./rfc-user-chat-durable-objects.md): one Durable Object per conversation behind a per-user hub (supersedes the rejected [rfc-think-multi-session.md](./rfc-think-multi-session.md))
 - [rfc-streams.md](./rfc-streams.md): Lifecycle capability and streamed-read precedent

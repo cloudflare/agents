@@ -5,9 +5,9 @@
  * WebSocket protocol to browser clients) and a **sub-agent** (called
  * via `chat()` over RPC from a parent agent).
  *
- * Each instance gets its own SQLite storage backed by Session — providing
- * tree-structured messages, context blocks, compaction, FTS5 search, and
- * multi-session support.
+ * Each instance holds one conversation in its own SQLite storage, backed by
+ * Sessions — providing tree-structured messages, context blocks, compaction,
+ * and FTS5 search.
  *
  * Configuration overrides:
  *   - getModel()            — return a model id string (resolved via the
