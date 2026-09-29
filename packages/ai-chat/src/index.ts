@@ -6387,49 +6387,24 @@ export class AIChatAgent<
   }
 
   /**
-   * Picks the message a tool update for `toolCallId` should land on.
+   * Finds an existing assistant message that contains a tool part with the given toolCallId.
+   * Used to detect when a tool result should update an existing message rather than
+   * creating a new one.
    *
-   * Providers may reuse a toolCallId across turns, so several messages can
-   * carry it. Candidates are the streaming message, then persisted assistant
-   * messages newest first. The first candidate whose part would actually
-   * change wins; otherwise the first whose part is in `matchStates` (an
-   * idempotent re-apply); otherwise the first owner, so the caller reports
-   * the state mismatch. A settled newer call never swallows a late update
-   * meant for an older pending one.
+   * @param toolCallId - The tool call ID to search for
+   * @returns The existing message if found, undefined otherwise
    */
-  private _findToolUpdateTarget(
-    toolCallId: string,
-    matchStates: string[],
-    applyUpdate: (part: Record<string, unknown>) => Record<string, unknown>
-  ): UIMessage | undefined {
-    const candidates: UIMessage[] = [];
-    if (this._streamingMessage) candidates.push(this._streamingMessage);
-    for (let i = this.messages.length - 1; i >= 0; i--) {
-      const msg = this.messages[i];
-      if (msg.role === "assistant" && msg.id !== this._streamingMessage?.id) {
-        candidates.push(msg);
-      }
-    }
+  private _findMessageByToolCallId(toolCallId: string): UIMessage | undefined {
+    for (const msg of this.messages) {
+      if (msg.role !== "assistant") continue;
 
-    let owner: UIMessage | undefined;
-    let matched: UIMessage | undefined;
-    for (const candidate of candidates) {
-      for (const part of candidate.parts) {
-        if (!("toolCallId" in part) || part.toolCallId !== toolCallId) {
-          continue;
-        }
-        owner ??= candidate;
-        if (!("state" in part) || !matchStates.includes(part.state as string)) {
-          continue;
-        }
-        matched ??= candidate;
-        const current = part as Record<string, unknown>;
-        if (!AIChatAgent._isToolPartUnchanged(current, applyUpdate(current))) {
-          return candidate;
+      for (const part of msg.parts) {
+        if ("toolCallId" in part && part.toolCallId === toolCallId) {
+          return msg;
         }
       }
     }
-    return matched ?? owner;
+    return undefined;
   }
 
   private _findLastAssistantMessage(): UIMessage | undefined {
@@ -6621,18 +6596,26 @@ export class AIChatAgent<
     matchStates: string[],
     applyUpdate: (part: Record<string, unknown>) => Record<string, unknown>
   ): Promise<boolean> {
-    // Find the message containing this tool call: the streaming message
-    // first (in-memory, not yet persisted), then persisted messages with
-    // backoff.
+    // Find the message containing this tool call.
+    // Check streaming message first (in-memory, not yet persisted), then
+    // retry persisted messages with backoff.
     let message: UIMessage | undefined;
-    for (let attempt = 0; attempt < 10; attempt++) {
-      message = this._findToolUpdateTarget(
-        toolCallId,
-        matchStates,
-        applyUpdate
-      );
-      if (message) break;
-      await new Promise((resolve) => setTimeout(resolve, 100));
+
+    if (this._streamingMessage) {
+      for (const part of this._streamingMessage.parts) {
+        if ("toolCallId" in part && part.toolCallId === toolCallId) {
+          message = this._streamingMessage;
+          break;
+        }
+      }
+    }
+
+    if (!message) {
+      for (let attempt = 0; attempt < 10; attempt++) {
+        message = this._findMessageByToolCallId(toolCallId);
+        if (message) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
     }
 
     if (!message) {
@@ -6745,10 +6728,7 @@ export class AIChatAgent<
         message
       });
     } else {
-      const messageId = message.id;
-      const broadcastMessage = this.messages.find(
-        (candidate) => candidate.id === messageId
-      );
+      const broadcastMessage = this._findMessageByToolCallId(toolCallId);
       if (broadcastMessage) {
         this._broadcastChatMessage({
           type: MessageType.CF_AGENT_MESSAGE_UPDATED,

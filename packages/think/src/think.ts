@@ -16438,18 +16438,11 @@ export class Think<
       // Still paused: a restart landed before the outcome was written, and the
       // execution it resolved is already consumed, so write it now. The owner
       // is looked up in storage when the hydrated window does not hold it.
-      const update = pausedExecutionUpdate(
-        toolCallId,
-        outcome.executionId,
-        outcome.output
-      );
-      const owner = await this._resolveToolCallOwner(
-        toolCallId,
-        undefined,
-        update
-      );
+      const owner = await this._resolveToolCallOwner(toolCallId, undefined);
       if (owner && ownsPausedToolCall(owner, toolCallId)) {
-        await this._applyToolUpdateToMessages(update);
+        await this._applyToolUpdateToMessages(
+          pausedExecutionUpdate(toolCallId, outcome.executionId, outcome.output)
+        );
       }
       await this._dropGenerationAfterResolvedPause(toolCallId);
     }
@@ -16482,16 +16475,15 @@ export class Think<
         Record<string, unknown>
       >;
       const result = applyToolUpdate(accParts, update);
-      // A match that changes nothing (the live call already settled) does not
-      // claim the update: a reused toolCallId can still name an older call
-      // that is waiting for it.
-      if (result && result.parts[result.index] !== accParts[result.index]) {
+      if (result) {
         accumulatorOwnsCall = true;
-        // `accParts` is a typed alias of the accumulator's live array, so
-        // this in-place write is reflected by `streaming.toMessage()` and
-        // the eventual end-of-stream persist.
-        accParts[result.index] = result.parts[result.index];
-        broadcastMessage = streaming.toMessage();
+        if (result.parts[result.index] !== accParts[result.index]) {
+          // `accParts` is a typed alias of the accumulator's live array, so
+          // this in-place write is reflected by `streaming.toMessage()` and
+          // the eventual end-of-stream persist.
+          accParts[result.index] = result.parts[result.index];
+          broadcastMessage = streaming.toMessage();
+        }
       }
     }
 
@@ -16508,8 +16500,7 @@ export class Think<
     // `MESSAGE_UPDATED` broadcast are both skipped so clients don't churn.
     const owner = await this._resolveToolCallOwner(
       update.toolCallId,
-      accumulatorOwnsCall && streaming ? streaming.messageId : undefined,
-      update
+      accumulatorOwnsCall && streaming ? streaming.messageId : undefined
     );
     if (owner) {
       const ownerParts = owner.parts as Array<Record<string, unknown>>;
@@ -16566,59 +16557,41 @@ export class Think<
    *    path is read from the leaf so a recent hit costs the rows it passed,
    *    not the transcript.
    *
-   * Providers may reuse a toolCallId across turns, so several rows can own
-   * it. With `update`, steps 2 and 3 take the newest owner whose stored part
-   * `update` would change, falling back to the newest owner (whose apply is
-   * then a no-op): a settled newer call never swallows a late update meant
-   * for an older pending one.
-   *
    * This is what keeps a long turn's tool updates independent of transcript
    * length: the previous shape re-read the whole path per update.
    */
   private async _resolveToolCallOwner(
     toolCallId: string,
-    liveMessageId: string | undefined,
-    update?: Parameters<typeof applyToolUpdate>[1]
+    liveMessageId: string | undefined
   ): Promise<UIMessage | null> {
     const owns = (message: UIMessage): boolean =>
       message.parts.some(
         (part) => (part as { toolCallId?: unknown }).toolCallId === toolCallId
       );
-    const accepts = (message: UIMessage): boolean => {
-      if (!update) return true;
-      const parts = message.parts as Array<Record<string, unknown>>;
-      const result = applyToolUpdate(parts, update);
-      return !!result && result.parts[result.index] !== parts[result.index];
-    };
     const stored = async (id: string): Promise<UIMessage | null> => {
       const row = (await this.session.getMessage(id)) as UIMessage | null;
       return row && owns(row) ? row : null;
     };
-    const cachedOwnerIds = this._cachedMessages
-      .filter(owns)
-      .map((message) => message.id)
-      .reverse();
+    const cachedOwnerId = (): string | null => {
+      for (let i = this._cachedMessages.length - 1; i >= 0; i--) {
+        if (owns(this._cachedMessages[i])) return this._cachedMessages[i].id;
+      }
+      return null;
+    };
 
     if (liveMessageId !== undefined) {
       const live = await stored(liveMessageId);
       if (live) return live;
-      return cachedOwnerIds.length > 0 ? stored(cachedOwnerIds[0]) : null;
+      const cachedId = cachedOwnerId();
+      return cachedId === null ? null : stored(cachedId);
     }
-    let newestOwner: UIMessage | null = null;
-    for (const id of cachedOwnerIds) {
-      const row = await stored(id);
-      if (!row) continue;
-      if (accepts(row)) return row;
-      newestOwner ??= row;
-    }
-    if (newestOwner || this._cacheCoversActivePath) return newestOwner;
+    const cachedId = cachedOwnerId();
+    if (cachedId !== null) return stored(cachedId);
+    if (this._cacheCoversActivePath) return null;
     for await (const message of this.session.history({ newestFirst: true })) {
-      const row = message as UIMessage;
-      if (!owns(row)) continue;
-      if (accepts(row)) return row;
-      newestOwner ??= row;
+      if (owns(message as UIMessage)) return message as UIMessage;
     }
-    return newestOwner;
+    return null;
   }
 
   // ── Stability + pending interactions ─────────────────────────────
