@@ -38,6 +38,24 @@ export interface CdpConnectionOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+
+/** JSON-RPC's "method not found" code, which Chrome also uses for CDP. */
+export const CDP_METHOD_NOT_FOUND = -32601;
+
+/** The browser answered a command with a JSON-RPC error. */
+export class CdpProtocolError extends Error {
+  override readonly name = "CdpProtocolError";
+  /** JSON-RPC error code, e.g. {@link CDP_METHOD_NOT_FOUND}. */
+  readonly code: number | undefined;
+  /** The CDP method that failed. */
+  readonly method: string;
+
+  constructor(method: string, code: number | undefined, message: string) {
+    super(`CDP error ${code ?? "unknown"}: ${message} for ${method}`);
+    this.code = code;
+    this.method = method;
+  }
+}
 const MAX_DEBUG_ENTRIES = 400;
 
 /**
@@ -139,7 +157,20 @@ export class CdpConnection {
     });
 
     this.#recordDebug("send", { id, method, sessionId, timeoutMs });
-    this.#socket.send(JSON.stringify({ id, method, params, sessionId }));
+    try {
+      this.#socket.send(JSON.stringify({ id, method, params, sessionId }));
+    } catch (error) {
+      // A closed socket throws on send: fail this command now rather than
+      // leave it pending until it times out.
+      const pending = this.#pending.get(id);
+      if (pending) {
+        clearTimeout(pending.timeoutId);
+        this.#pending.delete(id);
+        pending.reject(
+          error instanceof Error ? error : new Error(String(error))
+        );
+      }
+    }
     return result;
   }
 
@@ -251,10 +282,12 @@ export class CdpConnection {
 
     if (payload.error) {
       const err = payload.error as { code?: unknown; message?: string };
-      const code = err.code ?? "unknown";
-      const message = err.message ?? "CDP error";
       pending.reject(
-        new Error(`CDP error ${code}: ${message} for ${pending.method}`)
+        new CdpProtocolError(
+          pending.method,
+          typeof err.code === "number" ? err.code : undefined,
+          err.message ?? "CDP error"
+        )
       );
       return;
     }

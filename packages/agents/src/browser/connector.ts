@@ -6,7 +6,12 @@ import {
   type PassEndStatus,
   type ToolExecuteContext
 } from "@cloudflare/codemode";
-import { CdpConnection, connectUrl } from "./cdp-connection";
+import {
+  CDP_METHOD_NOT_FOUND,
+  CdpConnection,
+  CdpProtocolError,
+  connectUrl
+} from "./cdp-connection";
 import { validateConnectorArgs } from "./connector-validation";
 import {
   connectBrowser,
@@ -334,8 +339,8 @@ export class BrowserConnector extends CodemodeConnector {
             // sent), or a page-scoped command went to the browser-level
             // session because no sessionId was passed.
             if (
-              err instanceof Error &&
-              /-32601|wasn't found/.test(err.message)
+              err instanceof CdpProtocolError &&
+              err.code === CDP_METHOD_NOT_FOUND
             ) {
               if (await this.#isSpecEvent(method)) {
                 throw new Error(

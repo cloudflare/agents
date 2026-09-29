@@ -192,6 +192,18 @@ type StoredSessions = Record<
   { sessionId: string; createdAt: number; updatedAt: number }
 >;
 
+interface NamedRunOutput extends RunOutput {
+  report: {
+    restarted: boolean;
+    newTabs: Array<{ targetId: string; url?: string }>;
+  } | null;
+}
+
+/** Run code against the persistent named browser. */
+async function runNamed(code: string): Promise<NamedRunOutput> {
+  return (await callAgent("runNamed", [code])) as NamedRunOutput;
+}
+
 async function run(
   code: string,
   mode: "one-shot" | "reuse" | "dynamic" = "one-shot"
@@ -587,6 +599,144 @@ describe("browser connector e2e", () => {
       expect(typeof probe.concurrent).toBe("boolean");
 
       await callAgent("closeSession", ["reuse"]);
+    });
+  });
+  // The persistent named browser behind BrowserSessionConnector. These run
+  // against real Chrome, so they also check what the unit-test fake assumes.
+  describe("persistent named browser", () => {
+    afterAll(async () => {
+      await callAgent("closeNamed");
+    });
+
+    const setTitle = (title: string) => `async () => {
+      await cdp.send({
+        method: "Runtime.evaluate",
+        params: { expression: "document.title = '${title}'" },
+        sessionId: "active"
+      });
+    }`;
+    const readTitle = `async () => {
+      const { result } = await cdp.send({
+        method: "Runtime.evaluate",
+        params: { expression: "document.title", returnByValue: true },
+        sessionId: "active"
+      });
+      return result.value;
+    }`;
+
+    it("keeps the active tab's page between executions", async () => {
+      const first = await runNamed(setTitle("kept"));
+      expect(first.status).toBe("completed");
+
+      const second = await runNamed(readTitle);
+      expect(second.status).toBe("completed");
+      expect(second.result).toBe("kept");
+      expect(second.report?.restarted).toBe(false);
+    });
+
+    it("reports a popup as a new tab without switching to it", async () => {
+      await runNamed(setTitle("opener"));
+      const output = await runNamed(`async () => {
+        await cdp.send({
+          method: "Runtime.evaluate",
+          params: { expression: "void window.open('about:blank', '_blank')", userGesture: true },
+          sessionId: "active"
+        });
+      }`);
+      expect(output.status).toBe("completed");
+      expect(output.report?.newTabs).toHaveLength(1);
+
+      const title = await runNamed(readTitle);
+      expect(title.result).toBe("opener");
+    });
+
+    it("keeps the active tab across a pause for approval", async () => {
+      const output = await runNamed(`async () => {
+        await cdp.send({
+          method: "Runtime.evaluate",
+          params: { expression: "document.title = 'paused'" },
+          sessionId: "active"
+        });
+        await gate.confirm({ label: "continue" });
+        const { result } = await cdp.send({
+          method: "Runtime.evaluate",
+          params: { expression: "document.title", returnByValue: true },
+          sessionId: "active"
+        });
+        return result.value;
+      }`);
+      expect(output.status).toBe("paused");
+
+      const resumed = (await callAgent("approveNamed", [
+        output.executionId
+      ])) as RunOutput;
+      expect(resumed.status).toBe("completed");
+      expect(resumed.result).toBe("paused");
+    });
+
+    it('teaches sessionId: "active" for a page command sent without one', async () => {
+      const output = await runNamed(`async () => {
+        await cdp.send({ method: "Runtime.evaluate", params: { expression: "1" } });
+      }`);
+      expect(output.status).toBe("error");
+      expect(output.error).toContain('sessionId: "active"');
+    });
+
+    it("explains that a CDP event cannot be sent, using the live spec", async () => {
+      const output = await runNamed(`async () => {
+        await cdp.send({ method: "Page.loadEventFired" });
+      }`);
+      expect(output.status).toBe("error");
+      expect(output.error).toContain("CDP *event*");
+    });
+
+    it("reattaches after the model detaches from the active tab", async () => {
+      await runNamed(setTitle("detached"));
+      const output = await runNamed(`async () => {
+        const { targetInfos } = await cdp.send({ method: "Target.getTargets" });
+        await cdp.send({
+          method: "Runtime.evaluate",
+          params: { expression: "1" },
+          sessionId: "active"
+        });
+        const page = targetInfos.find((t) => t.type === "page" && t.title === "detached");
+        await cdp.send({
+          method: "Target.detachFromTarget",
+          params: { targetId: page.targetId }
+        });
+        const { result } = await cdp.send({
+          method: "Runtime.evaluate",
+          params: { expression: "document.title", returnByValue: true },
+          sessionId: "active"
+        });
+        return result.value;
+      }`);
+      expect(output.status).toBe("completed");
+      expect(output.result).toBe("detached");
+    });
+
+    it("refuses to close the browser", async () => {
+      await runNamed(setTitle("survivor"));
+      const output = await runNamed(`async () => {
+        await cdp.send({ method: "Browser.close" });
+      }`);
+      expect(output.status).toBe("error");
+      expect(output.error).toContain("managed for you");
+
+      const after = await runNamed(readTitle);
+      expect(after.result).toBe("survivor");
+      expect(after.report?.restarted).toBe(false);
+    });
+
+    it("reports restarted when the browser was replaced", async () => {
+      await runNamed(setTitle("lost"));
+      const key = (await callAgent("namedSessionKey")) as string;
+      await callAgent("corruptStoredSession", [key]);
+
+      const output = await runNamed(readTitle);
+      expect(output.status).toBe("completed");
+      expect(output.report?.restarted).toBe(true);
+      expect(output.result).not.toBe("lost");
     });
   });
 });
