@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createBrowserRuntime } from "../browser/ai";
 import { BrowserConnector } from "../browser/connector";
-import { CdpSession } from "../browser/cdp-session";
+import { CdpConnection, CdpSession } from "../browser/cdp-connection";
 import { connectBrowser, getBrowserRecording } from "../browser/browser-run";
 import type { ConnectBrowserOptions } from "../browser/browser-run";
 import type {
@@ -340,7 +340,7 @@ describe("browser_execute model output", () => {
   });
 });
 
-describe("CdpSession construction", () => {
+describe("CdpConnection construction", () => {
   /** A socket that never answers, so commands can only time out. */
   function silentSocket(): WebSocket {
     const listeners = new Map<string, Array<(event: unknown) => void>>();
@@ -357,7 +357,7 @@ describe("CdpSession construction", () => {
 
   it("still honors the deprecated positional arguments", async () => {
     let closed = 0;
-    const session = new CdpSession(
+    const session = new CdpConnection(
       silentSocket(),
       25,
       () => closed++,
@@ -374,7 +374,7 @@ describe("CdpSession construction", () => {
 
   it("accepts the options object", async () => {
     let closed = 0;
-    const session = new CdpSession(silentSocket(), {
+    const session = new CdpConnection(silentSocket(), {
       timeoutMs: 25,
       onClose: () => closed++,
       sessionId: "session-1"
@@ -386,6 +386,12 @@ describe("CdpSession construction", () => {
     );
     session.close();
     expect(closed).toBe(1);
+  });
+
+  it("keeps CdpSession as a deprecated alias", () => {
+    const legacy: CdpSession = new CdpSession(silentSocket());
+    expect(legacy).toBeInstanceOf(CdpConnection);
+    legacy.close();
   });
 });
 

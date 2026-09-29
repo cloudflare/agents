@@ -1,4 +1,4 @@
-import { CdpSession } from "./cdp-session";
+import { CdpConnection } from "./cdp-connection";
 
 /**
  * A Browser Rendering binding. Structural so it accepts both the classic
@@ -244,7 +244,7 @@ export async function deleteBrowserSession(
 export async function connectBrowser(
   browser: BrowserBinding,
   options?: number | ConnectBrowserOptions
-): Promise<CdpSession> {
+): Promise<CdpConnection> {
   const normalizedOptions: ConnectBrowserOptions =
     typeof options === "number" ? { timeoutMs: options } : (options ?? {});
   if (normalizedOptions.browser === "kitesurf") {
@@ -291,7 +291,7 @@ export async function connectBrowser(
     // an ID for analytics correlation, but it cannot be used with the
     // session-scoped reconnect or delete endpoints.
     ws.accept();
-    return new CdpSession(ws, { timeoutMs: normalizedOptions.timeoutMs });
+    return new CdpConnection(ws, { timeoutMs: normalizedOptions.timeoutMs });
   }
 
   const sessionId = response.headers.get("cf-browser-session-id");
@@ -302,7 +302,7 @@ export async function connectBrowser(
   }
 
   ws.accept();
-  return new CdpSession(ws, {
+  return new CdpConnection(ws, {
     timeoutMs: normalizedOptions.timeoutMs,
     onClose: () => {
       deleteBrowserSession(browser, sessionId).catch((error: unknown) => {
@@ -365,14 +365,14 @@ export async function getBrowserRecording(options: {
 export interface ConnectBrowserSessionOptions {
   timeoutMs?: number;
   /**
-   * Invoked once when the returned {@link CdpSession} reaches a terminal
+   * Invoked once when the returned {@link CdpConnection} reaches a terminal
    * state — an explicit `close()`, peer closure, or a socket error. The
    * session itself is never deleted on close — pass an `onClose` that
    * deletes it for one-shot (create-and-close) semantics.
    */
   onClose?: () => void;
   /**
-   * Invoked on every CDP command sent over the returned {@link CdpSession} —
+   * Invoked on every CDP command sent over the returned {@link CdpConnection} —
    * an activity signal for idle tracking. Keep it cheap and synchronous;
    * throttle any I/O it triggers.
    */
@@ -386,7 +386,7 @@ export async function connectBrowserSession(
   browser: BrowserBinding,
   sessionId: string,
   options?: ConnectBrowserSessionOptions
-): Promise<CdpSession>;
+): Promise<CdpConnection>;
 /**
  * @deprecated Pass `{ timeoutMs }` instead of a bare number — the numeric
  * form will be removed.
@@ -395,12 +395,12 @@ export async function connectBrowserSession(
   browser: BrowserBinding,
   sessionId: string,
   timeoutMs?: number
-): Promise<CdpSession>;
+): Promise<CdpConnection>;
 export async function connectBrowserSession(
   browser: BrowserBinding,
   sessionId: string,
   options?: number | ConnectBrowserSessionOptions
-): Promise<CdpSession> {
+): Promise<CdpConnection> {
   const normalized =
     typeof options === "number" ? { timeoutMs: options } : (options ?? {});
   const response = await browser.fetch(browserSessionEndpoint(sessionId), {
@@ -415,7 +415,7 @@ export async function connectBrowserSession(
   }
 
   ws.accept();
-  return new CdpSession(ws, {
+  return new CdpConnection(ws, {
     timeoutMs: normalized.timeoutMs,
     onClose: normalized.onClose,
     sessionId,

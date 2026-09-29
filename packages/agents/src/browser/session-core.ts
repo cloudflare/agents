@@ -1,4 +1,4 @@
-import type { CdpSession } from "./cdp-session";
+import type { CdpConnection } from "./cdp-connection";
 import {
   type BrowserBinding,
   type BrowserSessionGuardrails,
@@ -105,7 +105,7 @@ export interface ConnectedBrowserSession {
   sessionId: string;
   restarted: boolean;
   /** Closing this socket does NOT delete the named session. */
-  cdp: CdpSession;
+  cdp: CdpConnection;
 }
 
 /** One-shot session options for the default Chromium engine. */
@@ -416,13 +416,13 @@ export class NamedBrowserSessions {
 
 /**
  * Open a one-shot browser session: create, connect, and delete the platform
- * session when the returned {@link CdpSession} closes. No store involved —
+ * session when the returned {@link CdpConnection} closes. No store involved —
  * one-shot sessions have no name and no durability.
  */
 export async function openOneShotBrowserSession(
   browser: BrowserBinding,
   options: OneShotBrowserSessionOptions = {}
-): Promise<CdpSession> {
+): Promise<CdpConnection> {
   if (options.browser === "kitesurf") {
     // The options union already rejects these at the type level for literal
     // call sites; plain-JS callers and spreads can still smuggle them in, so

@@ -137,7 +137,7 @@ src/
   browser/              # Browser Run integration (experimental)
     index.ts            # Barrel for agents/browser
     browser-run.ts      # Low-level Browser Run REST/binding calls + errors
-    cdp-session.ts      # CdpSession — Chrome DevTools Protocol over WebSocket
+    cdp-connection.ts   # CdpConnection — one Chrome DevTools Protocol WebSocket
     connector.ts        # BrowserConnector — codemode connector + session helpers
     session-manager.ts  # Durable session-id store + sweep
     spec.ts             # CDP protocol spec loader (cdp.spec())
