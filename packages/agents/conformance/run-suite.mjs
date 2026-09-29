@@ -206,8 +206,19 @@ async function runScenario(name) {
   }
   const result = await runNode(args, { timeoutMs: scenarioTimeoutMs });
   // Alpha.10's server command reports WARNING checks but exits zero. Warnings
-  // remain non-conformant unless the scenario is explicitly baselined.
-  const warned = /"status"\s*:\s*"WARNING"/.test(result.stdout);
+  // remain non-conformant unless the scenario is explicitly baselined — with
+  // one exception: the sse-retry "reconnected slightly late" timing warning
+  // (client-sse-retry-timing), which the referee itself calls acceptable.
+  // Loaded CI runners add 200-400ms of scheduling jitter, so failing on it is
+  // pure flake; the too-early and very-late bands still emit FAILURE.
+  const warningCount = (result.stdout.match(/"status"\s*:\s*"WARNING"/g) ?? [])
+    .length;
+  const acceptableWarningCount = (
+    result.stdout.match(
+      /"errorMessage"\s*:\s*"Client reconnected slightly late/g
+    ) ?? []
+  ).length;
+  const warned = warningCount > acceptableWarningCount;
   const failed = result.code !== 0 || result.timedOut || warned;
   return { name, expected: expected.has(name), failed, ...result };
 }

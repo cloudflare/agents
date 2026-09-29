@@ -120,6 +120,35 @@ useAgent({
 });
 ```
 
+### Transport
+
+`useAgent` speaks the Agent protocol over one of two wires. The default,
+`"cf-websocket"`, is a hibernating WebSocket managed by PartySocket. The
+experimental `"capnweb"` transport carries protocol frames through a single
+[Cap'n Web](https://github.com/cloudflare/capnweb) RPC session whose root
+also serves the host's callables natively:
+
+```typescript
+useAgent({
+  agent: "ChatAgent",
+  name: "room-123",
+  transport: "capnweb" // default: "cf-websocket"
+});
+```
+
+Identity, state sync, reconnection with backoff, and terminal close codes are
+identical on both wires; PartySocket still owns the connection and the
+transport only swaps the socket class it instantiates. `call()` and `stub`
+differ by design. On `cf-websocket` they send JSON `rpc` frames. On `capnweb`
+they invoke the host's `callables` natively on the Cap'n Web session root: a
+method that returns an `RpcTarget` hands you a live stub you can keep
+calling, a `ReadableStream` result streams, and chained calls pipeline.
+`@callable()` decorators on an `Agent` are a JSON-wire feature and are not
+available on `capnweb` unless the Agent also passes a `callables` target.
+The trade-off is that a Cap'n Web connection does not hibernate: the Durable
+Object stays in memory while one is open. `AgentClient` accepts the same
+`transport` option.
+
 ### Async Query Parameters
 
 For authentication tokens or other async data, pass a function that returns a Promise:
@@ -351,6 +380,7 @@ type UseAgentOptions<State> = {
   name?: string; // Instance name (default: "default")
   host?: string; // Custom host
   path?: string; // Custom path prefix
+  transport?: "cf-websocket" | "capnweb"; // Wire (default: "cf-websocket")
 
   // Query parameters
   query?:

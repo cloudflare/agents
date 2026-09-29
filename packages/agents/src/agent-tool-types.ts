@@ -96,6 +96,41 @@ export const AGENT_TOOL_PROGRESS_PART = "data-agent-progress";
 export const AGENT_TOOL_MILESTONE_PART = "data-agent-milestone";
 
 /**
+ * Whether a chunk body is a progress or milestone frame. These are broadcast
+ * but never written to the child's chunk store, so they have no stored-chunk
+ * position and must not take part in stored-position numbering or dedupe.
+ */
+export function isAgentToolLifecycleChunk(body: string): boolean {
+  if (
+    !body.includes(AGENT_TOOL_PROGRESS_PART) &&
+    !body.includes(AGENT_TOOL_MILESTONE_PART)
+  ) {
+    return false;
+  }
+  try {
+    const type = (JSON.parse(body) as { type?: unknown } | null)?.type;
+    return (
+      type === AGENT_TOOL_PROGRESS_PART || type === AGENT_TOOL_MILESTONE_PART
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a forwarded chunk has no stored-chunk position: a progress or
+ * milestone frame, or a chunk too large to store. Such chunks carry the next
+ * stored position without consuming it.
+ */
+export function isPositionlessAgentToolChunk(
+  chunk: AgentToolStoredChunk
+): boolean {
+  return (
+    chunk.unstoredId !== undefined || isAgentToolLifecycleChunk(chunk.body)
+  );
+}
+
+/**
  * Ephemeral progress signal a running sub-agent emits with `reportProgress`. The
  * well-known fields drive generic UI (a bar + status line) with no per-app
  * convention; `data` is an app-specific escape hatch that is **live-only** by
@@ -271,7 +306,18 @@ export type RunAgentToolOptions<
    * must outlive the spawning turn; cancel it explicitly via `cancelAgentTool`.
    */
   detached?: boolean | DetachedAgentToolConfig<Self>;
+  /**
+   * Which child events reach the parent's clients. `"full"` (default) forwards
+   * every streamed chunk. `"terminal"` forwards only lifecycle events: started,
+   * progress and milestone frames, and the terminal event. The child still
+   * persists its whole stream, and the parent still tails it for completion,
+   * cancellation, progress and recovery. Use it for a headless parent with no
+   * client watching the child. Not supported with `detached`.
+   */
+  eventDelivery?: AgentToolEventDelivery;
 };
+
+export type AgentToolEventDelivery = "full" | "terminal";
 
 /**
  * Result of dispatching a detached run. Returns immediately after dispatch
@@ -340,16 +386,37 @@ export type AgentToolRunInspection<Output = unknown> = {
 export type AgentToolStoredChunk = {
   sequence: number;
   body: string;
+  /**
+   * Set when the child broadcast this chunk but could not store it (it exceeds
+   * the stored-chunk size limit). The chunk is never replayed, so it carries
+   * the next stored position without consuming it and dedupes on this id.
+   */
+  unstoredId?: string;
 };
 
 export type AgentToolChildAdapter<Input = unknown, Output = unknown> = {
   startAgentToolRun(
     input: Input,
-    options: { runId: string; signal?: AbortSignal }
+    options: {
+      runId: string;
+      signal?: AbortSignal;
+      /**
+       * `"terminal"` means no client is watching this run's chunks, so the
+       * child can skip broadcasting them.
+       */
+      eventDelivery?: AgentToolEventDelivery;
+    }
   ): Promise<AgentToolRunInspection<Output>>;
   cancelAgentToolRun(runId: string, reason?: unknown): Promise<void>;
   inspectAgentToolRun(
-    runId: string
+    runId: string,
+    options?: {
+      /**
+       * `false` reports the stored row as-is instead of first reconciling
+       * (and possibly sealing) a stale run. Defaults to `true`.
+       */
+      reconcile?: boolean;
+    }
   ): Promise<AgentToolRunInspection<Output> | null>;
   getAgentToolChunks(
     runId: string,
@@ -374,6 +441,8 @@ export type AgentToolEvent =
       kind: "chunk";
       runId: string;
       body: string;
+      /** See {@link AgentToolStoredChunk.unstoredId}. */
+      unstoredId?: string;
     }
   | {
       kind: "finished";

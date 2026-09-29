@@ -12,8 +12,9 @@ Focused protocol examples can be server-only when a frontend would obscure the c
 
 Early-access examples for a coordinated PR stack live under `examples/next/`.
 Each runnable child is an independent workspace package matched by
-`examples/next/*`; `examples/next/README.md` records the stack order. Move an
-example into the main catalog only after its public API stabilizes.
+`examples/next/*`. Harness examples are grouped under
+`examples/next/harnesses/*`; `examples/next/README.md` records the stack order.
+Move an example into the main catalog only after its public API stabilizes.
 
 Full-stack examples use the [Cloudflare Vite plugin](https://developers.cloudflare.com/workers/vite-plugin/) for development and builds. Server-only examples use Wrangler directly.
 

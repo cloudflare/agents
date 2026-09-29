@@ -1,4 +1,11 @@
-import { Agent, callable, type Schedule } from "../../index.ts";
+import {
+  Agent,
+  callable,
+  getCurrentAgent,
+  type Schedule
+} from "../../index.ts";
+import type { RecoveryLoopScheduleOptions } from "../../schedules/types";
+import { captureConsoleWarnings } from "../capabilities/console-capture";
 
 /**
  * Test agent that verifies this.name is accessible during scheduled callback
@@ -11,9 +18,26 @@ export class TestAlarmInitAgent extends Agent {
   _capturedName: string | null = null;
   _onStartCalled = false;
   _callbackError: string | null = null;
+  _scheduleContextEvents: string[] = [];
+
+  override observability = {
+    emit: (event: { type: string }) => {
+      if (event.type !== "schedule:execute") return;
+      const current = getCurrentAgent().agent;
+      this._scheduleContextEvents.push(
+        current === undefined ? "capability:no-context" : "capability:context"
+      );
+    }
+  };
 
   async onStart() {
     this._onStartCalled = true;
+  }
+
+  onAlarm(): void {
+    this._scheduleContextEvents.push(
+      getCurrentAgent().agent === this ? "host:context" : "host:missing-context"
+    );
   }
 
   // Callback that reads this.name — would throw before the fix if
@@ -28,6 +52,20 @@ export class TestAlarmInitAgent extends Agent {
 
   async scheduleNameCheck(delaySeconds: number): Promise<string> {
     const schedule = await this.schedule(delaySeconds, "nameCheckCallback");
+    return schedule.id;
+  }
+
+  contextCheckCallback(): void {
+    this._scheduleContextEvents.push(
+      getCurrentAgent().agent === this
+        ? "callback:context"
+        : "callback:missing-context"
+    );
+  }
+
+  async scheduleContextCheck(delaySeconds: number): Promise<string> {
+    this._scheduleContextEvents = [];
+    const schedule = await this.schedule(delaySeconds, "contextCheckCallback");
     return schedule.id;
   }
 
@@ -56,8 +94,20 @@ export class TestDestroyScheduleAgent extends Agent<
     return this.state.status;
   }
 
+  async makeSelfDestructingAlarmDue(): Promise<void> {
+    const past = Date.now() - 1_000;
+    this.sql`
+      UPDATE cf_agents_jobs SET time = ${past} WHERE fn = 'destroy'
+    `;
+    await this.ctx.storage.setAlarm(Date.now() + 1000);
+  }
+
   getStatus() {
     return this.state.status;
+  }
+
+  onAlarm(): void {
+    throw new Error("onAlarm must not run after a scheduled destroy");
   }
 }
 
@@ -65,25 +115,29 @@ export class TestDestroyScheduleAgent extends Agent<
  * Agent that calls schedule() in onStart() without idempotent — should warn.
  */
 export class TestOnStartScheduleWarnAgent extends Agent {
+  readonly scheduleWarnings: string[] = [];
+
   maintenanceCallback() {
     // no-op
   }
 
   async onStart() {
-    await this.schedule(60, "maintenanceCallback");
+    await captureConsoleWarnings(this.scheduleWarnings, async () => {
+      await this.schedule(60, "maintenanceCallback");
+    });
   }
 
   @callable()
   wasWarnedFor(cb: string): boolean {
-    return (
-      this as unknown as { _warnedScheduleInOnStart: Set<string> }
-    )._warnedScheduleInOnStart.has(cb);
+    return this.scheduleWarnings.some((warning) =>
+      warning.includes(`Scheduling "${cb}"`)
+    );
   }
 
   @callable()
   async getScheduleCount(): Promise<number> {
     const result = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_schedules
+      SELECT COUNT(*) as count FROM cf_agents_jobs WHERE capability = 'scheduler'
     `;
     return result[0].count;
   }
@@ -93,27 +147,31 @@ export class TestOnStartScheduleWarnAgent extends Agent {
  * Agent that calls schedule() in onStart() WITH idempotent — should not warn.
  */
 export class TestOnStartScheduleNoWarnAgent extends Agent {
+  readonly scheduleWarnings: string[] = [];
+
   maintenanceCallback() {
     // no-op
   }
 
   async onStart() {
-    await this.schedule(60, "maintenanceCallback", undefined, {
-      idempotent: true
+    await captureConsoleWarnings(this.scheduleWarnings, async () => {
+      await this.schedule(60, "maintenanceCallback", undefined, {
+        idempotent: true
+      });
     });
   }
 
   @callable()
   wasWarnedFor(cb: string): boolean {
-    return (
-      this as unknown as { _warnedScheduleInOnStart: Set<string> }
-    )._warnedScheduleInOnStart.has(cb);
+    return this.scheduleWarnings.some((warning) =>
+      warning.includes(`Scheduling "${cb}"`)
+    );
   }
 
   @callable()
   async getScheduleCount(): Promise<number> {
     const result = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_schedules
+      SELECT COUNT(*) as count FROM cf_agents_jobs WHERE capability = 'scheduler'
     `;
     return result[0].count;
   }
@@ -124,25 +182,59 @@ export class TestOnStartScheduleNoWarnAgent extends Agent {
  * NOT warn because the user explicitly opted out.
  */
 export class TestOnStartScheduleExplicitFalseAgent extends Agent {
+  readonly scheduleWarnings: string[] = [];
+
   maintenanceCallback() {
     // no-op
   }
 
   async onStart() {
-    await this.schedule(60, "maintenanceCallback", undefined, {
-      idempotent: false
+    await captureConsoleWarnings(this.scheduleWarnings, async () => {
+      await this.schedule(60, "maintenanceCallback", undefined, {
+        idempotent: false
+      });
     });
   }
 
   @callable()
   wasWarnedFor(cb: string): boolean {
-    return (
-      this as unknown as { _warnedScheduleInOnStart: Set<string> }
-    )._warnedScheduleInOnStart.has(cb);
+    return this.scheduleWarnings.some((warning) =>
+      warning.includes(`Scheduling "${cb}"`)
+    );
   }
 }
 
 export class TestScheduleAgent extends Agent {
+  /**
+   * Legacy chat-package sealing hook retained by already-published hosts.
+   * Agents 0.23 must invoke it when the host has no new onAlarmMemoryLimit.
+   */
+  protected async _cf_sealMemoryLimitedRecovery(): Promise<void> {
+    const count =
+      (await this.ctx.storage.get<number>("legacyMemoryLimitSeals")) ?? 0;
+    await this.ctx.storage.put("legacyMemoryLimitSeals", count + 1);
+  }
+
+  async getLegacyMemoryLimitSealsForTest(): Promise<number> {
+    return (await this.ctx.storage.get<number>("legacyMemoryLimitSeals")) ?? 0;
+  }
+
+  /**
+   * Simulate a memory-limit reset thrown during startup hydration (#1825):
+   * while the durable countdown is set, every cold start throws the
+   * platform's memory-limit error before any job can run.
+   */
+  async onStart() {
+    const remaining =
+      (await this.ctx.storage.get<number>("oomOnStartRemaining")) ?? 0;
+    if (remaining > 0) {
+      await this.ctx.storage.put("oomOnStartRemaining", remaining - 1);
+      throw new Error(
+        "Durable Object's isolate exceeded its memory limit and was reset."
+      );
+    }
+  }
+
   // A no-op callback method for testing schedules
   testCallback() {
     // Intentionally empty - used for testing schedule creation
@@ -202,12 +294,30 @@ export class TestScheduleAgent extends Agent {
 
   @callable()
   async backdateSchedule(id: string, time: number): Promise<void> {
-    this.sql`UPDATE cf_agents_schedules SET time = ${time} WHERE id = ${id}`;
+    // `time` is historical unix seconds; the job queue stores milliseconds.
+    this.sql`UPDATE cf_agents_jobs SET time = ${time * 1000} WHERE id = ${id}`;
   }
 
   @callable()
   async createSchedule(delaySeconds: number): Promise<string> {
     const schedule = await this.schedule(delaySeconds, "testCallback");
+    return schedule.id;
+  }
+
+  // A schedule flagged as part of an OOM-prone recovery loop (#1825): the
+  // alarm memory-limit breaker backs it off on a strike and purges it at seal.
+  @callable()
+  async createRecoveryLoopSchedule(delaySeconds: number): Promise<string> {
+    const options: RecoveryLoopScheduleOptions = {
+      idempotent: false,
+      recoveryLoop: true
+    };
+    const schedule = await this.schedule(
+      delaySeconds,
+      "testCallback",
+      undefined,
+      options
+    );
     return schedule.id;
   }
 
@@ -266,9 +376,9 @@ export class TestScheduleAgent extends Agent {
 
     // Manually set running=1 and execution_started_at to 60 seconds ago
     // to simulate a hung callback
-    const hungStartTime = Math.floor(Date.now() / 1000) - 60;
+    const hungStartTime = Date.now() - 60_000;
     this
-      .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${hungStartTime} WHERE id = ${schedule.id}`;
+      .sql`UPDATE cf_agents_jobs SET running = 1, execution_started_at = ${hungStartTime} WHERE id = ${schedule.id}`;
 
     // Clear the alarm armed by scheduleEvery in the same RPC. Otherwise the
     // alarm can fire in the gap before the test re-arms it manually, observe
@@ -291,7 +401,7 @@ export class TestScheduleAgent extends Agent {
     // Manually set running=1 but leave execution_started_at as NULL
     // to simulate a legacy schedule that was running before the migration
     this
-      .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = NULL WHERE id = ${schedule.id}`;
+      .sql`UPDATE cf_agents_jobs SET running = 1, execution_started_at = NULL WHERE id = ${schedule.id}`;
 
     // See note in simulateHungSchedule: clear the alarm in the same RPC to
     // avoid a race where it fires before the test can re-arm it.
@@ -372,7 +482,7 @@ export class TestScheduleAgent extends Agent {
   @callable()
   async getScheduleCount(): Promise<number> {
     const result = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_schedules
+      SELECT COUNT(*) as count FROM cf_agents_jobs WHERE capability = 'scheduler'
     `;
     return result[0].count;
   }
@@ -383,8 +493,10 @@ export class TestScheduleAgent extends Agent {
     cb: string
   ): Promise<number> {
     const result = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_schedules
-      WHERE type = ${type} AND callback = ${cb}
+      SELECT COUNT(*) as count FROM cf_agents_jobs
+      WHERE capability = 'scheduler'
+        AND fn = ${cb}
+        AND json_extract(payload, '$.type') = ${type}
     `;
     return result[0].count;
   }
@@ -420,8 +532,8 @@ export class TestScheduleAgent extends Agent {
     );
     // Backdate so the row is due when alarm() scans `time <= now`.
     this.sql`
-      UPDATE cf_agents_schedules
-      SET time = ${Math.floor(Date.now() / 1000) - 1}
+      UPDATE cf_agents_jobs
+      SET time = ${Date.now() - 1_000}
       WHERE id = ${schedule.id}
     `;
     let threw = false;
@@ -432,7 +544,7 @@ export class TestScheduleAgent extends Agent {
       threw = true;
     }
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_schedules WHERE id = ${schedule.id}
+      SELECT COUNT(*) as count FROM cf_agents_jobs WHERE id = ${schedule.id}
     `;
     return { threw, remaining: rows[0].count };
   }
@@ -513,8 +625,8 @@ export class TestScheduleAgent extends Agent {
     );
     // Backdate so the row is due when alarm() scans `time <= now`.
     this.sql`
-      UPDATE cf_agents_schedules
-      SET time = ${Math.floor(Date.now() / 1000) - 1}
+      UPDATE cf_agents_jobs
+      SET time = ${Date.now() - 1_000}
       WHERE id = ${schedule.id}
     `;
     let threw = false;
@@ -525,24 +637,29 @@ export class TestScheduleAgent extends Agent {
       threw = true;
     }
     const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_schedules WHERE id = ${schedule.id}
+      SELECT COUNT(*) as count FROM cf_agents_jobs WHERE id = ${schedule.id}
     `;
     const calls = this._errorSequenceCallsForTest;
     this._errorSequenceForTest = [];
     this._errorSequenceCallsForTest = 0;
     // Clean up a deferred (surviving) row so it doesn't leak into later tests
     // on the same instance.
-    this.sql`DELETE FROM cf_agents_schedules WHERE id = ${schedule.id}`;
+    this.sql`DELETE FROM cf_agents_jobs WHERE id = ${schedule.id}`;
     return { threw, remaining: rows[0].count, calls };
   }
 
   @callable()
   async insertStaleDelayedRows(count: number, cb: string): Promise<void> {
-    const past = Math.floor(Date.now() / 1000) - 60;
+    const past = Date.now() - 60_000;
+    const payload = JSON.stringify({
+      payload: null,
+      type: "delayed",
+      delayInSeconds: 60
+    });
     for (let i = 0; i < count; i++) {
       this.sql`
-        INSERT INTO cf_agents_schedules (id, callback, payload, type, delayInSeconds, time)
-        VALUES (${`stale-${i}`}, ${cb}, ${null}, 'delayed', 60, ${past})
+        INSERT INTO cf_agents_jobs (id, capability, fn, time, payload)
+        VALUES (${`stale-${i}`}, 'scheduler', ${cb}, ${past}, ${payload})
       `;
     }
     await this.ctx.storage.setAlarm(Date.now() + 1000);

@@ -12,8 +12,8 @@ when the RPC is the call that wakes a cold instance. For an agent that idles
 between messages, that is the normal case.
 
 [#1990](https://github.com/cloudflare/agents/issues/1990) reports two symptoms.
-Against `e87ad62b`, an empty `class ColdAgent extends Think {}` and a single
-`stub.saveMessages([message])` reproduces the first verbatim:
+An empty `class ColdAgent extends Think {}` and a single
+`stub.saveMessages([message])` reproduces the first:
 
 ```
 TypeError: Cannot read properties of undefined (reading 'appendMessage')
@@ -22,108 +22,91 @@ TypeError: Cannot read properties of undefined (reading 'appendMessage')
 `Think.session` is declared `session!: Session` with no initializer and is
 assigned during startup, so a cold RPC reaches it as `undefined`.
 
-The second symptom is quieter and worse. Seeding durable storage, evicting, then
-reading over RPC a field that startup hydrates returns the wrong answer with no
-error:
+The second symptom is quieter and worse: a read of state that startup hydrates
+returns the wrong answer with no error. `getMessages()` returns `[]` for a
+conversation that has one, and a caller cannot distinguish that from a genuinely
+empty result.
 
-```
-cold read after eviction => undefined     // "IMPORTANT" is durably stored
-```
-
-`getMessages()` returns `[]` for a conversation that has one, and
-`getMcpServers()` reports every registered server as `not-connected`. A caller
-cannot distinguish those from a genuinely empty result.
-
-`Agent` already treats initialization as an entry-point responsibility. It calls
-`__unsafe_ensureInitialized()` from `_cf_invokeAgentPath`, `_cf_initAsFacet`,
-`_cf_scheduleDestroy` and the three `_workflow_*` methods. All six are
-framework-internal. The surface users actually dial is the gap.
+`Agent` already treats initialization as an entry-point responsibility for its
+framework-internal `_cf_*` and `_workflow_*` RPCs, which call
+`__unsafe_ensureInitialized()`. The surface users actually dial is the gap.
 
 ## Proposal
 
-Widen the prototype wrapping `Agent` already performs.
+Start the lifecycle from the wrapper `Agent` already installs around subclass
+methods.
 
-The constructor calls `_autoWrapCustomMethods()`, which walks the prototype
-chain and replaces methods with a wrapper that establishes `getCurrentAgent()`
-context. Until now it excluded everything on `Agent.prototype`, so it only ever
-wrapped user-defined methods. Removing that exclusion brings the framework's own
-public API into scope, and the wrapper gains one branch:
+The constructor calls `_autoWrapCustomMethods()` once per class. It walks the
+prototype chain below `Agent.prototype` and replaces each public method with
+`withAgentContext`, which establishes `getCurrentAgent()` context for calls that
+arrive outside a lifecycle hook — native RPC being the main one. For `async`
+methods the wrapper gains one branch:
 
 ```ts
-if (this._rpcInitializationState !== "pending") {
-  return method.apply(this, args);
+if (getCurrentAgent().agent !== this && !this.lifecycle.isStarted()) {
+  await this.lifecycle.start();
 }
-return this.__unsafe_ensureInitialized().then(() => method.apply(this, args));
 ```
 
-A four-state field tracks the boundary. The constructor arms `"pending"` in a
-microtask under `blockConcurrencyWhile`, so a subclass calling its own methods
-during construction stays synchronous and no external event can arrive in the
-window. `onStart` sets `"starting"` then `"started"`, restoring the previous
-value on failure so startup can be retried. The `"starting"` state is what stops
-startup's own calls into public methods from recursing.
+- **The lifecycle owns the state.** `Lifecycle.isStarted()` exposes the
+  lifecycle's own status; there is no second state machine on `Agent`.
+- **Calls from inside this Agent never start it.** `onStart`, lifecycle hooks
+  and wrapped methods all run with this Agent as the current agent, so startup
+  calling its own public methods does not recurse. `lifecycle.start()` also
+  returns immediately while startup is running: startup holds the input gate, so
+  such a call can only come from startup itself (for example a capability
+  calling a host method).
+- **Synchronous methods stay synchronous.** Only functions that are `async` get
+  the startup branch. A sync method keeps its return type on every path,
+  including the one that wakes the instance, and a subclass constructor or field
+  initializer calling its own sync helpers is unaffected.
+- **Base `Agent` methods stay unwrapped.** Methods on `Agent.prototype` —
+  connection policy hooks, `destroy()`, `getMcpServers()` and the rest — are not
+  wrapped, so their signatures and the framework's synchronous decisions inside
+  entry points are unchanged, and a cold alarm can still finish deleting a
+  condemned Agent without startup recreating state.
 
-Only a constructed-but-unstarted instance defers. A warm call is unchanged.
+Think's public API (`saveMessages`, `getMessages`, `addMessages`, `chat`,
+`runTurn`, …) lives on `Think.prototype`, below `Agent.prototype`, so it is
+covered. Think's underscore-prefixed host bridge methods and the dynamic agent
+path RPCs are skipped by wrapping and call `__unsafe_ensureInitialized()`
+directly.
 
-The exclusion boundary is the framework's runtime surface: platform methods
-derived from `DurableObject.prototype`, lifecycle callbacks derived from the
-`LifecycleHostCallback` union and checked with `satisfies`, then runtime entry
-points, lifecycle accessors, connection policy hooks, state hooks, `destroy()`,
-and anything underscore-prefixed.
+Method discovery treats the nearest descriptor for a name as authoritative, so a
+subclass getter shadowing an inherited method is not replaced. It no longer stops
+at a fixed depth, and it does not re-wrap a function that is already a wrapper.
+
+## Costs
+
+- A non-`async` method that returns a Promise, or a synchronous method that
+  reads state `onStart` hydrates, is not started by the wrapper. Declare it
+  `async` or call `await this.lifecycle.start()` in it.
+- Methods on `Agent.prototype` called over native RPC on a cold instance still
+  run before startup. SQL-backed reads are correct cold because `_ensureSchema()`
+  runs in the constructor; in-memory state such as live MCP connections is not.
+- Startup resolves the object's name. An Agent addressed with `newUniqueId()` or
+  `idFromString()` without a migrated legacy name now fails its first `async`
+  subclass RPC with the lifecycle's addressing error instead of serving the call
+  against uninitialized state. This ships as a minor release.
 
 ## Alternatives
 
 **Document `await this.lifecycle.start()` and require callers to add it.** This
-is what `design/rfc-durable-object-lifecycle.md` prescribes, and it works — a
-user method with the line initializes correctly. It does not reach the reported
-bug. The MRE is an empty subclass calling a framework method on the stub; there
-is no user code in the path. The only workaround is overriding framework methods
-purely to inject the line, repeated for every method ever called over RPC, on
-signatures the subclass does not own. The issue asks specifically for no
-per-method boilerplate.
+is what `design/rfc-durable-object-lifecycle.md` prescribes. It does not reach
+the reported bug: the repro is an empty subclass calling a framework method on
+the stub, so there is no user code in the path.
 
-**Call `lifecycle.start()` explicitly from every public method.** `Agent` has 82
-public methods and `Think` has 60. Of those, 30 and 19 respectively are
-synchronous, and around 40 would have to become async to accommodate an `await`.
-That breaks every subclass overriding `getModel()` or `getTools()`. It is also
-opt-in: a public method added later silently misses the call, and the bug
-returns for that method alone. Wrapping fails closed — a name must be added to
-the exclusion list to break it.
+**Call `lifecycle.start()` explicitly from every public method.** Around 40
+synchronous methods on `Agent` and `Think` would have to become async, breaking
+every subclass overriding `getModel()` or `getTools()`, and a public method
+added later silently misses the call.
 
-Most of that surface would not benefit either way. `_ensureSchema()` runs in the
-constructor, so SQL-backed reads are already correct cold; seeding a
-`cf_agents_schedules` row, evicting, then calling `getSchedules()` over RPC
-returns the right answer on a fully uninitialized instance. The methods that
-need startup are the ones reading in-memory state it hydrates. That set is
-defined by implementation detail rather than by signature, so a curated list
-would drift as implementations move.
-
-**Wrap only `Agent.prototype` and `Think.prototype`, not user subclasses.** This
-fixes the MRE and every silent case while leaving user prototypes untouched. It
-reintroduces the footgun for a user method that calls a framework method, which
-is the shape most likely to be written.
-
-## Decision
-
-Widen the existing wrapping.
-
-The cost is real and worth stating. For a representative Think subclass the
-wrapper covers 229 methods, of which 84 are user-defined and 145 are framework
-methods — roughly a 2.7× widening. On the cold path a declared-synchronous
-method returns a Promise while TypeScript still shows the synchronous signature.
-That is a type-level inaccuracy, harmless over RPC where every call is awaited,
-and confined to the one path where the alternative is a wrong answer.
-
-Wrapping was not reintroduced by this change. `_autoWrapCustomMethods` predates
-the lifecycle vendoring and survived it; [#2133](https://github.com/cloudflare/agents/pull/2133)
-adjusted a single line of it for the removed base class and left the mechanism
-alone. `Lifecycle.installHandlers()` performs the same kind of installation onto
-its host, instance-level and guarded, which is why the factory is named
-`install`.
-
-The alternative that avoids reflection over our own surface costs about 40
-breaking signature changes. Preserving those signatures is what buys the
-wrapping.
+**Wrap `Agent.prototype` too, with a hand-kept exclusion list.** An earlier
+revision of this change did this, with a four-state field armed from a
+constructor microtask. It made synchronous methods return a Promise on the cold
+path while TypeScript still showed the synchronous signature, and every new
+runtime hook had to be added to the exclusion list. The current design reaches
+the same Think surface without either cost.
 
 ## History
 

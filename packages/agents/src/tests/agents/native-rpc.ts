@@ -34,6 +34,10 @@ export class TestNativeRpcAgent extends NativeRpcBaseAgent {
     this.ready = true;
   }
 
+  syncApplicationRpc(): { ready: boolean } {
+    return { ready: this.ready };
+  }
+
   async applicationRpc(): Promise<{
     name: string;
     ready: boolean;

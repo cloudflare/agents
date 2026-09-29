@@ -10,7 +10,7 @@ import type {
 import type { Connection } from "../../../lifecycle/types";
 import { describe, expect, it, vi } from "vitest";
 import { __DO_NOT_USE_WILL_BREAK__agentContext as agentContext } from "../../../internal_context";
-import { StreamableHTTPServerTransport } from "../../../mcp/transport";
+import { StreamableHTTPServerTransport } from "../../../mcp/server/transport";
 import worker from "../../worker";
 import {
   TEST_MESSAGES,

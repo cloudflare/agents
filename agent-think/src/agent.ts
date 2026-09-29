@@ -20,13 +20,12 @@ import type {
   ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
   ChatResponseResult,
-  Session,
   ThinkSubmissionStatus,
   ToolCallResultContext,
-  TurnContext,
-  WorkspaceLike as ThinkWorkspaceLike
+  TurnContext
 } from "@cloudflare/think";
 import { skills, Think } from "@cloudflare/think";
+import type { ContextConfig } from "agents/context";
 import type { WorkspaceAgent } from "./workspace-agent";
 import type { LanguageModel, ToolSet } from "ai";
 import { getAgentByName } from "agents";
@@ -72,20 +71,22 @@ export interface AgentThinkSubmissionStatus {
 }
 
 /**
- * Register agent-think's identity and operating contract as durable, read-only
- * Session context. Unlike getSystemPrompt(), this block remains present when
+ * agent-think's identity and operating contract as a durable, read-only
+ * context block. Unlike getSystemPrompt(), this block remains present when
  * Think adds its own skills catalog context.
  */
-export function configureAgentThinkSession(
-  session: Session,
+export function agentThinkContext(
   getContext: () => RunContext | null
-): Session {
-  return session.withContext("agent-think", {
-    description: "Run identity, user instruction, and operating contract.",
-    provider: {
-      get: async () => agentThinkInstructions(getContext())
+): ContextConfig[] {
+  return [
+    {
+      label: "agent-think",
+      description: "Run identity, user instruction, and operating contract.",
+      provider: {
+        get: async () => agentThinkInstructions(getContext())
+      }
     }
-  });
+  ];
 }
 
 function agentThinkInstructions(ctx: RunContext | null): string | null {
@@ -168,6 +169,10 @@ export class ThinkAgent extends ThinkBase {
    */
   override workspaceBash = false;
 
+  // This proxy presents Think's legacy direct-method shape even though the
+  // remote owner is Computer. Keep skills in Computer's mounted tree.
+  override skillWorkspace = { root: "/workspace/.agents/skills" };
+
   readonly #workspaceAgent: DurableObjectStub<WorkspaceAgent>;
   #workspaceReady: Promise<RemoteWorkspace> | null = null;
   #context: RunContext | null = null;
@@ -191,9 +196,7 @@ export class ThinkAgent extends ThinkBase {
     );
     // Do not call getWorkspace here: dispatch must submit without attaching a
     // container. The first durable turn operation resolves it lazily.
-    this.workspace = adaptToThinkWorkspace(() =>
-      this.#getWorkspace()
-    ) as unknown as ThinkWorkspaceLike;
+    this.workspace = adaptToThinkWorkspace(() => this.#getWorkspace());
 
     this.ctx.blockConcurrencyWhile(async () => {
       this.#context =
@@ -228,7 +231,7 @@ export class ThinkAgent extends ThinkBase {
     await this.ctx.storage.put(CONTEXT_KEY, context);
     // The context block provider reads #context. Re-freeze it for every
     // dispatch so a re-mention on the same issue sees the latest instruction.
-    await this.session.refreshSystemPrompt();
+    await this.context.refreshSystemPrompt();
   }
 
   async getContext(): Promise<RunContext | null> {
@@ -494,8 +497,8 @@ export class ThinkAgent extends ThinkBase {
 
   // ── Think hooks ────────────────────────────────────────────────
 
-  override configureSession(session: Session): Session {
-    return configureAgentThinkSession(session, () => this.#context);
+  override configureContext(): ContextConfig[] {
+    return agentThinkContext(() => this.#context);
   }
 
   override getModel(): LanguageModel {
@@ -756,6 +759,14 @@ function adaptToThinkWorkspace(getWorkspace: () => Promise<RemoteWorkspace>) {
     async writeFile(path: string, content: string): Promise<void> {
       await (await fs()).writeFile(path, new TextEncoder().encode(content));
     },
+    async writeFileBytes(
+      path: string,
+      content: Uint8Array | ArrayBuffer
+    ): Promise<void> {
+      const bytes =
+        content instanceof Uint8Array ? content : new Uint8Array(content);
+      await (await fs()).writeFile(path, bytes);
+    },
     async mkdir(path: string, opts?: { recursive?: boolean }): Promise<void> {
       await (
         await fs()
@@ -779,10 +790,12 @@ function adaptToThinkWorkspace(getWorkspace: () => Promise<RemoteWorkspace>) {
           path,
           name: path.split("/").pop() ?? path,
           type: s.isDirectory ? ("directory" as const) : ("file" as const),
+          mimeType: s.isDirectory
+            ? "inode/directory"
+            : "application/octet-stream",
           size: s.size,
-          modifiedAt: new Date(s.mtime),
-          isDirectory: s.isDirectory,
-          isFile: s.isFile
+          createdAt: s.mtime,
+          updatedAt: s.mtime
         };
       } catch (err) {
         if (isEnoent(err)) return null;
@@ -795,10 +808,12 @@ function adaptToThinkWorkspace(getWorkspace: () => Promise<RemoteWorkspace>) {
         path: `${dir}/${e.name}`,
         name: e.name,
         type: e.isDirectory ? ("directory" as const) : ("file" as const),
+        mimeType: e.isDirectory
+          ? "inode/directory"
+          : "application/octet-stream",
         size: 0,
-        modifiedAt: new Date(0),
-        isDirectory: e.isDirectory,
-        isFile: e.isFile
+        createdAt: 0,
+        updatedAt: 0
       }));
     },
     async readFileBytes(path: string): Promise<Uint8Array | null> {
@@ -842,10 +857,10 @@ function adaptToThinkWorkspace(getWorkspace: () => Promise<RemoteWorkspace>) {
         path,
         name: path.split("/").pop() ?? path,
         type: isDirectory ? ("directory" as const) : ("file" as const),
+        mimeType: isDirectory ? "inode/directory" : "application/octet-stream",
         size,
-        modifiedAt: new Date(mtime),
-        isDirectory,
-        isFile: !isDirectory
+        createdAt: mtime,
+        updatedAt: mtime
       });
       try {
         if (rest.length === 0) {

@@ -70,7 +70,7 @@ function Chat() {
 - Chunks are batched (every 10 chunks) and flushed to SQLite for performance
 - When a client sends `CF_AGENT_STREAM_RESUME_REQUEST`, the server checks for active streams and responds with `CF_AGENT_STREAM_RESUMING`
 - Stale streams (older than 5 minutes) are cleaned up on restore
-- Stream buffers are garbage collected from a scheduled alarm: completed or errored streams are retained for 10 minutes (a brief reconnect-and-replay grace; the assistant message itself is persisted separately), and abandoned in-flight streams are retained for 1 hour after their last chunk before being reclaimed
+- Stream buffers are deleted in the same transaction that persists the assistant message (the cutover), so a finished turn leaves nothing behind and no cleanup alarm is armed. A buffer a crash left behind is reclaimed when the next stream starts: finished streams immediately, abandoned in-flight streams after 1 hour without a chunk (recovery has until then to rebuild the message from it)
 
 ### Client-side (`useAgentChat`)
 
@@ -83,6 +83,8 @@ function Chat() {
 ### The `replay` flag
 
 Replayed chunks include `replay: true` to distinguish them from live chunks. The client uses this to batch-apply all replayed chunks before rendering, which prevents intermediate states (like reasoning "Thinking..." indicators) from flashing briefly during replay. During a live stream, chunks arrive gradually and React renders each intermediate state naturally.
+
+Live and replayed chunks also carry a `seq` field: the chunk's position in the stream, starting at `0`. A continuation stream (for example, a tool continuation) appends to an assistant message that the client already holds, so replaying it from the start would apply the same text twice. The client remembers the highest `seq` it has applied for each request and skips replayed continuation chunks at or below it. Replays of non-continuation streams rebuild the message from the first chunk and are not filtered.
 
 ## Durable client cleanup
 

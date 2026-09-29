@@ -55,18 +55,40 @@ describe("native Durable Object RPC initialization", () => {
     });
   });
 
-  it("initializes exactly once before inherited and application RPC methods", async () => {
+  it("keeps synchronous methods synchronous and unstarted on a cold instance", async () => {
     const namespace = env.TestNativeRpcAgent;
     const stub = namespace.get(namespace.idFromName(uniqueName()));
 
-    const inheritedRpcStub = stub as unknown as {
-      getMcpServers(): Promise<{ servers: Record<string, unknown> }>;
-    };
-    expect((await inheritedRpcStub.getMcpServers()).servers).toEqual({});
-    expect(await stub.applicationRpc()).toMatchObject({
-      ready: true,
-      startCount: 1
+    const result = await runInDurableObject(stub, async (instance, ctx) => {
+      const subclassValue = instance.syncApplicationRpc();
+      const inheritedValue = instance.getMcpServers();
+      return {
+        subclassIsPromise: subclassValue instanceof Promise,
+        inheritedIsPromise: (inheritedValue as unknown) instanceof Promise,
+        subclassValue,
+        startCount: await ctx.storage.get<number>("test_start_count")
+      };
     });
+
+    expect(result).toEqual({
+      subclassIsPromise: false,
+      inheritedIsPromise: false,
+      subclassValue: { ready: false },
+      startCount: undefined
+    });
+  });
+
+  it("initializes exactly once across repeated async RPC calls", async () => {
+    const namespace = env.TestNativeRpcAgent;
+    const stub = namespace.get(namespace.idFromName(uniqueName()));
+
+    const [first, second] = await Promise.all([
+      stub.applicationRpc(),
+      stub.applicationRpc()
+    ]);
+    expect(first).toMatchObject({ ready: true, startCount: 1 });
+    expect(second).toMatchObject({ ready: true, startCount: 1 });
+    expect(await stub.syncApplicationRpc()).toEqual({ ready: true });
   });
 
   it("keeps the nearest non-method descriptor authoritative", async () => {

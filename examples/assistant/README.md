@@ -276,9 +276,8 @@ class SharedMCPClient {
 
 OAuth callback URL is `/chat/mcp-callback` — one URL for every
 server across every chat. The Worker's existing `/chat*` gate
-forwards it to the directory; `Agent._onRequest` dispatches to
-`handleMcpOAuthCallback`, which uses `mcp.isCallbackRequest` to
-match on stored callback URLs. Token lives in the directory's DO
+forwards it to the directory; the installed MCP capability matches
+stored callback URLs and handles the request. Token lives in the directory's DO
 storage via `DurableObjectOAuthClientProvider`.
 
 Browser-side, `useChats()` exposes `mcpState`, `addMcpServer`,

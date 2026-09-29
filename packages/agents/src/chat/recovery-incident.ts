@@ -99,16 +99,28 @@ export type ChatRecoveryIncident = {
    * incident with `reason="out_of_memory"` (#1825). Optional for backward-compat.
    */
   oomAttempts?: number;
+  /**
+   * Recoveries scheduled for this incident after a transient or rate-limited
+   * stream error. Drives the retry backoff and is capped by `maxAttempts`.
+   * Unlike `attempt`, it is not debounced and does not reset on progress: a
+   * provider that fails every retry within seconds must still back off and
+   * run out of attempts. Bumped by `ChatRecoveryEngine.recordTransientRetry`.
+   */
+  transientRetries?: number;
 };
 
 // ── Persisted storage keys (cutover contract) ──────────────────────────────
 
 export const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
 /**
- * Durable, monotonic forward-progress counter for recovery budget resets.
- * Bumped at production time when new content is streamed, so it reflects
- * genuinely new content and is immune to reconnects/re-persists; never
- * recomputed from the (compactable) transcript.
+ * The pre-derivation forward-progress counter: a KV integer bumped per
+ * credited chunk. The marker is now derived from the stream log
+ * (`ResumableStream.progressMarker`), and this key is only read — once per
+ * isolate, to seed the derived marker so it never reads lower than the
+ * high-water mark an incident recorded before the upgrade. Current code
+ * writes it only as a mirror of the derived marker's durable part — one put
+ * per stream retired, none per chunk — so a build rolled back to the
+ * counter never reads a marker lower than an incident recorded here.
  */
 export const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
 /**
@@ -135,7 +147,7 @@ export const CHAT_LAST_TERMINAL_KEY = "cf:chat:last-terminal";
 export const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 10;
 /**
  * Runaway-loop guard default — the framework-imposed backstop on cumulative
- * recovery WORK (produced content/tool units) since an incident opened.
+ * recovery WORK (durable stream segments, see below) since an incident opened.
  *
  * Originally `Infinity` (rfc-chat-recovery-work-budget): the SDK shipped the
  * *mechanism* but no default cap, so a progressing turn was never terminated on
@@ -155,8 +167,17 @@ export const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 10;
  * the incident is deleted). A very long agentic turn under heavy interruption
  * that legitimately needs more should raise `maxRecoveryWork` (or set it to
  * `Infinity` to restore the pre-#1825 unbounded behavior).
+ *
+ * The unit is one durable stream segment — about ten packed streaming chunks,
+ * or one settled tool result, which is flushed on its own — plus one per
+ * explicit credit for forwarded sub-agent output. The marker is derived from
+ * the stream log (`ResumableStream.progressMarker`), so that is what it can
+ * count. The earlier KV counter credited per milestone chunk and per five
+ * seconds of deltas, a coarser measure of streamed text; 10 000 segments
+ * (on the order of 100 000 chunks of re-run output) keeps the budget as
+ * generous as 1 000 credits was for delta-heavy turns, and still finite.
  */
-export const DEFAULT_CHAT_RECOVERY_MAX_WORK = 1000;
+export const DEFAULT_CHAT_RECOVERY_MAX_WORK = 10_000;
 /**
  * Tight, OOM-specific retry budget (#1825). A Durable Object memory-limit reset
  * (`isDurableObjectMemoryLimitReset`) is usually deterministic — the turn's
@@ -384,9 +405,13 @@ export async function readChatRecoveryProgress(
 }
 
 /**
- * Advance the durable recovery-progress counter by one. Called when genuinely new
- * content is durably flushed (real, reconnect-immune forward progress); shared by
- * `AIChatAgent` and `Think`.
+ * Advance the KV progress counter by one.
+ *
+ * @deprecated Hosts no longer bump a counter per credited chunk: the marker
+ * is derived from the stream log (`ResumableStream.progressMarker`) and
+ * explicit credits go through `ResumableStream.creditProgress`. Kept for
+ * code that still maintains the KV counter; a value written here is folded
+ * into the derived marker on the next seed.
  */
 export async function bumpChatRecoveryProgress(
   storage: Pick<DurableObjectStorage, "get" | "put">
@@ -457,7 +482,12 @@ export class StreamProgressCreditThrottle {
 // wrapper, which are passed in. Shared by `AIChatAgent` and `Think`.
 
 /** Durable record of the last turn that ended in a terminal error (#1645). */
-export type ChatTerminalRecord = { requestId: string; body: string };
+export type ChatTerminalRecord = {
+  requestId: string;
+  body: string;
+  /** The request's originating user message ids (#2280). */
+  messageIds?: string[];
+};
 
 /**
  * Persist a durable record of the last terminal turn so a client that
@@ -468,9 +498,12 @@ export type ChatTerminalRecord = { requestId: string; body: string };
 export async function recordChatTerminal(
   storage: Pick<DurableObjectStorage, "put">,
   requestId: string,
-  body: string
+  body: string,
+  messageIds?: string[]
 ): Promise<void> {
-  await storage.put(CHAT_LAST_TERMINAL_KEY, { requestId, body });
+  const record: ChatTerminalRecord = { requestId, body };
+  if (messageIds?.length) record.messageIds = messageIds;
+  await storage.put(CHAT_LAST_TERMINAL_KEY, record);
 }
 
 /** Clear the durable terminal record once a later turn supersedes it (#1645). */
@@ -710,6 +743,12 @@ export async function evaluateChatRecoveryIncident(
     !awaitingClientInteraction &&
     oomAttempts > config.maxOomRetries;
 
+  const transientRetries = existing?.transientRetries ?? 0;
+  const transientBudgetExceeded =
+    existing != null &&
+    !awaitingClientInteraction &&
+    transientRetries >= config.maxAttempts;
+
   const debounced =
     existing != null &&
     !madeProgress &&
@@ -733,6 +772,7 @@ export async function evaluateChatRecoveryIncident(
     !noProgressExceeded &&
     !workBudgetExceeded &&
     !oomBudgetExceeded &&
+    !transientBudgetExceeded &&
     attempt <= config.maxAttempts
   ) {
     try {
@@ -759,6 +799,7 @@ export async function evaluateChatRecoveryIncident(
       noProgressExceeded ||
       workBudgetExceeded ||
       abortedByCaller ||
+      transientBudgetExceeded ||
       attempt > config.maxAttempts);
 
   const incident: ChatRecoveryIncident = {
@@ -777,6 +818,7 @@ export async function evaluateChatRecoveryIncident(
     // Carry the OOM count forward so a begin-path re-evaluation never loses what
     // `recordOomAndDecide` accrued between begins.
     ...(oomAttempts > 0 ? { oomAttempts } : {}),
+    ...(transientRetries > 0 ? { transientRetries } : {}),
     ...(exhausted
       ? {
           reason: oomBudgetExceeded

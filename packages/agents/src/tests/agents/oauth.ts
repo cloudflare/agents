@@ -1,14 +1,14 @@
 import { Agent } from "../../index.ts";
-import { DurableObjectOAuthClientProvider } from "../../mcp/do-oauth-client-provider";
-import type { AgentMcpOAuthProvider } from "../../mcp/do-oauth-client-provider";
+import { DurableObjectOAuthClientProvider } from "../../mcp/client/do-oauth-client-provider";
+import type { AgentMcpOAuthProvider } from "../../mcp/client/do-oauth-client-provider";
 import {
   MCPConnectionState,
   type MCPClientConnection
-} from "../../mcp/client-connection";
+} from "../../mcp/client/connection";
 import type {
   MCPClientOAuthResult,
   MCPConnectionResult
-} from "../../mcp/client.ts";
+} from "../../mcp/client/index.ts";
 
 function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";

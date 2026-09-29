@@ -1713,6 +1713,238 @@ describe("createAISDKWrapper payload storage", () => {
   });
 });
 
+describe("createAISDKWrapper oversized tool payloads", () => {
+  const ARGUMENTS = "gen_ai.tool.call.arguments";
+  const RESULT = "gen_ai.tool.call.result";
+  // Well over the 28 KiB per-attribute limit once serialized.
+  const IMAGE = "iVBORw0K".repeat(10_000);
+
+  function redacted(data: string, mediaType?: string): string {
+    const bytes = (data.length / 4) * 3;
+    return `[base64${mediaType ? ` ${mediaType}` : ""} data omitted: ${data.length.toLocaleString()} chars, approximately ${bytes.toLocaleString()} bytes]`;
+  }
+
+  async function traceTool(options: {
+    readonly input?: unknown;
+    readonly execute: (input: unknown) => unknown;
+    readonly storeTools?: boolean;
+  }): Promise<{
+    readonly attributes: Record<string, unknown>;
+    readonly received: unknown;
+    readonly returned: unknown;
+  }> {
+    const tracing = new RecordingTracer();
+    let received: unknown;
+    let returned: unknown;
+    const tool = {
+      execute: (input: unknown) => {
+        received = input;
+        return options.execute(input);
+      }
+    };
+    const ai: AISDKNamespace = {
+      generateText: async (params) => {
+        returned = await (params.tools as { run: typeof tool }).run.execute(
+          options.input ?? { ok: true }
+        );
+        if (
+          typeof returned === "object" &&
+          returned !== null &&
+          Symbol.asyncIterator in returned
+        ) {
+          for await (const _chunk of returned as AsyncIterable<unknown>) {
+            // Drain streaming tools so the span closes.
+          }
+        }
+        return { finishReason: "stop" };
+      }
+    };
+
+    await createAISDKWrapper(ai, {
+      options: { storeTools: options.storeTools ?? true },
+      tracer: tracing
+    }).generateText({ prompt: "go", tools: { run: tool } });
+
+    const span = tracing.spans.find(
+      (candidate) =>
+        candidate.attributes["gen_ai.operation.name"] === "execute_tool"
+    );
+    expect(span?.ended).toBe(true);
+    return { attributes: span?.attributes ?? {}, received, returned };
+  }
+
+  it("records a screenshot result with its image data redacted", async () => {
+    const screenshot = {
+      type: "browser_screenshot",
+      mediaType: "image/png",
+      data: IMAGE
+    };
+    const output = {
+      result: screenshot,
+      logs: ["navigated"],
+      calls: [{ method: "Page.captureScreenshot", result: { data: IMAGE } }]
+    };
+
+    const { attributes } = await traceTool({ execute: async () => output });
+
+    expect(JSON.parse(attributes[RESULT] as string)).toEqual({
+      result: {
+        type: "browser_screenshot",
+        mediaType: "image/png",
+        data: redacted(IMAGE, "image/png")
+      },
+      logs: ["navigated"],
+      calls: [
+        { method: "Page.captureScreenshot", result: { data: redacted(IMAGE) } }
+      ]
+    });
+  });
+
+  it("returns the original, unredacted result and input", async () => {
+    const input = { attachment: `data:image/jpeg;base64,${IMAGE}` };
+    const output = {
+      type: "browser_screenshot",
+      mediaType: "image/png",
+      data: IMAGE
+    };
+
+    const { attributes, received, returned } = await traceTool({
+      input,
+      execute: async () => output
+    });
+
+    expect(returned).toBe(output);
+    expect(output.data).toBe(IMAGE);
+    expect(received).toBe(input);
+    expect(input.attachment).toBe(`data:image/jpeg;base64,${IMAGE}`);
+    expect(JSON.parse(attributes[ARGUMENTS] as string)).toEqual({
+      attachment: redacted(IMAGE, "image/jpeg")
+    });
+  });
+
+  it("records payloads that already fit exactly as JSON.stringify does", async () => {
+    // Small base64, toJSON values and deep nesting are left untouched when
+    // the payload fits; redaction only applies to payloads that would
+    // otherwise be dropped.
+    let deep: Record<string, unknown> = { leaf: true };
+    for (let i = 0; i < 30; i++) deep = { next: deep };
+    const value = {
+      base64: "A".repeat(8192),
+      url: new URL("https://example.com/page"),
+      when: new Date("2026-01-02T03:04:05.000Z"),
+      deep
+    };
+
+    const { attributes } = await traceTool({
+      input: value,
+      execute: () => value
+    });
+
+    expect(attributes[ARGUMENTS]).toBe(JSON.stringify(value));
+    expect(attributes[RESULT]).toBe(JSON.stringify(value));
+  });
+
+  it("keeps toJSON output when redacting an oversized payload", async () => {
+    const value = {
+      url: new URL("https://example.com/page"),
+      image: IMAGE
+    };
+
+    const { attributes } = await traceTool({ execute: () => value });
+
+    expect(JSON.parse(attributes[RESULT] as string)).toEqual({
+      url: "https://example.com/page",
+      image: redacted(IMAGE)
+    });
+  });
+
+  it("runs a payload's toJSON only once when redacting", async () => {
+    let serialized = 0;
+    const output = {
+      toJSON() {
+        if (serialized++ > 0) throw new Error("already serialized");
+        return { data: IMAGE };
+      }
+    };
+
+    const { attributes } = await traceTool({ execute: () => output });
+
+    expect(serialized).toBe(1);
+    expect(JSON.parse(attributes[RESULT] as string)).toEqual({
+      data: redacted(IMAGE)
+    });
+  });
+
+  it("records an omission marker when redaction cannot make it fit", async () => {
+    const payload = {
+      prose: "ordinary tool text ".repeat(3_000),
+      image: IMAGE
+    };
+
+    const { attributes } = await traceTool({
+      input: payload,
+      execute: () => payload
+    });
+
+    // The marker reports the original size, including the redacted image.
+    const bytes = JSON.stringify(payload).length;
+    const marker = {
+      omitted: "tool payload exceeds trace attribute limit",
+      bytes
+    };
+    expect(JSON.parse(attributes[ARGUMENTS] as string)).toEqual(marker);
+    expect(JSON.parse(attributes[RESULT] as string)).toEqual(marker);
+  });
+
+  it("still records nothing for payloads JSON cannot serialize", async () => {
+    const circular: Record<string, unknown> = { image: IMAGE };
+    circular.self = circular;
+
+    const { attributes } = await traceTool({
+      input: { value: 1n },
+      execute: () => circular
+    });
+
+    expect(attributes).not.toHaveProperty([ARGUMENTS]);
+    expect(attributes).not.toHaveProperty([RESULT]);
+  });
+
+  it("redacts an oversized streaming tool return value", async () => {
+    const { attributes } = await traceTool({
+      execute: () =>
+        (async function* () {
+          yield "partial";
+          return { data: IMAGE };
+        })()
+    });
+
+    expect(JSON.parse(attributes[RESULT] as string)).toEqual({
+      data: redacted(IMAGE)
+    });
+  });
+
+  it("does not serialize payloads when storeTools is off", async () => {
+    let serialized = 0;
+    const payload = {
+      toJSON() {
+        serialized++;
+        return IMAGE;
+      }
+    };
+
+    const { attributes, returned } = await traceTool({
+      input: payload,
+      execute: () => payload,
+      storeTools: false
+    });
+
+    expect(returned).toBe(payload);
+    expect(serialized).toBe(0);
+    expect(attributes).not.toHaveProperty([ARGUMENTS]);
+    expect(attributes).not.toHaveProperty([RESULT]);
+  });
+});
+
 describe("createAISDKWrapper tool approval spans", () => {
   function approvalMessages(approved: boolean): Array<Record<string, unknown>> {
     return [

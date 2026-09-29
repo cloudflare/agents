@@ -3,7 +3,7 @@ import { createExecutionContext } from "cloudflare:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { JSONRPCError } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
-import { createLegacyMcpHandler } from "../../mcp/handler-compat";
+import { createLegacyMcpHandler } from "../../mcp/server/handler-compat";
 import { z } from "zod";
 
 /**
@@ -136,7 +136,8 @@ describe("createLegacyMcpHandler", () => {
   describe("Custom Transport Option", () => {
     it("should use provided transport instead of creating new one", async () => {
       const server = createTestServer();
-      const { WorkerTransport } = await import("../../mcp/worker-transport");
+      const { WorkerTransport } =
+        await import("../../mcp/server/worker-transport");
       const customTransport = new WorkerTransport({
         corsOptions: { origin: "https://custom-transport.com" }
       });
@@ -161,7 +162,8 @@ describe("createLegacyMcpHandler", () => {
 
     it("should not connect server twice when transport already started", async () => {
       const server = createTestServer();
-      const { WorkerTransport } = await import("../../mcp/worker-transport");
+      const { WorkerTransport } =
+        await import("../../mcp/server/worker-transport");
       const customTransport = new WorkerTransport();
 
       // Pre-connect the transport
@@ -459,7 +461,8 @@ describe("createLegacyMcpHandler", () => {
   describe("Error Handling", () => {
     it("should return 500 error when transport throws", async () => {
       const server = createTestServer();
-      const { WorkerTransport } = await import("../../mcp/worker-transport");
+      const { WorkerTransport } =
+        await import("../../mcp/server/worker-transport");
 
       // Create a custom transport that throws
       const errorTransport = new WorkerTransport();
@@ -505,7 +508,8 @@ describe("createLegacyMcpHandler", () => {
 
     it("should return generic error message for non-Error exceptions", async () => {
       const server = createTestServer();
-      const { WorkerTransport } = await import("../../mcp/worker-transport");
+      const { WorkerTransport } =
+        await import("../../mcp/server/worker-transport");
 
       const errorTransport = new WorkerTransport();
       errorTransport.handleRequest = async () => {

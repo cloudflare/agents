@@ -147,6 +147,190 @@ describe("Think — beforeTurn hook", () => {
     expect(log[0].continuation).toBe(false);
   });
 
+  it("routes a Workers AI model through the gateway from getGateway (#2262)", async () => {
+    const agent = await freshAgent("gateway-cf");
+    const gateway = { id: "clutch", metadata: { role: "support", siteId: 7 } };
+    const { models, calls } = await agent.resolveModelGatewayForTest(
+      "@cf/meta/llama-3.1-8b-instruct",
+      gateway
+    );
+
+    expect(models).toEqual(["@cf/meta/llama-3.1-8b-instruct"]);
+    expect(calls).toEqual([
+      {
+        kind: "run",
+        model: "@cf/meta/llama-3.1-8b-instruct",
+        gateway
+      }
+    ]);
+  });
+
+  it("routes a catalog model through the gateway from getGateway (#2262)", async () => {
+    const agent = await freshAgent("gateway-catalog");
+    const { models, calls } = await agent.resolveModelGatewayForTest(
+      "openai/gpt-5-mini",
+      { id: "clutch", metadata: { role: "support" } }
+    );
+
+    expect(models).toEqual(["openai/gpt-5-mini"]);
+    expect(calls).toEqual([
+      {
+        kind: "run",
+        model: "openai/gpt-5-mini",
+        gateway: { id: "clutch", metadata: { role: "support" } }
+      }
+    ]);
+  });
+
+  it("keeps the default gateway when getGateway returns undefined", async () => {
+    const agent = await freshAgent("gateway-default");
+    const cf = await agent.resolveModelGatewayForTest(
+      "@cf/meta/llama-3.1-8b-instruct",
+      null
+    );
+    expect(cf.calls).toEqual([
+      { kind: "run", model: "@cf/meta/llama-3.1-8b-instruct", gateway: null }
+    ]);
+
+    const catalog = await (
+      await freshAgent("gateway-default-catalog")
+    ).resolveModelGatewayForTest("openai/gpt-5-mini", null);
+    expect(catalog.calls.map((call) => call.gateway?.id)).toEqual(["default"]);
+  });
+
+  it("routes @hf/ ids to Workers AI like @cf/ ids", async () => {
+    const agent = await freshAgent("resolve-hf");
+    const { calls } = await agent.resolveModelGatewayForTest(
+      "@hf/nousresearch/hermes-2-pro-mistral-7b",
+      null
+    );
+    expect(calls).toEqual([
+      {
+        kind: "run",
+        model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
+        gateway: null
+      }
+    ]);
+  });
+
+  it.each([
+    "gpt-5",
+    "",
+    "openai/",
+    "/gpt-5",
+    "@",
+    "@bad",
+    "@cf/",
+    "@hf/",
+    "@openai/gpt-5"
+  ])(
+    "rejects the malformed model id %j before touching the AI binding",
+    async (model) => {
+      const agent = await freshAgent(`resolve-invalid-${model || "empty"}`);
+      const message = await agent.resolveModelErrorForTest(model);
+      expect(message).toContain(`Invalid model id ${JSON.stringify(model)}`);
+      expect(message).toContain("@cf/");
+      expect(message).toContain("<provider>/<model>");
+    }
+  );
+
+  it("explains a missing AI binding for a valid string model id", async () => {
+    const agent = await freshAgent("resolve-missing-binding");
+    const message = await agent.resolveModelErrorForTest(
+      "@cf/meta/llama-3.1-8b-instruct"
+    );
+    expect(message).toContain('Workers AI binding named "AI"');
+    expect(message).toContain("getAIBinding()");
+  });
+
+  it("returns a LanguageModel object unchanged", async () => {
+    const agent = await freshAgent("resolve-passthrough");
+    expect(await agent.resolveModelPassesThroughObjectForTest()).toBe(true);
+  });
+
+  it.each(["beforeTurn", "beforeStep"] as const)(
+    "resolves a string model returned from %s",
+    async (hook) => {
+      const agent = await freshAgent(`resolve-hook-${hook}`);
+      const { models, calls } = await agent.runTurnWithStringModelForTest(
+        hook,
+        "@cf/meta/llama-3.1-8b-instruct"
+      );
+      expect(models).toContain("@cf/meta/llama-3.1-8b-instruct");
+      expect(calls.map((call) => call.model)).toContain(
+        "@cf/meta/llama-3.1-8b-instruct"
+      );
+    }
+  );
+
+  it("does not resolve the default model when beforeTurn overrides it", async () => {
+    const agent = await freshAgent(`model-override-${crypto.randomUUID()}`);
+    const { result, gatewayModels } =
+      await agent.testChatWithBeforeTurnModelOverrideForTest();
+
+    expect(result.error).toBeUndefined();
+    expect(result.done).toBe(true);
+    expect(gatewayModels).toEqual([]);
+  });
+
+  it("rejects a getGateway that returns a Promise with a clear error", async () => {
+    const agent = await freshAgent(`gateway-async-${crypto.randomUUID()}`);
+
+    await expect(agent.resolveModelWithAsyncGatewayForTest()).resolves.toMatch(
+      /getGateway\(\) returned a Promise/
+    );
+  });
+
+  it("carries the turn's request id, trigger and abort signal", async () => {
+    const agent = await freshAgent("hook-bt-identity");
+    await agent.testChat("First");
+    await agent.testChat("Second");
+
+    const log = await agent.getTurnIdentityLogForTest();
+    expect(log).toHaveLength(2);
+    expect(log.map((entry) => entry.requestId)).toEqual(
+      await agent.getResponseRequestIdsForTest()
+    );
+    expect(log[0].requestId).not.toBe(log[1].requestId);
+    for (const entry of log) {
+      expect(entry.trigger).toBe("rpc");
+      expect(entry.hasAbortSignal).toBe(true);
+      expect(entry.activeRequestId).toBe(entry.requestId);
+      expect(entry.activeTrigger).toBe("rpc");
+      expect(entry.messengerThreadId).toBeNull();
+    }
+    expect(await agent.getActiveTurnForTest()).toBeNull();
+  });
+
+  it("gives each concurrent messenger turn its own thread", async () => {
+    const agent = await freshAgent("hook-bt-messenger-race");
+    await agent.runConcurrentMessengerTurnsForTest();
+
+    const log = await agent.getTurnIdentityLogForTest();
+    expect(
+      log
+        .map((entry) => ({
+          input: entry.input,
+          thread: entry.messengerThreadId,
+          getMessengerContext: entry.getMessengerThreadId
+        }))
+        .sort((a, b) => a.input.localeCompare(b.input))
+    ).toEqual([
+      {
+        input: expect.stringContaining("from thread a"),
+        thread: "thread-a",
+        getMessengerContext: "thread-a"
+      },
+      {
+        input: expect.stringContaining("from thread b"),
+        thread: "thread-b",
+        getMessengerContext: "thread-b"
+      }
+    ]);
+    // Turn A read its context again after turn B had been admitted.
+    expect(await agent.getHeldMessengerThreadIdForTest()).toBe("thread-a");
+  });
+
   it("captures continuation flag from programmatic path", async () => {
     const agent = await freshProgrammaticAgent("hook-bt-save");
     await agent.testChat("First message");
@@ -272,6 +456,57 @@ describe("Think — tool-call hooks expose typed input/output", () => {
     expect(log.length).toBeGreaterThan(0);
     expect(log[0].toolName).toBe("echo");
     expect(JSON.parse(log[0].inputJson)).toEqual({ message: "ping" });
+  });
+
+  it("beforeToolCall and tool execute see the turn's request id", async () => {
+    const agent = await freshLoopToolAgent("hook-tc-identity");
+    await agent.testChat("Use echo");
+
+    const identity = await agent.getToolCallIdentityForTest();
+    expect(identity.onChatResponse).toHaveLength(1);
+    const [requestId] = identity.onChatResponse;
+    expect(identity.beforeToolCall.length).toBeGreaterThan(0);
+    expect(identity.beforeToolCall.every((id) => id === requestId)).toBe(true);
+    expect(identity.execute.length).toBeGreaterThan(0);
+    expect(identity.execute.every((id) => id === requestId)).toBe(true);
+    expect(identity.afterToolCall.length).toBeGreaterThan(0);
+    expect(identity.afterToolCall.every((id) => id === requestId)).toBe(true);
+
+    // Work the tool left behind runs after the turn ended.
+    await agent.releaseDetachedToolWorkForTest();
+    const later = await agent.getToolCallIdentityForTest();
+    expect(later.detached.length).toBeGreaterThan(0);
+    expect(later.detached.every((id) => id === null)).toBe(true);
+    expect(later.detachedChannel.every((channel) => channel === null)).toBe(
+      true
+    );
+  });
+
+  it("work a tool left behind does not see a later turn's channel", async () => {
+    const agent = await freshLoopToolAgent("hook-tc-leftover-channel");
+    await agent.testChat("Use echo");
+
+    // The next turn runs on the voice channel; its tool releases the work the
+    // first turn's tool left behind and waits for it.
+    await agent.releaseLeftoverInNextToolForTest();
+    const second = await agent.testChatOnChannel("Use echo", "voice");
+    expect(second.done).toBe(true);
+
+    const identity = await agent.getToolCallIdentityForTest();
+    expect(identity.executeChannel).toEqual([null, "voice"]);
+    expect(identity.detached).toEqual([null]);
+    expect(identity.detachedChannel).toEqual([null]);
+    // Without a channel of its own the notice routes to the web transcript,
+    // not the voice turn that happened to be running.
+    expect(identity.detachedNotice).toEqual(["delivered"]);
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(
+      messages.some((message) =>
+        message.parts.some(
+          (part) => part.type === "text" && part.text === "leftover notice"
+        )
+      )
+    ).toBe(true);
   });
 
   it("afterToolCall receives typed output (was always undefined before)", async () => {
@@ -1205,6 +1440,32 @@ describe("Think — ToolCallDecision honored by wrapped execute", () => {
     expect(probe.insideLoop).toBe(true);
     expect(probe.persisted).toBe(true);
   });
+
+  it("replays an aged tool output through a validating toModelOutput (#2014)", async () => {
+    const agent = await freshToolAgent("validated-output-aged");
+    await agent.setEchoExecuteMode("validated-output");
+    const first = await agent.testChat("call echo");
+    expect(first.error).toBeUndefined();
+    expect(await agent.getEchoExecuteCount()).toBe(1);
+
+    for (let i = 0; i < 4; i++) {
+      const result = await agent.testChat(`follow-up ${i}`);
+      expect(result.error).toBeUndefined();
+      expect(result.done).toBe(true);
+    }
+
+    const prompt = JSON.parse(
+      (await agent.getToolPrompts()).at(-1) ?? "[]"
+    ) as Array<{ role: string; content: unknown }>;
+    const toolResult = JSON.stringify(
+      prompt.find((message) => message.role === "tool")
+    );
+    expect(toolResult).toContain("__truncated");
+    expect(toolResult).not.toContain("row-39");
+
+    const stored = JSON.stringify(await agent.getDurableMessagesForTest());
+    expect(stored).toContain("row-39");
+  });
 });
 
 // ── beforeToolCall gates whether execute runs (invocation counter) ──
@@ -1466,6 +1727,19 @@ describe("Think — extension observation hooks", () => {
     } | null;
     expect(recorded).not.toBeNull();
     expect(recorded!.type).toBe("text-delta");
+  });
+
+  it("keeps a beforeTurn model override without resolving the default for extensions", async () => {
+    const agent = await getAgentByName(
+      env.ThinkExtensionBeforeTurnModelAgent,
+      `ext-before-turn-model-${crypto.randomUUID()}`
+    );
+    const result = await agent.testChat("hello");
+
+    expect(result.error).toBeUndefined();
+    expect(result.done).toBe(true);
+    const snapshot = await agent.readBeforeTurnSnapshot();
+    expect(snapshot?.modelId).toBe("mock-tool-model-ext-hooks");
   });
 });
 
@@ -1847,6 +2121,124 @@ describe("Think — beforeTurn config overrides", () => {
     await agent.setTurnConfigOutputText();
     const result = await agent.testChat("Structured-output turn");
     expect(result.done).toBe(true);
+  });
+
+  it("returns the parsed structured output on a wait-mode TurnResult (#2263)", async () => {
+    const agent = await freshAgent(`bt-output-wait-${crypto.randomUUID()}`);
+    await agent.setResponse(JSON.stringify({ answer: "42" }));
+    await agent.setTurnConfigOutputObject();
+
+    const result = await agent.runTurnWaitForTest("What is the answer?");
+
+    expect(result.status).toBe("completed");
+    expect(JSON.parse(result.outputJson ?? "null")).toEqual({ answer: "42" });
+  });
+
+  it("errors a wait-mode turn whose structured output does not parse (#2263)", async () => {
+    const agent = await freshAgent(`bt-output-bad-${crypto.randomUUID()}`);
+    await agent.setResponse("not json");
+    await agent.setTurnConfigOutputObject();
+
+    const result = await agent.runTurnWaitForTest("What is the answer?");
+
+    expect(result.status).toBe("error");
+    expect(result.outputJson).toBeUndefined();
+  });
+
+  it("returns structured output from a wait-mode continuation", async () => {
+    const agent = await freshAgent(`bt-output-cont-${crypto.randomUUID()}`);
+    await agent.setResponse(JSON.stringify({ answer: "41" }));
+    await agent.setTurnConfigOutputObject();
+    await agent.runTurnWaitForTest("What is the answer?");
+
+    await agent.setResponse(JSON.stringify({ answer: "42" }));
+    const result = await agent.runTurnWaitForTest("", { continuation: true });
+
+    expect(result.status).toBe("completed");
+    expect(JSON.parse(result.outputJson ?? "null")).toEqual({ answer: "42" });
+  });
+
+  it("errors a wait-mode continuation whose structured output does not parse", async () => {
+    const agent = await freshAgent(`bt-output-cont-bad-${crypto.randomUUID()}`);
+    await agent.setResponse(JSON.stringify({ answer: "41" }));
+    await agent.setTurnConfigOutputObject();
+    await agent.runTurnWaitForTest("What is the answer?");
+
+    await agent.setResponse("not json");
+    const result = await agent.runTurnWaitForTest("", { continuation: true });
+
+    expect(result.status).toBe("error");
+    expect(result.outputJson).toBeUndefined();
+  });
+
+  it("keeps structured output when an overridden continueLastTurn delegates to super", async () => {
+    const agent = await getAgentByName(
+      env.ThinkContinueOverrideTestAgent,
+      `bt-output-override-${crypto.randomUUID()}`
+    );
+    await agent.setResponse(JSON.stringify({ answer: "41" }));
+    await agent.setTurnConfigOutputObject();
+    await agent.runTurnWaitForTest("What is the answer?");
+
+    await agent.setResponse(JSON.stringify({ answer: "42" }));
+    const valid = await agent.runTurnWaitForTest("", { continuation: true });
+    expect(valid.status).toBe("completed");
+    expect(JSON.parse(valid.outputJson ?? "null")).toEqual({ answer: "42" });
+
+    await agent.setResponse("not json");
+    const invalid = await agent.runTurnWaitForTest("", { continuation: true });
+    expect(invalid.status).toBe("error");
+    expect(invalid.outputJson).toBeUndefined();
+  });
+
+  it("keeps the status an overridden continueLastTurn returns", async () => {
+    const agent = await getAgentByName(
+      env.ThinkContinueOverrideTestAgent,
+      `bt-output-override-status-${crypto.randomUUID()}`
+    );
+    await agent.setResponse(JSON.stringify({ answer: "41" }));
+    await agent.setTurnConfigOutputObject();
+    await agent.runTurnWaitForTest("What is the answer?");
+    await agent.configureContinueOverrideForTest({ forcedStatus: "error" });
+
+    await agent.setResponse(JSON.stringify({ answer: "42" }));
+    const result = await agent.runTurnWaitForTest("", { continuation: true });
+
+    expect(result.status).toBe("error");
+    expect(JSON.parse(result.outputJson ?? "null")).toEqual({ answer: "42" });
+  });
+
+  it("keeps structured output for overlapping overridden continuations", async () => {
+    const agent = await getAgentByName(
+      env.ThinkContinueOverrideTestAgent,
+      `bt-output-override-overlap-${crypto.randomUUID()}`
+    );
+    await agent.setResponse(JSON.stringify({ answer: "41" }));
+    await agent.setTurnConfigOutputObject();
+    await agent.runTurnWaitForTest("What is the answer?");
+    await agent.configureContinueOverrideForTest({ delayBeforeSuperMs: 50 });
+
+    await agent.setResponse(JSON.stringify({ answer: "42" }));
+    const results = await Promise.all([
+      agent.runTurnWaitForTest("", { continuation: true }),
+      agent.runTurnWaitForTest("", { continuation: true })
+    ]);
+
+    for (const result of results) {
+      expect(result.status).toBe("completed");
+      expect(JSON.parse(result.outputJson ?? "null")).toEqual({ answer: "42" });
+    }
+  });
+
+  it("omits output from a wait-mode turn without a structured output spec", async () => {
+    const agent = await freshAgent(`bt-output-none-${crypto.randomUUID()}`);
+    await agent.setResponse("plain answer");
+
+    const result = await agent.runTurnWaitForTest("hello");
+
+    expect(result.status).toBe("completed");
+    expect(result.outputJson).toBeUndefined();
+    expect(result.messageText).toBe("plain answer");
   });
 
   it("experimental_transform override is forwarded to streamText and applied", async () => {

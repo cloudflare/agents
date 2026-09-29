@@ -5,6 +5,71 @@ import {
   routeSubAgentRequest
 } from "../index.ts";
 
+// Capability test fixtures (harness Durable Objects); see
+// tests/capabilities/AGENTS.md for the capability testing pattern.
+export { CapabilityHarnessObject } from "./capabilities/harness.ts";
+import type { CapabilityHarnessObject } from "./capabilities/harness.ts";
+export {
+  PlainLifecycleObject,
+  RetryableStartObject,
+  StatefulPlainObject
+} from "./capabilities/lifecycle.ts";
+import type {
+  PlainLifecycleObject,
+  RetryableStartObject,
+  StatefulPlainObject
+} from "./capabilities/lifecycle.ts";
+export {
+  ScheduledLifecycleObject,
+  SchedulerHarnessObject,
+  SchedulerStartupWarnObject
+} from "./capabilities/scheduler.ts";
+import type {
+  ScheduledLifecycleObject,
+  SchedulerHarnessObject,
+  SchedulerStartupWarnObject
+} from "./capabilities/scheduler.ts";
+export { QueueHarnessObject } from "./capabilities/queue.ts";
+import type { QueueHarnessObject } from "./capabilities/queue.ts";
+export {
+  TaskHarnessObject,
+  TaskSchedulerCoexistObject
+} from "./capabilities/tasks.ts";
+export {
+  CutoverHarnessObject,
+  StreamHarnessObject,
+  TaskStreamComposeObject
+} from "./capabilities/streams.ts";
+export { StreamBenchObject } from "./capabilities/streams-bench.ts";
+export { SqliteStrategiesBench } from "./capabilities/sqlite-strategies-bench.ts";
+export {
+  SessionBenchObject,
+  SessionHarnessObject,
+  SessionSearchHarnessObject
+} from "./capabilities/sessions.ts";
+import type {
+  CutoverHarnessObject,
+  StreamHarnessObject,
+  TaskStreamComposeObject
+} from "./capabilities/streams.ts";
+import type { StreamBenchObject } from "./capabilities/streams-bench.ts";
+import type { SqliteStrategiesBench } from "./capabilities/sqlite-strategies-bench.ts";
+import type {
+  SessionBenchObject,
+  SessionHarnessObject,
+  SessionSearchHarnessObject
+} from "./capabilities/sessions.ts";
+import type {
+  TaskHarnessObject,
+  TaskSchedulerCoexistObject
+} from "./capabilities/tasks.ts";
+export { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
+import type { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
+export { BrowserHarnessObject } from "./capabilities/browser.ts";
+import type { BrowserHarnessObject } from "./capabilities/browser.ts";
+export { TestBrowserAgent } from "./agents/browser.ts";
+import type { TestBrowserAgent } from "./agents/browser.ts";
+
 // Re-export all test agents so existing imports (e.g. `import { type Env } from "./worker"`)
 // and wrangler bindings continue to work.
 export {
@@ -29,6 +94,7 @@ export {
   TestOnStartScheduleNoWarnAgent,
   TestOnStartScheduleExplicitFalseAgent,
   TestScheduleAgent,
+  TestTaskAgent,
   TestWorkflowAgent,
   TestWorkflowOnStartSubAgent,
   TestWorkflowSubAgent,
@@ -49,16 +115,16 @@ export {
   TestKeepAliveAgent,
   TestMigrationAgent,
   TestSessionAgent,
-  TestSessionAgentWithContext,
-  TestSearchAgent,
-  TestMultiSessionAgent,
   TestWaitConnectionsAgent,
   TestNativeRpcAgent,
+  RoutingOwnerAgent,
+  RoutedChatAgent,
   TestSubAgentParent,
   CustomBoundSubAgentParent,
   CounterSubAgent,
   OuterSubAgent,
   InnerSubAgent,
+  DenyingSubAgent,
   LeafSubAgent,
   CallbackSubAgent,
   BroadcastSubAgent,
@@ -116,6 +182,7 @@ import type {
   TestReadonlyAgent,
   TestProtocolMessagesAgent,
   TestScheduleAgent,
+  TestTaskAgent,
   TestWorkflowAgent,
   TestAgentToolReplayAgent,
   TestAddMcpServerAgent,
@@ -135,11 +202,10 @@ import type {
   TestKeepAliveAgent,
   TestMigrationAgent,
   TestSessionAgent,
-  TestSessionAgentWithContext,
-  TestSearchAgent,
-  TestMultiSessionAgent,
   TestWaitConnectionsAgent,
   TestNativeRpcAgent,
+  RoutingOwnerAgent,
+  RoutedChatAgent,
   TestSubAgentParent,
   CustomBoundSubAgentParent,
   TestConnectionUriAgent,
@@ -153,6 +219,28 @@ import type {
 
 export type Env = {
   LOADER: WorkerLoader;
+  CapabilityHarnessObject: DurableObjectNamespace<CapabilityHarnessObject>;
+  PlainLifecycleObject: DurableObjectNamespace<PlainLifecycleObject>;
+  RetryableStartObject: DurableObjectNamespace<RetryableStartObject>;
+  StatefulPlainObject: DurableObjectNamespace<StatefulPlainObject>;
+  ScheduledLifecycleObject: DurableObjectNamespace<ScheduledLifecycleObject>;
+  SchedulerHarnessObject: DurableObjectNamespace<SchedulerHarnessObject>;
+  SchedulerStartupWarnObject: DurableObjectNamespace<SchedulerStartupWarnObject>;
+  QueueHarnessObject: DurableObjectNamespace<QueueHarnessObject>;
+  TaskHarnessObject: DurableObjectNamespace<TaskHarnessObject>;
+  TaskSchedulerCoexistObject: DurableObjectNamespace<TaskSchedulerCoexistObject>;
+  StreamHarnessObject: DurableObjectNamespace<StreamHarnessObject>;
+  CutoverHarnessObject: DurableObjectNamespace<CutoverHarnessObject>;
+  SqliteStrategiesBench: DurableObjectNamespace<SqliteStrategiesBench>;
+  STREAMS_R2: R2Bucket;
+  TaskStreamComposeObject: DurableObjectNamespace<TaskStreamComposeObject>;
+  StreamBenchObject: DurableObjectNamespace<StreamBenchObject>;
+  SessionHarnessObject: DurableObjectNamespace<SessionHarnessObject>;
+  SessionSearchHarnessObject: DurableObjectNamespace<SessionSearchHarnessObject>;
+  SessionBenchObject: DurableObjectNamespace<SessionBenchObject>;
+  PlainMcpClientObject: DurableObjectNamespace<PlainMcpClientObject>;
+  BrowserHarnessObject: DurableObjectNamespace<BrowserHarnessObject>;
+  TestBrowserAgent: DurableObjectNamespace<TestBrowserAgent>;
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   TestCodemodeMcpAgent: DurableObjectNamespace<TestCodemodeMcpAgent>;
   EmailAgent: DurableObjectNamespace<TestEmailAgent>;
@@ -169,6 +257,7 @@ export type Env = {
   TestReadonlyAgent: DurableObjectNamespace<TestReadonlyAgent>;
   TestProtocolMessagesAgent: DurableObjectNamespace<TestProtocolMessagesAgent>;
   TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
+  TestTaskAgent: DurableObjectNamespace<TestTaskAgent>;
   TestWorkflowAgent: DurableObjectNamespace<TestWorkflowAgent>;
   TestAgentToolReplayAgent: DurableObjectNamespace<TestAgentToolReplayAgent>;
   TestAddMcpServerAgent: DurableObjectNamespace<TestAddMcpServerAgent>;
@@ -190,11 +279,10 @@ export type Env = {
   TestKeepAliveAgent: DurableObjectNamespace<TestKeepAliveAgent>;
   TestMigrationAgent: DurableObjectNamespace<TestMigrationAgent>;
   TestSessionAgent: DurableObjectNamespace<TestSessionAgent>;
-  TestSessionAgentWithContext: DurableObjectNamespace<TestSessionAgentWithContext>;
-  TestSearchAgent: DurableObjectNamespace<TestSearchAgent>;
-  TestMultiSessionAgent: DurableObjectNamespace<TestMultiSessionAgent>;
   TestWaitConnectionsAgent: DurableObjectNamespace<TestWaitConnectionsAgent>;
   TestNativeRpcAgent: DurableObjectNamespace<TestNativeRpcAgent>;
+  RoutingOwnerAgent: DurableObjectNamespace<RoutingOwnerAgent>;
+  RoutedChatAgent: DurableObjectNamespace<RoutedChatAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
   CUSTOM_BOUND_SUB_AGENT_PARENT: DurableObjectNamespace<CustomBoundSubAgentParent>;
   TestUnboundParentAgent: DurableObjectNamespace<TestUnboundParentAgent>;

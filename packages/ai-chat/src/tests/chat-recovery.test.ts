@@ -58,6 +58,7 @@ interface ChatTestStub {
     maxAttempts?: number;
     terminalMessage?: string;
   }): Promise<void>;
+  readProgressMarkerForTest(): Promise<number>;
   seedIncidentForTest(incident: {
     incidentId: string;
     requestId: string;
@@ -67,6 +68,7 @@ interface ChatTestStub {
     status: string;
     firstSeenAt: number;
     lastAttemptAt: number;
+    progress?: number;
   }): Promise<void>;
   getChatRecoveryIncidentsForTest(): Promise<Array<{ status: string }>>;
 }
@@ -636,7 +638,12 @@ describe("chatRecovery", () => {
         maxAttempts: 1,
         status: "scheduled",
         firstSeenAt: Date.now() - 60_000,
-        lastAttemptAt: Date.now() - 60_000
+        lastAttemptAt: Date.now() - 60_000,
+        // The marker is derived from the stream log, so the seeded stream's
+        // segments already count. Record them as the incident's last observed
+        // progress: this wake must see no NEW content, exactly as a real
+        // incident that opened over this stream would.
+        progress: await stub.readProgressMarkerForTest()
       });
 
       await stub.triggerFiberRecovery();
@@ -818,7 +825,12 @@ describe("chatRecovery", () => {
         maxAttempts: 1,
         status: "scheduled",
         firstSeenAt: Date.now() - 60_000,
-        lastAttemptAt: Date.now() - 60_000
+        lastAttemptAt: Date.now() - 60_000,
+        // The marker is derived from the stream log, so the seeded stream's
+        // segments already count. Record them as the incident's last observed
+        // progress: this wake must see no NEW content, exactly as a real
+        // incident that opened over this stream would.
+        progress: await stub.readProgressMarkerForTest()
       });
 
       await stub.triggerFiberRecovery();

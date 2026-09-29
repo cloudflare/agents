@@ -26,6 +26,20 @@ import { raceWithSignal } from "./abort";
 
 export const RPC_DO_PREFIX = "rpc:";
 
+/** Narrow an unknown runtime binding to an MCP Durable Object namespace. */
+export function isDurableObjectNamespace(
+  namespace: unknown
+): namespace is DurableObjectNamespace<McpAgent> {
+  return (
+    typeof namespace === "object" &&
+    namespace !== null &&
+    "newUniqueId" in namespace &&
+    typeof namespace.newUniqueId === "function" &&
+    "idFromName" in namespace &&
+    typeof namespace.idFromName === "function"
+  );
+}
+
 function makeInvalidRequestError(id: unknown): JSONRPCMessage {
   return {
     jsonrpc: "2.0",

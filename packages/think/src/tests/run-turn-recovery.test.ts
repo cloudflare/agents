@@ -86,10 +86,12 @@ describe("recovery × runTurn", () => {
       }
     );
 
-    await agent.triggerFiberRecovery();
-    expect(
-      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
-    ).toBe(1);
+    // Assert atomically with the recovery scan. An immediate alarm may consume
+    // the Task after this RPC releases the Durable Object.
+    const transport = await agent.triggerFiberRecoveryWithTransportForTest(
+      "_chatRecoveryContinue"
+    );
+    expect(transport).toEqual({ tasks: 1, schedules: 0 });
     await agent.runScheduledRecoveryContinueForTest();
 
     // Recovery resolved the interrupted turn and left no leaked fiber.
@@ -107,5 +109,263 @@ describe("recovery × runTurn", () => {
     expect(finalMessages).toHaveLength(afterRecovery.length + 2);
     expect(finalMessages.at(-1)?.role).toBe("assistant");
     expect(await agent.getActiveFibers()).toHaveLength(0);
+  });
+
+  it("continues an interrupted assistant message instead of appending a duplicate assistant", async () => {
+    const agent = await freshRecoveryAgent(
+      `runturn-continuation-accumulator-${crypto.randomUUID()}`
+    );
+
+    await agent.persistTestMessage({
+      id: "u-continuation-accumulator",
+      role: "user",
+      parts: [{ type: "text", text: "continue this partial answer" }]
+    });
+    await agent.persistTestMessage({
+      id: "a-continuation-accumulator",
+      role: "assistant",
+      parts: [{ type: "text", text: "Partial answer" }]
+    });
+    await agent.insertInterruptedStream(
+      "stream-continuation-accumulator",
+      "req-continuation-accumulator",
+      [
+        {
+          body: JSON.stringify({
+            type: "start",
+            messageId: "a-continuation-accumulator"
+          }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({
+            type: "text-delta",
+            delta: "Partial answer"
+          }),
+          index: 2
+        }
+      ]
+    );
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-continuation-accumulator",
+      {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: "req-continuation-accumulator",
+          continuation: false,
+          latestMessageId: "a-continuation-accumulator",
+          latestMessageRole: "assistant",
+          latestUserMessageId: "u-continuation-accumulator",
+          startedAt: Date.now()
+        },
+        user: null
+      }
+    );
+
+    await agent.triggerFiberRecovery();
+    await agent.runScheduledRecoveryContinueForTest();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    const assistants = messages.filter(
+      (message) => message.role === "assistant"
+    );
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0]?.id).toBe("a-continuation-accumulator");
+    expect(
+      assistants[0]?.parts
+        .filter(
+          (part): part is { type: "text"; text: string } => part.type === "text"
+        )
+        .map((part) => part.text)
+        .join("")
+    ).toContain("Continued response.");
+    expect(
+      assistants[0]?.parts.filter(
+        (part) => "state" in part && part.state === "streaming"
+      )
+    ).toEqual([]);
+  });
+});
+
+describe("recovery × failed final persist (#1997)", () => {
+  it("reports a wait turn whose final persist fails as an error", async () => {
+    const agent = await freshRecoveryAgent(
+      `persist-fail-wait-${crypto.randomUUID()}`
+    );
+    await agent.failNextAssistantPersistForTest();
+
+    const result = await agent.testRunTurnWait("hello");
+
+    expect(result.status).toBe("error");
+    expect(await agent.getChatResponsesForTest()).toEqual([]);
+  });
+
+  it("does not mark a recovery incident completed when the continuation cannot persist", async () => {
+    const agent = await freshRecoveryAgent(
+      `persist-fail-recovery-${crypto.randomUUID()}`
+    );
+    await agent.persistTestMessage({
+      id: "u-persist-fail",
+      role: "user",
+      parts: [{ type: "text", text: "answer this" }]
+    });
+    await agent.persistTestMessage({
+      id: "a-persist-fail",
+      role: "assistant",
+      parts: [{ type: "text", text: "Partial answer" }]
+    });
+    await agent.insertInterruptedStream(
+      "stream-persist-fail",
+      "req-persist-fail",
+      [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-persist-fail" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", delta: "Partial answer" }),
+          index: 2
+        }
+      ]
+    );
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-persist-fail",
+      {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: "req-persist-fail",
+          continuation: false,
+          latestMessageId: "a-persist-fail",
+          latestMessageRole: "assistant",
+          latestUserMessageId: "u-persist-fail",
+          startedAt: Date.now()
+        },
+        user: null
+      }
+    );
+
+    const transport = await agent.triggerFiberRecoveryWithTransportForTest(
+      "_chatRecoveryContinue"
+    );
+    expect(transport.tasks).toBe(1);
+    await agent.failNextAssistantPersistForTest();
+    await agent.runScheduledRecoveryContinueForTest();
+
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      status: string;
+    }>;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0].status).not.toBe("completed");
+    expect(await agent.getChatResponsesForTest()).toEqual([]);
+  });
+});
+
+describe("recovery × onChatResponse after a reset (#2266)", () => {
+  it("fires the response hook once for a turn persisted before the reset", async () => {
+    const agent = await freshRecoveryAgent(`hook-reset-${crypto.randomUUID()}`);
+    await agent.resetBeforeNextResponseHookForTest();
+
+    const result = await agent.testRunTurnWait("hello");
+    expect(result.status).toBe("completed");
+    expect(await agent.getChatResponsesForTest()).toEqual([]);
+
+    await agent.recoverFromResetForTest();
+    await agent.runScheduledRecoveryContinueForTest();
+    await agent.runScheduledRecoveryRetryForTest();
+    expect(await agent.getTurnCallCount()).toBe(1);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    const responses = await agent.getChatResponsesForTest();
+    expect(responses).toEqual([
+      expect.objectContaining({
+        status: "completed",
+        messageId: messages[1].id,
+        recovered: true
+      })
+    ]);
+    expect(await agent.getActiveFibers()).toHaveLength(0);
+
+    await agent.replayPendingResponseHooksForTest();
+    expect(await agent.getChatResponsesForTest()).toHaveLength(1);
+  });
+
+  it("settles an RPC turn persisted before the reset without re-running it", async () => {
+    const agent = await freshRecoveryAgent(
+      `hook-reset-rpc-${crypto.randomUUID()}`
+    );
+    await agent.resetBeforeNextResponseHookForTest();
+    const result = await agent.testChat("hello");
+    expect(result.done).toBe(true);
+    expect(await agent.getChatResponsesForTest()).toEqual([]);
+
+    await agent.recoverFromResetForTest();
+    await agent.runScheduledRecoveryContinueForTest();
+    await agent.runScheduledRecoveryRetryForTest();
+    expect(await agent.getTurnCallCount()).toBe(1);
+    expect(await agent.getChatResponsesForTest()).toEqual([
+      expect.objectContaining({ status: "completed", recovered: true })
+    ]);
+  });
+
+  it("leaves an owed hook to chat recovery when startup runs first", async () => {
+    const agent = await freshRecoveryAgent(
+      `hook-reset-order-${crypto.randomUUID()}`
+    );
+    await agent.resetBeforeNextResponseHookForTest();
+    await agent.testRunTurnWait("hello");
+    await agent.restoreFiberFromResetForTest();
+
+    await agent.replayPendingResponseHooksForTest();
+    expect(await agent.getChatResponsesForTest()).toEqual([]);
+
+    await agent.triggerFiberRecovery();
+    await agent.runScheduledRecoveryContinueForTest();
+    await agent.runScheduledRecoveryRetryForTest();
+    expect(await agent.getTurnCallCount()).toBe(1);
+    expect(await agent.getChatResponsesForTest()).toEqual([
+      expect.objectContaining({ status: "completed", recovered: true })
+    ]);
+    expect(await agent.getActiveFibers()).toHaveLength(0);
+  });
+
+  it("replays an owed response hook on startup without a chat fiber", async () => {
+    const agent = await freshRecoveryAgent(
+      `hook-reset-start-${crypto.randomUUID()}`
+    );
+    await agent.resetBeforeNextResponseHookForTest();
+    await agent.testRunTurnWait("hello");
+    expect(await agent.getChatResponsesForTest()).toEqual([]);
+
+    await agent.replayPendingResponseHooksForTest();
+    await agent.replayPendingResponseHooksForTest();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(await agent.getChatResponsesForTest()).toEqual([
+      expect.objectContaining({
+        status: "completed",
+        messageId: messages[1].id,
+        recovered: true
+      })
+    ]);
+  });
+
+  it("does not replay the hook of a turn that completed normally", async () => {
+    const agent = await freshRecoveryAgent(
+      `hook-no-reset-${crypto.randomUUID()}`
+    );
+    await agent.testRunTurnWait("hello");
+    await agent.replayPendingResponseHooksForTest();
+
+    expect(await agent.getChatResponsesForTest()).toEqual([
+      expect.not.objectContaining({ recovered: true })
+    ]);
   });
 });

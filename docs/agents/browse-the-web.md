@@ -105,7 +105,7 @@ async () => {
 };
 ```
 
-To discover protocol surface, the model calls `cdp.spec()` — the live, normalized CDP protocol description (domains with commands, events, and types) — or uses the runtime's built-in `codemode.search` / `codemode.describe`.
+To discover protocol surface, the model calls `cdp.spec()` — the live, normalized CDP protocol description (domains with commands, events, and types, including each command's parameters and return values) — or uses the runtime's built-in `codemode.search` / `codemode.describe`.
 
 ## Use with an Agent
 
@@ -416,6 +416,24 @@ const connector = new BrowserConnector(this.ctx, {
   browser: this.env.BROWSER,
   store,
   session: { mode: "dynamic" }
+});
+```
+
+You can also manage Browser Rendering sessions directly. `createBrowserSession` accepts [hostname guardrails](https://developers.cloudflare.com/browser-run/features/guardrails/) that restrict which domains the session may reach — fixed at launch for every connection to the session, including Live View (not supported with Kitesurf):
+
+```ts
+import { createBrowserSession, connectBrowserSession } from "agents/browser";
+
+const { sessionId } = await createBrowserSession(this.env.BROWSER, {
+  guardrails: { allowedDomains: ["example.com", "*.example.com"] }
+});
+
+// Connect (and reconnect) without deleting the session on close:
+const session = await connectBrowserSession(this.env.BROWSER, sessionId, {
+  timeoutMs: 30_000,
+  onClose: () => {
+    /* the CDP socket closed; the session itself stays alive */
+  }
 });
 ```
 

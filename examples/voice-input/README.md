@@ -1,6 +1,6 @@
 # Voice Input
 
-Voice-to-text dictation example using the `useVoiceInput` hook from `@cloudflare/voice`.
+Voice-to-text dictation example using the `useVoiceInput` hook from `agents/voice`.
 
 Captures microphone audio, streams it to an Agent Durable Object for real-time speech-to-text using Workers AI, and displays the transcript in a text area.
 
@@ -20,7 +20,7 @@ Uses `withVoiceInput` — a lightweight mixin that only does STT. No TTS provide
 
 ```typescript
 import { Agent } from "agents";
-import { withVoiceInput, WorkersAINova3STT } from "@cloudflare/voice";
+import { withVoiceInput, WorkersAINova3STT } from "agents/voice";
 
 const InputAgent = withVoiceInput(Agent);
 
@@ -38,7 +38,7 @@ export class VoiceInputAgent extends InputAgent<Env> {
 Uses `useVoiceInput` — a lightweight React hook that accumulates transcripts into a single string:
 
 ```tsx
-import { useVoiceInput } from "@cloudflare/voice/react";
+import { useVoiceInput } from "agents/voice/react";
 
 const { transcript, interimTranscript, isListening, start, stop, clear } =
   useVoiceInput({ agent: "VoiceInputAgent" });
@@ -57,4 +57,4 @@ Returns:
 ## Related
 
 - [`examples/playground`](../playground) — full voice agent with conversation
-- [`@cloudflare/voice`](../../packages/voice) — the voice package
+- [`agents/voice`](../../packages/agents) — the Agents package Voice exports

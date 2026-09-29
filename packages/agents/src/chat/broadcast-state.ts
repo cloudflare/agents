@@ -40,7 +40,7 @@ export type BroadcastStreamEvent =
       replay?: boolean;
       replayComplete?: boolean;
       continuation?: boolean;
-      /** Required when continuation=true so the accumulator can pick up existing parts. */
+      /** @deprecated Continuations now seed from current messages in `messagesUpdate`. */
       currentMessages?: UIMessage[];
     }
   | {
@@ -56,6 +56,31 @@ export interface TransitionResult {
   state: BroadcastStreamState;
   messagesUpdate?: (prev: UIMessage[]) => UIMessage[];
   isStreaming: boolean;
+}
+
+// ── Snapshot reconciliation ────────────────────────────────────────
+
+function textOf(parts: UIMessage["parts"]): string {
+  let text = "";
+  for (const part of parts) {
+    if (part.type === "text") text += part.text;
+  }
+  return text;
+}
+
+/**
+ * Whether `messages` already holds a copy of the observed message whose text
+ * the accumulator does not extend. A healthy live accumulator is always the
+ * stored copy plus more; one that diverges holds interleaved or duplicated
+ * chunks (#2166), so the stored copy must win or the corruption never heals.
+ */
+export function observedDivergesFrom(
+  accumulator: StreamAccumulator,
+  messages: UIMessage[]
+): boolean {
+  const existing = messages.find((m) => m.id === accumulator.messageId);
+  if (!existing) return false;
+  return !textOf(accumulator.parts).startsWith(textOf(existing.parts));
 }
 
 // ── Transition ─────────────────────────────────────────────────────
@@ -103,33 +128,9 @@ export function transition(
         state.streamId !== event.streamId ||
         isReplayedStart
       ) {
-        let messageId = event.messageId;
-        let existingParts: UIMessage["parts"] | undefined;
-        let existingMetadata: Record<string, unknown> | undefined;
-
-        if (event.continuation && event.currentMessages) {
-          for (let i = event.currentMessages.length - 1; i >= 0; i--) {
-            if (event.currentMessages[i].role === "assistant") {
-              messageId = event.currentMessages[i].id;
-              existingParts = [...event.currentMessages[i].parts];
-              if (event.currentMessages[i].metadata != null) {
-                existingMetadata = {
-                  ...(event.currentMessages[i].metadata as Record<
-                    string,
-                    unknown
-                  >)
-                };
-              }
-              break;
-            }
-          }
-        }
-
         accumulator = new StreamAccumulator({
-          messageId,
-          continuation: event.continuation,
-          existingParts,
-          existingMetadata
+          messageId: event.messageId,
+          continuation: event.continuation
         });
       } else {
         accumulator = state.accumulator;
@@ -141,17 +142,21 @@ export function transition(
 
       let messagesUpdate: ((prev: UIMessage[]) => UIMessage[]) | undefined;
 
+      const mergeUnlessDiverged = (prev: UIMessage[]) =>
+        observedDivergesFrom(accumulator, prev)
+          ? prev
+          : accumulator.mergeInto(prev);
+
       if (event.done) {
-        messagesUpdate = (prev) => accumulator.mergeInto(prev);
         return {
           state: { status: "idle" },
-          messagesUpdate,
+          messagesUpdate: mergeUnlessDiverged,
           isStreaming: false
         };
       }
 
       if (event.chunkData && !event.replay) {
-        messagesUpdate = (prev) => accumulator.mergeInto(prev);
+        messagesUpdate = mergeUnlessDiverged;
       } else if (event.replayComplete) {
         messagesUpdate = (prev) => accumulator.mergeInto(prev);
       }
