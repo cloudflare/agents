@@ -1,0 +1,25 @@
+.changeset/facet-forward-stream-body.md
+  s_dd92ec9775f12a::t_be24558b7b7b5f 1-22
+packages/agents/src/index.ts
+  s_dd92ec9775f12a::t_a475fd5d29ccc4 7739-7742,7744
+packages/agents/src/sub-routing.ts
+  s_dd92ec9775f12a::t_a76ed2c63688de 427-430,432
+packages/agents/src/tests/agents/sub-agent.ts
+  s_dd92ec9775f12a::t_21c1cdd1e5dc45 2226-2322
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a592038aae64fd2f869cf2043338d231ec8c07ba",
+  "prompts": {},
+  "sessions": {
+    "s_dd92ec9775f12a": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_02da08d1dffeeMMGVunPAbYsSG",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Antoni T <atokarski@cloudflare.com>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+packages/agents/src/index.ts
+  s_6e48e6bf287351::t_561a8f2b4c6206 1683-1690,1692,7398-7406,7408-7413,7417,7422-7423,7425-7430,7432-7443,7447-7464,7600-7602,7647-7648,7650-7651,7664-7667
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8e18b89d19ae76412b572d11ad7cdcbb25200261",
+  "prompts": {},
+  "sessions": {
+    "s_6e48e6bf287351": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_00f84e677ffeyeFDTEZsnHAtlU",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Antoni T <atokarski@cloudflare.com>"
+    }
+  }
+}

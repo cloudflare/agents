@@ -1,0 +1,19 @@
+packages/agents/src/tests/state/capability.test.ts
+  s_ed98c05cfccb6d::t_731273705c37a2 1,126-128,144-146,173-228
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "847054ade1b815634cb6d048fb576191f3957c83",
+  "prompts": {},
+  "sessions": {
+    "s_ed98c05cfccb6d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_fa2452b6effeK3SmjBAnOi28KC",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Antoni T <atokarski@cloudflare.com>"
+    }
+  }
+}
