@@ -3492,6 +3492,41 @@ describe("Think — regeneration", () => {
     await closeWS(ws);
   });
 
+  it("regenerating an earlier response leaves later stored answers untouched (#2028)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+
+    const user1 = makeUserMessage("hello");
+    let donePromise = waitForDone(ws);
+    sendChatRequest(ws, [user1]);
+    await donePromise;
+    await delay(200);
+
+    // A later answer still waiting on a client tool result. Transcript
+    // repair would record it as failed if it reached the regeneration.
+    const user2 = makeUserMessage("run the tool");
+    await agent.persistToolCallMessage([
+      user2,
+      makeToolMessage("tc-later", "client_action", "input-available")
+    ]);
+
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [user1], { trigger: "regenerate-message" });
+    await donePromise;
+    await delay(200);
+
+    const [later] = (await agent.getBranches(user2.id)) as UIMessage[];
+    expect((later.parts[0] as Record<string, unknown>).state).toBe(
+      "input-available"
+    );
+
+    await closeWS(ws);
+  });
+
   it("regeneration fires onChatResponse", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

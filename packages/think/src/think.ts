@@ -4242,7 +4242,14 @@ export class Think<
       }
     }
 
-    this._replaceCachedMessages(repair.messages);
+    // `messages` can be a cut or off-cache path, so merge by id rather than
+    // replacing the cache with it.
+    const repairedById = new Map(
+      repair.messages.map((message) => [message.id, message])
+    );
+    this._replaceCachedMessages(
+      this.messages.map((message) => repairedById.get(message.id) ?? message)
+    );
     this._broadcastMessages();
     this._emit("chat:transcript:repaired", {
       removedToolCalls: repair.removedToolCalls,
@@ -6963,7 +6970,7 @@ export class Think<
     extra?: { requestId?: string; attempt?: number }
   ): Promise<boolean> {
     try {
-      const result = await this.session.compact();
+      const result = await this.session.compact(this._turnHistoryLeafId);
       const shortened = Boolean(result);
       this._emit("chat:context:compacted", {
         reason,
@@ -7090,21 +7097,17 @@ export class Think<
    * The repaired history the current turn's model request is built from: the
    * active path, cut at `_turnHistoryLeafId` when one is set. A leaf off the
    * cached path (another branch, or outside a windowed cache) is read from
-   * storage and repaired for this request only, leaving the cache alone.
+   * storage. The cut comes before repair so messages past the leaf, which the
+   * request never sees, are not rewritten.
    */
   private async _turnHistory(): Promise<UIMessage[]> {
     const leafId = this._turnHistoryLeafId;
-    if (
-      leafId === undefined ||
-      this.messages.some((message) => message.id === leafId)
-    ) {
-      const history = await this._repairTranscriptForProvider(this.messages);
-      if (leafId === undefined) return history;
-      // Repair keeps every message, so the leaf is still in `history`.
-      return history.slice(
-        0,
-        history.findIndex((message) => message.id === leafId) + 1
-      );
+    if (leafId === undefined) {
+      return this._repairTranscriptForProvider(this.messages);
+    }
+    const cut = this.messages.findIndex((message) => message.id === leafId);
+    if (cut >= 0) {
+      return this._repairTranscriptForProvider(this.messages.slice(0, cut + 1));
     }
     const budget = this.hydrationByteBudget;
     const path = (
@@ -7112,9 +7115,7 @@ export class Think<
         ? (await this.session.getRecentHistory(budget, { leafId })).messages
         : await this.session.getHistory({ leafId })
     ) as UIMessage[];
-    return this._repairToolTranscriptParts(path, {
-      repairApprovalResponded: this._repairApprovalRespondedThisTurn
-    }).messages;
+    return this._repairTranscriptForProvider(path);
   }
 
   /**
