@@ -1,0 +1,27 @@
+packages/ai-chat/src/index.ts
+  s_2569688183b285::t_afbe4634305da7 6390,6392-6398,6400-6406,6409-6412,6414-6428,6432,6624-6626,6628-6635,6748-6751
+packages/ai-chat/src/tests/client-tool-duplicate-message.test.ts
+  s_2569688183b285::t_5c34908254028d 407-488
+.changeset/quiet-tools-reconcile.md
+  s_2569688183b285::t_c1483b0f9418af 9
+packages/think/src/tests/client-tools.test.ts
+  s_2569688183b285::t_2c8af133075db8 284-361
+packages/think/src/think.ts
+  s_2569688183b285::t_0a87424604c66a 16441-16450,16452,16485-16488,16490-16494,16511-16512,16569-16574,16580-16581,16587-16592,16597-16600,16605-16612,16614,16616-16619,16621
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "22d369f1407fa90949bca459c133db1aad4dbc4d",
+  "prompts": {},
+  "sessions": {
+    "s_2569688183b285": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "b40acb03-72f6-402b-bbba-e37b905e09f9",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
