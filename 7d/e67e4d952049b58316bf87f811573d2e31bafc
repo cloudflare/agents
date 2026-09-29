@@ -1,0 +1,27 @@
+packages/agents/src/chat/message-reconciler.ts
+  s_2569688183b285::t_114e8561e396b2 16-19,22-24,157-162,164,175-179,199-203,207,264-265,272,333-335,338-341,345-348,350-363,366-379,383-413
+packages/think/src/tests/actions-durable-pause.test.ts
+  s_2569688183b285::t_f4243faaa18dba 993-1022
+packages/think/src/think.ts
+  s_2569688183b285::t_74a01be2cdbf9c 547-548,555,557,575-579,583,594-602,605
+.changeset/quiet-tools-reconcile.md
+  s_2569688183b285::t_653a228088f309 9,11
+packages/agents/src/chat/__tests__/message-reconciler.test.ts
+  s_2569688183b285::t_feb6b8bf53421b 297-300,302-304,308-327,330-332,340-341,346-510,751
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7de67e4d952049b58316bf87f811573d2e31bafc",
+  "prompts": {},
+  "sessions": {
+    "s_2569688183b285": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "b40acb03-72f6-402b-bbba-e37b905e09f9",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
