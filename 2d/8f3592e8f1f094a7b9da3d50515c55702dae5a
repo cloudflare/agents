@@ -1,0 +1,25 @@
+packages/think/src/messengers/telegram.ts
+  s_546c940cc078c2::t_b035866bf08c0f 12-20,28-34,61-64,69,72-73
+.changeset/think-telegram-native-streaming.md
+  s_546c940cc078c2::t_e1738bca50ddb9 1-5
+docs/think/messengers.md
+  s_546c940cc078c2::t_dbf8ff23f8d3a9 50-54
+packages/think/src/tests/telegram-messenger.test.ts
+  s_546c940cc078c2::t_e21bf27f9d6429 1-59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2d8f3592e8f1f094a7b9da3d50515c55702dae5a",
+  "prompts": {},
+  "sessions": {
+    "s_546c940cc078c2": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "6878811d-dd3b-4eb0-8043-768a38bc1af8",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
