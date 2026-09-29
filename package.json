@@ -27,6 +27,11 @@
     "test:react": "pnpm --filter agents run test:react",
     "prepare:playwright": "playwright install --with-deps chromium"
   },
+  "sherif": {
+    "ignoreDependency": [
+      "@a2a-js/sdk"
+    ]
+  },
   "license": "MIT",
   "version": "0.0.0",
   "devDependencies": {
