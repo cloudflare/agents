@@ -13,7 +13,7 @@ This led to:
 - **Duplicated wire protocol constants** (`MSG_CHAT_*` strings matching `MessageType` values)
 - **Duplicated metadata handling** (the `start`/`finish`/`message-metadata` switch that `applyChunkToParts` doesn't cover) in three separate code paths: ai-chat server, ai-chat client, and Think server
 
-On the ai-chat side, `index.ts` and `react.tsx` already mixed too many concerns together — streaming, reconciliation, persistence, broadcasting, turn management — making the code difficult to modify and reason about, and both have only grown since (today ~6.1k and ~2.5k lines respectively, with durable chat-recovery layered on).
+On the ai-chat side, `index.ts` and `react.tsx` already mixed too many concerns together — streaming, reconciliation, persistence, broadcasting, turn management — making the code difficult to modify and reason about. The server has only grown since (today ~7.9k lines, with durable chat-recovery layered on); the React hook has since moved into `agents/chat/react` so both packages share it.
 
 ## Architecture
 
@@ -31,17 +31,23 @@ packages/agents/src/chat/          ← shared foundation
   auto-continuation-controller.ts  AutoContinuationController (barrier timer + double-fire guard)
   async-helpers.ts                 TIMED_OUT, awaitWithDeadline, drainInteractionApplies
   abort-registry.ts                AbortRegistry
-  resumable-stream.ts              ResumableStream (SQLite chunk buffer)
+  resumable-stream.ts              ResumableStream (chunk replay over the Streams capability)
   sql-batch.ts                     bound-param batching for IN-clause deletes
   connection.ts                    sendIfOpen WS send guard
   client-tools.ts                  ClientToolSchema, createToolsFromClientSchemas
-  protocol.ts                      CHAT_MESSAGE_TYPES constants (chat + resume + tool)
+  protocol.ts                      CHAT_MESSAGE_TYPES constants (chat + resume + tool + recovery)
+  wire-types.ts                    MessageType enum, wire message types, ChatTurnOutcome
   parse-protocol.ts                parseProtocolMessage
   tool-state.ts                    tool-part update / interaction helpers
   agent-tools.ts                   agent-tool-as-child event state + broadcast snoop (interceptAgentToolBroadcast)
   message-reconciler.ts            reconcileMessages, resolveToolMergeId, reconcileOrphanPartial, assistantContentKey
   orphan-store.ts                  OrphanPersistStore interface
-  lifecycle.ts                     shared lifecycle / result / config types
+  pre-stream-turns.ts              PreStreamTurns (accepted-but-not-streaming window, STREAM_PENDING)
+  origin-message-ids.ts            originating user message ids on outgoing frames
+  truncate-older-messages.ts       truncateOlderMessages / truncateOlderToolResults for model requests
+  lifecycle.ts                     shared lifecycle / result / config types (MessageConcurrency, ...)
+  react.tsx                        useAgentChat and tool part helpers (exported as agents/chat/react)
+  ws-chat-transport.ts             WebSocketChatTransport (re-exported by transport.ts as agents/chat/transport)
 
   # @internal chat-recovery engine — shared by ai-chat, think, and the
   # experimental tanstack-recovery / pi-recovery adapters
@@ -49,20 +55,24 @@ packages/agents/src/chat/          ← shared foundation
   recovery-incident.ts             incident budget math + storage helpers
   recovery-engine.ts               ChatRecoveryEngine + adapter / wake-hook seams
   recovery-task.ts                 reserved chained Task definition for continuations
+  turn-task.ts                     createChatTurnTaskDefinition (chat turns as Tasks)
   recovery-codec.ts                ChatRecoveryCodec (AISDKRecoveryCodec)
   resume-handshake.ts              ResumeHandshake stream-resume driver
   stall-watchdog.ts                iterateWithStallWatchdog
 
-packages/ai-chat/src/              ← stable chat agent + client
+packages/ai-chat/src/              ← stable chat agent
   index.ts                         AIChatAgent (uses shared imports)
-  react.tsx                        useAgentChat (uses broadcastTransition)
-  ws-chat-transport.ts             WebSocket transport for AI SDK
-  types.ts                         MessageType enum, wire protocol types
+  react.tsx                        re-exports agents/chat/react
+  ws-chat-transport.ts             re-exports agents/chat/transport
+  types.ts                         re-exports MessageType and wire types from agents/chat
 
 packages/think/src/                ← opinionated assistant
   think.ts                         Think (uses shared imports)
+  react.tsx                        useAgentChat wrapper over agents/chat/react
   extensions/                      ExtensionManager, HostBridgeLoopback (standalone)
 ```
+
+The directory has a few more small helpers (throttling, chunk sizing, replay batching, transcript repair) that are not listed individually.
 
 **Dependency direction**: `ai-chat → agents`, `think → agents`. The shared layer resolves the circular dependency that caused the original fork.
 
@@ -78,25 +88,19 @@ This is the single most shared piece of code in the chat system. Used by:
 - `StreamAccumulator.applyChunk` — the higher-level wrapper (which is how
   `AIChatAgent._persistOrphanedStream` and Think now rebuild orphaned partials —
   the orphan path no longer calls `applyChunkToParts` directly)
-- Think's `StreamAccumulator` usage in `_streamResult` and `chat()`
+- Think's `StreamAccumulator` usage in `_streamResult` (WebSocket and programmatic turns) and `_streamResultToRpcCallback` (`chat()` RPC path)
 
 **Key type: `StreamChunkData`** — deliberately loose (index signature, many optionals) to match the wire format without encoding chunk-type-specific constraints. The `messageMetadata` field is typed as `unknown` (not `Record<string, unknown>`) to match `UIMessageChunk` from the AI SDK.
 
 ### sanitize.ts
 
-Two functions for persistence hygiene:
+Row-size enforcement for chat tables that are **not** session storage. Message persistence in both hosts goes through `agents/sessions`, which sanitizes messages and offloads oversized payloads losslessly (content-addressed attachments, chunked rows) instead of truncating.
 
-**`sanitizeMessage(message) → UIMessage`** — strips OpenAI ephemeral fields (`itemId`, `reasoningEncryptedContent`) from `providerMetadata` and `callProviderMetadata`, then filters truly empty reasoning parts (no text and no remaining provider metadata after stripping).
+**`sanitizeMessage(message) → UIMessage`** — re-exported from `agents/sessions/sanitize`. Strips OpenAI ephemeral fields (`itemId`, `reasoningEncryptedContent`) from `providerMetadata` and `callProviderMetadata`, then filters truly empty reasoning parts.
 
-**`enforceRowSizeLimit(message) → UIMessage`** — compacts messages exceeding 1.8MB (the safety threshold below SQLite's 2MB row limit). Two-pass: first compact tool outputs over 1KB, then truncate text parts.
+**`enforceRowSizeLimit(message, { warn? }) → UIMessage`** — compacts messages exceeding 1.8MB (`ROW_MAX_BYTES`, below SQLite's 2MB row limit). Two-pass: first compact tool outputs over 1KB (annotating `metadata.compactedToolOutputs`), then truncate text parts oldest-first (annotating `metadata.compactedTextParts`). The host passes `warn` to log with its own prefix.
 
-`@cloudflare/ai-chat` wraps these with additional logic:
-
-- `_truncateProviderExecutedToolPayloads` — truncates large strings in Anthropic-style server-executed tool payloads (code_execution, text_editor)
-- `sanitizeMessageForPersistence()` — protected hook for subclass customization
-- `_enforceRowSizeLimit` — adds `console.warn` logging and `metadata.compactedToolOutputs` / `metadata.compactedTextParts` tracking
-
-Think uses the shared functions directly (no extra steps).
+Think calls `enforceRowSizeLimit` only when serializing its submission queue (`cf_think_submissions`). `AIChatAgent` does not call it: its `_sanitizeMessageForPersistence` runs `_truncateProviderExecutedToolPayloads` (large strings in Anthropic-style server-executed tool payloads) and then the protected `sanitizeMessageForPersistence()` hook, and Sessions handles size.
 
 ### stream-accumulator.ts
 
@@ -129,13 +133,13 @@ class StreamAccumulator {
 
 **Where the accumulator is used vs. not:**
 
-- **ai-chat client** (`react.tsx`): Uses `StreamAccumulator` for broadcast/resume streams. The transport-owned path (local tab requests) still goes through `useChat`'s built-in pipeline.
+- **Client** (`agents/chat/react.tsx`, shared by both packages' React exports): Uses `StreamAccumulator` for broadcast/resume streams. The transport-owned path (local tab requests) still goes through `useChat`'s built-in pipeline.
 - **Think server**: Uses `StreamAccumulator` in both `_streamResult` (WebSocket path) and `chat()` (RPC sub-agent path), and to rebuild orphaned partials in `_persistOrphanedStream`.
 - **ai-chat server**: `_persistOrphanedStream` rebuilds orphaned partials through `StreamAccumulator` (the orphan-persist (a) step — see [recovery-engine.ts](#recovery-enginets)). The live streaming path (`_streamSSEReply`) **still** uses `applyChunkToParts` directly: its streaming message (`_streamingMessage`) is shared by reference with `hasPendingInteraction`, `_messagesForClientSync`, and `_findAndUpdateToolPart`, making it impractical to route through the accumulator without a deeper refactoring of the shared mutable state (see "Server-side StreamAccumulator (deferred)").
 
 ### protocol.ts
 
-**`CHAT_MESSAGE_TYPES`** — plain string constants for the wire protocol message types. Used by Think to avoid depending on `@cloudflare/ai-chat/types` (which would create a dependency edge Think shouldn't have). The values match `MessageType` in `ai-chat/src/types.ts`.
+**`CHAT_MESSAGE_TYPES`** — plain string constants for the wire protocol message types, including `STREAM_PENDING` (`cf_agent_stream_pending`) and `CHAT_RECOVERING` (`cf_agent_chat_recovering`). Think uses these directly. The `MessageType` enum with the same values lives next to them in `wire-types.ts`; `@cloudflare/ai-chat/types` re-exports it.
 
 ### message-reconciler.ts
 
@@ -231,11 +235,9 @@ The AI SDK's `UIMessageChunk` types `messageMetadata` as `unknown`. If `StreamCh
 
 ## Tradeoffs
 
-**Shared `enforceRowSizeLimit` lacks ai-chat's observability features.** The shared version doesn't add `metadata.compactedToolOutputs` or `console.warn` on compaction. Think gets the simpler version; ai-chat wraps it with its own enhanced version. If Think ever needs compaction observability, the shared function could accept an options bag.
-
 **The accumulator creates a new message on every `toMessage()` / `mergeInto()` call.** This is intentional for immutability (React needs new references for re-renders), but it means the server can't use `toMessage()` for its shared `_streamingMessage` reference without breaking identity.
 
-**Wire protocol constants are duplicated between `CHAT_MESSAGE_TYPES` and `MessageType`.** The values are identical strings but live in two places. `MessageType` is `@cloudflare/ai-chat`'s published enum; `CHAT_MESSAGE_TYPES` is `agents`'s internal constants. Drift is the operational risk. A future consolidation could move the canonical values to `agents/chat` and have `ai-chat` re-export them, but that requires `ai-chat` to depend on the specific export path — a semver-sensitive change.
+**Wire protocol values exist as both `CHAT_MESSAGE_TYPES` and `MessageType`.** Both now live in `agents/chat` (`protocol.ts` and `wire-types.ts`), and `ai-chat` re-exports `MessageType`, so there is one package to keep in sync, but still two declarations of the same strings.
 
 ## What's next
 
@@ -347,10 +349,14 @@ The machine handles accumulator creation (including continuation context walking
 - No prior RFCs — the extraction was motivated by Think's fork of `message-builder.ts` and the growing complexity of `ai-chat/src/index.ts`.
 - TurnQueue extracted to `agents/chat/turn-queue.ts`. AIChatAgent and Think both adopt it, unifying turn serialization and the epoch/clear-generation concept.
 - Broadcast stream state machine extracted to `agents/chat/broadcast-state.ts`. `useAgentChat`'s `onAgentMessage` handler uses `broadcastTransition` instead of manual accumulator/ref management.
-- Think stripped to minimal core: single-session inline storage, removed multi-session API, deleted `AgentChatTransport`, disconnected extensions from Think class. Session module and transport deleted.
+- Think stripped to minimal core (since superseded by the Sessions replatform below): single-session inline storage, removed multi-session API, deleted `AgentChatTransport`, disconnected extensions from Think class. Session module and transport deleted.
 - ResumableStream moved from ai-chat to `agents/chat/resumable-stream.ts`. Resume protocol constants (`STREAM_RESUMING`, `STREAM_RESUME_ACK`, `STREAM_RESUME_REQUEST`, `STREAM_RESUME_NONE`) added to `CHAT_MESSAGE_TYPES`. Think wired with full resume support.
 - Client tool primitives (`ClientToolSchema`, `createToolsFromClientSchemas`) moved to `agents/chat/client-tools.ts`. Tool protocol constants (`TOOL_RESULT`, `TOOL_APPROVAL`, `MESSAGE_UPDATED`) added. Think implements client-side tools with debounce-based auto-continuation.
 - Think now has: MCP `waitForMcpConnections`, message push on connect, feature parity with AIChatAgent's core chat experience.
 - Durable chat-recovery orchestration unified in `agents/chat/recovery-engine.ts` (`ChatRecoveryEngine` over a `ChatRecoveryAdapter` + per-wake `ChatFiberWakeHooks`); `AIChatAgent`, `Think`, and the `experimental/pi-recovery` fixture all drive it. The orphan-persist path was factored into named seams: (a) shared `StreamAccumulator` reconstruction, (b) host `resolveOrphanTargetId`, (c) shared `reconcileOrphanPartial`, and (d) `OrphanPersistStore` upsert backed by Sessions. See [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).
 - Auto-continuation barrier (#1649 / #1650) extracted to `agents/chat/auto-continuation-controller.ts` (`AutoContinuationController`). The controller owns the coalesce timer, the `_barrierActive` double-fire guard, and the schedule/coalesce/fire lifecycle (`schedule` / `rearmForBatch` / `armTimer` / `fireWhenStable` / `activateDeferredAndReschedule` / `reset`), parameterized by an `AutoContinuationHost` (stream-active signal, pending-interaction signal, incomplete-batch test, apply-drain, `keepAliveWhile`, and the host `fire()` turn pipeline). Both hosts retain thin delegating wrappers over their original method names; `COALESCE_MS` (50ms) is now single-sourced on the controller. Exported `@internal` for sibling packages. Fast-follow: Think's `waitUntilStable()` now consults `controller.isArmed()` to wait out an armed continuation, converging its idle definition with ai-chat's `waitForIdle()`. See [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).
 - Adapter-spine helpers de-duplicated (Tier A + B, pure leaf lifts, no behavior change). Three byte-identical fragments shared by both hosts now live once in `agents/chat`: (1) `async-helpers.ts` — the `TIMED_OUT` sentinel, `awaitWithDeadline` (deadline-bounded race), and `drainInteractionApplies` (the substrate-free interaction-apply completeness drain, parameterized by `hasPending` / `getTail`); (2) `classifyAgentToolChildRecovery(storage)` in `recovery-incident.ts` — the parent's agent-tool reattach incident scan (in-progress > failed > none precedence); (3) `interceptAgentToolBroadcast(msg, hooks)` in `agent-tools.ts` — the #1575 outgoing-frame snoop that tails an agent-tool child's progress, parameterized by an `AgentToolBroadcastHooks` substrate (forwarders / liveSequences / lastErrors maps, the host response-type constant, and the host run-lookup). Both hosts delegate through their existing private method names and `broadcast()` overrides (which keep a cheap size-guard so the common no-child path stays allocation-free, then call `super.broadcast`), so all call sites are untouched. The recovery-engine adapter seam (`_chatRecoveryEngine` / `_runChatRecoveryFiber`) and the genuinely product-substrate `dispatch`/`classify`/`terminalize` methods were deliberately left in the hosts (RFC bucket 3) for the Turns effort. See [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).
+- `useAgentChat` and `WebSocketChatTransport` hoisted into `agents/chat/react` and `agents/chat/transport` (#1801). `@cloudflare/ai-chat/react` re-exports the hook; `@cloudflare/think/react` wraps it.
+- Recovery continuations moved onto Tasks as chained `__cf_internal_chat_recovery` runs (#2194).
+- Sessions moved into a Lifecycle capability (`agents/sessions`, #2196). Both hosts persist through it, so row-size truncation left the message path and `enforceRowSizeLimit` now guards only non-session tables.
+- `ResumableStream` rebuilt over the Streams Lifecycle capability (`agents/streams`, #2173).

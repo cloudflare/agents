@@ -1,21 +1,21 @@
 # Think vs AIChatAgent
 
-A comparison of `@cloudflare/think` (`Think`) and `@cloudflare/ai-chat` (`AIChatAgent`) — two chat agent base classes built on the Agents SDK. Both extend `Agent` and speak the same `cf_agent_chat_*` WebSocket protocol, but they serve different goals.
+A comparison of `@cloudflare/think` (`Think`) and `@cloudflare/ai-chat` (`AIChatAgent`), the two chat base classes built on the Agents SDK. Both extend `Agent`, speak the same `cf_agent_chat_*` WebSocket protocol, and use the same `useAgentChat` hook implementation from `agents/chat/react`. Both are supported; [rfc-ai-chat-maintenance.md](./rfc-ai-chat-maintenance.md) records that `AIChatAgent` is first-class and not a legacy API.
 
 Related:
 
-- [think-roadmap.md](./think-roadmap.md) — Think implementation plan (all phases complete)
-- [sessions.md](./sessions.md) — Session integration design
+- [think.md](./think.md) — Think architecture
+- [sessions.md](./sessions.md) — the Sessions storage both classes use
+- [chat-shared-layer.md](./chat-shared-layer.md) — primitives both classes share
 - [chat-api.md](./chat-api.md) — AIChatAgent + useAgentChat API analysis
-- [chat-improvements.md](./chat-improvements.md) — shared extraction + client DX improvements
 
 ---
 
 ## Philosophical difference
 
-**AIChatAgent is a protocol adapter.** It bridges the `cf_agent_chat_*` WebSocket protocol to the AI SDK. You override `onChatMessage(onFinish, options) → Response | undefined` — you're responsible for calling `streamText`, wiring up tools, converting messages, constructing the system prompt, and returning a `Response`. AIChatAgent handles the plumbing: message persistence, streaming, abort, resume, client sync. But the LLM call is entirely your problem.
+**AIChatAgent is a protocol adapter.** You override `onChatMessage(onFinish, options) → Response | undefined` and are responsible for calling `streamText`, wiring tools, converting messages, and building the system prompt. AIChatAgent handles the plumbing: persistence, streaming, abort, resume, recovery, and client sync.
 
-**Think is an opinionated framework.** It makes decisions for you: `getModel()` returns the model, `getSystemPrompt()` or `configureSession()` sets the prompt, `getTools()` returns tools, `assembleContext()` handles message conversion + truncation + pruning. The default `onChatMessage` runs the complete agentic loop. You override individual pieces, not the whole pipeline.
+**Think is an opinionated framework.** `getModel()` returns the model, `configureContext()` (or the `getSystemPrompt()` fallback) sets the prompt, and `getTools()` returns tools. Think runs the loop. There is no `onChatMessage` to override; you change behavior through hooks such as `beforeTurn`, `beforeStep`, and `beforeToolCall`, which fire on every entry path.
 
 ---
 
@@ -23,55 +23,55 @@ Related:
 
 ### Override points
 
-| Concept                   | AIChatAgent                                                                 | Think                                                           |
-| ------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| **Minimal subclass**      | ~15 lines (wire `streamText` + tools + messages + system prompt + response) | 3 lines (`getModel()` only)                                     |
-| **onChatMessage**         | `(onFinish, options) → Response \| undefined`                               | `(options?) → StreamableResult`                                 |
-| **System prompt**         | Inline in your `onChatMessage`                                              | `getSystemPrompt()` or `configureSession()` with context blocks |
-| **Tools**                 | Inline in your `onChatMessage`                                              | `getTools()` + auto-merge with client tools + context tools     |
-| **Context assembly**      | Manual in `onChatMessage`                                                   | `assembleContext()` → `{ system, messages }`                    |
-| **Post-turn hook**        | `onChatResponse(result)`                                                    | `onChatResponse(result)` (same)                                 |
-| **Error handling**        | No dedicated hook                                                           | `onChatError(error, ctx)`                                       |
-| **Pre-persist transform** | `sanitizeMessageForPersistence(msg)`                                        | `sanitizeMessageForPersistence(msg)` (same)                     |
-| **Recovery hook**         | `onChatRecovery(ctx)`                                                       | `onChatRecovery(ctx)` (same)                                    |
+| Concept                   | AIChatAgent                                                      | Think                                                                                 |
+| ------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| **Minimal subclass**      | ~15 lines (wire `streamText`, tools, messages, prompt, response) | 3 lines (`getModel()` returning a model id string)                                    |
+| **Inference**             | `onChatMessage(onFinish, options) → Response \| undefined`       | Framework-owned; `beforeTurn` returns a `TurnConfig` to adjust it                     |
+| **System prompt**         | Inline in your `onChatMessage`                                   | `configureContext()` blocks, or `getSystemPrompt()` as a fallback                     |
+| **Tools**                 | Inline in your `onChatMessage`                                   | `getTools()` merged with workspace, action, extension, context, MCP, and client tools |
+| **Continuation flag**     | `options.continuation`                                           | `ctx.continuation` on `TurnContext`                                                   |
+| **Post-turn hook**        | `onChatResponse(result)`                                         | `onChatResponse(result)`                                                              |
+| **Error handling**        | No dedicated hook                                                | `onChatError(error, ctx)` and `classifyChatError`                                     |
+| **Pre-persist transform** | `sanitizeMessageForPersistence(msg)`                             | None; Sessions sanitizes provider metadata on write                                   |
+| **Recovery hook**         | `onChatRecovery(ctx)`                                            | `onChatRecovery(ctx)`                                                                 |
 
 ### Storage and data model
 
-| Concept                | AIChatAgent                                                                   | Think                                                                                                          |
-| ---------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| **Messages**           | `this.messages` — mutable field over a linear Sessions chain                  | `this.messages` — in-isolate projection of a branched Sessions path                                            |
-| **Storage**            | `agents/sessions` default handle in linear mode; legacy flat table auto-lifts | `agents/sessions` tree, compaction overlays, opt-in attachment storage; Think-private config in `think_config` |
-| **Regeneration**       | Destructive — `_deleteStaleRows` removes old response                         | Non-destructive — new response branches from same parent, old preserved                                        |
-| **Message pruning**    | `maxPersistedMessages` (deletes oldest)                                       | Compaction (non-destructive summaries via overlays)                                                            |
-| **Search**             | Not available                                                                 | FTS5 full-text search (per-session and cross-session)                                                          |
-| **Context blocks**     | Not available                                                                 | `configureSession()` with writable blocks, skills, search providers                                            |
-| **Multi-session**      | One conversation per DO                                                       | One conversation per DO behind a parent directory; named handles remain available                              |
-| **Config persistence** | Not available                                                                 | `configure(config)` / `getConfig()` with generic `Config` type                                                 |
+| Concept                | AIChatAgent                                                                | Think                                                                     |
+| ---------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| **Messages**           | `this.messages`, a mutable field over a linear Sessions chain              | `this.messages`, an in-isolate projection of a branched Sessions path     |
+| **Storage**            | `agents/sessions` default handle; the legacy flat table is lifted on start | `agents/sessions` tree with compaction overlays; config in `think_config` |
+| **Regeneration**       | Destructive — the old response is removed                                  | Non-destructive — the new response branches from the same user message    |
+| **History limits**     | `maxPersistedMessages` (deletes oldest)                                    | Compaction (summaries as overlays; originals kept)                        |
+| **Search**             | Reachable through `this.sessions.session().search()`; not model-facing     | `this.session.search()`, plus `search_context` over searchable blocks     |
+| **Context blocks**     | Not built in                                                               | `configureContext()` with writable, readonly, and searchable blocks       |
+| **Conversations**      | One per Durable Object                                                     | One per Durable Object; multi-chat apps add a parent directory            |
+| **Config persistence** | Not built in                                                               | `configure<T>(config)` / `getConfig<T>()`                                 |
 
 ### Turn execution
 
-| Concept                | AIChatAgent                                                               | Think                                                             |
-| ---------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| **WebSocket chat**     | Protocol handler in constructor                                           | Protocol handler via `_setupProtocolHandlers`                     |
-| **Sub-agent RPC**      | Not built in                                                              | `chat(userMessage, callback, options)` with `StreamCallback`      |
-| **Programmatic turns** | `saveMessages(messages)`                                                  | `saveMessages(messages)` (same)                                   |
-| **Continuation**       | `continueLastTurn(body?)` — appends to existing message (chunk rewriting) | `continueLastTurn(body?)` — creates new message (append deferred) |
-| **Concurrency**        | `messageConcurrency` (queue/latest/merge/drop/debounce)                   | `messageConcurrency` (same strategies, merge is non-destructive)  |
-| **Durability**         | Always-on recovery fibers; `chatRecovery` tunes budgets                   | Always-on recovery fibers; `chatRecovery` tunes budgets (same)    |
-| **Stability**          | `waitUntilStable()` / `hasPendingInteraction()`                           | `waitUntilStable()` / `hasPendingInteraction()` (same)            |
-| **Turn reset**         | `resetTurnState()` (protected)                                            | `resetTurnState()` (protected)                                    |
-| **onStart**            | Must call `super.onStart()`                                               | Constructor wrapping — no `super.onStart()` needed                |
+| Concept                | AIChatAgent                                                 | Think                                                                      |
+| ---------------------- | ----------------------------------------------------------- | -------------------------------------------------------------------------- |
+| **Sub-agent RPC**      | No `chat()` method                                          | `chat(message, callback, options)` with `StreamCallback`                   |
+| **Programmatic turns** | `saveMessages()`, `continueLastTurn()`                      | `runTurn()`, `saveMessages()`, `submitMessages()`, `continueLastTurn()`    |
+| **Continuation**       | `continueLastTurn()` appends to the last assistant message  | `continueLastTurn()` creates a new message (recovery continuations append) |
+| **Concurrency**        | `messageConcurrency` (queue, latest, merge, drop, debounce) | Same strategies; merge keeps each user message in the tree                 |
+| **Durability**         | Always-on recovery; `chatRecovery` tunes budgets            | Same; turns run as Tasks                                                   |
+| **Stability**          | `waitUntilStable()` / `hasPendingInteraction()`             | Same                                                                       |
+| **Turn reset**         | `resetTurnState()` (protected)                              | Same                                                                       |
+| **onStart**            | Wrapped in the constructor; no `super.onStart()` needed     | Same                                                                       |
 
 ### Client compatibility
 
-| Concept                    | AIChatAgent                                          | Think                                                |
-| -------------------------- | ---------------------------------------------------- | ---------------------------------------------------- |
-| **useAgentChat**           | Primary client hook                                  | Works unchanged (same protocol)                      |
-| **useChat (AI SDK)**       | `Response` return type designed for AI SDK internals | `StreamableResult` — works via `useAgentChat`        |
-| **v4 migration**           | `autoTransformMessages` bridges v4→v5                | v5 only (no legacy support)                          |
-| **Message reconciliation** | ID remapping, tool output merge                      | Session's idempotent append handles underlying cases |
-| **Client message sync**    | `CF_AGENT_CHAT_MESSAGES` from client                 | Not needed with Session                              |
-| **Plaintext responses**    | Auto-synthesizes UIMessage events                    | Requires `StreamableResult`                          |
+| Concept                    | AIChatAgent                                         | Think                                             |
+| -------------------------- | --------------------------------------------------- | ------------------------------------------------- |
+| **Client hook**            | `useAgentChat` from `@cloudflare/ai-chat/react`     | `useAgentChat` from `@cloudflare/think/react`     |
+| **Legacy message shapes**  | `autoTransformMessages` converts older formats      | Current UI messages only                          |
+| **Message reconciliation** | Shared `reconcileMessages` / `resolveToolMergeId`   | Same                                              |
+| **Client transcript sync** | `syncMessagesToServer` can push a client transcript | Omitted; the Session tree is server-authoritative |
+| **Plaintext responses**    | A plain-text `Response` is converted to UI chunks   | Not applicable; Think owns the model call         |
+
+Both React entry points wrap the same implementation in `agents/chat/react`.
 
 ---
 
@@ -79,40 +79,35 @@ Related:
 
 ### 1. You need full control over the LLM call
 
-You're doing something non-standard — custom streaming, multiple model calls per turn, RAG with vector search before the LLM call, response post-processing, or integrating with a non-AI-SDK provider. AIChatAgent lets you return any `Response` — even a plain text response or a manually constructed SSE stream.
+Custom streaming, several model calls per turn, retrieval before generation, response post-processing, or a non-AI-SDK provider. `onChatMessage` can return any `Response`, including plain text.
 
 ```typescript
 class MyAgent extends AIChatAgent<Env> {
   async onChatMessage(onFinish, options) {
-    // Full control: RAG → rerank → generate → post-process
     const context = await this.vectorSearch(this.messages);
-    const response = streamText({
-      model: openai("gpt-4o"),
+    const result = streamText({
+      model: workersai("@cf/moonshotai/kimi-k2.7-code"),
       system: buildPrompt(context),
       messages: await convertToModelMessages(this.messages),
       tools: this.buildTools(),
       onFinish
     });
-    return response.toUIMessageStreamResponse();
+    return result.toUIMessageStreamResponse();
   }
 }
 ```
 
-### 2. You're migrating from AI SDK v4
+### 2. You have stored messages in older formats
 
-`autoTransformMessages` handles the v4→v5 format bridge automatically. Think is v5-only — if you have existing v4 clients, AIChatAgent provides the migration path.
+`autoTransformMessages` converts legacy message shapes. Think expects current UI messages.
 
 ### 3. You want the `Response` abstraction
 
-If your infrastructure expects HTTP `Response` objects (e.g., for testing, middleware, or non-WebSocket transports), AIChatAgent's `onChatMessage → Response` pattern fits naturally. Think's `StreamableResult` is an internal abstraction.
+If your testing or middleware expects HTTP `Response` objects, `onChatMessage → Response` fits naturally.
 
-### 4. ~~You need message reconciliation~~ (no longer a differentiator)
+### 4. You want a thin chatbot
 
-Both agents now reconcile incoming messages via the shared `reconcileMessages` / `resolveToolMergeId` primitives in `agents/chat`. Think initially relied on Session's idempotent-append-by-ID for this, but that doesn't cover the case where the client posts an optimistic in-flight assistant under a client-generated ID while the server eventually persists the same `toolCallId` under a server-generated ID. Reconciliation runs in `Think._handleChatRequest` before persistence, mirroring `AIChatAgent.persistMessages`.
-
-### 5. You're building a simple chatbot with no memory
-
-If you don't need context blocks, compaction, search, or multi-session, AIChatAgent is less opinionated — you write your own `onChatMessage` and own exactly the complexity you need.
+If you do not need context blocks, compaction, workspace tools, or extensions, AIChatAgent is less opinionated: you write `onChatMessage` and own exactly the complexity you need.
 
 ---
 
@@ -120,23 +115,21 @@ If you don't need context blocks, compaction, search, or multi-session, AIChatAg
 
 ### 1. You want to ship fast
 
-3-line minimal subclass. Override `getModel()` and you have a working chat agent with streaming, persistence, abort/cancel, error handling, and resumable streams.
+Override `getModel()` and you have a streaming chat agent with persistence, cancellation, recovery, resumable streams, and workspace tools.
 
 ```typescript
 export class MyAgent extends Think<Env> {
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.7-code"
-    );
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 }
 ```
 
-Graduation path: add `getSystemPrompt()` for a custom prompt, `getTools()` for tools, `configureSession()` for memory — each is one method, each has a clear default.
+Then add `getTools()` for tools, `configureContext()` for memory and instructions, and `configureSession()` for compaction.
 
 ### 2. You need persistent memory
 
-Context blocks give the model writable persistent memory via the `set_context` tool. The model can learn and remember facts across conversations without any custom code.
+A writable context block gives the model memory it updates through the `set_context` tool.
 
 ```typescript
 configureContext(): ContextConfig[] {
@@ -150,128 +143,96 @@ configureContext(): ContextConfig[] {
 }
 ```
 
-The memory block content renders into the system prompt with token usage indicators. The model sees: `MEMORY (Important facts — use set_context to update) [42% — 462/1100 tokens]` and can proactively write to it.
+The block renders into the system prompt with a usage header such as `MEMORY (Important facts about the user.) [23% — 462/2000 tokens] [writable]`.
 
 ### 3. You need long conversations
 
-Compaction replaces old messages with LLM-generated summaries — non-destructive, original messages preserved as overlays. Contrast with AIChatAgent's `maxPersistedMessages` which deletes oldest messages (lossy, permanent data loss).
+Compaction summarizes older messages as overlays; the originals stay stored. `maxPersistedMessages` in AIChatAgent deletes them.
 
 ```typescript
 configureSession(session: Session) {
   return session
-    .onCompaction(createCompactFunction({
-      summarize: (prompt) => generateText({ model: this.getModel(), prompt }).then(r => r.text)
-    }))
+    .onCompaction(
+      createCompactFunction({
+        summarize: (prompt) =>
+          generateText({ model: this.resolveModel(), prompt }).then((r) => r.text)
+      })
+    )
     .compactAfter(50000);
 }
 ```
 
-### 4. You need conversation search
+### 4. You need regeneration with version history
 
-Think enables Sessions FTS5 for per-conversation message search. Search across conversations belongs in the parent directory or another application-owned index. The model can also search configured context through the `search_context` tool.
+Regenerated responses are branches in the Session tree; `session.getBranches(messageId)` lists them for a "v1 / v2 / v3" UI.
 
-### 5. You need regeneration with version history
+### 5. You are building a sub-agent system
 
-Think preserves all response alternatives as branches in the Session tree. Users can browse "v1 / v2 / v3" responses via `session.getBranches(messageId)`. AIChatAgent destroys the old response on regeneration.
-
-### 6. You're building a sub-agent system
-
-`chat(userMessage, callback)` is designed for parent-child agent communication over Durable Object RPC. The parent drives the child's turns and receives streaming events via `StreamCallback`.
+`chat()` streams a child's turn back to a parent over Durable Object RPC:
 
 ```typescript
-// Parent agent
-const child = this.spawn(ChildAgent, "child-1");
+const child = await this.subAgent(ResearchAgent, "research-1");
 await child.chat("Analyze this data", {
+  onStart: () => {},
   onEvent: (json) => this.forwardToClient(json),
-  onDone: () => this.handleChildComplete()
+  onDone: () => this.handleChildComplete(),
+  onError: (error) => console.error(error)
 });
 ```
 
-### 7. You need proactive agents
+The callback crosses the RPC boundary, so in practice it is an `RpcTarget`. For rendering a child's progress inline in a parent chat, use agent tools instead — see [agent-tools.md](./agent-tools.md).
 
-`saveMessages()` lets the agent inject messages and trigger turns from scheduled tasks, webhooks, or `onChatResponse` hooks — without a WebSocket connection.
+### 6. You need proactive or programmatic turns
 
-```typescript
-async onScheduled() {
-  await this.saveMessages([{
-    id: crypto.randomUUID(),
-    role: "user",
-    parts: [{ type: "text", text: "Time for your daily summary." }]
-  }]);
-}
-```
+`saveMessages()` runs a turn from a schedule, webhook, or hook without a WebSocket. `submitMessages()` adds durable acceptance with idempotency keys, and `getScheduledTasks()` declares recurring prompts.
 
-### 8. You need typed dynamic configuration
+### 7. You need typed server-side configuration
 
-`configure<Config>(config)` / `getConfig()` with TypeScript generics.
-Persisted in Think's `think_config` table, survives hibernation and restarts.
+`configure<T>(config)` / `getConfig<T>()` persist a JSON blob in `think_config` across hibernation. The type is a method-level generic.
 
 ```typescript
-class MyAgent extends Think<Env, { theme: string; model: string }> {
-  async onRequest(request: Request) {
-    const config = await request.json();
-    this.configure(config);
-    return new Response("OK");
+class MyAgent extends Think<Env> {
+  getModel() {
+    return (
+      this.getConfig<{ model: string }>()?.model ??
+      "@cf/moonshotai/kimi-k2.7-code"
+    );
   }
 }
 ```
 
-### 9. You need R2-backed skills or on-demand knowledge
+### 8. You need on-demand skills
 
-`R2SkillProvider` + `load_context` tool. The model sees skill metadata in the system prompt and loads full content on demand — without bloating the context window.
-
----
-
-## Architectural advantages Think has over AIChatAgent
-
-These are structural differences that come from the Session-backed architecture. They can't be added to AIChatAgent without a fundamental storage redesign.
-
-| Advantage                          | Why it matters                                                                 |
-| ---------------------------------- | ------------------------------------------------------------------------------ |
-| **Tree-structured messages**       | Branching, forking, non-destructive regeneration                               |
-| **Context blocks**                 | Persistent, structured, LLM-writable system prompt sections                    |
-| **Compaction overlays**            | Non-destructive summarization — original messages preserved                    |
-| **`assembleContext()` pipeline**   | Context blocks → frozen prompt → truncation → pruning, with LLM prefix caching |
-| **Session as first-class concept** | Multi-session, cross-session search, usage tracking, forking                   |
-| **`configureSession()` builder**   | Discoverable via autocomplete, async-capable, composable                       |
-
-## What AIChatAgent has that Think deliberately skips
-
-| Feature                                                    | Rationale                                                                    |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `onFinish` callback on `onChatMessage`                     | Think uses `onChatResponse` instead — cleaner, fires from all paths          |
-| `Response` return type                                     | Think uses `StreamableResult` — no HTTP abstraction mismatch                 |
-| v4 → v5 message migration                                  | Think is v5-only — no legacy clients to support                              |
-| ~~`reconcileMessages`~~                                    | Now shared via `agents/chat` and used by Think too — see #1381               |
-| Client message sync (`CF_AGENT_CHAT_MESSAGES` from client) | Unnecessary with Session's tree model                                        |
-| `maxPersistedMessages`                                     | Replaced by compaction (non-destructive, preserves information)              |
-| Plaintext response support                                 | Think requires `StreamableResult` — subclasses can wrap plain text if needed |
+`getSkills()` registers [Agent Skills](https://agentskills.io/). The prompt lists skill metadata, and the model loads full instructions with `activate_skill` only when a task needs them. See [skills.md](./skills.md).
 
 ---
 
-## Future directions
+## What Think adds beyond storage
 
-### Think could replace AIChatAgent entirely
+| Capability                   | Why it matters                                                              |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| **Tree-structured messages** | Non-destructive regeneration and branch navigation                          |
+| **Context blocks**           | Persistent, structured, model-writable system prompt sections               |
+| **Compaction overlays**      | Summarization without deleting originals                                    |
+| **Frozen system prompt**     | A stable prompt prefix across turns, which helps provider prompt caching    |
+| **Workspace and tools**      | File tools, code execution, fetch, browser, and extensions wired by default |
+| **Durable submission paths** | `submitMessages()`, scheduled tasks, messengers, and workflows              |
 
-Think's `onChatMessage` override gives the same level of control as AIChatAgent — you can ignore all the opinionated defaults and do everything manually. If Think is mature and tested enough, AIChatAgent becomes a legacy API maintained for backward compatibility.
+## What AIChatAgent keeps that Think skips
 
-### Shared Sessions layer
+| Feature                                | Rationale                                                    |
+| -------------------------------------- | ------------------------------------------------------------ |
+| `onFinish` callback on `onChatMessage` | Think uses `onChatResponse`, which fires from every path     |
+| `Response` return type                 | Think owns the model call, so there is no response to return |
+| Legacy message conversion              | Think has no legacy transcripts to support                   |
+| Client transcript sync                 | Think's Session tree is server-authoritative                 |
+| `maxPersistedMessages`                 | Replaced by compaction                                       |
+| Plaintext responses                    | Not applicable without `onChatMessage`                       |
 
-AIChatAgent and Think now both install `agents/sessions`. AIChatAgent uses a linear chain and keeps its lower-level protocol behavior; Think uses branching, compaction, context, and search.
+---
 
-### Think-specific client features
+## Open directions
 
-`useAgentChat` works with Think today, but Think-specific features could get first-class client support:
-
-- **Branch navigation** — `regenerate()` + `getBranches()` for "v1 / v2 / v3" UI
-- **Session status** — compaction progress and token estimates from capability diagnostics
-- **Context block UI** — display memory contents and token budgets
-- **Conversation list** — query the parent directory Durable Object that owns chat routing
-
-### Multi-agent orchestration
-
-Think's `chat()` RPC + `Session` + `configureSession` make it a natural building block for multi-agent systems where a parent Think agent delegates to child Think agents, each with their own conversation trees, memory, and tools.
-
-### `StreamableResult` ← `Response` bridge
-
-Think could accept `Response` objects in `onChatMessage` alongside `StreamableResult`, giving AIChatAgent users a zero-friction migration path. The bridge would parse SSE from the `Response` body into `StreamableResult` chunks.
+- **Think-specific client features.** Branch navigation, compaction status, and context-block display have server APIs but no dedicated client helpers yet.
+- **Multi-chat helpers.** Both classes use the same composition for many chats per user. `useChats()` and the directory remain example code (`examples/assistant`, `examples/next/routing`); see [rfc-user-chat-durable-objects.md](./rfc-user-chat-durable-objects.md) and [`docs/think/multi-chat.md`](../docs/think/multi-chat.md).
+- **More shared layer.** Capabilities that both classes need move into `agents/chat` rather than into one class.

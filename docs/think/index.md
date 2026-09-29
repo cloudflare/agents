@@ -1034,5 +1034,6 @@ The Agent Skills engine and its script runner live in
 - [Messengers](./messengers.md) — Chat SDK messenger ingress and delivery
 - [Client Tools](./client-tools.md) — Browser-side tools, approvals, and concurrency
 - [Sub-agents and Programmatic Turns](./sub-agents.md) — RPC streaming, `saveMessages`, recovery
+- [Multi-chat Applications](./multi-chat.md) — a per-user directory with one Think agent per conversation, sharing a workspace and MCP servers
 - [Programmatic Submissions](./programmatic-submissions.md) — durable acceptance, idempotent retry, cancellation, and status inspection
 - [Workflows](./workflows.md) — `ThinkWorkflow`, `step.prompt()`, structured output, and long-running workflow steps
