@@ -47,6 +47,11 @@ https://<your-worker>/messengers/telegram/webhook
 custom `verifyWebhook` function or explicitly opt out with
 `verifyWebhook: false`.
 
+To stream private-chat replies as native Telegram drafts instead of posting a
+message and editing it, pass `nativeStreaming: true`. With
+`@chat-adapter/telegram` 4.38 or later it defaults to `false`; earlier versions
+always use drafts in private chats. Group chats always post and edit.
+
 If one Think agent owns multiple Telegram bots, give each provider a distinct
 Chat SDK adapter name:
 
