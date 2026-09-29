@@ -723,6 +723,23 @@ function createMultiStepExecutableClientToolMockModel(): LanguageModel {
   } as LanguageModel;
 }
 
+export type PromptMessageForTest = { role: string; text: string };
+
+function promptMessageForTest(message: unknown): PromptMessageForTest {
+  const { role, content } = message as { role: string; content: unknown };
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+            .map((part: { type?: string; text?: string }) =>
+              part.type === "text" ? (part.text ?? "") : ""
+            )
+            .join("")
+        : "";
+  return { role, text };
+}
+
 function createTextOnlyMockModel(
   onPrompt?: (prompt: unknown[]) => void
 ): LanguageModel {
@@ -997,6 +1014,13 @@ export class ThinkClientToolsAgent extends Think {
   /** The prompt of each text-only model call. */
   async getTextOnlyPromptsForTest(): Promise<unknown[][]> {
     return this._textOnlyPrompts;
+  }
+
+  /** Each text-only model call's prompt as role/text pairs, oldest first. */
+  async getTextOnlyPromptTextsForTest(): Promise<PromptMessageForTest[][]> {
+    return this._textOnlyPrompts.map((prompt) =>
+      prompt.map(promptMessageForTest)
+    );
   }
 
   async setServerApprovalToolMode(value: boolean): Promise<void> {
