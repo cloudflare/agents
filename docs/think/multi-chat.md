@@ -556,6 +556,11 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
 message, which runs a normal durable turn in that chat. Like `recordChatTurn()`,
 it is not `@callable()`.
 
+Declared scheduled tasks run on the root agent only, so a `getScheduledTasks()`
+on the chat class does nothing unless it also overrides
+`getScheduledTasksScope()` to return `"all"`. Keep cross-chat schedules on the
+directory.
+
 See [Scheduled Tasks](./index.md#scheduled-tasks) for the schedule syntax.
 
 ## Known limits
