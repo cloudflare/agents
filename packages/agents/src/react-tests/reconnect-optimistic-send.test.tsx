@@ -1,8 +1,9 @@
 // Regression: the reconnect transcript replay must not drop a send buffered
 // while the socket was down, but must still honor a rollback of a delivered
 // send. Drives the real hook via a fake EventTarget agent whose send() returns
-// false when buffered (like PartySocket) — that return, captured at the real
-// send site in the transport, is what the fix reads to tell the two apart.
+// false when buffered (like PartySocket). That return, captured at the real
+// send site in the transport, plus the server's `connect` marker on its
+// connect transcript, is what the fix reads to tell the cases apart.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render as _render, cleanup } from "vitest-browser-react";
 import type { UIMessage } from "ai";
@@ -110,9 +111,17 @@ function makeInitialMessages(): UIMessage[] {
   ];
 }
 
-// Persisted transcript without the just-sent message — the shape Think's
-// _buildIdleConnectMessages and AIChatAgent's _rollbackDroppedSubmit both emit.
-function transcriptSnapshot(): Record<string, unknown> {
+// Persisted transcript without the just-sent message. Think's
+// _buildIdleConnectMessages marks it `connect: true`; a `drop` rollback does not.
+function connectSnapshot(): Record<string, unknown> {
+  return {
+    type: CHAT_MESSAGES,
+    messages: makeInitialMessages(),
+    connect: true
+  };
+}
+
+function rollbackSnapshot(): Record<string, unknown> {
   return { type: CHAT_MESSAGES, messages: makeInitialMessages() };
 }
 
@@ -197,7 +206,7 @@ describe("useAgentChat reconnect transcript replay vs optimistic send", () => {
     // Reconnect: the server replays its idle-connect transcript, which does NOT
     // yet include the buffered send.
     open(target);
-    dispatch(target, transcriptSnapshot());
+    dispatch(target, connectSnapshot());
     await sleep(50);
 
     // The reconnect replay must not drop the in-flight optimistic send.
@@ -238,7 +247,7 @@ describe("useAgentChat reconnect transcript replay vs optimistic send", () => {
     // The server rejects the overlapping submit and rolls it back by pushing a
     // transcript snapshot that omits it (messageConcurrency: "drop"). The
     // rollback must win — the delivered send is removed, not resurrected.
-    dispatch(target, transcriptSnapshot());
+    dispatch(target, rollbackSnapshot());
     await sleep(50);
 
     expect(transcript()).not.toContain(DELIVERED_USER);
@@ -284,7 +293,7 @@ describe("useAgentChat reconnect transcript replay vs optimistic send", () => {
     });
 
     open(target);
-    dispatch(target, transcriptSnapshot());
+    dispatch(target, connectSnapshot());
     await sleep(50);
 
     expect(transcript()).toContain(IN_FLIGHT_USER);
@@ -330,7 +339,46 @@ describe("useAgentChat reconnect transcript replay vs optimistic send", () => {
     });
 
     // Delivered on the reopened socket, then rolled back by the server snapshot.
-    dispatch(target, transcriptSnapshot());
+    dispatch(target, rollbackSnapshot());
+    await sleep(50);
+
+    expect(transcript()).not.toContain(DELIVERED_USER);
+    expect(transcript()).toContain(EXISTING_USER);
+    expect(transcript()).toContain(EXISTING_ASSISTANT);
+  });
+
+  // A reconnect while a turn is streaming (or to a server that sends no connect
+  // transcript, like AIChatAgent) delivers the buffered send before any
+  // snapshot. Under `drop` the first snapshot is then the rollback, which must
+  // win even though the send was buffered.
+  it("does NOT resurrect a buffered send the server rolls back after reconnect", async () => {
+    const { agent, target } = createFakeAgent({
+      name: "buffered-rollback",
+      url: "ws://localhost:3000/agents/chat/buffered-rollback?_pk=abc"
+    });
+    const { TestComponent, getChat } = mountChat(agent);
+
+    const { container } = await render(<TestComponent />);
+    const transcript = () =>
+      container.querySelector('[data-testid="transcript"]')?.textContent ?? "";
+
+    await vi.waitFor(() => {
+      expect(transcript()).toContain(EXISTING_USER);
+      expect(transcript()).toContain(EXISTING_ASSISTANT);
+    });
+
+    dispatch(target, { type: RESUME_NONE, reason: "idle" });
+    await sleep(10);
+
+    close(target);
+    void requireChat(getChat()).sendMessage({ text: DELIVERED_USER });
+
+    await vi.waitFor(() => {
+      expect(transcript()).toContain(DELIVERED_USER);
+    });
+
+    open(target);
+    dispatch(target, rollbackSnapshot());
     await sleep(50);
 
     expect(transcript()).not.toContain(DELIVERED_USER);

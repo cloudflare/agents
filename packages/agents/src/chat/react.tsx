@@ -651,11 +651,8 @@ function prependMissingHydratedMessages<ChatMessage extends UIMessage>(
   return [...missingHydratedMessages, ...currentMessages];
 }
 
-// Re-append the specific buffered sends a snapshot omits, restoring only the
-// tracked ids (in local order) so a message the server deliberately dropped is
-// left alone. Known limitation: a buffered send that is delivered and then
-// rolled back shares its id with the rollback snapshot, so that exact id can
-// still be resurrected under non-`queue` concurrency.
+// Re-append the specific buffered sends a connect transcript omits, restoring
+// only the tracked ids (in local order).
 function restoreBufferedSends<ChatMessage extends UIMessage>(
   snapshot: ChatMessage[],
   local: readonly ChatMessage[],
@@ -2162,8 +2159,12 @@ export function useAgentChat<
 
         case MessageType.CF_AGENT_CHAT_MESSAGES: {
           // One-shot, consumed outside the updater so a re-invoked updater
-          // sees the same ids.
-          const bufferedSendIds = new Set(pendingBufferedSendIdsRef.current);
+          // sees the same ids. Only a connect transcript predates the buffered
+          // sends; any other snapshot (e.g. a `drop` rollback after a
+          // mid-stream reconnect) has already seen them and wins.
+          const bufferedSendIds = data.connect
+            ? new Set(pendingBufferedSendIdsRef.current)
+            : new Set<string>();
           pendingBufferedSendIdsRef.current.clear();
           setMessages((currentMessages: ChatMessage[]) => {
             let next = preserveProtectedStreamingAssistant(
