@@ -1,0 +1,25 @@
+packages/agents/src/tests/capabilities/lifecycle.ts
+  s_d0e5bf68a766f9::t_153e8c2e16967d 703-704,707-726,735-739,742-759,761,786-810
+packages/agents/src/tests/lifecycle/startup.test.ts
+  s_d0e5bf68a766f9::t_66b818df87830e 124-159
+packages/agents/src/lifecycle/capability.ts
+  s_d0e5bf68a766f9::t_893f5a55bf0769 82-86
+packages/agents/src/lifecycle/durable-object-lifecycle.ts
+  s_d0e5bf68a766f9::t_9ea7949ea480cf 420-421
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4c4ca957f68db11dfd8f03ea698faf1f20070b07",
+  "prompts": {},
+  "sessions": {
+    "s_d0e5bf68a766f9": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "949d5d10-4895-4693-818e-5b6d232ed34a",
+        "model": "claude-opus-5-5-medium"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
