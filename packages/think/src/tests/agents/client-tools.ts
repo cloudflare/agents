@@ -723,7 +723,26 @@ function createMultiStepExecutableClientToolMockModel(): LanguageModel {
   } as LanguageModel;
 }
 
-function createTextOnlyMockModel(): LanguageModel {
+export type PromptMessageForTest = { role: string; text: string };
+
+function promptMessageForTest(message: unknown): PromptMessageForTest {
+  const { role, content } = message as { role: string; content: unknown };
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+            .map((part: { type?: string; text?: string }) =>
+              part.type === "text" ? (part.text ?? "") : ""
+            )
+            .join("")
+        : "";
+  return { role, text };
+}
+
+function createTextOnlyMockModel(
+  onPrompt?: (prompt: PromptMessageForTest[]) => void
+): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -732,7 +751,8 @@ function createTextOnlyMockModel(): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented");
     },
-    doStream() {
+    doStream(options: { prompt: unknown[] }) {
+      onPrompt?.(options.prompt.map(promptMessageForTest));
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
@@ -802,6 +822,7 @@ export type BilledRowsResult = { rowsRead: number; rowsWritten: number };
 export class ThinkClientToolsAgent extends Think {
   readonly #billed = new BilledRowsForTest(this.ctx.storage.sql);
   private _useTextOnly = false;
+  private _textOnlyPrompts: PromptMessageForTest[][] = [];
   private _useSlowStream = false;
   private _useSlowClientToolStream = false;
   private _slowClientToolDelayMs = 30;
@@ -940,7 +961,10 @@ export class ThinkClientToolsAgent extends Think {
         this._midStreamParallelGapsBeforeSlow,
         this._midStreamParallelGapsAfterSlow
       );
-    if (this._useTextOnly) return createTextOnlyMockModel();
+    if (this._useTextOnly)
+      return createTextOnlyMockModel((prompt) =>
+        this._textOnlyPrompts.push(prompt)
+      );
     if (this._useSequentialApprovalTool)
       return createSequentialApprovalMockModel();
     if (this._useServerApprovalTool) return createServerApprovalToolMockModel();
@@ -985,6 +1009,11 @@ export class ThinkClientToolsAgent extends Think {
 
   async setTextOnlyMode(value: boolean): Promise<void> {
     this._useTextOnly = value;
+  }
+
+  /** The prompt of each text-only model call, oldest first. */
+  async getTextOnlyPromptsForTest(): Promise<PromptMessageForTest[][]> {
+    return this._textOnlyPrompts;
   }
 
   async setServerApprovalToolMode(value: boolean): Promise<void> {

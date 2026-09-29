@@ -241,6 +241,19 @@ export type MockModelCallOptions = {
   }>;
 };
 
+/** A model call's prompt as `role: text` lines, for prompt assertions. */
+function promptLinesForTest(callOptions: MockModelCallOptions): string[] {
+  return (callOptions.prompt ?? []).map((message) => {
+    const text =
+      typeof message.content === "string"
+        ? message.content
+        : (message.content ?? [])
+            .map((part) => (part.type === "text" ? (part.text ?? "") : ""))
+            .join("");
+    return `${message.role}: ${text}`;
+  });
+}
+
 /** Create a streaming text model with static or prompt-derived output. */
 export function createMockModel(
   response: string | ((callOptions: MockModelCallOptions) => string),
@@ -1380,6 +1393,7 @@ export class ThinkTestAgent extends Think {
   private _releaseBeforeStepGate: (() => void) | null = null;
   private _beforeStepGateEntered = false;
   private _lastModelCallSettings: CapturedModelCallSettings | null = null;
+  private _modelPromptsForTest: string[][] = [];
   private _reasoningResponse: { response: string; reasoning: string } | null =
     null;
   private _inBandErrorResponse: {
@@ -1990,6 +2004,11 @@ export class ThinkTestAgent extends Think {
 
   async getLastModelCallSettings(): Promise<CapturedModelCallSettings | null> {
     return this._lastModelCallSettings;
+  }
+
+  /** Each model call's prompt as `role: text` lines, oldest first. */
+  async getModelPromptsForTest(): Promise<string[][]> {
+    return this._modelPromptsForTest;
   }
 
   async getBeforeStepLog(): Promise<
@@ -3655,11 +3674,17 @@ export class ThinkTestAgent extends Think {
     if (this._multiChunks) {
       return createMultiChunkMockModel(this._multiChunks);
     }
-    return createMockModel(this._response, {
-      onCall: (settings) => {
-        this._lastModelCallSettings = settings;
+    return createMockModel(
+      (callOptions) => {
+        this._modelPromptsForTest.push(promptLinesForTest(callOptions));
+        return this._response;
+      },
+      {
+        onCall: (settings) => {
+          this._lastModelCallSettings = settings;
+        }
       }
-    });
+    );
   }
 
   async getChatErrorLog(): Promise<string[]> {
@@ -3668,6 +3693,10 @@ export class ThinkTestAgent extends Think {
 
   async getStoredMessages(): Promise<UIMessage[]> {
     return this.getMessages();
+  }
+
+  async getBranchesForTest(messageId: string): Promise<UIMessage[]> {
+    return (await this.session.getBranches(messageId)) as UIMessage[];
   }
 
   async getCachedMessagesForTest(): Promise<UIMessage[]> {
@@ -9046,6 +9075,7 @@ export class ThinkRecoveryTestAgent extends Think {
   private _stashResult: { success: boolean; error?: string } | null = null;
   private _rejectPrefill = false;
   private _lastPromptRole: string | undefined;
+  private _modelPromptsForTest: string[][] = [];
   private _throwBeforeTurnMessage: string | null = null;
   // recovery × channels: capture the channel context + assembled system prompt
   // that each turn (including recovered ones) actually ran with, so a test can
@@ -9193,7 +9223,15 @@ export class ThinkRecoveryTestAgent extends Think {
         }
       });
     }
-    return createMockModel("Continued response.");
+    return createMockModel((callOptions) => {
+      this._modelPromptsForTest.push(promptLinesForTest(callOptions));
+      return "Continued response.";
+    });
+  }
+
+  /** Each model call's prompt as `role: text` lines, oldest first. */
+  async getModelPromptsForTest(): Promise<string[][]> {
+    return this._modelPromptsForTest;
   }
 
   override beforeTurn(ctx: TurnContext): void {
@@ -9257,6 +9295,10 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async getStoredMessages(): Promise<UIMessage[]> {
     return this.getMessages();
+  }
+
+  async getBranchesForTest(messageId: string): Promise<UIMessage[]> {
+    return (await this.session.getBranches(messageId)) as UIMessage[];
   }
 
   async getActiveFibers(): Promise<Array<{ id: string; name: string }>> {

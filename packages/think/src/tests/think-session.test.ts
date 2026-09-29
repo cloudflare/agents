@@ -683,6 +683,66 @@ describe("Think — error handling", () => {
     }
   });
 
+  it("retries a regeneration that stalls before its first chunk as a new branch (#2028)", async () => {
+    const room = `stall-first-chunk-regenerate-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    const ws = await connectThinkTestAgentWS(room);
+    const user: UIMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: "hello" }]
+    };
+    const sendChat = async (trigger?: string) => {
+      const done = waitForProtocolMessage(
+        ws,
+        (m) => m.type === "cf_agent_use_chat_response" && m.done === true
+      );
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({ messages: [user], trigger })
+          }
+        })
+      );
+      return done;
+    };
+    const textOf = (message: UIMessage) =>
+      message.parts
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("");
+    try {
+      await agent.setResponse("First answer.");
+      await sendChat();
+
+      await agent.setResponse("Second answer.");
+      await agent.armStallForTest(0, 50);
+      expect((await sendChat("regenerate-message")).error).toBeUndefined();
+
+      const recovered = await agent.runScheduledRecoveryForTest();
+      expect(recovered.scheduledRetries).toBe(1);
+      expect(recovered.scheduledContinues).toBe(0);
+
+      const messages = (await agent.getStoredMessages()) as UIMessage[];
+      expect(messages.map(textOf)).toEqual(["hello", "Second answer."]);
+      const branches = (await agent.getBranchesForTest(user.id)) as UIMessage[];
+      expect(branches.map(textOf).sort()).toEqual([
+        "First answer.",
+        "Second answer."
+      ]);
+      // The stalled attempt and its retry both answer the user message alone.
+      const prompts = await agent.getModelPromptsForTest();
+      expect(prompts).toHaveLength(3);
+      for (const prompt of prompts) {
+        expect(prompt.slice(1)).toEqual(["user: hello"]);
+      }
+    } finally {
+      await closeWS(ws);
+    }
+  });
+
   it.each([
     { classification: "transient" as const, inStream: false },
     { classification: "transient" as const, inStream: true },
@@ -4347,6 +4407,62 @@ describe("Think — onChatRecovery", () => {
         .join("")
     ).toBe("Continued response.");
     expect(await agent.getTurnBodies()).toEqual([{ mode: "snapshot" }]);
+  });
+
+  it("retries a pre-stream interrupted regeneration as a new branch (#2028)", async () => {
+    const agent = await freshRecoveryAgent(
+      `pre-stream-regenerate-${crypto.randomUUID()}`
+    );
+
+    await agent.persistTestMessage({
+      id: "u-regenerate",
+      role: "user",
+      parts: [{ type: "text", text: "Answer this again" }]
+    });
+    await agent.persistTestMessage({
+      id: "a-previous",
+      role: "assistant",
+      parts: [{ type: "text", text: "Previous answer." }]
+    });
+
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-regenerate",
+      {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: "req-regenerate",
+          continuation: false,
+          latestMessageId: "a-previous",
+          latestMessageRole: "assistant",
+          latestUserMessageId: "u-regenerate",
+          startedAt: Date.now(),
+          branchParentId: "u-regenerate"
+        },
+        user: null
+      }
+    );
+
+    const scheduled = await agent.triggerFiberRecovery();
+    expect(scheduled.scheduledRetryCount).toBe(1);
+    expect(scheduled.scheduledContinueCount).toBe(0);
+    await agent.runScheduledRecoveryRetryForTest();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.id)).toEqual([
+      "u-regenerate",
+      expect.not.stringMatching(/^a-previous$/)
+    ]);
+    const branches = (await agent.getBranchesForTest(
+      "u-regenerate"
+    )) as UIMessage[];
+    expect(branches).toHaveLength(2);
+    expect(branches.find((m) => m.id === "a-previous")?.parts).toEqual([
+      { type: "text", text: "Previous answer." }
+    ]);
+    const prompts = await agent.getModelPromptsForTest();
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0].slice(1)).toEqual(["user: Answer this again"]);
   });
 
   it("retries an interrupted opened stream with no assistant content", async () => {
