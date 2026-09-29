@@ -32,6 +32,23 @@ const RESUME_PROBE_TIMEOUT_MS = 5000;
  */
 const RESUME_PENDING_TIMEOUT_MS = 60000;
 
+const SOCKET_CLOSED_MID_STREAM = "WebSocket closed mid-stream";
+
+/**
+ * Ends a stream whose socket closed before the terminal `done` frame, so the
+ * AI SDK reports an interrupted turn instead of a completed one (#2013).
+ * Uses an error chunk because `controller.error()` would discard chunks the
+ * consumer has not read yet.
+ */
+function interruptChatStream(
+  controller: ReadableStreamDefaultController<UIMessageChunk>,
+  batch?: ReplayChunkBatch
+): void {
+  batch?.flush();
+  controller.enqueue({ type: "error", errorText: SOCKET_CLOSED_MID_STREAM });
+  controller.close();
+}
+
 /**
  * Agent-like interface for sending/receiving WebSocket messages.
  * Matches `AgentClient` from `agents/client` and the connection returned by
@@ -454,7 +471,7 @@ export class WebSocketChatTransport<
         };
 
         const onClose = () => {
-          finish(() => controller.close(), false, false);
+          finish(() => interruptChatStream(controller), false, false);
         };
 
         agent.addEventListener("message", onMessage, {
@@ -818,11 +835,14 @@ export class WebSocketChatTransport<
           }
         };
 
+        // Before the resume handshake there is no server turn to interrupt;
+        // closing cleanly lets the hook re-probe on the next open.
         const onClose = () =>
-          finish(() => {
-            batch.flush();
-            controller.close();
-          });
+          finish(() =>
+            requestId === null
+              ? controller.close()
+              : interruptChatStream(controller, batch)
+          );
 
         agent.addEventListener("message", onMessage, {
           signal: streamController.signal
@@ -948,14 +968,7 @@ export class WebSocketChatTransport<
         };
 
         const onClose = () => {
-          finish(
-            () => {
-              batch.flush();
-              controller.close();
-            },
-            false,
-            false
-          );
+          finish(() => interruptChatStream(controller, batch), false, false);
         };
 
         agent.addEventListener("message", onMessage, {

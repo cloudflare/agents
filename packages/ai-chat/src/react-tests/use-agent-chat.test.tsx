@@ -8133,3 +8133,168 @@ describe("useAgentChat terminal frames", () => {
     ]);
   });
 });
+
+describe("useAgentChat socket close mid-stream (#2013)", () => {
+  function createAgentWithTarget({ name, url }: { name: string; url: string }) {
+    const target = new EventTarget();
+    const sentMessages: string[] = [];
+    const agent = createAgent({
+      name,
+      url,
+      send: (data: string) => sentMessages.push(data)
+    });
+    (agent as unknown as Record<string, unknown>).addEventListener =
+      target.addEventListener.bind(target);
+    (agent as unknown as Record<string, unknown>).removeEventListener =
+      target.removeEventListener.bind(target);
+    return { agent, target, sentMessages };
+  }
+
+  function dispatch(target: EventTarget, data: Record<string, unknown>) {
+    target.dispatchEvent(
+      new MessageEvent("message", { data: JSON.stringify(data) })
+    );
+  }
+
+  function sentOfType(sentMessages: string[], type: string) {
+    return sentMessages
+      .map((message) => JSON.parse(message) as { type: string; id?: string })
+      .filter((message) => message.type === type);
+  }
+
+  it("resumes after the socket drops mid-response and ends ready", async () => {
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "close-mid-stream-resume",
+      url: "ws://localhost:3000/agents/chat/close-mid-stream-resume?_pk=abc"
+    });
+    const onError = vi.fn();
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    const statuses: string[] = [];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        onError
+      });
+      chatInstance = chat;
+      statuses.push(chat.status);
+      const assistant = chat.messages.filter((m) => m.role === "assistant");
+      const text = assistant
+        .flatMap((m) => m.parts)
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("");
+      return (
+        <div>
+          <div data-testid="status">{chat.status}</div>
+          <div data-testid="text">{text}</div>
+          <div data-testid="assistants">{assistant.length}</div>
+          <div data-testid="error">{chat.error?.message ?? ""}</div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_stream_resume_none" });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      void chatInstance!.sendMessage({ text: "hi" });
+      await sleep(20);
+    });
+    const requestId = sentOfType(sentMessages, "cf_agent_use_chat_request")[0]
+      ?.id;
+    expect(requestId).toBeDefined();
+
+    const chunk = (seq: number, body: string, replay = false) => ({
+      type: "cf_agent_use_chat_response",
+      id: requestId,
+      body,
+      done: false,
+      seq,
+      ...(replay && { replay: true })
+    });
+
+    await act(async () => {
+      dispatch(target, chunk(0, '{"type":"start","messageId":"a1"}'));
+      dispatch(target, chunk(1, '{"type":"text-start","id":"t1"}'));
+      dispatch(
+        target,
+        chunk(2, '{"type":"text-delta","id":"t1","delta":"Hel"}')
+      );
+      await sleep(10);
+    });
+    await expect.element(screen.getByTestId("text")).toHaveTextContent("Hel");
+
+    const resumeRequestsBefore = sentOfType(
+      sentMessages,
+      "cf_agent_stream_resume_request"
+    ).length;
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      await sleep(20);
+    });
+    const statusAfterClose = statuses.at(-1);
+
+    await act(async () => {
+      target.dispatchEvent(new Event("open"));
+      await sleep(20);
+    });
+    expect(
+      sentOfType(sentMessages, "cf_agent_stream_resume_request").length
+    ).toBeGreaterThan(resumeRequestsBefore);
+
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_stream_resuming", id: requestId });
+      await sleep(10);
+    });
+    await act(async () => {
+      dispatch(target, chunk(0, '{"type":"start","messageId":"a1"}', true));
+      dispatch(target, chunk(1, '{"type":"text-start","id":"t1"}', true));
+      dispatch(
+        target,
+        chunk(2, '{"type":"text-delta","id":"t1","delta":"Hel"}', true)
+      );
+      dispatch(
+        target,
+        chunk(3, '{"type":"text-delta","id":"t1","delta":"lo"}')
+      );
+      dispatch(target, chunk(4, '{"type":"text-end","id":"t1"}'));
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: requestId,
+        body: "",
+        done: true
+      });
+      await sleep(20);
+    });
+
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("ready");
+    await expect
+      .element(screen.getByTestId("text"))
+      .toHaveTextContent(/^Hello$/);
+    await expect
+      .element(screen.getByTestId("assistants"))
+      .toHaveTextContent("1");
+    // The drop surfaces as an error once, and the resume clears it.
+    expect(statusAfterClose).toBe("error");
+    expect(onError).toHaveBeenCalledTimes(1);
+    await expect.element(screen.getByTestId("error")).toBeEmptyDOMElement();
+  });
+});
