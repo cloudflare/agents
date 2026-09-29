@@ -3473,7 +3473,7 @@ describe("Think — regeneration", () => {
 
     const prompts = await agent.getTextOnlyPromptTextsForTest();
     expect(prompts).toHaveLength(4);
-    const conversation = (prompt: typeof prompts[number]) =>
+    const conversation = (prompt: (typeof prompts)[number]) =>
       prompt.slice(1).map((m) => `${m.role}: ${m.text}`);
     expect(prompts[2]).toEqual(prompts[1]);
     expect(conversation(prompts[2])).toEqual([
