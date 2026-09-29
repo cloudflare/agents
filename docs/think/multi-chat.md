@@ -9,8 +9,10 @@ agent:
 
 - one **directory** Durable Object per user, which owns the chat list and every
   resource that should be shared across that user's chats;
-- one **Think** Durable Object per conversation, which owns that conversation's
-  messages, memory, extensions, and branch history.
+- one **Think** agent per conversation, which owns that conversation's
+  messages, memory, extensions, and branch history. In the reference app each
+  chat is a facet of the directory: its own isolate and SQLite database, but
+  placed with the directory rather than independently.
 
 A Think instance holds exactly one conversation. Putting every conversation in
 one Durable Object would serialize all of a user's turns on one single-threaded
@@ -23,15 +25,11 @@ the reference Think app. The code below is taken from that example.
 > **Topology note.** `examples/assistant` hosts each chat as a facet (a
 > [dynamic agent](https://github.com/cloudflare/agents/blob/main/docs/agents/sub-agents.md))
 > of the directory, using `subAgent()`, `hasSubAgent()`, `listSubAgents()`,
-> and `deleteSubAgent()`. Those methods still work but are deprecated aliases
-> for `this.dynamicAgents`. For an open-ended set of long-lived chats, the Agents
-> SDK now recommends one top-level Durable Object per chat behind a per-user
-> hub — see
-> [Routing to independent Agents](https://github.com/cloudflare/agents/blob/main/docs/agents/routing.md#routing-to-independent-agents)
-> and [`examples/next/routing`](https://github.com/cloudflare/agents/tree/main/examples/next/routing).
-> The ownership split in this guide (what lives on the directory and what lives
-> on each chat) is the same in both topologies; only the routing and the
-> child-to-parent lookup differ. See [Known limits](#known-limits).
+> and `deleteSubAgent()`. Those methods are aliases for `this.dynamicAgents`.
+> The same ownership split also works with one top-level Durable Object per
+> chat behind a per-user hub (see
+> [Routing to independent Agents](https://github.com/cloudflare/agents/blob/main/docs/agents/routing.md#routing-to-independent-agents));
+> only the routing and the child-to-parent lookup differ.
 
 ## Architecture
 
@@ -563,14 +561,13 @@ See [Scheduled Tasks](./index.md#scheduled-tasks) for the schedule syntax.
 
 - **Facet topology.** Because the example's chats are facets of the directory,
   they are colocated with it on one machine, share its physical alarm, and
-  depend on the root for their native WebSockets. The
+  depend on the root for their native WebSockets, so every chat frame wakes the
+  directory. The
   [dynamic agents guide](https://github.com/cloudflare/agents/blob/main/docs/agents/sub-agents.md#when-to-use-dynamic-agents)
-  lists these tradeoffs and recommends top-level chat Durable Objects for many
-  long-lived chats per user.
-  [`rfc-user-chat-durable-objects.md`](https://github.com/cloudflare/agents/blob/main/design/rfc-user-chat-durable-objects.md)
-  records the planned migration of `examples/assistant`: chats become top-level
-  objects and the proxies look up the directory with `getAgentByName()` instead
-  of `parentAgent()`. The workspace and MCP boundaries do not change.
+  covers these tradeoffs. If a user has many chats streaming at once, host each
+  chat as a top-level Durable Object and look up the directory with
+  `getAgentByName()` instead of `parentAgent()`; the workspace and MCP
+  boundaries do not change.
 - **The directory is the fan-in point.** Every shared workspace call and every
   MCP tool call from every chat is one RPC into the directory's single-threaded
   isolate. Writes to the same path serialize there, and concurrent MCP calls

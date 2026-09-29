@@ -258,7 +258,7 @@ This is **better** than AIChatAgent's approach: alternatives are preserved, user
 
 **Why Think needs it:** Subclasses can adjust system prompts, select different models, skip expensive context assembly (RAG, memory retrieval), or log different metrics for continuations.
 
-**Status:** Resolved in Phase 0. The `continuation` field is added to AIChatAgent's `OnChatMessageOptions` as a non-breaking addition (see [chat-improvements.md §3](./chat-improvements.md#3-add-continuation-to-onchatmessageoptions)). Think imports the shared type from `agents/chat` and sets the flag at its call sites.
+**Status:** Resolved in Phase 0. The `continuation` field is added to AIChatAgent's `OnChatMessageOptions` as a non-breaking addition (see [chat-improvements.md](./chat-improvements.md#non-breaking-additions)). Think imports the shared type from `agents/chat` and sets the flag at its call sites.
 
 **Effort:** Zero for Think — the type and AIChatAgent wiring land in Phase 0.
 

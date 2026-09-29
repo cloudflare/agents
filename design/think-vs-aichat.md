@@ -209,14 +209,14 @@ class MyAgent extends Think<Env> {
 
 ## What Think adds beyond storage
 
-| Capability                   | Why it matters                                                              |
-| ---------------------------- | --------------------------------------------------------------------------- |
-| **Tree-structured messages** | Non-destructive regeneration and branch navigation                          |
-| **Context blocks**           | Persistent, structured, model-writable system prompt sections               |
-| **Compaction overlays**      | Summarization without deleting originals                                    |
-| **Frozen system prompt**     | A stable prompt prefix across turns, which helps provider prompt caching    |
-| **Workspace and tools**      | File tools, code execution, fetch, browser, and extensions wired by default |
-| **Durable submission paths** | `submitMessages()`, scheduled tasks, messengers, and workflows              |
+| Capability                   | Why it matters                                                                                      |
+| ---------------------------- | --------------------------------------------------------------------------------------------------- |
+| **Tree-structured messages** | Non-destructive regeneration and branch navigation                                                  |
+| **Context blocks**           | Persistent, structured, model-writable system prompt sections                                       |
+| **Compaction overlays**      | Summarization without deleting originals                                                            |
+| **Frozen system prompt**     | A stable prompt prefix across turns, which helps provider prompt caching                            |
+| **Workspace and tools**      | Workspace file and Bash tools by default; code execution, fetch, browser, and extensions are opt-in |
+| **Durable submission paths** | `submitMessages()`, scheduled tasks, messengers, and workflows                                      |
 
 ## What AIChatAgent keeps that Think skips
 

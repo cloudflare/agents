@@ -187,7 +187,7 @@ Durable Object binding and migration explicitly.
 
 ```jsonc
 {
-  "compatibility_date": "2026-01-28",
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "ai": { "binding": "AI" },
   "durable_objects": {
@@ -204,18 +204,18 @@ Both Think and [`AIChatAgent`](https://github.com/cloudflare/agents/blob/main/do
 
 **AIChatAgent** is a protocol adapter. You override `onChatMessage` and are responsible for calling `streamText`, wiring tools, converting messages, and returning a `Response`. AIChatAgent handles the plumbing — message persistence, streaming, abort, resume — but the LLM call is entirely your concern.
 
-**Think** is an opinionated framework. It makes decisions for you: `getModel()` returns the model, `getSystemPrompt()` or `configureContext()` sets the prompt, `getTools()` returns tools. The default `onChatMessage` runs the complete agentic loop. You override individual pieces, not the whole pipeline.
+**Think** is an opinionated framework. It makes decisions for you: `getModel()` returns the model, `getSystemPrompt()` or `configureContext()` sets the prompt, `getTools()` returns tools. Think runs the complete agentic loop itself; there is no `onChatMessage` to override. You customize individual pieces through these overrides and the lifecycle hooks (`beforeTurn`, `beforeStep`, `beforeToolCall`, and so on), not the whole pipeline.
 
 | Concern                | AIChatAgent                                                      | Think                                                      |
 | ---------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------- |
 | **Minimal subclass**   | ~15 lines (wire `streamText` + tools + system prompt + response) | 3 lines (`getModel()` only)                                |
-| **Storage**            | Flat SQL table                                                   | Sessions: tree-structured messages, compaction, FTS5       |
+| **Storage**            | Sessions, used as a single linear transcript                     | Sessions: tree-structured messages, compaction, FTS5       |
 | **Regeneration**       | Destructive (old response deleted)                               | Non-destructive branching (old responses preserved)        |
 | **Context management** | Manual                                                           | Context blocks with LLM-writable persistent memory         |
 | **Sub-agent RPC**      | Not built in                                                     | `chat()` with `StreamCallback`                             |
 | **Programmatic turns** | `saveMessages()`                                                 | `saveMessages()`, `submitMessages()`, `continueLastTurn()` |
 | **Compaction**         | `maxPersistedMessages` (deletes oldest)                          | Non-destructive summaries via overlays                     |
-| **Search**             | Not available                                                    | FTS5 full-text search per-session and cross-session        |
+| **Search**             | Not available                                                    | FTS5 full-text search within the conversation              |
 
 ### When to use AIChatAgent
 

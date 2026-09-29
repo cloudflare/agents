@@ -46,7 +46,9 @@ hook can:
 - mutate the request (`Request`)
 - short-circuit with a response (`Response`)
 
-After a WebSocket upgrade, frames flow directly to the child facet.
+After a WebSocket upgrade, the root parent keeps the native socket. Every
+frame wakes the root, which forwards it to the child over RPC without
+re-running `onBeforeSubAgent`; replies come back the same way.
 
 ## Parent-owned registry
 
