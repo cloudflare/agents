@@ -294,22 +294,42 @@ describe("reconcileMessages — ID reconciliation", () => {
     ).toBeUndefined();
   });
 
-  it("still merges a terminal result into an unclaimed same-input duplicate", () => {
-    // The server row is claimed by an exact-ID match, so the stale duplicate
-    // can claim nothing. It carries the SAME input, so it is the same call and
-    // must still pick up the server's terminal state — otherwise it persists
-    // as a dangling `input-available` orphan (#1381) and the server's
-    // output-error is lost from that row (#1623).
+  it("does not copy a claimed row's result into a later identical call", () => {
+    // srv-a1 is claimed by its exact-ID echo. cli-a2 reuses tc1 with the same
+    // input, which is indistinguishable from a new call, so it stays pending
+    // rather than inheriting the earlier turn's result.
     const server = [
-      toolAssistantMsg("srv-a1", "tc1", "output-error", {
-        input: { q: "same" },
-        output: undefined
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { query: "status" },
+        output: "offline"
       })
     ];
     const client = [
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { query: "status" },
+        output: "offline"
+      }),
+      userMsg("u2", "again"),
+      toolAssistantMsg("cli-a2", "tc1", "input-available", {
+        input: { query: "status" }
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+    const later = result[2].parts[0] as Record<string, unknown>;
+
+    expect(result[2].id).toBe("cli-a2");
+    expect(later.state).toBe("input-available");
+    expect(later.output).toBeUndefined();
+  });
+
+  it("resolves a stale copy submitted in place of its row", () => {
+    const server = [
       toolAssistantMsg("srv-a1", "tc1", "output-error", {
         input: { q: "same" }
-      }),
+      })
+    ];
+    const client = [
       toolAssistantMsg("cli-a9", "tc1", "input-available", {
         input: { q: "same" }
       })
@@ -317,10 +337,175 @@ describe("reconcileMessages — ID reconciliation", () => {
 
     const result = reconcileMessages(client, server);
 
-    expect(result).toHaveLength(2);
-    expect((result[1].parts[0] as Record<string, unknown>).state).toBe(
+    expect(result[0].id).toBe("srv-a1");
+    expect((result[0].parts[0] as Record<string, unknown>).state).toBe(
       "output-error"
     );
+  });
+
+  it("does not let a compacted-away row be claimed by a different call", () => {
+    // The older turn is absent from the submitted transcript, so srv-a1 is
+    // unclaimed. cli-a2 reuses tc1 with a different input and must not adopt
+    // srv-a1's ID (which would overwrite it) or its result.
+    const server = [
+      userMsg("u1", "first"),
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { turn: 1 },
+        output: "old"
+      })
+    ];
+    const client = [
+      userMsg("u2", "second"),
+      toolAssistantMsg("cli-a2", "tc1", "input-available", {
+        input: { turn: 2 }
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+    const part = result[1].parts[0] as Record<string, unknown>;
+
+    expect(result[1].id).toBe("cli-a2");
+    expect(part.state).toBe("input-available");
+    expect(part.output).toBeUndefined();
+  });
+
+  it("does not claim a row whose reused toolCallId belongs to a different tool", () => {
+    const server = [
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: {},
+        output: "weather",
+        toolName: "weather"
+      })
+    ];
+    const client = [
+      toolAssistantMsg("cli-a2", "tc1", "input-available", {
+        input: {},
+        toolName: "time"
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+
+    expect(result[0].id).toBe("cli-a2");
+    expect((result[0].parts[0] as Record<string, unknown>).state).toBe(
+      "input-available"
+    );
+  });
+
+  it("matches a stale copy to the reused-ID row with the same input", () => {
+    const server = [
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { turn: 1 },
+        output: 1
+      }),
+      toolAssistantMsg("srv-a2", "tc1", "output-available", {
+        input: { turn: 2 },
+        output: 2
+      })
+    ];
+    const client = [
+      toolAssistantMsg("cli-copy", "tc1", "input-available", {
+        input: { turn: 2 }
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+    const part = result[0].parts[0] as Record<string, unknown>;
+
+    expect(result[0].id).toBe("srv-a2");
+    expect(part.state).toBe("output-available");
+    expect(part.output).toBe(2);
+  });
+
+  it("leaves a stale copy pending when every same-call row is already claimed", () => {
+    const server = [
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { turn: 1 },
+        output: 1
+      }),
+      toolAssistantMsg("srv-a2", "tc1", "output-available", {
+        input: { turn: 2 },
+        output: 2
+      })
+    ];
+    const client = [
+      ...server,
+      toolAssistantMsg("cli-copy", "tc1", "input-available", {
+        input: { turn: 2 }
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+
+    expect(result.map((message) => message.id)).toEqual([
+      "srv-a1",
+      "srv-a2",
+      "cli-copy"
+    ]);
+    expect((result[2].parts[0] as Record<string, unknown>).state).toBe(
+      "input-available"
+    );
+  });
+
+  it("treats tool inputs with reordered keys as the same call", () => {
+    const server = [
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: { a: 1, nested: { x: 1, y: 2 }, b: 2 },
+        output: "done"
+      })
+    ];
+    const client = [
+      toolAssistantMsg("cli-a1", "tc1", "input-available", {
+        input: { b: 2, nested: { y: 2, x: 1 }, a: 1 }
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+    const part = result[0].parts[0] as Record<string, unknown>;
+
+    expect(result[0].id).toBe("srv-a1");
+    expect(part.state).toBe("output-available");
+    expect(part.output).toBe("done");
+  });
+
+  it("ignores input key order when merging a result from another row", () => {
+    const server = [
+      toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: {},
+        output: "one"
+      }),
+      toolAssistantMsg("srv-a2", "tc2", "output-available", {
+        input: { a: 1, b: 2 },
+        output: "two"
+      })
+    ];
+    const client = [
+      {
+        id: "srv-a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-calc",
+            toolCallId: "tc1",
+            state: "output-available",
+            input: {},
+            output: "one"
+          },
+          {
+            type: "tool-calc",
+            toolCallId: "tc2",
+            state: "input-available",
+            input: { b: 2, a: 1 }
+          }
+        ]
+      } as unknown as ChatMessage
+    ];
+
+    const result = reconcileMessages(client, server);
+    const part = result[0].parts[1] as Record<string, unknown>;
+
+    expect(part.state).toBe("output-available");
+    expect(part.output).toBe("two");
   });
 
   it("merges a result stored on a different server row than the one matched", () => {
@@ -563,6 +748,7 @@ describe("reconcileMessages — composed stages", () => {
   it("applies both tool merge and ID reconciliation in one call", () => {
     const server = [
       toolAssistantMsg("srv-a1", "tc1", "output-available", {
+        input: {},
         output: "result"
       }),
       assistantMsg("srv-a2", "Follow up")

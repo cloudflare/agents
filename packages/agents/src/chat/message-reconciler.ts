@@ -13,12 +13,15 @@ import type { UIMessage } from "ai";
 /**
  * Reconcile incoming client messages against server state.
  *
- * 1. Reconciles assistant IDs: exact match → toolCallId match → content-key match
+ * 1. Reconciles assistant IDs: exact match → same tool call → content-key
+ *    match. Each server row is claimed at most once, and a tool-call match
+ *    requires the same toolCallId, tool and input, since providers may reuse
+ *    toolCallIds across turns.
  * 2. Merges server-known tool outputs into incoming messages that still
  *    show stale states (input-available, approval-requested, approval-responded).
- *    Outputs come from the server row the message resolved to; a message that
- *    resolved to no row may still merge from an unambiguous toolCallId whose
- *    input is identical.
+ *    Outputs come from the server row the message resolved to. A call that
+ *    row does not carry may merge only from a server row no incoming message
+ *    claimed, and only when exactly one such row holds the same tool call.
  *
  * @param incoming - Messages from the client
  * @param serverMessages - Current server-side messages (source of truth)
@@ -151,12 +154,14 @@ function mergeServerToolOutputs(
     string,
     Map<string, Record<string, unknown>>
   >();
-  // Conversation-wide index used as a per-part fallback. `null` marks a
-  // toolCallId that resolved on more than one server row — too ambiguous to
-  // merge from.
-  const resolvedByToolCallId = new Map<
+  // Per-part fallback candidates, from server rows that no incoming message
+  // resolved to. A row an incoming message claimed belongs to that message;
+  // its results must not be copied into a different message, which may be a
+  // later call reusing the same toolCallId and input.
+  const claimedIds = new Set(incoming.map((msg) => msg.id));
+  const unclaimedResolvedByToolCallId = new Map<
     string,
-    Record<string, unknown> | null
+    Record<string, unknown>[]
   >();
 
   for (const msg of serverMessages) {
@@ -167,10 +172,11 @@ function mergeServerToolOutputs(
       if (isResolvedToolPart(record)) {
         const toolCallId = record.toolCallId as string;
         resolvedParts.set(toolCallId, record);
-        resolvedByToolCallId.set(
-          toolCallId,
-          resolvedByToolCallId.has(toolCallId) ? null : record
-        );
+        if (!claimedIds.has(msg.id)) {
+          const candidates = unclaimedResolvedByToolCallId.get(toolCallId);
+          if (candidates) candidates.push(record);
+          else unclaimedResolvedByToolCallId.set(toolCallId, [record]);
+        }
       }
     }
     if (resolvedParts.size > 0) {
@@ -190,18 +196,15 @@ function mergeServerToolOutputs(
       if (!isPendingToolPart(record)) return part;
 
       // Prefer the row this message resolved to. If that row does not carry
-      // this call — the message resolved to no row at all, or the result was
-      // persisted on a different row — fall back to the conversation-wide
-      // index, but only for a call carrying an identical input. Same
-      // toolCallId AND same input means the same call, whereas a provider
-      // reusing an ID for a NEW call carries different input. Without the
-      // fallback a pending part persists stuck in a pre-terminal state,
-      // reintroducing the dangling orphan of #1381 and losing the server's
-      // output-error / output-denied that #1623 hardened.
+      // this call, the result may have been persisted on a different row that
+      // the client did not submit. Merge from it only when exactly one such
+      // row holds the same call (toolCallId, tool and input); anything more
+      // ambiguous leaves the part pending rather than risk attaching a result
+      // to the wrong turn.
       const toolCallId = record.toolCallId as string;
       const server =
         ownResolvedParts?.get(toolCallId) ??
-        fallbackResolvedPart(resolvedByToolCallId, record);
+        uniqueSameCall(unclaimedResolvedByToolCallId.get(toolCallId), record);
 
       if (server) {
         hasChanges = true;
@@ -258,20 +261,15 @@ function reconcileAssistantIds(
       return incomingMessage;
     }
 
-    const incomingToolCallIds = getToolCallIds(incomingMessage);
-    if (incomingToolCallIds.size > 0) {
+    const incomingToolParts = toolPartsByCallId(incomingMessage);
+    if (incomingToolParts.size > 0) {
       for (let i = 0; i < serverMessages.length; i++) {
         if (claimedServerIndices.has(i)) continue;
 
         const serverMessage = serverMessages[i];
         if (
           serverMessage.role === "assistant" &&
-          serverMessage.parts.some(
-            (part) =>
-              "toolCallId" in part &&
-              typeof part.toolCallId === "string" &&
-              incomingToolCallIds.has(part.toolCallId)
-          )
+          carriesSameToolCalls(serverMessage, incomingToolParts)
         ) {
           claimedServerIndices.add(i);
           return { ...incomingMessage, id: serverMessage.id };
@@ -332,39 +330,85 @@ function isPendingToolPart(record: Record<string, unknown>): boolean {
   );
 }
 
-/**
- * Resolve a server part for an incoming tool part that never claimed a server
- * row. Requires an unambiguous toolCallId AND an identical input, so a
- * provider that reuses a toolCallId for a genuinely new call (different
- * input) cannot inherit the previous turn's result.
- */
-function fallbackResolvedPart(
-  resolvedByToolCallId: Map<string, Record<string, unknown> | null>,
+/** The single candidate that is the same call as `record`, if exactly one. */
+function uniqueSameCall(
+  candidates: Record<string, unknown>[] | undefined,
   record: Record<string, unknown>
 ): Record<string, unknown> | undefined {
-  const server = resolvedByToolCallId.get(record.toolCallId as string);
-  if (!server) return undefined;
-  return sameToolInput(record.input, server.input) ? server : undefined;
+  const matches = candidates?.filter((candidate) =>
+    sameToolCall(candidate, record)
+  );
+  return matches?.length === 1 ? matches[0] : undefined;
 }
 
 /**
- * Structural comparison of two tool inputs. Both absent counts as equal, which
- * keeps the pre-existing permissive behaviour for tools that take no input.
+ * Whether `serverMessage` shares at least one toolCallId with the incoming
+ * message and every shared toolCallId is the same call on both sides. A
+ * provider that reuses a toolCallId for a new call carries a different tool
+ * or input, so it cannot adopt the older row's ID.
  */
-function sameToolInput(a: unknown, b: unknown): boolean {
-  if (a === undefined && b === undefined) return true;
-  if (a === undefined || b === undefined) return false;
-  return JSON.stringify(a) === JSON.stringify(b);
+function carriesSameToolCalls(
+  serverMessage: UIMessage,
+  incomingToolParts: Map<string, Record<string, unknown>>
+): boolean {
+  let shared = false;
+  for (const part of serverMessage.parts) {
+    const record = part as Record<string, unknown>;
+    if (typeof record.toolCallId !== "string") continue;
+    const incomingPart = incomingToolParts.get(record.toolCallId);
+    if (!incomingPart) continue;
+    if (!sameToolCall(record, incomingPart)) return false;
+    shared = true;
+  }
+  return shared;
 }
 
-function getToolCallIds(message: UIMessage): Set<string> {
-  return new Set(
-    message.parts.flatMap((part) =>
-      "toolCallId" in part && typeof part.toolCallId === "string"
-        ? [part.toolCallId]
-        : []
-    )
+/**
+ * Same tool and structurally equal input (object key order ignored). Static
+ * tool parts may omit `toolName`, so it is compared only when both carry it.
+ */
+function sameToolCall(
+  a: Record<string, unknown>,
+  b: Record<string, unknown>
+): boolean {
+  return (
+    a.type === b.type &&
+    (a.toolName === undefined ||
+      b.toolName === undefined ||
+      a.toolName === b.toolName) &&
+    stableStringify(a.input) === stableStringify(b.input)
   );
+}
+
+function stableStringify(value: unknown): string | undefined {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item) ?? "null").join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .filter((key) => record[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+    .join(",")}}`;
+}
+
+function toolPartsByCallId(
+  message: UIMessage
+): Map<string, Record<string, unknown>> {
+  const parts = new Map<string, Record<string, unknown>>();
+  for (const part of message.parts) {
+    const record = part as Record<string, unknown>;
+    if (
+      typeof record.toolCallId === "string" &&
+      !parts.has(record.toolCallId)
+    ) {
+      parts.set(record.toolCallId, record);
+    }
+  }
+  return parts;
 }
 
 function findMessageByToolCallId(
