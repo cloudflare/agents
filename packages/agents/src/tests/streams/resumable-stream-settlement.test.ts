@@ -314,3 +314,30 @@ describe("ResumableStream originating message ids (#2280)", () => {
     });
   });
 });
+
+describe("ResumableStream parent message id", () => {
+  it("keeps a branching stream's parent across a restore", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
+      const first = createAdapter(instance, ctx.storage.sql);
+      const id = first.start("req-branch", { parentMessageId: "u1" });
+      first.storeChunk(id, JSON.stringify({ type: "text-delta", delta: "x" }));
+      first.flushBuffer();
+
+      const restored = createAdapter(instance, ctx.storage.sql);
+      restored.restore();
+      expect(restored.activeStreamId).toBe(id);
+      expect(restored.getStreamParentMessageId(id)).toBe("u1");
+    });
+  });
+
+  it("records no parent for a stream that appends to the latest leaf", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject, ctx) => {
+      const stream = createAdapter(instance, ctx.storage.sql);
+      const id = stream.start("req-leaf");
+      expect(stream.getStreamParentMessageId(id)).toBeNull();
+      expect(stream.getStreamParentMessageId("missing")).toBeNull();
+    });
+  });
+});

@@ -1023,6 +1023,24 @@ export class ThinkClientToolsAgent extends Think {
     );
   }
 
+  private _streamParents: Array<string | null> = [];
+
+  protected override _startResumableStream(
+    requestId: string,
+    options?: Parameters<Think["_startResumableStream"]>[1]
+  ): string {
+    const streamId = super._startResumableStream(requestId, options);
+    this._streamParents.push(
+      this["_resumableStream"].getStreamParentMessageId(streamId)
+    );
+    return streamId;
+  }
+
+  /** The parent message each chat stream recorded when it started. */
+  async getStreamParentsForTest(): Promise<Array<string | null>> {
+    return this._streamParents;
+  }
+
   async setServerApprovalToolMode(value: boolean): Promise<void> {
     this._useServerApprovalTool = value;
   }

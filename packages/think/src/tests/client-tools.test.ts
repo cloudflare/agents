@@ -3421,6 +3421,7 @@ describe("Think — regeneration", () => {
     sendChatRequest(ws, [userMsg]);
     await donePromise;
     await delay(200);
+    expect(await agent.getStreamParentsForTest()).toEqual([null]);
 
     donePromise = waitForDone(ws);
     sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
@@ -3432,6 +3433,8 @@ describe("Think — regeneration", () => {
     expect(prompts[1]).toEqual(prompts[0]);
     expect(prompts[1].map((m) => m.role)).toEqual(["system", "user"]);
     expect(prompts[1][1].text).toBe("explain monads");
+    // Recovery after a restart appends the partial under this parent.
+    expect(await agent.getStreamParentsForTest()).toEqual([null, userMsg.id]);
 
     await closeWS(ws);
   });

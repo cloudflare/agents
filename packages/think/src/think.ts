@@ -15047,8 +15047,11 @@ export class Think<
   ): Promise<StreamResultStatus> {
     const clearGen = this._turnQueue.generation;
     const continuation = options?.continuation ?? false;
-    const streamId = this._startResumableStream(requestId, { continuation });
     const parentId = options?.parentId;
+    const streamId = this._startResumableStream(requestId, {
+      continuation,
+      ...(parentId !== undefined && { parentMessageId: parentId })
+    });
 
     if (this._continuation.pending?.requestId === requestId) {
       this._continuation.activatePending();
@@ -19775,7 +19778,11 @@ export class Think<
    */
   protected _startResumableStream(
     requestId: string,
-    options?: { messageId?: string; continuation?: boolean }
+    options?: {
+      messageId?: string;
+      parentMessageId?: string;
+      continuation?: boolean;
+    }
   ): string {
     const originIds =
       this._requestOriginMessageIds.get(requestId) ??
@@ -19846,6 +19853,20 @@ export class Think<
     this._resumableStream.reclaim();
   }
 
+  /**
+   * The message an orphaned stream's assistant message branches from, so the
+   * reconstructed message lands where the live turn would have persisted it:
+   * a regeneration beside the response it replaces, not under it. Undefined
+   * for a turn that appends to the latest leaf, and on an `agents` release
+   * that does not record the parent.
+   */
+  private _orphanParentId(streamId: string): string | undefined {
+    const stream = this._resumableStream as ResumableStream & {
+      getStreamParentMessageId?: (streamId: string) => string | null;
+    };
+    return stream.getStreamParentMessageId?.(streamId) ?? undefined;
+  }
+
   private async _persistOrphanedStream(streamId: string): Promise<void> {
     this._resumableStream.flushBuffer();
     const chunks = this._resumableStream.getStreamChunks(streamId);
@@ -19862,8 +19883,16 @@ export class Think<
     // (#1637), NOT here — persisting on recovery or a client reconnect must not
     // be miscounted as new forward progress.
     let persistedId: string | undefined;
+    const store = this._orphanStore();
+    const parentId = this._orphanParentId(streamId);
     const wrote = await persistReconstructedOrphan(chunks, {
-      store: this._orphanStore(),
+      store:
+        parentId === undefined
+          ? store
+          : {
+              ...store,
+              appendMessage: (message) => store.appendMessage(message, parentId)
+            },
       fallbackId: crypto.randomUUID(),
       prepare: (message) => {
         const prepared = this._strippedForPersist(message);
