@@ -32,6 +32,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/browser`              | `src/browser/index.ts`        | Browser Run helpers — CDP sessions, connector, Quick Action primitives       |
 | `agents/browser/ai`           | `src/browser/ai.ts`           | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools` |
 | `agents/browser/tanstack-ai`  | `src/browser/tanstack-ai.ts`  | TanStack AI browser tool (`browser_execute`)                                 |
+| `agents/tools/testing`        | `src/tools/testing.ts`        | Fault-injection AI SDK tools (`sleep`, `oom`, `burn_cpu`) and test prompts   |
 | `agents/voice`                | `src/voice/index.ts`          | Voice server mixins, contracts, Workers AI providers, text, and SFU helpers  |
 | `agents/voice/types`          | `src/voice/types.ts`          | Dependency-light Voice protocol and provider contracts                       |
 | `agents/voice/client`         | `src/voice/client.ts`         | Framework-neutral browser Voice client                                       |
@@ -144,6 +145,9 @@ src/
     quick-actions.ts    # Stateless Quick Action primitives (browserMarkdown, …)
     ai.ts               # createBrowserTools + createQuickActionTools (AI SDK)
     tanstack-ai.ts      # createBrowserTools for TanStack AI
+
+  tools/
+    testing.ts          # createTestingTools (sleep, get_current_time, oom, burn_cpu) and prompts
 
   voice/                # Voice server, client, React, provider, SFU, and text entries
   channels/             # Messaging core, provider adapters, and AI framework adapters

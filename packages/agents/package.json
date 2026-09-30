@@ -150,6 +150,11 @@
       "import": "./dist/lifecycle/index.js",
       "require": "./dist/lifecycle/index.js"
     },
+    "./tools/testing": {
+      "types": "./dist/tools/testing.d.ts",
+      "import": "./dist/tools/testing.js",
+      "require": "./dist/tools/testing.js"
+    },
     "./agent-tools": {
       "types": "./dist/agent-tools.d.ts",
       "import": "./dist/agent-tools.js",

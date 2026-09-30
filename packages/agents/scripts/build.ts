@@ -32,6 +32,7 @@ const entries = [
   "src/state/index.ts",
   "src/websockets/index.ts",
   "src/codemode/ai.ts",
+  "src/tools/testing.ts",
   "src/browser/index.ts",
   "src/browser/ai.ts",
   "src/browser/tanstack-ai.ts",
