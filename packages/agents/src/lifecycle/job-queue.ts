@@ -112,8 +112,21 @@ export type LifecycleJobs = {
    * owner's job is impossible; a cross-owner id collision throws instead.
    */
   readonly push: (options: LifecycleJobPushOptions) => Promise<LifecycleJob>;
+  /**
+   * {@link LifecycleJobs.push}, synchronously and without re-arming the
+   * alarm, so it can share a `storage.transactionSync` with the caller's own
+   * writes: the job and those writes commit or roll back together. Call
+   * {@link LifecycleJobs.rearm} after the transaction commits, or the alarm
+   * may not fire for the new job until another mutation re-arms it.
+   */
+  readonly pushSync: (options: LifecycleJobPushOptions) => LifecycleJob;
   /** Cancel one owned job. Returns false when no job matched. */
   readonly cancel: (id: string) => Promise<boolean>;
+  /**
+   * {@link LifecycleJobs.cancel}, synchronously and without re-arming, for
+   * use inside a `storage.transactionSync`. Call `rearm()` after it commits.
+   */
+  readonly cancelSync: (id: string) => boolean;
   /** Re-time one owned job. Returns false when no job matched. */
   readonly reschedule: (id: string, time: number) => Promise<boolean>;
   /** Read one owned job. */
@@ -195,6 +208,17 @@ export class JobQueue {
     try {
       return [...this.#storage.sql.exec(query, ...params)] as T[];
     } catch (cause) {
+      // A transactionSync that rolled back after the first synchronous push
+      // also rolled back the CREATE TABLE, so the cached flag is stale.
+      if (String(cause).includes("no such table: cf_agents_jobs")) {
+        this.#tableEnsured = false;
+        this.#ensureTable();
+        try {
+          return [...this.#storage.sql.exec(query, ...params)] as T[];
+        } catch (retryCause) {
+          throw new SqlError(query, retryCause);
+        }
+      }
       throw new SqlError(query, cause);
     }
   }

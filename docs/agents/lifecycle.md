@@ -191,7 +191,21 @@ class Cleanup extends LifecycleCapability {
 ```
 
 The queue is ordered by timestamp, and every queue mutation re-arms the
-physical alarm automatically — there is no explicit rearm call. When the
+physical alarm automatically. The one exception is a job that must commit with
+the capability's own rows. `jobs.pushSync()` and `jobs.cancelSync()` write
+synchronously inside a `storage.transactionSync`, so the job and the rows
+commit or roll back together. They skip the re-arm, so call `jobs.rearm()`
+once the transaction commits:
+
+```ts
+this.lifecycle.storage.transactionSync(() => {
+  this.#insertRow(id, input);
+  this.lifecycle.jobs.pushSync({ id, fn: "step", time: Date.now() });
+});
+await this.lifecycle.jobs.rearm();
+```
+
+When the
 alarm fires, Lifecycle drives due jobs in due order as an event loop, then
 runs host `onAlarm()`, then re-arms from queue state. Before driving any job
 it arms a deadman pre-alarm so an isolate death mid-drive still wakes the
