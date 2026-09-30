@@ -10450,15 +10450,22 @@ export class ThinkRecoveryTestAgent extends Think {
     streamId: string,
     requestId: string,
     chunks: Array<{ body: string; index: number }>,
-    status: "streaming" | "completed" | "error" = "streaming"
+    status: "streaming" | "completed" | "error" = "streaming",
+    options: { parentMessageId?: string; restore?: boolean } = {}
   ): Promise<void> {
     const now = Date.now();
     const state = status === "error" ? "errored" : status;
     const closedAt = state === "streaming" ? null : now;
+    const metadata = {
+      cfChat: 1,
+      ...(options.parentMessageId !== undefined && {
+        parentMessageId: options.parentMessageId
+      })
+    };
     this.sql`
       INSERT INTO cf_agents_streams
         (stream_id, state, tag, metadata, chunk_count, created_at, updated_at, closed_at)
-      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify({ cfChat: 1 })},
+      VALUES (${streamId}, ${state}, ${requestId}, ${JSON.stringify(metadata)},
               ${chunks.length}, ${now}, ${now}, ${closedAt})
     `;
     if (chunks.length > 0) {
@@ -10470,6 +10477,9 @@ export class ThinkRecoveryTestAgent extends Think {
                 ${body}, ${now}, ${now})
       `;
     }
+    // What startup does after a restart: pick the streaming row back up as
+    // the active stream, so recovery persists its partial.
+    if (options.restore) this["_resumableStream"].restore();
   }
 
   async getScheduledChatRecoveryCountForTest(

@@ -4490,6 +4490,139 @@ describe("Think — onChatRecovery", () => {
     expect(prompts[0].slice(1)).toEqual(["user: Answer this again"]);
   });
 
+  it("continues a regeneration interrupted after partial output on its new branch (#2028)", async () => {
+    const agent = await freshRecoveryAgent(
+      `partial-regenerate-${crypto.randomUUID()}`
+    );
+
+    await agent.persistTestMessage({
+      id: "u-regenerate",
+      role: "user",
+      parts: [{ type: "text", text: "Answer this again" }]
+    });
+    await agent.persistTestMessage({
+      id: "a-previous",
+      role: "assistant",
+      parts: [{ type: "text", text: "Previous answer." }]
+    });
+    await agent.insertInterruptedStream(
+      "stream-partial-regenerate",
+      "req-partial-regenerate",
+      [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-regenerated" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", delta: "New partial" }),
+          index: 2
+        }
+      ],
+      "streaming",
+      { parentMessageId: "u-regenerate", restore: true }
+    );
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-partial-regenerate",
+      {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: "req-partial-regenerate",
+          continuation: false,
+          latestMessageId: "a-previous",
+          latestMessageRole: "assistant",
+          latestUserMessageId: "u-regenerate",
+          startedAt: Date.now(),
+          branchParentId: "u-regenerate"
+        },
+        user: null
+      }
+    );
+
+    const scheduled = await agent.triggerFiberRecovery();
+    expect(scheduled.scheduledContinueCount).toBe(1);
+    expect(scheduled.scheduledRetryCount).toBe(0);
+    await agent.runScheduledRecoveryContinueForTest();
+
+    const branches = (await agent.getBranchesForTest(
+      "u-regenerate"
+    )) as UIMessage[];
+    expect(branches.map((m) => m.id).sort()).toEqual(
+      ["a-previous", "a-regenerated"].sort()
+    );
+    expect(branches.find((m) => m.id === "a-previous")?.parts).toEqual([
+      { type: "text", text: "Previous answer." }
+    ]);
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.id)).toEqual([
+      "u-regenerate",
+      "a-regenerated"
+    ]);
+    const prompts = await agent.getModelPromptsForTest();
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0].slice(1, 3)).toEqual([
+      "user: Answer this again",
+      "assistant: New partial"
+    ]);
+    expect(prompts[0].join("\n")).not.toContain("Previous answer.");
+  });
+
+  it("keeps a recovered partial with no recorded parent on the latest leaf", async () => {
+    const agent = await freshRecoveryAgent(
+      `partial-no-parent-${crypto.randomUUID()}`
+    );
+
+    await agent.persistTestMessage({
+      id: "u-no-parent",
+      role: "user",
+      parts: [{ type: "text", text: "Answer this" }]
+    });
+    await agent.insertInterruptedStream(
+      "stream-no-parent",
+      "req-no-parent",
+      [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-no-parent" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", delta: "Partial" }),
+          index: 2
+        }
+      ],
+      "streaming",
+      { restore: true }
+    );
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-no-parent",
+      {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: "req-no-parent",
+          continuation: false,
+          latestMessageId: "u-no-parent",
+          latestMessageRole: "user",
+          latestUserMessageId: "u-no-parent",
+          startedAt: Date.now()
+        },
+        user: null
+      }
+    );
+
+    const scheduled = await agent.triggerFiberRecovery();
+    expect(scheduled.scheduledContinueCount).toBe(1);
+    await agent.runScheduledRecoveryContinueForTest();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.id)).toEqual([
+      "u-no-parent",
+      "a-no-parent"
+    ]);
+  });
+
   it("retries an interrupted opened stream with no assistant content", async () => {
     const agent = await freshRecoveryAgent(
       `empty-opened-stream-retry-${crypto.randomUUID()}`

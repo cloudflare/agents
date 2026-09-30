@@ -98,6 +98,13 @@ type ChatStreamMetadata = {
    */
   messageId?: string;
   /**
+   * The message the stream's assistant message is a child of, when the turn
+   * branches rather than appending to the latest leaf (a regeneration answers
+   * its user message beside the response it replaces). Orphan recovery
+   * appends under it so the reconstructed message lands on the same branch.
+   */
+  parentMessageId?: string;
+  /**
    * Whether this stream is a continuation (appends to the last assistant
    * message rather than starting a new one). Live broadcast frames carry
    * `continuation: true`, and replay frames must too (#1733): without it a
@@ -532,6 +539,7 @@ export class ResumableStream {
     requestId: string,
     options: {
       messageId?: string;
+      parentMessageId?: string;
       continuation?: boolean;
       originMessageIds?: string[];
     } = {}
@@ -554,6 +562,9 @@ export class ResumableStream {
 
     const metadata: ChatStreamMetadata = { cfChat: 1 };
     if (options.messageId != null) metadata.messageId = options.messageId;
+    if (options.parentMessageId != null) {
+      metadata.parentMessageId = options.parentMessageId;
+    }
     if (this._activeIsContinuation) metadata.isContinuation = 1;
     if (seqBase > 0) metadata.seqBase = seqBase;
     if (options.originMessageIds?.length) {
@@ -587,6 +598,16 @@ export class ResumableStream {
     const row = this.ops.getStream(streamId);
     if (!row) return null;
     return parseChatMetadata(row)?.messageId ?? null;
+  }
+
+  /**
+   * The message an orphaned stream's assistant message is a child of, or null
+   * when the stream appends to the latest leaf or predates parent tracking.
+   */
+  getStreamParentMessageId(streamId: string): string | null {
+    const row = this.ops.getStream(streamId);
+    if (!row) return null;
+    return parseChatMetadata(row)?.parentMessageId ?? null;
   }
 
   /**
