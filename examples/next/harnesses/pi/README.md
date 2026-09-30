@@ -17,7 +17,8 @@ The example composes:
 - app glue that is not part of the harness: `sockets.ts` puts one session
   per socket on `WebSockets`, and `view.ts` folds pi's events into what the
   UI shows;
-- `agents/skills` for a bundled `trip-planning` skill;
+- two tools: `current_time`, and `sleep`, a replay-safe wait whose
+  deadline survives an eviction;
 - pi-ai's Workers AI provider, transported over the `AI` binding.
 
 pi owns the transcript, the inbox of steers and follow-ups, generation and
@@ -40,11 +41,11 @@ one account, set `CLOUDFLARE_ACCOUNT_ID` when starting.
 
 ## What to try
 
-- `Roll four 12-sided dice and total them.`
-- `Use the calculator to multiply 47 by 19.`
-- `Remember that my favourite launch snack is stroopwafels.`, then in a
-  later message `What did I tell you my favourite launch snack was?`
-- `I want to plan a trip.` activates the bundled skill.
+- `What time is it?`
+- `Tell me the time, sleep for 10 seconds, then tell me the time again.`
+- `Sleep for 2 minutes, then tell me how long you actually slept.` The
+  object stays alive through the driver's alarm heartbeat, not through
+  `sleep`'s timer.
 - While a turn runs, type and press Enter to queue a follow-up, or Steer to
   join the running turn.
 
@@ -75,8 +76,7 @@ export class PiAgent extends DurableObject<Env> {
     driver: this.driver,
     models: createModels({ providers: [workersAI(this.env.AI)] }),
     model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
-    tools: createTools(this.ctx.storage),
-    skills: [skills]
+    tools: createTools() // sleep, current_time
   });
   // App glue: this app's socket protocol, built on session.events().
   readonly sockets = new PiSessionSockets(this.harness, (tag) =>

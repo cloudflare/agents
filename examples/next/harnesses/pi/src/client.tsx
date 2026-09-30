@@ -9,11 +9,10 @@ import {
 } from "@cloudflare/kumo";
 import {
   BrainIcon,
-  CalculatorIcon,
   CheckCircleIcon,
   ClockIcon,
-  DiceFiveIcon,
   GearIcon,
+  HourglassIcon,
   MoonIcon,
   PaperPlaneRightIcon,
   PlusIcon,
@@ -37,24 +36,20 @@ const MODEL = "@cf/moonshotai/kimi-k2.7-code";
 
 const SUGGESTIONS = [
   {
-    icon: <DiceFiveIcon size={15} />,
-    label: "Roll 4d12",
-    value: "Roll four 12-sided dice and tell me the total."
-  },
-  {
-    icon: <CalculatorIcon size={15} />,
-    label: "Calculate 47 × 19",
-    value: "Use the calculator to multiply 47 by 19."
-  },
-  {
-    icon: <BrainIcon size={15} />,
-    label: "Remember a fact",
-    value: "Remember that my favourite launch snack is stroopwafels."
-  },
-  {
     icon: <ClockIcon size={15} />,
     label: "What time is it?",
     value: "Use a tool to tell me the current UTC time."
+  },
+  {
+    icon: <HourglassIcon size={15} />,
+    label: "Sleep 10s",
+    value:
+      "Tell me the time, sleep for 10 seconds, then tell me the time again."
+  },
+  {
+    icon: <HourglassIcon size={15} />,
+    label: "Sleep 2 min",
+    value: "Sleep for 2 minutes, then tell me how long you actually slept."
   }
 ] satisfies Array<{ icon: ReactNode; label: string; value: string }>;
 

@@ -8,7 +8,6 @@ import {
 } from "@earendil-works/pi-durable";
 import { routeAgentRequest } from "agents";
 import { Lifecycle } from "agents/lifecycle";
-import { fromManifest } from "agents/skills";
 import { WebSockets } from "agents/websockets";
 import { Driver } from "./driver";
 import { PiHarness } from "./harness/pi-harness";
@@ -16,18 +15,10 @@ import { PiSessionSockets } from "./sockets";
 import { createModels } from "./providers/models";
 import { workersAI } from "./providers/workers-ai";
 
-const MEMORY_PREFIX = "pi-playground:memory:";
 const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 
-type Operation =
-  | "add"
-  | "subtract"
-  | "multiply"
-  | "divide"
-  | "+"
-  | "-"
-  | "*"
-  | "/";
+/** Longest `sleep` the model may ask for. */
+const MAX_SLEEP_SECONDS = 3600;
 
 function text(content: string, details?: JsonValue): ToolExecutionResult {
   return {
@@ -41,129 +32,52 @@ function argsOf<T>(args: JsonValue): T {
   return args as T;
 }
 
-function calculate(operation: Operation, left: number, right: number): number {
-  switch (operation) {
-    case "add":
-    case "+":
-      return left + right;
-    case "subtract":
-    case "-":
-      return left - right;
-    case "multiply":
-    case "*":
-      return left * right;
-    case "divide":
-    case "/":
-      if (right === 0) throw new Error("Cannot divide by zero");
-      return left / right;
-  }
+function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      },
+      { once: true }
+    );
+  });
 }
 
 /**
- * The playground's tools. `replay: "safe"` lets pi run a call again after an
- * eviction interrupted it; every other call is reported to the model as
- * interrupted instead.
+ * The playground's tools.
+ *
+ * `sleep` is the interesting one. It waits in memory with `setTimeout`, like
+ * pi's own retry and poll sleeps, but memoizes its deadline in pi so it is
+ * replay-safe: after an eviction pi reruns it and it only waits out what is
+ * left. A timer does not keep the object alive by itself; the driver's step
+ * does, through its alarm heartbeat. See NOTES.md, "pi's timers are in
+ * memory".
  */
-function createTools(storage: DurableObjectStorage): ToolRegistration[] {
+function createTools(): ToolRegistration[] {
   return [
     {
-      name: "calculate",
-      description: "Perform exact arithmetic with two numbers.",
+      name: "sleep",
+      description: `Wait for a number of seconds (at most ${MAX_SLEEP_SECONDS}) before continuing.`,
       parameters: Type.Object({
-        operation: Type.Union(
-          (
-            [
-              "add",
-              "subtract",
-              "multiply",
-              "divide",
-              "+",
-              "-",
-              "*",
-              "/"
-            ] as const
-          ).map((value) => Type.Literal(value))
-        ),
-        left: Type.Number(),
-        right: Type.Number()
+        seconds: Type.Number({ minimum: 0, maximum: MAX_SLEEP_SECONDS })
       }),
       replay: "safe",
-      async execute(args) {
-        const input = argsOf<{
-          operation: Operation;
-          left: number;
-          right: number;
-        }>(args);
-        const result = calculate(input.operation, input.left, input.right);
-        return text(String(result), { result });
-      }
-    },
-    {
-      name: "roll_dice",
-      description: "Roll one or more fair dice.",
-      parameters: Type.Object({
-        sides: Type.Integer({ minimum: 2, maximum: 1000 }),
-        count: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 }))
-      }),
-      async execute(args, api) {
-        const input = argsOf<{ sides: number; count?: number }>(args);
-        const count = input.count ?? 1;
-        api.output(`Rolling ${count}d${input.sides}…\n`);
-        const rolls = Array.from(
-          { length: count },
-          () => Math.floor(Math.random() * input.sides) + 1
-        );
-        const total = rolls.reduce((sum, roll) => sum + roll, 0);
-        return text(`Rolled ${rolls.join(", ")} (total ${total})`, {
-          rolls,
-          total
-        });
-      }
-    },
-    {
-      name: "remember",
-      description: "Persist a named fact in this Durable Object session.",
-      parameters: Type.Object({
-        key: Type.String({ minLength: 1, maxLength: 64 }),
-        value: Type.String({ maxLength: 4000 })
-      }),
-      replay: "safe",
-      async execute(args) {
-        const input = argsOf<{ key: string; value: string }>(args);
-        await storage.put(`${MEMORY_PREFIX}${input.key}`, input.value);
-        return text(`Remembered ${JSON.stringify(input.key)}.`, {
-          key: input.key
-        });
-      }
-    },
-    {
-      name: "recall",
-      description: "Read one fact previously saved in this session.",
-      parameters: Type.Object({
-        key: Type.String({ minLength: 1, maxLength: 64 })
-      }),
-      replay: "safe",
-      async execute(args) {
-        const { key } = argsOf<{ key: string }>(args);
-        const value = await storage.get<string>(`${MEMORY_PREFIX}${key}`);
-        return text(value ?? `No memory named ${JSON.stringify(key)}.`, {
-          key,
-          found: value !== undefined
-        });
-      }
-    },
-    {
-      name: "list_memories",
-      description: "List the fact names stored in this session.",
-      parameters: Type.Object({}),
-      replay: "safe",
-      async execute() {
-        const values = await storage.list<string>({ prefix: MEMORY_PREFIX });
-        const keys = [...values.keys()].map((key) =>
-          key.slice(MEMORY_PREFIX.length)
-        );
-        return text(keys.length === 0 ? "No memories." : keys.join("\n"), {
-          keys
+      async execute(args, api, context) {
+        const { seconds } = argsOf<{ seconds: number }>(args);
+        const startedAt = await api.memo("startedAt", Date.now(), context);
+        const until = startedAt + seconds * 1000;
+        api.output(`Sleeping until ${new Date(until).toISOString()}\n`);
+        const remaining = until - Date.now();
+        if (remaining > 0) await pause(remaining, context.abortSignal);
+        const slept = (Date.now() - startedAt) / 1000;
+        return text(`Slept ${slept.toFixed(1)}s.`, {
+          seconds,
+          startedAt: new Date(startedAt).toISOString(),
+          endedAt: new Date().toISOString()
         });
       }
     },
@@ -180,24 +94,6 @@ function createTools(storage: DurableObjectStorage): ToolRegistration[] {
   ];
 }
 
-const skills = fromManifest({
-  id: "pi-playground-skills",
-  fingerprint: "1",
-  skills: [
-    {
-      name: "trip-planning",
-      description:
-        "Use when the user asks to plan a trip, itinerary, or travel schedule.",
-      body: [
-        "Ask for the destination, dates, and interests if not given.",
-        "Use the calculator tool for any budget math instead of estimating.",
-        "Remember the finished itinerary with the remember tool under the key",
-        "`itinerary` so it can be recalled in a later message."
-      ].join("\n")
-    }
-  ]
-});
-
 /** Playable pi session backed by one Durable Object. */
 export class PiAgent extends DurableObject<Env> {
   readonly driver = new Driver();
@@ -207,17 +103,16 @@ export class PiAgent extends DurableObject<Env> {
     model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
     thinkingLevel: "low",
     retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 },
-    tools: createTools(this.ctx.storage),
-    skills: [skills],
+    tools: createTools(),
     systemPrompt:
-      "You are a concise playground assistant. Use tools whenever they can answer the request. Explain tool results plainly. You can calculate, roll dice, read the current time, and persist or recall facts for this session.",
+      "You are a concise playground assistant. You can read the current UTC time with current_time and wait with sleep. Use tools whenever they can answer the request, and explain their results plainly.",
     configure: (registry) => {
       registry.hooks.add(ToolTask, {
         beforeTool: (call) =>
-          call.name === "remember" &&
-          typeof call.arguments.key === "string" &&
-          call.arguments.key.startsWith("_")
-            ? { block: "Memory names cannot start with _." }
+          call.name === "sleep" &&
+          typeof call.arguments.seconds === "number" &&
+          call.arguments.seconds > MAX_SLEEP_SECONDS
+            ? { block: `sleep is capped at ${MAX_SLEEP_SECONDS} seconds.` }
             : undefined
       });
     }
