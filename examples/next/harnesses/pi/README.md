@@ -11,8 +11,9 @@ The example composes:
 - `PiHarness extends LifecycleCapability`, the harness interface:
   `harness.prompt()`, `harness.submit()`, `harness.sessions`,
   `harness.session(id)`, and `session.events()` for pi's live events;
-- a `Driver` (copied into `src/driver` from cloudflare/agents#2396) that
-  wakes the object and sees each submission through to pi's answer;
+- a `Driver` (copied into `src/driver` from cloudflare/agents#2396) as the
+  wake: one operation per session that keeps the object alive while pi has
+  live tasks in it, and parks when it has none;
 - a pi session store on the object's SQLite database (`session-store.ts`);
 - app glue that is not part of the harness: `sockets.ts` puts one session
   per socket on `WebSockets`, and `view.ts` folds pi's events into what the

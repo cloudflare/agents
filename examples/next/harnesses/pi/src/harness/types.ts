@@ -73,12 +73,12 @@ export type PiPromptResponse = PiOperationResult & {
   readonly messages: readonly PiMessage[];
 };
 
-/** A submission the driver still holds for this harness. */
+/** A submission pi has not settled yet. */
 export type PiPendingOperation = {
   readonly operationId: string;
   readonly session: PiSessionId;
+  /** `queued` in pi's inbox, or `running` as part of the current run. */
   readonly status: "queued" | "running";
-  readonly submittedAt: number;
 };
 
 export type PiSessionInfo = {

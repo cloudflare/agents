@@ -10,8 +10,8 @@ here is in `agents`.
 | Before (#2210)                               | Now                                                                  |
 | -------------------------------------------- | -------------------------------------------------------------------- |
 | pi-agent-core `AgentHarness`                 | pi-durable `Harness`                                                 |
-| `Tasks` run per lane, replay-driving pi      | `Driver` operation per submission                                    |
-| intake table for queued submissions          | pi's own inbox, plus the driver row                                  |
+| `Tasks` run per lane, replay-driving pi      | one `Driver` wake per session                                        |
+| intake table for queued submissions          | pi's own inbox                                                       |
 | `Streams` log per operation, cursors, replay | pi's `watchEvents`: snapshot, then one batch per commit              |
 | pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (`session-store.ts`) |
 | own event and message projections            | pi's `AgentEvent`s on the wire, one reducer (`view.ts`)              |
@@ -24,20 +24,18 @@ and the tests use the same reducer.
 ## Decision: driver, not Tasks or the state machine
 
 pi-durable already is a durable execution engine. It has checkpointed tasks,
-ownership trees, abort, replay-safe and unsafe tools, retries, and an inbox.
-Around it, the SDK only has to do two things: keep a submission's intent
-until pi has it, and wake the object when pi has work but no memory. Among
-the three options, the driver is the one that does only that.
+ownership trees, abort, replay-safe and unsafe tools, retries, and an inbox,
+and its `submit()` is durable before it resolves. Around it, the SDK only has
+to do one thing: wake the object when pi has work but no memory. Among the
+three options, the driver is the one that does only that.
 
-- **Driver (#2396).** `step(op)` admits the input into pi by request id
-  (idempotent), waits for pi to settle it, and returns `done`. The driver
-  owns the queue row and the alarm heartbeat. If the object is evicted
-  mid-run, the heartbeat alarm restarts it, pi reopens and resumes its own
-  tasks, and the step waits again. The step never replays model or tool
-  work, since pi does that. `sleep` handles pi's long waits, `stop` maps to
-  withdrawing the submission or aborting the conversation, and `onFail` to
-  withdrawal. It fits in about 60 lines (`#step`, `#withdraw`, `#failed` in
-  `pi-harness.ts`).
+- **Driver (#2396).** Each session has one driver operation, its wake.
+  `step` waits while pi has live tasks in the session and parks when it has
+  none. It never admits input and never replays model or tool work, since pi
+  does both. If the object is evicted mid-run, the heartbeat alarm restarts
+  it, pi reopens and resumes its own tasks, and the step waits again. Long
+  pi waits become `sleep`. It fits in about 80 lines (`#ensureWake`, `#step`,
+  `#failed` in `pi-harness.ts`).
 - **Tasks.** This was the old design. It works, but Tasks journals steps for
   replay, and pi is already the replay authority, so every Tasks step
   was a no-op wrapper around "ask pi". Registering a capability-owned driver
@@ -51,9 +49,32 @@ the three options, the driver is the one that does only that.
   pi's own child tasks and ownership. It would be a third state model next
   to pi's tasks and the driver's queue.
 
-Because nothing but `agents/tasks` has shipped, the driver is copied into
-`src/driver/` (from #2396 at 72b410cfd, without `DurableToolRuns`). The one
-change is noted under "Driver needs a synchronous push" below.
+Because nothing but `agents/tasks` has shipped, the driver is copied
+unchanged into `src/driver/` (from #2396 at 72b410cfd, without
+`DurableToolRuns`). It writes a queue row and its job in one
+`transactionSync` with `jobs.pushSync`, which #2420 adds to Lifecycle. This
+PR is stacked on #2420.
+
+### One admission, one wake per session
+
+`submit()` does three things, in this order:
+
+1. `#ensureWake(session)`: the session's wake exists and has a job. From
+   here on, if the object dies, that job's alarm restarts it.
+2. `conversation.submit({ requestId })`: the one admission. pi's inbox
+   places steers and follow-ups while a run is going, and deduplicates by
+   request id.
+3. `driver.wake(session)`: step now. If the wake had just parked, it sees
+   the new work.
+
+While a submit is between steps 1 and 2, the wake sleeps instead of parking
+(an in-memory counter), so a step that runs early cannot cancel the job
+before pi has the input. `onStart` also gives every session with live pi
+tasks a wake. That covers a wake that failed out, and conversations a
+subagent created without going through `submit()`.
+
+`wait()`, `pending()`, and `abort(operationId)` read or change pi's
+submissions directly. The driver holds no per-submission state.
 
 ## The harness interface
 
@@ -85,44 +106,46 @@ against it:
 
 ## Hard or unresolved
 
-### Driver needs a synchronous push
+### Background work is polled
 
-#2396 inserts the queue row and pushes the job inside one `transactionSync`,
-using a `jobs.pushSync` it adds to Lifecycle. The published Lifecycle has
-only async `jobs.push`. The copy pushes the job first and then writes the
-row. A job with an empty queue is a no-op, and a row with no job would sit
-until the next start. The window is one microtask, because the continuation
-after the awaited push runs before any other event. The same ordering is
-used in `#resume`. To make this atomic, `pushSync` (or a push that takes an
-open transaction) is needed in Lifecycle.
-
-### pi's work is not bound to a driver step
-
-`harness.resume()` lets pi run everything it has, on its own, in memory. The
-driver only heartbeats while a step is waiting. Work with no driver operation
-behind it gets no heartbeat, for example:
-
-- a background subagent (pi-durable example 23)
-- a child task that outlives its parent's run
-- a follow-up pi places from its inbox after the operation that admitted it
-  settled
-
-If the object is evicted in the middle of that work, nothing wakes it
-until the next request. The fix is a keep-alive derived from
-`harness.inspect()` (live tasks, unsettled submissions) instead of from
-driver operations. That could be a second driver scope, "pi has live work",
-stepped whenever `inspect()` is non-empty. It is not built, because nothing
-in the example spawns background work yet.
+The wake waits with `conversation.waitForIdle()`, which ignores background
+tasks, such as a background subagent's anchor (pi-durable example 23). When
+only background tasks are left, the wake sleeps 30 s and checks again. The
+alarm keeps the object alive, but a background task that finishes is only
+noticed at the next check. A background task in another conversation shows
+up under that conversation's wake, which `onStart` creates.
 
 ### pi's timers are in memory
 
-pi sleeps with `setTimeout`: retry backoff, deferred polling, and the 100 ms
-partial-commit throttle. Nothing outside pi can ask when it next needs to
-wake. `#longWait` reads pi's `LiveDoc` (`generation.retry.at`,
-`generation.deferred.pollAt`) and turns a wait more than 60 s away into a
-driver `sleep`, so the alarm wakes the object instead. That reads pi's
-presentation document as a control signal. **Ask for:** a "next wake time"
-on `inspect()`, or an injectable timer/scheduler in `HarnessOptions`.
+pi sleeps with `setTimeout`: `runtime.sleep(until)` in the scheduler, which
+the generation task uses for retry backoff (`{ phase: "retry", until }`) and
+deferred polling (`{ phase: "poll", pollAt }`), and which custom tasks can
+call too. The deadline is in the checkpoint, so a restart resumes the sleep
+correctly. But a pending timer does not keep a Durable Object alive. If
+nothing else is in flight, the object is evicted, the timer is gone, and
+nothing wakes it until the next request.
+
+While a wake step is waiting, it keeps the object alive through its alarm
+invocation, so pi's timer fires. `#longWait` turns a wait more than 60 s
+away into a driver `sleep` at the deadline. It finds the deadline by
+reading pi's `LiveDoc` (`generation.retry.at`, `generation.deferred.pollAt`).
+That is a presentation document used as a control signal, and it only
+covers the generation task. A custom task's `runtime.sleep` is invisible,
+and a wait under 60 s holds the alarm invocation open (billed wall time).
+
+**Ask Mario** (either would do):
+
+- **Scheduler-owned sleeps.** `runtime.sleep(until)` records the deadline
+  as scheduler state, and `inspect()` returns `nextWakeAt`, the earliest
+  deadline over live tasks, with a way to subscribe to changes. The host
+  sets its alarm to `nextWakeAt`, and pi's own timer becomes an
+  optimization.
+- **An injectable timer.** `HarnessOptions.timers: { sleep(until, signal) }`,
+  or an `onWakeNeeded(at)` callback, so a host can back every pi sleep
+  with its alarm.
+
+Either removes `#longWait` and makes custom task sleeps safe on Durable
+Objects.
 
 ### Alarm wall time
 
@@ -165,22 +188,6 @@ string literals, using the names it reads from pi's exported
 `SQLITE_MIGRATIONS`. pi's conformance suite passes against it. It breaks if
 a future pi statement puts a table name in a string literal or builds SQL
 dynamically. **Ask for:** a `tablePrefix` option on `SqliteStorage`.
-
-### Double admission
-
-`submit()` writes the driver row, and then admits into pi immediately. This
-lets pi's inbox place steers and follow-ups while a run is going, instead of
-the driver holding them back until the current operation is done. The step
-admits again with the same request id, and pi deduplicates it. Two
-consequences:
-
-- The driver's FIFO no longer orders anything. pi's inbox does. The
-  driver's per-session queue only decides which submission's wait carries
-  the heartbeat.
-- A queued follow-up's operation is stepped only after the operation in
-  front of it is done. A crash in between leaves pi with the follow-up and
-  the driver with its row, and the step's re-admission is a no-op. That is
-  correct, but it relies on pi's request-id deduplication.
 
 ### Abort needs tools that honor their signal
 

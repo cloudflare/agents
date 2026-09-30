@@ -130,6 +130,20 @@ describe("PiHarness on pi-durable and the driver", () => {
     expect(late.running).toBe(false);
   });
 
+  it("parks the session's wake once pi is idle, leaving no alarm", async () => {
+    const stub = fresh();
+    const receipt = await stub.submit("hello");
+    await stub.wait(receipt.operationId);
+    let alarm = await stub.alarmTime();
+    for (let i = 0; i < 50 && alarm !== null; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      alarm = await stub.alarmTime();
+    }
+    expect(alarm).toBeNull();
+    // The next submit wakes it again.
+    expect((await stub.prompt("again")).text).toBe("echo: again");
+  });
+
   it("keeps sessions separate", async () => {
     const stub = fresh();
     const other = await stub.createSession();

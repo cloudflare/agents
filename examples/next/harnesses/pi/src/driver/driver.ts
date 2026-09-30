@@ -57,11 +57,10 @@ type InFlight = {
 type Outcome = LifecycleJobOutcome | undefined;
 
 /**
- * Copied from cloudflare/agents#2396 (`packages/agents/src/driver`, commit
- * 72b410cfd), which is based on Aron's `harness-driver` branch. Nothing here
- * has shipped in `agents`; the only change is that the published Lifecycle
- * has no `jobs.pushSync`, so `submit` pushes the queue's job before writing
- * the row instead of both in one transaction.
+ * Copied unchanged from cloudflare/agents#2396 (`packages/agents/src/driver`,
+ * commit 72b410cfd), which is based on Aron's `harness-driver` branch. It
+ * relies on `jobs.pushSync` from #2420 to write a queue row and its job in
+ * one transaction. Nothing here has shipped in `agents`.
  *
  * Durable queues of operations, and a loop that steps each one until it is
  * done, across evictions and deploys.
@@ -218,12 +217,14 @@ export class Driver extends LifecycleCapability {
     const existing = store.get<Input>(id);
     if (existing) return receipt(existing, false);
 
-    // The published Lifecycle has no synchronous job push, so the row and
-    // the job cannot share one transactionSync. Push the job first: a job
-    // with an empty queue is a no-op, while a row with no job would sit
-    // until the next start. See NOTES.md, "Driver needs a synchronous push".
-    await this.#pushJob(registration.id, scope, Date.now());
-    const result = store.enqueue(scope, id, input);
+    // Create the job table before the transaction below writes to it.
+    this.lifecycle.jobs.list();
+    const result = this.lifecycle.storage.transactionSync(() => {
+      const enqueued = store.enqueue(scope, id, input);
+      this.#pushJobSync(registration.id, scope, Date.now());
+      return enqueued;
+    });
+    await this.lifecycle.jobs.rearm();
     return receipt(result.submission, result.accepted);
   }
 
@@ -462,9 +463,11 @@ export class Driver extends LifecycleCapability {
     registration: Registration<Input, Result>
   ): Promise<void> {
     const store = this.#store(registration);
+    this.lifecycle.jobs.list();
     for (const scope of store.scopes()) {
-      await this.#pushJob(registration.id, scope, Date.now());
+      this.#pushJobSync(registration.id, scope, Date.now());
     }
+    await this.lifecycle.jobs.rearm();
   }
 
   async #applyOutcome<Input, Result>(
@@ -487,8 +490,8 @@ export class Driver extends LifecycleCapability {
     });
   }
 
-  async #pushJob(runtimeId: string, scope: string, time: number) {
-    await this.lifecycle.jobs.push({
+  #pushJobSync(runtimeId: string, scope: string, time: number): void {
+    this.lifecycle.jobs.pushSync({
       id: jobId(runtimeId, scope),
       fn: STEP_FN,
       time,

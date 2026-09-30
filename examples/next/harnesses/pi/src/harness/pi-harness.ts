@@ -52,8 +52,7 @@ import type {
   PiSessionId,
   PiSessionInfo,
   PiSessionOptions,
-  PiSubmitOptions,
-  PiWhenBusy
+  PiSubmitOptions
 } from "./types";
 
 const BG = BACKGROUND_CONTEXT;
@@ -73,6 +72,9 @@ const SLEEP_THRESHOLD_MS = 60_000;
  * several steps.
  */
 const STEP_BUDGET_MS = 10 * 60_000;
+
+/** How often the wake re-checks work it cannot wait on, such as background tasks. */
+const RECHECK_MS = 30_000;
 
 export type PiHarnessOptions = {
   /** The host's driver. The harness registers one runtime on it. */
@@ -99,12 +101,14 @@ export type PiHarnessOptions = {
   readonly onReport?: (error: unknown) => void;
 };
 
-/** One driver operation: a pi input to admit and see through. */
-type PiOperationInput = {
+/** The one driver operation each session has: keep pi awake for it. */
+type PiWakeInput = {
   readonly session: PiSessionId;
-  readonly content: UserInput;
-  readonly whenBusy: PiWhenBusy;
 };
+
+function wakeId(session: PiSessionId): string {
+  return `pi-wake:${session}`;
+}
 
 type Opened = {
   readonly pi: Harness;
@@ -148,12 +152,12 @@ function signalContext(signal: AbortSignal | undefined): Context {
  * database (see `session-store.ts`).
  *
  * What pi cannot do on a Durable Object is wake itself: its scheduler runs
- * in memory, and an evicted object has no memory. The driver is that wake.
- * Each submission is one driver operation whose `step` re-admits the input
- * into pi by its request id (a no-op when pi already has it) and waits for
- * pi to settle it. The driver heartbeats the step through the object's
- * alarm, so an eviction mid-run fires the alarm, the object restarts, pi
- * reopens and resumes its own tasks, and the step waits again.
+ * in memory, and an evicted object has no memory. The driver is that wake,
+ * and only that. Input goes to pi once, in `submit()`. Each session has one
+ * driver operation whose `step` waits while pi has live tasks in it and
+ * parks when it has none. The driver heartbeats the step through the
+ * object's alarm, so an eviction mid-run fires the alarm, the object
+ * restarts, pi reopens and resumes its own tasks, and the step waits again.
  *
  * @experimental Example-local. Nothing here is exported from `agents`.
  */
@@ -162,7 +166,9 @@ export class PiHarness extends LifecycleCapability {
   readonly registry: Registry;
   readonly sessions: PiSessions;
   readonly #options: PiHarnessOptions;
-  readonly #driver: DriverHandle<PiOperationInput>;
+  readonly #driver: DriverHandle<PiWakeInput>;
+  /** Submissions between their wake and pi's admission, per session. */
+  readonly #admitting = new Map<PiSessionId, number>();
   #opening: Promise<Opened> | undefined;
 
   constructor(options: PiHarnessOptions) {
@@ -180,12 +186,9 @@ export class PiHarness extends LifecycleCapability {
       options.configure?.(this.registry);
     });
     this.sessions = new PiSessions(this);
-    this.#driver = options.driver.register<PiOperationInput, PiOperationResult>(
+    this.#driver = options.driver.register<PiWakeInput, null>(
       options.id ?? "pi",
-      {
-        step: (operation, signal) => this.#step(operation, signal),
-        stop: (operation) => this.#withdraw(operation)
-      },
+      { step: (operation, signal) => this.#step(operation, signal) },
       {
         onFail: (operation, error) => this.#failed(operation, error),
         // pi's own retries cover the model. Driver retries are for the
@@ -198,7 +201,14 @@ export class PiHarness extends LifecycleCapability {
   // ── Lifecycle ────────────────────────────────────────────────────────────
 
   override async onStart(_context: CapabilityStartContext): Promise<void> {
-    await this.#open();
+    const { pi } = await this.#open();
+    // Every session with live work gets a wake, including ones whose wake
+    // failed out or that a subagent created without going through submit().
+    const inspection = await pi.inspect(BG);
+    const sessions = new Set(
+      inspection.tasks.map((task) => String(task.record.conversationId))
+    );
+    for (const session of sessions) await this.#ensureWake(session);
   }
 
   /** Close pi's in-memory resources. Durable state is untouched. */
@@ -250,15 +260,24 @@ export class PiHarness extends LifecycleCapability {
     return this.session(options.session).messages();
   }
 
-  /** Operations the driver still holds, oldest first. */
+  /** Submissions pi has not settled yet, oldest first. */
   async pending(options: PiSessionOptions = {}): Promise<PiPendingOperation[]> {
-    const pending = await this.#driver.pending(options.session);
-    return pending.map((operation) => ({
-      operationId: operation.id,
-      session: operation.scope,
-      status: operation.status,
-      submittedAt: operation.submittedAt
-    }));
+    const { pi } = await this.#open();
+    const id =
+      options.session === undefined
+        ? undefined
+        : conversationId(options.session);
+    return (await pi.inspect(BG)).submissions
+      .filter(
+        (record) =>
+          record.requestId !== undefined &&
+          (id === undefined || record.conversationId === id)
+      )
+      .map((record) => ({
+        operationId: record.requestId as string,
+        session: String(record.conversationId),
+        status: record.status === "queued" ? "queued" : "running"
+      }));
   }
 
   /** The opened pi Harness, for anything the interface does not cover. */
@@ -298,26 +317,54 @@ export class PiHarness extends LifecycleCapability {
     options: PiSubmitOptions
   ): Promise<PiReceipt> {
     const operationId = options.operationId ?? crypto.randomUUID();
-    const operation: PiOperationInput = {
-      session,
-      content: userInput(input),
-      whenBusy: options.whenBusy ?? "followUp"
-    };
-    // The driver row first: it is what wakes the object if the admission
-    // below is lost to an eviction.
-    const receipt = await this.#driver.submit(session, operation, {
-      id: operationId
-    });
-    // Then admit into pi now, not when the driver reaches this operation,
-    // so pi's inbox places steers and follow-ups while a run is going. The
-    // step admits again by the same request id, which pi deduplicates.
-    await this.#admit(operationId, operation, BG);
-    return { operationId, session, accepted: receipt.accepted };
+    const { storage } = await this.#open();
+    const conversation = await this.conversation(session);
+    this.#admitting.set(session, (this.#admitting.get(session) ?? 0) + 1);
+    let accepted: boolean;
+    try {
+      // 1. The wake first, so a job is scheduled before pi has the work.
+      //    If the object dies after pi admits the input, that job restarts
+      //    it. While this admission is in flight the step will not park.
+      await this.#ensureWake(session);
+      // 2. The one admission. pi deduplicates by request id.
+      accepted =
+        (await storage.submissionByRequest(
+          conversation.id,
+          operationId,
+          BG
+        )) === undefined;
+      await conversation.submit(
+        {
+          type: "input",
+          content: userInput(input),
+          whenBusy: options.whenBusy ?? "followUp",
+          requestId: operationId
+        },
+        BG
+      );
+    } finally {
+      const left = (this.#admitting.get(session) ?? 1) - 1;
+      if (left === 0) this.#admitting.delete(session);
+      else this.#admitting.set(session, left);
+    }
+    // 3. Step now, so the wake sees the work even if it just parked.
+    await this.#driver.wake(session);
+    return { operationId, session, accepted };
   }
 
-  /** @internal Stop one driver operation. */
-  stopOperation(operationId: string): Promise<boolean> {
-    return this.#driver.stop(operationId);
+  /** @internal Withdraw a queued input, or abort the run it joined. */
+  async withdraw(session: PiSessionId, operationId: string): Promise<boolean> {
+    const { pi, storage } = await this.#open();
+    const id = conversationId(session);
+    const record = await storage.submissionByRequest(id, operationId, BG);
+    if (!record || record.status === "done" || record.status === "unanswered") {
+      return false;
+    }
+    const withdrawn = await pi.abortSubmission(record.id, BG, id);
+    if (withdrawn === "already_placed") {
+      await (await pi.conversation(id, BG))?.abort(BG);
+    }
+    return withdrawn !== "settled" && withdrawn !== "not_found";
   }
 
   /** @internal Wait for pi to settle an operation, by its request id. */
@@ -351,10 +398,26 @@ export class PiHarness extends LifecycleCapability {
 
   // ── Driver runtime ───────────────────────────────────────────────────────
 
+  /** Make sure the session's wake exists and has a job. */
+  async #ensureWake(session: PiSessionId): Promise<void> {
+    const receipt = await this.#driver.submit(
+      session,
+      { session },
+      { id: wakeId(session) }
+    );
+    // An existing wake may be parked, with no job; give it one.
+    if (!receipt.accepted) await this.#driver.wake(session);
+  }
+
+  /**
+   * One step of a session's wake. It never admits or replays anything: it
+   * waits while pi has live tasks in the session, and parks when it has
+   * none. pi does all the work in between.
+   */
   async #step(
-    operation: DriverOperation<PiOperationInput>,
+    operation: DriverOperation<PiWakeInput>,
     signal: AbortSignal
-  ): Promise<DriverStep<PiOperationResult>> {
+  ): Promise<DriverStep<null>> {
     const { pi } = await this.#open();
     const context = signalContext(signal);
     const { session } = operation.input;
@@ -362,66 +425,47 @@ export class PiHarness extends LifecycleCapability {
       conversationId(session),
       context
     );
-    if (!conversation) {
-      return {
-        then: "done",
-        result: {
-          operationId: operation.id,
-          session,
-          status: "unanswered",
-          reason: "session_not_found"
-        }
-      };
-    }
-    const submission = await this.#admit(
-      operation.id,
-      operation.input,
-      context
+    if (!conversation) return { then: "done", result: null };
+
+    const tasks = (await pi.inspect(context)).tasks.filter(
+      (task) => task.record.conversationId === conversation.id
     );
+    if (tasks.length === 0) {
+      // A submit between its wake and pi's admission: do not park yet.
+      return this.#admitting.has(session)
+        ? { then: "sleep", until: Date.now() + RECHECK_MS }
+        : { then: "park" };
+    }
     const wakeAt = await this.#longWait(pi, conversation.id, context);
     if (wakeAt !== undefined) return { then: "sleep", until: wakeAt };
+    // Background tasks are outside the conversation's idle wait.
+    if (tasks.every((task) => task.record.background)) {
+      return { then: "sleep", until: Date.now() + RECHECK_MS };
+    }
+
     const budget = new AbortController();
     const timer = setTimeout(() => budget.abort(), STEP_BUDGET_MS);
-    let settled: SettledSubmissionRecord;
     try {
       // Cancelling the wait never cancels pi's work.
-      settled = await submission.wait(withAbortSignal(budget.signal, context));
+      await conversation.waitForIdle(withAbortSignal(budget.signal, context));
     } catch (error) {
-      if (budget.signal.aborted && !signal.aborted) return { then: "continue" };
-      throw error;
+      if (!budget.signal.aborted || signal.aborted) throw error;
     } finally {
       clearTimeout(timer);
     }
-    return {
-      then: "done",
-      result: await this.#result(session, operation.id, settled, context)
-    };
-  }
-
-  /** Withdraw a queued input, or abort the run it joined. */
-  async #withdraw(operation: DriverOperation<PiOperationInput>): Promise<void> {
-    const { pi, storage } = await this.#open();
-    const id = conversationId(operation.input.session);
-    const record = await storage.submissionByRequest(id, operation.id, BG);
-    if (!record || record.status === "done" || record.status === "unanswered") {
-      return;
-    }
-    const withdrawn = await pi.abortSubmission(record.id, BG, id);
-    if (withdrawn === "already_placed") {
-      await (await pi.conversation(id, BG))?.abort(BG);
-    }
+    // Re-check: pi may have started more work, such as a queued follow-up.
+    return { then: "continue" };
   }
 
   async #failed(
-    operation: DriverOperation<PiOperationInput>,
+    operation: DriverOperation<PiWakeInput>,
     error: DriverError
   ): Promise<void> {
-    this.lifecycle.events.emit("pi:operation_failed", {
-      operationId: operation.id,
+    // The wake is removed. The next submit, or the next start, makes a new one.
+    this.lifecycle.events.emit("pi:wake_failed", {
       session: operation.input.session,
       error: error.message
     });
-    await this.#withdraw(operation);
   }
 
   // ── pi ───────────────────────────────────────────────────────────────────
@@ -476,20 +520,6 @@ export class PiHarness extends LifecycleCapability {
     config.model = { ...this.#options.model };
     config.thinkingLevel = this.#options.thinkingLevel ?? "off";
     if (this.#options.retry) config.retry = { ...this.#options.retry };
-  }
-
-  #admit(operationId: string, input: PiOperationInput, context: Context) {
-    return this.conversation(input.session).then((conversation) =>
-      conversation.submit(
-        {
-          type: "input",
-          content: input.content,
-          whenBusy: input.whenBusy,
-          requestId: operationId
-        },
-        context
-      )
-    );
   }
 
   async #findSubmission(
@@ -591,12 +621,13 @@ export class PiSession {
   }
 
   /**
-   * Stop one operation through the driver, or, with no id, abort the
-   * session: pi withdraws queued inputs and aborts the running work.
+   * Withdraw one queued operation (or abort the run it joined), or, with no
+   * id, abort the session: pi withdraws queued inputs and aborts the
+   * running work.
    */
   async abort(operationId?: string): Promise<boolean> {
     if (operationId !== undefined) {
-      return this.#harness.stopOperation(operationId);
+      return this.#harness.withdraw(this.id, operationId);
     }
     const conversation = await this.#harness.conversation(this.id);
     await conversation.abort(BG);

@@ -50,11 +50,12 @@ Responsibilities are split by authority:
   facade over `ctx.storage.sql`. Transactions use `transactionSync`, and
   pi's tables are moved under a `pi_` prefix. pi's own storage conformance
   suite runs against it on a real Durable Object.
-- **The driver** (copied from #2396) is the wake. Each submission is one
-  driver operation. Its `step` admits the input into pi by request id and
-  waits for pi to settle it. The driver's alarm heartbeat restarts an evicted
-  object, and pi resumes its own tasks on open. The driver never replays
-  model or tool work.
+- **The driver** (copied from #2396) is the wake, and only that. Input goes to
+  pi once, in `submit()`, after the session's wake has a job. Each session
+  has one driver operation whose `step` waits while pi has live tasks in it
+  and parks when it has none. The driver's alarm heartbeat restarts an
+  evicted object, and pi resumes its own tasks on open. The driver never
+  admits input or replays model or tool work.
 - **Transport is app glue**, not part of the harness. The harness exposes
   `session.events()`, which is pi's own agent events: a snapshot, then one
   batch per commit. The example's `sockets.ts` puts one session per socket on
@@ -66,14 +67,13 @@ over Tasks and the state machine, and records everything that was hard.
 
 ## Known costs
 
-- The driver is copied into the example until a driver ships in `agents`.
-  The copy lacks `jobs.pushSync`, so it pushes the job before it writes the
-  row.
-- pi's work that has no driver operation behind it gets no heartbeat.
-  Examples are background subagents and follow-ups placed after their
-  admitting operation settled.
-- pi's long waits are turned into driver sleeps by reading pi's `LiveDoc`,
-  because pi has no "next wake" API.
+- The driver is copied into the example until a driver ships in `agents`. It
+  needs `jobs.pushSync` from #2420, which this is stacked on.
+- Background pi tasks are polled every 30 s, because the conversation's idle
+  wait ignores them.
+- pi sleeps with `setTimeout`, which does not keep an object alive. Long
+  waits of the generation task become driver sleeps by reading pi's
+  `LiveDoc`; custom task sleeps are invisible. This needs a pi change.
 - Two reads (`submissionByRequest`, `scanConversations`) go to pi's storage
   directly, because the Harness does not offer them.
 - The table prefix is a SQL rewrite, because pi has no prefix option.
@@ -82,12 +82,11 @@ over Tasks and the state machine, and records everything that was hard.
 
 ## Before this becomes a package export
 
-- A driver in `agents`, with an atomic push.
+- A driver in `agents`, on #2420's atomic push.
 - A pi release with pi-durable Packages 17–19, so no archives are vendored.
-- Upstream asks: a next-wake time on `inspect()`, submission lookup by
-  request id, conversation listing, and a table prefix.
-- A keep-alive for pi's live work that does not depend on a driver
-  operation.
+- Upstream asks: scheduler-owned sleeps with a next-wake time on
+  `inspect()` (or an injectable timer), submission lookup by request id,
+  conversation listing, and a table prefix.
 - Compaction upstream, and an `ExecutionEnv` for pi's coding tools on
   Workspace or a Container.
 
