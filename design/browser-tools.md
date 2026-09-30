@@ -39,7 +39,7 @@ Because `disposeExecution` fires only on terminal transitions — never on pause
 
 ### Pauses, replay, and attach handles
 
-CDP session ids from `Target.attachToTarget` are scoped to one WebSocket connection, but the runtime's log must replay across reconnects. The connector therefore returns stable **attach handles** (`target:<targetId>`) instead of raw session ids and transparently re-attaches when a handle is used on a new connection — resumed code keeps working without knowing the socket changed. The persistent-browser connector does the same for a raw `Target.attachToTarget` sent through `cdp.send`, and maps a handle passed to `Target.detachFromTarget` back to the live id.
+CDP session ids from `Target.attachToTarget` are scoped to one WebSocket connection, but the runtime's log must replay across reconnects. The connector therefore returns stable **attach handles** (`target:<targetId>`) instead of raw session ids and transparently re-attaches when a handle is used on a new connection — resumed code keeps working without knowing the socket changed. In the persistent-browser connector, a raw `Target.attachToTarget` sent through `cdp.send` still returns Chrome's own id, which only lasts for that run; `Target.detachFromTarget` also accepts a handle.
 
 If Browser Rendering expires a session while a pause waits for a human, the resume surfaces a model-facing error ("browser session expired while awaiting approval") and cleans up the stale store entry.
 

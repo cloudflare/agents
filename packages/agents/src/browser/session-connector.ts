@@ -113,7 +113,7 @@ const INSTRUCTIONS = [
   "The browser can still be replaced between runs (idle timeout, crash) — even between the passes of a run that paused for approval. The tool result then says restarted: true, and earlier tabs, cookies, and logins are gone. Don't assume a page from an earlier run is still there: check where you are before an action that matters (submitting a form, making a purchase).",
   'Page-scoped commands (Page.*, Runtime.*, DOM.*, Input.*, Network.*, Emulation.*) need sessionId: "active" — the tab you are working in, which stays the same across executions. Example: await cdp.send({ method: "Page.navigate", params: { url }, sessionId: "active" }).',
   "Browser- and Target-scoped commands (Target.getTargets, Target.createTarget, Browser.getVersion) take no sessionId.",
-  'Opening a tab with Target.createTarget makes it the active tab. To switch to another open tab, call cdp.attachToTarget({ targetId }): it becomes active, and the returned sessionId works like "active" for that tab, in this run and later ones. Target.attachToTarget sent through cdp.send returns the same kind of handle.',
+  'Opening a tab with Target.createTarget makes it the active tab. To switch to another open tab, call cdp.attachToTarget({ targetId }): it becomes active, and the returned sessionId works like "active" for that tab, in this run and later ones. A raw Target.attachToTarget sent through cdp.send returns Chrome\'s own sessionId, which only lasts for the current run.',
   "Tabs a page opens on its own (popups, target=_blank links) do not become active; the tool result lists them as newTabs.",
   "cdp.send returns the CDP method result directly, not the JSON-RPC envelope: Target.createTarget returns { targetId }, Runtime.evaluate returns { result: { value } }, Page.captureScreenshot returns { data }.",
   "Issue CDP calls sequentially — never in parallel (no Promise.all): call order is recorded for durable replay.",
@@ -144,6 +144,11 @@ export class BrowserSessionConnector extends CodemodeConnector {
    * pause may run on a fresh connector, whose report starts over. Nothing
    * pauses today — the browser tool wires no approval tools — so reporting
    * across a resume is left for when approvals are added.
+   *
+   * The same goes for raw CDP session ids from `Target.attachToTarget` sent
+   * through `send`: they belong to one pass's socket, so a replay after a
+   * pause would reuse a dead id. The stable handles from `attachToTarget`
+   * are the replay-safe path.
    */
   #reports = new Map<string, BrowserExecutionReport>();
 
@@ -210,19 +215,6 @@ export class BrowserSessionConnector extends CodemodeConnector {
             );
           }
           const state = await this.#state(this.#executionId(ctx));
-          // A raw attach would return a CDP session id that dies with this
-          // pass's socket, and replays or later runs would reuse it. Return
-          // the stable handle instead, as cdp.attachToTarget does.
-          if (
-            method === "Target.attachToTarget" &&
-            !sessionId &&
-            typeof params?.targetId === "string"
-          ) {
-            const targetId = params.targetId as TargetId;
-            await this.#attach(state, targetId, timeoutMs);
-            this.#setActive(state, targetId);
-            return { sessionId: attachHandle(targetId) };
-          }
           const live = await this.#resolveSessionId(state, sessionId);
           const liveParams = this.#liveParams(state, method, params);
           if (liveParams === DETACHED) return {};
@@ -556,6 +548,8 @@ export class BrowserSessionConnector extends CodemodeConnector {
       if (typeof created === "string") {
         this.#setActive(state, created as TargetId);
       }
+    } else if (method === "Target.attachToTarget" && targetId) {
+      this.#setActive(state, targetId);
     } else if (method === "Target.closeTarget" && targetId) {
       state.attached.delete(targetId);
       // The next "active" use picks a tab afresh.

@@ -674,7 +674,7 @@ describe("browser connector e2e", () => {
       expect(resumed.result).toBe("paused");
     });
 
-    it("keeps a raw Target.attachToTarget handle working across a pause", async () => {
+    it("passes a raw Target.attachToTarget through to Chrome", async () => {
       await runNamed(setTitle("raw-attach"));
       const output = await runNamed(`async () => {
         const { targetInfos } = await cdp.send({ method: "Target.getTargets" });
@@ -683,21 +683,30 @@ describe("browser connector e2e", () => {
           method: "Target.attachToTarget",
           params: { targetId: page.targetId, flatten: true }
         });
-        await gate.confirm({ label: "continue" });
         const { result } = await cdp.send({
           method: "Runtime.evaluate",
           params: { expression: "document.title", returnByValue: true },
           sessionId
         });
-        return result.value;
+        return { sessionId, title: result.value };
       }`);
-      expect(output.status).toBe("paused");
+      expect(output.status).toBe("completed");
+      const { sessionId, title } = output.result as {
+        sessionId: string;
+        title: string;
+      };
+      expect(sessionId).not.toMatch(/^target:/);
+      expect(title).toBe("raw-attach");
 
-      const resumed = (await callAgent("approveNamed", [
-        output.executionId
-      ])) as RunOutput;
-      expect(resumed.status).toBe("completed");
-      expect(resumed.result).toBe("raw-attach");
+      const later = await runNamed(`async () => {
+        await cdp.send({
+          method: "Runtime.evaluate",
+          params: { expression: "1" },
+          sessionId: "${sessionId}"
+        });
+      }`);
+      expect(later.status).toBe("error");
+      expect(later.error).toContain("don't carry over between runs");
     });
 
     it("doesn't report a tab opened with Target.createTarget as a popup", async () => {

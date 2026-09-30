@@ -149,6 +149,8 @@ class FakeBrowserInstance {
 class FakeSocket {
   sent: SentCommand[] = [];
   closed = false;
+  /** CDP sessions attached over this socket; Chrome drops them on close. */
+  #sessions = new Set<string>();
   #listeners = new Map<string, Array<(event: unknown) => void>>();
   constructor(readonly instance: FakeBrowserInstance) {}
   accept(): void {}
@@ -164,6 +166,11 @@ class FakeSocket {
     this.sent.push(command);
     queueMicrotask(() => {
       const reply = this.instance.handle(command);
+      const attached = (reply.result as { sessionId?: unknown } | undefined)
+        ?.sessionId;
+      if (command.method === "Target.attachToTarget") {
+        this.#sessions.add(String(attached));
+      }
       this.#emit("message", {
         data: JSON.stringify({ id: command.id, ...reply })
       });
@@ -171,6 +178,9 @@ class FakeSocket {
   }
   close(): void {
     this.closed = true;
+    for (const sessionId of this.#sessions) {
+      this.instance.attached.delete(sessionId);
+    }
     this.#emit("close", {});
   }
   #emit(type: string, event: unknown): void {
@@ -457,7 +467,7 @@ describe("BrowserSessionConnector", () => {
     expect(evaluatedIn(results[2])).toBe("target-1");
   });
 
-  it("returns a stable handle from a raw Target.attachToTarget", async () => {
+  it("passes a raw Target.attachToTarget through unchanged", async () => {
     const t = setup();
     (await t.start()).addTab("https://other.example/");
 
@@ -470,23 +480,22 @@ describe("BrowserSessionConnector", () => {
         }
       ]
     ]);
-    expect(first.results[0]).toEqual({ sessionId: "target:target-2" });
+    const { sessionId } = first.results[0] as { sessionId: string };
+    expect(sessionId).toMatch(/^cdp-/);
     expect(t.stored()?.activeTargetId).toBe("target-2");
 
-    // The handle still works on a later run's new socket, as a replay
-    // after an approval pause would use it.
+    // Chrome's id belongs to that run's socket; a later run gets a hint.
     const second = await t.run([
       [
         "send",
         {
           method: "Runtime.evaluate",
           params: { expression: "1" },
-          sessionId: "target:target-2"
+          sessionId
         }
       ]
     ]);
-    expect(second.error).toBeUndefined();
-    expect(evaluatedIn(second.results[0])).toBe("target-2");
+    expect(String(second.error)).toContain("don't carry over between runs");
   });
 
   it("detaches a handle and reattaches on its next use", async () => {
