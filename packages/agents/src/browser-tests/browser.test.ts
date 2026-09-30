@@ -674,6 +674,44 @@ describe("browser connector e2e", () => {
       expect(resumed.result).toBe("paused");
     });
 
+    it("keeps a raw Target.attachToTarget handle working across a pause", async () => {
+      await runNamed(setTitle("raw-attach"));
+      const output = await runNamed(`async () => {
+        const { targetInfos } = await cdp.send({ method: "Target.getTargets" });
+        const page = targetInfos.find((t) => t.type === "page" && t.title === "raw-attach");
+        const { sessionId } = await cdp.send({
+          method: "Target.attachToTarget",
+          params: { targetId: page.targetId, flatten: true }
+        });
+        await gate.confirm({ label: "continue" });
+        const { result } = await cdp.send({
+          method: "Runtime.evaluate",
+          params: { expression: "document.title", returnByValue: true },
+          sessionId
+        });
+        return result.value;
+      }`);
+      expect(output.status).toBe("paused");
+
+      const resumed = (await callAgent("approveNamed", [
+        output.executionId
+      ])) as RunOutput;
+      expect(resumed.status).toBe("completed");
+      expect(resumed.result).toBe("raw-attach");
+    });
+
+    it("doesn't report a tab opened with Target.createTarget as a popup", async () => {
+      const output = await runNamed(`async () => {
+        const { targetId } = await cdp.send({
+          method: "Target.createTarget",
+          params: { url: "about:blank" }
+        });
+        return targetId;
+      }`);
+      expect(output.status).toBe("completed");
+      expect(output.report?.newTabs).toEqual([]);
+    });
+
     it('teaches sessionId: "active" for a page command sent without one', async () => {
       const output = await runNamed(`async () => {
         await cdp.send({ method: "Runtime.evaluate", params: { expression: "1" } });

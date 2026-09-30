@@ -53,6 +53,7 @@ interface Tab {
   type: "page";
   url: string;
   title?: string;
+  openerId?: string;
 }
 
 interface SentCommand {
@@ -73,9 +74,14 @@ class FakeBrowserInstance {
   /** CDP session id → target id, for page-scoped commands. */
   attached = new Map<string, string>();
 
-  addTab(url = "about:blank"): string {
+  addTab(url = "about:blank", openerId?: string): string {
     const targetId = `target-${++this.#nextTarget}`;
-    this.tabs.push({ targetId, type: "page", url });
+    this.tabs.push({
+      targetId,
+      type: "page",
+      url,
+      ...(openerId ? { openerId } : {})
+    });
     return targetId;
   }
 
@@ -124,7 +130,10 @@ class FakeBrowserInstance {
         if (command.method === "Runtime.evaluate" && command.sessionId) {
           // Simulate a page opening a popup.
           if (params.expression === "openPopup()") {
-            this.addTab("https://popup.example/");
+            this.addTab(
+              "https://popup.example/",
+              this.attached.get(command.sessionId)
+            );
           }
           return {
             result: {
@@ -446,6 +455,94 @@ describe("BrowserSessionConnector", () => {
     ]);
     expect(error).toBeUndefined();
     expect(evaluatedIn(results[2])).toBe("target-1");
+  });
+
+  it("returns a stable handle from a raw Target.attachToTarget", async () => {
+    const t = setup();
+    (await t.start()).addTab("https://other.example/");
+
+    const first = await t.run([
+      [
+        "send",
+        {
+          method: "Target.attachToTarget",
+          params: { targetId: "target-2", flatten: true }
+        }
+      ]
+    ]);
+    expect(first.results[0]).toEqual({ sessionId: "target:target-2" });
+    expect(t.stored()?.activeTargetId).toBe("target-2");
+
+    // The handle still works on a later run's new socket, as a replay
+    // after an approval pause would use it.
+    const second = await t.run([
+      [
+        "send",
+        {
+          method: "Runtime.evaluate",
+          params: { expression: "1" },
+          sessionId: "target:target-2"
+        }
+      ]
+    ]);
+    expect(second.error).toBeUndefined();
+    expect(evaluatedIn(second.results[0])).toBe("target-2");
+  });
+
+  it("detaches a handle and reattaches on its next use", async () => {
+    const t = setup();
+    const handle = "target:target-1";
+    const { results, error } = await t.run([
+      ["attachToTarget", { targetId: "target-1" }],
+      [
+        "send",
+        { method: "Target.detachFromTarget", params: { sessionId: handle } }
+      ],
+      [
+        "send",
+        {
+          method: "Runtime.evaluate",
+          params: { expression: "1" },
+          sessionId: handle
+        }
+      ]
+    ]);
+    expect(error).toBeUndefined();
+    expect(evaluatedIn(results[2])).toBe("target-1");
+    const detach = t.sockets[0].sent.find(
+      (command) => command.method === "Target.detachFromTarget"
+    );
+    expect(detach?.params?.sessionId).toMatch(/^cdp-/);
+  });
+
+  it("explains that a CDP session id from an earlier run has expired", async () => {
+    const t = setup();
+    const { error } = await t.run([
+      [
+        "send",
+        {
+          method: "Runtime.evaluate",
+          params: { expression: "1" },
+          sessionId: "cdp-from-an-earlier-run"
+        }
+      ]
+    ]);
+    expect(String(error)).toContain("don't carry over between runs");
+    expect(String(error)).toContain('sessionId: "active"');
+  });
+
+  it("doesn't report a tab another execution created as a popup", async () => {
+    const t = setup();
+    // Both executions connect before either creates a tab.
+    await t.connector.executeTool(evaluateActive[0], evaluateActive[1], {
+      executionId: "exec-a"
+    });
+    await t.pass("exec-b", [
+      ["send", { method: "Target.createTarget", params: { url: "" } }]
+    ]);
+    await t.connector.onPassEnd("exec-a");
+
+    expect(t.connector.takeReport("exec-a")?.newTabs).toEqual([]);
   });
 
   it("reports tabs the page opened as newTabs without switching to them", async () => {

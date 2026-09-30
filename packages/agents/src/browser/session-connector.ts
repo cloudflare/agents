@@ -58,6 +58,12 @@ export const ACTIVE_PAGE_SESSION = "active";
  */
 const ATTACH_HANDLE_PREFIX = "target:";
 
+/** Chrome's JSON-RPC code for a CDP session id it doesn't know. */
+const CDP_SESSION_NOT_FOUND = -32001;
+
+/** {@link BrowserSessionConnector} `#liveParams`: nothing to detach. */
+const DETACHED = Symbol("detached");
+
 /** Reports awaiting their tool call; bounded in case a caller never reads. */
 const MAX_PENDING_REPORTS = 100;
 
@@ -85,6 +91,8 @@ interface TargetInfo {
   type: string;
   url?: string;
   title?: string;
+  /** The tab that opened this one (popups, `target=_blank` links). */
+  openerId?: TargetId;
 }
 
 /** Per-execution state for one pass. Dropped when the pass ends. */
@@ -94,8 +102,6 @@ interface ExecutionState {
   attached: Map<TargetId, LiveSessionId>;
   /** Page targets open when the pass connected. */
   initialPages: Set<TargetId>;
-  /** Pages the agent itself created this pass. */
-  createdPages: Set<TargetId>;
   /** The tab `"active"` resolves to — decided lazily on first use. */
   activeTargetId?: TargetId;
   /** Whether {@link activeTargetId} was decided (vs. never needed). */
@@ -107,7 +113,7 @@ const INSTRUCTIONS = [
   "The browser can still be replaced between runs (idle timeout, crash) — even between the passes of a run that paused for approval. The tool result then says restarted: true, and earlier tabs, cookies, and logins are gone. Don't assume a page from an earlier run is still there: check where you are before an action that matters (submitting a form, making a purchase).",
   'Page-scoped commands (Page.*, Runtime.*, DOM.*, Input.*, Network.*, Emulation.*) need sessionId: "active" — the tab you are working in, which stays the same across executions. Example: await cdp.send({ method: "Page.navigate", params: { url }, sessionId: "active" }).',
   "Browser- and Target-scoped commands (Target.getTargets, Target.createTarget, Browser.getVersion) take no sessionId.",
-  'Opening a tab with Target.createTarget makes it the active tab. To switch to another open tab, call cdp.attachToTarget({ targetId }): it becomes active, and the returned sessionId works like "active" for that tab.',
+  'Opening a tab with Target.createTarget makes it the active tab. To switch to another open tab, call cdp.attachToTarget({ targetId }): it becomes active, and the returned sessionId works like "active" for that tab, in this run and later ones. Target.attachToTarget sent through cdp.send returns the same kind of handle.',
   "Tabs a page opens on its own (popups, target=_blank links) do not become active; the tool result lists them as newTabs.",
   "cdp.send returns the CDP method result directly, not the JSON-RPC envelope: Target.createTarget returns { targetId }, Runtime.evaluate returns { result: { value } }, Page.captureScreenshot returns { data }.",
   "Issue CDP calls sequentially — never in parallel (no Promise.all): call order is recorded for durable replay.",
@@ -204,17 +210,32 @@ export class BrowserSessionConnector extends CodemodeConnector {
             );
           }
           const state = await this.#state(this.#executionId(ctx));
+          // A raw attach would return a CDP session id that dies with this
+          // pass's socket, and replays or later runs would reuse it. Return
+          // the stable handle instead, as cdp.attachToTarget does.
+          if (
+            method === "Target.attachToTarget" &&
+            !sessionId &&
+            typeof params?.targetId === "string"
+          ) {
+            const targetId = params.targetId as TargetId;
+            await this.#attach(state, targetId, timeoutMs);
+            this.#setActive(state, targetId);
+            return { sessionId: attachHandle(targetId) };
+          }
           const live = await this.#resolveSessionId(state, sessionId);
+          const liveParams = this.#liveParams(state, method, params);
+          if (liveParams === DETACHED) return {};
           let result: unknown;
           try {
-            result = await state.connected.cdp.send(method, params, {
+            result = await state.connected.cdp.send(method, liveParams, {
               sessionId: live,
               timeoutMs
             });
           } catch (error) {
             throw await this.#teach(state, error, method, sessionId);
           }
-          this.#observe(state, method, params, result);
+          this.#observe(state, method, liveParams, result);
           return result;
         }
       },
@@ -251,8 +272,7 @@ export class BrowserSessionConnector extends CodemodeConnector {
           const state = await this.#state(this.#executionId(ctx));
           await this.#attach(state, targetId, timeoutMs);
           this.#setActive(state, targetId);
-          const handle: AttachHandle = `${ATTACH_HANDLE_PREFIX}${targetId}`;
-          return { sessionId: handle };
+          return { sessionId: attachHandle(targetId) };
         }
       },
 
@@ -376,7 +396,6 @@ export class BrowserSessionConnector extends CodemodeConnector {
       connected,
       attached: new Map(),
       initialPages: new Set(initialPages.map((page) => page.targetId)),
-      createdPages: new Set(),
       activeResolved: false
     };
     this.#states.set(executionId, state);
@@ -419,10 +438,10 @@ export class BrowserSessionConnector extends CodemodeConnector {
     const report = this.#report(executionId, state.connected.restarted);
     const opened = new Set<string>(report.newTabs.map((tab) => tab.targetId));
     for (const page of pages) {
-      if (
-        !state.initialPages.has(page.targetId) &&
-        !state.createdPages.has(page.targetId)
-      ) {
+      // Chrome sets openerId only on tabs a page opened, never on
+      // Target.createTarget tabs — including ones another execution sharing
+      // this browser created meanwhile.
+      if (!state.initialPages.has(page.targetId) && page.openerId) {
         opened.add(page.targetId);
       }
     }
@@ -496,7 +515,6 @@ export class BrowserSessionConnector extends CodemodeConnector {
         url: "about:blank"
       })) as { targetId: TargetId };
       targetId = created.targetId;
-      state.createdPages.add(targetId);
     }
     targetId ??= pages[0].targetId;
     this.#setActive(state, targetId);
@@ -536,11 +554,8 @@ export class BrowserSessionConnector extends CodemodeConnector {
     if (method === "Target.createTarget") {
       const created = (result as { targetId?: unknown } | undefined)?.targetId;
       if (typeof created === "string") {
-        state.createdPages.add(created as TargetId);
         this.#setActive(state, created as TargetId);
       }
-    } else if (method === "Target.attachToTarget" && targetId) {
-      this.#setActive(state, targetId);
     } else if (method === "Target.closeTarget" && targetId) {
       state.attached.delete(targetId);
       // The next "active" use picks a tab afresh.
@@ -556,7 +571,26 @@ export class BrowserSessionConnector extends CodemodeConnector {
   }
 
   /**
-   * Turn the two common protocol mistakes into instructions: sending an
+   * Swap a handle in `Target.detachFromTarget`'s `sessionId` param for the
+   * live CDP session id. Returns {@link DETACHED} when the handle's tab isn't
+   * attached on this socket, so there is nothing to detach.
+   */
+  #liveParams(
+    state: ExecutionState,
+    method: string,
+    params: Record<string, unknown> | undefined
+  ): Record<string, unknown> | undefined | typeof DETACHED {
+    const handle = params?.sessionId;
+    if (method !== "Target.detachFromTarget" || typeof handle !== "string") {
+      return params;
+    }
+    if (!isAttachHandle(handle)) return params;
+    const live = state.attached.get(targetOfHandle(handle));
+    return live ? { ...params, sessionId: live } : DETACHED;
+  }
+
+  /**
+   * Turn the common protocol mistakes into instructions: sending an
    * event as a command, and a page-scoped command without a session.
    */
   async #teach(
@@ -565,12 +599,20 @@ export class BrowserSessionConnector extends CodemodeConnector {
     method: string,
     sessionId: string | undefined
   ): Promise<unknown> {
+    if (!(error instanceof CdpProtocolError)) return error;
     if (
-      !(error instanceof CdpProtocolError) ||
-      error.code !== CDP_METHOD_NOT_FOUND
+      error.code === CDP_SESSION_NOT_FOUND &&
+      sessionId &&
+      sessionId !== ACTIVE_PAGE_SESSION &&
+      !isAttachHandle(sessionId)
     ) {
-      return error;
+      return new Error(
+        `${error.message}. CDP session ids don't carry over between runs. ` +
+          `Use sessionId: "active" for the current tab, or the handle from ` +
+          `cdp.attachToTarget({ targetId }) for another tab.`
+      );
     }
+    if (error.code !== CDP_METHOD_NOT_FOUND) return error;
     if (await this.#isEvent(state, method)) {
       return new Error(
         `${error.message}. '${method}' is a CDP *event*, not a command — it ` +
@@ -599,6 +641,10 @@ export class BrowserSessionConnector extends CodemodeConnector {
       return false;
     }
   }
+}
+
+function attachHandle(targetId: TargetId): AttachHandle {
+  return `${ATTACH_HANDLE_PREFIX}${targetId}`;
 }
 
 function isAttachHandle(
