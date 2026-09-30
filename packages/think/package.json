@@ -25,13 +25,13 @@
     "@ai-sdk/openai": "^4.0.0",
     "@cloudflare/codemode": ">=0.5.0",
     "@cloudflare/shell": ">=0.4.0",
-    "chat": "^4.31.0",
+    "chat": "^4.41.1",
     "just-bash": "^3.0.2",
     "workers-ai-provider": "^4.0.0"
   },
   "devDependencies": {
     "@ai-sdk/react": "^4.0.0",
-    "@chat-adapter/telegram": "^4.31.0",
+    "@chat-adapter/telegram": "^4.41.1",
     "@cloudflare/ai-chat": "workspace:*",
     "@testing-library/react": "^16.3.2",
     "@types/react": "^19.2.17",

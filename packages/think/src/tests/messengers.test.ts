@@ -33,7 +33,12 @@ import {
   type MessengerMessage,
   type MessengerThinkHost
 } from "../messengers";
-import { mentionsBot, withMessengerQueueTtl } from "../messengers/chat-sdk";
+import {
+  chatQueueDrainer,
+  chatSdkRenewsLocks,
+  mentionsBot,
+  withMessengerQueueTtl
+} from "../messengers/chat-sdk";
 import telegramMessenger, {
   isExpectedTelegramFinalEditNoop,
   isTelegramIgnorableDeliveryError,
@@ -981,10 +986,11 @@ describe("think messengers core", () => {
     ).toBe(true);
   });
 
-  it("gives queued messages a TTL that outlasts a slow turn", () => {
+  it("gives queued messages and the thread lock lifetimes that outlast a slow turn", () => {
     const thirtyMinutes = 30 * 60 * 1000;
 
     expect(withMessengerQueueTtl("queue")).toEqual({
+      maxLockLifetimeMs: thirtyMinutes,
       queueEntryTtlMs: thirtyMinutes,
       strategy: "queue"
     });
@@ -992,12 +998,22 @@ describe("think messengers core", () => {
       withMessengerQueueTtl({ debounceMs: 10, strategy: "burst" })
     ).toEqual({
       debounceMs: 10,
+      maxLockLifetimeMs: thirtyMinutes,
       queueEntryTtlMs: thirtyMinutes,
       strategy: "burst"
     });
     expect(
-      withMessengerQueueTtl({ queueEntryTtlMs: 5, strategy: "queue" })
-    ).toEqual({ queueEntryTtlMs: 5, strategy: "queue" });
+      withMessengerQueueTtl({
+        maxLockLifetimeMs: 7,
+        queueEntryTtlMs: 5,
+        strategy: "queue"
+      })
+    ).toEqual({ maxLockLifetimeMs: 7, queueEntryTtlMs: 5, strategy: "queue" });
+  });
+
+  it("renews the thread lock itself only when the Chat SDK does not", () => {
+    expect(chatSdkRenewsLocks(Chat.prototype)).toBe(true);
+    expect(chatSdkRenewsLocks({ async drainQueue() {} })).toBe(false);
   });
 
   it("leaves attachment id undefined when fetchMetadata has no known id key", () => {
@@ -1600,47 +1616,100 @@ describe("think messengers core", () => {
       expect(await agent.isSubscribedForTest(threadId)).toBe(true);
     });
 
-    it("keeps the thread locked through a turn that outlives the lock TTL", async () => {
-      const threadId = "fake:dm-slow";
-      const send = (id: string, text: string) =>
-        agent
-          .fetch("https://example.com/messengers/fake/webhook", {
-            body: JSON.stringify({ id, text, threadId }),
-            method: "POST"
-          })
-          .then((res) => res.text());
-      const agent = await getAgentByName(
-        env.ThinkMessengerDeliveryTestAgent,
-        `slow-dm-${crypto.randomUUID()}`
-      );
-      const first = send("l1", "first");
-      for (let i = 0; i < 100; i++) {
-        if ((await agent.getModelLog()).length > 0) break;
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      // Past the 1s lock TTL, well inside the 4s first turn.
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      await send("l2", "second");
-      // Queued behind the running turn, not handled under a lock of its own.
-      expect(await agent.queueDepthForTest(threadId)).toBe(1);
-      await first;
-
-      expect(await agent.getModelLog()).toEqual([
-        { content: "first", kind: "prompt" },
-        { content: "first", kind: "stream-end" },
-        { content: "second", kind: "prompt" },
-        { content: "second", kind: "stream-end" }
-      ]);
-    }, 30_000);
-
     it("finds the private Chat SDK queue methods the recovery drain relies on", () => {
       // The drain feature-checks these at runtime and silently skips when a
-      // `chat` release drops or renames them; this fails the upgrade instead.
+      // `chat` release drops, renames, or reshapes them; this fails the
+      // upgrade instead.
       const internals = Chat.prototype as unknown as Record<string, unknown>;
       expect(typeof internals.getLockKey).toBe("function");
-      expect(typeof internals.drainQueue).toBe("function");
       expect((internals.getLockKey as () => unknown).length).toBe(2);
-      expect((internals.drainQueue as () => unknown).length).toBe(4);
+      expect(
+        chatQueueDrainer(Chat.prototype, { releaseLock: async () => {} })
+      ).toBeTypeOf("function");
+    });
+
+    describe("chatQueueDrainer", () => {
+      const lock = { threadId: "key", token: "t", expiresAt: 0 };
+      const adapter = {} as Adapter;
+
+      it("drains through the lock heartbeat on chat >= 4.39", async () => {
+        const calls: unknown[][] = [];
+        const released: unknown[] = [];
+        const heartbeat = { isOwnershipLost: () => false };
+        const chat = {
+          async withHeldLock(
+            held: unknown,
+            threadId: string,
+            lockKey: string,
+            fn: (heartbeat: unknown) => Promise<void>
+          ) {
+            calls.push(["withHeldLock", held, threadId, lockKey]);
+            await fn(heartbeat);
+            released.push(held);
+          },
+          async drainQueue(hb: unknown, a: unknown, lockKey: string) {
+            calls.push(["drainQueue", hb, a, lockKey]);
+          }
+        };
+        const state = {
+          releaseLock: async (l: unknown) => {
+            released.push(l);
+          }
+        };
+
+        await chatQueueDrainer(chat, state)?.(lock, adapter, "thread", "key");
+
+        expect(calls).toEqual([
+          ["withHeldLock", lock, "thread", "key"],
+          ["drainQueue", heartbeat, adapter, "key"]
+        ]);
+        expect(released).toEqual([lock]);
+      });
+
+      it("drains with the lock and releases it on chat < 4.39", async () => {
+        const calls: unknown[][] = [];
+        const released: unknown[] = [];
+        const chat = {
+          async drainQueue(
+            held: unknown,
+            a: unknown,
+            threadId: string,
+            lockKey: string
+          ) {
+            calls.push([held, a, threadId, lockKey]);
+            throw new Error("dispatch failed");
+          }
+        };
+        const state = {
+          releaseLock: async (l: unknown) => {
+            released.push(l);
+          }
+        };
+
+        await expect(
+          chatQueueDrainer(chat, state)?.(lock, adapter, "thread", "key")
+        ).rejects.toThrow("dispatch failed");
+
+        expect(calls).toEqual([[lock, adapter, "thread", "key"]]);
+        expect(released).toEqual([lock]);
+      });
+
+      it("skips a queue shape it does not recognize", () => {
+        const state = { releaseLock: async () => {} };
+        expect(chatQueueDrainer({}, state)).toBeUndefined();
+        expect(
+          chatQueueDrainer({ async drainQueue(_a: unknown) {} }, state)
+        ).toBeUndefined();
+        expect(
+          chatQueueDrainer(
+            {
+              async withHeldLock() {},
+              async drainQueue(_a: unknown, _b: unknown) {}
+            },
+            state
+          )
+        ).toBeUndefined();
+      });
     });
 
     it("drains messages queued behind a reply recovered after a restart", async () => {

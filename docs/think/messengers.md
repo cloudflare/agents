@@ -191,10 +191,11 @@ Use `{ strategy: "burst", debounceMs: 1500 }` to wait longer for a burst. The
 batched or dropped. Think still runs the turns of one conversation one at a
 time, so the replies arrive in order rather than in parallel.
 
-Think keeps the thread lock alive for as long as a reply runs, and keeps queued
-messages for 30 minutes (the Chat SDK default is 90 seconds), so a message that
-arrives during a slow reply is still answered after it. Set `queueEntryTtlMs`
-in a `ConcurrencyConfig` to change that. Messages still queued when the Durable
+Think keeps the thread lock alive for up to 30 minutes while a reply runs (the
+Chat SDK default is 10 minutes), and keeps queued messages for 30 minutes (the
+Chat SDK default is 90 seconds), so a message that arrives during a slow reply
+is still answered after it. Set `maxLockLifetimeMs` and `queueEntryTtlMs` in a
+`ConcurrencyConfig` to change these. Messages still queued when the Durable
 Object restarts are answered once the interrupted reply is recovered.
 
 ## Conversation Targets

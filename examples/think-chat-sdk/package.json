@@ -12,7 +12,7 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@chat-adapter/telegram": "^4.31.0",
+    "@chat-adapter/telegram": "^4.41.1",
     "@cloudflare/kumo": "^2.6.0",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",
