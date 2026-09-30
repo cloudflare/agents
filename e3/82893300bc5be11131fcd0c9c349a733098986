@@ -1,0 +1,35 @@
+packages/agents/src/chat/resumable-stream.ts
+  s_b2b9b60652ef3b::t_fa32e8dcd1e213 100-106,542,565-567,603-612
+packages/think/src/tests/client-tools.test.ts
+  s_b2b9b60652ef3b::t_a996f45cedbbe1 3424,3436-3437
+packages/think/src/think.ts
+  s_b2b9b60652ef3b::t_ddd37490a5f889 15051-15054,19781-19785,19856-19869,19886-19887,19889-19895
+.changeset/think-regenerate-partial-restart.md
+  s_b2b9b60652ef3b::t_80c3fbbe28cd49 1-8
+docs/think/index.md
+  s_b2b9b60652ef3b::t_33e4f9b60e72fb 614
+packages/agents/src/tests/streams/resumable-stream-settlement.test.ts
+  s_b2b9b60652ef3b::t_619ff032550271 317-343
+packages/think/src/tests/agents/client-tools.ts
+  s_b2b9b60652ef3b::t_89dc376f354328 1026-1043
+packages/think/src/tests/agents/think-session.ts
+  s_b2b9b60652ef3b::t_adcedb61d3ee4d 10453-10454,10459-10464,10468,10480-10482
+packages/think/src/tests/think-session.test.ts
+  s_b2b9b60652ef3b::t_05b8b9095a1ee6 4493-4625
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e382893300bc5be11131fcd0c9c349a733098986",
+  "prompts": {},
+  "sessions": {
+    "s_b2b9b60652ef3b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "116a35e7-e84f-4df0-b25d-8bdcbff2fca7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Sunil Pai <18808+threepointone@users.noreply.github.com>"
+    }
+  }
+}
