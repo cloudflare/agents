@@ -248,6 +248,23 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     return (await this._chat?.getState().queueDepth(threadId)) ?? 0;
   }
 
+  /** How the live Chat instance's thread lock is renewed. */
+  async lockRenewalForTest(): Promise<{
+    maxLockLifetimeMs: number | undefined;
+    stateAdapterRenewsLock: boolean | undefined;
+  }> {
+    const chat = this._chat as
+      | (ChatInstance & {
+          _concurrencyConfig?: { maxLockLifetimeMs?: number };
+        })
+      | undefined;
+    const state = chat?.getState() as { lockHeartbeat?: boolean } | undefined;
+    return {
+      maxLockLifetimeMs: chat?._concurrencyConfig?.maxLockLifetimeMs,
+      stateAdapterRenewsLock: state?.lockHeartbeat
+    };
+  }
+
   async isSubscribedForTest(threadId: string): Promise<boolean> {
     return (await this._chat?.getState().isSubscribed(threadId)) ?? false;
   }

@@ -1616,6 +1616,26 @@ describe("think messengers core", () => {
       expect(await agent.isSubscribedForTest(threadId)).toBe(true);
     });
 
+    it("gives the live Chat instance Think's lock lifetime and leaves renewal to it", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `lock-renewal-${crypto.randomUUID()}`
+      );
+      await agent.fetch("https://example.com/messengers/fake/webhook", {
+        body: JSON.stringify({
+          id: "r1",
+          text: "hello",
+          threadId: "fake:dm-lock-renewal"
+        }),
+        method: "POST"
+      });
+
+      expect(await agent.lockRenewalForTest()).toEqual({
+        maxLockLifetimeMs: 30 * 60 * 1000,
+        stateAdapterRenewsLock: false
+      });
+    });
+
     it("finds the private Chat SDK queue methods the recovery drain relies on", () => {
       // The drain feature-checks these at runtime and silently skips when a
       // `chat` release drops, renames, or reshapes them; this fails the
