@@ -9,7 +9,6 @@ import {
 import { routeAgentRequest } from "agents";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
-import { Driver } from "./driver";
 import { PiHarness } from "./harness/pi-harness";
 import { PiSessionSockets } from "./sockets";
 import { createModels } from "./providers/models";
@@ -53,8 +52,8 @@ function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
  * `sleep` is the interesting one. It waits in memory with `setTimeout`, like
  * pi's own retry and poll sleeps, but memoizes its deadline in pi so it is
  * replay-safe: after an eviction pi reruns it and it only waits out what is
- * left. A timer does not keep the object alive by itself; the driver's step
- * does, through its alarm heartbeat. See NOTES.md, "pi's timers are in
+ * left. A timer does not keep the object alive by itself; the harness's wake
+ * job does, through its alarm. See NOTES.md, "pi's timers are in
  * memory".
  */
 function createTools(): ToolRegistration[] {
@@ -96,9 +95,7 @@ function createTools(): ToolRegistration[] {
 
 /** Playable pi session backed by one Durable Object. */
 export class PiAgent extends DurableObject<Env> {
-  readonly driver = new Driver();
   readonly harness = new PiHarness({
-    driver: this.driver,
     models: createModels({ providers: [workersAI(this.env.AI)] }),
     model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
     thinkingLevel: "low",
@@ -123,7 +120,6 @@ export class PiAgent extends DurableObject<Env> {
   );
   readonly webSockets = new WebSockets(this.sockets.options());
   readonly lifecycle = Lifecycle.install(this)
-    .use(this.driver)
     .use(this.webSockets)
     .use(this.harness);
 

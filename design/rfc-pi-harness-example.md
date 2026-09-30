@@ -28,17 +28,15 @@ Prove the composition as an example first. `examples/next/harnesses/pi`
 hosts pi-durable on a plain Durable Object:
 
 ```ts
-readonly driver = new Driver();
-readonly harness = new PiHarness({ driver: this.driver, models, model, tools });
+readonly harness = new PiHarness({ models, model, tools });
 readonly sockets = new PiSessionSockets(this.harness, (tag) => this.ctx.getWebSockets(tag));
 readonly webSockets = new WebSockets(this.sockets.options());
 readonly lifecycle = Lifecycle.install(this)
-  .use(this.driver)
   .use(this.webSockets)
   .use(this.harness);
 ```
 
-`PiHarness`, the driver, and the session store are example-local code.
+`PiHarness` and the session store are example-local code.
 Nothing in this RFC adds an export to the `agents` package.
 
 Responsibilities are split by authority:
@@ -50,29 +48,27 @@ Responsibilities are split by authority:
   facade over `ctx.storage.sql`. Transactions use `transactionSync`, and
   pi's tables are moved under a `pi_` prefix. pi's own storage conformance
   suite runs against it on a real Durable Object.
-- **The driver** (copied from #2396) is the wake, and only that. Input goes to
-  pi once, in `submit()`, after the session's wake has a job. Each session
-  has one driver operation whose `step` waits while pi has live tasks in it
-  and parks when it has none. The driver's alarm heartbeat restarts an
-  evicted object, and pi resumes its own tasks on open. The driver never
-  admits input or replays model or tool work.
+- **The wake** is one Lifecycle job per session, owned by `PiHarness`. Input
+  goes to pi once, in `submit()`, after the session's job is scheduled. The
+  job waits while pi has live tasks in the session, rescheduling itself as a
+  heartbeat, and completes when there are none. An eviction leaves it due,
+  so its alarm restarts the object and pi resumes its own tasks. The wake
+  never admits input or replays model or tool work.
 - **Transport is app glue**, not part of the harness. The harness exposes
   `session.events()`, which is pi's own agent events: a snapshot, then one
   batch per commit. The example's `sockets.ts` puts one session per socket on
   `WebSockets`. There is no cursor or replay log. A client that joins or
   reconnects gets a snapshot.
 
-`examples/next/harnesses/pi/NOTES.md` explains why the driver was chosen
-over Tasks and the state machine, and records everything that was hard.
+`examples/next/harnesses/pi/NOTES.md` explains why a Lifecycle job was chosen
+over Tasks, the driver, and the state machine, and records everything that was hard.
 
 ## Known costs
 
-- The driver is copied into the example until a driver ships in `agents`. It
-  needs `jobs.pushSync` from #2420, which this is stacked on.
 - Background pi tasks are polled every 30 s, because the conversation's idle
   wait ignores them.
 - pi sleeps with `setTimeout`, which does not keep an object alive. Long
-  waits of the generation task become driver sleeps by reading pi's
+  waits of the generation task become wake-job reschedules by reading pi's
   `LiveDoc`; custom task sleeps are invisible. This needs a pi change.
 - Two reads (`submissionByRequest`, `scanConversations`) go to pi's storage
   directly, because the Harness does not offer them.
@@ -82,7 +78,6 @@ over Tasks and the state machine, and records everything that was hard.
 
 ## Before this becomes a package export
 
-- A driver in `agents`, on #2420's atomic push.
 - A pi release with pi-durable Packages 17–19, so no archives are vendored.
 - Upstream asks: scheduler-owned sleeps with a next-wake time on
   `inspect()` (or an injectable timer), submission lookup by request id,
@@ -95,6 +90,9 @@ over Tasks and the state machine, and records everything that was hard.
 - Keep driving pi from `Tasks` (#2210). Rejected: Tasks journals steps for
   replay, pi is the replay authority, and capability-owned Tasks drivers
   need private apertures.
+- Drive pi from the driver (#2396). Rejected: with pi owning admission and
+  replay, the driver reduces to one heartbeat job per session, which
+  Lifecycle jobs already are.
 - Drive pi from `agents/state-machine` (#2338). Rejected: pi-durable's
   scheduler leaves nothing to drive in passes, and child machines overlap
   with pi's own task ownership.

@@ -14,7 +14,7 @@ function fresh(
   return env.PI_HARNESS_TEST.getByName(name);
 }
 
-describe("PiHarness on pi-durable and the driver", () => {
+describe("PiHarness on pi-durable", () => {
   it("answers a prompt with a tool call and keeps the transcript across eviction", async () => {
     const stub = fresh();
     const first = await stub.prompt("multiply 4");
@@ -60,12 +60,12 @@ describe("PiHarness on pi-durable and the driver", () => {
     ]);
   });
 
-  it("resumes a replay-safe tool after an eviction mid-call, woken by the driver's alarm", async () => {
+  it("resumes a replay-safe tool after an eviction mid-call, woken by the wake job's alarm", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);
     const receipt = await stub.submit("gate");
     await stub.gateStarted(1);
-    // The driver keeps a heartbeat job while its step waits on pi.
+    // The wake job keeps a heartbeat while it waits on pi.
     expect(await stub.alarmTime()).not.toBeNull();
 
     // Graceful eviction waits for the in-flight step, which is the point of

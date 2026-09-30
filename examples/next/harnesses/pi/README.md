@@ -2,7 +2,7 @@
 
 An experimental example that runs [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable),
 pi's durable agent harness, inside a Durable Object. Nothing here is exported
-from the `agents` package. `PiHarness`, the driver, the session store, and
+from the `agents` package. `PiHarness`, the session store, and
 the Workers AI provider all live in this example's `src/` and pin an
 unreleased pi build.
 
@@ -11,9 +11,8 @@ The example composes:
 - `PiHarness extends LifecycleCapability`, the harness interface:
   `harness.prompt()`, `harness.submit()`, `harness.sessions`,
   `harness.session(id)`, and `session.events()` for pi's live events;
-- a `Driver` (copied into `src/driver` from cloudflare/agents#2396) as the
-  wake: one operation per session that keeps the object alive while pi has
-  live tasks in it, and parks when it has none;
+- one Lifecycle job per session as the wake: it keeps the object alive while
+  pi has live tasks in the session, and completes when there are none;
 - a pi session store on the object's SQLite database (`session-store.ts`);
 - app glue that is not part of the harness: `sockets.ts` puts one session
   per socket on `WebSockets`, and `view.ts` folds pi's events into what the
@@ -45,7 +44,7 @@ one account, set `CLOUDFLARE_ACCOUNT_ID` when starting.
 - `What time is it?`
 - `Tell me the time, sleep for 10 seconds, then tell me the time again.`
 - `Sleep for 2 minutes, then tell me how long you actually slept.` The
-  object stays alive through the driver's alarm heartbeat, not through
+  object stays alive through the wake job's alarm, not through
   `sleep`'s timer.
 - While a turn runs, type and press Enter to queue a follow-up, or Steer to
   join the running turn.
@@ -63,7 +62,7 @@ pnpm test
   the session store on a real Durable Object.
 - `harness.test.ts` drives a real Durable Object with pi-ai's faux provider:
   tool turns, follow-ups queued behind a run, abort, sessions, and a crash
-  mid-tool-call that the driver's alarm recovers (a replay-safe tool reruns,
+  mid-tool-call that the wake job's alarm recovers (a replay-safe tool reruns,
   an unsafe one is reported to the model as interrupted).
 - `sockets.test.ts` connects real WebSockets: a run started over the
   socket, a client joining mid-run, and a socket that outlives an eviction.
@@ -72,9 +71,7 @@ pnpm test
 
 ```ts
 export class PiAgent extends DurableObject<Env> {
-  readonly driver = new Driver();
   readonly harness = new PiHarness({
-    driver: this.driver,
     models: createModels({ providers: [workersAI(this.env.AI)] }),
     model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
     tools: createTools() // sleep, current_time
@@ -85,7 +82,6 @@ export class PiAgent extends DurableObject<Env> {
   );
   readonly webSockets = new WebSockets(this.sockets.options());
   readonly lifecycle = Lifecycle.install(this)
-    .use(this.driver)
     .use(this.webSockets)
     .use(this.harness);
 

@@ -13,7 +13,6 @@ import type { AgentEvent, ToolRegistration } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
-import { Driver } from "../driver";
 import { PiHarness } from "../harness/pi-harness";
 import { PiSessionSockets } from "../sockets";
 import type {
@@ -92,9 +91,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     tokensPerSecond: 200,
     tokenSize: { min: 2, max: 4 }
   });
-  readonly driver = new Driver();
   readonly harness = new PiHarness({
-    driver: this.driver,
     models: createModels({ providers: [this.#faux.provider] }),
     model: {
       provider: this.#faux.getModel().provider,
@@ -109,7 +106,6 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   );
   readonly webSockets = new WebSockets(this.sockets.options());
   readonly lifecycle = Lifecycle.install(this)
-    .use(this.driver)
     .use(this.webSockets)
     .use(this.harness);
 
