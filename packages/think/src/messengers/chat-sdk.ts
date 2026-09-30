@@ -10,6 +10,7 @@ import type {
   Lock as ChatLock,
   Message as ChatMessage,
   SerializedThread,
+  StateAdapter,
   Thread as ChatThread
 } from "chat";
 import { Chat, Message, ThreadImpl } from "chat";
@@ -151,8 +152,16 @@ export type MessengerConcurrency = ConcurrencyStrategy | ConcurrencyConfig;
  */
 export const MESSENGER_QUEUE_ENTRY_TTL_MS = 30 * 60 * 1000;
 
+/**
+ * How long one reply may keep renewing its thread lock. The Chat SDK default
+ * (10 minutes) lets the lock lapse under a long Think turn, so Think applies
+ * this unless `maxLockLifetimeMs` is set explicitly.
+ */
+export const MESSENGER_MAX_LOCK_LIFETIME_MS = 30 * 60 * 1000;
+
 export const DEFAULT_MESSENGER_CONCURRENCY: MessengerConcurrency = {
   debounceMs: 600,
+  maxLockLifetimeMs: MESSENGER_MAX_LOCK_LIFETIME_MS,
   queueEntryTtlMs: MESSENGER_QUEUE_ENTRY_TTL_MS,
   strategy: "burst"
 };
@@ -164,29 +173,87 @@ const CHAT_SDK_LOCK_TTL_MS = 30_000;
  * Private `Chat` methods the post-recovery drain reuses so a stranded queue
  * is dispatched exactly as the SDK would (lock scope, expiry, `skipped`).
  * Feature-checked at runtime: a `chat` release without them skips the drain.
+ *
+ * `chat` 4.39 moved `drainQueue` behind a lock heartbeat: it takes the
+ * heartbeat `withHeldLock` hands its callback, and `withHeldLock` releases
+ * the lock. Earlier releases take the lock itself and leave the release to
+ * the caller.
  */
 interface ChatSdkQueueInternals {
   getLockKey(adapter: Adapter, threadId: string): Promise<string>;
-  drainQueue(
+  drainQueue(...args: unknown[]): Promise<void>;
+  withHeldLock?(
     lock: ChatLock,
-    adapter: Adapter,
     threadId: string,
-    lockKey: string
+    lockKey: string,
+    fn: (heartbeat: unknown) => Promise<void>
   ): Promise<void>;
 }
 
-/** Fill in Think's queue-entry TTL where the setting leaves it unset. */
+type ChatQueueDrainer = (
+  lock: ChatLock,
+  adapter: Adapter,
+  threadId: string,
+  lockKey: string
+) => Promise<void>;
+
+/**
+ * A drain for this `chat` release's private queue shape that dispatches a
+ * thread's queue under an acquired lock and then releases it, or undefined
+ * when the shape is unrecognized.
+ */
+export function chatQueueDrainer(
+  chat: object,
+  state: Pick<StateAdapter, "releaseLock">
+): ChatQueueDrainer | undefined {
+  const { drainQueue, withHeldLock } = chat as Partial<ChatSdkQueueInternals>;
+  if (typeof drainQueue !== "function") return undefined;
+  if (typeof withHeldLock === "function") {
+    if (drainQueue.length !== 3) return undefined;
+    return (lock, adapter, threadId, lockKey) =>
+      withHeldLock.call(chat, lock, threadId, lockKey, (heartbeat) =>
+        drainQueue.call(chat, heartbeat, adapter, lockKey)
+      );
+  }
+  if (drainQueue.length !== 4) return undefined;
+  return async (lock, adapter, threadId, lockKey) => {
+    try {
+      await drainQueue.call(chat, lock, adapter, threadId, lockKey);
+    } finally {
+      await state.releaseLock(lock);
+    }
+  };
+}
+
+/**
+ * Whether this `chat` release renews its own thread lock while a handler
+ * runs (4.39+). Older releases never do, so Think's state adapter renews it.
+ */
+export function chatSdkRenewsLocks(chatPrototype: object): boolean {
+  return (
+    typeof (chatPrototype as Partial<ChatSdkQueueInternals>).withHeldLock ===
+    "function"
+  );
+}
+
+/**
+ * Fill in Think's queue-entry TTL and lock lifetime where the setting leaves
+ * them unset.
+ */
 export function withMessengerQueueTtl(
   concurrency: MessengerConcurrency
 ): MessengerConcurrency {
   if (typeof concurrency === "string") {
     return {
+      maxLockLifetimeMs: MESSENGER_MAX_LOCK_LIFETIME_MS,
       queueEntryTtlMs: MESSENGER_QUEUE_ENTRY_TTL_MS,
       strategy: concurrency
     };
   }
   return {
     ...concurrency,
+    maxLockLifetimeMs:
+      concurrency.maxLockLifetimeMs ?? MESSENGER_MAX_LOCK_LIFETIME_MS,
     queueEntryTtlMs: concurrency.queueEntryTtlMs ?? MESSENGER_QUEUE_ENTRY_TTL_MS
   };
 }
@@ -512,35 +579,18 @@ export class ThinkMessengerRuntime {
     threadId: string
   ): Promise<void> {
     const chat = (this.chat ??= this.createChat());
-    const internals = chat as unknown as Partial<ChatSdkQueueInternals>;
-    if (
-      typeof internals.getLockKey !== "function" ||
-      typeof internals.drainQueue !== "function"
-    ) {
-      return;
-    }
+    const { getLockKey } = chat as unknown as Partial<ChatSdkQueueInternals>;
+    if (typeof getLockKey !== "function") return;
     await chat.initialize();
     const state = chat.getState();
-    const lockKey = await internals.getLockKey.call(
-      chat,
-      definition.adapter,
-      threadId
-    );
+    const drain = chatQueueDrainer(chat, state);
+    if (!drain) return;
+    const lockKey = await getLockKey.call(chat, definition.adapter, threadId);
     const deadline = Date.now() + CHAT_SDK_LOCK_TTL_MS + 5_000;
     while ((await state.queueDepth(lockKey)) > 0) {
       const lock = await state.acquireLock(lockKey, CHAT_SDK_LOCK_TTL_MS);
       if (lock) {
-        try {
-          await internals.drainQueue.call(
-            chat,
-            lock,
-            definition.adapter,
-            threadId,
-            lockKey
-          );
-        } finally {
-          await state.releaseLock(lock);
-        }
+        await drain(lock, definition.adapter, threadId, lockKey);
         return;
       }
       if (Date.now() >= deadline) return;
@@ -562,9 +612,11 @@ export class ThinkMessengerRuntime {
       state: createChatSdkState({
         agent: ThinkMessengerStateAgent,
         keyShard: (key) => this.shardStateKey(key),
-        // The Chat SDK never extends its 30 second thread lock while a
-        // handler runs; a Think turn often takes longer.
-        lockHeartbeat: true,
+        // Before 4.39 the Chat SDK never extends its 30 second thread lock
+        // while a handler runs, and a Think turn often takes longer. A second
+        // renewer on 4.39+ would hold the lock past `maxLockLifetimeMs` after
+        // the SDK has stopped treating it as held.
+        lockHeartbeat: !chatSdkRenewsLocks(Chat.prototype),
         parent: this.host as unknown as ChatSdkStateAdapterOptions["parent"],
         shardKey: (threadId) => this.shardThread(threadId)
       }),
