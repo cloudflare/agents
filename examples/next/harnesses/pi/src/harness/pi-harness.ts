@@ -29,7 +29,6 @@ import {
   type CapabilityStartContext
 } from "agents/lifecycle";
 import type { SkillSource } from "agents/skills";
-import type { WebSocketsOptions } from "agents/websockets";
 import type {
   Driver,
   DriverError,
@@ -43,7 +42,6 @@ import {
   type PiSessionStoreOptions
 } from "./session-store";
 import { resolveSkillSources } from "./skills";
-import { PiTransport } from "./transport";
 import type {
   PiMessage,
   PiMessageInput,
@@ -55,7 +53,6 @@ import type {
   PiSessionInfo,
   PiSessionOptions,
   PiSubmitOptions,
-  PiToolInfo,
   PiWhenBusy
 } from "./types";
 
@@ -142,7 +139,8 @@ function signalContext(signal: AbortSignal | undefined): Context {
 /**
  * pi-durable hosted in a Durable Object, behind the harness interface the
  * other `examples/next/harnesses` share: `harness.prompt()`,
- * `harness.sessions`, `harness.session(id)`, `webSockets()`.
+ * `harness.sessions`, `harness.session(id)`. How a session reaches a
+ * client (sockets, SSE, RPC) is the host's glue, built on `session.events()`.
  *
  * pi owns everything about a run: the transcript, the inbox of steers and
  * follow-ups, generation and tool tasks, retries, crash recovery, and the
@@ -165,7 +163,6 @@ export class PiHarness extends LifecycleCapability {
   readonly sessions: PiSessions;
   readonly #options: PiHarnessOptions;
   readonly #driver: DriverHandle<PiOperationInput>;
-  readonly #transport: PiTransport;
   #opening: Promise<Opened> | undefined;
 
   constructor(options: PiHarnessOptions) {
@@ -183,7 +180,6 @@ export class PiHarness extends LifecycleCapability {
       options.configure?.(this.registry);
     });
     this.sessions = new PiSessions(this);
-    this.#transport = new PiTransport(this, () => this.lifecycle.sockets);
     this.#driver = options.driver.register<PiOperationInput, PiOperationResult>(
       options.id ?? "pi",
       {
@@ -203,14 +199,10 @@ export class PiHarness extends LifecycleCapability {
 
   override async onStart(_context: CapabilityStartContext): Promise<void> {
     await this.#open();
-    // Watches are in memory. Sockets that outlived the old isolate get a
-    // fresh snapshot and a new watch.
-    await this.#transport.reattach();
   }
 
   /** Close pi's in-memory resources. Durable state is untouched. */
   async dispose(): Promise<void> {
-    await this.#transport.close();
     const opening = this.#opening;
     this.#opening = undefined;
     const opened = await opening?.catch(() => undefined);
@@ -267,18 +259,6 @@ export class PiHarness extends LifecycleCapability {
       status: operation.status,
       submittedAt: operation.submittedAt
     }));
-  }
-
-  /** Tools registered now, as the UI lists them. */
-  tools(): PiToolInfo[] {
-    return this.registry.tools
-      .list()
-      .map((tool) => ({ name: tool.name, description: tool.description }));
-  }
-
-  /** Options for `new WebSockets(...)` serving the session protocol. */
-  webSockets(): WebSocketsOptions {
-    return this.#transport.options();
   }
 
   /** The opened pi Harness, for anything the interface does not cover. */

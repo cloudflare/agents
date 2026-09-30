@@ -5,7 +5,7 @@ import {
   runDurableObjectAlarm
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { PiSessionView } from "../harness/types";
+import type { PiSessionView } from "../view";
 import type { PiHarnessTestObject } from "./worker";
 
 function fresh(

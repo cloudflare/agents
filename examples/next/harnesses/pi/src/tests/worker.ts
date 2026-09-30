@@ -15,13 +15,14 @@ import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
 import { Driver } from "../driver";
 import { PiHarness } from "../harness/pi-harness";
+import { PiSessionSockets } from "../sockets";
 import type {
   PiMessage,
   PiOperationResult,
   PiReceipt,
   PiWhenBusy
 } from "../harness/types";
-import { EMPTY_VIEW, reduceEvents } from "../harness/view";
+import { EMPTY_VIEW, reduceEvents } from "../view";
 import { createModels } from "../providers/models";
 
 const RELEASE_KEY = "test:gate:release";
@@ -103,11 +104,18 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     tools: this.#tools(),
     systemPrompt: "Use the supplied test tools."
   });
-  readonly webSockets = new WebSockets(this.harness.webSockets());
+  readonly sockets = new PiSessionSockets(this.harness, (tag) =>
+    this.ctx.getWebSockets(tag)
+  );
+  readonly webSockets = new WebSockets(this.sockets.options());
   readonly lifecycle = Lifecycle.install(this)
     .use(this.driver)
     .use(this.webSockets)
     .use(this.harness);
+
+  async onStart(): Promise<void> {
+    await this.sockets.reattach();
+  }
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);

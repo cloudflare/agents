@@ -60,8 +60,14 @@ change is noted under "Driver needs a synchronous push" below.
 `PiHarness` has the shape the other `examples/next/harnesses` share:
 `harness.prompt()`, `harness.submit()`, `harness.abort()`, `harness.wait()`,
 `harness.messages()`, `harness.sessions` (`create`, `get`, `fork`, `list`),
-`harness.session(id)` handles, and `webSockets()`. A session is a pi
+`harness.session(id)` handles, and `session.events()`. A session is a pi
 conversation. The root is `"1"`.
+
+Transport is not part of the harness. The socket protocol (one session per
+socket, a tool list on connect, commands) lives in the app's `sockets.ts` and
+`protocol.ts`, and the UI reducer in `view.ts`. They use only the harness's
+public API, so another app could put the same sessions on SSE or RPC
+instead.
 
 The shared `Harness` capability in #2285 goes further than this. It has
 `events({ previews })` from a cursor, `requests()`/`reply()` for permission
@@ -185,11 +191,13 @@ then moves on, but pi's abort itself has no grace period.
 
 ### Watches are per socket and in memory
 
-Each socket gets its own `watchEvents` stream. After hibernation or eviction,
-`onStart` re-watches every socket and sends a fresh snapshot, and the
-client replaces its state. `LifecycleSockets` finds sockets by tag but
-cannot give the tags of a socket, so the re-watch walks
-`sessions.list()` and looks up each session's tag.
+This is app glue in `sockets.ts`, not the harness. Each socket gets its own
+`session.events()` stream. After hibernation or eviction, the host's
+`onStart` calls `sockets.reattach()`, which re-watches every socket and
+sends a fresh snapshot, and the client replaces its state.
+`ctx.getWebSockets(tag)` finds sockets by tag, but nothing gives the tags of
+a socket, so the re-watch walks `sessions.list()` and looks up each
+session's tag.
 
 ### Surprises in pi
 

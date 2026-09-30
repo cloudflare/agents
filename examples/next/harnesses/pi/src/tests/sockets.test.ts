@@ -2,8 +2,8 @@ import { env } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { routeAgentRequest } from "agents";
 import { describe, expect, it } from "vitest";
-import type { PiServerMessage, PiSessionView } from "../harness/types";
-import { EMPTY_VIEW, reduceEvents } from "../harness/view";
+import type { PiServerMessage } from "../protocol";
+import { EMPTY_VIEW, reduceEvents, type PiSessionView } from "../view";
 
 async function connect(name: string, query = ""): Promise<WebSocket> {
   const response = await routeAgentRequest(

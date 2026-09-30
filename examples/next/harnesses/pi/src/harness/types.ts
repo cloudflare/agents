@@ -1,9 +1,7 @@
-import type { AgentEvent } from "@earendil-works/pi-durable";
-
 /**
- * The example's public types. Kept separate from pi's own so the client and
- * the wire depend on a small, JSON-only surface: a pi release that reshapes
- * an internal type is absorbed in `messages.ts` and `pi-harness.ts`.
+ * `PiHarness`'s public types. Kept separate from pi's own so callers depend
+ * on a small, JSON-only surface: a pi release that reshapes an internal type
+ * is absorbed in `messages.ts` and `pi-harness.ts`.
  */
 
 /** Any JSON value. */
@@ -123,72 +121,3 @@ export type PiMessage = {
   readonly stopReason?: string;
   readonly error?: string;
 };
-
-export type PiToolInfo = {
-  readonly name: string;
-  readonly description: string;
-};
-
-/** A tool call running now, with its streamed output. */
-export type PiRunningTool = {
-  readonly callId: string;
-  readonly name: string;
-  readonly output: string;
-};
-
-/**
- * Everything a UI shows for one session, derived from pi's agent events by
- * `reduceView` on either side of the wire.
- */
-export type PiSessionView = {
-  readonly messages: readonly PiMessage[];
-  /** The assistant message being streamed, or null. */
-  readonly live: PiMessage | null;
-  readonly running: boolean;
-  readonly tools: readonly PiRunningTool[];
-  /** Submissions queued in pi's inbox behind the running work. */
-  readonly queued: number;
-  /** Retry backoff pi is waiting out, if any. */
-  readonly retry: { readonly at: number; readonly error: string } | null;
-  readonly model: {
-    readonly provider: string;
-    readonly modelId: string;
-  } | null;
-  readonly error: string | null;
-};
-
-// ── Wire protocol ───────────────────────────────────────────────────────────
-
-/** Client → server. Commands with an `id` get a `result` or `error` back. */
-export type PiClientMessage =
-  | {
-      readonly type: "submit";
-      readonly id?: string;
-      readonly input: PiMessageInput;
-      readonly whenBusy?: PiWhenBusy;
-      readonly operationId?: string;
-    }
-  | { readonly type: "abort"; readonly id?: string }
-  | { readonly type: "reset"; readonly id?: string; readonly handoff?: string }
-  /** Ask for a fresh snapshot. */
-  | { readonly type: "resync"; readonly id?: string };
-
-/** Server → client. */
-export type PiServerMessage =
-  | {
-      readonly type: "hello";
-      readonly session: PiSessionId;
-      readonly tools: readonly PiToolInfo[];
-    }
-  /**
-   * pi's own agent events for the connection's session. The first batch of a
-   * watch, and any batch after the server lost its watch, starts with a
-   * `snapshot` event that replaces the client's state.
-   */
-  | {
-      readonly type: "events";
-      readonly session: PiSessionId;
-      readonly events: readonly AgentEvent[];
-    }
-  | { readonly type: "result"; readonly id: string; readonly result: PiJson }
-  | { readonly type: "error"; readonly id?: string; readonly message: string };

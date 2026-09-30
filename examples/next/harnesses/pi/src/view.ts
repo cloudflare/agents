@@ -4,13 +4,45 @@ import type {
   EntryRecord,
   MessageChange
 } from "@earendil-works/pi-durable";
-import { projectEntries, projectEntry, projectMessage } from "./messages";
-import type { PiMessage, PiMessagePart, PiSessionView } from "./types";
+import {
+  projectEntries,
+  projectEntry,
+  projectMessage
+} from "./harness/messages";
+import type { PiMessage, PiMessagePart } from "./harness/types";
+
+/** A tool call running now, with its streamed output. */
+export type PiRunningTool = {
+  readonly callId: string;
+  readonly name: string;
+  readonly output: string;
+};
+
+/**
+ * Everything a UI shows for one session, derived from pi's agent events by
+ * `reduceView` on either side of the wire.
+ */
+export type PiSessionView = {
+  readonly messages: readonly PiMessage[];
+  /** The assistant message being streamed, or null. */
+  readonly live: PiMessage | null;
+  readonly running: boolean;
+  readonly tools: readonly PiRunningTool[];
+  /** Submissions queued in pi's inbox behind the running work. */
+  readonly queued: number;
+  /** Retry backoff pi is waiting out, if any. */
+  readonly retry: { readonly at: number; readonly error: string } | null;
+  readonly model: {
+    readonly provider: string;
+    readonly modelId: string;
+  } | null;
+  readonly error: string | null;
+};
 
 /**
  * Folds pi's agent events into what a UI shows. Pure, so the browser and
  * the tests run the same code: pi's events are the wire format, and this is
- * the only place that interprets them.
+ * the only place that interprets them. App glue, not part of the harness.
  */
 export const EMPTY_VIEW: PiSessionView = {
   messages: [],

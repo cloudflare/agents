@@ -1,17 +1,9 @@
 import type { AgentEventStream } from "@earendil-works/pi-durable";
-import type {
-  Connection,
-  ConnectionContext,
-  LifecycleSockets
-} from "agents/lifecycle";
+import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
-import type {
-  PiClientMessage,
-  PiJson,
-  PiSessionId,
-  PiServerMessage
-} from "./types";
-import type { PiHarness } from "./pi-harness";
+import { ROOT_SESSION, type PiHarness } from "./harness/pi-harness";
+import type { PiJson, PiSessionId } from "./harness/types";
+import type { PiClientMessage, PiServerMessage } from "./protocol";
 
 const SESSION_TAG_PREFIX = "pi-session:";
 const SESSION_QUERY = "session";
@@ -48,30 +40,33 @@ function send(socket: WebSocket, message: PiServerMessage): void {
 }
 
 /**
- * The session protocol over the `WebSockets` capability.
+ * App glue: this app's session protocol over the `WebSockets` capability,
+ * built only on the harness's public API.
  *
- * pi's agent events are the wire format: each socket gets its own
- * `watchEvents` stream, which starts with a `snapshot` and then carries one
- * batch per commit. There is no replay log and no cursor. pi commits
- * partial answers and tool output as it goes, so a client that joins late,
- * reconnects, or outlives a hibernation gets a snapshot of the current
- * state and continues from there. The client folds events with the same
- * `reduceView` the tests use.
+ * Each socket follows one session, picked by `?session=`, through its own
+ * `session.events()` stream: a `snapshot`, then one batch of pi's agent
+ * events per commit. Commands on the socket call `session.submit()`,
+ * `abort()`, and `reset()`. Watches live in memory, so the host calls
+ * `reattach()` from its `onStart` to give sockets that outlived the last
+ * isolate a new watch and a fresh snapshot.
  */
-export class PiTransport {
+export class PiSessionSockets {
   readonly #harness: PiHarness;
-  readonly #sockets: () => LifecycleSockets;
+  readonly #getWebSockets: (tag?: string) => WebSocket[];
   readonly #watches = new Map<WebSocket, AgentEventStream>();
 
-  constructor(harness: PiHarness, sockets: () => LifecycleSockets) {
+  constructor(
+    harness: PiHarness,
+    getWebSockets: (tag?: string) => WebSocket[]
+  ) {
     this.#harness = harness;
-    this.#sockets = sockets;
+    this.#getWebSockets = getWebSockets;
   }
 
   options(): WebSocketsOptions {
     return {
       getConnectionTags: (_connection, ctx) => [
-        sessionTag(sessionFromRequest(ctx.request, "1"))
+        sessionTag(sessionFromRequest(ctx.request, ROOT_SESSION))
       ],
       handlers: {
         onConnect: (connection, ctx) => this.#onConnect(connection, ctx),
@@ -85,11 +80,11 @@ export class PiTransport {
 
   /** Give every hibernated socket a new watch after the object restarts. */
   async reattach(): Promise<void> {
-    if (this.#sockets().get().length === 0) return;
-    // LifecycleSockets finds sockets by tag, not tags by socket, so walk
-    // the sessions and look up each one's tag.
+    if (this.#getWebSockets().length === 0) return;
+    // Sockets are found by tag, not tags by socket, so walk the sessions
+    // and look up each one's tag.
     for (const { id } of await this.#harness.sessions.list()) {
-      for (const socket of this.#sockets().get(sessionTag(id))) {
+      for (const socket of this.#getWebSockets(sessionTag(id))) {
         await this.#watch(socket, id);
       }
     }
@@ -102,11 +97,13 @@ export class PiTransport {
   }
 
   async #onConnect(connection: Connection, ctx: ConnectionContext) {
-    const session = sessionFromRequest(ctx.request, "1");
+    const session = sessionFromRequest(ctx.request, ROOT_SESSION);
     send(connection, {
       type: "hello",
       session,
-      tools: this.#harness.tools()
+      tools: this.#harness.registry.tools
+        .list()
+        .map((tool) => ({ name: tool.name, description: tool.description }))
     });
     await this.#watch(connection, session);
   }
@@ -141,7 +138,7 @@ export class PiTransport {
       send(connection, { type: "error", message: "Malformed JSON" });
       return;
     }
-    const session = sessionOf(connection.tags) ?? "1";
+    const session = sessionOf(connection.tags) ?? ROOT_SESSION;
     try {
       const result = await this.#dispatch(connection, session, message);
       if (message.id !== undefined) {

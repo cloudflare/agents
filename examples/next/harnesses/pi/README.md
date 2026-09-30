@@ -10,11 +10,13 @@ The example composes:
 
 - `PiHarness extends LifecycleCapability`, the harness interface:
   `harness.prompt()`, `harness.submit()`, `harness.sessions`,
-  `harness.session(id)`, `harness.webSockets()`;
+  `harness.session(id)`, and `session.events()` for pi's live events;
 - a `Driver` (copied into `src/driver` from cloudflare/agents#2396) that
   wakes the object and sees each submission through to pi's answer;
 - a pi session store on the object's SQLite database (`session-store.ts`);
-- `WebSockets` to serve pi's own agent events to the browser;
+- app glue that is not part of the harness: `sockets.ts` puts one session
+  per socket on `WebSockets`, and `view.ts` folds pi's events into what the
+  UI shows;
 - `agents/skills` for a bundled `trip-planning` skill;
 - pi-ai's Workers AI provider, transported over the `AI` binding.
 
@@ -61,7 +63,7 @@ pnpm test
   tool turns, follow-ups queued behind a run, abort, sessions, and a crash
   mid-tool-call that the driver's alarm recovers (a replay-safe tool reruns,
   an unsafe one is reported to the model as interrupted).
-- `transport.test.ts` connects real WebSockets: a run started over the
+- `sockets.test.ts` connects real WebSockets: a run started over the
   socket, a client joining mid-run, and a socket that outlives an eviction.
 
 ## Core pattern
@@ -76,11 +78,19 @@ export class PiAgent extends DurableObject<Env> {
     tools: createTools(this.ctx.storage),
     skills: [skills]
   });
-  readonly webSockets = new WebSockets(this.harness.webSockets());
+  // App glue: this app's socket protocol, built on session.events().
+  readonly sockets = new PiSessionSockets(this.harness, (tag) =>
+    this.ctx.getWebSockets(tag)
+  );
+  readonly webSockets = new WebSockets(this.sockets.options());
   readonly lifecycle = Lifecycle.install(this)
     .use(this.driver)
     .use(this.webSockets)
     .use(this.harness);
+
+  async onStart() {
+    await this.sockets.reattach(); // watches are in memory
+  }
 }
 
 // Anywhere in the object:
@@ -94,8 +104,10 @@ call again after an eviction interrupted it; otherwise the model gets an
 interrupted result. `configure(registry)` adds pi hooks, prompt sections, or
 tasks.
 
-The wire is pi's own `AgentEvent`s: a `snapshot`, then one batch per commit,
-folded by `reduceView` in `src/harness/view.ts` on both sides.
+The harness does not choose a transport. `session.events()` returns pi's own
+`AgentEvent` stream: a `snapshot`, then one batch per commit. This app sends
+it over WebSockets (`src/sockets.ts`, `src/protocol.ts`) and folds it with
+`reduceView` (`src/view.ts`) in the browser and in the tests.
 
 ## Pi source
 

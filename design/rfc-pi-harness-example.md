@@ -30,7 +30,8 @@ hosts pi-durable on a plain Durable Object:
 ```ts
 readonly driver = new Driver();
 readonly harness = new PiHarness({ driver: this.driver, models, model, tools });
-readonly webSockets = new WebSockets(this.harness.webSockets());
+readonly sockets = new PiSessionSockets(this.harness, (tag) => this.ctx.getWebSockets(tag));
+readonly webSockets = new WebSockets(this.sockets.options());
 readonly lifecycle = Lifecycle.install(this)
   .use(this.driver)
   .use(this.webSockets)
@@ -54,8 +55,10 @@ Responsibilities are split by authority:
   waits for pi to settle it. The driver's alarm heartbeat restarts an evicted
   object, and pi resumes its own tasks on open. The driver never replays
   model or tool work.
-- **WebSockets** serves pi's own agent events: a snapshot, then one batch per
-  commit. There is no cursor or replay log. A client that joins or
+- **Transport is app glue**, not part of the harness. The harness exposes
+  `session.events()`, which is pi's own agent events: a snapshot, then one
+  batch per commit. The example's `sockets.ts` puts one session per socket on
+  `WebSockets`. There is no cursor or replay log. A client that joins or
   reconnects gets a snapshot.
 
 `examples/next/harnesses/pi/NOTES.md` explains why the driver was chosen

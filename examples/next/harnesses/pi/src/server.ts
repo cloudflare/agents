@@ -12,6 +12,7 @@ import { fromManifest } from "agents/skills";
 import { WebSockets } from "agents/websockets";
 import { Driver } from "./driver";
 import { PiHarness } from "./harness/pi-harness";
+import { PiSessionSockets } from "./sockets";
 import { createModels } from "./providers/models";
 import { workersAI } from "./providers/workers-ai";
 
@@ -221,11 +222,20 @@ export class PiAgent extends DurableObject<Env> {
       });
     }
   });
-  readonly webSockets = new WebSockets(this.harness.webSockets());
+  // App glue, not the harness: how this app puts sessions on a socket.
+  readonly sockets = new PiSessionSockets(this.harness, (tag) =>
+    this.ctx.getWebSockets(tag)
+  );
+  readonly webSockets = new WebSockets(this.sockets.options());
   readonly lifecycle = Lifecycle.install(this)
     .use(this.driver)
     .use(this.webSockets)
     .use(this.harness);
+
+  /** Host startup, after the harness has opened pi. */
+  async onStart(): Promise<void> {
+    await this.sockets.reattach();
+  }
 }
 
 export default {

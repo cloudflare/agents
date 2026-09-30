@@ -1,6 +1,6 @@
 import { useAgent } from "agents/react";
 import { useCallback, useEffect, useState } from "react";
-import { EMPTY_VIEW, reduceEvents } from "./harness/view";
+import { EMPTY_VIEW, reduceEvents } from "./view";
 import type {
   ClientMessage,
   ServerMessage,
