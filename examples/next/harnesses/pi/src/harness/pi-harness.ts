@@ -1,1189 +1,718 @@
+import type { Context } from "@earendil-works/chord";
 import {
-  AgentHarness as createAgentHarness,
-  awaitWithContext,
   BACKGROUND_CONTEXT,
-  StorageBackedSession,
-  uuidv7,
-  type AgentHarness as UpstreamAgentHarness,
-  type AgentHarnessOptions as UpstreamAgentHarnessOptions,
-  type AgentHarnessTool as UpstreamAgentHarnessTool,
-  type AgentLane as UpstreamAgentLane,
-  type Context as UpstreamContext,
-  type Entry,
-  type HarnessEvent,
-  type LaneSnapshot,
-  type OpenOperation,
-  type OperationRequest as UpstreamOperationRequest,
-  type OperationResultRecord,
-  type Resources as UpstreamResources,
-  type Skill as UpstreamSkill
-} from "@earendil-works/pi-agent-core";
-import type { Api, ImageContent, Model, Models } from "@earendil-works/pi-ai";
-import { SqliteStorage } from "@earendil-works/pi-session-backend-sqlite-node/storage";
+  withAbortSignal
+} from "@earendil-works/chord/context";
+import type { ModelThinkingLevel, Models } from "@earendil-works/pi-ai";
+import {
+  ConversationConfig,
+  createRegistry,
+  Harness,
+  LiveDoc,
+  ROOT_CONVERSATION_ID,
+  watchEvents,
+  type AgentEventStream,
+  type Conversation,
+  type ConversationId,
+  type ConversationRetryPolicy,
+  type ModelRef,
+  type Registry,
+  type SettledSubmissionRecord,
+  type ToolRegistration,
+  type Tx,
+  type UserInput
+} from "@earendil-works/pi-durable";
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
+import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import {
   LifecycleCapability,
-  type CapabilityStartContext,
-  type LifecycleJobContext,
-  type LifecycleJobOutcome
+  type CapabilityStartContext
 } from "agents/lifecycle";
-import type { Streams } from "agents/streams";
-import type { Tasks, TaskStep } from "agents/tasks";
+import type { SkillSource } from "agents/skills";
 import type { WebSocketsOptions } from "agents/websockets";
-import { DurableObjectPiDatabase, ensurePiSession } from "./do-sqlite";
-import {
-  OperationStreamWriter,
-  projectHarnessEvent,
-  SUBSCRIBED_EVENT_TYPES
-} from "./events";
-import { PiSubmissions, type QueuedSubmission } from "./intake";
-import {
-  projectMessages,
-  projectQueue,
-  projectAgentMessage,
-  projectToolResult
-} from "./messages";
-import { resolveModel } from "../providers/models";
-import { resolveSkillSources, type ResolvedSkills } from "./skills";
-import { PiTransport, type PiTransportHost } from "./transport";
 import type {
-  PiAbortResult,
-  PiContext,
-  PiEvent,
-  PiEventListener,
-  PiHarnessConfig,
-  PiHookRegistry,
-  PiJson,
-  PiLaneOptions,
-  PiLaneSnapshot,
+  Driver,
+  DriverError,
+  DriverHandle,
+  DriverOperation,
+  DriverStep
+} from "../driver";
+import { assistantText, projectEntries } from "./messages";
+import {
+  openPiSessionStore,
+  type PiSessionStoreOptions
+} from "./session-store";
+import { resolveSkillSources } from "./skills";
+import { PiTransport } from "./transport";
+import type {
   PiMessage,
   PiMessageInput,
-  PiOperationKind,
-  PiOperationRequest,
   PiOperationResult,
-  PiOperationStatus,
-  PiOperationStream,
-  PiPendingSubmission,
+  PiPendingOperation,
   PiPromptResponse,
-  PiQueueReceipt,
-  PiResources,
-  PiSubmissionReceipt,
+  PiReceipt,
+  PiSessionId,
+  PiSessionInfo,
+  PiSessionOptions,
   PiSubmitOptions,
-  PiTool,
-  PiTranscriptOptions
+  PiToolInfo,
+  PiWhenBusy
 } from "./types";
 
-/** Task definition that drives one lane's operations to settlement. */
-export const LANE_DRIVER_DEFINITION = "__cf_pi_harness_lane@v1";
+const BG = BACKGROUND_CONTEXT;
 
-const RECONCILE_JOB_ID = "reconcile";
-const RECONCILE_FN = "reconcile";
-const ENSURE_DRIVER_FN = "ensure-driver";
-const DRIVE_STEP_TIMEOUT = "7 days";
-const DRIVE_STEP_RETRIES = 100;
-/** Each pass and each wait is a journaled step; Tasks caps steps per run. */
-const MAX_PASSES_PER_DRIVER = 4_000;
-const DRIVER_ROTATION_DELAY_MS = 2_000;
-const DEFERRED_POLL_MS = 30_000;
-const ERROR_BACKOFF_BASE_MS = 1_000;
-const ERROR_BACKOFF_MAX_MS = 5 * 60_000;
-const RESULT_POLL_MS = 500;
+/** The root session's id, as the example addresses sessions. */
+export const ROOT_SESSION: PiSessionId = String(ROOT_CONVERSATION_ID);
 
-type LaneDriverInput = { readonly version: 1; readonly lane: string };
+/**
+ * A pi long wait further away than this becomes a driver `sleep`, so the
+ * object's alarm, not an in-memory timer, is what wakes it.
+ */
+const SLEEP_THRESHOLD_MS = 60_000;
 
-type DrivePassOutcome =
-  | { readonly kind: "idle" }
-  | { readonly kind: "settled"; readonly operationId: string }
-  | { readonly kind: "rejected"; readonly operationId: string }
-  | { readonly kind: "retry"; readonly notBefore: number }
-  | { readonly kind: "deferred"; readonly pollAfterMs: number }
-  | { readonly kind: "error"; readonly message: string };
+/**
+ * Longest a step waits on pi. A step runs inside an alarm invocation, which
+ * has a 15 minute wall-time limit, so a longer run is waited on across
+ * several steps.
+ */
+const STEP_BUDGET_MS = 10 * 60_000;
 
-type Attached = {
-  readonly harness: UpstreamAgentHarness<object | undefined>;
-  readonly open: readonly OpenOperation[];
+export type PiHarnessOptions = {
+  /** The host's driver. The harness registers one runtime on it. */
+  readonly driver: Driver;
+  /** Driver runtime id. Renaming it strands queued work. Default `"pi"`. */
+  readonly id?: string;
+  readonly models: Models;
+  /** Model for new sessions. Change one session's with `session.setModel`. */
+  readonly model: ModelRef;
+  readonly thinkingLevel?: ModelThinkingLevel;
+  /** pi's generation retries for new sessions. */
+  readonly retry?: ConversationRetryPolicy;
+  /** First system prompt section. */
+  readonly systemPrompt?: string;
+  readonly tools?: readonly ToolRegistration[];
+  /** `agents/skills` sources, offered through `activate_skill`. */
+  readonly skills?: readonly SkillSource[];
+  /** Execution environment for pi's `read`/`bash`/`edit`/`write` tools. */
+  readonly env?: ExecutionEnv;
+  /** Add hooks, prompt sections, tasks, or more tools to pi's registry. */
+  readonly configure?: (registry: Registry) => void;
+  readonly store?: PiSessionStoreOptions;
+  /** Extension failures pi reports without failing the operation. */
+  readonly onReport?: (error: unknown) => void;
 };
 
-/** A submission pi refused to admit. */
-export class PiOperationRejectedError extends Error {
-  readonly operationId: string;
-  readonly code: string;
+/** One driver operation: a pi input to admit and see through. */
+type PiOperationInput = {
+  readonly session: PiSessionId;
+  readonly content: UserInput;
+  readonly whenBusy: PiWhenBusy;
+};
 
-  constructor(operationId: string, code: string, message: string) {
-    super(message);
-    this.name = "PiOperationRejectedError";
-    this.operationId = operationId;
-    this.code = code;
+type Opened = {
+  readonly pi: Harness;
+  readonly storage: SqliteStorage;
+};
+
+function conversationId(session: PiSessionId): ConversationId {
+  const id = Number(session);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    throw new Error(`Invalid pi session ${JSON.stringify(session)}`);
   }
+  return id as ConversationId;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function userInput(input: PiMessageInput): UserInput {
+  if (typeof input === "string") return input;
+  if (!input.images?.length) return input.text;
+  return [
+    { type: "text", text: input.text },
+    ...input.images.map((image) => ({
+      type: "image" as const,
+      data: image.data,
+      mimeType: image.mimeType
+    }))
+  ];
 }
 
-function parseLaneDriverInput(value: unknown): LaneDriverInput {
-  if (
-    !isRecord(value) ||
-    value.version !== 1 ||
-    typeof value.lane !== "string"
-  ) {
-    throw new Error("Invalid pi lane driver input");
-  }
-  return { version: 1, lane: value.lane };
-}
-
-function asUpstreamContext(context: PiContext | undefined): UpstreamContext {
-  // SAFETY: PiContext is the public structural projection of Chord Context.
-  return (context ?? BACKGROUND_CONTEXT) as UpstreamContext;
-}
-
-function asUpstreamRequest(
-  request: PiOperationRequest,
-  operationId: string
-): UpstreamOperationRequest {
-  switch (request.kind) {
-    case "prompt":
-      return {
-        kind: "prompt",
-        operationId,
-        prompt: request.prompt,
-        ...(request.images === undefined
-          ? {}
-          : {
-              images: request.images.map(
-                (image): ImageContent => ({ type: "image", ...image })
-              )
-            })
-      };
-    case "skill":
-      return {
-        kind: "skill",
-        operationId,
-        name: request.name,
-        ...(request.additionalInstructions === undefined
-          ? {}
-          : { additionalInstructions: request.additionalInstructions })
-      };
-    case "prompt_template":
-      return {
-        kind: "prompt_template",
-        operationId,
-        name: request.name,
-        ...(request.args === undefined ? {} : { args: [...request.args] })
-      };
-    case "compaction":
-      return {
-        kind: "compaction",
-        operationId,
-        ...(request.customInstructions === undefined
-          ? {}
-          : { customInstructions: request.customInstructions })
-      };
-    case "navigation":
-      return {
-        kind: "navigation",
-        operationId,
-        targetId: request.targetId,
-        options: {
-          ...(request.summarize === undefined
-            ? {}
-            : { summarize: request.summarize }),
-          ...(request.label === undefined ? {} : { label: request.label }),
-          ...(request.customInstructions === undefined
-            ? {}
-            : { customInstructions: request.customInstructions })
-        }
-      };
-  }
-}
-
-function requestKind(request: PiOperationRequest): PiOperationKind {
-  switch (request.kind) {
-    case "compaction":
-      return "compaction";
-    case "navigation":
-      return "navigation";
-    default:
-      return "run";
-  }
-}
-
-function messageInput(input: PiMessageInput): {
-  text: string;
-  images: ImageContent[] | undefined;
-} {
-  if (typeof input === "string") return { text: input, images: undefined };
-  return {
-    text: input.text,
-    images: input.images?.map((image) => ({ type: "image", ...image }))
-  };
-}
-
-function asUpstreamTools<ToolContext extends object | undefined>(
-  tools: readonly PiTool<ToolContext>[]
-): UpstreamAgentHarnessTool<ToolContext>[] {
-  // SAFETY: PiTool is the public structural projection of AgentHarnessTool.
-  return tools as unknown as UpstreamAgentHarnessTool<ToolContext>[];
-}
-
-function asUpstreamResources(resources: PiResources): UpstreamResources {
-  // SAFETY: PiSkill and PiPromptTemplate mirror pi's Skill and PromptTemplate.
-  return {
-    ...(resources.skills === undefined
-      ? {}
-      : { skills: [...resources.skills] as UpstreamSkill[] }),
-    ...(resources.promptTemplates === undefined
-      ? {}
-      : { promptTemplates: [...resources.promptTemplates] })
-  };
-}
-
-function projectResult(record: OperationResultRecord): PiOperationResult {
-  return {
-    operationId: record.operationId,
-    kind: record.kind,
-    status: record.status,
-    ...(record.error === undefined
-      ? {}
-      : { error: { code: record.error.code, message: record.error.message } }),
-    fromTipId: record.fromTipId,
-    tipId: record.tipId,
-    startedAt: record.startedAt,
-    endedAt: record.endedAt
-  };
-}
-
-function operationStatus(
-  operation: NonNullable<LaneSnapshot["operation"]>
-): PiOperationStatus {
-  const streaming = operation.streamingMessage
-    ? projectAgentMessage(operation.streamingMessage, `pending:${operation.id}`)
-    : undefined;
-  return {
-    operationId: operation.id,
-    kind: operation.kind,
-    status: operation.status === "aborting" ? "aborting" : "running",
-    startedAt: operation.startedAt,
-    ...(streaming === undefined ? {} : { streaming }),
-    runningTools: operation.runningTools.map((tool) => ({
-      toolCallId: tool.toolCallId,
-      toolName: tool.toolName,
-      // SAFETY: pi validated these arguments against the tool schema.
-      arguments: tool.args as PiJson,
-      ...(tool.partialResult === undefined
-        ? {}
-        : { partial: projectToolResult(tool.partialResult) })
-    })),
-    ...(operation.retry === undefined ? {} : { retry: operation.retry }),
-    ...(operation.deferred === undefined
-      ? {}
-      : { deferred: operation.deferred.handle })
-  };
-}
-
-function errorBackoffMs(consecutiveErrors: number): number {
-  return Math.min(
-    ERROR_BACKOFF_MAX_MS,
-    ERROR_BACKOFF_BASE_MS * 2 ** Math.max(0, consecutiveErrors - 1)
-  );
+function signalContext(signal: AbortSignal | undefined): Context {
+  return signal ? withAbortSignal(signal, BG) : BG;
 }
 
 /**
- * Hosts pi's durable AgentHarness inside a Lifecycle Durable Object.
+ * pi-durable hosted in a Durable Object, behind the harness interface the
+ * other `examples/next/harnesses` share: `harness.prompt()`,
+ * `harness.sessions`, `harness.session(id)`, `webSockets()`.
  *
- * Pi owns the transcript, operation state, tool intents and outcomes,
- * retries, and crash recovery, all in this object's SQLite database. Around
- * it the capability composes the SDK's durable primitives: submissions queue
- * in a small intake table, each lane's work runs as one `Tasks` run whose
- * replay resumes pi from its own durable state, and every operation's live
- * events land in one `Streams` stream that clients replay and tail.
+ * pi owns everything about a run: the transcript, the inbox of steers and
+ * follow-ups, generation and tool tasks, retries, crash recovery, and the
+ * live view. It keeps all of it in its own tables in this object's SQLite
+ * database (see `session-store.ts`).
  *
- * @experimental This is a v0.2 integration with pi-mono's pinned `dev` API.
+ * What pi cannot do on a Durable Object is wake itself: its scheduler runs
+ * in memory, and an evicted object has no memory. The driver is that wake.
+ * Each submission is one driver operation whose `step` re-admits the input
+ * into pi by its request id (a no-op when pi already has it) and waits for
+ * pi to settle it. The driver heartbeats the step through the object's
+ * alarm, so an eviction mid-run fires the alarm, the object restarts, pi
+ * reopens and resumes its own tasks, and the step waits again.
+ *
+ * @experimental Example-local. Nothing here is exported from `agents`.
  */
-export class PiHarness<
-  ToolContext extends object | undefined = object | undefined
-> extends LifecycleCapability {
-  readonly #config: PiHarnessConfig<ToolContext>;
-  readonly #tasks: Tasks;
-  readonly #streams: Streams;
-  readonly #defaultLane: string;
-  #submissions: PiSubmissions | undefined;
-  #attaching: Promise<Attached> | undefined;
-  #skills: Promise<ResolvedSkills> | undefined;
-  #transport: PiTransport | undefined;
-  readonly #listeners = new Set<PiEventListener>();
-  readonly #writers = new Map<string, OperationStreamWriter>();
-  readonly #laneWriters = new Map<string, OperationStreamWriter>();
-  readonly #settlementWaiters = new Map<string, Set<() => void>>();
-  readonly #rejections = new Map<string, PiOperationRejectedError>();
-  readonly #ensuring = new Map<string, Promise<void>>();
+export class PiHarness extends LifecycleCapability {
+  /** pi's registry. Registrations may change while the harness runs. */
+  readonly registry: Registry;
+  readonly sessions: PiSessions;
+  readonly #options: PiHarnessOptions;
+  readonly #driver: DriverHandle<PiOperationInput>;
+  readonly #transport: PiTransport;
+  #opening: Promise<Opened> | undefined;
 
-  constructor(config: PiHarnessConfig<ToolContext>) {
+  constructor(options: PiHarnessOptions) {
     super("pi-harness");
-    this.#config = config;
-    this.#tasks = config.tasks;
-    this.#streams = config.streams;
-    this.#defaultLane = config.defaultLane ?? "main";
-    config.tasks.register(LANE_DRIVER_DEFINITION, (input, step) =>
-      this.#driveLane(parseLaneDriverInput(input), step)
+    this.#options = options;
+    this.registry = createRegistry();
+    this.registry.batch(() => {
+      if (options.systemPrompt !== undefined) {
+        const prompt = options.systemPrompt;
+        this.registry.systemPrompt.section("preamble", () => prompt, {
+          tag: false
+        });
+      }
+      for (const tool of options.tools ?? []) this.registry.tools.add(tool);
+      options.configure?.(this.registry);
+    });
+    this.sessions = new PiSessions(this);
+    this.#transport = new PiTransport(this, () => this.lifecycle.sockets);
+    this.#driver = options.driver.register<PiOperationInput, PiOperationResult>(
+      options.id ?? "pi",
+      {
+        step: (operation, signal) => this.#step(operation, signal),
+        stop: (operation) => this.#withdraw(operation)
+      },
+      {
+        onFail: (operation, error) => this.#failed(operation, error),
+        // pi's own retries cover the model. Driver retries are for the
+        // harness failing to reach pi, such as a storage error on open.
+        maxAttempts: 3
+      }
     );
   }
 
-  /** The lane used when a call names none. */
-  get defaultLane(): string {
-    return this.#defaultLane;
-  }
+  // ── Lifecycle ────────────────────────────────────────────────────────────
 
-  /** The Streams capability holding operation output. */
-  get streams(): Streams {
-    return this.#streams;
-  }
-
-  // ── Lifecycle hooks ──────────────────────────────────────────────────────
-
-  /** Attach pi to this object's SQLite state and re-derive lane drivers. */
   override async onStart(_context: CapabilityStartContext): Promise<void> {
-    this.#submissions = new PiSubmissions(this.lifecycle.storage);
-    this.#submissions.ensureTable();
-    const attached = await this.#attached();
-    const lanes = new Set<string>([
-      ...this.#submissions.lanes(),
-      ...attached.open.map((operation) => operation.lane)
-    ]);
-    if (lanes.size === 0) return;
-    // Drivers are re-derived after startup completes so Tasks is ready no
-    // matter the installation order; interrupted drivers also replay on
-    // their own through Tasks.
-    await this.lifecycle.jobs.push({
-      id: RECONCILE_JOB_ID,
-      fn: RECONCILE_FN,
-      time: Date.now(),
-      payload: { lanes: [...lanes] }
-    });
+    await this.#open();
+    // Watches are in memory. Sockets that outlived the old isolate get a
+    // fresh snapshot and a new watch.
+    await this.#transport.reattach();
   }
 
-  async onJob(
-    context: LifecycleJobContext
-  ): Promise<LifecycleJobOutcome | void> {
-    const payload = context.job.payload;
-    switch (context.job.fn) {
-      case RECONCILE_FN: {
-        const lanes =
-          isRecord(payload) && Array.isArray(payload.lanes)
-            ? payload.lanes.filter((lane) => typeof lane === "string")
-            : [];
-        for (const lane of lanes) await this.#ensureLaneDriver(lane);
-        return;
-      }
-      case ENSURE_DRIVER_FN:
-        if (isRecord(payload) && typeof payload.lane === "string") {
-          await this.#ensureLaneDriver(payload.lane);
-        }
-        return;
-      default:
-        this.lifecycle.events.emit("operation:invalid_job", {
-          jobId: context.job.id,
-          fn: context.job.fn
-        });
-        return;
-    }
-  }
-
-  /** Close process-local pi resources without changing durable state. */
+  /** Close pi's in-memory resources. Durable state is untouched. */
   async dispose(): Promise<void> {
-    const attaching = this.#attaching;
-    this.#attaching = undefined;
-    for (const writer of this.#writers.values()) writer.flush();
-    if (attaching) {
-      const attached = await attaching.catch(() => undefined);
-      await attached?.harness.close(BACKGROUND_CONTEXT);
-    }
+    await this.#transport.close();
+    const opening = this.#opening;
+    this.#opening = undefined;
+    const opened = await opening?.catch(() => undefined);
+    await opened?.pi.close(BG);
   }
 
-  // ── Operations ───────────────────────────────────────────────────────────
+  // ── The harness interface ────────────────────────────────────────────────
 
-  /**
-   * Durably queue an operation and return a receipt without waiting for the
-   * model. The submission is durable before this resolves; the lane driver
-   * admits it into pi in order.
-   */
-  async submit(
-    request: PiOperationRequest,
+  /** A handle on one session. No I/O until you call it. */
+  session(id: PiSessionId = ROOT_SESSION): PiSession {
+    return new PiSession(this, id);
+  }
+
+  /** Submit a prompt and wait for its answer. */
+  prompt(
+    input: PiMessageInput,
     options: PiSubmitOptions = {}
-  ): Promise<PiSubmissionReceipt> {
-    await this.lifecycle.ready();
-    const lane = options.lane ?? this.#defaultLane;
-    const operationId = options.operationId ?? request.operationId ?? uuidv7();
-    const context = asUpstreamContext(options.context);
-    const upstream = await this.#upstreamLane(lane, context);
-    const submissions = this.#requireSubmissions();
-    if (
-      submissions.has(operationId) ||
-      (await upstream.getResult(operationId, context)) !== undefined ||
-      (await upstream.inspectExecution(context)).current?.id === operationId
-    ) {
-      return { operationId, lane, accepted: false };
-    }
-    submissions.insert(lane, operationId, request);
-    await this.#ensureLaneDriver(lane);
-    return { operationId, lane, accepted: true };
+  ): Promise<PiPromptResponse> {
+    return this.session(options.session).prompt(input, options);
   }
 
-  /** Submit a prompt and wait for its outcome and the updated transcript. */
+  /** Durably submit a prompt. Resolves before the model runs. */
+  submit(
+    input: PiMessageInput,
+    options: PiSubmitOptions = {}
+  ): Promise<PiReceipt> {
+    return this.session(options.session).submit(input, options);
+  }
+
+  /** Stop one operation, or everything running in a session. */
+  abort(
+    options: PiSessionOptions & { readonly operationId?: string } = {}
+  ): Promise<boolean> {
+    return this.session(options.session).abort(options.operationId);
+  }
+
+  wait(
+    operationId: string,
+    options: PiSessionOptions & { readonly signal?: AbortSignal } = {}
+  ): Promise<PiOperationResult> {
+    return this.session(options.session).wait(operationId, options.signal);
+  }
+
+  messages(options: PiSessionOptions = {}): Promise<PiMessage[]> {
+    return this.session(options.session).messages();
+  }
+
+  /** Operations the driver still holds, oldest first. */
+  async pending(options: PiSessionOptions = {}): Promise<PiPendingOperation[]> {
+    const pending = await this.#driver.pending(options.session);
+    return pending.map((operation) => ({
+      operationId: operation.id,
+      session: operation.scope,
+      status: operation.status,
+      submittedAt: operation.submittedAt
+    }));
+  }
+
+  /** Tools registered now, as the UI lists them. */
+  tools(): PiToolInfo[] {
+    return this.registry.tools
+      .list()
+      .map((tool) => ({ name: tool.name, description: tool.description }));
+  }
+
+  /** Options for `new WebSockets(...)` serving the session protocol. */
+  webSockets(): WebSocketsOptions {
+    return this.#transport.options();
+  }
+
+  /** The opened pi Harness, for anything the interface does not cover. */
+  async pi(): Promise<Harness> {
+    return (await this.#open()).pi;
+  }
+
+  /** Resolve once no driver step is in flight. For tests. */
+  waitForIdle(session?: PiSessionId): Promise<void> {
+    return this.#driver.waitForIdle(session);
+  }
+
+  // ── Used by PiSession and PiSessions ─────────────────────────────────────
+
+  /** @internal */
+  async conversation(session: PiSessionId): Promise<Conversation> {
+    const { pi } = await this.#open();
+    const conversation = await pi.conversation(conversationId(session), BG);
+    if (!conversation) throw new Error(`Unknown pi session ${session}`);
+    return conversation;
+  }
+
+  /** @internal */
+  async storage(): Promise<SqliteStorage> {
+    return (await this.#open()).storage;
+  }
+
+  /** @internal Configure a new session like the root. */
+  initSession(tx: Tx, id: ConversationId): Promise<void> {
+    return this.#init(tx, id);
+  }
+
+  /** @internal */
+  async enqueue(
+    session: PiSessionId,
+    input: PiMessageInput,
+    options: PiSubmitOptions
+  ): Promise<PiReceipt> {
+    const operationId = options.operationId ?? crypto.randomUUID();
+    const operation: PiOperationInput = {
+      session,
+      content: userInput(input),
+      whenBusy: options.whenBusy ?? "followUp"
+    };
+    // The driver row first: it is what wakes the object if the admission
+    // below is lost to an eviction.
+    const receipt = await this.#driver.submit(session, operation, {
+      id: operationId
+    });
+    // Then admit into pi now, not when the driver reaches this operation,
+    // so pi's inbox places steers and follow-ups while a run is going. The
+    // step admits again by the same request id, which pi deduplicates.
+    await this.#admit(operationId, operation, BG);
+    return { operationId, session, accepted: receipt.accepted };
+  }
+
+  /** @internal Stop one driver operation. */
+  stopOperation(operationId: string): Promise<boolean> {
+    return this.#driver.stop(operationId);
+  }
+
+  /** @internal Wait for pi to settle an operation, by its request id. */
+  async settled(
+    session: PiSessionId,
+    operationId: string,
+    signal?: AbortSignal
+  ): Promise<PiOperationResult> {
+    const conversation = await this.conversation(session);
+    const context = signalContext(signal);
+    const submission = await this.#findSubmission(
+      conversation.id,
+      operationId,
+      context
+    );
+    if (!submission) {
+      return {
+        operationId,
+        session,
+        status: "unanswered",
+        reason: "not_found"
+      };
+    }
+    return this.#result(
+      session,
+      operationId,
+      await submission.wait(context),
+      context
+    );
+  }
+
+  // ── Driver runtime ───────────────────────────────────────────────────────
+
+  async #step(
+    operation: DriverOperation<PiOperationInput>,
+    signal: AbortSignal
+  ): Promise<DriverStep<PiOperationResult>> {
+    const { pi } = await this.#open();
+    const context = signalContext(signal);
+    const { session } = operation.input;
+    const conversation = await pi.conversation(
+      conversationId(session),
+      context
+    );
+    if (!conversation) {
+      return {
+        then: "done",
+        result: {
+          operationId: operation.id,
+          session,
+          status: "unanswered",
+          reason: "session_not_found"
+        }
+      };
+    }
+    const submission = await this.#admit(
+      operation.id,
+      operation.input,
+      context
+    );
+    const wakeAt = await this.#longWait(pi, conversation.id, context);
+    if (wakeAt !== undefined) return { then: "sleep", until: wakeAt };
+    const budget = new AbortController();
+    const timer = setTimeout(() => budget.abort(), STEP_BUDGET_MS);
+    let settled: SettledSubmissionRecord;
+    try {
+      // Cancelling the wait never cancels pi's work.
+      settled = await submission.wait(withAbortSignal(budget.signal, context));
+    } catch (error) {
+      if (budget.signal.aborted && !signal.aborted) return { then: "continue" };
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+    return {
+      then: "done",
+      result: await this.#result(session, operation.id, settled, context)
+    };
+  }
+
+  /** Withdraw a queued input, or abort the run it joined. */
+  async #withdraw(operation: DriverOperation<PiOperationInput>): Promise<void> {
+    const { pi, storage } = await this.#open();
+    const id = conversationId(operation.input.session);
+    const record = await storage.submissionByRequest(id, operation.id, BG);
+    if (!record || record.status === "done" || record.status === "unanswered") {
+      return;
+    }
+    const withdrawn = await pi.abortSubmission(record.id, BG, id);
+    if (withdrawn === "already_placed") {
+      await (await pi.conversation(id, BG))?.abort(BG);
+    }
+  }
+
+  async #failed(
+    operation: DriverOperation<PiOperationInput>,
+    error: DriverError
+  ): Promise<void> {
+    this.lifecycle.events.emit("pi:operation_failed", {
+      operationId: operation.id,
+      session: operation.input.session,
+      error: error.message
+    });
+    await this.#withdraw(operation);
+  }
+
+  // ── pi ───────────────────────────────────────────────────────────────────
+
+  #open(): Promise<Opened> {
+    this.#opening ??= this.#doOpen().catch((error: unknown) => {
+      this.#opening = undefined;
+      throw error;
+    });
+    return this.#opening;
+  }
+
+  async #doOpen(): Promise<Opened> {
+    const skills = this.#options.skills;
+    if (skills?.length) {
+      const resolved = await resolveSkillSources(skills);
+      for (const warning of resolved.warnings) {
+        console.warn(`PiHarness skills: ${warning}`);
+      }
+      const catalog = resolved.catalog;
+      this.registry.batch(() => {
+        for (const tool of resolved.tools) this.registry.tools.add(tool);
+        if (catalog)
+          this.registry.systemPrompt.section("skills", () => catalog);
+      });
+    }
+    const storage = await openPiSessionStore(
+      this.lifecycle.storage,
+      this.#options.store
+    );
+    const pi = await Harness.open(
+      storage,
+      {
+        models: this.#options.models,
+        registry: this.registry,
+        ...(this.#options.env ? { env: this.#options.env } : {}),
+        onReport:
+          this.#options.onReport ??
+          ((error) => console.warn("pi report", error))
+      },
+      BG
+    );
+    await pi.root(BG, { init: (tx, id) => this.#init(tx, id) });
+    // Continue whatever the last isolate left: pi reconciles tasks that were
+    // running to pending and schedules them again.
+    pi.resume();
+    return { pi, storage };
+  }
+
+  async #init(tx: Tx, id: ConversationId): Promise<void> {
+    const config = await tx.doc(ConversationConfig, id);
+    config.model = { ...this.#options.model };
+    config.thinkingLevel = this.#options.thinkingLevel ?? "off";
+    if (this.#options.retry) config.retry = { ...this.#options.retry };
+  }
+
+  #admit(operationId: string, input: PiOperationInput, context: Context) {
+    return this.conversation(input.session).then((conversation) =>
+      conversation.submit(
+        {
+          type: "input",
+          content: input.content,
+          whenBusy: input.whenBusy,
+          requestId: operationId
+        },
+        context
+      )
+    );
+  }
+
+  async #findSubmission(
+    id: ConversationId,
+    operationId: string,
+    context: Context
+  ) {
+    const { pi, storage } = await this.#open();
+    // Read from pi's storage: the Harness only reacquires submissions by id.
+    const record = await storage.submissionByRequest(id, operationId, context);
+    return record ? pi.submission(record.id, context) : undefined;
+  }
+
+  /** When pi's current wait is far enough away to hand to the alarm. */
+  async #longWait(
+    pi: Harness,
+    id: ConversationId,
+    context: Context
+  ): Promise<number | undefined> {
+    const live = await pi.snapshot(LiveDoc, id, context);
+    const at =
+      live?.generation?.deferred?.pollAt ?? live?.generation?.retry?.at;
+    return at !== undefined && at - Date.now() > SLEEP_THRESHOLD_MS
+      ? at
+      : undefined;
+  }
+
+  async #result(
+    session: PiSessionId,
+    operationId: string,
+    settled: SettledSubmissionRecord,
+    context: Context
+  ): Promise<PiOperationResult> {
+    if (settled.status === "unanswered") {
+      return {
+        operationId,
+        session,
+        status: "unanswered",
+        reason: settled.reason
+      };
+    }
+    if (settled.type !== "input")
+      return { operationId, session, status: "done" };
+    const conversation = await this.conversation(session);
+    const page = await conversation.entries(
+      { minEntryId: settled.answer, maxEntryId: settled.answer },
+      1,
+      undefined,
+      context
+    );
+    return {
+      operationId,
+      session,
+      status: "done",
+      text: assistantText(page.items[0])
+    };
+  }
+}
+
+/** One pi conversation, addressed through the harness. */
+export class PiSession {
+  readonly #harness: PiHarness;
+  readonly id: PiSessionId;
+
+  constructor(harness: PiHarness, id: PiSessionId) {
+    this.#harness = harness;
+    this.id = id;
+  }
+
+  /** Durably submit a prompt. Resolves before the model runs. */
+  submit(
+    input: PiMessageInput,
+    options: PiSubmitOptions = {}
+  ): Promise<PiReceipt> {
+    return this.#harness.enqueue(this.id, input, options);
+  }
+
+  /** Submit and wait for the answer and the updated transcript. */
   async prompt(
     input: PiMessageInput,
     options: PiSubmitOptions = {}
   ): Promise<PiPromptResponse> {
-    const { text, images } = messageInput(input);
-    const receipt = await this.submit(
+    const receipt = await this.submit(input, options);
+    const result = await this.wait(receipt.operationId);
+    return { ...result, messages: await this.messages() };
+  }
+
+  /** Join the running work after its current tool round. */
+  steer(
+    input: PiMessageInput,
+    options: Omit<PiSubmitOptions, "whenBusy"> = {}
+  ) {
+    return this.submit(input, { ...options, whenBusy: "steer" });
+  }
+
+  /** Wait for an operation to settle. Aborting `signal` stops only the wait. */
+  wait(operationId: string, signal?: AbortSignal): Promise<PiOperationResult> {
+    return this.#harness.settled(this.id, operationId, signal);
+  }
+
+  /**
+   * Stop one operation through the driver, or, with no id, abort the
+   * session: pi withdraws queued inputs and aborts the running work.
+   */
+  async abort(operationId?: string): Promise<boolean> {
+    if (operationId !== undefined) {
+      return this.#harness.stopOperation(operationId);
+    }
+    const conversation = await this.#harness.conversation(this.id);
+    await conversation.abort(BG);
+    return true;
+  }
+
+  /** Start a new context, optionally from a handoff note. */
+  async reset(handoff?: string): Promise<void> {
+    await (await this.#harness.conversation(this.id)).reset(handoff, BG);
+  }
+
+  async setModel(model: ModelRef): Promise<void> {
+    await (await this.#harness.conversation(this.id)).setModel(model, BG);
+  }
+
+  /** The active transcript: entries since the newest reset. */
+  async messages(): Promise<PiMessage[]> {
+    const view = await (await this.#harness.conversation(this.id)).context(BG);
+    return projectEntries(view.entries);
+  }
+
+  /** pi's agent events for this session: a snapshot, then one batch per commit. */
+  async events(context: Context = BG): Promise<AgentEventStream> {
+    const pi = await this.#harness.pi();
+    return watchEvents(pi, conversationId(this.id), context);
+  }
+
+  async busy(): Promise<boolean> {
+    const pi = await this.#harness.pi();
+    const live = await pi.snapshot(LiveDoc, conversationId(this.id), BG);
+    return live?.run !== undefined;
+  }
+}
+
+/** Every pi conversation in this object. */
+export class PiSessions {
+  readonly #harness: PiHarness;
+
+  constructor(harness: PiHarness) {
+    this.#harness = harness;
+  }
+
+  get(id: PiSessionId): PiSession {
+    return this.#harness.session(id);
+  }
+
+  /** A new top-level session, configured like the root. */
+  async create(): Promise<PiSession> {
+    const pi = await this.#harness.pi();
+    const conversation = await pi.createConversation(
       {
-        kind: "prompt",
-        prompt: text,
-        ...(images === undefined ? {} : { images })
+        ownership: { kind: "ownerless" },
+        init: (tx, id) => this.#harness.initSession(tx, id)
       },
-      options
+      BG
     );
-    const result = await this.waitForResult(receipt.operationId, options);
-    const messages = await this.getMessages(options);
-    return { ...result, messages };
+    return this.#harness.session(String(conversation.id));
   }
 
-  /** Wait for one operation's terminal result. */
-  async waitForResult(
-    operationId: string,
-    options: PiLaneOptions = {}
-  ): Promise<PiOperationResult> {
-    const lane = options.lane ?? this.#defaultLane;
-    const context = asUpstreamContext(options.context);
+  /** A new session that sees `from`'s history up to its newest entry. */
+  async fork(from: PiSessionId): Promise<PiSession> {
+    const conversation = await this.#harness.conversation(from);
+    const newest = await conversation.entries({}, 1, undefined, BG);
+    const at = newest.items[0];
+    if (!at) throw new Error(`Session ${from} has no entries to fork from`);
+    const fork = await conversation.fork(
+      at.id,
+      { ownership: { kind: "ownerless" } },
+      BG
+    );
+    return this.#harness.session(String(fork.id));
+  }
+
+  /**
+   * Every conversation, including ones subagent tools own. Read from pi's
+   * storage directly: the Harness has no conversation listing.
+   */
+  async list(): Promise<PiSessionInfo[]> {
+    const storage = await this.#harness.storage();
+    const pi = await this.#harness.pi();
+    const sessions: PiSessionInfo[] = [];
+    let cursor: Parameters<SqliteStorage["scanConversations"]>[2];
     for (;;) {
-      const upstream = await this.#upstreamLane(lane, context);
-      const settled = await upstream.getResult(operationId, context);
-      if (settled) return projectResult(settled);
-      const rejection = this.#rejections.get(operationId);
-      if (rejection) {
-        this.#rejections.delete(operationId);
-        throw rejection;
+      const page = await storage.scanConversations({}, 100, cursor, BG);
+      for (const record of page.items) {
+        const live = await pi.snapshot(LiveDoc, record.id, BG);
+        sessions.push({
+          id: String(record.id),
+          ...(record.parent
+            ? { parent: String(record.parent.conversationId) }
+            : {}),
+          busy: live?.run !== undefined
+        });
       }
-      await this.#awaitSettlement(operationId, context);
+      if (page.next === undefined) return sessions;
+      cursor = page.next;
     }
-  }
-
-  /**
-   * Durably request that the lane's current operation stop. A queued
-   * submission is withdrawn instead. Returns null when nothing matched.
-   */
-  async abort(
-    options: PiLaneOptions & { readonly operationId?: string } = {}
-  ): Promise<PiAbortResult> {
-    await this.lifecycle.ready();
-    const lane = options.lane ?? this.#defaultLane;
-    const context = asUpstreamContext(options.context);
-    const upstream = await this.#upstreamLane(lane, context);
-    const current = (await upstream.inspectExecution(context)).current;
-    const operationId = options.operationId ?? current?.id;
-    if (operationId === undefined) return null;
-    if (current?.id !== operationId) {
-      if (!this.#requireSubmissions().deleteOperation(operationId)) return null;
-      this.#reject(
-        lane,
-        operationId,
-        "run",
-        new PiOperationRejectedError(
-          operationId,
-          "aborted",
-          "Operation withdrawn before it started"
-        )
-      );
-      return { operationId, newlyRequested: true };
-    }
-    const requested = await upstream.requestAbort(operationId, context);
-    if (!requested.ok) {
-      if (requested.error._tag === "OperationMismatch") return null;
-      throw requested.error;
-    }
-    // The marker is durable; a driver reconciles it, now or after a wake.
-    await this.#ensureLaneDriver(lane);
-    return { operationId, newlyRequested: requested.value.newlyRequested };
-  }
-
-  /** Queue a message the running operation reads at its next turn boundary. */
-  async steer(
-    message: PiMessageInput,
-    options: PiLaneOptions = {}
-  ): Promise<PiQueueReceipt> {
-    const { text, images } = messageInput(message);
-    const context = asUpstreamContext(options.context);
-    const upstream = await this.#upstreamLane(
-      options.lane ?? this.#defaultLane,
-      context
-    );
-    const queued = await upstream.steer(text, images, context);
-    if (!queued.ok) throw queued.error;
-    return { entryId: queued.value.entryId };
-  }
-
-  // ── Reads ────────────────────────────────────────────────────────────────
-
-  /** Read one lane's durable transcript as display-ready chat messages. */
-  async getMessages(options: PiTranscriptOptions = {}): Promise<PiMessage[]> {
-    const context = asUpstreamContext(options.context);
-    const upstream = await this.#upstreamLane(
-      options.lane ?? this.#defaultLane,
-      context
-    );
-    const entries: Entry[] = await upstream.findEntries(
-      { order: options.order ?? "oldestFirst" },
-      context
-    );
-    return projectMessages(entries);
-  }
-
-  /** Read one immutable terminal operation result. */
-  async getResult(
-    operationId: string,
-    options: PiLaneOptions = {}
-  ): Promise<PiOperationResult | undefined> {
-    const context = asUpstreamContext(options.context);
-    const upstream = await this.#upstreamLane(
-      options.lane ?? this.#defaultLane,
-      context
-    );
-    const result = await upstream.getResult(operationId, context);
-    return result ? projectResult(result) : undefined;
-  }
-
-  /** Submissions the lane driver has not yet admitted into pi. */
-  async pending(options: PiLaneOptions = {}): Promise<PiPendingSubmission[]> {
-    await this.lifecycle.ready();
-    return this.#requireSubmissions()
-      .list(options.lane ?? this.#defaultLane)
-      .map(({ seq: _seq, ...submission }) => submission);
-  }
-
-  /** A point-in-time view of one lane: transcript, live operation, queues. */
-  async snapshot(options: PiLaneOptions = {}): Promise<PiLaneSnapshot> {
-    const lane = options.lane ?? this.#defaultLane;
-    const context = asUpstreamContext(options.context);
-    const upstream = await this.#upstreamLane(lane, context);
-    const handle = await upstream.watch(context);
-    handle.unsubscribe();
-    const snapshot = handle.snapshot;
-    const operation = snapshot.operation
-      ? operationStatus(snapshot.operation)
-      : null;
-    return {
-      lane,
-      messages: projectMessages(snapshot.transcript),
-      operation,
-      stream: operation
-        ? await this.#operationStream(lane, operation.operationId)
-        : null,
-      pending: await this.pending({ lane }),
-      queue: projectQueue(snapshot.queues),
-      model: snapshot.configuration.model,
-      thinkingLevel: snapshot.configuration.thinkingLevel,
-      activeTools: snapshot.configuration.activeToolNames,
-      tools: (await this.#resolveTools(context)).map((tool) => ({
-        name: tool.name,
-        label: tool.label,
-        description: tool.description
-      })),
-      usage: snapshot.stats.usage
-    };
-  }
-
-  /** The durable stream id of one operation's live events. */
-  streamId(operationId: string, lane = this.#defaultLane): string {
-    return `pi:${lane}:${operationId}`;
-  }
-
-  // ── Live ─────────────────────────────────────────────────────────────────
-
-  /** Observe projected events in this isolate. Returns an unsubscribe. */
-  on(listener: PiEventListener): () => void {
-    this.#listeners.add(listener);
-    return () => {
-      this.#listeners.delete(listener);
-    };
-  }
-
-  /**
-   * Options for a `WebSockets` capability serving this harness's protocol:
-   * `new WebSockets(this.pi.webSockets())`. Clients receive a lane snapshot
-   * on connect and replay-then-tail operation streams from their cursor.
-   */
-  webSockets(): WebSocketsOptions {
-    this.#transport ??= new PiTransport(
-      this.#transportHost(),
-      () => this.lifecycle.sockets
-    );
-    return this.#transport.webSocketOptions();
-  }
-
-  // ── Attachment ───────────────────────────────────────────────────────────
-
-  #attached(): Promise<Attached> {
-    this.#attaching ??= this.#attach().catch((error: unknown) => {
-      this.#attaching = undefined;
-      throw error;
-    });
-    return this.#attaching;
-  }
-
-  async #attach(): Promise<Attached> {
-    const storage = this.lifecycle.storage;
-    const metadata = await ensurePiSession(storage);
-    const database = new DurableObjectPiDatabase(storage);
-    const session = new StorageBackedSession(
-      metadata,
-      new SqliteStorage(database, { sessionId: metadata.id })
-    );
-    const context = BACKGROUND_CONTEXT;
-    const config = this.#config;
-    const tools = await this.#resolveTools(context);
-    const resources = await this.#resolveResources(context);
-    const model = resolveModel(
-      // SAFETY: the registry is pi-ai's Models; the opaque public type hides
-      // the pinned upstream shape.
-      config.models as never,
-      config.model
-    );
-
-    let attached: UpstreamAgentHarness<object | undefined> | undefined;
-    try {
-      const options: UpstreamAgentHarnessOptions<object | undefined> = {
-        session,
-        // SAFETY: PiModels and PiModel are narrow public projections.
-        models: config.models as Models,
-        model: model as Model<Api>,
-        ...(config.thinkingLevel === undefined
-          ? {}
-          : { thinkingLevel: config.thinkingLevel }),
-        activeToolNames:
-          config.activeToolNames === undefined
-            ? tools.map((tool) => tool.name)
-            : [...config.activeToolNames],
-        tools,
-        resources,
-        ...(config.toolContext === undefined
-          ? {}
-          : {
-              // SAFETY: the tool context is opaque to the harness; PiContext
-              // projects the Chord Context a resolver receives.
-              toolContext: config.toolContext as UpstreamAgentHarnessOptions<
-                object | undefined
-              >["toolContext"]
-            }),
-        systemPrompt: async (toolContext, upstreamContext) => {
-          const base =
-            typeof config.systemPrompt === "function"
-              ? await config.systemPrompt(
-                  toolContext as ToolContext,
-                  upstreamContext as PiContext
-                )
-              : (config.systemPrompt ?? "");
-          const catalog = (await this.#resolvedSkills())?.catalog;
-          return catalog ? [base, catalog].filter(Boolean).join("\n\n") : base;
-        },
-        ...(config.streamOptions === undefined
-          ? {}
-          : { streamOptions: config.streamOptions }),
-        ...(config.retry === undefined ? {} : { retry: config.retry }),
-        ...(config.compaction === undefined
-          ? {}
-          : { compaction: config.compaction }),
-        ...(config.steeringMode === undefined
-          ? {}
-          : { steeringMode: config.steeringMode }),
-        ...(config.followUpMode === undefined
-          ? {}
-          : { followUpMode: config.followUpMode }),
-        ...(config.toolExecution === undefined
-          ? {}
-          : { toolExecution: config.toolExecution })
-      };
-      const created = await createAgentHarness.create(options, context);
-      attached = created.harness;
-      for (const type of SUBSCRIBED_EVENT_TYPES) {
-        attached.events.on(type, (event) => this.#dispatchEvent(event));
-      }
-      // SAFETY: PiHookRegistry is the public structural projection of pi's
-      // hook registry.
-      await config.configure?.(
-        attached.hooks as PiHookRegistry,
-        context as PiContext
-      );
-      return { harness: attached, open: created.open };
-    } catch (error) {
-      if (attached) await attached.close(context).catch(() => {});
-      else await session.close(context).catch(() => {});
-      throw error;
-    }
-  }
-
-  async #upstreamLane(
-    name: string,
-    context: UpstreamContext
-  ): Promise<UpstreamAgentLane> {
-    await this.lifecycle.ready();
-    const { harness } = await this.#attached();
-    return harness.lane(name, context);
-  }
-
-  #requireSubmissions(): PiSubmissions {
-    if (!this.#submissions) {
-      throw new Error("PiHarness is not attached to its Durable Object");
-    }
-    return this.#submissions;
-  }
-
-  #resolvedSkills(): Promise<ResolvedSkills> | undefined {
-    const sources = this.#config.skills;
-    if (!sources || sources.length === 0) return undefined;
-    // Sources are read once per isolate lifetime: pi's resources are
-    // process-local anyway, so every wake sees the current skills.
-    this.#skills ??= resolveSkillSources(sources).then((resolved) => {
-      for (const warning of resolved.warnings)
-        console.warn(`PiHarness skills: ${warning}`);
-      return resolved;
-    });
-    return this.#skills;
-  }
-
-  async #resolveTools(
-    context: UpstreamContext
-  ): Promise<UpstreamAgentHarnessTool<object | undefined>[]> {
-    const source = this.#config.tools;
-    const own =
-      typeof source === "function"
-        ? await source(context as PiContext)
-        : (source ?? []);
-    const skillTools = (await this.#resolvedSkills())?.tools ?? [];
-    return asUpstreamTools<object | undefined>([
-      ...(own as readonly PiTool<object | undefined>[]),
-      ...skillTools
-    ]);
-  }
-
-  async #resolveResources(
-    context: UpstreamContext
-  ): Promise<UpstreamResources> {
-    const source = this.#config.resources;
-    const own =
-      typeof source === "function"
-        ? await source(context as PiContext)
-        : (source ?? {});
-    const skills = (await this.#resolvedSkills())?.skills ?? [];
-    return asUpstreamResources({
-      ...own,
-      skills: [...(own.skills ?? []), ...skills]
-    });
-  }
-
-  /** Re-supply process-local configuration pi does not persist. */
-  async #refreshProcessLocal(
-    harness: UpstreamAgentHarness<object | undefined>,
-    lane: UpstreamAgentLane,
-    context: UpstreamContext
-  ): Promise<void> {
-    const tools = await this.#resolveTools(context);
-    await harness.setTools(tools, context);
-    await harness.setResources(await this.#resolveResources(context), context);
-    if (this.#config.activeToolNames !== undefined) return;
-    // Without an explicit selection the lane offers every registered tool;
-    // keep pi's durable selection aligned when the registry changes.
-    const names = tools.map((tool) => tool.name);
-    const active = await lane.getActiveTools(context);
-    if (
-      active.length !== names.length ||
-      names.some((name) => !active.includes(name))
-    ) {
-      await lane.setActiveTools(names, context);
-    }
-  }
-
-  // ── Lane driver ──────────────────────────────────────────────────────────
-
-  async #ensureLaneDriver(lane: string): Promise<void> {
-    let ensuring = this.#ensuring.get(lane);
-    if (!ensuring) {
-      ensuring = this.#startLaneDriver(lane).finally(() => {
-        this.#ensuring.delete(lane);
-      });
-      this.#ensuring.set(lane, ensuring);
-    }
-    return ensuring;
-  }
-
-  async #startLaneDriver(lane: string): Promise<void> {
-    const live = await this.#tasks.list({
-      definition: LANE_DRIVER_DEFINITION,
-      status: ["pending", "running", "waiting"]
-    });
-    if (live.some((run) => run.metadata?.lane === lane)) return;
-    const input: LaneDriverInput = { version: 1, lane };
-    await this.#tasks.__DO_NOT_USE_WILL_BREAK__enqueue(
-      LANE_DRIVER_DEFINITION,
-      input,
-      { runId: `pi:${lane}:${uuidv7()}`, metadata: { lane }, retain: false }
-    );
-  }
-
-  async #driveLane(
-    input: LaneDriverInput,
-    step: TaskStep
-  ): Promise<{ lane: string; passes: number; rotated?: true }> {
-    const { lane } = input;
-    let consecutiveErrors = 0;
-    for (let pass = 0; pass < MAX_PASSES_PER_DRIVER; pass++) {
-      const outcome = await step.do(
-        `pass:${pass}`,
-        { timeout: DRIVE_STEP_TIMEOUT, retries: { limit: DRIVE_STEP_RETRIES } },
-        ({ signal }) => this.#drivePass(lane, signal)
-      );
-      if (outcome.kind === "error") {
-        consecutiveErrors += 1;
-        await step.status(`pi: ${outcome.message}`);
-        await step.sleep(`backoff:${pass}`, errorBackoffMs(consecutiveErrors));
-        continue;
-      }
-      consecutiveErrors = 0;
-      switch (outcome.kind) {
-        case "idle":
-          return { lane, passes: pass + 1 };
-        case "settled":
-        case "rejected":
-          continue;
-        case "retry":
-          await step.sleepUntil(`retry:${pass}`, outcome.notBefore);
-          continue;
-        case "deferred":
-          await step.sleep(`poll:${pass}`, outcome.pollAfterMs);
-          continue;
-      }
-    }
-    // Rotate: this run completes, and a fresh driver picks the lane up.
-    await this.lifecycle.jobs.push({
-      fn: ENSURE_DRIVER_FN,
-      time: Date.now() + DRIVER_ROTATION_DELAY_MS,
-      payload: { lane }
-    });
-    return { lane, passes: MAX_PASSES_PER_DRIVER, rotated: true };
-  }
-
-  async #drivePass(
-    lane: string,
-    signal: AbortSignal
-  ): Promise<DrivePassOutcome> {
-    const context = BACKGROUND_CONTEXT;
-    try {
-      const { harness } = await this.#attached();
-      const upstream = await harness.lane(lane, context);
-      let execution = await upstream.inspectExecution(context);
-
-      if (!execution.current) {
-        const head = this.#requireSubmissions().head(lane);
-        if (!head) return { kind: "idle" };
-        if (await upstream.getResult(head.operationId, context)) {
-          this.#requireSubmissions().delete(head.seq);
-          return { kind: "settled", operationId: head.operationId };
-        }
-        const admission = await upstream.accept(
-          asUpstreamRequest(head.request, head.operationId),
-          context
-        );
-        if (admission.ok) {
-          this.#requireSubmissions().delete(head.seq);
-          const writer = await this.#writerFor(
-            lane,
-            head.operationId,
-            admission.value.kind
-          );
-          this.#emitLaneEvent(
-            lane,
-            {
-              type: "operation_start",
-              operationId: head.operationId,
-              kind: admission.value.kind,
-              startedAt: admission.value.startedAt
-            },
-            head.operationId,
-            writer
-          );
-        } else if (admission.error._tag !== "LaneBusy") {
-          this.#requireSubmissions().delete(head.seq);
-          this.#reject(
-            lane,
-            head.operationId,
-            requestKind(head.request),
-            new PiOperationRejectedError(
-              head.operationId,
-              admission.error._tag,
-              admission.error.message
-            ),
-            head
-          );
-          return { kind: "rejected", operationId: head.operationId };
-        }
-        execution = await upstream.inspectExecution(context);
-        if (!execution.current) return { kind: "idle" };
-      }
-
-      const current = execution.current;
-      await this.#refreshProcessLocal(harness, upstream, context);
-      const writer = await this.#writerFor(
-        lane,
-        current.id,
-        current.kind,
-        current.startedAt
-      );
-      const onAbort = () => {
-        void upstream.requestAbort(current.id, BACKGROUND_CONTEXT);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      try {
-        const driven = await upstream.drive(
-          { operationId: current.id, waitForRetry: false, pollDeferred: true },
-          context
-        );
-        if (!driven.ok) {
-          if (driven.error._tag === "OperationMismatch") {
-            const settled = await upstream.getResult(current.id, context);
-            if (settled) {
-              this.#settle(lane, writer, settled);
-              return { kind: "settled", operationId: current.id };
-            }
-            return { kind: "error", message: driven.error.message };
-          }
-          throw driven.error;
-        }
-        const outcome = driven.value;
-        switch (outcome.kind) {
-          case "settled":
-            this.#settle(lane, writer, outcome.outcome);
-            return { kind: "settled", operationId: current.id };
-          case "waiting":
-            writer.flush();
-            return outcome.reason === "retry"
-              ? { kind: "retry", notBefore: outcome.notBefore }
-              : {
-                  kind: "deferred",
-                  pollAfterMs: outcome.deferred.pollAfterMs ?? DEFERRED_POLL_MS
-                };
-        }
-      } finally {
-        signal.removeEventListener("abort", onAbort);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.lifecycle.events.emit("operation:error", { lane, message });
-      // A faulted harness is sealed; the next pass attaches a fresh one.
-      this.#attaching = undefined;
-      return { kind: "error", message };
-    }
-  }
-
-  #settle(
-    lane: string,
-    writer: OperationStreamWriter,
-    record: OperationResultRecord
-  ): void {
-    const result = projectResult(record);
-    this.#emitLaneEvent(
-      lane,
-      { type: "operation_end", ...result },
-      record.operationId,
-      writer
-    );
-    writer.close();
-    this.#writers.delete(record.operationId);
-    if (this.#laneWriters.get(lane) === writer) this.#laneWriters.delete(lane);
-    this.lifecycle.events.emit("operation:settled", {
-      lane,
-      operationId: record.operationId,
-      status: record.status
-    });
-    this.#notifySettled(record.operationId);
-  }
-
-  #reject(
-    lane: string,
-    operationId: string,
-    kind: PiOperationKind,
-    error: PiOperationRejectedError,
-    submission?: QueuedSubmission
-  ): void {
-    this.#rejections.set(operationId, error);
-    const now = Date.now();
-    const event: PiEvent = {
-      type: "operation_end",
-      operationId,
-      kind,
-      status: "declined",
-      error: { code: error.code, message: error.message },
-      fromTipId: null,
-      tipId: null,
-      startedAt: submission?.submittedAt ?? now,
-      endedAt: now
-    };
-    this.#emitLaneEvent(lane, event, operationId);
-    this.lifecycle.events.emit("operation:rejected", {
-      lane,
-      operationId,
-      code: error.code,
-      message: error.message
-    });
-    this.#notifySettled(operationId);
-  }
-
-  // ── Streams ──────────────────────────────────────────────────────────────
-
-  async #writerFor(
-    lane: string,
-    operationId: string,
-    kind: PiOperationKind,
-    startedAt?: number
-  ): Promise<OperationStreamWriter> {
-    const existing = this.#writers.get(operationId);
-    if (existing) return existing;
-    const streamId = this.streamId(operationId, lane);
-    let writer: Awaited<ReturnType<Streams["open"]>> | undefined;
-    try {
-      writer = await this.#streams.open(streamId, {
-        tag: lane,
-        metadata: { lane, operationId, kind }
-      });
-    } catch {
-      // Already settled by a previous attempt: events have nowhere to go.
-      writer = undefined;
-    }
-    const cursor = writer?.cursor ?? 0;
-    const operationWriter = new OperationStreamWriter({
-      streamId,
-      operationId,
-      lane,
-      writer
-    });
-    this.#writers.set(operationId, operationWriter);
-    this.#laneWriters.set(lane, operationWriter);
-    if (writer && cursor === 0 && startedAt !== undefined) {
-      // Admitted before a crash reached the stream: start it from pi's record.
-      this.#emitLaneEvent(
-        lane,
-        { type: "operation_start", operationId, kind, startedAt },
-        operationId,
-        operationWriter
-      );
-    }
-    this.#transport?.streamOpened(lane, streamId, operationId, cursor);
-    return operationWriter;
-  }
-
-  async #operationStream(
-    lane: string,
-    operationId: string
-  ): Promise<PiOperationStream | null> {
-    const streamId = this.streamId(operationId, lane);
-    const status = await this.#streams.status(streamId);
-    return status ? { streamId, operationId, cursor: status.cursor } : null;
-  }
-
-  #dispatchEvent(event: HarnessEvent): void {
-    if (event.type === "fault") {
-      // The harness sealed itself; the next pass attaches a fresh one.
-      this.#attaching = undefined;
-    }
-    const projected = projectHarnessEvent(event);
-    if (!projected) return;
-    const lane =
-      "lane" in event && typeof event.lane === "string"
-        ? event.lane
-        : undefined;
-    if (lane === undefined) {
-      for (const writer of this.#laneWriters.values()) {
-        this.#emitLaneEvent(
-          writer.lane,
-          projected.event,
-          projected.operationId,
-          writer
-        );
-      }
-      if (this.#laneWriters.size === 0) {
-        this.#emitLaneEvent(
-          this.#defaultLane,
-          projected.event,
-          projected.operationId
-        );
-      }
-      return;
-    }
-    const writer =
-      (projected.operationId
-        ? this.#writers.get(projected.operationId)
-        : undefined) ?? this.#laneWriters.get(lane);
-    this.#emitLaneEvent(lane, projected.event, projected.operationId, writer);
-  }
-
-  #emitLaneEvent(
-    lane: string,
-    event: PiEvent,
-    operationId: string | undefined,
-    writer?: OperationStreamWriter
-  ): void {
-    if (writer && !writer.closed) writer.push(event);
-    else this.#transport?.laneEvent(lane, event);
-    const context = {
-      lane,
-      ...(operationId === undefined ? {} : { operationId })
-    };
-    for (const listener of this.#listeners) {
-      try {
-        listener(event, context);
-      } catch (error) {
-        console.error("PiHarness event listener failed", error);
-      }
-    }
-  }
-
-  // ── Waiters ──────────────────────────────────────────────────────────────
-
-  #notifySettled(operationId: string): void {
-    const waiters = this.#settlementWaiters.get(operationId);
-    this.#settlementWaiters.delete(operationId);
-    if (waiters) for (const wake of waiters) wake();
-  }
-
-  #awaitSettlement(
-    operationId: string,
-    context: UpstreamContext
-  ): Promise<void> {
-    return awaitWithContext(
-      new Promise<void>((resolve) => {
-        let waiters = this.#settlementWaiters.get(operationId);
-        if (!waiters) {
-          waiters = new Set();
-          this.#settlementWaiters.set(operationId, waiters);
-        }
-        const wake = () => {
-          clearTimeout(timer);
-          waiters?.delete(wake);
-          resolve();
-        };
-        // The poll is insurance: settlement normally wakes waiters directly.
-        const timer = setTimeout(wake, RESULT_POLL_MS);
-        waiters.add(wake);
-      }),
-      context
-    );
-  }
-
-  #transportHost(): PiTransportHost {
-    return {
-      defaultLane: this.#defaultLane,
-      streams: this.#streams,
-      snapshot: (options) => this.snapshot(options),
-      submit: (request, options) => this.submit(request, options),
-      abort: (options) => this.abort(options),
-      steer: (message, options) => this.steer(message, options)
-    };
   }
 }

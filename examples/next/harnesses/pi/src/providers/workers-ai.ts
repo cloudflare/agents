@@ -1,14 +1,14 @@
 import {
   createProvider,
   type ApiStreamOptions,
-  type Context,
   type Model,
+  type Provider,
   type ProviderStreams,
-  type SimpleStreamOptions
+  type SimpleStreamOptions,
+  type TranscriptContext
 } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { cloudflareWorkersAIProvider } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai";
-import type { PiProvider } from "./models";
 
 /** Provider id shared with pi-ai's REST-based Workers AI provider. */
 export const WORKERS_AI_PROVIDER = "cloudflare-workers-ai";
@@ -96,7 +96,7 @@ function customModel(
 export function workersAI(
   binding: Ai,
   options: WorkersAIOptions = {}
-): PiProvider {
+): Provider {
   // SAFETY: Workers AI returns a Response when `returnRawResponse` is true.
   // The public `Ai` overload cannot preserve that correlation structurally.
   const runBinding = binding as unknown as RunBinding;
@@ -125,7 +125,7 @@ export function workersAI(
       } as ApiStreamOptions<string>),
     streamSimple: (
       model: Model<string>,
-      context: Context,
+      context: TranscriptContext,
       streamOptions?: SimpleStreamOptions
     ) => api.streamSimple(model, context, { ...streamOptions, fetch })
   };

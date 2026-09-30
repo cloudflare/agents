@@ -1,60 +1,46 @@
 import { DurableObject } from "cloudflare:workers";
+import type { JsonValue } from "@earendil-works/chord";
+import { Type } from "@earendil-works/pi-ai";
+import {
+  ToolTask,
+  type ToolExecutionResult,
+  type ToolRegistration
+} from "@earendil-works/pi-durable";
 import { routeAgentRequest } from "agents";
-import { Type } from "typebox";
-import { PiHarness } from "./harness/pi-harness";
-import type { PiEvent, PiTool } from "./harness/types";
 import { Lifecycle } from "agents/lifecycle";
+import { fromManifest } from "agents/skills";
+import { WebSockets } from "agents/websockets";
+import { Driver } from "./driver";
+import { PiHarness } from "./harness/pi-harness";
 import { createModels } from "./providers/models";
 import { workersAI } from "./providers/workers-ai";
-import { fromManifest } from "agents/skills";
-import { Streams } from "agents/streams";
-import { Tasks } from "agents/tasks";
-import { WebSockets } from "agents/websockets";
 
 const MEMORY_PREFIX = "pi-playground:memory:";
 const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 
-const calculateParameters = Type.Object({
-  operation: Type.Union([
-    Type.Literal("add"),
-    Type.Literal("subtract"),
-    Type.Literal("multiply"),
-    Type.Literal("divide"),
-    Type.Literal("+"),
-    Type.Literal("-"),
-    Type.Literal("*"),
-    Type.Literal("/")
-  ]),
-  left: Type.Number(),
-  right: Type.Number()
-});
-const diceParameters = Type.Object({
-  sides: Type.Integer({ minimum: 2, maximum: 1000 }),
-  count: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 }))
-});
-const memoryParameters = Type.Object({
-  key: Type.String({ minLength: 1, maxLength: 64 }),
-  value: Type.String({ maxLength: 4000 })
-});
-const recallParameters = Type.Object({
-  key: Type.String({ minLength: 1, maxLength: 64 })
-});
-const noParameters = Type.Object({});
+type Operation =
+  | "add"
+  | "subtract"
+  | "multiply"
+  | "divide"
+  | "+"
+  | "-"
+  | "*"
+  | "/";
 
-type ToolContext = {
-  readonly storage: DurableObjectStorage;
-  readonly now: () => Date;
-};
-
-function text(content: string) {
-  return [{ type: "text" as const, text: content }];
+function text(content: string, details?: JsonValue): ToolExecutionResult {
+  return {
+    content: [{ type: "text", text: content }],
+    ...(details === undefined ? {} : { details })
+  };
 }
 
-function calculate(
-  operation: "add" | "subtract" | "multiply" | "divide" | "+" | "-" | "*" | "/",
-  left: number,
-  right: number
-): number {
+/** pi validates arguments against `parameters` before `execute` runs. */
+function argsOf<T>(args: JsonValue): T {
+  return args as T;
+}
+
+function calculate(operation: Operation, left: number, right: number): number {
   switch (operation) {
     case "add":
     case "+":
@@ -72,136 +58,125 @@ function calculate(
   }
 }
 
-function createTools(): PiTool<ToolContext>[] {
-  const calculator: PiTool<
-    ToolContext,
-    typeof calculateParameters,
-    { readonly result: number }
-  > = {
-    name: "calculate",
-    label: "Calculator",
-    description: "Perform exact arithmetic with two numbers.",
-    parameters: calculateParameters,
-    replay: "safe",
-    async execute(_id, input) {
-      const result = calculate(input.operation, input.left, input.right);
-      return { content: text(String(result)), details: { result } };
-    }
-  };
-
-  const rollDice: PiTool<
-    ToolContext,
-    typeof diceParameters,
-    { readonly rolls: number[]; readonly total: number }
-  > = {
-    name: "roll_dice",
-    label: "Roll dice",
-    description: "Roll one or more fair dice.",
-    parameters: diceParameters,
-    replay: "never",
-    async execute(_id, input, onUpdate) {
-      const count = input.count ?? 1;
-      onUpdate({
-        content: text(`Rolling ${count}d${input.sides}…`),
-        details: { rolls: [], total: 0 }
-      });
-      const rolls = Array.from(
-        { length: count },
-        () => Math.floor(Math.random() * input.sides) + 1
-      );
-      const total = rolls.reduce((sum, roll) => sum + roll, 0);
-      return {
-        content: text(`Rolled ${rolls.join(", ")} (total ${total})`),
-        details: { rolls, total }
-      };
-    }
-  };
-
-  const remember: PiTool<
-    ToolContext,
-    typeof memoryParameters,
-    { readonly key: string }
-  > = {
-    name: "remember",
-    label: "Remember",
-    description: "Persist a named fact in this Durable Object session.",
-    parameters: memoryParameters,
-    replay: "safe",
-    async execute(_id, input, _onUpdate, context) {
-      await context.storage.put(`${MEMORY_PREFIX}${input.key}`, input.value);
-      return {
-        content: text(`Remembered ${JSON.stringify(input.key)}.`),
-        details: { key: input.key }
-      };
-    }
-  };
-
-  const recall: PiTool<
-    ToolContext,
-    typeof recallParameters,
-    { readonly key: string; readonly found: boolean }
-  > = {
-    name: "recall",
-    label: "Recall",
-    description: "Read one fact previously saved in this session.",
-    parameters: recallParameters,
-    replay: "safe",
-    async execute(_id, input, _onUpdate, context) {
-      const value = await context.storage.get<string>(
-        `${MEMORY_PREFIX}${input.key}`
-      );
-      return {
-        content: text(
-          value === undefined
-            ? `No memory named ${JSON.stringify(input.key)}.`
-            : value
+/**
+ * The playground's tools. `replay: "safe"` lets pi run a call again after an
+ * eviction interrupted it; every other call is reported to the model as
+ * interrupted instead.
+ */
+function createTools(storage: DurableObjectStorage): ToolRegistration[] {
+  return [
+    {
+      name: "calculate",
+      description: "Perform exact arithmetic with two numbers.",
+      parameters: Type.Object({
+        operation: Type.Union(
+          (
+            [
+              "add",
+              "subtract",
+              "multiply",
+              "divide",
+              "+",
+              "-",
+              "*",
+              "/"
+            ] as const
+          ).map((value) => Type.Literal(value))
         ),
-        details: { key: input.key, found: value !== undefined }
-      };
+        left: Type.Number(),
+        right: Type.Number()
+      }),
+      replay: "safe",
+      async execute(args) {
+        const input = argsOf<{
+          operation: Operation;
+          left: number;
+          right: number;
+        }>(args);
+        const result = calculate(input.operation, input.left, input.right);
+        return text(String(result), { result });
+      }
+    },
+    {
+      name: "roll_dice",
+      description: "Roll one or more fair dice.",
+      parameters: Type.Object({
+        sides: Type.Integer({ minimum: 2, maximum: 1000 }),
+        count: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 }))
+      }),
+      async execute(args, api) {
+        const input = argsOf<{ sides: number; count?: number }>(args);
+        const count = input.count ?? 1;
+        api.output(`Rolling ${count}d${input.sides}…\n`);
+        const rolls = Array.from(
+          { length: count },
+          () => Math.floor(Math.random() * input.sides) + 1
+        );
+        const total = rolls.reduce((sum, roll) => sum + roll, 0);
+        return text(`Rolled ${rolls.join(", ")} (total ${total})`, {
+          rolls,
+          total
+        });
+      }
+    },
+    {
+      name: "remember",
+      description: "Persist a named fact in this Durable Object session.",
+      parameters: Type.Object({
+        key: Type.String({ minLength: 1, maxLength: 64 }),
+        value: Type.String({ maxLength: 4000 })
+      }),
+      replay: "safe",
+      async execute(args) {
+        const input = argsOf<{ key: string; value: string }>(args);
+        await storage.put(`${MEMORY_PREFIX}${input.key}`, input.value);
+        return text(`Remembered ${JSON.stringify(input.key)}.`, {
+          key: input.key
+        });
+      }
+    },
+    {
+      name: "recall",
+      description: "Read one fact previously saved in this session.",
+      parameters: Type.Object({
+        key: Type.String({ minLength: 1, maxLength: 64 })
+      }),
+      replay: "safe",
+      async execute(args) {
+        const { key } = argsOf<{ key: string }>(args);
+        const value = await storage.get<string>(`${MEMORY_PREFIX}${key}`);
+        return text(value ?? `No memory named ${JSON.stringify(key)}.`, {
+          key,
+          found: value !== undefined
+        });
+      }
+    },
+    {
+      name: "list_memories",
+      description: "List the fact names stored in this session.",
+      parameters: Type.Object({}),
+      replay: "safe",
+      async execute() {
+        const values = await storage.list<string>({ prefix: MEMORY_PREFIX });
+        const keys = [...values.keys()].map((key) =>
+          key.slice(MEMORY_PREFIX.length)
+        );
+        return text(keys.length === 0 ? "No memories." : keys.join("\n"), {
+          keys
+        });
+      }
+    },
+    {
+      name: "current_time",
+      description: "Return the current UTC time.",
+      parameters: Type.Object({}),
+      replay: "safe",
+      async execute() {
+        const iso = new Date().toISOString();
+        return text(iso, { iso });
+      }
     }
-  };
-
-  const listMemory: PiTool<
-    ToolContext,
-    typeof noParameters,
-    { readonly keys: string[] }
-  > = {
-    name: "list_memories",
-    label: "List memories",
-    description: "List the fact names stored in this session.",
-    parameters: noParameters,
-    replay: "safe",
-    async execute(_id, _input, _onUpdate, context) {
-      const values = await context.storage.list<string>({
-        prefix: MEMORY_PREFIX
-      });
-      const keys = [...values.keys()].map((key) =>
-        key.slice(MEMORY_PREFIX.length)
-      );
-      return {
-        content: text(keys.length === 0 ? "No memories." : keys.join("\n")),
-        details: { keys }
-      };
-    }
-  };
-
-  const clock: PiTool<
-    ToolContext,
-    typeof noParameters,
-    { readonly iso: string }
-  > = {
-    name: "current_time",
-    label: "Current time",
-    description: "Return the current UTC time.",
-    parameters: noParameters,
-    replay: "safe",
-    async execute(_id, _input, _onUpdate, context) {
-      const iso = context.now().toISOString();
-      return { content: text(iso), details: { iso } };
-    }
-  };
-
-  return [calculator, rollDice, remember, recall, listMemory, clock];
+  ];
 }
 
 const skills = fromManifest({
@@ -222,81 +197,35 @@ const skills = fromManifest({
   ]
 });
 
-type ToolCallEvent = { readonly toolName: string; readonly args: unknown };
-
-function toolCallOf(event: unknown): ToolCallEvent | undefined {
-  return typeof event === "object" &&
-    event !== null &&
-    "toolName" in event &&
-    typeof event.toolName === "string" &&
-    "args" in event
-    ? { toolName: event.toolName, args: event.args }
-    : undefined;
-}
-
-function memoryKeyOf(call: ToolCallEvent): string {
-  return typeof call.args === "object" &&
-    call.args !== null &&
-    "key" in call.args &&
-    typeof call.args.key === "string"
-    ? call.args.key
-    : "";
-}
-
 /** Playable pi session backed by one Durable Object. */
 export class PiAgent extends DurableObject<Env> {
-  readonly tasks = new Tasks();
-  readonly streams = new Streams();
-  readonly harness = new PiHarness<ToolContext>({
+  readonly driver = new Driver();
+  readonly harness = new PiHarness({
+    driver: this.driver,
     models: createModels({ providers: [workersAI(this.env.AI)] }),
     model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
-    tasks: this.tasks,
-    streams: this.streams,
     thinkingLevel: "low",
-    toolContext: { storage: this.ctx.storage, now: () => new Date() },
-    tools: () => createTools(),
+    retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 },
+    tools: createTools(this.ctx.storage),
     skills: [skills],
     systemPrompt:
       "You are a concise playground assistant. Use tools whenever they can answer the request. Explain tool results plainly. You can calculate, roll dice, read the current time, and persist or recall facts for this session.",
-    retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 },
-    compaction: {
-      enabled: true,
-      reserveTokens: 4000,
-      keepRecentTokens: 12000
-    },
-    configure: (hooks) => {
-      // Pi hooks are process-local and re-registered on every wake.
-      hooks.on("before_tool", (event) => {
-        const call = toolCallOf(event);
-        if (
-          call?.toolName === "remember" &&
-          memoryKeyOf(call).startsWith("_")
-        ) {
-          return { block: { reason: "Memory names cannot start with _." } };
-        }
-        return undefined;
+    configure: (registry) => {
+      registry.hooks.add(ToolTask, {
+        beforeTool: (call) =>
+          call.name === "remember" &&
+          typeof call.arguments.key === "string" &&
+          call.arguments.key.startsWith("_")
+            ? { block: "Memory names cannot start with _." }
+            : undefined
       });
     }
   });
-
   readonly webSockets = new WebSockets(this.harness.webSockets());
-
   readonly lifecycle = Lifecycle.install(this)
-    .use(this.tasks)
-    .use(this.streams)
+    .use(this.driver)
     .use(this.webSockets)
     .use(this.harness);
-
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    // Surface durable operation lifecycle in the tail log for local `wrangler
-    // dev` observability; a real host would forward these to its own sink.
-    this.harness.on((event: PiEvent) => {
-      if (event.type === "fault" || event.type === "operation_end") {
-        console.log("pi", event);
-      }
-    });
-  }
 }
 
 export default {

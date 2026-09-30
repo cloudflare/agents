@@ -1,87 +1,102 @@
 Status: proposed
 
-# Pi AgentHarness as a Lifecycle capability
+# pi-durable as a Lifecycle capability
 
 ## The problem
 
-Pi's `AgentHarness` has the operation state machine we need for durable model
-and tool execution: transcript, tool intent and settlement, retries,
-cancellation, and crash recovery. It does not own platform storage, scheduling,
-or client transport. Rebuilding its logic in the Agents SDK would create two
-competing authorities for the same effects.
+pi's durable harness, `@earendil-works/pi-durable`, has the whole execution
+model we need:
+
+- transcript and inbox (steers, follow-ups, writes)
+- generation and tool tasks with checkpoints, and replay-safe versus unsafe
+  tools
+- retries, abort, task ownership, and subagents
+- a committed live view that clients can join late
+
+It keeps all of this in a storage it opens itself, and its scheduler runs in
+memory. It cannot wake an evicted Durable Object, and it has no Durable
+Object storage backend. Rebuilding its logic in the Agents SDK would create
+two competing authorities for the same effects.
+
+The first version of this example (#2210) wrapped pi-agent-core's older
+`AgentHarness` with `Tasks`, `Streams`, and an intake table. pi-durable
+replaces that API, and most of the wrapper with it.
 
 ## The proposal
 
-Prove the composition as an example first. `examples/next/harnesses/pi` hosts
-pi's harness on a plain Durable Object using only the SDK's existing durable
-primitives:
+Prove the composition as an example first. `examples/next/harnesses/pi`
+hosts pi-durable on a plain Durable Object:
 
 ```ts
-readonly tasks = new Tasks();
-readonly streams = new Streams();
-readonly harness = new PiHarness({ models, model, tasks, streams, tools });
+readonly driver = new Driver();
+readonly harness = new PiHarness({ driver: this.driver, models, model, tools });
 readonly webSockets = new WebSockets(this.harness.webSockets());
 readonly lifecycle = Lifecycle.install(this)
-  .use(this.tasks)
-  .use(this.streams)
+  .use(this.driver)
   .use(this.webSockets)
   .use(this.harness);
 ```
 
-`PiHarness` is example-local code. Nothing in this RFC adds an export to the
-`agents` package.
+`PiHarness`, the driver, and the session store are example-local code.
+Nothing in this RFC adds an export to the `agents` package.
 
 Responsibilities are split by authority:
 
-- **Pi** owns operation acceptance, transcript state, provider attempts, tool
-  intent and settlement, retry waits, and recovery. Its session is stored in
-  this object's SQLite database through a small adapter that namespaces pi's
-  tables under `cf_agents_pi_*`.
-- **Tasks** delivers durable wakes. Each lane's work is one Task run whose
-  journaled steps drive pi to settlement and replay after eviction. Tasks
-  never re-executes a model or tool effect itself; pi's session is the
-  recovery evidence.
-- **Streams** is the durable output log. Every operation's live events land in
-  one stream, batched per chunk, so a client replays then tails from its
-  cursor.
-- **WebSockets** serves the browser protocol: a lane snapshot on connect,
-  `subscribe` to replay-then-tail an operation stream, and `submit`, `abort`,
-  and `steer` to drive it.
-- **Skills** from `agents/skills` become pi resources plus `activate_skill`
-  and `read_skill_resource` tools, the same tools `@cloudflare/think` offers.
+- **pi** owns everything about a run: the transcript, inbox, tasks, tool
+  replay, retries, abort, and the live view. It stores them in its own schema
+  through its portable `SqliteStorage`.
+- **The session store** (`session-store.ts`) is pi's `SqliteDatabase`
+  facade over `ctx.storage.sql`. Transactions use `transactionSync`, and
+  pi's tables are moved under a `pi_` prefix. pi's own storage conformance
+  suite runs against it on a real Durable Object.
+- **The driver** (copied from #2396) is the wake. Each submission is one
+  driver operation. Its `step` admits the input into pi by request id and
+  waits for pi to settle it. The driver's alarm heartbeat restarts an evicted
+  object, and pi resumes its own tasks on open. The driver never replays
+  model or tool work.
+- **WebSockets** serves pi's own agent events: a snapshot, then one batch per
+  commit. There is no cursor or replay log. A client that joins or
+  reconnects gets a snapshot.
 
-Submission is durable before the caller sees a receipt: `submit()` writes an
-intake row and enqueues the lane driver before pi accepts the operation, so a
-crash cannot leave accepted work without a wake.
+`examples/next/harnesses/pi/NOTES.md` explains why the driver was chosen
+over Tasks and the state machine, and records everything that was hard.
 
 ## Known costs
 
-- The pi session adapter carries pi's own schema: seven tables and their
-  indexes. Once `agents/sessions` (#2196) lands, pi's `Storage` contract
-  should be implemented over the sessions tables instead, leaving one message
-  store per object.
-- The harness uses the framework-internal Tasks apertures (`register` with a
-  reserved name and the queued enqueue). A public way for a capability to add
-  a driver to host-owned Tasks is still to be designed.
-- The build pins an unreleased pi commit (`c4b0e35a`) as vendored archives.
-  Replace them with published versions when a pi release contains the
-  completed harness API.
+- The driver is copied into the example until a driver ships in `agents`.
+  The copy lacks `jobs.pushSync`, so it pushes the job before it writes the
+  row.
+- pi's work that has no driver operation behind it gets no heartbeat.
+  Examples are background subagents and follow-ups placed after their
+  admitting operation settled.
+- pi's long waits are turned into driver sleeps by reading pi's `LiveDoc`,
+  because pi has no "next wake" API.
+- Two reads (`submissionByRequest`, `scanConversations`) go to pi's storage
+  directly, because the Harness does not offer them.
+- The table prefix is a SQL rewrite, because pi has no prefix option.
+- The build pins pi `main` (2bbfcca4) as vendored archives. The npm 0.99.1
+  release predates pi-durable's inbox, events, and subagents.
 
 ## Before this becomes a package export
 
-- `agents/sessions` merged, and pi's session stored there.
-- A pi release with the harness API, so no vendored archives ship.
-- Public Tasks support for capability-owned drivers.
-- Eviction and recovery tests promoted from the example into the package.
+- A driver in `agents`, with an atomic push.
+- A pi release with pi-durable Packages 17–19, so no archives are vendored.
+- Upstream asks: a next-wake time on `inspect()`, submission lookup by
+  request id, conversation listing, and a table prefix.
+- A keep-alive for pi's live work that does not depend on a driver
+  operation.
+- Compaction upstream, and an `ExecutionEnv` for pi's coding tools on
+  Workspace or a Container.
 
 ## Alternatives
 
-- Reimplement execution on `Tasks` steps. Rejected because Tasks and pi would
-  both own replay and effect recovery.
-- Wrap pi's older in-memory `Agent`. Rejected because it needs another
-  transcript and recovery implementation.
-- Ship `agents/harness` now. Rejected until the items above land; the example
-  lets the composition get real use without committing the package API.
+- Keep driving pi from `Tasks` (#2210). Rejected: Tasks journals steps for
+  replay, pi is the replay authority, and capability-owned Tasks drivers
+  need private apertures.
+- Drive pi from `agents/state-machine` (#2338). Rejected: pi-durable's
+  scheduler leaves nothing to drive in passes, and child machines overlap
+  with pi's own task ownership.
+- Ship `agents/harness` now. Rejected until the items above land.
 
 ## The decision
 

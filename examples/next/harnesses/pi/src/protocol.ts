@@ -1,10 +1,8 @@
 export type {
   PiClientMessage as ClientMessage,
-  PiEvent as TranscriptEvent,
-  PiLaneSnapshot as LaneSnapshot,
   PiMessage as TranscriptMessage,
-  PiMessageDelta as MessageDelta,
   PiMessagePart as TranscriptPart,
   PiServerMessage as ServerMessage,
+  PiSessionView as SessionView,
   PiToolInfo as ToolInfo
 } from "./harness/types";

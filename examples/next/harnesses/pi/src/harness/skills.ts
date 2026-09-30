@@ -1,22 +1,22 @@
-import { Type } from "typebox";
+import type { JsonValue } from "@earendil-works/chord";
+import { Type } from "@earendil-works/pi-ai";
+import type {
+  ToolExecutionResult,
+  ToolRegistration
+} from "@earendil-works/pi-durable";
 import type {
   SkillContent,
   SkillDescriptor,
   SkillResourceDescriptor,
   SkillSource
 } from "agents/skills";
-import type { PiSkill, PiTool, PiToolResult } from "./types";
-
-/** Virtual root under which source-backed skills are addressed. */
-export const SKILLS_ROOT = "/skills";
 
 /** Skills resolved from `agents/skills` sources for one process lifetime. */
 export type ResolvedSkills = {
   /** Changes when any source's fingerprint changes. */
   readonly fingerprint: string;
-  readonly skills: readonly PiSkill[];
   /** Model-facing activation tools; empty when there are no skills. */
-  readonly tools: readonly PiTool<object | undefined>[];
+  readonly tools: readonly ToolRegistration[];
   /** System-prompt catalog, or null when there are no skills. */
   readonly catalog: string | null;
   readonly warnings: readonly string[];
@@ -34,12 +34,13 @@ export function skillsFingerprint(sources: readonly SkillSource[]): string {
     .join("|");
 }
 
-function skillFilePath(name: string): string {
-  return `${SKILLS_ROOT}/${name}/SKILL.md`;
+function textResult(text: string): ToolExecutionResult {
+  return { content: [{ type: "text", text }] };
 }
 
-function textResult(text: string): PiToolResult<undefined> {
-  return { content: [{ type: "text", text }], details: undefined };
+/** pi validates arguments against the schema before `execute` runs. */
+function argsOf<T>(args: JsonValue): T {
+  return args as T;
 }
 
 function attributes(
@@ -96,13 +97,14 @@ function renderSkillContent(skill: ResolvedSkill): string {
 }
 
 /**
- * Resolve `agents/skills` sources into pi skills and activation tools.
+ * Resolve `agents/skills` sources into a system-prompt catalog and two
+ * tools.
  *
- * The first source to list a name wins, as in `SkillRegistry`. Skill bodies
- * become pi `Skill.content`, so `submit({ kind: "skill", name })` works, and
- * the model activates skills through `activate_skill` and reads bundled files
- * through `read_skill_resource` — the same tools `@cloudflare/think` offers,
- * so skills authored for one framework work in the other.
+ * The first source to list a name wins, as in `SkillRegistry`. pi-durable
+ * has no skill concept of its own, so the model activates skills through
+ * `activate_skill` and reads bundled files through `read_skill_resource` —
+ * the same tools `@cloudflare/think` offers, so skills authored for one
+ * framework work in the other.
  */
 export async function resolveSkillSources(
   sources: readonly SkillSource[]
@@ -145,21 +147,11 @@ export async function resolveSkillSources(
     }
   }
 
-  const skills: PiSkill[] = [...resolved.values()].map((skill) => ({
-    name: skill.descriptor.name,
-    description: skill.descriptor.description,
-    content: skill.content.body.trim(),
-    filePath: skillFilePath(skill.descriptor.name),
-    ...(skill.descriptor.metadata?.["disable-model-invocation"] === true
-      ? { disableModelInvocation: true }
-      : {})
-  }));
-
   const visible = [...resolved.values()].filter(
     (skill) => skill.descriptor.metadata?.["disable-model-invocation"] !== true
   );
   if (visible.length === 0) {
-    return { fingerprint, skills, tools: [], catalog: null, warnings };
+    return { fingerprint, tools: [], catalog: null, warnings };
   }
 
   const names = visible.map((skill) => skill.descriptor.name);
@@ -169,14 +161,14 @@ export async function resolveSkillSources(
   );
 
   const activateParameters = Type.Object({ name: nameSchema });
-  const activateSkill: PiTool<object | undefined, typeof activateParameters> = {
+  const activateSkill: ToolRegistration = {
     name: "activate_skill",
-    label: "Activate skill",
     description:
       "Activate a skill by name. Use this when the user's task matches one of the available skills; the response contains the skill's full instructions.",
     parameters: activateParameters,
     replay: "safe",
-    async execute(_toolCallId, input) {
+    async execute(args) {
+      const input = argsOf<{ name: string }>(args);
       const skill = byName.get(input.name);
       return textResult(
         skill ? renderSkillContent(skill) : `Skill not found: ${input.name}`
@@ -188,14 +180,14 @@ export async function resolveSkillSources(
     name: Type.Optional(nameSchema),
     path: Type.String({ minLength: 1 })
   });
-  const readResource: PiTool<object | undefined, typeof resourceParameters> = {
+  const readResource: ToolRegistration = {
     name: "read_skill_resource",
-    label: "Read skill resource",
     description:
       "Read a file bundled with a skill, such as a reference document or template. Provide the skill name and the file's path from the skill's resource list.",
     parameters: resourceParameters,
     replay: "safe",
-    async execute(_toolCallId, input) {
+    async execute(args) {
+      const input = argsOf<{ name?: string; path: string }>(args);
       const target = resolveResourceTarget(byName, input.name, input.path);
       if (!target) {
         return textResult(
@@ -236,10 +228,7 @@ export async function resolveSkillSources(
 
   return {
     fingerprint,
-    skills,
-    // SAFETY: TypeBox object schemas narrow to their declared shape; the
-    // tool list is typed on the generic TSchema like every other pi tool.
-    tools: [activateSkill, readResource] as PiTool<object | undefined>[],
+    tools: [activateSkill, readResource],
     catalog,
     warnings
   };
