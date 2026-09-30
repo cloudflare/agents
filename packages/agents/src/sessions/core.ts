@@ -11,6 +11,7 @@
  * lifetime because finding it means scanning the session's rows.
  */
 
+import { createHash } from "node:crypto";
 import { extractAttachments, resolveAttachments } from "./attachment-ingest";
 import { AttachmentStore } from "./attachment-store";
 import { splitContent } from "./chunking";
@@ -81,6 +82,14 @@ type PathTokens = {
 
 export type UpdateOutcome = "missing" | "unchanged" | "updated";
 
+/**
+ * Digest of a message's stored form, stamped on the row by every write, so an
+ * update can decide "unchanged" without reading the stored content back.
+ */
+function contentDigest(json: string): string {
+  return createHash("sha256").update(json, "utf8").digest("hex");
+}
+
 export class SessionsCore {
   readonly io: SessionsIo;
   readonly #reservedMetadataKeys: readonly string[];
@@ -114,10 +123,12 @@ export class SessionsCore {
         content_chunks INTEGER NOT NULL DEFAULT 0,
         token_estimate INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
+        content_hash TEXT,
         PRIMARY KEY (session_id, id)
       ) WITHOUT ROWID`,
       []
     );
+    this.#addMessageContentHashColumn();
     this.io.sqlWrite(
       `CREATE TABLE IF NOT EXISTS cf_agents_session_message_chunks (
         session_id TEXT NOT NULL,
@@ -153,6 +164,24 @@ export class SessionsCore {
     this.#attachments.ensureTables();
     this.#fts = this.#tableExists("cf_agents_session_fts");
     this.#tablesEnsured = true;
+  }
+
+  /**
+   * Add the digest column to a message table that predates it. Nullable, so
+   * no existing row is rewritten; a `null` digest falls back to reading the
+   * row back once.
+   */
+  #addMessageContentHashColumn(): void {
+    const columns = this.io
+      .sql<{
+        name: string;
+      }>("SELECT name FROM pragma_table_info('cf_agents_session_messages')", [])
+      .map((row) => row.name);
+    if (columns.includes("content_hash")) return;
+    this.io.sqlWrite(
+      "ALTER TABLE cf_agents_session_messages ADD COLUMN content_hash TEXT",
+      []
+    );
   }
 
   #tableExists(name: string): boolean {
@@ -945,7 +974,8 @@ export class SessionsCore {
       attachments,
       references
     } = extractAttachments(message);
-    const slices = splitContent(JSON.stringify(staged));
+    const json = JSON.stringify(staged);
+    const slices = splitContent(json);
     const seq = tail.nextSeq;
     this.io.transaction(() => {
       for (const attachment of attachments) {
@@ -953,8 +983,8 @@ export class SessionsCore {
       }
       this.io.sqlWrite(
         `INSERT INTO cf_agents_session_messages
-          (session_id, id, seq, parent_id, role, content, content_chunks, token_estimate, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (session_id, id, seq, parent_id, role, content, content_chunks, token_estimate, created_at, content_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           sessionId,
           message.id,
@@ -964,7 +994,8 @@ export class SessionsCore {
           slices[0],
           slices.length - 1,
           tokenEstimate,
-          Date.now()
+          Date.now(),
+          contentDigest(json)
         ]
       );
       this.#writeContinuations(sessionId, message.id, slices);
@@ -1000,28 +1031,26 @@ export class SessionsCore {
   /**
    * Durable update of an existing row. An identical row writes nothing: no
    * row, no continuation, no FTS, no event. The no-op guard compares the
-   * FULL reassembled content, not just the slice the message row holds.
+   * FULL content, through the digest the last write stamped, so neither the
+   * payload nor a continuation row is read. A row without a digest compares
+   * the reassembled content once and is stamped.
    */
   update(
     sessionId: string,
     message: SessionMessage,
     tokenEstimate: number
   ): UpdateOutcome {
+    // Key-side columns only; the payload stays in SQLite.
     const oldRows = this.io.sql<{
-      content: string;
       content_chunks: number;
       token_estimate: number;
+      content_hash: string | null;
     }>(
-      "SELECT content, content_chunks, token_estimate FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
+      "SELECT content_chunks, token_estimate, content_hash FROM cf_agents_session_messages WHERE session_id = ? AND id = ?",
       [sessionId, message.id]
     );
     if (oldRows.length === 0) return "missing";
     const old = oldRows[0];
-    const oldContent =
-      old.content_chunks === 0
-        ? old.content
-        : old.content +
-          (this.#continuations(sessionId, [message.id]).get(message.id) ?? "");
     // Compare in stored form: a re-sent identical image extracts to the same
     // address, so an unchanged update still writes nothing.
     const {
@@ -1030,7 +1059,18 @@ export class SessionsCore {
       references
     } = extractAttachments(message);
     const json = JSON.stringify(staged);
-    if (oldContent === json) return "unchanged";
+    const digest = contentDigest(json);
+    if (old.content_hash !== null) {
+      if (old.content_hash === digest) return "unchanged";
+    } else if (this.#content(sessionId, message.id) === json) {
+      // Byte-identical: stamp the digest so this row stops paying the
+      // read-back. Still `unchanged`: no continuation, FTS, or event.
+      this.io.sqlWrite(
+        "UPDATE cf_agents_session_messages SET content_hash = ? WHERE session_id = ? AND id = ?",
+        [digest, sessionId, message.id]
+      );
+      return "unchanged";
+    }
 
     const slices = splitContent(json);
     this.io.transaction(() => {
@@ -1039,13 +1079,14 @@ export class SessionsCore {
       }
       this.io.sqlWrite(
         `UPDATE cf_agents_session_messages
-         SET role = ?, content = ?, content_chunks = ?, token_estimate = ?
+         SET role = ?, content = ?, content_chunks = ?, token_estimate = ?, content_hash = ?
          WHERE session_id = ? AND id = ?`,
         [
           message.role,
           slices[0],
           slices.length - 1,
           tokenEstimate,
+          digest,
           sessionId,
           message.id
         ]
@@ -1298,7 +1339,8 @@ export class SessionsCore {
       attachments,
       references
     } = extractAttachments(message);
-    const slices = splitContent(JSON.stringify(staged));
+    const json = JSON.stringify(staged);
+    const slices = splitContent(json);
     const tail = this.#tail(sessionId);
     let inserted = 0;
     this.io.transaction(() => {
@@ -1307,8 +1349,8 @@ export class SessionsCore {
       }
       inserted = this.io.sqlWrite(
         `INSERT OR IGNORE INTO cf_agents_session_messages
-          (session_id, id, seq, parent_id, role, content, content_chunks, token_estimate, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (session_id, id, seq, parent_id, role, content, content_chunks, token_estimate, created_at, content_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           sessionId,
           message.id,
@@ -1318,7 +1360,8 @@ export class SessionsCore {
           slices[0],
           slices.length - 1,
           this.estimateRowTokens(message),
-          options.createdAt
+          options.createdAt,
+          contentDigest(json)
         ]
       );
       if (inserted === 0) return;
