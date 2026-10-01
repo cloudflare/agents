@@ -1,10 +1,9 @@
 # Pi harness
 
 An experimental example that runs [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable),
-pi's durable agent harness, inside a Durable Object. Nothing here is exported
-from the `agents` package. `PiHarness`, the session store, and
-the Workers AI provider all live in this example's `src/`, on pi's published
-npm packages (see [Pi source](#pi-source)).
+pi's durable agent harness, inside a Durable Object. `PiHarness` and the
+session store live in this example's `src/`, on pi's published npm packages
+(see [Pi source](#pi-source)). The model provider is `agents/models/pi-ai`.
 
 The example composes:
 
@@ -19,7 +18,8 @@ The example composes:
   UI shows;
 - two tools: `current_time`, and `sleep`, a replay-safe wait whose
   deadline survives an eviction;
-- pi-ai's Workers AI provider, transported over the `AI` binding.
+- `createAI` from `agents/models/pi-ai`: Workers AI, and other vendors through
+  AI Gateway, all over the `AI` binding, registered on pi's `Models`.
 
 pi owns the transcript, the inbox of steers and follow-ups, generation and
 tool tasks, retries, recovery, and the live view, all in its own tables. The
@@ -71,6 +71,8 @@ pnpm test
 
 ```ts
 export class PiAgent extends DurableObject<Env> {
+  // Workers AI and AI Gateway over the AI binding, as a pi-ai provider.
+  readonly ai = createAI({ binding: this.env.AI });
   // pi's own registry: system prompt, tools (sleep, current_time), hooks.
   readonly registry = createAppRegistry();
   readonly harness = new PiHarness({
@@ -78,13 +80,13 @@ export class PiAgent extends DurableObject<Env> {
       Harness.open(
         storage,
         {
-          models: createModels({ providers: [workersAI(this.env.AI)] }),
+          models: this.#models(), // createModels() with this.ai.provider set
           registry: this.registry
         },
         context
       ),
     defaults: {
-      model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID }
+      model: { provider: "cloudflare", modelId: MODEL_ID }
     }
   });
   // App glue: this app's socket protocol, built on session.events().

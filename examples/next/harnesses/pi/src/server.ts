@@ -9,13 +9,13 @@ import {
   type ToolExecutionResult,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
+import { createModels } from "@earendil-works/pi-ai/models";
 import { routeAgentRequest } from "agents";
 import { Lifecycle } from "agents/lifecycle";
+import { CLOUDFLARE_PROVIDER_ID, createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
 import { PiHarness } from "./harness/pi-harness";
 import { PiSessionSockets } from "./sockets";
-import { createModels } from "./providers/models";
-import { workersAI } from "./providers/workers-ai";
 
 const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 
@@ -121,24 +121,32 @@ function createAppRegistry(): Registry {
 
 /** Playable pi session backed by one Durable Object. */
 export class PiAgent extends DurableObject<Env> {
+  // Workers AI and AI Gateway over the AI binding, as a pi-ai provider.
+  readonly ai = createAI({ binding: this.env.AI });
   readonly registry = createAppRegistry();
   readonly harness = new PiHarness({
     harness: ({ storage, context }) =>
       Harness.open(
         storage,
         {
-          models: createModels({ providers: [workersAI(this.env.AI)] }),
+          models: this.#models(),
           registry: this.registry,
           onReport: (error) => console.warn("pi report", error)
         },
         context
       ),
     defaults: {
-      model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
+      model: { provider: CLOUDFLARE_PROVIDER_ID, modelId: MODEL_ID },
       thinkingLevel: "low",
       retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 }
     }
   });
+  #models() {
+    const models = createModels();
+    models.setProvider(this.ai.provider);
+    return models;
+  }
+
   // App glue, not the harness: how this app puts sessions on a socket.
   readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
     this.ctx.getWebSockets(tag)

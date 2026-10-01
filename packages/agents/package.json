@@ -37,6 +37,7 @@
     "@ai-sdk/react": "^4.0.0",
     "@ai-sdk/valibot": "3.0.6",
     "@cloudflare/codemode": "workspace:*",
+    "@earendil-works/pi-ai": "^0.99.2",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/conformance-v2": "npm:@modelcontextprotocol/conformance@0.2.0-alpha.10",
     "@modelcontextprotocol/sdk": "1.30.0",
@@ -58,6 +59,7 @@
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.0 || ^4.0.0",
     "@cloudflare/codemode": ">=0.5.0",
+    "@earendil-works/pi-ai": "^0.99.2",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@modelcontextprotocol/server": "2.0.0",
@@ -76,6 +78,9 @@
       "optional": true
     },
     "@cloudflare/codemode": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
       "optional": true
     },
     "@tanstack/ai": {
@@ -184,6 +189,11 @@
       "types": "./dist/observability/index.d.ts",
       "import": "./dist/observability/index.js",
       "require": "./dist/observability/index.js"
+    },
+    "./models/pi-ai": {
+      "types": "./dist/models/pi-ai/index.d.ts",
+      "import": "./dist/models/pi-ai/index.js",
+      "require": "./dist/models/pi-ai/index.js"
     },
     "./observability/ai": {
       "types": "./dist/observability/ai/index.d.ts",

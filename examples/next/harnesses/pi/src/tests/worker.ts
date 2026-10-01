@@ -9,6 +9,7 @@ import {
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
+import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
 import {
   createRegistry,
   Harness,
@@ -28,7 +29,13 @@ import type {
   PiWhenBusy
 } from "../harness/types";
 import { EMPTY_VIEW, reduceEvents } from "../view";
-import { createModels } from "../providers/models";
+
+/** A pi-ai model registry holding only the faux provider. */
+function fauxModels(provider: Parameters<MutableModels["setProvider"]>[0]) {
+  const models = createModels();
+  models.setProvider(provider);
+  return models;
+}
 
 const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
@@ -103,7 +110,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
       Harness.open(
         storage,
         {
-          models: createModels({ providers: [this.#faux.provider] }),
+          models: fauxModels(this.#faux.provider),
           registry: this.registry,
           onReport: (error) => console.warn("pi report", error)
         },
@@ -302,7 +309,7 @@ export class PiNoDefaultsTestObject extends DurableObject<Env> {
       Harness.open(
         storage,
         {
-          models: createModels({ providers: [this.#faux.provider] }),
+          models: fauxModels(this.#faux.provider),
           registry: createRegistry()
         },
         context
