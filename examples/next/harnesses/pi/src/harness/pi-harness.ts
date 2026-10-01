@@ -56,6 +56,9 @@ const BG = BACKGROUND_CONTEXT;
 export const ROOT_SESSION: PiSessionId = String(ROOT_CONVERSATION_ID);
 
 /**
+ * Defaults for the three wake timings; a host overrides them with
+ * `timing`, which is what the tests do to avoid the real heartbeat.
+ *
  * A pi long wait further away than this is handed to the alarm, so the
  * alarm, not pi's in-memory timer, is what wakes the object.
  */
@@ -90,26 +93,117 @@ function sessionOfJob(payload: unknown): PiSessionId | undefined {
     : undefined;
 }
 
-export type PiHarnessOptions = {
-  readonly models: Models;
+/**
+ * What the harness factory is handed. The store is already open and pi's
+ * migrations have run, so a factory only has to decide how to call
+ * `Harness.open` — or call something else that satisfies the same contract.
+ */
+export type PiHarnessContext = {
+  /** pi's storage over this object's SQLite, tables under the store prefix. */
+  readonly storage: SqliteStorage;
+  /**
+   * The registry this harness built from `tools`, `systemPrompt`, `skills`
+   * and `configure`. A factory may register more onto it, or ignore it and
+   * supply its own.
+   */
+  readonly registry: Registry;
+  /** Background context, for the open itself. */
+  readonly context: Context;
+};
+
+/**
+ * Builds pi's `Harness`. Return value is adopted as-is: the caller owns
+ * `models`, `env`, `onReport` and anything else `HarnessOptions` grows.
+ */
+export type PiHarnessFactory = (
+  context: PiHarnessContext
+) => Harness | Promise<Harness>;
+
+/** Applied to a session the first time it is created. */
+export type PiSessionDefaults = {
   /** Model for new sessions. Change one session's with `session.setModel`. */
   readonly model: ModelRef;
   readonly thinkingLevel?: ModelThinkingLevel;
   /** pi's generation retries for new sessions. */
   readonly retry?: ConversationRetryPolicy;
+};
+
+/**
+ * How long the wake waits and when it hands a wait to the alarm. Defaults
+ * suit a real deployment; a test shortens them so a suite does not sit on
+ * the real heartbeat.
+ */
+export type PiWakeTiming = {
+  /** A pi wait further away than this goes to the alarm. Default 60_000. */
+  readonly sleepThresholdMs?: number;
+  /** Longest one wake waits inside an alarm. Default 600_000. */
+  readonly waitBudgetMs?: number;
+  /** Heartbeat while waiting, and the re-check for background work. Default 30_000. */
+  readonly heartbeatMs?: number;
+};
+
+/** What every `PiHarness` takes, however pi itself is built. */
+type PiHarnessCommon = {
+  /** Applied to new sessions. */
+  readonly defaults: PiSessionDefaults;
   /** First system prompt section. */
   readonly systemPrompt?: string;
   readonly tools?: readonly ToolRegistration[];
   /** `agents/skills` sources, offered through `activate_skill`. */
   readonly skills?: readonly SkillSource[];
-  /** Execution environment for pi's `read`/`bash`/`edit`/`write` tools. */
-  readonly env?: ExecutionEnv;
   /** Add hooks, prompt sections, tasks, or more tools to pi's registry. */
   readonly configure?: (registry: Registry) => void;
   readonly store?: PiSessionStoreOptions;
-  /** Extension failures pi reports without failing the operation. */
-  readonly onReport?: (error: unknown) => void;
+  readonly timing?: PiWakeTiming;
 };
+
+/**
+ * `PiHarness`'s options, in two forms.
+ *
+ * The declarative form is the one to reach for: give `models` and
+ * `defaults`, and the harness opens pi itself.
+ *
+ * ```ts
+ * new PiHarness({
+ *   models: createModels({ providers: [workersAI(env.AI)] }),
+ *   defaults: { model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID } },
+ *   tools: createTools()
+ * });
+ * ```
+ *
+ * The `harness` factory form takes over the open. Use it when a caller needs
+ * a `HarnessOptions` field this type does not forward, wants to wrap the
+ * `Harness`, or builds its own registry. `models`, `env` and `onReport` move
+ * to the factory, because it is the thing calling `Harness.open`.
+ *
+ * ```ts
+ * new PiHarness({
+ *   defaults: { model },
+ *   harness: ({ storage, registry, context }) =>
+ *     Harness.open(storage, { models, registry, hooks }, context)
+ * });
+ * ```
+ *
+ * The two are exclusive: `models` and `harness` cannot both be given, so
+ * there is never a question of which one built pi.
+ */
+export type PiHarnessOptions = PiHarnessCommon &
+  (
+    | {
+        readonly models: Models;
+        /** Execution environment for pi's `read`/`bash`/`edit`/`write` tools. */
+        readonly env?: ExecutionEnv;
+        /** Extension failures pi reports without failing the operation. */
+        readonly onReport?: (error: unknown) => void;
+        readonly harness?: never;
+      }
+    | {
+        readonly harness: PiHarnessFactory;
+        readonly models?: never;
+        readonly env?: never;
+        readonly onReport?: never;
+      }
+  );
 
 type Opened = {
   readonly pi: Harness;
@@ -172,11 +266,27 @@ export class PiHarness extends LifecycleCapability {
   readonly #waits = new Map<PiSessionId, Promise<void>>();
   /** Submissions between their wake and pi's admission, per session. */
   readonly #admitting = new Map<PiSessionId, number>();
+  readonly #sleepThresholdMs: number;
+  readonly #waitBudgetMs: number;
+  readonly #heartbeatMs: number;
   #opening: Promise<Opened> | undefined;
 
   constructor(options: PiHarnessOptions) {
     super("pi-harness");
     this.#options = options;
+    this.#sleepThresholdMs =
+      options.timing?.sleepThresholdMs ?? SLEEP_THRESHOLD_MS;
+    this.#waitBudgetMs = options.timing?.waitBudgetMs ?? WAIT_BUDGET_MS;
+    this.#heartbeatMs = options.timing?.heartbeatMs ?? HEARTBEAT_MS;
+    for (const [name, value] of [
+      ["sleepThresholdMs", this.#sleepThresholdMs],
+      ["waitBudgetMs", this.#waitBudgetMs],
+      ["heartbeatMs", this.#heartbeatMs]
+    ] as const) {
+      if (!Number.isFinite(value) || value <= 0) {
+        throw new Error(`PiHarness timing.${name} must be a positive number`);
+      }
+    }
     this.registry = createRegistry();
     this.registry.batch(() => {
       if (options.systemPrompt !== undefined) {
@@ -414,7 +524,7 @@ export class PiHarness extends LifecycleCapability {
    * has none. pi does all the work in between.
    */
   async #wakeStep(session: PiSessionId): Promise<LifecycleJobOutcome> {
-    const heartbeat = { rescheduleAt: Date.now() + HEARTBEAT_MS };
+    const heartbeat = { rescheduleAt: Date.now() + this.#heartbeatMs };
     if (this.#waits.has(session)) return heartbeat;
     const { pi } = await this.#open();
     const conversation = await pi.conversation(conversationId(session), BG);
@@ -446,7 +556,7 @@ export class PiHarness extends LifecycleCapability {
 
   async #waitForIdle(conversation: Conversation): Promise<void> {
     const budget = new AbortController();
-    const timer = setTimeout(() => budget.abort(), WAIT_BUDGET_MS);
+    const timer = setTimeout(() => budget.abort(), this.#waitBudgetMs);
     try {
       // Cancelling the wait never cancels pi's work.
       await conversation.waitForIdle(withAbortSignal(budget.signal, BG));
@@ -490,18 +600,28 @@ export class PiHarness extends LifecycleCapability {
       this.lifecycle.storage,
       this.#options.store
     );
-    const pi = await Harness.open(
-      storage,
-      {
-        models: this.#options.models,
-        registry: this.registry,
-        ...(this.#options.env ? { env: this.#options.env } : {}),
-        onReport:
-          this.#options.onReport ??
-          ((error) => console.warn("pi report", error))
-      },
-      BG
-    );
+    // The factory owns the open when given; otherwise the declarative fields
+    // are forwarded to pi. The registry is already built either way, so a
+    // factory that ignores it is choosing to.
+    const pi =
+      this.#options.harness === undefined
+        ? await Harness.open(
+            storage,
+            {
+              models: this.#options.models,
+              registry: this.registry,
+              ...(this.#options.env ? { env: this.#options.env } : {}),
+              onReport:
+                this.#options.onReport ??
+                ((error) => console.warn("pi report", error))
+            },
+            BG
+          )
+        : await this.#options.harness({
+            storage,
+            registry: this.registry,
+            context: BG
+          });
     await pi.root(BG, { init: (tx, id) => this.#init(tx, id) });
     // Continue whatever the last isolate left: pi reconciles tasks that were
     // running to pending and schedules them again.
@@ -511,9 +631,10 @@ export class PiHarness extends LifecycleCapability {
 
   async #init(tx: Tx, id: ConversationId): Promise<void> {
     const config = await tx.doc(ConversationConfig, id);
-    config.model = { ...this.#options.model };
-    config.thinkingLevel = this.#options.thinkingLevel ?? "off";
-    if (this.#options.retry) config.retry = { ...this.#options.retry };
+    const defaults = this.#options.defaults;
+    config.model = { ...defaults.model };
+    config.thinkingLevel = defaults.thinkingLevel ?? "off";
+    if (defaults.retry) config.retry = { ...defaults.retry };
   }
 
   async #findSubmission(
@@ -536,7 +657,7 @@ export class PiHarness extends LifecycleCapability {
     const live = await pi.snapshot(LiveDoc, id, context);
     const at =
       live?.generation?.deferred?.pollAt ?? live?.generation?.retry?.at;
-    return at !== undefined && at - Date.now() > SLEEP_THRESHOLD_MS
+    return at !== undefined && at - Date.now() > this.#sleepThresholdMs
       ? at
       : undefined;
   }

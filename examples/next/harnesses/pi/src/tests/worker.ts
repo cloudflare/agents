@@ -9,7 +9,11 @@ import {
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
-import type { AgentEvent, ToolRegistration } from "@earendil-works/pi-durable";
+import {
+  Harness,
+  type AgentEvent,
+  type ToolRegistration
+} from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
@@ -93,13 +97,17 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   });
   readonly harness = new PiHarness({
     models: createModels({ providers: [this.#faux.provider] }),
-    model: {
-      provider: this.#faux.getModel().provider,
-      modelId: this.#faux.getModel().id
+    defaults: {
+      model: {
+        provider: this.#faux.getModel().provider,
+        modelId: this.#faux.getModel().id
+      },
+      retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
     },
-    retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
     tools: this.#tools(),
-    systemPrompt: "Use the supplied test tools."
+    systemPrompt: "Use the supplied test tools.",
+    // Short enough that a suite does not sit on the real 30s heartbeat.
+    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
   });
   readonly sockets = new PiSessionSockets(this.harness, (tag) =>
     this.ctx.getWebSockets(tag)
@@ -232,23 +240,79 @@ export class PiHarnessTestObject extends DurableObject<Env> {
         };
       }
     });
-    return [
-      {
-        name: "multiply",
-        description: "Multiply by three.",
-        parameters: Type.Object({ value: Type.Number() }),
-        replay: "safe",
-        async execute(args: JsonValue) {
-          const { value } = args as { value: number };
-          return {
-            content: [{ type: "text", text: String(value * 3) }],
-            details: { result: value * 3 }
-          };
-        }
+    return [multiplyTool(), gate("gate", "safe"), gate("gate_unsafe", "unsafe")];
+  }
+}
+
+/** The one tool the factory fixture needs: no gating, no storage. */
+function multiplyTool(): ToolRegistration {
+  return {
+    name: "multiply",
+    description: "Multiply by three.",
+    parameters: Type.Object({ value: Type.Number() }),
+    replay: "safe",
+    async execute(args: JsonValue) {
+      const { value } = args as { value: number };
+      return {
+        content: [{ type: "text", text: String(value * 3) }],
+        details: { result: value * 3 }
+      };
+    }
+  };
+}
+
+/**
+ * The same harness built through the `harness` factory instead of the
+ * declarative `models` field, so both construction paths are exercised at
+ * runtime rather than only in the types.
+ *
+ * The factory is handed the open store and the registry the harness already
+ * built from `tools`/`systemPrompt`, so it only has to call `Harness.open` —
+ * which is the point: a caller needing a `HarnessOptions` field the
+ * declarative form does not forward can reach it here without reimplementing
+ * the wake, the store, or the registry.
+ */
+export class PiFactoryTestObject extends DurableObject<Env> {
+  readonly #faux = fauxProvider({
+    tokensPerSecond: 200,
+    tokenSize: { min: 2, max: 4 }
+  });
+  readonly harness = new PiHarness({
+    defaults: {
+      model: {
+        provider: this.#faux.getModel().provider,
+        modelId: this.#faux.getModel().id
       },
-      gate("gate", "safe"),
-      gate("gate_unsafe", "unsafe")
-    ];
+      retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
+    },
+    tools: [multiplyTool()],
+    systemPrompt: "Use the supplied test tools.",
+    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 },
+    harness: ({ storage, registry, context }) =>
+      Harness.open(
+        storage,
+        {
+          models: createModels({ providers: [this.#faux.provider] }),
+          registry,
+          onReport: (error) => console.warn("factory pi report", error)
+        },
+        context
+      )
+  });
+  readonly lifecycle = Lifecycle.install(this).use(this.harness);
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.#faux.setResponses(Array.from({ length: 200 }, () => script));
+  }
+
+  async prompt(text: string) {
+    const response = await this.harness.prompt(text);
+    return { ...response, messages: response.messages.map(messageText) };
+  }
+
+  async alarmTime(): Promise<number | null> {
+    return this.ctx.storage.getAlarm();
   }
 }
 

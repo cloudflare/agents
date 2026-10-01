@@ -1,7 +1,7 @@
 # Notes: pi-durable on a Durable Object
 
 Working notes from moving this example from pi-agent-core's `AgentHarness`
-(0.84, vendored) to `@earendil-works/pi-durable` (pi `main`, 2bbfcca4). They
+(0.84, vendored) to `@earendil-works/pi-durable` (npm `^0.99.2`). They
 record what we decided, what was hard, and what is still missing. Nothing
 here is in `agents`.
 
@@ -212,13 +212,17 @@ session's tag.
 - System-prompt changes are positional entries. On the first turn, the
   `system` message comes after the user's input in the model context. The
   faux script has to skip it to find the prompt.
-- pi-ai's `openai-completions` API needs the `openai` SDK at runtime. The
-  vendored pi-ai keeps it. The old 0.84 archive did not need it.
-- Chord depends on `esbuild`, which is used only by its Node bundler. The
-  vendored archive drops it.
-- The npm release 0.99.1 predates the inbox, events, ownership, and
-  subagents. `main` still carries the same version number. See
-  `vendor/pi-dev/README.md`.
+- pi-ai's `openai-completions` API needs the `openai` SDK at runtime, so
+  pi-ai depends on it. The old 0.84 archive did not.
+- Chord depends on `esbuild`, which is used only by its Node bundler and is
+  never reached from a Worker. It is ~12 MB installed. Worth an upstream ask
+  that chord move it to an optional peer.
+- The npm release 0.99.1 predates the events API, which is why this example
+  was first built against a vendored `main`. **0.99.2 ships it** — plus
+  `watchEvents`, `AgentEvent`, `AgentEventStream`, and the compaction types —
+  so the vendor is gone and the deps are ordinary npm ranges. The inbox and
+  ownership were already in published 0.99.1. Subagents are still absent from
+  any published release.
 
 ### Build
 
@@ -231,7 +235,10 @@ example.
 - Subagents. pi-durable's subagent tools (examples 22 and 23) should work
   unchanged as registered tools. The background variant needs the "live work
   keep-alive" above.
-- Compaction, which is pending upstream.
+- Compaction. No longer pending upstream: 0.99.2 ships `CompactionPolicy`,
+  `CompactionHooks` and the rest, wired into `HarnessOptions`. Not yet used
+  or tested here.
 - `ExecutionEnv` for pi's `read`/`bash`/`edit`/`write` on Workspace or a
-  Container. `PiHarnessOptions.env` is plumbed through but unused.
+  Container. `env` is plumbed through the declarative option form but unused;
+  a caller using the `harness` factory passes it to `Harness.open` directly.
 - Session deletion. pi has no conversation delete.

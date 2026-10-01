@@ -6,13 +6,18 @@
   "durable_objects": {
     "bindings": [
       { "name": "PI_HARNESS_TEST", "class_name": "PiHarnessTestObject" },
-      { "name": "PI_STORE_TEST", "class_name": "PiStoreTestObject" }
+      { "name": "PI_STORE_TEST", "class_name": "PiStoreTestObject" },
+      { "name": "PI_FACTORY_TEST", "class_name": "PiFactoryTestObject" }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["PiHarnessTestObject", "PiStoreTestObject"]
+      "new_sqlite_classes": [
+        "PiHarnessTestObject",
+        "PiStoreTestObject",
+        "PiFactoryTestObject"
+      ]
     }
   ]
 }

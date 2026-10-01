@@ -97,9 +97,11 @@ function createTools(): ToolRegistration[] {
 export class PiAgent extends DurableObject<Env> {
   readonly harness = new PiHarness({
     models: createModels({ providers: [workersAI(this.env.AI)] }),
-    model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
-    thinkingLevel: "low",
-    retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 },
+    defaults: {
+      model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
+      thinkingLevel: "low",
+      retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 }
+    },
     tools: createTools(),
     systemPrompt:
       "You are a concise playground assistant. You can read the current UTC time with current_time and wait with sleep. Use tools whenever they can answer the request, and explain their results plainly.",

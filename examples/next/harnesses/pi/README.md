@@ -73,7 +73,7 @@ pnpm test
 export class PiAgent extends DurableObject<Env> {
   readonly harness = new PiHarness({
     models: createModels({ providers: [workersAI(this.env.AI)] }),
-    model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
+    defaults: { model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID } },
     tools: createTools() // sleep, current_time
   });
   // App glue: this app's socket protocol, built on session.events().
@@ -101,6 +101,31 @@ call again after an eviction interrupted it; otherwise the model gets an
 interrupted result. `configure(registry)` adds pi hooks, prompt sections, or
 tasks.
 
+### Options
+
+`defaults` applies to new sessions only — change one session's model with
+`session.setModel`. `timing` overrides how long the wake waits and when a
+long wait is handed to the alarm; the defaults suit a deployment and the
+tests shorten them.
+
+For anything the declarative form does not forward, give a `harness` factory
+instead of `models` and call `Harness.open` yourself. The store is already
+open and the registry is already built from `tools`/`systemPrompt`/`skills`/
+`configure`, so a factory only decides how pi is opened:
+
+```ts
+new PiHarness({
+  defaults: { model },
+  tools: createTools(),
+  harness: ({ storage, registry, context }) =>
+    Harness.open(storage, { models, registry, hooks: myHooks }, context)
+});
+```
+
+`models`, `env` and `onReport` are `Harness.open` arguments, so they move to
+the factory — passing both `models` and `harness` is a type error rather
+than a precedence rule.
+
 The harness does not choose a transport. `session.events()` returns pi's own
 `AgentEvent` stream: a `snapshot`, then one batch per commit. This app sends
 it over WebSockets (`src/sockets.ts`, `src/protocol.ts`) and folds it with
@@ -108,7 +133,11 @@ it over WebSockets (`src/sockets.ts`, `src/protocol.ts`) and folds it with
 
 ## Pi source
 
-The build pins `earendil-works/pi` commit `2bbfcca4` as vendored archives
-under `vendor/pi-dev`. `vendor/pi-dev/pack.mjs` rebuilds them from a pi
-checkout. Pi is MIT licensed; see
+Pi comes from npm: `@earendil-works/pi-durable`, `pi-ai`, `chord` and
+`pi-telemetry` at `^0.99.2`. Pi is MIT licensed; see
 [`licenses/mit-earendil-pi.txt`](./licenses/mit-earendil-pi.txt).
+
+Note that the repository sets `minimumReleaseAge: 1440` in
+`pnpm-workspace.yaml`, so a pi release less than 24 hours old will not
+install until it ages out or `@earendil-works/*` is listed in
+`minimumReleaseAgeExclude`.
