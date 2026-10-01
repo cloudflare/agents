@@ -311,8 +311,12 @@ function stripWheelToPackage(
 ): Record<string, FileEntry> {
   const result: Record<string, FileEntry> = {};
   for (const [path, content] of Object.entries(files)) {
-    // Skip wheel metadata and data directories
-    if (path.includes(".dist-info/") || path.includes(".data/")) {
+    // Keep each distribution's METADATA so importlib.metadata.version()
+    // works; skip the rest of the wheel metadata and data directories.
+    if (path.includes(".dist-info/") && !path.endsWith(".dist-info/METADATA")) {
+      continue;
+    }
+    if (path.includes(".data/")) {
       continue;
     }
     // We'll expect that any remaining directories in the wheel are importable packages
