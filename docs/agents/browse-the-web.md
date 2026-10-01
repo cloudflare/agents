@@ -212,7 +212,7 @@ await runtime.expirePaused(); // reject stale never-approved pauses, freeing the
 ```ts
 import { Think } from "@cloudflare/think";
 import { Browser, browserRun } from "agents/browser";
-import { browserTool } from "agents/browser/ai";
+import { browserTool } from "agents/browser/ai-sdk";
 
 export class MyAgent extends Think<Env> {
   browser = new Browser({ provider: browserRun(this.env.BROWSER) });

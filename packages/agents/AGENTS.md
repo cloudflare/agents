@@ -6,47 +6,48 @@ The core Agents SDK, published to npm as `agents`. This is the most complex pack
 
 Each export maps to a public entry point that users `import` from. These are the boundaries of the public API — changes here need a changeset.
 
-| Import path                   | Source file(s)                | Purpose                                                                      |
-| ----------------------------- | ----------------------------- | ---------------------------------------------------------------------------- |
-| `agents`                      | `src/index.ts`                | Agent base class, routing, connections, RPC, state, scheduling, SQL          |
-| `agents/client`               | `src/client.ts`               | Browser/Node WebSocket client (`AgentClient`) via partysocket                |
-| `agents/lifecycle`            | `src/lifecycle/index.ts`      | Composable Durable Object lifecycle and hibernating connections              |
-| `agents/react`                | `src/react.tsx`               | `useAgent` React hook, state sync, RPC from components                       |
-| `agents/chat`                 | `src/chat/index.ts`           | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think` |
-| `agents/chat/transport`       | `src/chat/transport.ts`       | Framework-neutral WebSocket chat transport for AI SDK clients                |
-| `agents/mcp`                  | `src/mcp/index.ts`            | Compatibility barrel plus retained legacy `McpAgent`/transport APIs          |
-| `agents/mcp/server`           | `src/mcp/server/index.ts`     | Isolated Agents wrapper for SDK v2 stateless servers                         |
-| `agents/mcp/client`           | `src/mcp/client/index.ts`     | MCP client manager (connect to remote MCP servers from an Agent)             |
-| `agents/email`                | `src/email.ts`                | Email routing, resolvers, header signing                                     |
-| `agents/workflows`            | `src/workflows.ts`            | `AgentWorkflow` — Workflows integrated with Agents                           |
-| `agents/schedule`             | `src/schedule.ts`             | Deprecated scheduling-parser compatibility entry point                       |
-| `agents/schedules`            | `src/schedules/index.ts`      | Dependency-light Lifecycle Scheduler primitive and runtime types             |
-| `agents/schedules/parser`     | `src/schedules/parser.ts`     | Zod-based natural-language scheduling prompt and schema helpers              |
-| `agents/observability`        | `src/observability/index.ts`  | Observability event types and emitters                                       |
-| `agents/ai-chat-agent`        | `src/ai-chat-agent.ts`        | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                          |
-| `agents/ai-react`             | `src/ai-react.tsx`            | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                         |
-| `agents/tsconfig`             | `agents.tsconfig.json`        | Shared TypeScript config for all projects in the repo                        |
-| `agents/vite`                 | `src/vite.ts`                 | Vite plugin — decorator transforms and the `agents:skills` import transform  |
-| `agents/skills`               | `src/skills/index.ts`         | Framework-agnostic Agent Skills engine — sources, `SkillRegistry`, runner    |
-| `agents/experimental/webmcp`  | `src/experimental/webmcp.ts`  | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`      |
-| `agents/browser`              | `src/browser/index.ts`        | Browser Run helpers — CDP sessions, connector, Quick Action primitives       |
-| `agents/browser/ai`           | `src/browser/ai.ts`           | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools` |
-| `agents/browser/tanstack-ai`  | `src/browser/tanstack-ai.ts`  | TanStack AI browser tool (`browser_execute`)                                 |
-| `agents/voice`                | `src/voice/index.ts`          | Voice server mixins, contracts, Workers AI providers, text, and SFU helpers  |
-| `agents/voice/types`          | `src/voice/types.ts`          | Dependency-light Voice protocol and provider contracts                       |
-| `agents/voice/client`         | `src/voice/client.ts`         | Framework-neutral browser Voice client                                       |
-| `agents/voice/react`          | `src/voice/react.tsx`         | React Voice hooks                                                            |
-| `agents/voice/errors`         | `src/voice/errors.ts`         | Provider error and logging helpers                                           |
-| `agents/voice/workers-ai`     | `src/voice/workers-ai.ts`     | Workers AI speech providers                                                  |
-| `agents/voice/sfu`            | `src/voice/sfu.ts`            | Realtime SFU and audio conversion helpers                                    |
-| `agents/voice/text`           | `src/voice/text.ts`           | Sentence and streamed-text helpers                                           |
-| `agents/channels`             | `src/channels/index.ts`       | Transport-neutral messaging contracts and host                               |
-| `agents/channels/email`       | `src/channels/email.ts`       | Workers Email adapter and MIME ingress                                       |
-| `agents/channels/slack`       | `src/channels/slack.ts`       | Slack adapter                                                                |
-| `agents/channels/telegram`    | `src/channels/telegram.ts`    | Telegram adapter                                                             |
-| `agents/channels/voice`       | `src/channels/voice.ts`       | Output-only browser Voice adapter                                            |
-| `agents/channels/ai-sdk`      | `src/channels/ai-sdk.ts`      | AI SDK tool and stream adapters                                              |
-| `agents/channels/tanstack-ai` | `src/channels/tanstack-ai.ts` | TanStack AI tool adapter                                                     |
+| Import path                   | Source file(s)                | Purpose                                                                                |
+| ----------------------------- | ----------------------------- | -------------------------------------------------------------------------------------- |
+| `agents`                      | `src/index.ts`                | Agent base class, routing, connections, RPC, state, scheduling, SQL                    |
+| `agents/client`               | `src/client.ts`               | Browser/Node WebSocket client (`AgentClient`) via partysocket                          |
+| `agents/lifecycle`            | `src/lifecycle/index.ts`      | Composable Durable Object lifecycle and hibernating connections                        |
+| `agents/react`                | `src/react.tsx`               | `useAgent` React hook, state sync, RPC from components                                 |
+| `agents/chat`                 | `src/chat/index.ts`           | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think`           |
+| `agents/chat/transport`       | `src/chat/transport.ts`       | Framework-neutral WebSocket chat transport for AI SDK clients                          |
+| `agents/mcp`                  | `src/mcp/index.ts`            | Compatibility barrel plus retained legacy `McpAgent`/transport APIs                    |
+| `agents/mcp/server`           | `src/mcp/server/index.ts`     | Isolated Agents wrapper for SDK v2 stateless servers                                   |
+| `agents/mcp/client`           | `src/mcp/client/index.ts`     | MCP client manager (connect to remote MCP servers from an Agent)                       |
+| `agents/email`                | `src/email.ts`                | Email routing, resolvers, header signing                                               |
+| `agents/workflows`            | `src/workflows.ts`            | `AgentWorkflow` — Workflows integrated with Agents                                     |
+| `agents/schedule`             | `src/schedule.ts`             | Deprecated scheduling-parser compatibility entry point                                 |
+| `agents/schedules`            | `src/schedules/index.ts`      | Dependency-light Lifecycle Scheduler primitive and runtime types                       |
+| `agents/schedules/parser`     | `src/schedules/parser.ts`     | Zod-based natural-language scheduling prompt and schema helpers                        |
+| `agents/observability`        | `src/observability/index.ts`  | Observability event types and emitters                                                 |
+| `agents/ai-chat-agent`        | `src/ai-chat-agent.ts`        | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                                    |
+| `agents/ai-react`             | `src/ai-react.tsx`            | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                                   |
+| `agents/tsconfig`             | `agents.tsconfig.json`        | Shared TypeScript config for all projects in the repo                                  |
+| `agents/vite`                 | `src/vite.ts`                 | Vite plugin — decorator transforms and the `agents:skills` import transform            |
+| `agents/skills`               | `src/skills/index.ts`         | Framework-agnostic Agent Skills engine — sources, `SkillRegistry`, runner              |
+| `agents/experimental/webmcp`  | `src/experimental/webmcp.ts`  | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`                |
+| `agents/browser`              | `src/browser/index.ts`        | Browser Run helpers — CDP sessions, connector, Quick Action primitives                 |
+| `agents/browser/ai`           | `src/browser/ai.ts`           | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools`           |
+| `agents/browser/ai-sdk`       | `src/browser/ai-sdk.ts`       | AI SDK `browserTool` for a persistent `Browser` (+ `createQuickActionTools` re-export) |
+| `agents/browser/tanstack-ai`  | `src/browser/tanstack-ai.ts`  | TanStack AI browser tool (`browser_execute`)                                           |
+| `agents/voice`                | `src/voice/index.ts`          | Voice server mixins, contracts, Workers AI providers, text, and SFU helpers            |
+| `agents/voice/types`          | `src/voice/types.ts`          | Dependency-light Voice protocol and provider contracts                                 |
+| `agents/voice/client`         | `src/voice/client.ts`         | Framework-neutral browser Voice client                                                 |
+| `agents/voice/react`          | `src/voice/react.tsx`         | React Voice hooks                                                                      |
+| `agents/voice/errors`         | `src/voice/errors.ts`         | Provider error and logging helpers                                                     |
+| `agents/voice/workers-ai`     | `src/voice/workers-ai.ts`     | Workers AI speech providers                                                            |
+| `agents/voice/sfu`            | `src/voice/sfu.ts`            | Realtime SFU and audio conversion helpers                                              |
+| `agents/voice/text`           | `src/voice/text.ts`           | Sentence and streamed-text helpers                                                     |
+| `agents/channels`             | `src/channels/index.ts`       | Transport-neutral messaging contracts and host                                         |
+| `agents/channels/email`       | `src/channels/email.ts`       | Workers Email adapter and MIME ingress                                                 |
+| `agents/channels/slack`       | `src/channels/slack.ts`       | Slack adapter                                                                          |
+| `agents/channels/telegram`    | `src/channels/telegram.ts`    | Telegram adapter                                                                       |
+| `agents/channels/voice`       | `src/channels/voice.ts`       | Output-only browser Voice adapter                                                      |
+| `agents/channels/ai-sdk`      | `src/channels/ai-sdk.ts`      | AI SDK tool and stream adapters                                                        |
+| `agents/channels/tanstack-ai` | `src/channels/tanstack-ai.ts` | TanStack AI tool adapter                                                               |
 
 The `agents:skills` virtual-module types ship from `skills-module.d.ts` (referenced from the built `dist/index.d.ts`); `@cloudflare/think` consumes `agents/skills` and `@cloudflare/ai-chat` can too.
 
@@ -145,6 +146,8 @@ src/
     spec.ts             # CDP protocol spec loader (cdp.spec())
     quick-actions.ts    # Stateless Quick Action primitives (browserMarkdown, …)
     ai.ts               # createBrowserTools + createQuickActionTools (AI SDK)
+    ai-sdk.ts           # browserTool for a persistent Browser (AI SDK)
+    tool-helpers.ts     # model-output + ctx helpers shared by ai.ts and ai-sdk.ts
     tanstack-ai.ts      # createBrowserTools for TanStack AI
 
   voice/                # Voice server, client, React, provider, SFU, and text entries
