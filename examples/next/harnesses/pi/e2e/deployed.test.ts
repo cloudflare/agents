@@ -9,6 +9,11 @@
  *  - oom: a tool fills memory until the isolate exceeds 128 MB.
  *  - burn_cpu: a tool hashes an endless `fetch()` body until the invocation
  *    exceeds its 30 s CPU limit.
+ *  - abort-generation: the agent is reset (`ctx.abort()`, like a runtime
+ *    restart) while the model streams.
+ *  - abort-tool: the agent is reset during a replay-safe `sleep 60`.
+ *  - redeploy: the Worker is redeployed during `sleep 60`, which resets the
+ *    agent for a code update.
  *  - wall-time: the model alternates `sleep` (60 s) and `current_time` for
  *    30 minutes, twice the 15-minute wall-time limit of the alarm invocation
  *    the harness waits in.
@@ -34,12 +39,23 @@ import {
   type CrashTool
 } from "agents/tools/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { PiMessage, PiOperationResult } from "../src/harness/types";
-import { TOKEN_HEADER, type ChaosStatus } from "../src/e2e/protocol";
+import type {
+  PiJson,
+  PiMessage,
+  PiOperationResult
+} from "../src/harness/types";
+import {
+  TOKEN_HEADER,
+  type ChaosProgress,
+  type ChaosStatus
+} from "../src/e2e/protocol";
 
 const RUN = process.env.RUN_DEPLOYED_E2E === "1";
 const SCENARIOS = new Set(
-  (process.env.PI_E2E_SCENARIOS ?? "oom,burn_cpu,wall-time")
+  (
+    process.env.PI_E2E_SCENARIOS ??
+    "oom,burn_cpu,abort-generation,abort-tool,redeploy,wall-time"
+  )
     .split(",")
     .map((scenario) => scenario.trim())
 );
@@ -68,6 +84,10 @@ function wrangler(args: string[], timeoutMs: number): string {
   return output;
 }
 
+/**
+ * Deploy the Worker and return its URL. Every deploy gets a fresh
+ * `DEPLOY_ID`, so a redeploy is a new version and resets live objects.
+ */
 function deploy(): string {
   let lastError: unknown;
   // Back-to-back deploys occasionally hit a transient API error.
@@ -81,7 +101,9 @@ function deploy(): string {
           "--name",
           WORKER_NAME,
           "--var",
-          `E2E_TOKEN:${TOKEN}`
+          `E2E_TOKEN:${TOKEN}`,
+          "--var",
+          `DEPLOY_ID:${crypto.randomUUID()}`
         ],
         180_000
       );
@@ -120,16 +142,21 @@ type ToolCall = {
   readonly name: string;
   readonly error: boolean | undefined;
   readonly text: string;
+  readonly details: PiJson | undefined;
 };
 
 /** Tool calls in transcript order, each joined with its result. */
 function toolCalls(messages: readonly PiMessage[]): ToolCall[] {
-  const results = new Map<string, { error: boolean; text: string }>();
+  const results = new Map<
+    string,
+    { error: boolean; text: string; details: PiJson | undefined }
+  >();
   for (const message of messages) {
     for (const part of message.parts) {
       if (part.type !== "tool-result") continue;
       results.set(part.id, {
         error: part.error,
+        details: part.details,
         text: part.content
           .map((c) => (c.type === "text" ? c.text : ""))
           .join("")
@@ -144,7 +171,8 @@ function toolCalls(messages: readonly PiMessage[]): ToolCall[] {
       calls.push({
         name: part.name,
         error: result?.error,
-        text: result?.text ?? ""
+        text: result?.text ?? "",
+        details: result?.details
       });
     }
   }
@@ -156,6 +184,36 @@ function isSettled(
 ): operation is PiOperationResult {
   return operation.status !== "pending";
 }
+
+/** When the `sleep` call's memoized deadline started, from its details. */
+function sleepStartedAt(call: ToolCall | undefined): number {
+  const details = call?.details;
+  if (
+    typeof details === "object" &&
+    details !== null &&
+    !Array.isArray(details) &&
+    "startedAt" in details &&
+    typeof details.startedAt === "string"
+  ) {
+    return Date.parse(details.startedAt);
+  }
+  return Number.NaN;
+}
+
+/** Steps 1-3 around a replay-safe `sleep 60` that the suite interrupts. */
+const SLEEP_PROMPT = [
+  "This is a durability test. Follow these steps exactly.",
+  "1. Call current_time.",
+  "2. Call sleep with seconds set to 60.",
+  `3. Then ${secondaryTask.instruction}`
+].join("\n");
+
+/** A long answer first, so the suite can interrupt the model mid-stream. */
+const STORY_PROMPT = [
+  "This is a durability test. Follow these steps exactly.",
+  "1. Write a story of about 400 words about a lighthouse keeper, in plain text.",
+  `2. Then ${secondaryTask.instruction}`
+].join("\n");
 
 describe.skipIf(!RUN)("pi harness on deployed Workers", () => {
   let baseUrl = "";
@@ -226,14 +284,45 @@ describe.skipIf(!RUN)("pi harness on deployed Workers", () => {
     );
   }
 
-  beforeAll(async () => {
-    baseUrl = deploy();
+  /** Poll the agent's reported progress until a step with `label` appears. */
+  async function waitForProgress(
+    agent: string,
+    label: string,
+    timeoutMs: number
+  ): Promise<ChaosProgress> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const events = await progressOf(agent).catch(() => []);
+      const event = events.find((e) => e.label === label);
+      if (event !== undefined) return event;
+      await sleep(1000);
+    }
+    throw new Error(`${agent} never reported ${label}`);
+  }
+
+  async function progressOf(agent: string): Promise<ChaosProgress[]> {
+    const response = await request(`/e2e/${agent}/progress`);
+    return (await response.json()) as ChaosProgress[];
+  }
+
+  /** Reset the agent the way a runtime restart does. */
+  async function kill(agent: string): Promise<void> {
+    const response = await request(`/e2e/${agent}/kill`, { method: "POST" });
+    console.log(`[pi-e2e] ${agent}: kill`, await response.text());
+  }
+
+  async function waitForHealthy(): Promise<void> {
     for (let attempt = 1; attempt <= 30; attempt++) {
       const response = await request("/health").catch(() => undefined);
       if (response?.ok) return;
       await sleep(2000);
     }
     throw new Error(`${baseUrl} never became healthy`);
+  }
+
+  beforeAll(async () => {
+    baseUrl = deploy();
+    await waitForHealthy();
   }, 5 * MINUTE);
 
   afterAll(() => {
@@ -267,6 +356,87 @@ describe.skipIf(!RUN)("pi harness on deployed Workers", () => {
             .slice(crash + 1)
             .some((call) => call.name === "current_time" && !call.error)
         ).toBe(true);
+        expect(status.operation.text).toContain(secondaryTask.answer);
+      },
+      20 * MINUTE
+    );
+  }
+
+  it.skipIf(!SCENARIOS.has("abort-generation"))(
+    "recovers a turn whose object is reset while the model streams, then finishes the secondary task",
+    async () => {
+      const agent = `abort-generation-${Date.now()}`;
+      await submit(agent, STORY_PROMPT);
+      await waitForProgress(agent, "generating", 3 * MINUTE);
+      await kill(agent);
+
+      const status = await settle(agent, 15 * MINUTE);
+
+      console.log(
+        `[pi-e2e] ${agent}:`,
+        JSON.stringify(await progressOf(agent))
+      );
+      expect(status.operation.status).toBe("done");
+      expect(status.instances).toBeGreaterThanOrEqual(2);
+      // What streamed before the reset survives as an aborted message.
+      expect(
+        status.messages.some(
+          (message) =>
+            message.role === "assistant" && message.stopReason === "aborted"
+        )
+      ).toBe(true);
+      expect(
+        toolCalls(status.messages).some(
+          (call) => call.name === "current_time" && !call.error
+        )
+      ).toBe(true);
+      expect(status.operation.text).toContain(secondaryTask.answer);
+    },
+    20 * MINUTE
+  );
+
+  const sleepInterruptions = [
+    {
+      scenario: "abort-tool",
+      what: "the object is reset",
+      interrupt: (agent: string) => kill(agent)
+    },
+    {
+      scenario: "redeploy",
+      what: "the Worker is redeployed",
+      interrupt: async (_agent: string) => {
+        deploy();
+        await waitForHealthy();
+      }
+    }
+  ];
+  for (const { scenario, what, interrupt } of sleepInterruptions) {
+    it.skipIf(!SCENARIOS.has(scenario))(
+      `resumes a replay-safe sleep when ${what} mid-tool, then finishes the secondary task`,
+      async () => {
+        const agent = `${scenario}-${Date.now()}`;
+        await submit(agent, SLEEP_PROMPT);
+        await waitForProgress(agent, "tool:sleep", 3 * MINUTE);
+        await sleep(15_000);
+        const interruptedAt = Date.now();
+        await interrupt(agent);
+
+        const status = await settle(agent, 15 * MINUTE);
+
+        console.log(
+          `[pi-e2e] ${agent}:`,
+          JSON.stringify(await progressOf(agent))
+        );
+        expect(status.operation.status).toBe("done");
+        expect(status.instances).toBeGreaterThanOrEqual(2);
+        // pi reran the same call rather than reporting it interrupted, and
+        // the rerun kept the deadline it memoized before the interruption.
+        const sleeps = toolCalls(status.messages).filter(
+          (call) => call.name === "sleep"
+        );
+        expect(sleeps).toHaveLength(1);
+        expect(sleeps[0]?.error).toBe(false);
+        expect(sleepStartedAt(sleeps[0])).toBeLessThan(interruptedAt);
         expect(status.operation.text).toContain(secondaryTask.answer);
       },
       20 * MINUTE

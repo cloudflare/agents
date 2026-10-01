@@ -37,18 +37,26 @@ function textOf(content: Message["content"] | undefined): string {
     .join("");
 }
 
+/** What the faux model answers to `long`: about ten seconds of streaming. */
+export const LONG_ANSWER = Array.from(
+  { length: 300 },
+  (_, i) => `sentence ${i} of a long answer.`
+).join(" ");
+
 /**
  * The faux model's script, derived from the transcript alone so it gives
  * the same answer after an eviction as before it:
  *
  * - `multiply N` calls `multiply`, `gate` calls `gate`, `gate-unsafe` calls
- *   `gate_unsafe`; anything else is echoed back.
+ *   `gate_unsafe`, `long` streams {@link LONG_ANSWER}; anything else is
+ *   echoed back.
  * - After a tool result it answers `tool said: <result>`.
  */
 function script(context: TranscriptContext): AssistantMessage {
   // pi places system-prompt changes positionally, so a system message can
   // follow the user's input.
-  const last = context.messages.filter((m) => m.role !== "system").at(-1);
+  const messages = context.messages.filter((m) => m.role !== "system");
+  const last = messages.at(-1);
   if (last?.role === "toolResult") {
     return fauxAssistantMessage([
       fauxText(
@@ -56,7 +64,11 @@ function script(context: TranscriptContext): AssistantMessage {
       )
     ]);
   }
-  const prompt = last?.role === "user" ? textOf(last.content) : "";
+  // After a crash mid-stream, pi keeps the partial as an aborted assistant
+  // message, so answer the newest user message rather than the last one.
+  const user = messages.filter((m) => m.role === "user").at(-1);
+  const prompt = user ? textOf(user.content) : "";
+  if (prompt === "long") return fauxAssistantMessage([fauxText(LONG_ANSWER)]);
   const multiply = /^multiply (\d+)$/.exec(prompt);
   if (multiply) {
     return fauxAssistantMessage(
@@ -196,6 +208,17 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     await stream.stop();
     // JSON, so the RPC type stays shallow for the test's type checker.
     return { view: JSON.stringify(view), types };
+  }
+
+  /** Resolve once the model has streamed part of a message. */
+  async streaming(): Promise<void> {
+    const stream = await this.harness.session().events();
+    await new Promise<void>((resolve) => {
+      stream.start(async (events: readonly AgentEvent[]) => {
+        if (events.some((event) => event.type === "message_update")) resolve();
+      });
+    });
+    await stream.stop();
   }
 
   /** The view folded from a fresh snapshot, as a client joining now sees it. */

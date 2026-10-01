@@ -6,7 +6,7 @@ import {
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { PiSessionView } from "../view";
-import type { PiHarnessTestObject } from "./worker";
+import { LONG_ANSWER, type PiHarnessTestObject } from "./worker";
 
 function fresh(
   name: string = crypto.randomUUID()
@@ -98,6 +98,30 @@ describe("PiHarness on pi-durable", () => {
     expect(result.status).toBe("done");
     expect(result.text).toMatch(/^tool failed: /);
     expect(await stub.gateRuns()).toBe(1);
+  });
+
+  it("resumes a turn whose object crashed mid-stream, woken by the wake job's alarm", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("long");
+    await stub.streaming();
+
+    // Like a runtime restart: no drain, in-memory state and timers are gone.
+    await abortAllDurableObjects();
+    stub = fresh(name);
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+
+    const result = await stub.wait(receipt.operationId);
+    expect(result).toMatchObject({ status: "done", text: LONG_ANSWER });
+    // pi keeps what streamed before the crash as an aborted message, then
+    // generates the whole answer again rather than continuing it.
+    const [prompt, partial = "", answer, ...rest] = await stub.messages();
+    expect(prompt).toBe("long");
+    expect(partial.length).toBeGreaterThan(0);
+    expect(partial.length).toBeLessThan(LONG_ANSWER.length);
+    expect(LONG_ANSWER.startsWith(partial)).toBe(true);
+    expect(answer).toBe(LONG_ANSWER);
+    expect(rest).toEqual([]);
   });
 
   it("aborts the running work", async () => {

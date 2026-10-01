@@ -10,8 +10,10 @@
  *
  * The suite must not wake the object it is testing: any request would start
  * a new instance and resume pi, hiding whether the harness's wake alarm
- * recovers on its own. So each `PiChaosAgent` reports its outcome to a
- * separate `ChaosResults` object, and the suite polls that.
+ * recovers on its own. So each `PiChaosAgent` reports its progress (model
+ * streaming, tool starts) and outcome to a separate `ChaosResults` object,
+ * and the suite polls that. The only request the suite sends an agent after
+ * submitting is `kill`, which resets it the way a runtime restart does.
  *
  * Neither limit is enforced by local workerd, so this Worker only means
  * anything deployed. Every route requires the `x-e2e-token` header to match
@@ -21,6 +23,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { Type } from "@earendil-works/pi-ai";
 import type {
+  AgentEvent,
   ToolExecutionResult,
   ToolRegistration
 } from "@earendil-works/pi-durable";
@@ -35,7 +38,7 @@ import { PiHarness } from "../harness/pi-harness";
 import { createModels } from "../providers/models";
 import { workersAI } from "../providers/workers-ai";
 import { createTools, MODEL_ID, text } from "../tools";
-import { TOKEN_HEADER, type ChaosStatus } from "./protocol";
+import { TOKEN_HEADER, type ChaosProgress, type ChaosStatus } from "./protocol";
 
 /** Bindings from `src/e2e/wrangler.jsonc`, plus the deploy-time token. */
 export interface ChaosEnv {
@@ -49,6 +52,7 @@ export interface ChaosEnv {
 const INSTANCES_KEY = "e2e:instances";
 const OPERATION_KEY = "e2e:operation";
 const RESULT_KEY = "e2e:result";
+const PROGRESS_KEY = "e2e:progress";
 
 function crashedKey(tool: CrashTool): string {
   return `e2e:crashed:${tool}`;
@@ -67,6 +71,7 @@ export class PiChaosAgent extends DurableObject<ChaosEnv> {
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
   #reporting = false;
+  #watching = false;
 
   constructor(ctx: DurableObjectState, env: ChaosEnv) {
     super(ctx, env);
@@ -81,7 +86,9 @@ export class PiChaosAgent extends DurableObject<ChaosEnv> {
   /** Host startup: after a crash, the wake alarm lands here. */
   async onStart(): Promise<void> {
     const operationId = await this.ctx.storage.get<string>(OPERATION_KEY);
-    if (operationId !== undefined) this.#report(operationId);
+    if (operationId === undefined) return;
+    this.#watch();
+    this.#report(operationId);
   }
 
   /**
@@ -91,9 +98,18 @@ export class PiChaosAgent extends DurableObject<ChaosEnv> {
   async submit(prompt: string, operationId: string): Promise<void> {
     // Native RPC bypasses the fetch entry point that starts Lifecycle.
     await this.lifecycle.start();
+    this.#watch();
     await this.harness.submit(prompt, { operationId });
     await this.ctx.storage.put(OPERATION_KEY, operationId);
     this.#report(operationId);
+  }
+
+  /**
+   * Reset the object the way a runtime restart does: in-memory state and
+   * timers are dropped and nothing drains. The wake alarm must bring it back.
+   */
+  kill(): void {
+    this.ctx.abort("e2e: simulated runtime reset");
   }
 
   /**
@@ -132,6 +148,39 @@ export class PiChaosAgent extends DurableObject<ChaosEnv> {
       .finally(() => {
         this.#reporting = false;
       });
+  }
+
+  /** Forward model streaming and tool starts to `ChaosResults`. */
+  #watch(): void {
+    if (this.#watching) return;
+    this.#watching = true;
+    const results = this.env.ChaosResults.getByName(
+      this.ctx.id.name ?? this.ctx.id.toString()
+    );
+    const instance = crypto.randomUUID().slice(0, 8);
+    void (async () => {
+      const stream = await this.harness.session().events();
+      let streaming = false;
+      stream.start(async (events: readonly AgentEvent[]) => {
+        for (const event of events) {
+          let label: string | undefined;
+          if (event.type === "message_start") streaming = false;
+          if (event.type === "message_update" && !streaming) {
+            streaming = true;
+            label = "generating";
+          }
+          if (event.type === "tool_execution_start") {
+            label = `tool:${event.toolName}`;
+          }
+          if (label !== undefined) {
+            await results.progress({ label, instance, at: Date.now() });
+          }
+        }
+      });
+    })().catch((error: unknown) => {
+      this.#watching = false;
+      console.error("e2e watch failed", error);
+    });
   }
 
   async #status(operation: ChaosStatus["operation"]): Promise<ChaosStatus> {
@@ -215,9 +264,23 @@ export class ChaosResults extends DurableObject<ChaosEnv> {
   async get(): Promise<string | null> {
     return (await this.ctx.storage.get<string>(RESULT_KEY)) ?? null;
   }
+
+  /** Record one progress event. */
+  async progress(event: ChaosProgress): Promise<void> {
+    const events =
+      (await this.ctx.storage.get<ChaosProgress[]>(PROGRESS_KEY)) ?? [];
+    await this.ctx.storage.put(PROGRESS_KEY, [...events, event]);
+  }
+
+  /** Every progress event so far, as JSON. */
+  async getProgress(): Promise<string> {
+    return JSON.stringify(
+      (await this.ctx.storage.get<ChaosProgress[]>(PROGRESS_KEY)) ?? []
+    );
+  }
 }
 
-const AGENT_ROUTE = /^\/e2e\/([\w-]+)\/(submit|result|status)$/;
+const AGENT_ROUTE = /^\/e2e\/([\w-]+)\/(submit|result|progress|status|kill)$/;
 
 function json(body: string): Response {
   return new Response(body, {
@@ -250,8 +313,21 @@ export default {
       }
       case "result":
         return json((await env.ChaosResults.getByName(name).get()) ?? "null");
+      case "progress":
+        return json(await env.ChaosResults.getByName(name).getProgress());
       case "status":
         return json(await env.PiChaosAgent.getByName(name).status());
+      case "kill": {
+        if (request.method !== "POST") break;
+        // The reset rejects the call that caused it.
+        const error = await env.PiChaosAgent.getByName(name)
+          .kill()
+          .then(
+            () => undefined,
+            (reason: unknown) => String(reason)
+          );
+        return Response.json({ killed: true, error });
+      }
     }
     return new Response("Bad request", { status: 400 });
   }

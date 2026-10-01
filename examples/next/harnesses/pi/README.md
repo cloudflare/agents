@@ -80,15 +80,25 @@ Local workerd enforces none of these limits, so it only runs deployed:
 - **oom**: mid-turn, a tool fills memory until the isolate exceeds 128 MB.
 - **burn_cpu**: mid-turn, a tool hashes an endless `fetch()` body until the
   invocation exceeds its 30 s CPU limit.
+- **abort-generation**: the agent is reset with `ctx.abort()`, like a
+  runtime restart, while the model streams.
+- **abort-tool** and **redeploy**: the agent is reset, or the Worker
+  redeployed, 15 s into a replay-safe `sleep 60`. pi must rerun the same
+  call with its memoized deadline.
 - **wall-time**: the model alternates `sleep` (60 s) and `current_time` for
   30 minutes, twice the alarm invocation's 15-minute wall-time limit.
 
 Each turn must then finish a secondary task: one more `current_time` call
-and an answer. The suite never wakes the object it is testing. Each agent
-reports its outcome to a separate `ChaosResults` object, so recovery has to
-come from the harness's wake alarm, not a client reconnecting. The crash
+and an answer. The suite never wakes the object it is testing, apart from
+the `kill` request itself. Each agent reports its progress and outcome to a
+separate `ChaosResults` object, so recovery has to come from the harness's
+wake alarm, not a client reconnecting. The crash
 tools come from `agents/tools/testing`. `PI_E2E_SCENARIOS=oom,burn_cpu` skips
 the 30-minute scenario.
+
+`harness.test.ts` covers the same crashes locally and deterministically:
+`abortAllDurableObjects()` mid-stream and mid-tool, recovered by the wake
+job's alarm.
 
 ## Core pattern
 

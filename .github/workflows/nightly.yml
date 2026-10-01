@@ -403,10 +403,11 @@ jobs:
       - run: pnpm run build
 
       # Deploys examples/next/harnesses/pi/src/e2e under a throwaway name and
-      # breaks a pi turn three ways on Workers AI: an OOM and a CPU-limit kill
-      # mid-turn, and a 30-minute turn past the alarm's 15-minute wall time.
-      # Each must recover on its own and finish a secondary task. Local
-      # workerd enforces none of these limits, so this only runs deployed.
+      # breaks pi turns on Workers AI: OOM and CPU-limit kills mid-turn, a
+      # runtime reset mid-stream and mid-tool, a redeploy mid-tool, and a
+      # 30-minute turn past the alarm's 15-minute wall time. Each must
+      # recover on its own and finish a secondary task. Local workerd
+      # enforces none of these limits, so this only runs deployed.
       - name: Run pi harness DEPLOYED suite
         env:
           RUN_DEPLOYED_E2E: "1"

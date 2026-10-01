@@ -21,3 +21,13 @@ export type ChaosStatus = {
   /** The root session's transcript. */
   readonly messages: readonly PiMessage[];
 };
+
+/** One step an agent reported while working, in the order it happened. */
+export type ChaosProgress = {
+  /** `generating` when the model starts streaming a message, or `tool:<name>`. */
+  readonly label: string;
+  /** A random id per object instance, so a restart shows up as a new id. */
+  readonly instance: string;
+  /** Epoch milliseconds. */
+  readonly at: number;
+};
