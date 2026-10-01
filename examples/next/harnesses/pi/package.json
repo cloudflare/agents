@@ -10,7 +10,8 @@
     "deploy": "vite build && wrangler deploy",
     "typecheck": "tsc --noEmit",
     "types": "wrangler types env.d.ts --include-runtime false",
-    "test": "vitest run --config src/tests/vitest.config.ts"
+    "test": "vitest run --config src/tests/vitest.config.ts",
+    "test:e2e:deployed": "vitest run --config e2e/vitest.config.ts"
   },
   "dependencies": {
     "@cloudflare/kumo": "^2.6.0",

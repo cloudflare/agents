@@ -1,0 +1,20 @@
+{
+  // Deployed only by the e2e suite (e2e/deployed.test.ts), under a unique
+  // name per run, and deleted afterwards. See src/e2e/worker.ts.
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "pi-harness-e2e",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "PiChaosAgent", "class_name": "PiChaosAgent" },
+      { "name": "ChaosResults", "class_name": "ChaosResults" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["PiChaosAgent", "ChaosResults"] }
+  ],
+  "observability": { "enabled": true }
+}

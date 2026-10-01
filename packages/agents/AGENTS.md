@@ -32,6 +32,8 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/browser`              | `src/browser/index.ts`        | Browser Run helpers — CDP sessions, connector, Quick Action primitives       |
 | `agents/browser/ai`           | `src/browser/ai.ts`           | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools` |
 | `agents/browser/tanstack-ai`  | `src/browser/tanstack-ai.ts`  | TanStack AI browser tool (`browser_execute`)                                 |
+| `agents/tools/testing`        | `src/tools/testing/index.ts`  | Fault injection: `fillMemory`, `burnCpu`, `sleep`, and mid-turn test prompts |
+| `agents/tools/testing/ai`     | `src/tools/testing/ai.ts`     | The testing toolbox as AI SDK tools (`createTestingTools`)                   |
 | `agents/voice`                | `src/voice/index.ts`          | Voice server mixins, contracts, Workers AI providers, text, and SFU helpers  |
 | `agents/voice/types`          | `src/voice/types.ts`          | Dependency-light Voice protocol and provider contracts                       |
 | `agents/voice/client`         | `src/voice/client.ts`         | Framework-neutral browser Voice client                                       |
@@ -146,6 +148,10 @@ src/
     quick-actions.ts    # Stateless Quick Action primitives (browserMarkdown, …)
     ai.ts               # createBrowserTools + createQuickActionTools (AI SDK)
     tanstack-ai.ts      # createBrowserTools for TanStack AI
+
+  tools/testing/
+    index.ts            # Fault-injection functions and mid-turn test prompts (no deps)
+    ai.ts               # createTestingTools: the same as AI SDK tools
 
   voice/                # Voice server, client, React, provider, SFU, and text entries
   channels/             # Messaging core, provider adapters, and AI framework adapters

@@ -1,0 +1,4 @@
+{
+  "extends": "agents/tsconfig",
+  "include": ["./*.ts", "../src/e2e/protocol.ts"]
+}
