@@ -123,6 +123,17 @@ src/
   codemode/             # Experimental code generation
     ai.ts
 
+  models/               # Experimental model providers (one createAI() per framework, same skeleton)
+    core/               # Framework-neutral, not exported: binding transport, gateway options, Workers AI ids, SSE, errors
+      transport.ts      #   env.AI.run + env.AI.gateway(id).run (universal), envelope unwrap, errors
+      settings.ts       #   AISettings (binding only), GatewayOptions/ModelOptions, option merging
+      catalog.ts        #   WorkersAIModelId + per-modality id types (Workers AI only)
+      gateway-providers.ts # AI Gateway provider table: vendor host -> slug, endpoint, auth headers to strip
+      chat-completions/ # Workers AI <-> strict OpenAI chat-completions compat (quirk table, request/response/stream)
+      sse.ts            #   SSE decoder TransformStream
+      errors.ts         #   CloudflareAIError + status classification
+      images.ts         #   image input helpers
+
   skills/               # Framework-agnostic Agent Skills engine
     index.ts            # Barrel — sources, registry, runner, types
     types.ts            # SkillSource, SkillRegistrySnapshot, SkillRunContext, etc.
