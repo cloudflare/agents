@@ -9,7 +9,13 @@ import {
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
-import type { AgentEvent, ToolRegistration } from "@earendil-works/pi-durable";
+import {
+  createRegistry,
+  Harness,
+  type AgentEvent,
+  type Registry,
+  type ToolRegistration
+} from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
@@ -91,17 +97,29 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     tokensPerSecond: 200,
     tokenSize: { min: 2, max: 4 }
   });
+  readonly registry = this.#registry();
   readonly harness = new PiHarness({
-    models: createModels({ providers: [this.#faux.provider] }),
-    model: {
-      provider: this.#faux.getModel().provider,
-      modelId: this.#faux.getModel().id
+    harness: ({ storage, context }) =>
+      Harness.open(
+        storage,
+        {
+          models: createModels({ providers: [this.#faux.provider] }),
+          registry: this.registry,
+          onReport: (error) => console.warn("pi report", error)
+        },
+        context
+      ),
+    defaults: {
+      model: {
+        provider: this.#faux.getModel().provider,
+        modelId: this.#faux.getModel().id
+      },
+      retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
     },
-    retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
-    tools: this.#tools(),
-    systemPrompt: "Use the supplied test tools."
+    // Short enough that a suite does not sit on the real 30s heartbeat.
+    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
   });
-  readonly sockets = new PiSessionSockets(this.harness, (tag) =>
+  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
     this.ctx.getWebSockets(tag)
   );
   readonly webSockets = new WebSockets(this.sockets.options());
@@ -209,6 +227,19 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     return this.ctx.storage.getAlarm();
   }
 
+  #registry(): Registry {
+    const registry = createRegistry();
+    registry.batch(() => {
+      registry.systemPrompt.section(
+        "preamble",
+        () => "Use the supplied test tools.",
+        { tag: false }
+      );
+      for (const tool of this.#tools()) registry.tools.add(tool);
+    });
+    return registry;
+  }
+
   #tools(): ToolRegistration[] {
     const storage = this.ctx.storage;
     const gate = (
@@ -233,22 +264,72 @@ export class PiHarnessTestObject extends DurableObject<Env> {
       }
     });
     return [
-      {
-        name: "multiply",
-        description: "Multiply by three.",
-        parameters: Type.Object({ value: Type.Number() }),
-        replay: "safe",
-        async execute(args: JsonValue) {
-          const { value } = args as { value: number };
-          return {
-            content: [{ type: "text", text: String(value * 3) }],
-            details: { result: value * 3 }
-          };
-        }
-      },
+      multiplyTool(),
       gate("gate", "safe"),
       gate("gate_unsafe", "unsafe")
     ];
+  }
+}
+
+/** The one tool the factory fixture needs: no gating, no storage. */
+function multiplyTool(): ToolRegistration {
+  return {
+    name: "multiply",
+    description: "Multiply by three.",
+    parameters: Type.Object({ value: Type.Number() }),
+    replay: "safe",
+    async execute(args: JsonValue) {
+      const { value } = args as { value: number };
+      return {
+        content: [{ type: "text", text: String(value * 3) }],
+        details: { result: value * 3 }
+      };
+    }
+  };
+}
+
+/**
+ * A harness given only its factory: no `defaults`, so new sessions start
+ * without a model until one is set.
+ */
+export class PiNoDefaultsTestObject extends DurableObject<Env> {
+  readonly #faux = fauxProvider({
+    tokensPerSecond: 200,
+    tokenSize: { min: 2, max: 4 }
+  });
+  readonly harness = new PiHarness({
+    harness: ({ storage, context }) =>
+      Harness.open(
+        storage,
+        {
+          models: createModels({ providers: [this.#faux.provider] }),
+          registry: createRegistry()
+        },
+        context
+      ),
+    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
+  });
+  readonly lifecycle = Lifecycle.install(this).use(this.harness);
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.#faux.setResponses(Array.from({ length: 200 }, () => script));
+  }
+
+  async prompt(text: string) {
+    const response = await this.harness.prompt(text);
+    return { ...response, messages: response.messages.map(messageText) };
+  }
+
+  async setFauxModel(): Promise<void> {
+    const model = this.#faux.getModel();
+    await this.harness
+      .session()
+      .setModel({ provider: model.provider, modelId: model.id });
+  }
+
+  async alarmTime(): Promise<number | null> {
+    return this.ctx.storage.getAlarm();
   }
 }
 

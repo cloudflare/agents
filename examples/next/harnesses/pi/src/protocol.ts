@@ -1,10 +1,6 @@
-import type { AgentEvent } from "@earendil-works/pi-durable";
-import type {
-  PiJson,
-  PiMessageInput,
-  PiSessionId,
-  PiWhenBusy
-} from "./harness/types";
+import type { JsonValue } from "@earendil-works/pi-ai";
+import type { AgentEvent, UserInput } from "@earendil-works/pi-durable";
+import type { PiSessionId, PiWhenBusy } from "./harness/types";
 
 /**
  * This app's WebSocket protocol, served by `sockets.ts`. The harness knows
@@ -22,7 +18,7 @@ export type PiClientMessage =
   | {
       readonly type: "submit";
       readonly id?: string;
-      readonly input: PiMessageInput;
+      readonly input: UserInput;
       readonly whenBusy?: PiWhenBusy;
       readonly operationId?: string;
     }
@@ -48,7 +44,7 @@ export type PiServerMessage =
       readonly session: PiSessionId;
       readonly events: readonly AgentEvent[];
     }
-  | { readonly type: "result"; readonly id: string; readonly result: PiJson }
+  | { readonly type: "result"; readonly id: string; readonly result: JsonValue }
   | { readonly type: "error"; readonly id?: string; readonly message: string };
 
 export type {

@@ -3,26 +3,22 @@ import {
   BACKGROUND_CONTEXT,
   withAbortSignal
 } from "@earendil-works/chord/context";
-import type { ModelThinkingLevel, Models } from "@earendil-works/pi-ai";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
   ConversationConfig,
-  createRegistry,
-  Harness,
   LiveDoc,
   ROOT_CONVERSATION_ID,
   watchEvents,
   type AgentEventStream,
   type Conversation,
+  type Harness,
   type ConversationId,
   type ConversationRetryPolicy,
   type ModelRef,
-  type Registry,
   type SettledSubmissionRecord,
-  type ToolRegistration,
   type Tx,
   type UserInput
 } from "@earendil-works/pi-durable";
-import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import {
   LifecycleCapability,
@@ -30,16 +26,13 @@ import {
   type LifecycleJobContext,
   type LifecycleJobOutcome
 } from "agents/lifecycle";
-import type { SkillSource } from "agents/skills";
 import { assistantText, projectEntries } from "./messages";
 import {
   openPiSessionStore,
   type PiSessionStoreOptions
 } from "./session-store";
-import { resolveSkillSources } from "./skills";
 import type {
   PiMessage,
-  PiMessageInput,
   PiOperationResult,
   PiPendingOperation,
   PiPromptResponse,
@@ -56,6 +49,9 @@ const BG = BACKGROUND_CONTEXT;
 export const ROOT_SESSION: PiSessionId = String(ROOT_CONVERSATION_ID);
 
 /**
+ * Defaults for the three wake timings; a host overrides them with
+ * `timing`, which is what the tests do to avoid the real heartbeat.
+ *
  * A pi long wait further away than this is handed to the alarm, so the
  * alarm, not pi's in-memory timer, is what wakes the object.
  */
@@ -90,25 +86,66 @@ function sessionOfJob(payload: unknown): PiSessionId | undefined {
     : undefined;
 }
 
-export type PiHarnessOptions = {
-  readonly models: Models;
+/**
+ * What the harness factory is handed. The store is already open and pi's
+ * migrations have run, so a factory only has to decide how to call
+ * `Harness.open` — or call something else that satisfies the same contract.
+ */
+export type PiHarnessContext = {
+  /** pi's storage over this object's SQLite, tables under the store prefix. */
+  readonly storage: SqliteStorage;
+  /** Background context, for the open itself. */
+  readonly context: Context;
+};
+
+/**
+ * Builds pi's `Harness`. Return value is adopted as-is: the caller owns the
+ * registry (tools, system prompt, hooks, skills), `models`, `env`,
+ * `onReport` and anything else `HarnessOptions` grows.
+ *
+ * ```ts
+ * harness: ({ storage, context }) =>
+ *   Harness.open(storage, { models, registry }, context)
+ * ```
+ */
+export type PiHarnessFactory = (
+  context: PiHarnessContext
+) => Harness | Promise<Harness>;
+
+/**
+ * Applied to a session the first time it is created. Without a model, a
+ * session's generation fails as unanswered until `session.setModel` sets one.
+ */
+export type PiSessionDefaults = {
   /** Model for new sessions. Change one session's with `session.setModel`. */
-  readonly model: ModelRef;
+  readonly model?: ModelRef;
   readonly thinkingLevel?: ModelThinkingLevel;
   /** pi's generation retries for new sessions. */
   readonly retry?: ConversationRetryPolicy;
-  /** First system prompt section. */
-  readonly systemPrompt?: string;
-  readonly tools?: readonly ToolRegistration[];
-  /** `agents/skills` sources, offered through `activate_skill`. */
-  readonly skills?: readonly SkillSource[];
-  /** Execution environment for pi's `read`/`bash`/`edit`/`write` tools. */
-  readonly env?: ExecutionEnv;
-  /** Add hooks, prompt sections, tasks, or more tools to pi's registry. */
-  readonly configure?: (registry: Registry) => void;
+};
+
+/**
+ * How long the wake waits and when it hands a wait to the alarm. Defaults
+ * suit a real deployment; a test shortens them so a suite does not sit on
+ * the real heartbeat.
+ */
+export type PiWakeTiming = {
+  /** A pi wait further away than this goes to the alarm. Default 60_000. */
+  readonly sleepThresholdMs?: number;
+  /** Longest one wake waits inside an alarm. Default 600_000. */
+  readonly waitBudgetMs?: number;
+  /** Heartbeat while waiting, and the re-check for background work. Default 30_000. */
+  readonly heartbeatMs?: number;
+};
+
+/** `PiHarness`'s options. Only `harness`, which opens pi, is required. */
+export type PiHarnessOptions = {
+  /** Opens pi's `Harness` over the store this object prepared. */
+  readonly harness: PiHarnessFactory;
+  /** Applied to new sessions. */
+  readonly defaults?: PiSessionDefaults;
   readonly store?: PiSessionStoreOptions;
-  /** Extension failures pi reports without failing the operation. */
-  readonly onReport?: (error: unknown) => void;
+  readonly timing?: PiWakeTiming;
 };
 
 type Opened = {
@@ -122,19 +159,6 @@ function conversationId(session: PiSessionId): ConversationId {
     throw new Error(`Invalid pi session ${JSON.stringify(session)}`);
   }
   return id as ConversationId;
-}
-
-function userInput(input: PiMessageInput): UserInput {
-  if (typeof input === "string") return input;
-  if (!input.images?.length) return input.text;
-  return [
-    { type: "text", text: input.text },
-    ...input.images.map((image) => ({
-      type: "image" as const,
-      data: image.data,
-      mimeType: image.mimeType
-    }))
-  ];
 }
 
 function signalContext(signal: AbortSignal | undefined): Context {
@@ -164,30 +188,33 @@ function signalContext(signal: AbortSignal | undefined): Context {
  * @experimental Example-local. Nothing here is exported from `agents`.
  */
 export class PiHarness extends LifecycleCapability {
-  /** pi's registry. Registrations may change while the harness runs. */
-  readonly registry: Registry;
   readonly sessions: PiSessions;
   readonly #options: PiHarnessOptions;
   /** In-memory waits on pi, per session, each inside an alarm's work. */
   readonly #waits = new Map<PiSessionId, Promise<void>>();
   /** Submissions between their wake and pi's admission, per session. */
   readonly #admitting = new Map<PiSessionId, number>();
+  readonly #sleepThresholdMs: number;
+  readonly #waitBudgetMs: number;
+  readonly #heartbeatMs: number;
   #opening: Promise<Opened> | undefined;
 
   constructor(options: PiHarnessOptions) {
     super("pi-harness");
     this.#options = options;
-    this.registry = createRegistry();
-    this.registry.batch(() => {
-      if (options.systemPrompt !== undefined) {
-        const prompt = options.systemPrompt;
-        this.registry.systemPrompt.section("preamble", () => prompt, {
-          tag: false
-        });
+    this.#sleepThresholdMs =
+      options.timing?.sleepThresholdMs ?? SLEEP_THRESHOLD_MS;
+    this.#waitBudgetMs = options.timing?.waitBudgetMs ?? WAIT_BUDGET_MS;
+    this.#heartbeatMs = options.timing?.heartbeatMs ?? HEARTBEAT_MS;
+    for (const [name, value] of [
+      ["sleepThresholdMs", this.#sleepThresholdMs],
+      ["waitBudgetMs", this.#waitBudgetMs],
+      ["heartbeatMs", this.#heartbeatMs]
+    ] as const) {
+      if (!Number.isFinite(value) || value <= 0) {
+        throw new Error(`PiHarness timing.${name} must be a positive number`);
       }
-      for (const tool of options.tools ?? []) this.registry.tools.add(tool);
-      options.configure?.(this.registry);
-    });
+    }
     this.sessions = new PiSessions(this);
   }
 
@@ -229,17 +256,14 @@ export class PiHarness extends LifecycleCapability {
 
   /** Submit a prompt and wait for its answer. */
   prompt(
-    input: PiMessageInput,
+    input: UserInput,
     options: PiSubmitOptions = {}
   ): Promise<PiPromptResponse> {
     return this.session(options.session).prompt(input, options);
   }
 
   /** Durably submit a prompt. Resolves before the model runs. */
-  submit(
-    input: PiMessageInput,
-    options: PiSubmitOptions = {}
-  ): Promise<PiReceipt> {
+  submit(input: UserInput, options: PiSubmitOptions = {}): Promise<PiReceipt> {
     return this.session(options.session).submit(input, options);
   }
 
@@ -309,7 +333,7 @@ export class PiHarness extends LifecycleCapability {
   /** @internal */
   async enqueue(
     session: PiSessionId,
-    input: PiMessageInput,
+    input: UserInput,
     options: PiSubmitOptions
   ): Promise<PiReceipt> {
     const operationId = options.operationId ?? crypto.randomUUID();
@@ -332,7 +356,7 @@ export class PiHarness extends LifecycleCapability {
       await conversation.submit(
         {
           type: "input",
-          content: userInput(input),
+          content: input,
           whenBusy: options.whenBusy ?? "followUp",
           requestId: operationId
         },
@@ -414,7 +438,7 @@ export class PiHarness extends LifecycleCapability {
    * has none. pi does all the work in between.
    */
   async #wakeStep(session: PiSessionId): Promise<LifecycleJobOutcome> {
-    const heartbeat = { rescheduleAt: Date.now() + HEARTBEAT_MS };
+    const heartbeat = { rescheduleAt: Date.now() + this.#heartbeatMs };
     if (this.#waits.has(session)) return heartbeat;
     const { pi } = await this.#open();
     const conversation = await pi.conversation(conversationId(session), BG);
@@ -446,7 +470,7 @@ export class PiHarness extends LifecycleCapability {
 
   async #waitForIdle(conversation: Conversation): Promise<void> {
     const budget = new AbortController();
-    const timer = setTimeout(() => budget.abort(), WAIT_BUDGET_MS);
+    const timer = setTimeout(() => budget.abort(), this.#waitBudgetMs);
     try {
       // Cancelling the wait never cancels pi's work.
       await conversation.waitForIdle(withAbortSignal(budget.signal, BG));
@@ -473,35 +497,11 @@ export class PiHarness extends LifecycleCapability {
   }
 
   async #doOpen(): Promise<Opened> {
-    const skills = this.#options.skills;
-    if (skills?.length) {
-      const resolved = await resolveSkillSources(skills);
-      for (const warning of resolved.warnings) {
-        console.warn(`PiHarness skills: ${warning}`);
-      }
-      const catalog = resolved.catalog;
-      this.registry.batch(() => {
-        for (const tool of resolved.tools) this.registry.tools.add(tool);
-        if (catalog)
-          this.registry.systemPrompt.section("skills", () => catalog);
-      });
-    }
     const storage = await openPiSessionStore(
       this.lifecycle.storage,
       this.#options.store
     );
-    const pi = await Harness.open(
-      storage,
-      {
-        models: this.#options.models,
-        registry: this.registry,
-        ...(this.#options.env ? { env: this.#options.env } : {}),
-        onReport:
-          this.#options.onReport ??
-          ((error) => console.warn("pi report", error))
-      },
-      BG
-    );
+    const pi = await this.#options.harness({ storage, context: BG });
     await pi.root(BG, { init: (tx, id) => this.#init(tx, id) });
     // Continue whatever the last isolate left: pi reconciles tasks that were
     // running to pending and schedules them again.
@@ -511,9 +511,10 @@ export class PiHarness extends LifecycleCapability {
 
   async #init(tx: Tx, id: ConversationId): Promise<void> {
     const config = await tx.doc(ConversationConfig, id);
-    config.model = { ...this.#options.model };
-    config.thinkingLevel = this.#options.thinkingLevel ?? "off";
-    if (this.#options.retry) config.retry = { ...this.#options.retry };
+    const defaults = this.#options.defaults;
+    if (defaults?.model) config.model = { ...defaults.model };
+    if (defaults?.thinkingLevel) config.thinkingLevel = defaults.thinkingLevel;
+    if (defaults?.retry) config.retry = { ...defaults.retry };
   }
 
   async #findSubmission(
@@ -536,7 +537,7 @@ export class PiHarness extends LifecycleCapability {
     const live = await pi.snapshot(LiveDoc, id, context);
     const at =
       live?.generation?.deferred?.pollAt ?? live?.generation?.retry?.at;
-    return at !== undefined && at - Date.now() > SLEEP_THRESHOLD_MS
+    return at !== undefined && at - Date.now() > this.#sleepThresholdMs
       ? at
       : undefined;
   }
@@ -584,16 +585,13 @@ export class PiSession {
   }
 
   /** Durably submit a prompt. Resolves before the model runs. */
-  submit(
-    input: PiMessageInput,
-    options: PiSubmitOptions = {}
-  ): Promise<PiReceipt> {
+  submit(input: UserInput, options: PiSubmitOptions = {}): Promise<PiReceipt> {
     return this.#harness.enqueue(this.id, input, options);
   }
 
   /** Submit and wait for the answer and the updated transcript. */
   async prompt(
-    input: PiMessageInput,
+    input: UserInput,
     options: PiSubmitOptions = {}
   ): Promise<PiPromptResponse> {
     const receipt = await this.submit(input, options);
@@ -602,10 +600,7 @@ export class PiSession {
   }
 
   /** Join the running work after its current tool round. */
-  steer(
-    input: PiMessageInput,
-    options: Omit<PiSubmitOptions, "whenBusy"> = {}
-  ) {
+  steer(input: UserInput, options: Omit<PiSubmitOptions, "whenBusy"> = {}) {
     return this.submit(input, { ...options, whenBusy: "steer" });
   }
 

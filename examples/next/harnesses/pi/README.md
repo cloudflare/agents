@@ -3,8 +3,8 @@
 An experimental example that runs [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable),
 pi's durable agent harness, inside a Durable Object. Nothing here is exported
 from the `agents` package. `PiHarness`, the session store, and
-the Workers AI provider all live in this example's `src/` and pin an
-unreleased pi build.
+the Workers AI provider all live in this example's `src/`, on pi's published
+npm packages (see [Pi source](#pi-source)).
 
 The example composes:
 
@@ -71,13 +71,24 @@ pnpm test
 
 ```ts
 export class PiAgent extends DurableObject<Env> {
+  // pi's own registry: system prompt, tools (sleep, current_time), hooks.
+  readonly registry = createAppRegistry();
   readonly harness = new PiHarness({
-    models: createModels({ providers: [workersAI(this.env.AI)] }),
-    model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
-    tools: createTools() // sleep, current_time
+    harness: ({ storage, context }) =>
+      Harness.open(
+        storage,
+        {
+          models: createModels({ providers: [workersAI(this.env.AI)] }),
+          registry: this.registry
+        },
+        context
+      ),
+    defaults: {
+      model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID }
+    }
   });
   // App glue: this app's socket protocol, built on session.events().
-  readonly sockets = new PiSessionSockets(this.harness, (tag) =>
+  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
     this.ctx.getWebSockets(tag)
   );
   readonly webSockets = new WebSockets(this.sockets.options());
@@ -96,10 +107,25 @@ const side = await this.harness.sessions.create();
 await side.submit("Summarise the repo", { whenBusy: "steer" });
 ```
 
-Tools are pi-durable `ToolRegistration`s. `replay: "safe"` lets pi run a
-call again after an eviction interrupted it; otherwise the model gets an
-interrupted result. `configure(registry)` adds pi hooks, prompt sections, or
-tasks.
+The system prompt, tools, hooks and tasks are composed on pi's own
+`Registry` (`createRegistry()` from `@earendil-works/pi-durable`); the
+harness never sees it. Tools are pi-durable `ToolRegistration`s.
+`replay: "safe"` lets pi run a call again after an eviction interrupted it;
+otherwise the model gets an interrupted result. For `agents/skills` sources,
+`await addSkills(registry, sources)` (`src/harness/skills.ts`) in the
+factory, before `Harness.open`.
+
+### Options
+
+Only `harness` is required. It opens pi's `Harness` over the store the
+object prepared, so the registry, `models`, `env`, `onReport` and any other
+`Harness.open` option belong to it.
+
+`defaults` applies to new sessions only — change one session's model with
+`session.setModel`. Without a default model, a session's prompts end
+unanswered (`no_model`) until one is set. `timing` overrides how long the
+wake waits and when a long wait is handed to the alarm; the defaults suit a
+deployment and the tests shorten them.
 
 The harness does not choose a transport. `session.events()` returns pi's own
 `AgentEvent` stream: a `snapshot`, then one batch per commit. This app sends
@@ -108,7 +134,11 @@ it over WebSockets (`src/sockets.ts`, `src/protocol.ts`) and folds it with
 
 ## Pi source
 
-The build pins `earendil-works/pi` commit `2bbfcca4` as vendored archives
-under `vendor/pi-dev`. `vendor/pi-dev/pack.mjs` rebuilds them from a pi
-checkout. Pi is MIT licensed; see
+Pi comes from npm: `@earendil-works/pi-durable`, `pi-ai`, `chord` and
+`pi-telemetry` at `^0.99.2`. Pi is MIT licensed; see
 [`licenses/mit-earendil-pi.txt`](./licenses/mit-earendil-pi.txt).
+
+Note that the repository sets `minimumReleaseAge: 1440` in
+`pnpm-workspace.yaml`, so a pi release less than 24 hours old will not
+install until it ages out or `@earendil-works/*` is listed in
+`minimumReleaseAgeExclude`.

@@ -1,24 +1,15 @@
 import type {
   AssistantMessage,
   Message,
-  ToolResultMessage,
   UserMessage
 } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
-import type { PiJson, PiMessage, PiMessagePart, PiToolContent } from "./types";
-
-/** pi carries tool arguments and details as JSON it parsed or a tool returned. */
-function asJson(value: unknown): PiJson {
-  return value as PiJson;
-}
+import type { PiMessage, PiMessagePart } from "./types";
 
 function userParts(content: UserMessage["content"]): PiMessagePart[] {
-  if (typeof content === "string") return [{ type: "text", text: content }];
-  return content.map((part) =>
-    part.type === "text"
-      ? { type: "text", text: part.text }
-      : { type: "image", data: part.data, mimeType: part.mimeType }
-  );
+  return typeof content === "string"
+    ? [{ type: "text", text: content }]
+    : content;
 }
 
 function assistantParts(content: AssistantMessage["content"]): PiMessagePart[] {
@@ -33,18 +24,10 @@ function assistantParts(content: AssistantMessage["content"]): PiMessagePart[] {
           type: "tool-call",
           id: part.id,
           name: part.name,
-          arguments: asJson(part.arguments)
+          arguments: part.arguments
         };
     }
   });
-}
-
-function toolContent(content: ToolResultMessage["content"]): PiToolContent[] {
-  return content.map((part) =>
-    part.type === "text"
-      ? { type: "text", text: part.text }
-      : { type: "image", data: part.data, mimeType: part.mimeType }
-  );
 }
 
 /** Project one pi-ai message. */
@@ -80,10 +63,10 @@ export function projectMessage(message: Message, id: string): PiMessage {
             type: "tool-result",
             id: message.toolCallId,
             name: message.toolName,
-            content: toolContent(message.content),
+            content: message.content,
             ...(message.details === undefined
               ? {}
-              : { details: asJson(message.details) }),
+              : { details: message.details }),
             error: message.isError
           }
         ],

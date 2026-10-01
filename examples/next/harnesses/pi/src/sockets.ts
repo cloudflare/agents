@@ -1,8 +1,12 @@
-import type { AgentEventStream } from "@earendil-works/pi-durable";
+import type { JsonValue } from "@earendil-works/pi-ai";
+import type {
+  AgentEventStream,
+  RegistryReader
+} from "@earendil-works/pi-durable";
 import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
 import { ROOT_SESSION, type PiHarness } from "./harness/pi-harness";
-import type { PiJson, PiSessionId } from "./harness/types";
+import type { PiSessionId } from "./harness/types";
 import type { PiClientMessage, PiServerMessage } from "./protocol";
 
 const SESSION_TAG_PREFIX = "pi-session:";
@@ -52,14 +56,18 @@ function send(socket: WebSocket, message: PiServerMessage): void {
  */
 export class PiSessionSockets {
   readonly #harness: PiHarness;
+  readonly #registry: RegistryReader;
   readonly #getWebSockets: (tag?: string) => WebSocket[];
   readonly #watches = new Map<WebSocket, AgentEventStream>();
 
   constructor(
     harness: PiHarness,
+    /** The registry pi was opened with, for the tool list sent on connect. */
+    registry: RegistryReader,
     getWebSockets: (tag?: string) => WebSocket[]
   ) {
     this.#harness = harness;
+    this.#registry = registry;
     this.#getWebSockets = getWebSockets;
   }
 
@@ -101,8 +109,9 @@ export class PiSessionSockets {
     send(connection, {
       type: "hello",
       session,
-      tools: this.#harness.registry.tools
-        .list()
+      tools: this.#registry
+        .snapshot()
+        .tools()
         .map((tool) => ({ name: tool.name, description: tool.description }))
     });
     await this.#watch(connection, session);
@@ -157,7 +166,7 @@ export class PiSessionSockets {
     connection: Connection,
     session: PiSessionId,
     message: PiClientMessage
-  ): Promise<PiJson> {
+  ): Promise<JsonValue> {
     const handle = this.#harness.session(session);
     switch (message.type) {
       case "submit":

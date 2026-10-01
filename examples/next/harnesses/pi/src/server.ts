@@ -2,7 +2,10 @@ import { DurableObject } from "cloudflare:workers";
 import type { JsonValue } from "@earendil-works/chord";
 import { Type } from "@earendil-works/pi-ai";
 import {
+  createRegistry,
+  Harness,
   ToolTask,
+  type Registry,
   type ToolExecutionResult,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
@@ -93,29 +96,51 @@ function createTools(): ToolRegistration[] {
   ];
 }
 
+/** pi's registry for this app: the prompt, the tools, and a sleep cap. */
+function createAppRegistry(): Registry {
+  const registry = createRegistry();
+  registry.batch(() => {
+    registry.systemPrompt.section(
+      "preamble",
+      () =>
+        "You are a concise playground assistant. You can read the current UTC time with current_time and wait with sleep. Use tools whenever they can answer the request, and explain their results plainly.",
+      { tag: false }
+    );
+    for (const tool of createTools()) registry.tools.add(tool);
+    registry.hooks.add(ToolTask, {
+      beforeTool: (call) =>
+        call.name === "sleep" &&
+        typeof call.arguments.seconds === "number" &&
+        call.arguments.seconds > MAX_SLEEP_SECONDS
+          ? { block: `sleep is capped at ${MAX_SLEEP_SECONDS} seconds.` }
+          : undefined
+    });
+  });
+  return registry;
+}
+
 /** Playable pi session backed by one Durable Object. */
 export class PiAgent extends DurableObject<Env> {
+  readonly registry = createAppRegistry();
   readonly harness = new PiHarness({
-    models: createModels({ providers: [workersAI(this.env.AI)] }),
-    model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
-    thinkingLevel: "low",
-    retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 },
-    tools: createTools(),
-    systemPrompt:
-      "You are a concise playground assistant. You can read the current UTC time with current_time and wait with sleep. Use tools whenever they can answer the request, and explain their results plainly.",
-    configure: (registry) => {
-      registry.hooks.add(ToolTask, {
-        beforeTool: (call) =>
-          call.name === "sleep" &&
-          typeof call.arguments.seconds === "number" &&
-          call.arguments.seconds > MAX_SLEEP_SECONDS
-            ? { block: `sleep is capped at ${MAX_SLEEP_SECONDS} seconds.` }
-            : undefined
-      });
+    harness: ({ storage, context }) =>
+      Harness.open(
+        storage,
+        {
+          models: createModels({ providers: [workersAI(this.env.AI)] }),
+          registry: this.registry,
+          onReport: (error) => console.warn("pi report", error)
+        },
+        context
+      ),
+    defaults: {
+      model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID },
+      thinkingLevel: "low",
+      retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 }
     }
   });
   // App glue, not the harness: how this app puts sessions on a socket.
-  readonly sockets = new PiSessionSockets(this.harness, (tag) =>
+  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
     this.ctx.getWebSockets(tag)
   );
   readonly webSockets = new WebSockets(this.sockets.options());

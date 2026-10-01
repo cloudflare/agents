@@ -11,8 +11,8 @@ export default defineConfig({
     })
   ],
   resolve: {
-    // Same as vite.config.ts: the vendored pi archives omit their sibling
-    // dependencies, so resolve every pi package from this example.
+    // Resolve every pi package from this example, so the harness and the
+    // tests share one copy of pi's module state.
     dedupe: [
       "@earendil-works/chord",
       "@earendil-works/pi-ai",

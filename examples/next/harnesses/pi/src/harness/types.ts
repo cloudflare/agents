@@ -1,31 +1,17 @@
-/**
- * `PiHarness`'s public types. Kept separate from pi's own so callers depend
- * on a small, JSON-only surface: a pi release that reshapes an internal type
- * is absorbed in `messages.ts` and `pi-harness.ts`.
- */
+import type {
+  ImageContent,
+  JsonValue,
+  TextContent
+} from "@earendil-works/pi-ai";
 
-/** Any JSON value. */
-export type PiJson =
-  | null
-  | boolean
-  | number
-  | string
-  | readonly PiJson[]
-  | { readonly [key: string]: PiJson };
+/**
+ * `PiHarness`'s public types. Each is a projection of pi's state that pi
+ * does not publish in this shape; anything pi already publishes (JSON
+ * values, text and image content, user input) is used directly.
+ */
 
 /** A pi conversation, addressed by its id as a string. The root is `"1"`. */
 export type PiSessionId = string;
-
-export type PiImage = {
-  /** Base64-encoded bytes. */
-  readonly data: string;
-  readonly mimeType: string;
-};
-
-/** A prompt: plain text, or text with images. */
-export type PiMessageInput =
-  | string
-  | { readonly text: string; readonly images?: readonly PiImage[] };
 
 /**
  * What a submission does when the session is already running.
@@ -88,26 +74,22 @@ export type PiSessionInfo = {
   readonly busy: boolean;
 };
 
-export type PiToolContent =
-  | { readonly type: "text"; readonly text: string }
-  | ({ readonly type: "image" } & PiImage);
-
 export type PiMessagePart =
-  | { readonly type: "text"; readonly text: string }
-  | ({ readonly type: "image" } & PiImage)
+  | TextContent
+  | ImageContent
   | { readonly type: "thinking"; readonly text: string }
   | {
       readonly type: "tool-call";
       readonly id: string;
       readonly name: string;
-      readonly arguments: PiJson;
+      readonly arguments: JsonValue;
     }
   | {
       readonly type: "tool-result";
       readonly id: string;
       readonly name: string;
-      readonly content: readonly PiToolContent[];
-      readonly details?: PiJson;
+      readonly content: readonly (TextContent | ImageContent)[];
+      readonly details?: JsonValue;
       readonly error: boolean;
     };
 
