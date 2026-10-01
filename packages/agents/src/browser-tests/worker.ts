@@ -10,6 +10,15 @@ import {
 } from "@cloudflare/codemode";
 import { BrowserConnector } from "../browser/connector";
 import {
+  BrowserSessionConnector,
+  type BrowserExecutionReport
+} from "../browser/session-connector";
+import {
+  Browser,
+  browserRun,
+  namedBrowserSessionKey
+} from "../browser/browser";
+import {
   DurableBrowserSessionStore,
   type StoredBrowserSession
 } from "../browser/session-store";
@@ -31,6 +40,9 @@ type Env = {
 };
 
 type SessionMode = "one-shot" | "reuse" | "dynamic";
+
+/** The named session the persistent-browser tests drive. */
+const NAMED_SESSION = "e2e";
 
 /** Approval-gated connector used to pause executions mid-run in tests. */
 class GateConnector extends CodemodeConnector<Env> {
@@ -88,6 +100,62 @@ export class BrowserTestAgent extends Agent<Env> {
       { code },
       { toolCallId: crypto.randomUUID(), messages: [] }
     )) as ProxyToolOutput;
+  }
+
+  // ── Persistent named browser (BrowserSessionConnector) ──
+
+  #namedBrowser(): Browser {
+    return new Browser({
+      provider: browserRun(this.env.BROWSER),
+      name: NAMED_SESSION,
+      store: this.#store()
+    });
+  }
+
+  #namedConnector(): BrowserSessionConnector {
+    return new BrowserSessionConnector(this.ctx, {
+      browser: this.#namedBrowser()
+    });
+  }
+
+  #namedRuntime(connector: BrowserSessionConnector): CodemodeRuntimeHandle {
+    return createCodemodeRuntime({
+      ctx: this.ctx,
+      executor: new DynamicWorkerExecutor({ loader: this.env.LOADER }),
+      connectors: [connector, new GateConnector(this.ctx, this.env)],
+      name: "browser-named"
+    });
+  }
+
+  /** Run code against the persistent browser; include the browser report. */
+  @callable()
+  async runNamed(
+    code: string
+  ): Promise<ProxyToolOutput & { report: BrowserExecutionReport | null }> {
+    const connector = this.#namedConnector();
+    const output = await this.#execute(this.#namedRuntime(connector), code);
+    return {
+      ...output,
+      report: connector.takeReport(output.executionId) ?? null
+    };
+  }
+
+  @callable()
+  async approveNamed(executionId: string) {
+    const connector = this.#namedConnector();
+    return this.#namedRuntime(connector).approve({ executionId });
+  }
+
+  /** Close the persistent browser so it doesn't outlive the suite. */
+  @callable()
+  async closeNamed(): Promise<void> {
+    await this.#namedBrowser().close();
+  }
+
+  /** Storage key of the named session, for corruptStoredSession. */
+  @callable()
+  async namedSessionKey(): Promise<string> {
+    return namedBrowserSessionKey(NAMED_SESSION);
   }
 
   @callable()
