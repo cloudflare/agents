@@ -276,7 +276,7 @@ no-op when the runtime has no native tracing capability.
 
 When Worker traces are enabled, every job the Lifecycle alarm loop runs gets
 its own span, named `process {owner}`, under the alarm invocation's root span.
-The owner is the capability that queued the job (`schedules`, `queue`,
+The owner is the capability that queued the job (`scheduler`, `queue`,
 `tasks`, ...) or `host` for the Durable Object's own jobs. Spans the job
 creates while it runs, such as Durable Object storage calls and model calls
 from a scheduled callback, appear as children of its span.
