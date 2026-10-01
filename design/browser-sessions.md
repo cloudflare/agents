@@ -69,7 +69,7 @@ On an `Agent`, call `this.lifecycle.use(this.browser)` in the constructor instea
 ## Key decisions
 
 - **The model still writes raw CDP.** A typed set of browser actions was prototyped and parked until tests show it beats raw CDP (see the `park/browser-interaction-contract` branch).
-- **The host names the browser, not the model.** The original connector let the model decide when to keep a browser. Here the host decides, and a lost browser is always reported, never silently replaced.
+- **The host names the browser, not the model.** `BrowserConnector`, the connector behind `createBrowserTools`, lets the model decide when to keep a browser (its `dynamic` mode). Here the host decides, and a lost browser is always reported, never silently replaced.
 - **One object per browser.** An earlier version had one object that managed every browser by name, on top of a separate internal class. The two were hard to tell apart, and naming the browser once up front is simpler.
 - **Browser Run handles idle browsers.** An earlier version had a cleanup job. It duplicated `keepAliveMs`, woke idle objects, and could shut down a browser a person was using through Live View, because that traffic never reaches the host.
 - **No provider interface yet.** `browserRun()` returns a plain config object. A real interface waits until there's a second provider to shape it.
