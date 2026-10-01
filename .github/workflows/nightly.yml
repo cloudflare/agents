@@ -386,3 +386,31 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: pnpm run test:e2e:deployed
         working-directory: experimental/chat-recovery-probe
+
+  e2e-deployed-pi-harness:
+    name: "E2E (deployed): pi harness OOM / CPU / wall time on real edge"
+    if: ${{ github.event_name == 'schedule' || vars.RUN_DEPLOYED_E2E == '1' || github.event.inputs.run_deployed == 'true' }}
+    # The wall-time scenario alone runs one turn for 30 minutes.
+    timeout-minutes: 75
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/install
+
+      - run: pnpm run build
+
+      # Deploys examples/next/harnesses/pi/src/e2e under a throwaway name and
+      # breaks a pi turn three ways on Workers AI: an OOM and a CPU-limit kill
+      # mid-turn, and a 30-minute turn past the alarm's 15-minute wall time.
+      # Each must recover on its own and finish a secondary task. Local
+      # workerd enforces none of these limits, so this only runs deployed.
+      - name: Run pi harness DEPLOYED suite
+        env:
+          RUN_DEPLOYED_E2E: "1"
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: pnpm run test:e2e:deployed
+        working-directory: examples/next/harnesses/pi

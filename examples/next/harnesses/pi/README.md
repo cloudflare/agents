@@ -67,6 +67,29 @@ pnpm test
 - `sockets.test.ts` connects real WebSockets: a run started over the
   socket, a client joining mid-run, and a socket that outlives an eviction.
 
+### Deployed e2e
+
+```sh
+RUN_DEPLOYED_E2E=1 pnpm run test:e2e:deployed
+```
+
+`e2e/deployed.test.ts` deploys `src/e2e/worker.ts` under a throwaway name,
+runs three turns on Workers AI, and deletes the Worker. Nightly CI runs it.
+Local workerd enforces none of these limits, so it only runs deployed:
+
+- **oom**: mid-turn, a tool fills memory until the isolate exceeds 128 MB.
+- **burn_cpu**: mid-turn, a tool hashes an endless `fetch()` body until the
+  invocation exceeds its 30 s CPU limit.
+- **wall-time**: the model alternates `sleep` (60 s) and `current_time` for
+  30 minutes, twice the alarm invocation's 15-minute wall-time limit.
+
+Each turn must then finish a secondary task: one more `current_time` call
+and an answer. The suite never wakes the object it is testing. Each agent
+reports its outcome to a separate `ChaosResults` object, so recovery has to
+come from the harness's wake alarm, not a client reconnecting. The crash
+tools come from `agents/tools/testing`. `PI_E2E_SCENARIOS=oom,burn_cpu` skips
+the 30-minute scenario.
+
 ## Core pattern
 
 ```ts

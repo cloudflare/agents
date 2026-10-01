@@ -151,9 +151,14 @@
       "require": "./dist/lifecycle/index.js"
     },
     "./tools/testing": {
-      "types": "./dist/tools/testing.d.ts",
-      "import": "./dist/tools/testing.js",
-      "require": "./dist/tools/testing.js"
+      "types": "./dist/tools/testing/index.d.ts",
+      "import": "./dist/tools/testing/index.js",
+      "require": "./dist/tools/testing/index.js"
+    },
+    "./tools/testing/ai": {
+      "types": "./dist/tools/testing/ai.d.ts",
+      "import": "./dist/tools/testing/ai.js",
+      "require": "./dist/tools/testing/ai.js"
     },
     "./agent-tools": {
       "types": "./dist/agent-tools.d.ts",
