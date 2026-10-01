@@ -248,9 +248,28 @@ export class Browser extends LifecycleCapability {
    * the connection refresh the record's `updatedAt` (throttled to
    * {@link SESSION_TOUCH_INTERVAL_MS}), so hosts can tell an actively used
    * browser from one the platform has likely reclaimed.
+   *
+   * If the browser expires between the liveness probe and the WebSocket
+   * upgrade, the record is retired and the browser resolved once more, so
+   * the caller gets a fresh browser with `restarted: true` instead of an
+   * error.
    */
   async connect(): Promise<BrowserConnection> {
     const resolved = await this.resolve();
+    try {
+      return await this.#attach(resolved);
+    } catch (error) {
+      if (!isMissingBrowserSession(error)) throw error;
+      await this.#retireIfCurrent(resolved.sessionId);
+    }
+    // The browser this caller resolved is gone, so report a restart even
+    // when a concurrent resolver already replaced it and this resolve
+    // reattaches to that replacement.
+    const replaced = await this.resolve();
+    return this.#attach({ ...replaced, restarted: true });
+  }
+
+  async #attach(resolved: ResolvedBrowser): Promise<BrowserConnection> {
     let lastTouchAt = Date.now();
     let touchInFlight = false;
     const cdp = await connectBrowserSession(
@@ -406,6 +425,17 @@ export class Browser extends LifecycleCapability {
         updatedAt: Date.now()
       });
       return true;
+    } finally {
+      await lock.release();
+    }
+  }
+
+  /** Retire the record if it still holds `sessionId`. */
+  async #retireIfCurrent(sessionId: string): Promise<void> {
+    const lock = await this.#sessionStore.acquireLock(this.#key);
+    try {
+      const current = await this.#sessionStore.get(this.#key);
+      if (current?.sessionId === sessionId) await this.#retire(current);
     } finally {
       await lock.release();
     }

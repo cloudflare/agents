@@ -103,6 +103,8 @@ function createFakeBrowser(options?: {
   deleteStatuses?: number[];
   /** Upgrade requests return a response with no WebSocket. */
   failUpgrades?: boolean;
+  /** Statuses to return (once each, no WebSocket) from upgrade requests. */
+  upgradeStatuses?: number[];
   /** Awaited before each session create responds — for race orchestration. */
   onCreate?: () => Promise<void> | void;
   /** Called on every fetch — for lock-discipline assertions. */
@@ -113,6 +115,7 @@ function createFakeBrowser(options?: {
   let created = 0;
   const listStatuses = [...(options?.listStatuses ?? [])];
   const deleteStatuses = [...(options?.deleteStatuses ?? [])];
+  const upgradeStatuses = [...(options?.upgradeStatuses ?? [])];
 
   const browser = {
     async fetch(input: RequestInfo | URL, init?: RequestInit) {
@@ -126,6 +129,8 @@ function createFakeBrowser(options?: {
 
       if (upgrade) {
         if (options?.failUpgrades) return new Response(null, { status: 502 });
+        const upgradeStatus = upgradeStatuses.shift();
+        if (upgradeStatus) return new Response(null, { status: upgradeStatus });
         const socket = new FakeSocket();
         sockets.push(socket);
         const sessionId =
@@ -462,6 +467,29 @@ describe("Browser.connect", () => {
     // connections by design.
     cdp.close();
     expect(deletes(requests, "session-1")).toHaveLength(0);
+  });
+
+  it("replaces a browser that expires between the probe and the upgrade", async () => {
+    // The first upgrade finds the just-resolved browser gone (410).
+    const { browser, requests } = createFakeBrowser({ upgradeStatuses: [410] });
+    const store = new MemorySessionStore();
+    const named = createBrowser(browser, store, { name: "checkout" });
+
+    const connected = await named.connect();
+
+    expect(connected.restarted).toBe(true);
+    expect(connected.sessionId).toBe("session-2");
+    expect(
+      store.sessions.get(namedBrowserSessionKey("checkout"))?.sessionId
+    ).toBe("session-2");
+    expect(creates(requests)).toHaveLength(2);
+  });
+
+  it("does not retry upgrade failures other than 404/410", async () => {
+    const { browser } = createFakeBrowser({ upgradeStatuses: [502] });
+    const named = createBrowser(browser, new MemorySessionStore());
+
+    await expect(named.connect()).rejects.toThrow(/\(502\)/);
   });
 
   it("CDP activity refreshes the record's updatedAt", async () => {
