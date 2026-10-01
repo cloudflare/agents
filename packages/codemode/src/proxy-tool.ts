@@ -173,6 +173,11 @@ type ProxyToolInputSchema = {
   readonly "~standard": {
     readonly version: 1;
     readonly vendor: "@cloudflare/codemode";
+    /** Lets Standard Schema consumers (e.g. TanStack AI) infer `{ code }`. */
+    readonly types?: {
+      readonly input: ProxyToolInput;
+      readonly output: ProxyToolInput;
+    };
     readonly validate: (
       value: unknown
     ) =>

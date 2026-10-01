@@ -360,3 +360,67 @@ describe("browserTool over a Browser", () => {
     });
   });
 });
+
+describe("TanStack AI browserTool over a Browser", () => {
+  const code = `async () => cdp.send({
+    method: "Runtime.evaluate",
+    params: { expression: "document.title" },
+    sessionId: "active"
+  })`;
+
+  it("is named browser unless the host picks a name", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      expect(instance.tanStackBrowserTool().name).toBe("browser");
+      expect(instance.tanStackBrowserTool("web").name).toBe("web");
+      expect(instance.tanStackBrowserTool().description).toContain("`cdp`");
+    });
+  });
+
+  it("drives the same persistent browser and returns what the model sees", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const first = await instance.tanStackBrowserTool().execute?.({ code });
+      expect(first).toMatchObject({
+        status: "completed",
+        result: { result: { value: "evaluated in target-session-1" } }
+      });
+      // The durable call log stays out of the model's context.
+      expect(first).not.toHaveProperty("calls");
+
+      instance.killBrowserSession("session-1");
+      const second = await instance.tanStackBrowserTool().execute?.({ code });
+      expect(second).toMatchObject({
+        status: "completed",
+        result: { result: { value: "evaluated in target-session-2" } },
+        restarted: true,
+        notice: expect.stringMatching(/navigate again/)
+      });
+    });
+  });
+
+  it("keeps the browser report when a screenshot becomes a summary", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const tool = instance.tanStackBrowserTool();
+      await tool.execute?.({ code });
+      instance.killBrowserSession("session-1");
+
+      const output = await tool.execute?.({
+        code: `async () => {
+          await cdp.send({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" });
+          return { type: "browser_screenshot", mediaType: "image/png", data: "aGVsbG8=" };
+        }`
+      });
+      expect(output).toMatchObject({
+        status: "completed",
+        result: expect.stringMatching(/^Screenshot captured successfully/),
+        restarted: true
+      });
+      expect(JSON.stringify(output)).not.toContain("aGVsbG8=");
+    });
+  });
+});

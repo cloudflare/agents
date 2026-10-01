@@ -3,8 +3,91 @@ import type { ServerTool } from "@tanstack/ai";
 import type { ProxyToolOutput } from "@cloudflare/codemode";
 import { z } from "zod";
 import { createBrowserRuntime, type CreateBrowserToolsOptions } from "./ai";
+import {
+  createBrowserToolCore,
+  type BrowserToolOptions,
+  type BrowserToolOutput
+} from "./browser-tool";
+import { browserExecuteModelOutput } from "./tool-helpers";
 
 export type { CreateBrowserToolsOptions } from "./ai";
+export type {
+  BrowserToolInput,
+  BrowserToolOptions,
+  BrowserToolOutput
+} from "./browser-tool";
+export type { BrowserNewTab, BrowserSource } from "./session-connector";
+
+export interface TanStackBrowserToolOptions<
+  TName extends string = "browser"
+> extends BrowserToolOptions {
+  /** The tool's name. TanStack AI tools carry it in the definition. */
+  name?: TName;
+}
+
+/**
+ * What the model sees from one run. TanStack AI has one return channel, so
+ * this is the AI SDK adapter's model projection: no `calls` log, bounded
+ * `logs`, and a text summary in place of a screenshot's base64.
+ */
+function browserToolModelResult(output: BrowserToolOutput): unknown {
+  const model = browserExecuteModelOutput(output);
+  if (model.type === "json") return model.value;
+  // A screenshot collapsed to a summary: keep the rest of the result
+  // (status, restarted, notice, newTabs) around it.
+  const withSummary = browserExecuteModelOutput({
+    ...output,
+    result: model.value
+  });
+  return withSummary.value;
+}
+
+/**
+ * Create a TanStack AI tool that lets the model drive a persistent browser
+ * with JavaScript and the Chrome DevTools Protocol.
+ *
+ * Works like `browserTool` in `agents/browser/ai-sdk`: tabs, cookies, and
+ * logins carry over between runs, `sessionId: "active"` addresses the tab the
+ * model last worked in, and a replaced browser is reported as
+ * `restarted: true`. The tool is named `browser` unless you pass `name`.
+ *
+ * Unlike the AI SDK tool, the host gets the same output as the model:
+ * screenshots come back as a text summary, not the image.
+ *
+ * @example
+ * ```ts
+ * import { Browser, browserRun } from "agents/browser";
+ * import { browserTool } from "agents/browser/tanstack-ai";
+ * import { chat } from "@tanstack/ai";
+ *
+ * export class MyAgent extends Agent<Env> {
+ *   browser = new Browser({ provider: browserRun(this.env.BROWSER) });
+ *
+ *   constructor(ctx: AgentContext, env: Env) {
+ *     super(ctx, env);
+ *     this.lifecycle.use(this.browser);
+ *   }
+ *
+ *   async onChatMessage() {
+ *     const stream = chat({
+ *       adapter,
+ *       tools: [browserTool({ browser: this.browser, loader: this.env.LOADER })],
+ *       messages
+ *     });
+ *   }
+ * }
+ * ```
+ */
+export function browserTool<TName extends string = "browser">(
+  options: TanStackBrowserToolOptions<TName>
+) {
+  const core = createBrowserToolCore(options);
+  return toolDefinition({
+    name: options.name ?? ("browser" as TName),
+    description: core.description,
+    inputSchema: core.inputSchema
+  }).server(async (input) => browserToolModelResult(await core.execute(input)));
+}
 
 /**
  * Create TanStack AI tools for browser automation via CDP code mode.

@@ -242,6 +242,20 @@ export class MyAgent extends Think<Env> {
 
 Only Chromium on a Browser Run binding is supported. It needs the same `LOADER` binding and `CodemodeRuntime` export as `createBrowserTools`.
 
+For TanStack AI, import `browserTool` from `agents/browser/tanstack-ai` instead. It takes the same options plus an optional `name` (default `"browser"`) and returns a `ServerTool`:
+
+```ts
+import { browserTool } from "agents/browser/tanstack-ai";
+
+const stream = chat({
+  adapter,
+  tools: [browserTool({ browser: this.browser, loader: this.env.LOADER })],
+  messages
+});
+```
+
+TanStack AI gives the host and the model the same tool output, so a screenshot comes back as a short text summary rather than the image.
+
 ## Quick Actions (stateless browsing)
 
 `browser_execute` drives a full, stateful CDP session — the right tool for interactive, multi-step automation. But a lot of agent browsing is really one-shot: _read this page as Markdown_, _extract these fields_, _list the links_. For those, [Quick Actions](https://developers.cloudflare.com/browser-run/quick-actions/) are simpler, faster, and cheaper. They need only the `browser` binding — no Durable Object, Worker Loader, or sandbox — so they work from any Worker.
