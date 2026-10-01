@@ -4,7 +4,7 @@ import {
   browserTool,
   type BrowserTool,
   type BrowserToolOutput
-} from "../browser/ai";
+} from "../browser/ai-sdk";
 import { Browser, browserRun } from "../browser";
 
 declare const env: { BROWSER: Fetcher; LOADER: WorkerLoader };

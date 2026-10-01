@@ -295,6 +295,11 @@
       "import": "./dist/browser/ai.js",
       "require": "./dist/browser/ai.js"
     },
+    "./browser/ai-sdk": {
+      "types": "./dist/browser/ai-sdk.d.ts",
+      "import": "./dist/browser/ai-sdk.js",
+      "require": "./dist/browser/ai-sdk.js"
+    },
     "./browser/tanstack-ai": {
       "types": "./dist/browser/tanstack-ai.d.ts",
       "import": "./dist/browser/tanstack-ai.js",
