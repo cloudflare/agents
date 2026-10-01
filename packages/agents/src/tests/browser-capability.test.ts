@@ -375,6 +375,13 @@ describe("TanStack AI browserTool over a Browser", () => {
       expect(instance.tanStackBrowserTool().name).toBe("browser");
       expect(instance.tanStackBrowserTool("web").name).toBe("web");
       expect(instance.tanStackBrowserTool().description).toContain("`cdp`");
+      // The model is told screenshots can't come back, not that the UI keeps them.
+      expect(instance.tanStackBrowserTool().description).toContain(
+        "can't return images"
+      );
+      expect(instance.tanStackBrowserTool().description).not.toContain(
+        "the UI keeps the image"
+      );
     });
   });
 
@@ -401,7 +408,7 @@ describe("TanStack AI browserTool over a Browser", () => {
     });
   });
 
-  it("keeps the browser report when a screenshot becomes a summary", async () => {
+  it("says a screenshot was left out and keeps the browser report", async () => {
     const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
 
     await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
@@ -417,7 +424,7 @@ describe("TanStack AI browserTool over a Browser", () => {
       });
       expect(output).toMatchObject({
         status: "completed",
-        result: expect.stringMatching(/^Screenshot captured successfully/),
+        result: expect.stringMatching(/neither you nor the user can see it/),
         restarted: true
       });
       expect(JSON.stringify(output)).not.toContain("aGVsbG8=");

@@ -109,7 +109,13 @@ export function browserReportNotes(output: BrowserToolOutput): string[] {
  * Build the codemode runtime and connector for one `browserTool`, and wrap
  * `execute` so each result carries the browser report.
  */
-export function createBrowserToolCore(options: BrowserToolOptions) {
+export function createBrowserToolCore(
+  options: BrowserToolOptions,
+  adapter: {
+    /** What the adapter does with screenshots, told to the model. */
+    screenshotHint: string;
+  }
+) {
   const ctx = resolveCtx(options);
   if (!ctx) {
     throw new Error(
@@ -133,7 +139,7 @@ export function createBrowserToolCore(options: BrowserToolOptions) {
 
   const codemodeTool = runtime.tool({
     connectorHints: {
-      cdp: "A persistent browser over CDP — tabs and logins carry over between runs. Use sessionId: \"active\" for page commands. Return screenshots as { type: 'browser_screenshot', mediaType: 'image/png', data: screenshot.data }; the UI keeps the image while the model receives a compact summary."
+      cdp: `A persistent browser over CDP — tabs and logins carry over between runs. Use sessionId: "active" for page commands. ${adapter.screenshotHint}`
     }
   });
 

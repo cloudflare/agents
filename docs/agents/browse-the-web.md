@@ -254,7 +254,7 @@ const stream = chat({
 });
 ```
 
-TanStack AI gives the host and the model the same tool output, so a screenshot comes back as a short text summary rather than the image.
+The TanStack AI tool doesn't support screenshots yet. TanStack AI gives the host and the model the same output, so if the model returns a screenshot, the tool replaces it with a note saying it was left out, and the tool's instructions tell the model to read the page with `Runtime.evaluate` instead.
 
 ## Quick Actions (stateless browsing)
 
