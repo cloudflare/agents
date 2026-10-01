@@ -2,6 +2,7 @@ import type { AgentContext } from "../../index.ts";
 import { Agent } from "../../index.ts";
 import { Browser, browserRun } from "../../browser/browser";
 import { browserTool, type BrowserTool } from "../../browser/ai-sdk";
+import { browserTool as tanStackBrowserTool } from "../../browser/tanstack-ai";
 import {
   createFakeBrowserBinding,
   type RecordedBrowserRequest
@@ -32,6 +33,16 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
       ctx: this.ctx,
       browser: this.browser,
       loader: this.env.LOADER
+    });
+  }
+
+  /** The same browser, as a TanStack AI tool. */
+  tanStackBrowserTool(name?: string) {
+    return tanStackBrowserTool({
+      ctx: this.ctx,
+      browser: this.browser,
+      loader: this.env.LOADER,
+      name
     });
   }
 }

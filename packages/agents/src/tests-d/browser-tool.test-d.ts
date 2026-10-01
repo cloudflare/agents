@@ -1,4 +1,5 @@
 import type { Tool, ToolSet } from "ai";
+import type { ServerTool } from "@tanstack/ai";
 import { expectTypeOf } from "vitest";
 import {
   browserTool,
@@ -6,6 +7,7 @@ import {
   type BrowserToolOutput
 } from "../browser/ai-sdk";
 import { Browser, browserRun } from "../browser";
+import { browserTool as tanStackBrowserTool } from "../browser/tanstack-ai";
 
 declare const env: { BROWSER: Fetcher; LOADER: WorkerLoader };
 
@@ -32,3 +34,18 @@ browserTool({
   browser: "research",
   loader: env.LOADER
 });
+
+// The TanStack AI adapter: a ServerTool named `browser` unless the host picks.
+const tanStackTool = tanStackBrowserTool({
+  browser: new Browser({ provider: browserRun(env.BROWSER) }),
+  loader: env.LOADER
+});
+expectTypeOf(tanStackTool).toExtend<ServerTool>();
+expectTypeOf(tanStackTool.name).toEqualTypeOf<"browser">();
+expectTypeOf(
+  tanStackBrowserTool({
+    browser: new Browser({ provider: browserRun(env.BROWSER) }),
+    loader: env.LOADER,
+    name: "web"
+  }).name
+).toEqualTypeOf<"web">();
