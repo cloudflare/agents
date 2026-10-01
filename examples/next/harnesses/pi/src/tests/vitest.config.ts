@@ -10,7 +10,20 @@ export default defineConfig({
       wrangler: { configPath: path.join(testsDir, "wrangler.jsonc") }
     })
   ],
+  resolve: {
+    // Same as vite.config.ts: the vendored pi archives omit their sibling
+    // dependencies, so resolve every pi package from this example.
+    dedupe: [
+      "@earendil-works/chord",
+      "@earendil-works/pi-ai",
+      "@earendil-works/pi-durable",
+      "@earendil-works/pi-telemetry"
+    ]
+  },
   test: {
+    // harness.test.ts crashes objects with abortAllDurableObjects(), which
+    // reaches every object in the runtime, including other files' objects.
+    fileParallelism: false,
     name: "next-pi-harness",
     include: [path.join(testsDir, "**/*.test.ts")],
     testTimeout: 30_000,

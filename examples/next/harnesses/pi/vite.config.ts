@@ -19,9 +19,8 @@ export default defineConfig({
       "react",
       "react-dom",
       "@earendil-works/chord",
-      "@earendil-works/pi-agent-core",
       "@earendil-works/pi-ai",
-      "@earendil-works/pi-session-backend-sqlite-node",
+      "@earendil-works/pi-durable",
       "@earendil-works/pi-telemetry"
     ]
   }

@@ -5,16 +5,14 @@
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
-      {
-        "name": "PI_HARNESS_TEST",
-        "class_name": "PiHarnessTestObject"
-      }
+      { "name": "PI_HARNESS_TEST", "class_name": "PiHarnessTestObject" },
+      { "name": "PI_STORE_TEST", "class_name": "PiStoreTestObject" }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["PiHarnessTestObject"]
+      "new_sqlite_classes": ["PiHarnessTestObject", "PiStoreTestObject"]
     }
   ]
 }

@@ -108,7 +108,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `rfc-cold-rpc-initialization.md`         | RFC        | Cold native RPC runs lifecycle startup from the Agent context wrapper for async methods; sync methods stay sync (accepted)                                                      |
 | `rfc-fibers.md`                          | RFC        | Tasks (née Fibers) — durable replayable execution as one Lifecycle capability: named definitions, journaled steps, sleeps, optional recovery callback (accepted, amended)       |
 | `rfc-streams.md`                         | RFC        | Streams — durable incremental output as a Lifecycle capability: chunk log, cursor, replay-then-tail reads, composed with Tasks via checkpointed cursors (proposed)              |
-| `rfc-pi-harness-example.md`              | RFC        | Pi `AgentHarness` as an example-local Lifecycle capability over Tasks, Streams, and WebSockets; what must land before it becomes a package export (proposed)                    |
+| `rfc-pi-harness-example.md`              | RFC        | pi-durable as an example-local Lifecycle capability with a per-session wake job and a pi session store; what must land before it becomes a package export (proposed)            |
 | `rfc-self-modifying-harness.md`          | RFC        | Editable harness source in Workspace, activation through Worker Bundler, and one fresh Dynamic Worker per turn (proposed)                                                       |
 | `browser-sessions.md`                    | design doc | Internal named browser sessions — reattach-or-create session core, restart signaling, `BrowserSessions` lifecycle capability                                                    |
 
