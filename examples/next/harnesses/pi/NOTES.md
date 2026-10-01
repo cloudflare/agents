@@ -239,6 +239,5 @@ example.
   `CompactionHooks` and the rest, wired into `HarnessOptions`. Not yet used
   or tested here.
 - `ExecutionEnv` for pi's `read`/`bash`/`edit`/`write` on Workspace or a
-  Container. `env` is plumbed through the declarative option form but unused;
-  a caller using the `harness` factory passes it to `Harness.open` directly.
+  Container. Unused here; the `harness` factory passes it to `Harness.open`.
 - Session deletion. pi has no conversation delete.

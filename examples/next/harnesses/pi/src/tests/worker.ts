@@ -10,8 +10,10 @@ import {
   type TranscriptContext
 } from "@earendil-works/pi-ai";
 import {
+  createRegistry,
   Harness,
   type AgentEvent,
+  type Registry,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
@@ -95,8 +97,18 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     tokensPerSecond: 200,
     tokenSize: { min: 2, max: 4 }
   });
+  readonly registry = this.#registry();
   readonly harness = new PiHarness({
-    models: createModels({ providers: [this.#faux.provider] }),
+    harness: ({ storage, context }) =>
+      Harness.open(
+        storage,
+        {
+          models: createModels({ providers: [this.#faux.provider] }),
+          registry: this.registry,
+          onReport: (error) => console.warn("pi report", error)
+        },
+        context
+      ),
     defaults: {
       model: {
         provider: this.#faux.getModel().provider,
@@ -104,12 +116,10 @@ export class PiHarnessTestObject extends DurableObject<Env> {
       },
       retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
     },
-    tools: this.#tools(),
-    systemPrompt: "Use the supplied test tools.",
     // Short enough that a suite does not sit on the real 30s heartbeat.
     timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
   });
-  readonly sockets = new PiSessionSockets(this.harness, (tag) =>
+  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
     this.ctx.getWebSockets(tag)
   );
   readonly webSockets = new WebSockets(this.sockets.options());
@@ -217,6 +227,19 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     return this.ctx.storage.getAlarm();
   }
 
+  #registry(): Registry {
+    const registry = createRegistry();
+    registry.batch(() => {
+      registry.systemPrompt.section(
+        "preamble",
+        () => "Use the supplied test tools.",
+        { tag: false }
+      );
+      for (const tool of this.#tools()) registry.tools.add(tool);
+    });
+    return registry;
+  }
+
   #tools(): ToolRegistration[] {
     const storage = this.ctx.storage;
     const gate = (
@@ -240,7 +263,11 @@ export class PiHarnessTestObject extends DurableObject<Env> {
         };
       }
     });
-    return [multiplyTool(), gate("gate", "safe"), gate("gate_unsafe", "unsafe")];
+    return [
+      multiplyTool(),
+      gate("gate", "safe"),
+      gate("gate_unsafe", "unsafe")
+    ];
   }
 }
 
@@ -262,42 +289,25 @@ function multiplyTool(): ToolRegistration {
 }
 
 /**
- * The same harness built through the `harness` factory instead of the
- * declarative `models` field, so both construction paths are exercised at
- * runtime rather than only in the types.
- *
- * The factory is handed the open store and the registry the harness already
- * built from `tools`/`systemPrompt`, so it only has to call `Harness.open` —
- * which is the point: a caller needing a `HarnessOptions` field the
- * declarative form does not forward can reach it here without reimplementing
- * the wake, the store, or the registry.
+ * A harness given only its factory: no `defaults`, so new sessions start
+ * without a model until one is set.
  */
-export class PiFactoryTestObject extends DurableObject<Env> {
+export class PiNoDefaultsTestObject extends DurableObject<Env> {
   readonly #faux = fauxProvider({
     tokensPerSecond: 200,
     tokenSize: { min: 2, max: 4 }
   });
   readonly harness = new PiHarness({
-    defaults: {
-      model: {
-        provider: this.#faux.getModel().provider,
-        modelId: this.#faux.getModel().id
-      },
-      retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
-    },
-    tools: [multiplyTool()],
-    systemPrompt: "Use the supplied test tools.",
-    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 },
-    harness: ({ storage, registry, context }) =>
+    harness: ({ storage, context }) =>
       Harness.open(
         storage,
         {
           models: createModels({ providers: [this.#faux.provider] }),
-          registry,
-          onReport: (error) => console.warn("factory pi report", error)
+          registry: createRegistry()
         },
         context
-      )
+      ),
+    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
@@ -309,6 +319,13 @@ export class PiFactoryTestObject extends DurableObject<Env> {
   async prompt(text: string) {
     const response = await this.harness.prompt(text);
     return { ...response, messages: response.messages.map(messageText) };
+  }
+
+  async setFauxModel(): Promise<void> {
+    const model = this.#faux.getModel();
+    await this.harness
+      .session()
+      .setModel({ provider: model.provider, modelId: model.id });
   }
 
   async alarmTime(): Promise<number | null> {

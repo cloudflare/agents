@@ -1,6 +1,7 @@
 import type { JsonValue } from "@earendil-works/chord";
 import { Type } from "@earendil-works/pi-ai";
 import type {
+  Registry,
   ToolExecutionResult,
   ToolRegistration
 } from "@earendil-works/pi-durable";
@@ -257,4 +258,25 @@ function hasResource(skill: ResolvedSkill, path: string): boolean {
   return (skill.content.resources ?? []).some(
     (resource) => resource.path === path
   );
+}
+
+/**
+ * Register `agents/skills` sources on a pi registry: the activation tools
+ * and a "skills" system prompt section. Resolution reads the sources, so a
+ * host awaits this in its `harness` factory, before `Harness.open`.
+ */
+export async function addSkills(
+  registry: Registry,
+  sources: readonly SkillSource[]
+): Promise<ResolvedSkills> {
+  const resolved = await resolveSkillSources(sources);
+  for (const warning of resolved.warnings) {
+    console.warn(`pi skills: ${warning}`);
+  }
+  const catalog = resolved.catalog;
+  registry.batch(() => {
+    for (const tool of resolved.tools) registry.tools.add(tool);
+    if (catalog) registry.systemPrompt.section("skills", () => catalog);
+  });
+  return resolved;
 }

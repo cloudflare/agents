@@ -71,13 +71,24 @@ pnpm test
 
 ```ts
 export class PiAgent extends DurableObject<Env> {
+  // pi's own registry: system prompt, tools (sleep, current_time), hooks.
+  readonly registry = createAppRegistry();
   readonly harness = new PiHarness({
-    models: createModels({ providers: [workersAI(this.env.AI)] }),
-    defaults: { model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID } },
-    tools: createTools() // sleep, current_time
+    harness: ({ storage, context }) =>
+      Harness.open(
+        storage,
+        {
+          models: createModels({ providers: [workersAI(this.env.AI)] }),
+          registry: this.registry
+        },
+        context
+      ),
+    defaults: {
+      model: { provider: "cloudflare-workers-ai", modelId: MODEL_ID }
+    }
   });
   // App glue: this app's socket protocol, built on session.events().
-  readonly sockets = new PiSessionSockets(this.harness, (tag) =>
+  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
     this.ctx.getWebSockets(tag)
   );
   readonly webSockets = new WebSockets(this.sockets.options());
@@ -96,35 +107,25 @@ const side = await this.harness.sessions.create();
 await side.submit("Summarise the repo", { whenBusy: "steer" });
 ```
 
-Tools are pi-durable `ToolRegistration`s. `replay: "safe"` lets pi run a
-call again after an eviction interrupted it; otherwise the model gets an
-interrupted result. `configure(registry)` adds pi hooks, prompt sections, or
-tasks.
+The system prompt, tools, hooks and tasks are composed on pi's own
+`Registry` (`createRegistry()` from `@earendil-works/pi-durable`); the
+harness never sees it. Tools are pi-durable `ToolRegistration`s.
+`replay: "safe"` lets pi run a call again after an eviction interrupted it;
+otherwise the model gets an interrupted result. For `agents/skills` sources,
+`await addSkills(registry, sources)` (`src/harness/skills.ts`) in the
+factory, before `Harness.open`.
 
 ### Options
 
+Only `harness` is required. It opens pi's `Harness` over the store the
+object prepared, so the registry, `models`, `env`, `onReport` and any other
+`Harness.open` option belong to it.
+
 `defaults` applies to new sessions only — change one session's model with
-`session.setModel`. `timing` overrides how long the wake waits and when a
-long wait is handed to the alarm; the defaults suit a deployment and the
-tests shorten them.
-
-For anything the declarative form does not forward, give a `harness` factory
-instead of `models` and call `Harness.open` yourself. The store is already
-open and the registry is already built from `tools`/`systemPrompt`/`skills`/
-`configure`, so a factory only decides how pi is opened:
-
-```ts
-new PiHarness({
-  defaults: { model },
-  tools: createTools(),
-  harness: ({ storage, registry, context }) =>
-    Harness.open(storage, { models, registry, hooks: myHooks }, context)
-});
-```
-
-`models`, `env` and `onReport` are `Harness.open` arguments, so they move to
-the factory — passing both `models` and `harness` is a type error rather
-than a precedence rule.
+`session.setModel`. Without a default model, a session's prompts end
+unanswered (`no_model`) until one is set. `timing` overrides how long the
+wake waits and when a long wait is handed to the alarm; the defaults suit a
+deployment and the tests shorten them.
 
 The harness does not choose a transport. `session.events()` returns pi's own
 `AgentEvent` stream: a `snapshot`, then one batch per commit. This app sends
