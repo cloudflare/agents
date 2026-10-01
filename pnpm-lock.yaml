@@ -2449,6 +2449,43 @@ importers:
         specifier: ^4.115.0
         version: 4.120.1(@cloudflare/workers-types@5.20260812.1)
 
+  examples/next/models:
+    dependencies:
+      '@ai-sdk/anthropic':
+        specifier: ^4.0.0
+        version: 4.0.10(zod@4.5.4)
+      '@ai-sdk/openai':
+        specifier: ^4.0.0
+        version: 4.0.9(zod@4.5.4)
+      '@ai-sdk/provider':
+        specifier: ^4.0.0
+        version: 4.0.2
+      '@earendil-works/pi-agent-core':
+        specifier: ^0.80.2
+        version: 0.80.2(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@8.10.2)(ws@8.21.3)(zod@4.5.4)
+      '@earendil-works/pi-ai':
+        specifier: ^0.99.2
+        version: 0.99.2(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@8.10.2)(ws@8.21.3)(zod@4.5.4)
+      agents:
+        specifier: '*'
+        version: link:../../../packages/agents
+      ai:
+        specifier: ^7.0.0
+        version: 7.0.18(zod@4.5.4)
+      zod:
+        specifier: ^4.5.4
+        version: 4.5.4
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^5.20260729.1
+        version: 5.20260812.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      wrangler:
+        specifier: ^4.115.0
+        version: 4.120.1(@cloudflare/workers-types@5.20260812.1)
+
   examples/next/queue:
     dependencies:
       agents:
@@ -4350,6 +4387,15 @@ importers:
         specifier: ^2.9.0
         version: 2.9.0
     devDependencies:
+      '@ai-sdk/anthropic':
+        specifier: ^4.0.0
+        version: 4.0.10(zod@4.5.4)
+      '@ai-sdk/openai':
+        specifier: ^4.0.0
+        version: 4.0.9(zod@4.5.4)
+      '@ai-sdk/provider':
+        specifier: ^4.0.0
+        version: 4.0.2
       '@ai-sdk/react':
         specifier: ^4.0.0
         version: 4.0.19(react@19.2.7)(zod@4.5.4)

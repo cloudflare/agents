@@ -1,7 +1,7 @@
 # Models for pi-ai (Experimental)
 
 `agents/models/pi-ai` is the [pi-ai](https://github.com/earendil-works/pi/tree/main/packages/ai)
-twin of `agents/models/ai-sdk`: the same `createAI` factory, the same options,
+twin of [`agents/models/ai-sdk`](./models.md): the same `createAI` factory, the same options,
 the same gateway, returning pi-ai `Model` objects instead of AI SDK ones. Use it with pi-ai's
 `stream`/`complete`, with [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable)'s
 `Harness`, or with any framework built on a pi-ai `Models` registry.
@@ -227,7 +227,7 @@ are not routable today, among them `mistral` (`mistral-conversations`), `google`
 
 Workers AI stays on `env.AI.run`. Its departures from strict OpenAI chat completions (native
 events, heartbeats, per-delta usage, per-family request quirks) are absorbed by the same
-compat layer the AI SDK provider uses, so the parser only ever sees strict
+compat layer the [AI SDK provider](./models.md) uses, so the parser only ever sees strict
 OpenAI chunks. Anything the layer had to drop is recorded on the message as a
 `cloudflare-compat` diagnostic.
 
@@ -289,7 +289,7 @@ diagnostic listing the abandoned attempts, and `message.model` names the model t
 answered.
 
 A leg travels with the chain's gateway options — the chain's `id`, `cacheTtl` and the rest win
-over a leg's own, and `metadata` merges — as they do in the AI SDK provider. A
+over a leg's own, and `metadata` merges — as they do in the [AI SDK provider](./models.md). A
 leg built as `ai(model, options)` keeps everything else it was built with. A leg named by a
 `@cf/` id has no options of its own, so it also inherits the chain's `headers`, session
 affinity and Workers AI knobs; it never inherits the chain's model metadata (`name`, `cost`,
@@ -320,5 +320,6 @@ and may change in a minor release. An unlisted `@cf/` id resolves with default m
 
 ## See also
 
+- [Models for the AI SDK](./models.md) — the same factory for the Vercel AI SDK
 - [pi-ai](https://github.com/earendil-works/pi/tree/main/packages/ai) and
   [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable)
