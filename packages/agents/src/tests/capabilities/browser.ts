@@ -12,11 +12,35 @@ export interface RecordedBrowserRequest {
   body?: unknown;
 }
 
-/** A CDP WebSocket stub that acks accept/close — enough for connect paths. */
+/**
+ * A CDP WebSocket stub: acks accept/close, and answers the handful of CDP
+ * commands the browser tool issues against the session's one page target.
+ */
 class FakeBrowserSocket {
   #listeners = new Map<string, Array<(event: unknown) => void>>();
+  constructor(readonly sessionId: string) {}
   accept(): void {}
-  send(_data: string): void {}
+  send(data: string): void {
+    const { id, method } = JSON.parse(data) as { id: number; method: string };
+    const targetId = `target-${this.sessionId}`;
+    const result =
+      method === "Target.getTargets"
+        ? {
+            targetInfos: [
+              { targetId, type: "page", url: "https://example.com/" }
+            ]
+          }
+        : method === "Target.attachToTarget"
+          ? { sessionId: `cdp-${targetId}` }
+          : method === "Runtime.evaluate"
+            ? { result: { value: `evaluated in ${targetId}` } }
+            : {};
+    queueMicrotask(() => {
+      for (const fn of this.#listeners.get("message") ?? []) {
+        fn({ data: JSON.stringify({ id, result }) });
+      }
+    });
+  }
   addEventListener(type: string, fn: (event: unknown) => void): void {
     const list = this.#listeners.get(type) ?? [];
     list.push(fn);
@@ -59,7 +83,9 @@ export function createFakeBrowserBinding(): FakeBrowserBinding {
       requests.push({ url, method, upgrade, body });
 
       if (upgrade) {
-        const socket = new FakeBrowserSocket();
+        const socket = new FakeBrowserSocket(
+          url.match(/\/browser\/([^/?]+)/)?.[1] ?? "session-upgraded"
+        );
         const response = new Response(null, {
           headers: { "cf-browser-session-id": "session-upgraded" }
         });

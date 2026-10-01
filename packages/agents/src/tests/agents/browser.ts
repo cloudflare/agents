@@ -1,6 +1,7 @@
 import type { AgentContext } from "../../index.ts";
 import { Agent } from "../../index.ts";
 import { Browser, browserRun } from "../../browser/browser";
+import { browserTool, type BrowserTool } from "../../browser/ai";
 import {
   createFakeBrowserBinding,
   type RecordedBrowserRequest
@@ -15,6 +16,7 @@ import {
 export class TestBrowserAgent extends Agent<Cloudflare.Env> {
   readonly #binding = createFakeBrowserBinding();
   readonly browserRequests: RecordedBrowserRequest[] = this.#binding.requests;
+  readonly killBrowserSession = this.#binding.kill;
   readonly browser = new Browser({
     provider: browserRun(this.#binding.browser)
   });
@@ -22,5 +24,14 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
   constructor(ctx: AgentContext, env: Cloudflare.Env) {
     super(ctx, env);
     this.lifecycle.use(this.browser);
+  }
+
+  /** The host wiring the docs show: one `Browser`, a tool built per turn. */
+  browserTool(): BrowserTool {
+    return browserTool({
+      ctx: this.ctx,
+      browser: this.browser,
+      loader: this.env.LOADER
+    });
   }
 }
