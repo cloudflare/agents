@@ -207,19 +207,23 @@ await runtime.expirePaused(); // reject stale never-approved pauses, freeing the
 
 ## Persistent browser
 
-`browserTool` gives the model one browser that stays open between turns, so tabs, cookies, and logins carry over. You create the browser once on your agent and pass it in; the model never starts or closes it.
+`browserTool` gives the model one browser that stays open between turns, so tabs, cookies, and logins carry over. You create the browser once on your agent and pass it in; the model never starts or closes it. This example uses a [Think](../think/index.md) agent, whose `getTools()` runs every turn:
 
 ```ts
-import { Agent, type AgentContext } from "agents";
+import { Think } from "@cloudflare/think";
 import { Browser, browserRun } from "agents/browser";
 import { browserTool } from "agents/browser/ai";
 
-export class MyAgent extends Agent<Env> {
+export class MyAgent extends Think<Env> {
   browser = new Browser({ provider: browserRun(this.env.BROWSER) });
 
-  constructor(ctx: AgentContext, env: Env) {
+  constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.lifecycle.use(this.browser);
+  }
+
+  getModel() {
+    return "@cf/moonshotai/kimi-k2.7-code";
   }
 
   getTools() {
