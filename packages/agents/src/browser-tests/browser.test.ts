@@ -650,6 +650,28 @@ describe("browser connector e2e", () => {
       expect(title.result).toBe("opener");
     });
 
+    it("reports noopener popups as new tabs too", async () => {
+      await runNamed(setTitle("noopener-opener"));
+      // Chrome still sets openerId on these; only canAccessOpener is false.
+      const output = await runNamed(`async () => {
+        const open = (expression) => cdp.send({
+          method: "Runtime.evaluate",
+          params: { expression, userGesture: true },
+          sessionId: "active"
+        });
+        await open("void window.open('about:blank#noopener', '_blank', 'noopener')");
+        await open("(() => { const a = document.createElement('a'); a.href = 'about:blank#rel-noopener'; a.target = '_blank'; a.rel = 'noopener noreferrer'; document.body.appendChild(a); a.click(); })()");
+      }`);
+      expect(output.status).toBe("completed");
+      const urls = (output.report?.newTabs ?? []).map((tab) => tab.url);
+      expect(urls).toEqual(
+        expect.arrayContaining([
+          "about:blank#noopener",
+          "about:blank#rel-noopener"
+        ])
+      );
+    });
+
     it("keeps the active tab across a pause for approval", async () => {
       const output = await runNamed(`async () => {
         await cdp.send({
