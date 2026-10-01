@@ -22,8 +22,8 @@ export interface CdpAttachOptions {
   timeoutMs?: number;
 }
 
-/** Construction options for {@link CdpSession}. */
-export interface CdpSessionOptions {
+/** Construction options for {@link CdpConnection}. */
+export interface CdpConnectionOptions {
   /** Default per-command timeout. Defaults to 10 seconds. */
   timeoutMs?: number;
   /**
@@ -41,13 +41,14 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_DEBUG_ENTRIES = 400;
 
 /**
- * A CDP session over an open WebSocket. Manages command correlation,
- * timeouts, target sessions, and a debug event ring buffer.
+ * One Chrome DevTools Protocol connection over an open WebSocket. Manages
+ * command correlation, timeouts, per-tab CDP sessions, and a debug event
+ * ring buffer.
  *
  * Used host-side (not in the sandbox) — the sandbox calls into this
  * via DynamicWorkerExecutor's ToolDispatcher RPC.
  */
-export class CdpSession {
+export class CdpConnection {
   #socket: WebSocket;
   #nextId = 1;
   #pending = new Map<number, PendingCommand>();
@@ -58,10 +59,10 @@ export class CdpSession {
   #onActivity?: () => void;
   readonly sessionId?: string;
 
-  constructor(socket: WebSocket, options?: CdpSessionOptions);
+  constructor(socket: WebSocket, options?: CdpConnectionOptions);
   /**
-   * @deprecated Pass a {@link CdpSessionOptions} object instead —
-   * `new CdpSession(socket, { timeoutMs, onClose, sessionId })`. The
+   * @deprecated Pass a {@link CdpConnectionOptions} object instead —
+   * `new CdpConnection(socket, { timeoutMs, onClose, sessionId })`. The
    * positional form will be removed.
    */
   constructor(
@@ -72,11 +73,11 @@ export class CdpSession {
   );
   constructor(
     socket: WebSocket,
-    optionsOrTimeoutMs?: CdpSessionOptions | number,
+    optionsOrTimeoutMs?: CdpConnectionOptions | number,
     onClose?: () => void,
     sessionId?: string
   ) {
-    const options: CdpSessionOptions =
+    const options: CdpConnectionOptions =
       typeof optionsOrTimeoutMs === "object"
         ? optionsOrTimeoutMs
         : { timeoutMs: optionsOrTimeoutMs, onClose, sessionId };
@@ -292,7 +293,7 @@ const LOCALHOST_HOSTS = new Set([
 export async function connectUrl(
   baseUrl: string,
   options?: { timeoutMs?: number; headers?: Record<string, string> }
-): Promise<CdpSession> {
+): Promise<CdpConnection> {
   const endpoint = new URL("/json/version", baseUrl).toString();
   const response = await fetch(endpoint, {
     headers: options?.headers
@@ -334,5 +335,10 @@ export async function connectUrl(
   }
   ws.accept();
 
-  return new CdpSession(ws, { timeoutMs: options?.timeoutMs });
+  return new CdpConnection(ws, { timeoutMs: options?.timeoutMs });
 }
+
+/** @deprecated Renamed to {@link CdpConnection}. */
+export const CdpSession = CdpConnection;
+/** @deprecated Renamed to {@link CdpConnection}. */
+export type CdpSession = CdpConnection;

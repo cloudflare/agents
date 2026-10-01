@@ -7,7 +7,7 @@ import {
   type PassEndStatus,
   type ToolExecuteContext
 } from "@cloudflare/codemode";
-import { CdpSession, connectUrl } from "./cdp-session";
+import { CdpConnection, connectUrl } from "./cdp-connection";
 import {
   connectBrowser,
   connectBrowserSession,
@@ -179,7 +179,7 @@ function formatToolValidationError(
 }
 
 interface CachedSocket {
-  session: CdpSession;
+  session: CdpConnection;
   /** Browser Run session id the socket is attached to (undefined for cdpUrl). */
   browserSessionId?: string;
   /**
@@ -222,7 +222,7 @@ const ATTACH_HANDLE_PREFIX = "target:";
 export class BrowserConnector extends CodemodeConnector {
   #options: BrowserConnectorOptions;
   #sockets = new Map<string, CachedSocket>();
-  #connecting = new Map<string, Promise<CdpSession>>();
+  #connecting = new Map<string, Promise<CdpConnection>>();
 
   constructor(
     ctx: DurableObjectState | ExecutionContext,
@@ -964,7 +964,7 @@ export class BrowserConnector extends CodemodeConnector {
    * uses Promise.all) share one in-flight connect instead of racing and
    * leaking the loser's WebSocket.
    */
-  #socket(executionId: string): Promise<CdpSession> {
+  #socket(executionId: string): Promise<CdpConnection> {
     const inFlight = this.#connecting.get(executionId);
     if (inFlight) return inFlight;
     const promise = this.#socketInner(executionId).finally(() => {
@@ -976,7 +976,7 @@ export class BrowserConnector extends CodemodeConnector {
     return promise;
   }
 
-  async #socketInner(executionId: string): Promise<CdpSession> {
+  async #socketInner(executionId: string): Promise<CdpConnection> {
     if (this.#options.cdpUrl) {
       const cached = this.#sockets.get(executionId);
       if (cached) return cached.session;

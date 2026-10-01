@@ -404,12 +404,12 @@ Either `browser` or `cdpUrl` must be provided. When both are set, `cdpUrl` takes
 For custom integrations, import the building blocks directly:
 
 ```ts
-import { BrowserConnector, CdpSession, connectUrl } from "agents/browser";
+import { BrowserConnector, CdpConnection, connectUrl } from "agents/browser";
 
 // Connect to a custom CDP endpoint
-const session = await connectUrl("http://localhost:9222");
-const version = await session.send("Browser.getVersion");
-session.close();
+const connection = await connectUrl("http://localhost:9222");
+const version = await connection.send("Browser.getVersion");
+connection.close();
 
 // Or plug the connector into your own codemode runtime
 const connector = new BrowserConnector(this.ctx, {

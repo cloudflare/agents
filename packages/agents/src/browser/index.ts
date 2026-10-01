@@ -1,10 +1,11 @@
 export {
+  CdpConnection,
   CdpSession,
   connectUrl,
   type CdpSendOptions,
   type CdpAttachOptions,
-  type CdpSessionOptions
-} from "./cdp-session";
+  type CdpConnectionOptions
+} from "./cdp-connection";
 
 export {
   connectBrowser,
