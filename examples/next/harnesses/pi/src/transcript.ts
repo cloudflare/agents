@@ -1,10 +1,47 @@
 import type {
   AssistantMessage,
+  ImageContent,
+  JsonValue,
   Message,
+  TextContent,
   UserMessage
 } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
-import type { PiMessage, PiMessagePart } from "./types";
+
+/**
+ * This app's display model for a transcript. The harness returns pi's own
+ * entries; the UI folds them into these messages, on the server for a
+ * snapshot and in the browser for streamed events.
+ */
+export type PiMessagePart =
+  | TextContent
+  | ImageContent
+  | { readonly type: "thinking"; readonly text: string }
+  | {
+      readonly type: "tool-call";
+      readonly id: string;
+      readonly name: string;
+      readonly arguments: JsonValue;
+    }
+  | {
+      readonly type: "tool-result";
+      readonly id: string;
+      readonly name: string;
+      readonly content: readonly (TextContent | ImageContent)[];
+      readonly details?: JsonValue;
+      readonly error: boolean;
+    };
+
+/** One display-ready message projected from a pi transcript entry. */
+export type PiMessage = {
+  /** The pi entry id, or `live` for the message being streamed. */
+  readonly id: string;
+  readonly role: "user" | "assistant" | "tool" | "notice";
+  readonly parts: readonly PiMessagePart[];
+  readonly timestamp: number;
+  readonly stopReason?: string;
+  readonly error?: string;
+};
 
 function userParts(content: UserMessage["content"]): PiMessagePart[] {
   return typeof content === "string"
@@ -99,13 +136,4 @@ export function projectEntries(entries: readonly EntryRecord[]): PiMessage[] {
     const message = projectEntry(entry);
     return message ? [message] : [];
   });
-}
-
-/** The text of an assistant entry, for results. */
-export function assistantText(entry: EntryRecord | undefined): string {
-  const message = entry?.model?.[0];
-  if (message?.role !== "assistant") return "";
-  return message.content
-    .map((part) => (part.type === "text" ? part.text : ""))
-    .join("");
 }

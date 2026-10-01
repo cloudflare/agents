@@ -1,0 +1,22 @@
+{
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "PI_HARNESS_TEST", "class_name": "PiHarnessTestObject" },
+      { "name": "PI_STORE_TEST", "class_name": "PiStoreTestObject" },
+      { "name": "PI_NO_DEFAULTS_TEST", "class_name": "PiNoDefaultsTestObject" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "PiHarnessTestObject",
+        "PiStoreTestObject",
+        "PiNoDefaultsTestObject"
+      ]
+    }
+  ]
+}

@@ -1,8 +1,3 @@
-import type { Context } from "@earendil-works/chord";
-import {
-  BACKGROUND_CONTEXT,
-  withAbortSignal
-} from "@earendil-works/chord/context";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
   ConversationConfig,
@@ -14,6 +9,7 @@ import {
   type Harness,
   type ConversationId,
   type ConversationRetryPolicy,
+  type EntryRecord,
   type ModelRef,
   type SettledSubmissionRecord,
   type Tx,
@@ -25,14 +21,13 @@ import {
   type CapabilityStartContext,
   type LifecycleJobContext,
   type LifecycleJobOutcome
-} from "agents/lifecycle";
-import { assistantText, projectEntries } from "./messages";
+} from "../../lifecycle";
+import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "./context";
 import {
   openPiSessionStore,
   type PiSessionStoreOptions
 } from "./session-store";
 import type {
-  PiMessage,
   PiOperationResult,
   PiPendingOperation,
   PiPromptResponse,
@@ -45,7 +40,7 @@ import type {
 
 const BG = BACKGROUND_CONTEXT;
 
-/** The root session's id, as the example addresses sessions. */
+/** The root session's id. */
 export const ROOT_SESSION: PiSessionId = String(ROOT_CONVERSATION_ID);
 
 /**
@@ -161,14 +156,22 @@ function conversationId(session: PiSessionId): ConversationId {
   return id as ConversationId;
 }
 
+/** The text of an assistant entry, for an operation's result. */
+function assistantText(entry: EntryRecord | undefined): string {
+  const message = entry?.model?.[0];
+  if (message?.role !== "assistant") return "";
+  return message.content
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .join("");
+}
+
 function signalContext(signal: AbortSignal | undefined): Context {
   return signal ? withAbortSignal(signal, BG) : BG;
 }
 
 /**
- * pi-durable hosted in a Durable Object, behind the harness interface the
- * other `examples/next/harnesses` share: `harness.prompt()`,
- * `harness.sessions`, `harness.session(id)`. How a session reaches a
+ * pi-durable hosted in a Durable Object, behind a small harness interface:
+ * `harness.prompt()`, `harness.sessions`, `harness.session(id)`. How a session reaches a
  * client (sockets, SSE, RPC) is the host's glue, built on `session.events()`.
  *
  * pi owns everything about a run: the transcript, the inbox of steers and
@@ -185,7 +188,7 @@ function signalContext(signal: AbortSignal | undefined): Context {
  * restarts the object, pi reopens and resumes its own tasks, and the job
  * waits again.
  *
- * @experimental Example-local. Nothing here is exported from `agents`.
+ * @experimental The API may change between releases.
  */
 export class PiHarness extends LifecycleCapability {
   readonly sessions: PiSessions;
@@ -281,7 +284,8 @@ export class PiHarness extends LifecycleCapability {
     return this.session(options.session).wait(operationId, options.signal);
   }
 
-  messages(options: PiSessionOptions = {}): Promise<PiMessage[]> {
+  /** The session's active transcript, as pi's entries. */
+  messages(options: PiSessionOptions = {}): Promise<EntryRecord[]> {
     return this.session(options.session).messages();
   }
 
@@ -632,10 +636,10 @@ export class PiSession {
     await (await this.#harness.conversation(this.id)).setModel(model, BG);
   }
 
-  /** The active transcript: entries since the newest reset. */
-  async messages(): Promise<PiMessage[]> {
+  /** The active transcript, as pi's entries since the newest reset. */
+  async messages(): Promise<EntryRecord[]> {
     const view = await (await this.#harness.conversation(this.id)).context(BG);
-    return projectEntries(view.entries);
+    return [...view.entries];
   }
 
   /** pi's agent events for this session: a snapshot, then one batch per commit. */

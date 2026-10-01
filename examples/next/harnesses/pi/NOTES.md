@@ -7,18 +7,19 @@ here is in `agents`.
 
 ## What changed
 
-| Before (#2210)                               | Now                                                                  |
-| -------------------------------------------- | -------------------------------------------------------------------- |
-| pi-agent-core `AgentHarness`                 | pi-durable `Harness`                                                 |
-| `Tasks` run per lane, replay-driving pi      | one Lifecycle wake job per session                                   |
-| intake table for queued submissions          | pi's own inbox                                                       |
-| `Streams` log per operation, cursors, replay | pi's `watchEvents`: snapshot, then one batch per commit              |
-| pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (`session-store.ts`) |
-| own event and message projections            | pi's `AgentEvent`s on the wire, one reducer (`view.ts`)              |
-| compaction config                            | none; pi-durable has no compaction yet                               |
+| Before (#2210)                               | Now                                                             |
+| -------------------------------------------- | --------------------------------------------------------------- |
+| pi-agent-core `AgentHarness`                 | pi-durable `Harness`                                            |
+| `Tasks` run per lane, replay-driving pi      | one Lifecycle wake job per session                              |
+| intake table for queued submissions          | pi's own inbox                                                  |
+| `Streams` log per operation, cursors, replay | pi's `watchEvents`: snapshot, then one batch per commit         |
+| pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (session store) |
+| own event and message projections            | pi's `AgentEvent`s on the wire, one reducer (`view.ts`)         |
+| compaction config                            | none; pi-durable has no compaction yet                          |
 
-`src/harness` went from about 3,600 lines to under 2,000, with no other SDK
-primitive besides Lifecycle jobs. The client and the tests use the same
+The harness went from about 3,600 lines to under 2,000, with no other SDK
+primitive besides Lifecycle jobs. It now lives in `packages/agents` as
+`agents/harnesses/pi`, with its models from `agents/models/pi-ai`. The client and the tests use the same
 reducer.
 
 ## Decision: a Lifecycle job, not Tasks, a driver, or the state machine
@@ -82,7 +83,7 @@ pi's submissions directly. The wake holds no per-submission state.
 
 `PiHarness` has the shape the other `examples/next/harnesses` share:
 `harness.prompt()`, `harness.submit()`, `harness.abort()`, `harness.wait()`,
-`harness.messages()`, `harness.sessions` (`create`, `get`, `fork`, `list`),
+`harness.messages()` (pi's own `EntryRecord`s), `harness.sessions` (`create`, `get`, `fork`, `list`),
 `harness.session(id)` handles, and `session.events()`. A session is a pi
 conversation. The root is `"1"`.
 
@@ -185,7 +186,7 @@ Both read committed state only, so they are safe here. **Ask for:**
 
 pi's SQLite schema uses bare names such as `tasks`, `entries`,
 `conversations`, and `documents`, which easily collide in an object that
-also hosts other state. `session-store.ts` rewrites identifiers outside
+also hosts other state. The session store rewrites identifiers outside
 string literals, using the names it reads from pi's exported
 `SQLITE_MIGRATIONS`. pi's conformance suite passes against it. It breaks if
 a future pi statement puts a table name in a string literal or builds SQL

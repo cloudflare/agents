@@ -5,8 +5,11 @@ import type {
 } from "@earendil-works/pi-durable";
 import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
-import { ROOT_SESSION, type PiHarness } from "./harness/pi-harness";
-import type { PiSessionId } from "./harness/types";
+import {
+  ROOT_SESSION,
+  type PiHarness,
+  type PiSessionId
+} from "agents/harnesses/pi";
 import type { PiClientMessage, PiServerMessage } from "./protocol";
 
 const SESSION_TAG_PREFIX = "pi-session:";

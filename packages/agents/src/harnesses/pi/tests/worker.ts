@@ -14,20 +14,18 @@ import {
   createRegistry,
   Harness,
   type AgentEvent,
+  type EntryRecord,
   type Registry,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
+import { Lifecycle } from "../../../lifecycle";
 import {
   PiHarness,
   type PiOperationResult,
   type PiReceipt,
   type PiWhenBusy
-} from "agents/harnesses/pi";
-import { Lifecycle } from "agents/lifecycle";
-import { WebSockets } from "agents/websockets";
-import { PiSessionSockets } from "../sockets";
-import { EMPTY_VIEW, reduceEvents } from "../view";
+} from "../index";
 
 /** A pi-ai model registry holding only the faux provider. */
 function fauxModels(provider: Parameters<MutableModels["setProvider"]>[0]) {
@@ -85,8 +83,21 @@ function script(context: TranscriptContext): AssistantMessage {
   return fauxAssistantMessage([fauxText(`echo: ${prompt}`)]);
 }
 
-/** Real Durable Object fixture: the example's composition with pi-ai's faux provider. */
-export class PiHarnessTestObject extends DurableObject<Env> {
+/**
+ * The text of each transcript entry that carries a model message, so tests
+ * can compare transcripts as strings. A tool call with no text is "".
+ */
+function entryTexts(entries: readonly EntryRecord[]): string[] {
+  return entries.flatMap((entry) => {
+    if (entry.kind === "pi.reset") return ["Context reset"];
+    const message = entry.model?.[0];
+    if (entry.kind === "pi.system" || message === undefined) return [];
+    return [textOf(message.content)];
+  });
+}
+
+/** Real Durable Object fixture: a harness over pi-ai's faux provider. */
+export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   readonly #faux = fauxProvider({
     tokensPerSecond: 200,
     tokenSize: { min: 2, max: 4 }
@@ -113,27 +124,19 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     // Short enough that a suite does not sit on the real 30s heartbeat.
     timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
   });
-  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
-    this.ctx.getWebSockets(tag)
-  );
-  readonly webSockets = new WebSockets(this.sockets.options());
-  readonly lifecycle = Lifecycle.install(this)
-    .use(this.webSockets)
-    .use(this.harness);
+  readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
-  async onStart(): Promise<void> {
-    await this.sockets.reattach();
-  }
-
-  constructor(ctx: DurableObjectState, env: Env) {
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.#faux.setResponses(Array.from({ length: 200 }, () => script));
   }
 
-  /** Prompt the root session; the result without its transcript. */
-  async prompt(text: string): Promise<PiOperationResult> {
-    const { messages: _messages, ...result } = await this.harness.prompt(text);
-    return result;
+  async prompt(text: string, session?: string) {
+    const response = await this.harness.prompt(
+      text,
+      session ? { session } : {}
+    );
+    return { ...response, messages: entryTexts(response.messages) };
   }
 
   submit(
@@ -151,6 +154,26 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     return this.harness.wait(operationId, session ? { session } : {});
   }
 
+  async messages(session?: string): Promise<string[]> {
+    return entryTexts(await this.harness.messages(session ? { session } : {}));
+  }
+
+  async pending() {
+    return this.harness.pending();
+  }
+
+  async abort(): Promise<boolean> {
+    return this.harness.abort();
+  }
+
+  async createSession(): Promise<string> {
+    return (await this.harness.sessions.create()).id;
+  }
+
+  async listSessions() {
+    return this.harness.sessions.list();
+  }
+
   /** Resolve once the gate tool has started `runs` times. */
   async gateStarted(runs: number): Promise<number> {
     for (let i = 0; i < 200; i++) {
@@ -165,28 +188,33 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     await this.ctx.storage.put(RELEASE_KEY, true);
   }
 
+  async gateRuns(): Promise<number> {
+    return (await this.ctx.storage.get<number>(GATE_RUNS_KEY)) ?? 0;
+  }
+
   /** Watch the root session's events until a run ends. */
-  async watch(): Promise<{ view: string; types: string[] }> {
+  async watch(): Promise<string[]> {
     const stream = await this.harness.session().events();
-    let view = reduceEvents(EMPTY_VIEW, [stream.snapshot]);
-    const types: string[] = ["snapshot"];
+    const types: string[] = [stream.snapshot.type];
     await new Promise<void>((resolve) => {
       stream.start(async (events: readonly AgentEvent[]) => {
         types.push(...events.map((event) => event.type));
-        view = reduceEvents(view, events);
         if (events.some((event) => event.type === "run_end")) resolve();
       });
     });
     await stream.stop();
-    // JSON, so the RPC type stays shallow for the test's type checker.
-    return { view: JSON.stringify(view), types };
+    return types;
   }
 
-  /** The view folded from a fresh snapshot, as a client joining now sees it. */
-  async snapshotView(): Promise<string> {
+  /** The transcript in a fresh snapshot, as a client joining now sees it. */
+  async snapshotTexts(): Promise<string[]> {
     const stream = await this.harness.session().events();
     await stream.stop();
-    return JSON.stringify(reduceEvents(EMPTY_VIEW, [stream.snapshot]));
+    return entryTexts(stream.snapshot.entries);
+  }
+
+  async alarmTime(): Promise<number | null> {
+    return this.ctx.storage.getAlarm();
   }
 
   #registry(): Registry {
@@ -233,7 +261,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   }
 }
 
-/** Multiplies by three. */
+/** The one tool the factory fixture needs: no gating, no storage. */
 function multiplyTool(): ToolRegistration {
   return {
     name: "multiply",
@@ -249,5 +277,53 @@ function multiplyTool(): ToolRegistration {
     }
   };
 }
+
+/**
+ * A harness given only its factory: no `defaults`, so new sessions start
+ * without a model until one is set.
+ */
+export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
+  readonly #faux = fauxProvider({
+    tokensPerSecond: 200,
+    tokenSize: { min: 2, max: 4 }
+  });
+  readonly harness = new PiHarness({
+    harness: ({ storage, context }) =>
+      Harness.open(
+        storage,
+        {
+          models: fauxModels(this.#faux.provider),
+          registry: createRegistry()
+        },
+        context
+      ),
+    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
+  });
+  readonly lifecycle = Lifecycle.install(this).use(this.harness);
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    this.#faux.setResponses(Array.from({ length: 200 }, () => script));
+  }
+
+  async prompt(text: string) {
+    const response = await this.harness.prompt(text);
+    return { ...response, messages: entryTexts(response.messages) };
+  }
+
+  async setFauxModel(): Promise<void> {
+    const model = this.#faux.getModel();
+    await this.harness
+      .session()
+      .setModel({ provider: model.provider, modelId: model.id });
+  }
+
+  async alarmTime(): Promise<number | null> {
+    return this.ctx.storage.getAlarm();
+  }
+}
+
+/** A bare object whose SQLite database the storage conformance suite uses. */
+export class PiStoreTestObject extends DurableObject<Cloudflare.Env> {}
 
 export default { fetch: () => new Response("Not found", { status: 404 }) };
