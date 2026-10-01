@@ -30,6 +30,7 @@ import {
   type BrowserSessionStore,
   type StoredBrowserSession
 } from "./session-store";
+import { loadCdpSpec, type SearchableCdpSpec } from "./spec";
 
 /**
  * Browser Run's server-side `keep_alive` maximum (600 seconds). A `Browser`
@@ -150,15 +151,38 @@ export interface ResolvedBrowser {
   restarted: boolean;
   createdAt: number;
   updatedAt: number;
+  /**
+   * The tab the agent last worked in, when one was recorded for this
+   * browser. Absent on a browser this resolution created; a replacement a
+   * concurrent caller already created and used may carry one.
+   */
+  activeTargetId?: string;
 }
 
 export interface BrowserConnection {
   name: string;
   sessionId: string;
-  /** See {@link ResolvedBrowser.restarted}. */
+  /**
+   * `true` when the browser this caller resolved is gone, even if a
+   * concurrent caller already replaced it. See
+   * {@link ResolvedBrowser.restarted}.
+   */
   restarted: boolean;
+  /** See {@link ResolvedBrowser.activeTargetId}. */
+  activeTargetId?: string;
   /** Closing this connection does NOT close the browser. */
   cdp: CdpConnection;
+  /**
+   * Record the tab the agent is working in (or clear it with `undefined`).
+   * Never resurrects: returns `false` when the browser was closed or
+   * replaced since this connection resolved it.
+   */
+  setActiveTarget(targetId: string | undefined): Promise<boolean>;
+  /**
+   * The Chrome DevTools Protocol description this browser serves, read from
+   * the browser itself (cached per binding).
+   */
+  spec(): Promise<SearchableCdpSpec>;
 }
 
 /**
@@ -297,11 +321,21 @@ export class Browser extends LifecycleCapability {
         }
       }
     );
+    const { binding } = this.#provider;
     return {
       name: resolved.name,
       sessionId: resolved.sessionId,
       restarted: resolved.restarted,
-      cdp
+      activeTargetId: resolved.activeTargetId,
+      cdp,
+      setActiveTarget: (targetId) =>
+        this.#update(resolved.sessionId, (current) => ({
+          ...current,
+          activeTargetId: targetId,
+          updatedAt: Date.now()
+        })),
+      spec: () =>
+        loadCdpSpec({ browser: binding, sessionId: resolved.sessionId })
     };
   }
 
@@ -409,21 +443,31 @@ export class Browser extends LifecycleCapability {
   }
 
   /**
-   * Refresh `updatedAt` while the record still holds `sessionId` — a
-   * replaced or retired record is never resurrected. Returns false when a
-   * concurrent close or replacement already retired it.
+   * Refresh `updatedAt` while the record still holds `sessionId`. Returns
+   * false when a concurrent close or replacement already retired it.
    */
-  async #touch(sessionId: string): Promise<boolean> {
+  #touch(sessionId: string): Promise<boolean> {
+    return this.#update(sessionId, (current) => ({
+      ...current,
+      updatedAt: Date.now()
+    }));
+  }
+
+  /**
+   * Rewrite the record only while it still holds `sessionId`: a replaced or
+   * retired record is never resurrected.
+   */
+  async #update(
+    sessionId: string,
+    change: (current: StoredBrowserSession) => StoredBrowserSession
+  ): Promise<boolean> {
     const lock = await this.#sessionStore.acquireLock(this.#key);
     try {
       const current = await this.#sessionStore.get(this.#key);
       if (current?.sessionId !== sessionId) {
-        return false; // replaced or gone — activity no longer counts
+        return false; // replaced or gone — the caller's view is stale
       }
-      await this.#sessionStore.set(this.#key, {
-        ...current,
-        updatedAt: Date.now()
-      });
+      await this.#sessionStore.set(this.#key, change(current));
       return true;
     } finally {
       await lock.release();
