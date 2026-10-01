@@ -39,3 +39,5 @@ minimumReleaseAgeExclude:
   - "@cloudflare/*"
   - "@typescript/*"
   - "@earendil-works/*"
+overrides:
+  "@earendil-works/pi-agent-core>@earendil-works/pi-ai": "^0.99.2"

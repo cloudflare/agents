@@ -3,8 +3,8 @@
 An experimental example that runs [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable),
 pi's durable agent harness, inside a Durable Object. Nothing here is exported
 from the `agents` package. `PiHarness`, the session store, and
-the Workers AI provider all live in this example's `src/` and pin an
-unreleased pi build.
+the Workers AI provider all live in this example's `src/`, on pi's published
+npm packages (see [Pi source](#pi-source)).
 
 The example composes:
 
