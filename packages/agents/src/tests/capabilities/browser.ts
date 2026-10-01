@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { BrowserBinding } from "../../browser/browser-run";
-import { BrowserSessions } from "../../browser/capability";
+import { Browser, browserRun } from "../../browser/browser";
 import { Lifecycle } from "../../lifecycle";
 
 /** One request the fake Browser Run binding served, in arrival order. */
@@ -95,8 +95,8 @@ export function createFakeBrowserBinding(): FakeBrowserBinding {
 }
 
 /**
- * Minimal real host for capability-level browser-session tests: a Durable
- * Object whose only capability is `BrowserSessions`, with runtime handlers
+ * Minimal real host for capability-level browser tests: a Durable Object
+ * whose only capability is a `Browser`, with runtime handlers
  * installed so tests can drive real Lifecycle startup, real storage, and the
  * real job queue and alarm. The binding is the in-memory fake above; its
  * requests are exposed for platform-call assertions.
@@ -105,6 +105,8 @@ export class BrowserHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly #binding = createFakeBrowserBinding();
   readonly browserRequests = this.#binding.requests;
   readonly killBrowserSession = this.#binding.kill;
-  readonly browser = new BrowserSessions({ browser: this.#binding.browser });
+  readonly browser = new Browser({
+    provider: browserRun(this.#binding.browser)
+  });
   readonly lifecycle = Lifecycle.install(this).use(this.browser);
 }

@@ -27,7 +27,7 @@ import {
 import {
   DurableBrowserSessionStore,
   type BrowserSessionStore
-} from "./session-manager";
+} from "./session-store";
 
 export interface CreateBrowserToolsOptions {
   /**

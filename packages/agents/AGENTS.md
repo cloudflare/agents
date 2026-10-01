@@ -138,8 +138,10 @@ src/
     index.ts            # Barrel for agents/browser
     browser-run.ts      # Low-level Browser Run REST/binding calls + errors
     cdp-connection.ts   # CdpConnection — one Chrome DevTools Protocol WebSocket
+    browser.ts          # Browser — one named persistent browser (Lifecycle capability) + browserRun()
     connector.ts        # BrowserConnector — codemode connector + session helpers
-    session-manager.ts  # Durable session-id store + sweep
+    session-store.ts    # Durable session-id store + sweep
+    live-view.ts        # Live View URL minting shared by Browser and BrowserConnector
     spec.ts             # CDP protocol spec loader (cdp.spec())
     quick-actions.ts    # Stateless Quick Action primitives (browserMarkdown, …)
     ai.ts               # createBrowserTools + createQuickActionTools (AI SDK)

@@ -12,7 +12,7 @@ import { BrowserConnector } from "../browser/connector";
 import {
   DurableBrowserSessionStore,
   type StoredBrowserSession
-} from "../browser/session-manager";
+} from "../browser/session-store";
 import {
   listBrowserTargets,
   connectBrowserSession,

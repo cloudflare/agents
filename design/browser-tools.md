@@ -2,7 +2,7 @@
 
 **Status:** experimental (`agents/browser`)
 
-> A named browser session layer (reattach-or-create sessions, restart signaling, a `BrowserSessions` lifecycle capability) is being built beneath this connector — see [browser-sessions.md](./browser-sessions.md). It is internal and not yet exported. Everything below is the shipping surface.
+> A persistent named `Browser` (reattach-or-create, restart signaling, a Lifecycle capability) is being built beneath this connector — see [browser-sessions.md](./browser-sessions.md). It is internal and not yet exported. Everything below is the shipping surface.
 
 ## Problem
 

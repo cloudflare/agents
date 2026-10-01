@@ -32,7 +32,7 @@ export {
   type BrowserSessionLock,
   type BrowserSessionStore,
   type StoredBrowserSession
-} from "./session-manager";
+} from "./session-store";
 
 export {
   browserContent,

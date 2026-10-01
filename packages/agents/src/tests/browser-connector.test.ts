@@ -8,7 +8,7 @@ import type {
   BrowserSessionLock,
   BrowserSessionStore,
   StoredBrowserSession
-} from "../browser/session-manager";
+} from "../browser/session-store";
 
 class MemorySessionStore implements BrowserSessionStore {
   sessions = new Map<string, StoredBrowserSession>();
