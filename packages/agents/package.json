@@ -360,6 +360,11 @@
       "import": "./dist/channels/telegram.js",
       "require": "./dist/channels/telegram.js"
     },
+    "./channels/web": {
+      "types": "./dist/channels/web.d.ts",
+      "import": "./dist/channels/web.js",
+      "require": "./dist/channels/web.js"
+    },
     "./channels/voice": {
       "types": "./dist/channels/voice.d.ts",
       "import": "./dist/channels/voice.js",
@@ -431,6 +436,8 @@
     "test:voice:react": "vitest --project voice-react",
     "test:channels": "vitest --project channels",
     "test:channels:live": "vitest --run -c src/channels/vitest.live.config.ts",
+    "dev:channels:live:web": "wrangler dev -c src/channels/live-tests/web/wrangler.jsonc --port 8799 --inspector-port 0",
+    "dev:channels:react:web": "vite -c src/channels/live-tests/web/vite.config.ts",
     "test:browser": "vitest run --config src/browser-tests/vitest.config.ts",
     "test:workers": "vitest --project workers",
     "test:chat": "vitest --project chat",

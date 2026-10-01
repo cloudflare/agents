@@ -143,12 +143,24 @@ export interface StreamReadBatchesOptions extends StreamReadOptions {
   onUpToDate?: () => void;
 }
 
+/** Position of the last status of a `Streams.list()` page. */
+export interface StreamListCursor {
+  readonly createdAt: number;
+  readonly streamId: string;
+}
+
 /** Filters accepted by `Streams.list()`. */
 export interface StreamListOptions {
   state?: StreamState | StreamState[];
   /** Only streams opened with this exact tag (indexed). */
   tag?: string;
   limit?: number;
+  /**
+   * Continue after this position, exclusive, in the newest-first order
+   * `list()` returns. Pass the last status of the previous page to walk
+   * every stream a filter cannot express here.
+   */
+  after?: StreamListCursor;
 }
 
 /**

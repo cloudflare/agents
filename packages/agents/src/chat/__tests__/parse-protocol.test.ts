@@ -9,7 +9,9 @@ describe("parseProtocolMessage", () => {
     expect(parseProtocolMessage("{broken")).toBeNull();
   });
 
-  it("returns null for JSON without type field", () => {
+  it("returns null for JSON without an object message", () => {
+    expect(parseProtocolMessage("null")).toBeNull();
+    expect(parseProtocolMessage("[]")).toBeNull();
     expect(parseProtocolMessage(JSON.stringify({ id: "abc" }))).toBeNull();
   });
 

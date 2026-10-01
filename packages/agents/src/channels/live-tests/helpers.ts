@@ -18,15 +18,16 @@ export function uniqueText(text: string): string {
 export async function readObserved(
   channel: LiveDeliveryBinding
 ): Promise<ObservedMessage[]> {
-  return (await channel.read()).map((message) => ({
-    text: message.text.replaceAll(RUN_MARKER, "")
+  return (await channel.read()).map(({ text, ...observation }) => ({
+    text: text.replaceAll(RUN_MARKER, ""),
+    ...observation
   }));
 }
 
 /** Run one scenario against an empty destination and leave it empty. */
-export async function withDestination(
-  create: () => LiveDeliveryBinding,
-  run: (channel: LiveDeliveryBinding) => Promise<void>
+export async function withDestination<TBinding extends LiveDeliveryBinding>(
+  create: () => TBinding,
+  run: (channel: TBinding) => Promise<void>
 ): Promise<void> {
   const channel = create();
   await channel.open();
@@ -48,7 +49,8 @@ export async function readUntil(
   channel: LiveDeliveryBinding,
   expected: string
 ): Promise<ObservedMessage[]> {
-  const deadline = Date.now() + OBSERVATION_TIMEOUT_MS;
+  const deadline =
+    Date.now() + (channel.observationTimeoutMs ?? OBSERVATION_TIMEOUT_MS);
   let messages: ObservedMessage[] = [];
   while (Date.now() < deadline) {
     messages = await readObserved(channel);

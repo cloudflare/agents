@@ -341,6 +341,47 @@ describe("fanout streaming", () => {
     });
   });
 
+  it("preserves rich events while a sibling collects the same stream as text", async () => {
+    const deliver = vi.fn(async () => ({ status: "delivered" as const }));
+    const seen: ChannelChunk[] = [];
+    const channelHost = host({
+      plain: { deliver },
+      rich: {
+        async stream(_surface, chunks) {
+          for await (const chunk of chunks) seen.push(chunk);
+          return { status: "delivered" };
+        }
+      }
+    });
+    const parts: ChannelChunk[] = [
+      { type: "message-start", messageId: "m1", metadata: { model: "test" } },
+      {
+        type: "tool-input-available",
+        toolCallId: "t1",
+        toolName: "lookup",
+        input: { query: "weather" }
+      },
+      { type: "tool-output-available", toolCallId: "t1", output: "Sunny" },
+      { type: "text-start", id: "p1" },
+      { type: "text", id: "p1", text: "Sunny today" },
+      { type: "text-end", id: "p1" },
+      { type: "message-finish", finishReason: "stop" }
+    ];
+
+    await expect(
+      channelHost.stream(
+        fanout([surface("plain"), surface("rich")]),
+        streamOf(parts)
+      )
+    ).resolves.toEqual({ status: "delivered" });
+    expect(seen).toEqual(parts);
+    expect(deliver).toHaveBeenCalledWith(
+      surface("plain"),
+      { markdown: "Sunny today" },
+      undefined
+    );
+  });
+
   it("collects for a destination that cannot stream and streams to one that can", async () => {
     const deliver = vi.fn(async () => ({ status: "delivered" as const }));
     const channelHost = host({

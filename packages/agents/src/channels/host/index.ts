@@ -1,14 +1,17 @@
 import type {
   Channel,
   ChannelApprovalRequestOptions,
+  ChannelMessageResolver,
   ChannelChunk,
   ChannelChunkSource,
   ChannelDeliveryOptions,
   ChannelMessage,
   ChannelRoute,
+  ChannelResponseContext,
   ChannelRouteContext,
   ChannelStreamOptions,
-  DeliveryResult
+  DeliveryResult,
+  OutboundResolver
 } from "../channel";
 import { fallbackChannel } from "../fallback";
 import { fanoutChannel } from "../fanout";
@@ -17,21 +20,34 @@ import type {
   ChannelIdentityInput,
   UserIdentity
 } from "../identity";
-import { unsupported } from "../internal";
+import {
+  bindChannelHost,
+  bindChannelIngress,
+  describeChannelResponse,
+  type BindableChannelHost,
+  type BindableChannelIngress,
+  type ChannelIngressDispatchOutcome,
+  type DescribableChannelResponse,
+  unsupported
+} from "../internal";
 import { collectText } from "../stream";
 import type {
   ChannelApprovalResponse,
+  ChannelCancelRequest,
+  ChannelConversationResetRequest,
   ChannelEmailInput,
   ChannelInboundMessage,
   ChannelIngressEnvelope,
   ChannelIngressEvent,
-  ChannelIngressEventInput
+  ChannelIngressEventInput,
+  ChannelToolResult
 } from "../ingress";
 import {
   isChannelMessageSurface,
   type ChannelMessageSurface,
   type ChannelMessageSurfaceInput
 } from "../surface";
+import type { Streams, StreamWriter } from "../../streams";
 
 export type ChannelMessageEvent = {
   channelKey: string;
@@ -41,12 +57,36 @@ export type ChannelMessageEvent = {
   message: ChannelInboundMessage;
 };
 
+export type ChannelToolResultEvent = {
+  channelKey: string;
+  route: string;
+  /** Stable identity derived only from the configured Channel and eventId. */
+  dispatchId: string;
+  result: ChannelToolResult;
+};
+
 export type ChannelApprovalResponseEvent = {
   channelKey: string;
   route: string;
   /** Stable identity derived only from the configured Channel and eventId. */
   dispatchId: string;
   response: ChannelApprovalResponse;
+};
+
+export type ChannelCancelEvent = {
+  channelKey: string;
+  route: string;
+  /** Stable identity derived only from the configured Channel and eventId. */
+  dispatchId: string;
+  request: ChannelCancelRequest;
+};
+
+export type ChannelConversationResetEvent = {
+  channelKey: string;
+  route: string;
+  /** Stable identity derived only from the configured Channel and eventId. */
+  dispatchId: string;
+  request: ChannelConversationResetRequest;
 };
 
 export type ChannelRouteEvent = {
@@ -59,6 +99,10 @@ export type ChannelRouteEvent = {
 
 export type ChannelHostOptions = {
   channels: Record<string, Channel>;
+  /** Durable response storage used by `stream()`. */
+  streams?: Streams;
+  /** Resolve canonical conversation history for Channels that synchronize it. */
+  resolveMessages?: ChannelMessageResolver;
   /** Used when a Channel does not provide a route. Default: event thread id. */
   defaultRoute?: ChannelRoute;
   /** Resolve an existing, explicitly linked application user. */
@@ -66,8 +110,15 @@ export type ChannelHostOptions = {
   /** Observes every valid route outcome before application dispatch. */
   onRoute?(event: ChannelRouteEvent): void | Promise<void>;
   onMessage?(event: ChannelMessageEvent): void | Promise<void>;
+  onToolResult?(event: ChannelToolResultEvent): void | Promise<void>;
   onApprovalResponse?(
     event: ChannelApprovalResponseEvent
+  ): void | Promise<void>;
+  /** Observe a participant request to stop application work for one response. */
+  onCancel?(event: ChannelCancelEvent): void | Promise<void>;
+  /** Apply application-owned conversation reset policy. */
+  onConversationReset?(
+    event: ChannelConversationResetEvent
   ): void | Promise<void>;
 };
 
@@ -84,11 +135,15 @@ const POLICY_KEYS = new Set(["fallback", "fanout"]);
  */
 export class ChannelHost {
   readonly #channels: Record<string, Channel>;
+  readonly #streams: Streams | undefined;
   readonly #defaultRoute: ChannelRoute | undefined;
   readonly #findUser: ChannelHostOptions["findUser"];
   readonly #onRoute: ChannelHostOptions["onRoute"];
   readonly #onMessage: ChannelHostOptions["onMessage"];
+  readonly #onToolResult: ChannelHostOptions["onToolResult"];
   readonly #onApprovalResponse: ChannelHostOptions["onApprovalResponse"];
+  readonly #onCancel: ChannelHostOptions["onCancel"];
+  readonly #onConversationReset: ChannelHostOptions["onConversationReset"];
 
   constructor(options: ChannelHostOptions) {
     for (const channelKey of Object.keys(options.channels)) {
@@ -100,13 +155,43 @@ export class ChannelHost {
     }
     const channels = { ...options.channels };
     this.#channels = channels;
-    channels.fallback = fallbackChannel(this);
-    channels.fanout = fanoutChannel(this);
+    this.#streams = options.streams;
+    const compositeResolver: OutboundResolver = {
+      deliver: (surface, message, deliveryOptions) =>
+        this.deliver(surface, message, deliveryOptions),
+      stream: (surface, chunks, streamOptions = {}) =>
+        this.#stream(surface, chunks, streamOptions, false),
+      requestApproval: (surface, approvalOptions) =>
+        this.requestApproval(surface, approvalOptions),
+      isAvailable: (surface) => this.isAvailable(surface)
+    };
+    channels.fallback = fallbackChannel(compositeResolver);
+    channels.fanout = fanoutChannel(compositeResolver);
     this.#defaultRoute = options.defaultRoute;
     this.#findUser = options.findUser;
     this.#onRoute = options.onRoute;
     this.#onMessage = options.onMessage;
+    this.#onToolResult = options.onToolResult;
     this.#onApprovalResponse = options.onApprovalResponse;
+    this.#onCancel = options.onCancel;
+    this.#onConversationReset = options.onConversationReset;
+
+    for (const [channelKey, channel] of Object.entries(options.channels)) {
+      const bindHost = (channel as Channel & Partial<BindableChannelHost>)[
+        bindChannelHost
+      ];
+      bindHost?.call(channel, {
+        channelKey,
+        resolveMessages: options.resolveMessages,
+        responseStreams: options.streams
+      });
+      const bindIngress = (
+        channel as Channel & Partial<BindableChannelIngress>
+      )[bindChannelIngress];
+      bindIngress?.call(channel, (envelope) =>
+        this.#dispatch(channelKey, channel, envelope)
+      );
+    }
   }
 
   async handleRequest(request: Request): Promise<Response | undefined> {
@@ -170,10 +255,19 @@ export class ChannelHost {
    * cannot never learns it was a stream, because the Host collects the answer
    * and calls `deliver` once.
    */
-  async stream(
+  stream(
     surface: ChannelMessageSurface,
     chunks: ChannelChunkSource,
     options: ChannelStreamOptions = {}
+  ): Promise<DeliveryResult> {
+    return this.#stream(surface, chunks, options, true);
+  }
+
+  async #stream(
+    surface: ChannelMessageSurface,
+    chunks: ChannelChunkSource,
+    options: ChannelStreamOptions,
+    record: boolean
   ): Promise<DeliveryResult> {
     if (!isChannelMessageSurface(surface)) {
       await chunks.cancel().catch(() => {});
@@ -189,8 +283,52 @@ export class ChannelHost {
       );
     }
 
-    if (channel.stream) return channel.stream(surface, chunks, options);
-    return collectAndDeliver(channel, surface, chunks, options);
+    const recorded =
+      record && this.#streams
+        ? await this.#recordResponse(channel, surface, chunks, options)
+        : chunks;
+    try {
+      if (channel.stream)
+        return await channel.stream(surface, recorded, options);
+      return await collectAndDeliver(channel, surface, recorded, options);
+    } finally {
+      if (recorded !== chunks) void recorded.cancel().catch(() => {});
+    }
+  }
+
+  async #recordResponse(
+    channel: Channel,
+    surface: ChannelMessageSurface,
+    chunks: ChannelChunkSource,
+    options: ChannelStreamOptions
+  ): Promise<ReadableStream<ChannelChunk>> {
+    const response = options.response;
+    if (!response) {
+      await chunks.cancel().catch(() => {});
+      throw new Error(
+        "ChannelHost.stream requires options.response when Streams are configured"
+      );
+    }
+    try {
+      const describe = (
+        channel as Channel & Partial<DescribableChannelResponse>
+      )[describeChannelResponse];
+      const channelMetadata = describe?.call(channel, surface, options);
+      const writer = await this.#streams!.open(response.id, {
+        tag: response.conversationId,
+        metadata: {
+          ...channelMetadata,
+          owner: "channels",
+          channelKey: surface.channelKey,
+          conversationId: response.conversationId,
+          messageId: response.messageId
+        }
+      });
+      return recordedResponse(chunks, writer, response);
+    } catch (error) {
+      await chunks.cancel(error).catch(() => {});
+      throw error;
+    }
   }
 
   /** Request approval through the Channel or composite named by the surface. */
@@ -258,34 +396,87 @@ export class ChannelHost {
     channelKey: string,
     channel: Channel,
     envelope: ChannelIngressEnvelope
-  ): Promise<void> {
+  ): Promise<ChannelIngressDispatchOutcome> {
     const rawEvent = envelope.event;
     const event = stampEvent(channelKey, rawEvent);
     const route = await this.#route(channelKey, channel, event, envelope.raw);
     const dispatchId = await createDispatchId(channelKey, event.eventId);
     await this.#onRoute?.({ channelKey, event, route, dispatchId });
-    if (route === null) return;
+    await envelope.onRouted?.(route !== null);
+    if (route === null) return "ignored";
 
-    if (event.type === "message") {
-      if (!this.#onMessage) {
-        throw new Error(
-          `Channel "${channelKey}" received a message without an onMessage callback`
-        );
+    switch (event.type) {
+      case "message": {
+        if (!this.#onMessage) {
+          throw new Error(
+            `Channel "${channelKey}" received a message without an onMessage callback`
+          );
+        }
+        await this.#onMessage({
+          channelKey,
+          route,
+          dispatchId,
+          message: event
+        });
+        return "handled";
       }
-      await this.#onMessage({ channelKey, route, dispatchId, message: event });
-      return;
+      case "tool-result": {
+        if (!this.#onToolResult) {
+          throw new Error(
+            `Channel "${channelKey}" received a tool result without an onToolResult callback`
+          );
+        }
+        await this.#onToolResult({
+          channelKey,
+          route,
+          dispatchId,
+          result: event
+        });
+        return "handled";
+      }
+      case "approval-response": {
+        if (!this.#onApprovalResponse) {
+          throw new Error(
+            `Channel "${channelKey}" received an approval response without an onApprovalResponse callback`
+          );
+        }
+        await this.#onApprovalResponse({
+          channelKey,
+          route,
+          dispatchId,
+          response: event
+        });
+        return "handled";
+      }
+      case "cancel-request": {
+        if (!this.#onCancel) {
+          throw new Error(
+            `Channel "${channelKey}" received a cancellation request without an onCancel callback`
+          );
+        }
+        await this.#onCancel({
+          channelKey,
+          route,
+          dispatchId,
+          request: event
+        });
+        return "handled";
+      }
+      case "conversation-reset-request": {
+        if (!this.#onConversationReset) {
+          throw new Error(
+            `Channel "${channelKey}" received a conversation reset request without an onConversationReset callback`
+          );
+        }
+        await this.#onConversationReset({
+          channelKey,
+          route,
+          dispatchId,
+          request: event
+        });
+        return "handled";
+      }
     }
-    if (!this.#onApprovalResponse) {
-      throw new Error(
-        `Channel "${channelKey}" received an approval response without an onApprovalResponse callback`
-      );
-    }
-    await this.#onApprovalResponse({
-      channelKey,
-      route,
-      dispatchId,
-      response: event
-    });
   }
 
   async #route(
@@ -330,6 +521,157 @@ export class ChannelHost {
       }
     };
   }
+}
+
+function recordedResponse(
+  source: ReadableStream<ChannelChunk>,
+  writer: StreamWriter,
+  response: ChannelResponseContext
+): ReadableStream<ChannelChunk> {
+  const reader = source.getReader();
+  let first = true;
+  let settled = false;
+  let released = false;
+  let partSequence = 0;
+  let implicitPart: { type: "text" | "reasoning"; id: string } | undefined;
+
+  function release(): void {
+    if (released) return;
+    released = true;
+    reader.releaseLock();
+  }
+
+  function append(chunk: ChannelChunk): void {
+    writer.append(chunk as unknown as import("../../streams").StreamJson);
+  }
+
+  function emit(
+    controller: ReadableStreamDefaultController<ChannelChunk>,
+    chunks: readonly ChannelChunk[]
+  ): void {
+    for (const chunk of chunks) {
+      append(chunk);
+      controller.enqueue(chunk);
+    }
+  }
+
+  function fail(reason: unknown): void {
+    if (settled) return;
+    settled = true;
+    writer.error(reason instanceof Error ? reason.message : String(reason));
+  }
+
+  function nextPartId(): string {
+    partSequence += 1;
+    return `${response.messageId}:part:${partSequence}`;
+  }
+
+  function closeImplicitPart(): ChannelChunk[] {
+    if (!implicitPart) return [];
+    const end = {
+      type: implicitPart.type === "text" ? "text-end" : "reasoning-end",
+      id: implicitPart.id
+    } as ChannelChunk;
+    implicitPart = undefined;
+    return [end];
+  }
+
+  function normalizePart(chunk: ChannelChunk): ChannelChunk[] {
+    if (chunk.type === "text" && chunk.id === undefined) {
+      const normalized: ChannelChunk[] = [];
+      if (implicitPart?.type !== "text") {
+        normalized.push(...closeImplicitPart());
+        implicitPart = { type: "text", id: nextPartId() };
+        normalized.push({ type: "text-start", id: implicitPart.id });
+      }
+      normalized.push({ ...chunk, id: implicitPart.id });
+      return normalized;
+    }
+    if (chunk.type === "reasoning" && chunk.id === undefined) {
+      const normalized: ChannelChunk[] = [];
+      if (implicitPart?.type !== "reasoning") {
+        normalized.push(...closeImplicitPart());
+        implicitPart = { type: "reasoning", id: nextPartId() };
+        normalized.push({ type: "reasoning-start", id: implicitPart.id });
+      }
+      normalized.push({ ...chunk, id: implicitPart.id });
+      return normalized;
+    }
+
+    const normalized = closeImplicitPart();
+    if (
+      (chunk.type === "tool" ||
+        chunk.type === "source" ||
+        chunk.type === "data") &&
+      chunk.id === undefined
+    ) {
+      normalized.push({ ...chunk, id: nextPartId() });
+    } else {
+      normalized.push(chunk);
+    }
+    return normalized;
+  }
+
+  function normalize(chunk: ChannelChunk): ChannelChunk[] {
+    if (first) {
+      first = false;
+      if (chunk.type === "message-start") {
+        if (
+          chunk.messageId !== undefined &&
+          chunk.messageId !== response.messageId
+        ) {
+          throw new Error(
+            `Channel response message ID ${JSON.stringify(response.messageId)} does not match stream message ID ${JSON.stringify(chunk.messageId)}`
+          );
+        }
+        return [{ ...chunk, messageId: response.messageId }];
+      }
+      return [
+        { type: "message-start", messageId: response.messageId },
+        ...normalizePart(chunk)
+      ];
+    }
+    if (chunk.type === "message-start") {
+      throw new Error("A Channel response stream can contain one message");
+    }
+    return normalizePart(chunk);
+  }
+
+  return new ReadableStream<ChannelChunk>({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) {
+          const finalChunks: ChannelChunk[] = [];
+          if (first) {
+            finalChunks.push({
+              type: "message-start",
+              messageId: response.messageId
+            });
+          }
+          finalChunks.push(...closeImplicitPart());
+          emit(controller, finalChunks);
+          settled = true;
+          writer.close();
+          release();
+          controller.close();
+          return;
+        }
+
+        emit(controller, normalize(next.value));
+      } catch (error) {
+        fail(error);
+        await reader.cancel(error).catch(() => {});
+        release();
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      fail(reason ?? "Channel stopped reading the response");
+      await reader.cancel(reason).catch(() => {});
+      release();
+    }
+  });
 }
 
 /**

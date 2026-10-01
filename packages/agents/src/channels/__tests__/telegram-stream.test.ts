@@ -100,6 +100,65 @@ describe("Telegram streaming", () => {
     vi.useRealTimers();
   });
 
+  it("keeps tool activity and reasoning hidden by default", async () => {
+    const { fetch, calls } = recorder();
+    const channel = telegram({
+      botToken: BOT_TOKEN,
+      fetch,
+      streamIntervalMs: 0
+    });
+
+    await channel.stream!(
+      PRIVATE_SURFACE,
+      streamOf<ChannelChunk>([
+        { type: "reasoning", text: "Private reasoning." },
+        { type: "tool", name: "search", status: "completed" },
+        { type: "text", text: "The answer." }
+      ]),
+      {}
+    );
+
+    expect(calls.at(-1)?.body.text).toBe("The answer.");
+  });
+
+  it("renders opted-in tool activity and reasoning around the answer", async () => {
+    const { fetch, calls } = recorder();
+    const channel = telegram({
+      botToken: BOT_TOKEN,
+      fetch,
+      streamIntervalMs: 0,
+      renderParts: { tools: true, reasoning: true }
+    });
+    const parts: ChannelChunk[] = [
+      { type: "reasoning-start", id: "reasoning-1" },
+      { type: "reasoning", id: "reasoning-1", text: "Checking docs." },
+      { type: "reasoning-end", id: "reasoning-1" },
+      {
+        type: "tool-input-available",
+        toolCallId: "tool-1",
+        toolName: "search",
+        title: "Searching docs",
+        input: { secret: "not-for-telegram" }
+      },
+      {
+        type: "tool-output-available",
+        toolCallId: "tool-1",
+        output: { secret: "not-for-telegram" }
+      },
+      { type: "text", text: "The answer." }
+    ];
+
+    await expect(
+      channel.stream!(PRIVATE_SURFACE, streamOf(parts), {})
+    ).resolves.toMatchObject({ status: "delivered" });
+
+    const expected =
+      "Tools\n- Searching docs: completed\n\nReasoning\nChecking docs.\n\nAnswer\nThe answer.";
+    expect(of(calls, "sendMessageDraft").at(-1)?.body.text).toBe(expected);
+    expect(calls.at(-1)?.body).toEqual({ chat_id: "99", text: expected });
+    expect(JSON.stringify(calls)).not.toContain("not-for-telegram");
+  });
+
   it("prefixes the title on both the preview and the message", async () => {
     const { fetch, calls } = recorder();
     const channel = telegram({

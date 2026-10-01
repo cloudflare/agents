@@ -83,6 +83,49 @@ describe("Slack streaming", () => {
     ]);
   });
 
+  it("renders selected parts when a top-level stream is collected", async () => {
+    const { fetch, calls } = recorder();
+    const channel = slack({
+      botToken: BOT_TOKEN,
+      fetch,
+      renderParts: { tools: true, reasoning: true }
+    });
+    const parts: ChannelChunk[] = [
+      { type: "reasoning", text: "Checking docs." },
+      {
+        type: "tool-input-available",
+        toolCallId: "tool-1",
+        toolName: "search",
+        title: "Searching docs",
+        input: { secret: "not-for-slack" }
+      },
+      {
+        type: "tool-output-available",
+        toolCallId: "tool-1",
+        output: { secret: "not-for-slack" }
+      },
+      { type: "text", text: "The answer." }
+    ];
+
+    await channel.stream!(
+      { ...CHANNEL_SURFACE, address: { channelId: "CDEST" } },
+      streamOf(parts),
+      {}
+    );
+
+    expect(calls).toEqual([
+      {
+        method: "chat.postMessage",
+        body: {
+          channel: "CDEST",
+          text: "Tools\n- Searching docs: completed\n\nReasoning\nChecking docs.\n\nAnswer\nThe answer.",
+          mrkdwn: true
+        }
+      }
+    ]);
+    expect(JSON.stringify(calls)).not.toContain("not-for-slack");
+  });
+
   it("starts, appends, and stops one streaming message", async () => {
     const { fetch, calls } = recorder();
     const channel = slack({ botToken: BOT_TOKEN, fetch, streamIntervalMs: 0 });
@@ -114,6 +157,101 @@ describe("Slack streaming", () => {
       channel: "CDEST",
       ts: "1711000000.9"
     });
+  });
+
+  it("renders opted-in reasoning while hiding opted-out tool activity", async () => {
+    const { fetch, calls } = recorder();
+    const channel = slack({
+      botToken: BOT_TOKEN,
+      fetch,
+      streamIntervalMs: 0,
+      renderParts: { tools: false, reasoning: true }
+    });
+    const parts: ChannelChunk[] = [
+      { type: "reasoning-start", id: "reasoning-1" },
+      { type: "reasoning", id: "reasoning-1", text: "Checking docs." },
+      { type: "reasoning-end", id: "reasoning-1" },
+      {
+        type: "tool-input-available",
+        toolCallId: "tool-1",
+        toolName: "search",
+        title: "Searching docs",
+        input: { secret: "not-for-slack" }
+      },
+      {
+        type: "tool-output-available",
+        toolCallId: "tool-1",
+        output: { secret: "not-for-slack" }
+      },
+      { type: "text", text: "The answer." }
+    ];
+
+    await expect(
+      channel.stream!(CHANNEL_SURFACE, streamOf(parts), {})
+    ).resolves.toMatchObject({ status: "delivered" });
+
+    const appended = calls
+      .filter((call) => call.method === "chat.appendStream")
+      .flatMap((call) => call.body.chunks as unknown[]);
+    expect(appended).toEqual([
+      { type: "markdown_text", text: "*Reasoning*\n" },
+      { type: "markdown_text", text: "Checking docs." },
+      { type: "markdown_text", text: "\n\n" },
+      { type: "markdown_text", text: "The answer." }
+    ]);
+    expect(JSON.stringify(calls)).not.toContain("not-for-slack");
+    expect(JSON.stringify(calls)).not.toContain("task_update");
+  });
+
+  it("renders rich tool calls as status without exposing inputs or outputs", async () => {
+    const { fetch, calls } = recorder();
+    const channel = slack({ botToken: BOT_TOKEN, fetch, streamIntervalMs: 0 });
+    const parts: ChannelChunk[] = [
+      { type: "message-start", messageId: "m1" },
+      {
+        type: "tool-input-available",
+        toolCallId: "t1",
+        toolName: "search",
+        title: "Searching",
+        input: { secret: "not-for-slack" }
+      },
+      {
+        type: "tool-output-available",
+        toolCallId: "t1",
+        output: { secret: "not-for-slack" },
+        preliminary: true
+      },
+      { type: "tool-output-available", toolCallId: "t1", output: "result" },
+      { type: "text-start", id: "p1" },
+      { type: "text", id: "p1", text: "Answer" },
+      { type: "data", name: "internal", data: "not-for-slack" },
+      { type: "text-end", id: "p1" },
+      { type: "message-finish", finishReason: "stop" }
+    ];
+
+    await expect(
+      channel.stream!(CHANNEL_SURFACE, streamOf(parts), {})
+    ).resolves.toMatchObject({ status: "delivered" });
+    const appended = calls
+      .filter((call) => call.method === "chat.appendStream")
+      .flatMap((call) => call.body.chunks as unknown[]);
+    expect(appended).toEqual([
+      {
+        type: "task_update",
+        id: "t1",
+        title: "Searching",
+        status: "in_progress"
+      },
+      {
+        type: "task_update",
+        id: "t1",
+        title: "Searching",
+        status: "in_progress"
+      },
+      { type: "task_update", id: "t1", title: "Searching", status: "complete" },
+      { type: "markdown_text", text: "Answer" }
+    ]);
+    expect(JSON.stringify(calls)).not.toContain("not-for-slack");
   });
 
   it("opens the stream with the title, which is known before the first token", async () => {

@@ -12,6 +12,11 @@ export type ChunkConsumer<TChunk, TResult> = {
   onFinish(outcome: StreamOutcome): Awaitable<TResult>;
 };
 
+export type ConsumeChunksOptions = {
+  /** Stop consumption and cancel the producer when aborted. */
+  signal?: AbortSignal;
+};
+
 /** The complete text of a stream, and whether it ended before its answer did. */
 export type CollectedText = {
   text: string;
@@ -27,23 +32,34 @@ export type CollectedText = {
  */
 export async function consumeChunks<TChunk, TResult>(
   chunks: ReadableStream<TChunk>,
-  consumer: ChunkConsumer<TChunk, TResult>
+  consumer: ChunkConsumer<TChunk, TResult>,
+  options: ConsumeChunksOptions = {}
 ): Promise<TResult> {
   const reader = chunks.getReader();
   let outcome: StreamOutcome = { interrupted: false };
   let cancellation: Promise<void> | undefined;
+  const abort = () => {
+    const error =
+      options.signal?.reason ??
+      new DOMException("The stream was cancelled", "AbortError");
+    outcome = { interrupted: true, error };
+    cancellation ??= reader.cancel(error).catch(() => {});
+  };
+  options.signal?.addEventListener("abort", abort, { once: true });
   try {
-    while (true) {
+    if (options.signal?.aborted) abort();
+    while (!options.signal?.aborted) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done || options.signal?.aborted) break;
       await consumer.onChunk(value);
     }
   } catch (error) {
     outcome = { interrupted: true, error };
     // Start cancellation before finalizing, but do not block the terminal
     // provider call on sibling tee branches. Await cleanup only afterward.
-    cancellation = reader.cancel().catch(() => {});
+    cancellation ??= reader.cancel(error).catch(() => {});
   } finally {
+    options.signal?.removeEventListener("abort", abort);
     reader.releaseLock();
   }
   try {
@@ -66,6 +82,15 @@ export function collectText(
   const joiner = new TextSegmentJoiner();
   return consumeChunks(chunks, {
     onChunk(chunk) {
+      // Metadata can be interleaved between deltas of the same word. It does
+      // not delimit text, unlike tool calls, reasoning, or explicit part ends.
+      if (
+        chunk.type === "message-metadata" ||
+        chunk.type === "data" ||
+        chunk.type === "custom"
+      ) {
+        return;
+      }
       for (const event of joiner.pushChunk(
         chunk.type === "text"
           ? { type: "text-delta", text: chunk.text }

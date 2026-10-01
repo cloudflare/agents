@@ -49,6 +49,7 @@ const entries = [
   "src/channels/slack.ts",
   "src/channels/telegram.ts",
   "src/channels/voice.ts",
+  "src/channels/web.ts",
   "src/channels/ai-sdk.ts",
   "src/channels/tanstack-ai.ts"
 ];

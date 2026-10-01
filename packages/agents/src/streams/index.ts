@@ -18,6 +18,7 @@ export { sseResponse, type SSEResponseOptions } from "./sse";
 export type {
   StreamChunk,
   StreamJson,
+  StreamListCursor,
   StreamListOptions,
   StreamOpenOptions,
   StreamReadBatchesOptions,

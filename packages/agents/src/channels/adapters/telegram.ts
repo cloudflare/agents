@@ -3,10 +3,12 @@ import type {
   ChannelApprovalRequest,
   ChannelChunk,
   ChannelMessage,
+  ChannelPartRenderingOptions,
   ChannelRoute,
   ChannelStreamOptions,
   DeliveryResult
 } from "../channel";
+import { createTextPartRenderer } from "../render-parts";
 import { consumeChunks, createPacer } from "../stream";
 import type { ChannelIdentity } from "../identity";
 import {
@@ -92,6 +94,11 @@ export type TelegramChannelOptions = {
   toText?: (message: ChannelMessage) => string;
   /** Parse mode for caller-formatted delivery text. */
   parseMode?: "HTML" | "MarkdownV2";
+  /**
+   * Non-text stream parts to include in Telegram messages.
+   * @default { tools: false, reasoning: false }
+   */
+  renderParts?: ChannelPartRenderingOptions;
   /**
    * Smallest gap between `sendMessageDraft` previews. Snapshots produced
    * inside one interval are replaced rather than sent. @default 500
@@ -695,12 +702,14 @@ export function telegram(
   /** Persist the answer, splitting it when it outgrows one Telegram message. */
   async function sendComplete(
     destination: ChannelMessageSurface,
-    text: string
+    text: string,
+    parseParts = false
   ): Promise<DeliveryResult> {
     const [head, ...tail] = splitText(text, maxLength);
     // Raw HTML and Markdown cannot be partitioned safely without parsing it.
-    // Preserve all content literally rather than send malformed fragments.
-    const parseMode = tail.length === 0 ? options.parseMode : undefined;
+    // Rich parts also contain provider-owned text rather than caller-formatted markup.
+    const parseMode =
+      tail.length === 0 && !parseParts ? options.parseMode : undefined;
     const first = await send(destination, head!, parseMode);
     if (first.status !== "delivered") return first;
 
@@ -746,22 +755,25 @@ export function telegram(
       : undefined;
     const prefix = streamOptions.title ? `${streamOptions.title}\n\n` : "";
     const shouldPreview = createPacer(streamIntervalMs);
-    let answer = "";
+    const renderer = createTextPartRenderer({
+      tools: options.renderParts?.tools ?? false,
+      reasoning: options.renderParts?.reasoning ?? false
+    });
     let draftsStopped = draftId === undefined;
 
     return consumeChunks(chunks, {
       async onChunk(chunk) {
-        if (chunk.type !== "text" || chunk.text.length === 0) return;
-        answer += chunk.text;
-        if (draftsStopped || !shouldPreview()) return;
-        const preview = splitText(`${prefix}${answer}`, maxLength)[0] ?? "";
+        if (!renderer.push(chunk) || draftsStopped || !shouldPreview()) return;
+        const rendered = renderer.render(prefix);
+        const preview = splitText(rendered, maxLength)[0] ?? "";
         const shown = await sendDraft(destination, draftId!, preview);
         if (!shown) draftsStopped = true;
       },
       async onFinish(outcome) {
         // The draft is not the message. Without this send the reader's screen
         // goes blank in thirty seconds and nothing is kept.
-        if (answer.length === 0) {
+        const hasRenderedParts = renderer.hasNonText();
+        if (!renderer.hasContent()) {
           return {
             status: "failed",
             retryable: false,
@@ -777,7 +789,11 @@ export function telegram(
           };
         }
 
-        const result = await sendComplete(destination, `${prefix}${answer}`);
+        const result = await sendComplete(
+          destination,
+          renderer.render(prefix),
+          hasRenderedParts
+        );
         if (!outcome.interrupted || result.status !== "delivered") {
           return result;
         }

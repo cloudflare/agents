@@ -55,7 +55,10 @@ export function telegramBinding(): LiveDeliveryBinding {
     requiredEnv("CHANNELS_LIVE_TELEGRAM_API_HASH"),
     { connectionRetries: 3 }
   );
-  const channel = telegram({ botToken });
+  const channel = telegram({
+    botToken,
+    renderParts: { tools: true, reasoning: true }
+  });
   const botId = botUserId(botToken);
   // Telegram surfaces a bot's draft to the recipient's client as a typing
   // update with its own action, distinct from an ordinary typing indicator.

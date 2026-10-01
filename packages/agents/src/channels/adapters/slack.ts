@@ -3,11 +3,13 @@ import type {
   ChannelApprovalRequest,
   ChannelChunk,
   ChannelMessage,
+  ChannelPartRenderingOptions,
   ChannelRoute,
   ChannelStreamOptions,
   DeliveryResult
 } from "../channel";
-import { collectText, consumeChunks, createPacer } from "../stream";
+import { createTextPartRenderer } from "../render-parts";
+import { consumeChunks, createPacer } from "../stream";
 import type { ChannelIdentity } from "../identity";
 import {
   isChannelMessageSurface,
@@ -137,6 +139,11 @@ export type SlackChannelOptions = {
   apiBaseUrl?: string;
   /** Project canonical Channel Markdown into Slack mrkdwn text. */
   toText?: (message: ChannelMessage) => string;
+  /**
+   * Non-text stream parts to include in Slack messages.
+   * @default { tools: true, reasoning: false }
+   */
+  renderParts?: ChannelPartRenderingOptions;
   /**
    * Smallest gap between `chat.appendStream` calls. Chunks produced inside
    * one interval are appended together. @default 500
@@ -811,32 +818,121 @@ function escapeLinkLabel(value: string): string {
  * rather than appended, so it can be rendered once beneath the finished
  * message instead of interrupting the text.
  */
+type SlackStreamRenderState = {
+  reasoningOpen: boolean;
+  tools: Map<string, { name: string; title?: string }>;
+};
+
+function markdownChunks(text: string): SlackStreamChunk[] {
+  return splitText(text, SLACK_APPEND_LIMIT).map((part) => ({
+    type: "markdown_text",
+    text: part
+  }));
+}
+
+function closeReasoning(state: SlackStreamRenderState): SlackStreamChunk[] {
+  if (!state.reasoningOpen) return [];
+  state.reasoningOpen = false;
+  return [{ type: "markdown_text", text: "\n\n" }];
+}
+
 function toStreamChunks(
   chunk: ChannelChunk,
-  sources: { url: string; title?: string }[]
+  sources: { url: string; title?: string }[],
+  state: SlackStreamRenderState,
+  renderParts: Required<ChannelPartRenderingOptions>
 ): SlackStreamChunk[] {
   switch (chunk.type) {
+    case "reasoning-start":
+      if (!renderParts.reasoning || state.reasoningOpen) return [];
+      state.reasoningOpen = true;
+      return [{ type: "markdown_text", text: "*Reasoning*\n" }];
+    case "reasoning": {
+      if (!renderParts.reasoning || chunk.text.length === 0) return [];
+      const opening = state.reasoningOpen
+        ? []
+        : [{ type: "markdown_text" as const, text: "*Reasoning*\n" }];
+      state.reasoningOpen = true;
+      return [...opening, ...markdownChunks(chunk.text)];
+    }
+    case "reasoning-end":
+      return renderParts.reasoning ? closeReasoning(state) : [];
     case "text":
-      return splitText(chunk.text, SLACK_APPEND_LIMIT).map((text) => ({
-        type: "markdown_text",
-        text
-      }));
+      return [...closeReasoning(state), ...markdownChunks(chunk.text)];
     case "tool":
       return [
-        {
-          type: "task_update",
-          id: clamp(chunk.id ?? chunk.name, SLACK_TASK_FIELD_LIMIT),
-          title: clamp(chunk.title ?? chunk.name, SLACK_TASK_FIELD_LIMIT),
-          status: SLACK_TASK_STATUS[chunk.status],
-          ...(chunk.detail !== undefined && {
-            details: clamp(chunk.detail, SLACK_TASK_FIELD_LIMIT)
-          })
-        }
+        ...closeReasoning(state),
+        ...(renderParts.tools
+          ? [
+              {
+                type: "task_update" as const,
+                id: clamp(chunk.id ?? chunk.name, SLACK_TASK_FIELD_LIMIT),
+                title: clamp(chunk.title ?? chunk.name, SLACK_TASK_FIELD_LIMIT),
+                status: SLACK_TASK_STATUS[chunk.status],
+                ...(chunk.detail !== undefined && {
+                  details: clamp(chunk.detail, SLACK_TASK_FIELD_LIMIT)
+                })
+              }
+            ]
+          : [])
       ];
+    case "tool-input-start":
+    case "tool-input-available":
+    case "tool-input-error": {
+      state.tools.set(chunk.toolCallId, {
+        name: chunk.toolName,
+        ...(chunk.title !== undefined && { title: chunk.title })
+      });
+      return [
+        ...closeReasoning(state),
+        ...(renderParts.tools
+          ? [
+              {
+                type: "task_update" as const,
+                id: clamp(chunk.toolCallId, SLACK_TASK_FIELD_LIMIT),
+                title: clamp(
+                  chunk.title ?? chunk.toolName,
+                  SLACK_TASK_FIELD_LIMIT
+                ),
+                status:
+                  chunk.type === "tool-input-error"
+                    ? SLACK_TASK_STATUS.failed
+                    : SLACK_TASK_STATUS.started
+              }
+            ]
+          : [])
+      ];
+    }
+    case "tool-output-available":
+    case "tool-output-error":
+    case "tool-output-denied": {
+      const tool = state.tools.get(chunk.toolCallId);
+      return [
+        ...closeReasoning(state),
+        ...(renderParts.tools
+          ? [
+              {
+                type: "task_update" as const,
+                id: clamp(chunk.toolCallId, SLACK_TASK_FIELD_LIMIT),
+                title: clamp(
+                  tool?.title ?? tool?.name ?? chunk.toolCallId,
+                  SLACK_TASK_FIELD_LIMIT
+                ),
+                status:
+                  chunk.type === "tool-output-available"
+                    ? chunk.preliminary
+                      ? SLACK_TASK_STATUS.started
+                      : SLACK_TASK_STATUS.completed
+                    : SLACK_TASK_STATUS.failed
+              }
+            ]
+          : [])
+      ];
+    }
     case "source":
       sources.push(chunk);
-      return [];
-    case "reasoning":
+      return closeReasoning(state);
+    default:
       return [];
   }
 }
@@ -1037,8 +1133,19 @@ export function slack(
       !unresolvedTarget.threadTs &&
       !unresolvedTarget.recipientUserId
     ) {
-      const collected = await collectText(chunks);
-      if (collected.interrupted && collected.text.length === 0) {
+      const renderer = createTextPartRenderer({
+        tools: options.renderParts?.tools ?? true,
+        reasoning: options.renderParts?.reasoning ?? false
+      });
+      const collected = await consumeChunks(chunks, {
+        onChunk(chunk) {
+          renderer.push(chunk);
+        },
+        onFinish(outcome) {
+          return { ...outcome, text: renderer.render() };
+        }
+      });
+      if (collected.interrupted && !renderer.hasContent()) {
         return failed(
           "SLACK_STREAM_INTERRUPTED",
           "The stream ended before producing any content to deliver",
@@ -1092,6 +1199,14 @@ export function slack(
 
     const reference = outboundReference(started.channelId, started.ts);
     const sources: { url: string; title?: string }[] = [];
+    const renderState: SlackStreamRenderState = {
+      reasoningOpen: false,
+      tools: new Map()
+    };
+    const renderParts = {
+      tools: options.renderParts?.tools ?? true,
+      reasoning: options.renderParts?.reasoning ?? false
+    };
     const shouldFlush = createPacer(streamIntervalMs);
     let pending: SlackStreamChunk[] = [];
     let appendFailure:
@@ -1100,7 +1215,9 @@ export function slack(
 
     return consumeChunks(chunks, {
       async onChunk(chunk) {
-        pending.push(...toStreamChunks(chunk, sources));
+        pending.push(
+          ...toStreamChunks(chunk, sources, renderState, renderParts)
+        );
         if (pending.length === 0 || !shouldFlush()) return;
         const appended = await callSlack("chat.appendStream", {
           channel: started.channelId,
@@ -1116,6 +1233,7 @@ export function slack(
         }
       },
       async onFinish(outcome) {
+        pending.push(...closeReasoning(renderState));
         // Whatever the pacer withheld rides along on the terminal call, so an
         // interrupted answer keeps its tail without an extra round trip.
         const stopped = await callSlack("chat.stopStream", {

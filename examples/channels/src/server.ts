@@ -38,7 +38,7 @@ function createChannels(env: Env): Record<string, Channel> {
         const addressed =
           event.type === "approval-response" ||
           event.thread.isDirectMessage === true ||
-          event.message.isMention === true;
+          (event.type === "message" && event.message.isMention === true);
 
         // A Slack message inside a thread carries `reply`, pointing at the
         // message that started it. Join a thread only if we are already in it.
