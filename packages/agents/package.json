@@ -167,6 +167,11 @@
       "import": "./dist/lifecycle/index.js",
       "require": "./dist/lifecycle/index.js"
     },
+    "./harness/ai-sdk": {
+      "types": "./dist/harness/ai-sdk/index.d.ts",
+      "import": "./dist/harness/ai-sdk/index.js",
+      "require": "./dist/harness/ai-sdk/index.js"
+    },
     "./harness/pi": {
       "types": "./dist/harness/pi/index.d.ts",
       "import": "./dist/harness/pi/index.js",
