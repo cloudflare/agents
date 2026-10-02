@@ -137,6 +137,8 @@ export class Chat extends AIChatAgent<Env> {
 
 That's the whole developer surface: a connector class, `createCodemodeRuntime`, and the runtime handle. The handle is the control plane — `tool()` for the model, `pending()`/`approve()`/`reject()`/`rollback()` for approvals, `executions()` for the audit trail, and `saveSnippet()`/`snippets()`/`deleteSnippet()` for curating what the model gets to reuse.
 
+`runtime.tool()` declares its input as `{ code: string }`. Its schema implements the Standard Schema protocol, so compatible tool consumers such as TanStack AI can infer that input type.
+
 ## Use it (what the model writes)
 
 The sandbox SDK is four methods — discover, learn, do-once, reuse — plus one global per connector:

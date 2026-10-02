@@ -361,6 +361,10 @@ A Durable Object can be evicted at any time (a deploy, an inactivity timeout, a 
 
 This protection applies to interactions only the client can resolve — `approval-requested` parts and `input-available` parts for client-side tools (those without a server `execute`). A server tool whose `execute()` was killed mid-flight is a genuine orphan and recovers through the normal transcript-repair path instead.
 
+### Repair an approved tool that never ran
+
+An approval can be recorded even if its tool continuation never starts. When a later user turn moves past that approval, `AIChatAgent` and Think repair the transcript so the model does not receive an unresolved tool call. An approved tool that never ran becomes an error result, and a denied tool becomes a denied result. An approval in the current final message is left for the AI SDK to execute.
+
 ## Client-Side Tool Execution with `onToolCall`
 
 For tools that need browser APIs (geolocation, camera, clipboard) or user interaction, define the tool on the server without an `execute` function and handle it on the client with `onToolCall`:
