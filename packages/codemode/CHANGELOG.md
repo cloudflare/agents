@@ -1,5 +1,11 @@
 # @cloudflare/codemode
 
+## 0.5.3
+
+### Patch Changes
+
+- [#2428](https://github.com/cloudflare/agents/pull/2428) [`e780214`](https://github.com/cloudflare/agents/commit/e780214e9ed9850be21b1fc8c947aba97f6b6e6b) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Declare the Code Mode tool input as `{ code: string }` in its Standard Schema metadata so compatible consumers infer its type. See [Code Mode](https://github.com/cloudflare/agents/blob/main/docs/codemode/index.md).
+
 ## 0.5.2
 
 ### Patch Changes
