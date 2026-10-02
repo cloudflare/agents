@@ -88,4 +88,4 @@ Pi owns the transcript, operation inbox, generation, tools, retries, and recover
 
 ## Run the example
 
-The [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi) connects `session.events()` to WebSockets and projects pi's entries into a browser transcript. It also demonstrates a replay-safe tool and model configuration with Workers AI.
+The [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi) connects `session.events()` to WebSockets and projects pi's entries into a browser transcript. It also registers Workspace tools from `@cloudflare/computer` as pi tools, marking which are replay-safe, and configures a Workers AI model.

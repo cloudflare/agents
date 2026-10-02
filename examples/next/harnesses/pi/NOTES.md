@@ -225,6 +225,42 @@ session's tag.
   ownership were already in published 0.99.1. Subagents are still absent from
   any published release.
 
+### Workspace tools
+
+The model's tools are computer's `createPiTools`, adapted in
+`src/workspace.ts`, not pi's own `read`/`bash`/`edit`/`write` on an
+`ExecutionEnv`. computer's set comes with the Workspace's limits, locks and
+schemas, and its `exec` runs on a Workspace backend. What came up:
+
+- **Two loop models.** `createPiTools` returns declarations and one
+  `execute(call)` for a hand-written loop. pi-durable wants a
+  `ToolRegistration` per tool, so the adapter pairs them by name. The
+  declarations are JSON Schema, not TypeBox. pi validates with TypeBox, which
+  accepts either, so only the static type needs a cast.
+- **Replay is ours to choose.** computer has no replay notion. Reads,
+  searches, whole-file `write` and forced `delete` are marked safe. `edit`
+  would fail on text it already replaced, and `exec` runs arbitrary code, so
+  both are unsafe.
+- **`exec`'s description assumes shells.** It is built for a choice of
+  backends and talks about `npm test`. With one JavaScript backend that
+  misleads the model, so the adapter replaces the description and the
+  `command` parameter's text. It documents the typed `ws:git` interface
+  rather than its `cli()`, which gives the model return values it can use
+  directly. The model still sometimes tries `node:path` first; the error
+  names the module and it recovers.
+- **Git is opt-in twice.** The backend installs `ws:git`, but every call
+  fails until the `Workspace` gets `git: createGitClient()`, which needs the
+  optional `@platformatic/vfs` peer. Network operations also need
+  `allowGitNetwork: true` on the backend.
+- **`ws:git` paths are not the client's.** The git client's types say `dir`
+  defaults to `/`. Through `ws:git` the host resolves `dir` against the
+  module's working directory and keeps it inside the backend root. The
+  `exec` description follows the bridge.
+- **Tool calls run in parallel.** pi runs one round's tool calls at once by
+  default. In testing the model sent a `clone` and a `log` in the same
+  round, and the `log` ran before the clone finished. Marking `exec`
+  `executionMode: "sequential"` would order them; not done yet.
+
 ### Build
 
 `vite build` needs `packages/codemode` built, because `agents/skills`
@@ -239,6 +275,6 @@ example.
 - Compaction. No longer pending upstream: 0.99.2 ships `CompactionPolicy`,
   `CompactionHooks` and the rest, wired into `HarnessOptions`. Not yet used
   or tested here.
-- `ExecutionEnv` for pi's `read`/`bash`/`edit`/`write` on Workspace or a
-  Container. Unused here; the `harness` factory passes it to `Harness.open`.
+- `ExecutionEnv` for pi's own `read`/`bash`/`edit`/`write`. Unused here:
+  the Workspace tools come from computer instead (see "Workspace tools").
 - Session deletion. pi has no conversation delete.

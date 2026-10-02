@@ -10,9 +10,10 @@ import {
 import {
   BrainIcon,
   CheckCircleIcon,
-  ClockIcon,
+  CodeIcon,
+  FilePlusIcon,
   GearIcon,
-  HourglassIcon,
+  GitBranchIcon,
   MoonIcon,
   PaperPlaneRightIcon,
   PlusIcon,
@@ -36,20 +37,22 @@ const MODEL = "@cf/moonshotai/kimi-k2.7-code";
 
 const SUGGESTIONS = [
   {
-    icon: <ClockIcon size={15} />,
-    label: "What time is it?",
-    value: "Use a tool to tell me the current UTC time."
-  },
-  {
-    icon: <HourglassIcon size={15} />,
-    label: "Sleep 10s",
+    icon: <FilePlusIcon size={15} />,
+    label: "Write a file",
     value:
-      "Tell me the time, sleep for 10 seconds, then tell me the time again."
+      "Write a haiku about Durable Objects to /workspace/haiku.txt, then read it back."
   },
   {
-    icon: <HourglassIcon size={15} />,
-    label: "Sleep 2 min",
-    value: "Sleep for 2 minutes, then tell me how long you actually slept."
+    icon: <CodeIcon size={15} />,
+    label: "Run JavaScript",
+    value:
+      "Use exec to run JavaScript that lists /workspace and returns the size of each file."
+  },
+  {
+    icon: <GitBranchIcon size={15} />,
+    label: "Clone a repo",
+    value:
+      "Clone https://github.com/octocat/Hello-World into /workspace/hello, then show its git log."
   }
 ] satisfies Array<{ icon: ReactNode; label: string; value: string }>;
 

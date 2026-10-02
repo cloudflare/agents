@@ -2231,6 +2231,9 @@ importers:
 
   examples/next/harnesses/pi:
     dependencies:
+      '@cloudflare/computer':
+        specifier: ^0.4.0
+        version: 0.4.0(@cloudflare/workers-types@5.20260812.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(supports-color@10.2.2)(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.5.4)
@@ -2249,6 +2252,9 @@ importers:
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@platformatic/vfs':
+        specifier: ^0.4.0
+        version: 0.4.0
       '@streamdown/code':
         specifier: ^1.1.1
         version: 1.1.1(react@19.2.8)
@@ -2267,6 +2273,9 @@ importers:
       typebox:
         specifier: 1.3.27
         version: 1.3.27
+      zod:
+        specifier: ^4.5.4
+        version: 4.5.4
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.48.0
@@ -4449,7 +4458,7 @@ importers:
         version: 13.0.6
       just-bash:
         specifier: ^3.0.2
-        version: 3.0.2(supports-color@7.2.0)
+        version: 3.0.2(supports-color@10.2.2)
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -5582,6 +5591,23 @@ packages:
   '@clack/prompts@1.6.0':
     resolution: {integrity: sha512-EYlRokl8szrP9Z25qT5aepMdBjzBvHF9ZEhzIiUBc9guz/T31EqRgvD0QSgZcpE93xiwrr+OkB4nz0BZyF6fSA==}
     engines: {node: '>= 20.12.0'}
+
+  '@cloudflare/computer@0.4.0':
+    resolution: {integrity: sha512-9bYPrMktAUR/EUX/Z2Xdk1JoSK4LeM7owBsFEHCG+9Lb0IjxJRaMjAkqOzVvDTm6OLNvoKUoUt99Heg6y9MdlA==}
+    peerDependencies:
+      '@cloudflare/workers-types': ^4.20260616.1 || ^5.20260921.1
+      '@platformatic/vfs': '*'
+      ai: ^6.0.196 || ^7.0.0
+      zod: ^4.4.3
+    peerDependenciesMeta:
+      '@cloudflare/workers-types':
+        optional: true
+      '@platformatic/vfs':
+        optional: true
+      ai:
+        optional: true
+      zod:
+        optional: true
 
   '@cloudflare/containers@0.3.7':
     resolution: {integrity: sha512-DM9dm3FnIBSyiSJ1FLavKwl/lk3oAmTaynCzZQ9pZR0ncRPquSxkxd8Nu2MFILxmDDsPkxKsSNEh9mHHMty4Fw==}
@@ -8870,6 +8896,9 @@ packages:
 
   caniuse-lite@1.0.30001810:
     resolution: {integrity: sha512-TITQPUkaz+aVk5GL6NhOdwk1aEaNTSDPsGFWrTuhKGtjTF70jL/Oht2W4c6rXUe5fu7Ie19VIahAXHIIiWWNeg==}
+
+  capnweb@0.10.0:
+    resolution: {integrity: sha512-lQ2nlzaifkqBeNfs8RLErn7NZ8FNf3vn1W7J3nSH73edWG+0B5nHZGR51S2S9HMZEuZcEypOO469dZRY/BluFA==}
 
   capnweb@0.12.0:
     resolution: {integrity: sha512-jgZ/LMtMVTi+RVlooIslH78Gg23XbDTdvcLghWx3oz17D6u5GuJARt+uhZk/wcTo+f81eeabfnow4d3zLBj+JQ==}
@@ -13972,6 +14001,19 @@ snapshots:
       fast-wrap-ansi: 0.2.2
       sisteransi: 1.0.5
 
+  '@cloudflare/computer@0.4.0(@cloudflare/workers-types@5.20260812.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(supports-color@10.2.2)(zod@4.5.4)':
+    dependencies:
+      acorn: 8.17.0
+      capnweb: 0.10.0
+      just-bash: 3.0.2(supports-color@10.2.2)
+    optionalDependencies:
+      '@cloudflare/workers-types': 5.20260812.1
+      '@platformatic/vfs': 0.4.0
+      ai: 7.0.18(zod@4.5.4)
+      zod: 4.5.4
+    transitivePeerDependencies:
+      - supports-color
+
   '@cloudflare/containers@0.3.7': {}
 
   '@cloudflare/kumo@2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)':
@@ -17533,6 +17575,8 @@ snapshots:
       get-intrinsic: 1.3.0
 
   caniuse-lite@1.0.30001810: {}
+
+  capnweb@0.10.0: {}
 
   capnweb@0.12.0: {}
 
