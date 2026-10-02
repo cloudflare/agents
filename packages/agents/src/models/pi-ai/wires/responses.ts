@@ -108,15 +108,17 @@ export function streamResponses(
       // can be asked for no reasoning at all. Both reads mirror pi-ai's own
       // Responses implementation; neither is a rule of this package.
       if (model.reasoning === true) {
+        // With `store: false`, a reasoning item can only be replayed on the
+        // next turn if it carries its encrypted content. A model that cannot
+        // turn reasoning off reasons even when no effort is asked for, so the
+        // content is requested whenever the model reasons at all.
+        body.include = ["reasoning.encrypted_content"];
         const effort = request.reasoningEffort;
         if (typeof effort === "string") {
           body.reasoning = {
             effort: mappedEffort(model, effort),
             summary: "auto"
           };
-          // Encrypted reasoning items keep `store: false` multi-turn replay
-          // stateless, mirroring pi-ai's own Responses request shape.
-          body.include = ["reasoning.encrypted_content"];
         } else if (model.thinkingLevelMap?.off !== null) {
           body.reasoning = { effort: model.thinkingLevelMap?.off ?? "none" };
         }

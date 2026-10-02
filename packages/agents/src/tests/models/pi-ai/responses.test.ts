@@ -229,7 +229,7 @@ describe("pi-ai: the reasoning level is the model's to decide", () => {
     );
   });
 
-  it("omits reasoning entirely when the model declares `off: null`", async () => {
+  it("omits the effort but keeps reasoning replayable when the model declares `off: null`", async () => {
     const binding = fakeBinding(() =>
       sseResponse(gatewayPadded(responsesTextStream()))
     );
@@ -237,6 +237,11 @@ describe("pi-ai: the reasoning level is the model's to decide", () => {
     await collectEvents(ai.stream(ai(MODEL), userContext("hi")));
     // `gpt-5-mini` declares `thinkingLevelMap: { off: null }`, i.e. it cannot
     // be asked for no reasoning at all.
-    expect(field(binding.universal[0]?.query, "reasoning")).toBeUndefined();
+    const query = binding.universal[0]?.query;
+    expect(field(query, "reasoning")).toBeUndefined();
+    // It still reasons, so its items need their encrypted content for the
+    // next turn to replay them with `store: false`.
+    expect(field(query, "store")).toBe(false);
+    expect(field(query, "include")).toEqual(["reasoning.encrypted_content"]);
   });
 });
