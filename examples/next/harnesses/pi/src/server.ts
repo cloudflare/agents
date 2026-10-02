@@ -55,7 +55,9 @@ export class PiAgent extends DurableObject<Env> {
           models,
           registry: this.registry,
           settings: {
-            retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 }
+            // pi doubles the delay before each retry: 1, 2, 4, 8 and 16 seconds,
+            // so a rate-limited model gets about 30 seconds to recover.
+            retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 }
           },
           onReport: (error) => console.warn("pi report", error)
         },
