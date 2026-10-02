@@ -1,5 +1,33 @@
 # @cloudflare/agents
 
+## 0.27.0
+
+### Minor Changes
+
+- [#2434](https://github.com/cloudflare/agents/pull/2434) [`0ebeae5`](https://github.com/cloudflare/agents/commit/0ebeae52a7897cd04ae8921663a92dfd52f04c49) Thanks [@cjol](https://github.com/cjol)! - Add `AiSdkHarness` from the new `agents/harness/ai-sdk` entry point, which runs each message with `streamText` and keeps sessions and transcripts in the Durable Object, so `Channels.forHarness` can serve an AI SDK model. The same entry point exports the AI SDK message conversions it is built on and `createSendMessageTool`, an AI SDK tool that sends a message to a surface through the gateway.
+
+- [#2431](https://github.com/cloudflare/agents/pull/2431) [`6393265`](https://github.com/cloudflare/agents/commit/6393265469703cb6d094368dfa3fbadc43742057) Thanks [@cjol](https://github.com/cjol)! - Add `Channels` to `agents/experimental/channels`: a Lifecycle capability that serves an agent harness's sessions as conversations to every surface that joins them, with durable, resumable responses on `Streams`. Connect a harness with `Channels.forHarness(harness, { channels })`. The entry point also exports the turn protocol types and a draft harness interface (`AgentHarness`), which may change.
+
+- [#2429](https://github.com/cloudflare/agents/pull/2429) [`df4cbd6`](https://github.com/cloudflare/agents/commit/df4cbd69d777ed240c69da7fb2791fee567a6d62) Thanks [@cjol](https://github.com/cjol)! - Breaking: remove the first pass of `agents/channels` and move Channels to `agents/experimental/channels`.
+
+  The `agents/channels` entry points are gone, along with `ChannelHost`, the `fallback` and `fanout` composites, and the AI SDK, TanStack AI and Voice helpers from the first pass. Slack, Telegram and Email move to `agents/experimental/channels/slack`, `agents/experimental/channels/telegram` and `agents/experimental/channels/email`, and keep verified ingress and normalization. Channels is being rebuilt around conversations and turns; the new API is experimental and may change between releases.
+
+- [#2432](https://github.com/cloudflare/agents/pull/2432) [`752cdc3`](https://github.com/cloudflare/agents/commit/752cdc30451302a0f44b1fc33661bf26034b5f64) Thanks [@cjol](https://github.com/cjol)! - Add `ChannelGateway` to `agents/experimental/channels`: the Worker entry point that verifies channel webhooks, routes each event to the agent object that holds its conversation, and delivers outbound messages.
+
+- [#2436](https://github.com/cloudflare/agents/pull/2436) [`062d091`](https://github.com/cloudflare/agents/commit/062d0911b307249fa1a7cae7eb8628e9c1bee0e7) Thanks [@cjol](https://github.com/cjol)! - Add `WebChannelChatTransport` (`agents/experimental/channels/web/ai-sdk`), an AI SDK `ChatTransport` over the Web Channel, so AI SDK UIs can join a Channels conversation.
+
+- [#2433](https://github.com/cloudflare/agents/pull/2433) [`6e6c58a`](https://github.com/cloudflare/agents/commit/6e6c58a195502336bc75d0535baf71d3f293dcfb) Thanks [@cjol](https://github.com/cjol)! - Add the Web Channel (`agents/experimental/channels/web`) and its client (`agents/experimental/channels/web/client`), which connect browsers and terminals to a conversation over the agent's WebSockets: live transcript and turns, approvals, client tool results, and creating, forking, resetting, listing and following conversations. `WebSockets` gains `use` for protocol handlers that run before the configured ones.
+
+### Patch Changes
+
+- [#2437](https://github.com/cloudflare/agents/pull/2437) [`5a7643e`](https://github.com/cloudflare/agents/commit/5a7643e1260e03f523609e06a0a8d7744a6ff84a) Thanks [@cjol](https://github.com/cjol)! - Add `npx agents tui <url>`, a terminal client for a conversation's Web Channel.
+
+  It streams the transcript with highlighted Markdown, collapsible reasoning and tool cards, and shows messages and turns from every surface live. It answers approvals inline, lets a person type a client tool's result, and cancels the running turn with Esc. `--header` adds headers to the WebSocket upgrade, and `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` are sent as an Access service token. Its dependencies are bundled into `dist/cli.js`, so installing `agents` adds none.
+
+- [#2458](https://github.com/cloudflare/agents/pull/2458) [`6bf0378`](https://github.com/cloudflare/agents/commit/6bf03781e5486f72952772ebee44f82519998bf4) Thanks [@cjol](https://github.com/cjol)! - Streams: a live `read`/`readBatches` no longer misses chunks appended while the consumer is still handling the previous batch. It re-polls before waiting for the next append, so a reader no longer stalls until a later append or the stream's end.
+
+- [#2462](https://github.com/cloudflare/agents/pull/2462) [`2f3176b`](https://github.com/cloudflare/agents/commit/2f3176b9fa03c6429c805b560c8dc14371c15f64) Thanks [@cjol](https://github.com/cjol)! - `agents tui` now handles Cloudflare Access: for a URL behind Access, it gets a token from `cloudflared` (logging in through the browser the first time) and sends it on the WebSocket upgrade. `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` and explicit `--header` credentials still take precedence.
+
 ## 0.26.0
 
 ### Minor Changes
