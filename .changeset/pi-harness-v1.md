@@ -9,4 +9,4 @@ Move the experimental pi integrations to pi-durable and pi-ai 1.0: both optional
 - `addSkills(registry, sources)` is replaced by `registry.install(await skills(sources))`.
 - The `store` and `timing` options are removed.
 
-See [Pi harness](https://github.com/cloudflare/agents/blob/main/docs/agents/harnesses/pi.md).
+Update pi-durable and pi-ai to `^1.0.0`. See [Pi harness](https://github.com/cloudflare/agents/blob/main/docs/agents/harnesses/pi.md) docs for details.

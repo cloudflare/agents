@@ -1,4 +1,4 @@
-# Models for pi-ai (Experimental)
+# Models for pi-ai (Beta)
 
 `agents/models/pi-ai` is the [pi-ai](https://github.com/earendil-works/pi/tree/main/packages/ai)
 twin of [`agents/models/ai-sdk`](./models.md): the same `createAI` factory, the same options,
@@ -45,7 +45,7 @@ design: a model this package cannot name exactly is yours to construct.
    store on the gateway (BYOK) — so nothing vendor-shaped needs a secret in your Worker.
 4. **The binding is the only way in.** Workers AI goes through `env.AI.run`, vendor models
    through `env.AI.gateway(id).run`; there is no HTTP transport and no API token to hold.
-5. Everything here is experimental and may change in a minor release.
+5. Everything here is in beta and may change in a minor release.
 
 ## Quick start
 
@@ -311,10 +311,10 @@ Image generation is Workers AI only. The knobs a model takes are the model's:
 in a `cloudflare-compat` diagnostic on the result rather than sent and ignored.
 Every other model in the catalog takes the full set.
 
-## Experimental
+## Beta
 
 This subpath needs `@earendil-works/pi-ai@^1.0.0`, an optional peer of `agents`. `agents`
-takes no vendor package as a dependency, optional or otherwise. The surface is experimental
+takes no vendor package as a dependency, optional or otherwise. The surface is in beta
 and may change in a minor release. An unlisted `@cf/` id resolves with default metadata (a
 128k context window, 8192 output tokens, zero cost); pass overrides when you know better.
 
