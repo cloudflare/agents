@@ -4,8 +4,8 @@
  * A leg is abandoned when its stream terminates with an `error` event before
  * it produced any content; the next model is tried with the same context and
  * options. Once a leg has emitted content it is committed to, and a later
- * error propagates. pi-ai's protocol requires `start` before any update, so
- * `start` is held back until a leg proves itself.
+ * error propagates. `start` and the block starts that may follow it carry no
+ * content, so they are held back until a leg proves itself.
  */
 
 import {
@@ -33,6 +33,18 @@ export interface FallbackAttempt {
 
 /** Diagnostic type under which abandoned legs are recorded. */
 export const FALLBACK_DIAGNOSTIC = "cloudflare-fallback";
+
+/**
+ * Events that announce output without carrying any. A leg that emits only
+ * these and then fails has produced nothing, so they are held back with
+ * `start` until the leg proves itself.
+ */
+const PREAMBLE_EVENTS = new Set<AssistantMessageEvent["type"]>([
+  "start",
+  "text_start",
+  "thinking_start",
+  "toolcall_start"
+]);
 
 function isAbandonable(event: AssistantMessageEvent): boolean {
   return event.type === "error" && event.reason === "error";
@@ -81,12 +93,12 @@ export function streamWithFallback(
         current = leg;
         const isLast = index === legs.length - 1;
         const inner = leg.start();
-        let pendingStart: AssistantMessageEvent | undefined;
+        let pending: AssistantMessageEvent[] = [];
         let committed = false;
         let finished = false;
         for await (const event of inner) {
-          if (event.type === "start" && !committed) {
-            pendingStart = event;
+          if (!committed && PREAMBLE_EVENTS.has(event.type)) {
+            pending.push(event);
             continue;
           }
           if (!committed) {
@@ -99,8 +111,8 @@ export function streamWithFallback(
               break;
             }
             committed = true;
-            if (pendingStart !== undefined) outer.push(pendingStart);
-            pendingStart = undefined;
+            for (const held of pending) outer.push(held);
+            pending = [];
           }
           if (
             (event.type === "done" || event.type === "error") &&

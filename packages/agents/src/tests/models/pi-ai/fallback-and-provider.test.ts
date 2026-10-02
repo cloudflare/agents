@@ -218,6 +218,12 @@ describe("pi-ai: fallback", () => {
               const partial = startMessage(model);
               stream.push({ partial, type: "start" });
               stream.push({ contentIndex: 0, partial, type: "text_start" });
+              stream.push({
+                contentIndex: 0,
+                delta: "Hel",
+                partial,
+                type: "text_delta"
+              });
               stream.end();
               return stream;
             }
@@ -227,9 +233,72 @@ describe("pi-ai: fallback", () => {
       expect(events.map((event) => event.type)).toEqual([
         "start",
         "text_start",
+        "text_delta",
         "error"
       ]);
       expect(message.errorMessage).toContain("without a done or error event");
+    });
+
+    it("falls back from a leg that announced a block and then failed", async () => {
+      const second = startMessage(model);
+      second.content = [{ text: "from the second leg", type: "text" }];
+      const { events, message } = await collectEvents(
+        streamWithFallback([
+          {
+            model,
+            start: () => {
+              const stream = createAssistantMessageEventStream();
+              const partial = startMessage(model);
+              stream.push({ partial, type: "start" });
+              stream.push({ contentIndex: 0, partial, type: "text_start" });
+              const failed = startMessage(model);
+              failed.stopReason = "error";
+              failed.errorMessage = "connection dropped";
+              stream.push({ error: failed, reason: "error", type: "error" });
+              stream.end(failed);
+              return stream;
+            }
+          },
+          {
+            model,
+            start: () => {
+              const stream = createAssistantMessageEventStream();
+              stream.push({ partial: second, type: "start" });
+              stream.push({
+                contentIndex: 0,
+                partial: second,
+                type: "text_start"
+              });
+              stream.push({
+                contentIndex: 0,
+                delta: "from the second leg",
+                partial: second,
+                type: "text_delta"
+              });
+              stream.push({ message: second, reason: "stop", type: "done" });
+              stream.end(second);
+              return stream;
+            }
+          }
+        ])
+      );
+
+      // Only the answering leg's events reach the caller, in order.
+      expect(events.map((event) => event.type)).toEqual([
+        "start",
+        "text_start",
+        "text_delta",
+        "done"
+      ]);
+      expect(message.content).toEqual([
+        { text: "from the second leg", type: "text" }
+      ]);
+      expect(
+        message.diagnostics?.find((d) => d.type === FALLBACK_DIAGNOSTIC)
+          ?.details
+      ).toEqual({
+        attempts: [{ errorMessage: "connection dropped", model: WORKERS_AI }]
+      });
     });
 
     it("as aborted when the caller's signal fired", async () => {
