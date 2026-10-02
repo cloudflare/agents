@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-`connectBrowserSession` now throws a `BrowserRenderingError` carrying the HTTP status when Browser Run returns no WebSocket, instead of a plain `Error`. The message now ends with the status, for example `(410)` when the session has expired.
+`connectBrowserSession` throws a `BrowserRenderingError` with the HTTP status when Browser Run returns no WebSocket. See [Browse the web](https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md).

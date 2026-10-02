@@ -1,6 +1,6 @@
 ---
-"agents": minor
-"@cloudflare/think": minor
+"agents": patch
+"@cloudflare/think": patch
 ---
 
-Context blocks can opt into `whenChanged: "remind"`. When such a block changes after the system prompt was frozen, `ContextBlocks.reminder()` returns its current value for the host to send after the cached prefix, and the frozen prompt stays intact until `refreshSystemPrompt()` promotes it. Think adds the reminder to the last user message of each model request without persisting it.
+Context blocks can set `whenChanged: "remind"` to send changes as a reminder after the cached prompt instead of rewriting it. See [Context](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md).

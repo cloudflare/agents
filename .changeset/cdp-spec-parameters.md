@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-`cdp.spec()` and `loadCdpSpec()` now keep each command's `parameters` and `returns`, event parameters, and type details (`type`, `enum`, `properties`, `items`, plus `experimental`/`deprecated` flags). Previously normalization kept only names and descriptions, so the model could find a CDP method but not how to call it. Every `$ref` is domain-qualified (`"Page.FrameId"`) so it matches a type's `name`. `CdpField` and `CdpItems` are exported from `agents/browser`.
+`cdp.spec()` and `loadCdpSpec()` now include command parameters, return types, and type details, so a model can see how to call a CDP method. See [Browse the web](https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md).

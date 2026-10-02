@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-Fix `withX402Client` enforcing `maxPaymentValue` against the first advertised payment requirement instead of the requirement selected for signing. Validate the selected amount after scheme and network selection, before signing or retrying the tool call.
+`withX402Client` enforces `maxPaymentValue` against the payment requirement selected for signing, before signing or retrying the tool call. See [Pay from Agents SDK](https://developers.cloudflare.com/agents/tools/payments/x402/pay-from-agents-sdk/).
