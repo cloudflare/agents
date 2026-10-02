@@ -1,13 +1,9 @@
-import type {
-  ImageContent,
-  JsonValue,
-  TextContent
-} from "@earendil-works/pi-ai";
+import type { EntryRecord } from "@earendil-works/pi-durable";
 
 /**
- * `PiHarness`'s public types. Each is a projection of pi's state that pi
- * does not publish in this shape; anything pi already publishes (JSON
- * values, text and image content, user input) is used directly.
+ * `PiHarness`'s own types: how the harness addresses sessions and reports
+ * operations. Anything pi already publishes (input, transcript entries,
+ * events) is pi's type, used directly.
  */
 
 /** A pi conversation, addressed by its id as a string. The root is `"1"`. */
@@ -56,7 +52,7 @@ export type PiOperationResult = {
 
 export type PiPromptResponse = PiOperationResult & {
   /** The session's active transcript after the operation. */
-  readonly messages: readonly PiMessage[];
+  readonly messages: readonly EntryRecord[];
 };
 
 /** A submission pi has not settled yet. */
@@ -72,34 +68,4 @@ export type PiSessionInfo = {
   /** The session this one was forked from. */
   readonly parent?: PiSessionId;
   readonly busy: boolean;
-};
-
-export type PiMessagePart =
-  | TextContent
-  | ImageContent
-  | { readonly type: "thinking"; readonly text: string }
-  | {
-      readonly type: "tool-call";
-      readonly id: string;
-      readonly name: string;
-      readonly arguments: JsonValue;
-    }
-  | {
-      readonly type: "tool-result";
-      readonly id: string;
-      readonly name: string;
-      readonly content: readonly (TextContent | ImageContent)[];
-      readonly details?: JsonValue;
-      readonly error: boolean;
-    };
-
-/** One display-ready message projected from a pi transcript entry. */
-export type PiMessage = {
-  /** The pi entry id, or `live` for the message being streamed. */
-  readonly id: string;
-  readonly role: "user" | "assistant" | "tool" | "notice";
-  readonly parts: readonly PiMessagePart[];
-  readonly timestamp: number;
-  readonly stopReason?: string;
-  readonly error?: string;
 };

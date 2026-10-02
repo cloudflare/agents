@@ -2,8 +2,9 @@
 
 An experimental example that runs [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable),
 pi's durable agent harness, inside a Durable Object. `PiHarness` and the
-session store live in this example's `src/`, on pi's published npm packages
-(see [Pi source](#pi-source)). The model provider is `agents/models/pi-ai`.
+session store come from `agents/harnesses/pi`, and the model provider from
+`agents/models/pi-ai`. Both entry points are experimental. This example adds
+the app around them.
 
 The example composes:
 
@@ -12,10 +13,10 @@ The example composes:
   `harness.session(id)`, and `session.events()` for pi's live events;
 - one Lifecycle job per session as the wake: it keeps the object alive while
   pi has live tasks in the session, and completes when there are none;
-- a pi session store on the object's SQLite database (`session-store.ts`);
+- a pi session store on the object's SQLite database;
 - app glue that is not part of the harness: `sockets.ts` puts one session
-  per socket on `WebSockets`, and `view.ts` folds pi's events into what the
-  UI shows;
+  per socket on `WebSockets`, and `view.ts` and `transcript.ts` fold pi's
+  entries and events into what the UI shows;
 - two tools: `current_time`, and `sleep`, a replay-safe wait whose
   deadline survives an eviction;
 - `createAI` from `agents/models/pi-ai`: Workers AI, and other vendors through
@@ -58,14 +59,16 @@ including the partial answer, and continues from there.
 pnpm test
 ```
 
-- `session-store.test.ts` runs pi's own storage conformance suite against
-  the session store on a real Durable Object.
-- `harness.test.ts` drives a real Durable Object with pi-ai's faux provider:
-  tool turns, follow-ups queued behind a run, abort, sessions, and a crash
-  mid-tool-call that the wake job's alarm recovers (a replay-safe tool reruns,
-  an unsafe one is reported to the model as interrupted).
 - `sockets.test.ts` connects real WebSockets: a run started over the
   socket, a client joining mid-run, and a socket that outlives an eviction.
+- `view.test.ts` checks that a client following a run and one joining after
+  it fold pi's events into the same view.
+
+The harness's own tests live with it in `packages/agents`
+(`pnpm run test:harnesses:pi` there): pi's storage conformance suite on a
+real Durable Object, tool turns, follow-ups, abort, sessions, a harness
+without defaults, and a crash mid-tool-call that the wake job's alarm
+recovers.
 
 ## Core pattern
 
@@ -114,7 +117,7 @@ The system prompt, tools, hooks and tasks are composed on pi's own
 harness never sees it. Tools are pi-durable `ToolRegistration`s.
 `replay: "safe"` lets pi run a call again after an eviction interrupted it;
 otherwise the model gets an interrupted result. For `agents/skills` sources,
-`await addSkills(registry, sources)` (`src/harness/skills.ts`) in the
+`await addSkills(registry, sources)` from `agents/harnesses/pi` in the
 factory, before `Harness.open`.
 
 ### Options
@@ -133,6 +136,10 @@ The harness does not choose a transport. `session.events()` returns pi's own
 `AgentEvent` stream: a `snapshot`, then one batch per commit. This app sends
 it over WebSockets (`src/sockets.ts`, `src/protocol.ts`) and folds it with
 `reduceView` (`src/view.ts`) in the browser and in the tests.
+
+`harness.messages()` and `prompt()`'s `messages` are pi's own transcript
+entries (`EntryRecord`). The display model the UI renders is this app's
+projection of them, in `src/transcript.ts`.
 
 ## Pi source
 

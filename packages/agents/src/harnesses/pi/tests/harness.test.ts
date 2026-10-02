@@ -5,7 +5,6 @@ import {
   runDurableObjectAlarm
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { PiSessionView } from "../view";
 import type { PiHarnessTestObject } from "./worker";
 
 function fresh(
@@ -110,14 +109,14 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.pending()).toEqual([]);
   });
 
-  it("streams pi's events and folds them into the same view a late joiner gets", async () => {
+  it("streams pi's events, and a late snapshot carries the same transcript", async () => {
     const stub = fresh();
     const watching = stub.watch();
     const receipt = await stub.submit("multiply 5");
     await stub.wait(receipt.operationId);
-    const { view: folded, types } = await watching;
-    const view = JSON.parse(folded) as PiSessionView;
+    const types = await watching;
     for (const type of [
+      "snapshot",
       "run_start",
       "tool_execution_start",
       "tool_execution_end",
@@ -125,9 +124,7 @@ describe("PiHarness on pi-durable", () => {
     ]) {
       expect(types).toContain(type);
     }
-    const late = JSON.parse(await stub.snapshotView()) as PiSessionView;
-    expect(view.messages).toEqual(late.messages);
-    expect(late.running).toBe(false);
+    expect(await stub.snapshotTexts()).toEqual(await stub.messages());
   });
 
   it("parks the session's wake once pi is idle, leaving no alarm", async () => {

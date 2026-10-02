@@ -1,12 +1,12 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT } from "../context";
 import { registerStorageConformance } from "@earendil-works/pi-durable/testing";
 import { describe, expect, it } from "vitest";
 import {
   DurableObjectSqliteDatabase,
   openPiSessionStore
-} from "../harness/session-store";
+} from "../session-store";
 
 // pi's own storage conformance suite, run against the session store on a
 // real Durable Object's SQLite database. Each case gets a fresh object.

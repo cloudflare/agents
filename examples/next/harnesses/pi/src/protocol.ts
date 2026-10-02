@@ -1,6 +1,6 @@
 import type { JsonValue } from "@earendil-works/pi-ai";
 import type { AgentEvent, UserInput } from "@earendil-works/pi-durable";
-import type { PiSessionId, PiWhenBusy } from "./harness/types";
+import type { PiSessionId, PiWhenBusy } from "agents/harnesses/pi";
 
 /**
  * This app's WebSocket protocol, served by `sockets.ts`. The harness knows
@@ -55,5 +55,5 @@ export type {
 export type {
   PiMessage as TranscriptMessage,
   PiMessagePart as TranscriptPart
-} from "./harness/types";
+} from "./transcript";
 export type { PiSessionView as SessionView } from "./view";

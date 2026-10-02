@@ -1,4 +1,4 @@
-import type { JsonValue } from "@earendil-works/chord";
+import type { JsonValue } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type {
   Registry,
@@ -10,7 +10,7 @@ import type {
   SkillDescriptor,
   SkillResourceDescriptor,
   SkillSource
-} from "agents/skills";
+} from "../../skills";
 
 /** Skills resolved from `agents/skills` sources for one process lifetime. */
 export type ResolvedSkills = {

@@ -41,6 +41,7 @@
     "@ai-sdk/valibot": "3.0.6",
     "@cloudflare/codemode": "workspace:*",
     "@earendil-works/pi-ai": "^0.99.2",
+    "@earendil-works/pi-durable": "^0.99.2",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/conformance-v2": "npm:@modelcontextprotocol/conformance@0.2.0-alpha.10",
     "@modelcontextprotocol/sdk": "1.30.0",
@@ -64,6 +65,7 @@
     "@ai-sdk/react": "^3.0.0 || ^4.0.0",
     "@cloudflare/codemode": ">=0.5.0",
     "@earendil-works/pi-ai": "^0.99.2",
+    "@earendil-works/pi-durable": "^0.99.2",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@modelcontextprotocol/server": "2.0.0",
@@ -88,6 +90,9 @@
       "optional": true
     },
     "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-durable": {
       "optional": true
     },
     "@tanstack/ai": {
@@ -161,6 +166,11 @@
       "types": "./dist/lifecycle/index.d.ts",
       "import": "./dist/lifecycle/index.js",
       "require": "./dist/lifecycle/index.js"
+    },
+    "./harnesses/pi": {
+      "types": "./dist/harnesses/pi/index.d.ts",
+      "import": "./dist/harnesses/pi/index.js",
+      "require": "./dist/harnesses/pi/index.js"
     },
     "./agent-tools": {
       "types": "./dist/agent-tools.d.ts",
@@ -461,6 +471,7 @@
     "test:browser": "vitest run --config src/browser-tests/vitest.config.ts",
     "test:workers": "vitest --project workers",
     "test:chat": "vitest --project chat",
+    "test:harnesses:pi": "vitest --project harnesses-pi",
     "test:webmcp": "vitest --project webmcp",
     "test:x402": "vitest --project x402",
     "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts",
