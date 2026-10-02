@@ -144,10 +144,12 @@ export class AiSdkHarness<TOOLS extends ToolSet = ToolSet>
 
   override async onStart(): Promise<void> {
     // Sessions with unsettled operations: an earlier instance was running
-    // them, or was about to.
-    for (const [, session] of this.#kv.list<StoredSession>({
-      prefix: `${PREFIX}s:`
-    })) {
+    // them, or was about to. Read them all first: storage allows one open
+    // kv.list() at a time, and #pending() lists too.
+    const sessions = [
+      ...this.#kv.list<StoredSession>({ prefix: `${PREFIX}s:` })
+    ];
+    for (const [, session] of sessions) {
       if (this.#pending(session.id).length > 0) await this.#wake(session.id);
     }
   }
