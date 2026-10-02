@@ -1,5 +1,5 @@
 ---
-"@cloudflare/think": minor
+"@cloudflare/think": patch
 ---
 
-Add `messengerConcurrency` to choose the Chat SDK concurrency strategy for messenger replies (#2313). It defaults to the existing 600 ms `burst` strategy, exported as `DEFAULT_MESSENGER_CONCURRENCY`, and accepts any `ConcurrencyStrategy` or `ConcurrencyConfig`, such as `"queue"` or `{ strategy: "burst", debounceMs: 1500 }`.
+Add `messengerConcurrency` to choose the Chat SDK concurrency strategy for messenger replies (#2313). See [Messengers](https://github.com/cloudflare/agents/blob/main/docs/think/messengers.md).

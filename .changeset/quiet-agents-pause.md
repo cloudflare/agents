@@ -1,5 +1,5 @@
 ---
-"@cloudflare/think": minor
+"@cloudflare/think": patch
 ---
 
-Allow `rejectExecution()` callers to record a durable rejection without automatically starting another model turn by passing `{ autoContinue: false }`.
+`rejectExecution()` accepts `{ autoContinue: false }` to record a rejection without starting another turn. See [Actions](https://github.com/cloudflare/agents/blob/main/docs/think/actions.md).

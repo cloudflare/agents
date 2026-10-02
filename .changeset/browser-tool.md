@@ -1,5 +1,5 @@
 ---
-"agents": minor
+"agents": patch
 ---
 
-Add `browserTool` (`agents/browser/ai-sdk`) and `Browser` (`agents/browser`), an experimental browser that persists between agent turns. See [Persistent browser](https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser).
+Add persistent browser tools for AI SDK and TanStack AI, backed by experimental Browser sessions. See [Browse the web](https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md).

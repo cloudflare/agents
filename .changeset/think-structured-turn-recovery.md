@@ -2,4 +2,4 @@
 "@cloudflare/think": patch
 ---
 
-A `step.prompt()` turn interrupted mid-stream now recovers and completes with its structured output instead of failing with `ThinkPromptSkippedError` (#1727). Recovery retries a turn cut off inside its final answer, since that partial persists nothing to continue from. Retried and continued turns now keep the structured output tool and capture its result.
+`step.prompt()` turns interrupted mid-stream now recover with their structured output instead of failing (#1727). See [Workflows](https://github.com/cloudflare/agents/blob/main/docs/think/workflows.md).
