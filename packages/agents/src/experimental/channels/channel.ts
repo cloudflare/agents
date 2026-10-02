@@ -4,6 +4,7 @@ import type {
   ChannelIngressEvent
 } from "./ingress";
 import type { ChannelIdentity, UserIdentity } from "./identity";
+import type { ResponseChunk } from "./protocol";
 import type {
   ChannelMessageSurface,
   ChannelMessageSurfaceInput
@@ -52,8 +53,23 @@ export type DeliveryResult =
       error: DeliveryFailure;
     };
 
+/** A response's chunks, as `ChannelGateway.stream` takes them. */
+export type ChannelChunkSource = ReadableStream<ResponseChunk>;
+
 /** Caller options for one finished delivery. */
 export type ChannelDeliveryOptions = {
+  /** Caller-owned correlation an Adapter may use where the provider supports it. */
+  delivery?: ChannelDeliveryContext;
+};
+
+/** Caller options for one streamed answer. */
+export type ChannelStreamOptions = {
+  /**
+   * Optional topic. It is an option rather than a chunk because it is known
+   * before the first token, and a Channel usually needs it in its opening
+   * provider call.
+   */
+  title?: string;
   /** Caller-owned correlation an Adapter may use where the provider supports it. */
   delivery?: ChannelDeliveryContext;
 };
@@ -79,7 +95,7 @@ export type ChannelRoute<TRaw = unknown> = (
   context: ChannelRouteContext
 ) => Awaitable<string | null>;
 
-/** A configured delivery route with optional approval and ingress support. */
+/** A configured delivery route with optional ingress support. */
 export interface Channel<TRaw = unknown> {
   /** Select an opaque application route, or return null to ignore the event. */
   route?(
@@ -90,12 +106,26 @@ export interface Channel<TRaw = unknown> {
   /** Derive a direct destination from this configured Channel's identity. */
   contactSurface?(identity: ChannelIdentity): ChannelMessageSurfaceInput | null;
   /**
-   * Perform one outbound delivery. Absent for inbound-only Channels.
+   * Deliver one finished message. Only for Channels that cannot stream:
+   * the gateway delivers to a Channel that can by streaming the message.
    */
   deliver?(
     surface: ChannelMessageSurface,
     message: ChannelMessage,
     options?: ChannelDeliveryOptions
+  ): Promise<DeliveryResult>;
+  /**
+   * Deliver one progressively generated answer. Absent for Channels that
+   * cannot stream, which the Host serves by collecting and calling `deliver`.
+   *
+   * The Channel owns the consumption loop. It must finalize whether the
+   * stream closed or errored, because a model can fail mid-generation, and it
+   * must not abandon a terminal provider call on error.
+   */
+  stream?(
+    surface: ChannelMessageSurface,
+    chunks: ChannelChunkSource,
+    options: ChannelStreamOptions
   ): Promise<DeliveryResult>;
   readonly ingress?: ChannelIngress<TRaw>;
   readonly emailIngress?: ChannelEmailIngress<TRaw>;
