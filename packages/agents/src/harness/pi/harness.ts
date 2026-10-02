@@ -1,5 +1,6 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
+  createRegistry,
   LiveDoc,
   ROOT_CONVERSATION_ID,
   watchEvents,
@@ -12,6 +13,8 @@ import {
   type EntryRecord,
   type HarnessSettings,
   type ModelRef,
+  type Registry,
+  type RegistryReader,
   type SettledSubmissionRecord,
   type UserInput
 } from "@earendil-works/pi-durable";
@@ -23,6 +26,7 @@ import {
   type LifecycleJobOutcome
 } from "../../lifecycle";
 import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "./context";
+import { installExtensions, type PiExtensions } from "./extensions";
 import {
   openPiSessionStore,
   type PiSessionStoreOptions
@@ -91,18 +95,20 @@ export type PiHarnessContext = {
   readonly storage: SqliteStorage;
   /** Background context, for the open itself. */
   readonly context: Context;
+  /** pi's registry, with every extension in `extensions` installed. */
+  readonly registry: Registry;
   /** Harness-wide settings supplied by `PiHarness`, such as its retry default. */
   readonly settings?: Pick<HarnessSettings, "retry">;
 };
 
 /**
- * Builds pi's `Harness`. Return value is adopted as-is: the caller owns the
- * registry (tools, system prompt, hooks, skills), `models`, `env`,
+ * Builds pi's `Harness`. Return value is adopted as-is: the caller passes
+ * on the registry and settings it is handed, and owns `models`, `env`,
  * `onReport` and anything else `HarnessOptions` grows.
  *
  * ```ts
- * harness: ({ storage, context }) =>
- *   Harness.open(storage, { models, registry }, context)
+ * harness: ({ storage, context, registry, settings }) =>
+ *   Harness.open(storage, { models, registry, settings }, context)
  * ```
  */
 export type PiHarnessFactory = (
@@ -139,6 +145,11 @@ export type PiWakeTiming = {
 export type PiHarnessOptions = {
   /** Opens pi's `Harness` over the store this object prepared. */
   readonly harness: PiHarnessFactory;
+  /**
+   * Tools and prompt sections, by extension name. They run in key order
+   * the first time the harness opens. See `PiExtension`.
+   */
+  readonly extensions?: PiExtensions;
   /** Model and thinking defaults apply to new sessions; retry applies harness-wide. */
   readonly defaults?: PiSessionDefaults;
   readonly store?: PiSessionStoreOptions;
@@ -194,7 +205,9 @@ function signalContext(signal: AbortSignal | undefined): Context {
  */
 export class PiHarness extends LifecycleCapability {
   readonly sessions: PiSessions;
+  readonly #registry: Registry = createRegistry();
   readonly #options: PiHarnessOptions;
+  #extending: Promise<void> | undefined;
   /** In-memory waits on pi, per session, each inside an alarm's work. */
   readonly #waits = new Map<PiSessionId, Promise<void>>();
   /** Submissions between their wake and pi's admission, per session. */
@@ -309,6 +322,14 @@ export class PiHarness extends LifecycleCapability {
         session: String(record.conversationId),
         status: record.status === "queued" ? "queued" : "running"
       }));
+  }
+
+  /**
+   * pi's registry, read-only: what the extensions installed. Empty until the
+   * harness first opens.
+   */
+  get registry(): RegistryReader {
+    return this.#registry;
   }
 
   /** The opened pi Harness, for anything the interface does not cover. */
@@ -502,10 +523,12 @@ export class PiHarness extends LifecycleCapability {
       this.lifecycle.storage,
       this.#options.store
     );
+    await this.#installExtensions();
     const retry = this.#options.defaults?.retry;
     const pi = await this.#options.harness({
       storage,
       context: BG,
+      registry: this.#registry,
       ...(retry === undefined ? {} : { settings: { retry } })
     });
     await pi.root(BG, { agent: this.agentDefaults() });
@@ -513,6 +536,18 @@ export class PiHarness extends LifecycleCapability {
     // running to pending and schedules them again.
     pi.resume();
     return { pi, storage };
+  }
+
+  /** Extensions run once per isolate; a failed run is retried on the next open. */
+  #installExtensions(): Promise<void> {
+    this.#extending ??= installExtensions(
+      this.#registry,
+      this.#options.extensions ?? {}
+    ).catch((error: unknown) => {
+      this.#extending = undefined;
+      throw error;
+    });
+    return this.#extending;
   }
 
   /** @internal The per-conversation defaults supported by pi-durable. */

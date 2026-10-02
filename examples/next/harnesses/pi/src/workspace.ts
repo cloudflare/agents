@@ -5,7 +5,7 @@ import {
   type PiTool
 } from "@cloudflare/computer/tools/pi-ai";
 import type { Tool } from "@earendil-works/pi-ai";
-import type { ToolRegistration } from "@earendil-works/pi-durable";
+import type { PiExtension } from "agents/harness/pi";
 
 /** The id of the Workspace's one backend, which `exec` runs on. */
 export const JAVASCRIPT_BACKEND = "javascript";
@@ -89,8 +89,8 @@ function describeExec(tool: PiTool): PiTool {
 }
 
 /**
- * The Workspace tools from `@cloudflare/computer/tools/pi-ai`, as
- * pi-durable `ToolRegistration`s.
+ * The Workspace tools from `@cloudflare/computer/tools/pi-ai`, as a pi
+ * extension.
  *
  * `createPiTools` returns pi-ai declarations and one `execute` that runs a
  * call, for a hand-written agent loop. pi-durable runs the loop itself and
@@ -98,10 +98,10 @@ function describeExec(tool: PiTool): PiTool {
  * name. `execute` validates the arguments against the tool's schema and
  * reports failures as `isError` results rather than throwing.
  */
-export function createWorkspaceTools(
+export function workspaceTools(
   workspace: Workspace,
   options: Omit<CreatePiToolsOptions, "workspace" | "shell"> = {}
-): ToolRegistration[] {
+): PiExtension {
   const { tools, execute } = createPiTools({
     ...options,
     workspace,
@@ -115,25 +115,28 @@ export function createWorkspaceTools(
     }
   });
 
-  return tools.map((declared): ToolRegistration => {
-    const tool = declared.name === "exec" ? describeExec(declared) : declared;
-    return {
-      name: tool.name,
-      description: tool.description,
-      // JSON Schema rather than TypeBox. pi validates with TypeBox, which
-      // accepts plain JSON Schema, so only the static type differs.
-      parameters: tool.parameters as unknown as Tool["parameters"],
-      ...(tool.constrainedSampling
-        ? { constrainedSampling: tool.constrainedSampling }
-        : {}),
-      replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
-      async execute(args, api, context) {
-        const { content, isError } = await execute(
-          { id: api.callId, name: tool.name, arguments: args },
-          { abortSignal: context.abortSignal }
-        );
-        return { content, isError };
+  return (ctx) =>
+    ctx.tools.transform((draft) => {
+      for (const declared of tools) {
+        const tool =
+          declared.name === "exec" ? describeExec(declared) : declared;
+        draft.set(tool.name, {
+          description: tool.description,
+          // JSON Schema rather than TypeBox. pi validates with TypeBox, which
+          // accepts plain JSON Schema, so only the static type differs.
+          parameters: tool.parameters as unknown as Tool["parameters"],
+          ...(tool.constrainedSampling
+            ? { constrainedSampling: tool.constrainedSampling }
+            : {}),
+          replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
+          async execute(args, api, context) {
+            const { content, isError } = await execute(
+              { id: api.callId, name: tool.name, arguments: args },
+              { abortSignal: context.abortSignal }
+            );
+            return { content, isError };
+          }
+        });
       }
-    };
-  });
+    });
 }

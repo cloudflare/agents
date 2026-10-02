@@ -20,7 +20,17 @@ export {
   openPiSessionStore,
   type PiSessionStoreOptions
 } from "./session-store";
-export { addSkills, type ResolvedSkills } from "./skills";
+export type { ExtensionDraft, ExtensionState } from "../extension";
+export type {
+  PiExtension,
+  PiExtensionContext,
+  PiExtensions,
+  PiPrompt,
+  PiSection,
+  PiTool,
+  PiTools
+} from "./extensions";
+export { skills } from "./skills";
 export type {
   PiOperationResult,
   PiPendingOperation,

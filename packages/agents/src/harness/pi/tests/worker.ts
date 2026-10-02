@@ -10,20 +10,17 @@ import {
 } from "@earendil-works/pi-ai";
 import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
 import {
-  createRegistry,
-  defineExtension,
   Harness,
-  section,
   type AgentEvent,
-  type EntryRecord,
-  type Registry,
-  type ToolRegistration
+  type EntryRecord
 } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
 import {
   PiHarness,
+  type PiExtension,
   type PiOperationResult,
+  type PiTool,
   type PiReceipt,
   type PiWhenBusy
 } from "../index";
@@ -103,14 +100,13 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     tokensPerSecond: 200,
     tokenSize: { min: 2, max: 4 }
   });
-  readonly registry = this.#registry();
   readonly harness = new PiHarness({
-    harness: ({ storage, context, settings }) =>
+    harness: ({ storage, context, registry, settings }) =>
       Harness.open(
         storage,
         {
           models: fauxModels(this.#faux.provider),
-          registry: this.registry,
+          registry,
           settings,
           onReport: (error) => console.warn("pi report", error)
         },
@@ -123,6 +119,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
       },
       retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
     },
+    extensions: { "test-tools": this.#testTools() },
     // Short enough that a suite does not sit on the real 30s heartbeat.
     timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
   });
@@ -219,31 +216,11 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.getAlarm();
   }
 
-  #registry(): Registry {
-    const registry = createRegistry();
-    registry.install(
-      defineExtension({
-        name: "test-tools",
-        sections: [
-          section("preamble", () => "Use the supplied test tools.", {
-            tag: false
-          })
-        ],
-        tools: this.#tools()
-      })
-    );
-    return registry;
-  }
-
-  #tools(): ToolRegistration[] {
+  #testTools(): PiExtension {
     const storage = this.ctx.storage;
-    const gate = (
-      name: string,
-      replay: "safe" | "unsafe"
-    ): ToolRegistration => ({
-      name,
+    const gate = (replay: "safe" | "unsafe"): PiTool<typeof NoParameters> => ({
       description: "Wait until the test releases it.",
-      parameters: Type.Object({}),
+      parameters: NoParameters,
       replay,
       async execute(_args, api, context) {
         const runs = ((await storage.get<number>(GATE_RUNS_KEY)) ?? 0) + 1;
@@ -258,20 +235,28 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         };
       }
     });
-    return [
-      multiplyTool(),
-      gate("gate", "safe"),
-      gate("gate_unsafe", "unsafe")
-    ];
+    return (ctx) => {
+      ctx.prompt.transform((prompt) =>
+        prompt.set("preamble", {
+          render: () => "Use the supplied test tools.",
+          tag: false
+        })
+      );
+      ctx.tools.transform((tools) => {
+        tools.set("multiply", multiplyTool());
+        tools.set("gate", gate("safe"));
+        tools.set("gate_unsafe", gate("unsafe"));
+      });
+    };
   }
 }
 
+const NoParameters = Type.Object({});
 const MultiplyParameters = Type.Object({ value: Type.Number() });
 
 /** The one tool the factory fixture needs: no gating, no storage. */
-function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
+function multiplyTool(): PiTool<typeof MultiplyParameters> {
   return {
-    name: "multiply",
     description: "Multiply by three.",
     parameters: MultiplyParameters,
     replay: "safe",
@@ -294,12 +279,12 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
     tokenSize: { min: 2, max: 4 }
   });
   readonly harness = new PiHarness({
-    harness: ({ storage, context, settings }) =>
+    harness: ({ storage, context, registry, settings }) =>
       Harness.open(
         storage,
         {
           models: fauxModels(this.#faux.provider),
-          registry: createRegistry(),
+          registry,
           settings
         },
         context

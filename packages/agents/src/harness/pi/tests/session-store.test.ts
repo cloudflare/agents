@@ -61,8 +61,14 @@ describe("pi session store", () => {
     await runInDurableObject(stub, async (_instance, state) => {
       const db = new DurableObjectSqliteDatabase(state.storage);
       await db.exec("CREATE TABLE notes (text TEXT)");
-      const { promise: held, resolve: release } = Promise.withResolvers<void>();
-      const { promise: open, resolve: opened } = Promise.withResolvers<void>();
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let opened = () => {};
+      const open = new Promise<void>((resolve) => {
+        opened = resolve;
+      });
       const rolledBack = db.transaction(async (tx) => {
         await tx.run("INSERT INTO notes VALUES (?)", "inside");
         opened();

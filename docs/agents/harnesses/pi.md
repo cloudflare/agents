@@ -25,24 +25,19 @@ Open pi's `Harness` with the storage and background context that `PiHarness` pro
 ```ts
 import { DurableObject } from "cloudflare:workers";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, Harness } from "@earendil-works/pi-durable";
+import { Harness } from "@earendil-works/pi-durable";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { CLOUDFLARE_PROVIDER_ID, createAI } from "agents/models/pi-ai";
 
 export class Assistant extends DurableObject<Env> {
   readonly ai = createAI({ binding: this.env.AI });
-  readonly registry = createRegistry();
 
   readonly harness = new PiHarness({
-    harness: ({ storage, context }) => {
+    harness: ({ storage, context, registry, settings }) => {
       const models = createModels();
       models.setProvider(this.ai.provider);
-      return Harness.open(
-        storage,
-        { models, registry: this.registry },
-        context
-      );
+      return Harness.open(storage, { models, registry, settings }, context);
     },
     defaults: {
       model: {
@@ -60,7 +55,23 @@ export class Assistant extends DurableObject<Env> {
 }
 ```
 
-The `harness` factory receives a pi storage adapter backed by the Durable Object's SQLite database. It also receives a background context for opening pi. Configure pi's models, registry, and other `Harness.open` options in this factory.
+The `harness` factory receives a pi storage adapter backed by the Durable Object's SQLite database, a background context for opening pi, pi's registry, and harness-wide settings. Pass the registry and settings to `Harness.open`, and configure pi's models and other `Harness.open` options in this factory.
+
+## Add tools and prompt sections
+
+Tools and system prompt sections come from extensions, plain functions passed to `PiHarness` by name:
+
+```ts
+extensions: {
+  preamble: (ctx) =>
+    ctx.prompt.transform((prompt) =>
+      prompt.set("preamble", { render: () => "Be brief.", tag: false })
+    ),
+  skills: skills(sources)
+}
+```
+
+To write extensions, and for which pi-durable extension features `PiHarness` supports, refer to [Pi harness extensions](./pi-extensions.md).
 
 `defaults` applies when the harness creates a new session. You can change an individual session's model with `session.setModel()`. Without a model, the session cannot produce an answer until one is set.
 

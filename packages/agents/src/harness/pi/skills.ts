@@ -1,24 +1,19 @@
 import { Type } from "@earendil-works/pi-ai";
-import {
-  defineExtension,
-  section,
-  type Registry,
-  type ToolExecutionResult,
-  type ToolRegistration
-} from "@earendil-works/pi-durable";
+import type { ToolExecutionResult } from "@earendil-works/pi-durable";
 import type {
   SkillContent,
   SkillDescriptor,
   SkillResourceDescriptor,
   SkillSource
 } from "../../skills";
+import type { PiExtension, PiTool } from "./extensions";
 
 /** Skills resolved from `agents/skills` sources for one process lifetime. */
 export type ResolvedSkills = {
   /** Changes when any source's fingerprint changes. */
   readonly fingerprint: string;
-  /** Model-facing activation tools; empty when there are no skills. */
-  readonly tools: readonly ToolRegistration[];
+  /** Model-facing activation tools, by name; empty when there are no skills. */
+  readonly tools: Readonly<Record<string, PiTool>>;
   /** System-prompt catalog, or null when there are no skills. */
   readonly catalog: string | null;
   readonly warnings: readonly string[];
@@ -148,7 +143,7 @@ export async function resolveSkillSources(
     (skill) => skill.descriptor.metadata?.["disable-model-invocation"] !== true
   );
   if (visible.length === 0) {
-    return { fingerprint, tools: [], catalog: null, warnings };
+    return { fingerprint, tools: {}, catalog: null, warnings };
   }
 
   const names = visible.map((skill) => skill.descriptor.name);
@@ -158,8 +153,7 @@ export async function resolveSkillSources(
   );
 
   const activateParameters = Type.Object({ name: nameSchema });
-  const activateSkill: ToolRegistration<typeof activateParameters> = {
-    name: "activate_skill",
+  const activateSkill: PiTool<typeof activateParameters> = {
     description:
       "Activate a skill by name. Use this when the user's task matches one of the available skills; the response contains the skill's full instructions.",
     parameters: activateParameters,
@@ -176,8 +170,7 @@ export async function resolveSkillSources(
     name: Type.Optional(nameSchema),
     path: Type.String({ minLength: 1 })
   });
-  const readResource: ToolRegistration<typeof resourceParameters> = {
-    name: "read_skill_resource",
+  const readResource: PiTool<typeof resourceParameters> = {
     description:
       "Read a file bundled with a skill, such as a reference document or template. Provide the skill name and the file's path from the skill's resource list.",
     parameters: resourceParameters,
@@ -223,7 +216,10 @@ export async function resolveSkillSources(
 
   return {
     fingerprint,
-    tools: [activateSkill, readResource],
+    tools: {
+      activate_skill: activateSkill,
+      read_skill_resource: readResource
+    },
     catalog,
     warnings
   };
@@ -255,25 +251,30 @@ function hasResource(skill: ResolvedSkill, path: string): boolean {
 }
 
 /**
- * Register `agents/skills` sources on a pi registry: the activation tools
- * and a "skills" system prompt section. Resolution reads the sources, so a
- * host awaits this in its `harness` factory, before `Harness.open`.
+ * `agents/skills` sources as a pi extension: the activation tools and a
+ * `skills` system prompt section. It reads the sources when the harness
+ * first opens.
+ *
+ * ```ts
+ * new PiHarness({ harness, extensions: { skills: skills(sources) } });
+ * ```
  */
-export async function addSkills(
-  registry: Registry,
-  sources: readonly SkillSource[]
-): Promise<ResolvedSkills> {
-  const resolved = await resolveSkillSources(sources);
-  for (const warning of resolved.warnings) {
-    console.warn(`pi skills: ${warning}`);
-  }
-  const catalog = resolved.catalog;
-  registry.install(
-    defineExtension({
-      name: "agents.skills",
-      tools: resolved.tools,
-      sections: catalog === null ? [] : [section("skills", () => catalog)]
-    })
-  );
-  return resolved;
+export function skills(sources: readonly SkillSource[]): PiExtension {
+  return async (ctx) => {
+    const resolved = await resolveSkillSources(sources);
+    for (const warning of resolved.warnings) {
+      console.warn(`pi skills: ${warning}`);
+    }
+    ctx.tools.transform((tools) => {
+      for (const [name, tool] of Object.entries(resolved.tools)) {
+        tools.set(name, tool);
+      }
+    });
+    const catalog = resolved.catalog;
+    if (catalog !== null) {
+      ctx.prompt.transform((prompt) =>
+        prompt.set("skills", { render: () => catalog })
+      );
+    }
+  };
 }
