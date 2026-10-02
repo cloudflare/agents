@@ -8,7 +8,8 @@
     "start": "vite dev",
     "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false",
-    "tui": "node src/ai-sdk-tui.ts"
+    "tui": "node src/ai-sdk-tui.ts",
+    "tui2": "sh -c 'tsx ../../../packages/agents/src/cli/index.ts tui \"${AGENT_ORIGIN:-http://localhost:5173}/channels/${1:-ai-sdk}/${2:-default}\" --as \"terminal-$$\"' tui2"
   },
   "dependencies": {
     "@cloudflare/kumo": "^2.6.0",
