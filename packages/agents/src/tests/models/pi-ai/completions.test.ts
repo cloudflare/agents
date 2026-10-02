@@ -326,6 +326,35 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
     expect(message.content[1]).toEqual({ text: "hi", type: "text" });
   });
 
+  it("fails a stream that closes before a finish reason or [DONE]", async () => {
+    const binding = fakeBinding(() =>
+      sseResponse([
+        vendorChunk({ content: "The answer is", role: "assistant" })
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { events, message } = await collectEvents(
+      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+    );
+
+    expect(events.at(-1)?.type).toBe("error");
+    expect(message.stopReason).toBe("error");
+    expect(message.errorMessage).toContain("before the model finished");
+    // What arrived is kept on the failed message.
+    expect(message.content[0]).toEqual({ text: "The answer is", type: "text" });
+  });
+
+  it("completes a stream that ends with [DONE] and no finish reason", async () => {
+    const binding = fakeBinding(() =>
+      sseResponse([vendorChunk({ content: "hi", role: "assistant" }), "[DONE]"])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.stream(ai(groqModel("llama-3.1-8b-instant")), userContext("hi"))
+    );
+    expect(message.stopReason).toBe("stop");
+  });
+
   it("takes the first non-empty reasoning field and no other", async () => {
     // Some endpoints send the same text twice; reading both would double it.
     const binding = fakeBinding(() =>

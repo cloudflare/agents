@@ -403,12 +403,16 @@ class CompletionAssembler {
     const hasToolCalls = this.blocks.some((b) => b.type === "toolCall");
     if (this.output.stopReason === "error") return;
     if (!sawFinishReason) {
-      if (sawDone || this.blocks.length > 0) {
+      // A complete stream ends with a finish reason or `[DONE]`; a stream
+      // that closes without either was cut off, whatever it delivered first.
+      if (sawDone) {
         this.output.stopReason = hasToolCalls ? "toolUse" : "stop";
       } else {
         this.output.stopReason = "error";
         this.output.errorMessage =
-          "The stream ended before the model produced any output.";
+          this.blocks.length > 0
+            ? "The stream ended before the model finished its answer."
+            : "The stream ended before the model produced any output.";
       }
     } else if (this.output.stopReason === "stop" && hasToolCalls) {
       this.output.stopReason = "toolUse";
