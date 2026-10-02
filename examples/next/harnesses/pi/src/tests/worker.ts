@@ -80,7 +80,9 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   });
   readonly harness = new PiHarness({
     providers: [this.#faux.provider],
-    onReport: (error) => console.warn("pi report", error),
+    harnessOptions: {
+      onReport: (error) => console.warn("pi report", error)
+    },
     defaults: {
       model: this.#faux.getModel(),
       retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }

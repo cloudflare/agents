@@ -92,9 +92,10 @@ function sessionOfJob(payload: unknown): PiSessionId | undefined {
 }
 
 /**
- * pi's own `Harness.open` options that `PiHarness` passes through as-is:
- * `settings`, `env`, `onReport`, `conversationCreated`, `now`. It builds
- * `models` from `providers` and `registry` from `extensions` itself.
+ * pi-durable's own `HarnessOptions`, which `PiHarness` passes to
+ * `Harness.open` as-is: `settings`, `env`, `onReport`,
+ * `conversationCreated`, `now`. It builds `models` from `providers` and
+ * `registry` from `extensions` itself.
  */
 export type PiOpenOptions = Omit<HarnessOptions, "models" | "registry">;
 
@@ -129,10 +130,9 @@ export type PiWakeTiming = {
 
 /**
  * `PiHarness`'s options. Only `providers` is required. `defaults` applies
- * to new sessions; everything else, including pi's own `Harness.open`
- * options (`PiOpenOptions`), applies to the whole harness.
+ * to new sessions; `harnessOptions` are pi-durable's own, passed through.
  */
-export type PiHarnessOptions = PiOpenOptions & {
+export type PiHarnessOptions = {
   /**
    * pi-ai providers the harness's models come from, such as `createAI`'s
    * `ai.provider`.
@@ -147,23 +147,9 @@ export type PiHarnessOptions = PiOpenOptions & {
   readonly defaults?: PiSessionDefaults;
   readonly store?: PiSessionStoreOptions;
   readonly timing?: PiWakeTiming;
+  /** pi-durable's own `Harness.open` options, passed through as-is. */
+  readonly harnessOptions?: PiOpenOptions;
 };
-
-/**
- * The options that are pi's, not `PiHarness`'s. A rest spread, so every
- * `Harness.open` option passes through, including ones pi adds later.
- */
-function piOpenOptions(options: PiHarnessOptions): PiOpenOptions {
-  const {
-    providers: _providers,
-    extensions: _extensions,
-    defaults: _defaults,
-    store: _store,
-    timing: _timing,
-    ...open
-  } = options;
-  return open;
-}
 
 type Opened = {
   readonly pi: Harness;
@@ -240,10 +226,10 @@ export class PiHarness extends LifecycleCapability {
     this.#heartbeatMs = options.timing?.heartbeatMs ?? HEARTBEAT_MS;
     if (
       options.defaults?.retry !== undefined &&
-      options.settings?.retry !== undefined
+      options.harnessOptions?.settings?.retry !== undefined
     ) {
       throw new Error(
-        "PiHarness: set retry in defaults.retry or settings.retry, not both"
+        "PiHarness: set retry in defaults.retry or harnessOptions.settings.retry, not both"
       );
     }
     for (const [name, value] of [
@@ -558,7 +544,7 @@ export class PiHarness extends LifecycleCapability {
     for (const provider of this.#options.providers) {
       models.setProvider(provider);
     }
-    const { settings, ...open } = piOpenOptions(this.#options);
+    const { settings, ...open } = this.#options.harnessOptions ?? {};
     const retry = this.#options.defaults?.retry;
     const pi = await Harness.open(
       storage,

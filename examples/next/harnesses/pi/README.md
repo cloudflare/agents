@@ -132,7 +132,7 @@ add `skills: skills(sources)` from `agents/harness/pi` to `extensions`.
 Only `providers` is required. `PiHarness` opens pi's `Harness` itself,
 with models from `providers` and a registry from `extensions`. pi's other
 `Harness.open` options (`settings`, `env`, `onReport`,
-`conversationCreated`) go at the top level and pass through as-is.
+`conversationCreated`) go in `harnessOptions` and pass through as-is.
 
 `defaults` applies to new sessions only — change one session's model with
 `session.setModel`. Without a default model, a session's prompts end

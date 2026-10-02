@@ -48,14 +48,14 @@ export class Assistant extends Agent<Env> {
 
 `PiHarness` opens pi's `Harness` itself, over the Durable Object's SQLite database. Only `providers` is required.
 
-| Option                                                      | What it sets                                                                                                    |
-| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `providers`                                                 | The pi-ai providers models come from, such as `createAI`'s `ai.provider`.                                       |
-| `defaults`                                                  | What a new session starts with: `model` (a pi-ai `Model`, such as `ai("@cf/…")`), `thinkingLevel`, and `retry`. |
-| `extensions`                                                | Tools and system prompt sections. Refer to [Pi harness extensions](./pi-extensions.md).                         |
-| `settings`, `env`, `onReport`, `conversationCreated`, `now` | pi-durable's own `Harness.open` options, passed through as-is.                                                  |
-| `store`                                                     | The prefix for pi's tables. Default `pi_`.                                                                      |
-| `timing`                                                    | How long the wake waits on pi before handing a wait to the alarm.                                               |
+| Option           | What it sets                                                                                                                 |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `providers`      | The pi-ai providers models come from, such as `createAI`'s `ai.provider`.                                                    |
+| `defaults`       | What a new session starts with: `model` (a pi-ai `Model`, such as `ai("@cf/…")`), `thinkingLevel`, and `retry`.              |
+| `extensions`     | Tools and system prompt sections. Refer to [Pi harness extensions](./pi-extensions.md).                                      |
+| `harnessOptions` | pi-durable's own `Harness.open` options (`settings`, `env`, `onReport`, `conversationCreated`, `now`), passed through as-is. |
+| `store`          | The prefix for pi's tables. Default `pi_`.                                                                                   |
+| `timing`         | How long the wake waits on pi before handing a wait to the alarm.                                                            |
 
 ## Add tools and prompt sections
 

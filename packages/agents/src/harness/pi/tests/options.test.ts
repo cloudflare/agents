@@ -34,14 +34,14 @@ describe("a harness without defaults", () => {
 });
 
 describe("PiHarness options", () => {
-  it("rejects retry set both as a default and in settings", () => {
+  it("rejects retry set both as a default and in harnessOptions.settings", () => {
     const retry = { enabled: true, maxRetries: 1, baseDelayMs: 10 };
     expect(
       () =>
         new PiHarness({
           providers: [],
           defaults: { retry },
-          settings: { retry }
+          harnessOptions: { settings: { retry } }
         })
     ).toThrow("not both");
   });

@@ -152,8 +152,10 @@ export class PiExtensionsTestObject extends DurableObject<Cloudflare.Env> {
     },
     extensions: this.#extensions(),
     // One of pi's own Harness.open options, passed through as-is.
-    conversationCreated: () => {
-      this.created += 1;
+    harnessOptions: {
+      conversationCreated: () => {
+        this.created += 1;
+      }
     },
     timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
   });

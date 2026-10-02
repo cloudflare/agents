@@ -54,7 +54,9 @@ export class PiAgent extends DurableObject<Env> {
       playground,
       workspace: workspaceTools(this.workspace)
     },
-    onReport: (error) => console.warn("pi report", error)
+    harnessOptions: {
+      onReport: (error) => console.warn("pi report", error)
+    }
   });
 
   // App glue, not the harness: how this app puts sessions on a socket.
