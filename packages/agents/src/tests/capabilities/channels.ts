@@ -7,11 +7,13 @@ import {
   type GatewayOrigin,
   type HarnessSession,
   type HarnessSessions,
+  type JsonObject,
   type SessionEvent,
   type SessionInfo,
   type SessionState,
   type SubmitOptions
 } from "../../experimental/channels";
+import { slack } from "../../experimental/channels/slack";
 import { WebChannel } from "../../experimental/channels/web";
 import { Lifecycle } from "../../lifecycle";
 import { Streams } from "../../streams";
@@ -128,16 +130,35 @@ class ScriptedHarness implements AgentHarness {
 }
 
 /**
- * Channels with the Web Channel over a scripted harness. Tests play the
- * harness through RPC and the participants through WebSockets, connecting
- * with the identity header the gateway would set.
+ * Channels with the Web Channel and a Slack Channel over a scripted
+ * harness. Tests play the harness through RPC and the participants through
+ * WebSockets, connecting with the identity header the gateway would set.
  */
 export class ChannelsHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly harness = new ScriptedHarness();
+  /** Every call the Slack Channel made, answered as a working Slack would. */
+  readonly slackCalls: { method: string; body: JsonObject }[] = [];
+  #slackTs = 0;
+
   readonly channels = Channels.forHarness(this.harness, {
     streams: new Streams({ maxChunkBytes: 1024 }),
     channels: {
-      web: new WebChannel()
+      web: new WebChannel(),
+      slack: slack({
+        botToken: "xoxb-test",
+        streamIntervalMs: 0,
+        fetch: async (input, init) => {
+          const method = String(input).split("/").pop() ?? "";
+          const body = JSON.parse(String(init?.body)) as JsonObject;
+          this.slackCalls.push({ method, body });
+          this.#slackTs += 1;
+          return Response.json({
+            ok: true,
+            channel: body.channel,
+            ts: `1800000000.${this.#slackTs}`
+          });
+        }
+      })
     }
   });
 
@@ -168,6 +189,10 @@ export class ChannelsHarnessObject extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
     }
+  }
+
+  getSlackCalls() {
+    return this.slackCalls;
   }
 
   getCalls(): HarnessCall[] {
