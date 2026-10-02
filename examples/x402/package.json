@@ -23,7 +23,7 @@
     "viem": "^2.53.1"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.62.5",
+    "@cloudflare/vite-plugin": "1.62.3",
     "@cloudflare/workers-types": "^5.20260729.1",
     "@tailwindcss/vite": "^4",
     "@types/node": "^26.0.1",
@@ -33,6 +33,6 @@
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
-    "wrangler": "^4.147.0"
+    "wrangler": "^4.145.0"
   }
 }
