@@ -29,11 +29,15 @@ export type WebSocketHandlers = {
     connection: Connection,
     ctx: ConnectionContext
   ): void | Promise<void>;
-  /** Handle a message from a hibernating WebSocket connection. */
+  /**
+   * Handle a message from a hibernating WebSocket connection. For handlers
+   * added with `WebSockets.use`, returning true claims the message, so
+   * later handlers do not see it.
+   */
   onMessage?(
     connection: Connection,
     message: WebSocketMessage
-  ): void | Promise<void>;
+  ): void | boolean | Promise<void | boolean>;
   /** Handle a closing hibernating WebSocket connection. */
   onClose?(
     connection: Connection,
