@@ -1,5 +1,39 @@
 # @cloudflare/ai-chat
 
+## 0.12.1
+
+### Patch Changes
+
+- [#2390](https://github.com/cloudflare/agents/pull/2390) [`c55ec80`](https://github.com/cloudflare/agents/commit/c55ec80087ba2531ccdc9e211921fb5bf6ddb065) Thanks [@threepointone](https://github.com/threepointone)! - Report a failed agent-tool child as failed even when it was evicted before recording the failure. See [Agent tools](https://github.com/cloudflare/agents/blob/main/docs/agents/agent-tools.md).
+
+- [#2384](https://github.com/cloudflare/agents/pull/2384) [`f904999`](https://github.com/cloudflare/agents/commit/f9049991fe9ca637b5326788e08e1cea6b4280c1) Thanks [@threepointone](https://github.com/threepointone)! - Fix agent-tool chunks being duplicated or dropped on reconnect, child re-attach, and fiber recovery. See [Agent tools](https://github.com/cloudflare/agents/blob/main/docs/agents/agent-tools.md).
+
+- [#2364](https://github.com/cloudflare/agents/pull/2364) [`5e0507e`](https://github.com/cloudflare/agents/commit/5e0507e5f1ba27cc7c2bf2920c380a7c8f9caaad) Thanks [@threepointone](https://github.com/threepointone)! - Add `eventDelivery: "terminal"` to `runAgentTool` to forward only lifecycle, progress, and milestone events for a run. See [Agent tools](https://github.com/cloudflare/agents/blob/main/docs/agents/agent-tools.md).
+
+- [#2334](https://github.com/cloudflare/agents/pull/2334) [`7f564e7`](https://github.com/cloudflare/agents/commit/7f564e7bfeee6ec976c12ce1e4dbbaa150906d26) Thanks [@threepointone](https://github.com/threepointone)! - AI Chat and Think send the terminal `done` frame after persisting and broadcasting the assistant reply, so later sends are not overwritten. See [Chat agents](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md).
+
+- [#2352](https://github.com/cloudflare/agents/pull/2352) [`449ac27`](https://github.com/cloudflare/agents/commit/449ac2787a1d101d7246b8035c9751bc8b5f9966) Thanks [@threepointone](https://github.com/threepointone)! - Do not start an automatic continuation after an active stream finishes with a normal assistant response. See [Client-side tools and auto-continuation](https://github.com/cloudflare/agents/blob/main/docs/agents/client-tools-continuation.md).
+
+- [#2360](https://github.com/cloudflare/agents/pull/2360) [`7206134`](https://github.com/cloudflare/agents/commit/720613485a9257e25de89d96be7a30a05c40f623) Thanks [@threepointone](https://github.com/threepointone)! - AI Chat recovers from transient response-reader errors instead of ending the turn, and respects recovery persistence choices without joining stale recovery runs. See [Chat agents](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md).
+
+- [#2391](https://github.com/cloudflare/agents/pull/2391) [`d3fe93c`](https://github.com/cloudflare/agents/commit/d3fe93cd968ea4d8e57a909dcbfd56b879df77e0) Thanks [@threepointone](https://github.com/threepointone)! - Keep a tool call's input when its approval request arrives before the input finishes streaming ([#1872](https://github.com/cloudflare/agents/issues/1872)). See [Human in the loop](https://github.com/cloudflare/agents/blob/main/docs/agents/human-in-the-loop.md).
+
+- [#2408](https://github.com/cloudflare/agents/pull/2408) [`6c8f85a`](https://github.com/cloudflare/agents/commit/6c8f85a571802881e5e380ecce03eb24d6fb5f71) Thanks [@threepointone](https://github.com/threepointone)! - Require `agents@>=0.25.0` so Think and AI Chat can import the chat helpers provided by that release.
+
+- [#2378](https://github.com/cloudflare/agents/pull/2378) [`dbf170c`](https://github.com/cloudflare/agents/commit/dbf170cf7d0313ffe79d7d6a84201841f2e12184) Thanks [@threepointone](https://github.com/threepointone)! - `useAgentChat` gains `onTurnEnd`, and terminal chat frames carry outcomes and user message IDs so clients can settle sends correctly across recovery and reconnects. Replay, tool callbacks, and turn state now remain consistent through terminal delivery; see [Chat agents](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md).
+
+- [#2393](https://github.com/cloudflare/agents/pull/2393) [`a7d0e02`](https://github.com/cloudflare/agents/commit/a7d0e02a2b5cfb651b34f8f7970eed4f172658c6) Thanks [@threepointone](https://github.com/threepointone)! - Continuation turns that fail before streaming now report an error to clients and `onChatResponse` instead of appearing to hang ([#2381](https://github.com/cloudflare/agents/issues/2381)). See [Client tools](https://github.com/cloudflare/agents/blob/main/docs/agents/client-tools-continuation.md).
+
+- [#2238](https://github.com/cloudflare/agents/pull/2238) [`c3a4010`](https://github.com/cloudflare/agents/commit/c3a401006b482fab061030ac13536e1e0025fd59) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Interfaces can now be used as `Props` on `Agent`, `AIChatAgent`, `Think`, and routing helpers. See [Routing](https://github.com/cloudflare/agents/blob/main/docs/agents/routing.md).
+
+- [#2040](https://github.com/cloudflare/agents/pull/2040) [`2afe0e0`](https://github.com/cloudflare/agents/commit/2afe0e0ba9eb91605adb0bcac289e9df8a723aa7) Thanks [@AntoniTok](https://github.com/AntoniTok)! - Keep assistant messages and tool outputs attached to the correct turn when a provider reuses a `toolCallId`; `resolveToolMergeId` is deprecated in favour of `reconcileMessages`. See [Chat agents](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md).
+
+- [#2348](https://github.com/cloudflare/agents/pull/2348) [`39361fa`](https://github.com/cloudflare/agents/commit/39361fa8c2194bb46c2b165454726252cca80c34) Thanks [@threepointone](https://github.com/threepointone)! - Fix text appearing twice when reconnecting during a tool continuation. See [Resumable streaming](https://github.com/cloudflare/agents/blob/main/docs/agents/resumable-streaming.md).
+
+- [#2404](https://github.com/cloudflare/agents/pull/2404) [`9d125c8`](https://github.com/cloudflare/agents/commit/9d125c8d75571ccde8abb8c0c75ff343a7ef149a) Thanks [@threepointone](https://github.com/threepointone)! - Add `session.mirror()` to keep an in-memory transcript in sync with a session's change feed. See [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md).
+
+- [#2392](https://github.com/cloudflare/agents/pull/2392) [`4f26402`](https://github.com/cloudflare/agents/commit/4f2640204adb629fe6bf0143ed43e65fc6a46703) Thanks [@threepointone](https://github.com/threepointone)! - Settle approved tool calls that never ran once the conversation moves past them, so later turns don't send unresolved tool calls ([#2382](https://github.com/cloudflare/agents/issues/2382)). See [Human in the loop](https://github.com/cloudflare/agents/blob/main/docs/agents/human-in-the-loop.md).
+
 ## 0.12.0
 
 ### Minor Changes

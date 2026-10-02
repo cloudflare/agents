@@ -1,5 +1,11 @@
 # @cloudflare/worker-bundler
 
+## 0.2.5
+
+### Patch Changes
+
+- [#2423](https://github.com/cloudflare/agents/pull/2423) [`0c29717`](https://github.com/cloudflare/agents/commit/0c29717194eed148cb9d8b51dee840bfc02912f8) Thanks [@aron-cf](https://github.com/aron-cf)! - Keep Python wheel `METADATA` files during installation so `importlib.metadata.version()` can resolve package versions.
+
 ## 0.2.4
 
 ### Patch Changes
