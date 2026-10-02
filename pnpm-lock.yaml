@@ -1986,7 +1986,7 @@ importers:
         version: link:../../packages/agents
       hono:
         specifier: ^4.13.5
-        version: 4.13.8
+        version: 4.13.12
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -3809,13 +3809,13 @@ importers:
         version: 2.17.0
       '@x402/hono':
         specifier: ^2.17.0
-        version: 2.17.0(hono@4.13.8)(typescript@6.0.3)
+        version: 2.17.0(hono@4.13.12)(typescript@6.0.3)
       agents:
         specifier: '*'
         version: link:../../packages/agents
       hono:
         specifier: ^4.13.5
-        version: 4.13.8
+        version: 4.13.12
       nanoid:
         specifier: ^5.1.16
         version: 5.1.16
@@ -4523,7 +4523,7 @@ importers:
         version: link:../agents
       hono:
         specifier: ^4.13.5
-        version: 4.13.8
+        version: 4.13.12
 
   packages/shell:
     dependencies:
@@ -9968,6 +9968,10 @@ packages:
     resolution: {integrity: sha512-1yrb/+w6HWQJrUCLkJ2IF5jNIPvvFkblV5RNOYl6bV+OA6p9GLcMpHFFGTosSvHvcAUibuUukRqhlYI4z32C7Q==}
     engines: {node: '>=16.9.0'}
 
+  hono@4.13.12:
+    resolution: {integrity: sha512-6E2QDAc9Ick9Sq77ZrGS/dk2WUYni91aufTw6LJKpV7w8kW5/GxVUc650FOADOmlwg3K+f7Pun6XlV+pYmW6gw==}
+    engines: {node: '>=16.9.0'}
+
   hono@4.13.8:
     resolution: {integrity: sha512-/Gng7NfoykZl2pjukW5Z6+8Yxm3BPRf86GTbQnt0SbySkvax4fyL4H3HhY1cCpBGmiW9XDRFzRV+CXK2W8QudQ==}
     engines: {node: '>=16.9.0'}
@@ -14065,7 +14069,7 @@ snapshots:
       '@cloudflare/containers': 0.3.7
       aws4fetch: 1.0.20
       capnweb: 0.8.0
-      hono: 4.12.27
+      hono: 4.13.8
     optionalDependencies:
       '@openai/agents': 0.12.0(@aws-sdk/credential-provider-node@3.972.84)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.21.3)(zod@4.5.4)
 
@@ -17145,11 +17149,11 @@ snapshots:
     dependencies:
       '@x402/core': 2.17.0
 
-  '@x402/hono@2.17.0(hono@4.13.8)(typescript@6.0.3)':
+  '@x402/hono@2.17.0(hono@4.13.12)(typescript@6.0.3)':
     dependencies:
       '@x402/core': 2.17.0
       '@x402/extensions': 2.17.0(typescript@6.0.3)
-      hono: 4.13.8
+      hono: 4.13.12
     transitivePeerDependencies:
       - bufferutil
       - ethers
@@ -18834,6 +18838,8 @@ snapshots:
       set-cookie-parser: 3.1.2
 
   hono@4.12.27: {}
+
+  hono@4.13.12: {}
 
   hono@4.13.8: {}
 
