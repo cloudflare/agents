@@ -4,10 +4,12 @@ import {
 } from "agents/experimental/channels";
 
 export { AiSdkAgent } from "./ai-sdk-agent";
+export { PiAgent } from "./pi/agent";
 
 /** Each harness's agents, by the first segment of a route. */
 const harnesses: Record<string, (env: Env, name: string) => GatewayAgent> = {
-  "ai-sdk": (env, name) => env.AiSdkAgent.getByName(name)
+  "ai-sdk": (env, name) => env.AiSdkAgent.getByName(name),
+  pi: (env, name) => env.PiAgent.getByName(name)
 };
 
 /**

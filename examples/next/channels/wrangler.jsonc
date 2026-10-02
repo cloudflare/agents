@@ -10,7 +10,13 @@
     "run_worker_first": ["/channels/*"]
   },
   "durable_objects": {
-    "bindings": [{ "class_name": "AiSdkAgent", "name": "AiSdkAgent" }]
+    "bindings": [
+      { "class_name": "AiSdkAgent", "name": "AiSdkAgent" },
+      { "class_name": "PiAgent", "name": "PiAgent" }
+    ]
   },
-  "migrations": [{ "new_sqlite_classes": ["AiSdkAgent"], "tag": "v1" }]
+  "migrations": [
+    { "new_sqlite_classes": ["AiSdkAgent"], "tag": "v1" },
+    { "new_sqlite_classes": ["PiAgent"], "tag": "v2" }
+  ]
 }

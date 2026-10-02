@@ -16,7 +16,8 @@ import { createRoot } from "react-dom/client";
 
 /** The agents this Worker serves, by the route segment that reaches them. */
 const harnesses: Record<string, string> = {
-  "ai-sdk": "AI SDK"
+  "ai-sdk": "AI SDK",
+  pi: "pi"
 };
 
 // The URL hash picks the agent and room: #<harness>/<room>.
