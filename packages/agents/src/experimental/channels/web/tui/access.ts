@@ -12,8 +12,14 @@ export type AccessDeps = {
   log(message: string): void;
 };
 
-/** Headers that already authenticate to Access. */
-const CREDENTIALS = ["cf-access-token", "cf-access-client-id", "cookie"];
+/** Whether the caller already sends Access credentials. */
+function authenticated(headers: Readonly<Record<string, string>>): boolean {
+  return (
+    "cf-access-token" in headers ||
+    "cf-access-client-id" in headers ||
+    /(?:^|;\s*)CF_Authorization=/.test(headers.cookie ?? "")
+  );
+}
 
 /**
  * The `cf-access-token` header for a URL behind Cloudflare Access, from
@@ -26,16 +32,19 @@ export async function accessHeaders(
   headers: Readonly<Record<string, string>>,
   deps: AccessDeps = nodeDeps
 ): Promise<Record<string, string>> {
-  if (CREDENTIALS.some((name) => name in headers)) return {};
+  if (authenticated(headers)) return {};
+  // Access can protect a path rather than the whole host, so probe and log
+  // in to the address being opened.
   const url = new URL(socketUrl);
   url.protocol = url.protocol === "ws:" ? "http:" : "https:";
-  const origin = url.origin;
-  if (!(await behindAccess(origin, deps))) return {};
+  url.search = "";
+  const app = url.toString();
+  if (!(await behindAccess(app, deps))) return {};
 
   const token = async () => {
     const { code, stdout } = await deps.run(
       "cloudflared",
-      ["access", "token", `-app=${origin}`],
+      ["access", "token", `-app=${app}`],
       false
     );
     const value = stdout.trim();
@@ -46,26 +55,26 @@ export async function accessHeaders(
 
   let value = await token();
   if (value === undefined) {
-    deps.log(`${origin} is behind Cloudflare Access; logging in.`);
-    await deps.run("cloudflared", ["access", "login", origin], true);
+    deps.log(`${app} is behind Cloudflare Access; logging in.`);
+    await deps.run("cloudflared", ["access", "login", app], true);
     value = await token();
   }
   if (value === undefined) {
     throw new Error(
-      `Could not get a Cloudflare Access token for ${origin}. Run \`cloudflared access login ${origin}\`, or pass --header cf-access-token=<token>.`
+      `Could not get a Cloudflare Access token for ${app}. Run \`cloudflared access login ${app}\`, or pass --header cf-access-token=<token>.`
     );
   }
   return { "cf-access-token": value };
 }
 
-async function behindAccess(origin: string, deps: AccessDeps) {
+async function behindAccess(app: string, deps: AccessDeps) {
   try {
-    const response = await deps.fetch(origin, { redirect: "manual" });
+    const response = await deps.fetch(app, { redirect: "manual" });
     const location = response.headers.get("location");
     if (response.status < 300 || response.status >= 400 || !location) {
       return false;
     }
-    return new URL(location, origin).hostname.endsWith(".cloudflareaccess.com");
+    return new URL(location, app).hostname.endsWith(".cloudflareaccess.com");
   } catch {
     // Unreachable: let the WebSocket report it.
     return false;

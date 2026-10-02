@@ -39,16 +39,16 @@ describe("tui Access", () => {
   it("sends nothing to a URL that is not behind Access", async () => {
     const { value, calls } = deps({});
     expect(await accessHeaders("wss://h/channels/r", {}, value)).toEqual({});
-    expect(calls).toEqual([{ url: "https://h" }]);
+    expect(calls).toEqual([{ url: "https://h/channels/r" }]);
   });
 
-  it("gets a token from cloudflared for the URL's origin", async () => {
+  it("gets a token from cloudflared for the address being opened", async () => {
     const { value, calls } = deps({ location: LOGIN, tokens: [TOKEN] });
     expect(await accessHeaders("wss://h/channels/r?as=a", {}, value)).toEqual({
       "cf-access-token": TOKEN
     });
     expect(calls[1]).toEqual({
-      command: ["cloudflared", "access", "token", "-app=https://h"]
+      command: ["cloudflared", "access", "token", "-app=https://h/channels/r"]
     });
   });
 
@@ -74,6 +74,26 @@ describe("tui Access", () => {
       await accessHeaders("wss://h/c", { "cf-access-client-id": "id" }, value)
     ).toEqual({});
     expect(calls).toEqual([]);
+  });
+
+  it("probes the channel path, which Access may protect alone", async () => {
+    const { value, calls } = deps({ location: LOGIN, tokens: [TOKEN] });
+    await accessHeaders("wss://h/channels/team/one", {}, value);
+    expect(calls[0]).toEqual({ url: "https://h/channels/team/one" });
+  });
+
+  it("still logs in when the caller's cookie is not Access's", async () => {
+    const { value } = deps({ location: LOGIN, tokens: [TOKEN] });
+    expect(
+      await accessHeaders("wss://h/c", { cookie: "theme=dark" }, value)
+    ).toEqual({ "cf-access-token": TOKEN });
+    expect(
+      await accessHeaders(
+        "wss://h/c",
+        { cookie: "theme=dark; CF_Authorization=x" },
+        value
+      )
+    ).toEqual({});
   });
 
   it("ignores redirects that are not to Access", async () => {
