@@ -11,6 +11,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents`                                  | `src/index.ts`                                | Agent base class, routing, connections, RPC, state, scheduling, SQL                              |
 | `agents/client`                           | `src/client.ts`                               | Browser/Node WebSocket client (`AgentClient`) via partysocket                                    |
 | `agents/lifecycle`                        | `src/lifecycle/index.ts`                      | Composable Durable Object lifecycle and hibernating connections                                  |
+| `agents/harness/ai-sdk`                   | `src/harness/ai-sdk/index.ts`                 | Experimental: `AiSdkHarness`, AI SDK turn conversions and `createSendMessageTool`                |
 | `agents/harness/pi`                       | `src/harness/pi/index.ts`                     | Experimental: pi-durable hosted in a Durable Object (`PiHarness`)                                |
 | `agents/react`                            | `src/react.tsx`                               | `useAgent` React hook, state sync, RPC from components                                           |
 | `agents/chat`                             | `src/chat/index.ts`                           | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think`                     |
