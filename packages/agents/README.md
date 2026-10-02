@@ -121,24 +121,22 @@ AI           Chat agents · Agent tools · Tool calling · MCP servers & clients
 Platform     Observability · Cross-domain auth · Resumable streams
 ```
 
-### Voice and messaging channels
+### Voice and Channels
 
-Voice and provider-neutral messaging use separate entry points so applications
-only load the integrations they import:
+Voice and Channels use separate entry points so applications only load the
+integrations they import:
 
 ```typescript
 import { withVoice } from "agents/voice";
 import { VoiceClient } from "agents/voice/client";
 import { useVoiceAgent } from "agents/voice/react";
 
-import { ChannelHost } from "agents/channels";
-import { email } from "agents/channels/email";
-import { slack } from "agents/channels/slack";
-import { telegram } from "agents/channels/telegram";
+import { email } from "agents/experimental/channels/email";
+import { slack } from "agents/experimental/channels/slack";
+import { telegram } from "agents/experimental/channels/telegram";
 ```
 
-See the [Voice](../../docs/agents/voice.md) and
-[Channels](../../docs/agents/channels.md) references.
+See the [Voice](../../docs/agents/voice.md) reference.
 
 ### State Management
 

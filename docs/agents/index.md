@@ -58,7 +58,6 @@ The differentiator is not "we have durable state" — it is what happens when a 
 - [Push Notifications](./push-notifications.md) - Browser push notifications via Web Push API and scheduled delivery
 - TODO: [SMS](./sms.md) - Text message integration (Twilio, etc.)
 - [Voice Agents](./voice.md) - Build voice agents with real-time speech-to-text, text-to-speech, and conversation persistence
-- [Channels](./channels.md) - Send and receive messages through Slack, Telegram, email, browser voice, or custom adapters
 - [Chat SDK State](./chat-sdk.md) - Store Chat SDK subscriptions, locks, queues, and history in Agents sub-agents
 
 ## Background Processing

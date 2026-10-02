@@ -382,40 +382,25 @@
       "import": "./dist/voice/text.js",
       "require": "./dist/voice/text.js"
     },
-    "./channels": {
-      "types": "./dist/channels/index.d.ts",
-      "import": "./dist/channels/index.js",
-      "require": "./dist/channels/index.js"
+    "./experimental/channels": {
+      "types": "./dist/experimental/channels/index.d.ts",
+      "import": "./dist/experimental/channels/index.js",
+      "require": "./dist/experimental/channels/index.js"
     },
-    "./channels/email": {
-      "types": "./dist/channels/email.d.ts",
-      "import": "./dist/channels/email.js",
-      "require": "./dist/channels/email.js"
+    "./experimental/channels/email": {
+      "types": "./dist/experimental/channels/email/index.d.ts",
+      "import": "./dist/experimental/channels/email/index.js",
+      "require": "./dist/experimental/channels/email/index.js"
     },
-    "./channels/slack": {
-      "types": "./dist/channels/slack.d.ts",
-      "import": "./dist/channels/slack.js",
-      "require": "./dist/channels/slack.js"
+    "./experimental/channels/slack": {
+      "types": "./dist/experimental/channels/slack/index.d.ts",
+      "import": "./dist/experimental/channels/slack/index.js",
+      "require": "./dist/experimental/channels/slack/index.js"
     },
-    "./channels/telegram": {
-      "types": "./dist/channels/telegram.d.ts",
-      "import": "./dist/channels/telegram.js",
-      "require": "./dist/channels/telegram.js"
-    },
-    "./channels/voice": {
-      "types": "./dist/channels/voice.d.ts",
-      "import": "./dist/channels/voice.js",
-      "require": "./dist/channels/voice.js"
-    },
-    "./channels/ai-sdk": {
-      "types": "./dist/channels/ai-sdk.d.ts",
-      "import": "./dist/channels/ai-sdk.js",
-      "require": "./dist/channels/ai-sdk.js"
-    },
-    "./channels/tanstack-ai": {
-      "types": "./dist/channels/tanstack-ai.d.ts",
-      "import": "./dist/channels/tanstack-ai.js",
-      "require": "./dist/channels/tanstack-ai.js"
+    "./experimental/channels/telegram": {
+      "types": "./dist/experimental/channels/telegram/index.d.ts",
+      "import": "./dist/experimental/channels/telegram/index.js",
+      "require": "./dist/experimental/channels/telegram/index.js"
     },
     "./tsconfig": "./agents.tsconfig.json",
     "./vite": {
@@ -472,7 +457,6 @@
     "test:voice:workers": "vitest --project voice-workers",
     "test:voice:react": "vitest --project voice-react",
     "test:channels": "vitest --project channels",
-    "test:channels:live": "vitest --run -c src/channels/vitest.live.config.ts",
     "test:browser": "vitest run --config src/browser-tests/vitest.config.ts",
     "test:workers": "vitest --project workers",
     "test:chat": "vitest --project chat",

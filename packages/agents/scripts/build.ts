@@ -49,13 +49,10 @@ const entries = [
   "src/voice/workers-ai.ts",
   "src/voice/sfu.ts",
   "src/voice/text.ts",
-  "src/channels/index.ts",
-  "src/channels/email.ts",
-  "src/channels/slack.ts",
-  "src/channels/telegram.ts",
-  "src/channels/voice.ts",
-  "src/channels/ai-sdk.ts",
-  "src/channels/tanstack-ai.ts"
+  "src/experimental/channels/index.ts",
+  "src/experimental/channels/email/index.ts",
+  "src/experimental/channels/slack/index.ts",
+  "src/experimental/channels/telegram/index.ts"
 ];
 
 for (const entry of entries) {
