@@ -1,3 +1,5 @@
+import { runInDurableObject } from "cloudflare:test";
+import type { AiSdkHarnessObject } from "../capabilities/ai-sdk-harness";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type {
@@ -9,9 +11,7 @@ import {
   type ServerFrame
 } from "../../experimental/channels/web";
 
-type Agent = DurableObjectStub<
-  import("../capabilities/ai-sdk-harness").AiSdkHarnessObject
->;
+type Agent = DurableObjectStub<AiSdkHarnessObject>;
 
 function agent(): Agent {
   return env.AiSdkHarnessObject.getByName(crypto.randomUUID());
@@ -242,6 +242,22 @@ describe("An AI SDK harness served through Channels", () => {
       type: "text",
       text: "You are in Lisbon"
     });
+  });
+
+  it("starts with unsettled work in several sessions", async () => {
+    const stub = agent();
+    await stub.setScript([
+      { text: "a", delayMs: 300 },
+      { text: "b", delayMs: 300 }
+    ]);
+    await stub.submit("a", "hi", "op-a");
+    await stub.submit("b", "hi", "op-b");
+    // What a restart runs: walk the stored sessions and wake the busy ones.
+    await runInDurableObject(stub, (instance: AiSdkHarnessObject) =>
+      instance.harness.onStart()
+    );
+    expect(await stub.wait("a", "op-a")).toMatchObject({ status: "done" });
+    expect(await stub.wait("b", "op-b")).toMatchObject({ status: "done" });
   });
 
   it("forks a conversation with its history", async () => {
