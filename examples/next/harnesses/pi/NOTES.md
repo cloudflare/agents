@@ -1,7 +1,7 @@
 # Notes: pi-durable on a Durable Object
 
 Working notes from moving this example from pi-agent-core's `AgentHarness`
-(0.84, vendored) to `@earendil-works/pi-durable` (npm `^0.99.2`). They
+(0.84, vendored) to `@earendil-works/pi-durable` (npm `^1.0.0`). They
 record what we decided, what was hard, and what is still missing. Nothing
 here is in `agents`.
 

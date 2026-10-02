@@ -12,9 +12,9 @@ import type { Harness } from "@earendil-works/pi-durable";
  *
  * One limit: chord's own derived contexts read the abort signal through a
  * private key rather than `abortSignal`, so a chord `withContextValue`
- * wrapped around one of these would not see its signal. pi 0.99.2 never
- * wraps a caller's context that way; `withAbortSignal` and `withCancel`
- * read `abortSignal` and work.
+ * wrapped around one of these would not see its signal. pi-durable does not
+ * use `withContextValue` to wrap a caller's context that way; `withAbortSignal`
+ * and `withCancel` read `abortSignal` and work.
  *
  * If pi-durable starts re-exporting chord's context helpers, replace this
  * file with those.

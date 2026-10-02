@@ -1,9 +1,10 @@
-import type { JsonValue } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
-import type {
-  Registry,
-  ToolExecutionResult,
-  ToolRegistration
+import {
+  defineExtension,
+  section,
+  type Registry,
+  type ToolExecutionResult,
+  type ToolRegistration
 } from "@earendil-works/pi-durable";
 import type {
   SkillContent,
@@ -40,7 +41,7 @@ function textResult(text: string): ToolExecutionResult {
 }
 
 /** pi validates arguments against the schema before `execute` runs. */
-function argsOf<T>(args: JsonValue): T {
+function argsOf<T>(args: unknown): T {
   return args as T;
 }
 
@@ -274,9 +275,13 @@ export async function addSkills(
     console.warn(`pi skills: ${warning}`);
   }
   const catalog = resolved.catalog;
-  registry.batch(() => {
-    for (const tool of resolved.tools) registry.tools.add(tool);
-    if (catalog) registry.systemPrompt.section("skills", () => catalog);
-  });
+  registry.install(
+    defineExtension({
+      name: "agents.skills",
+      tools: resolved.tools,
+      sections:
+        catalog === null ? [] : [section("skills", () => catalog)]
+    })
+  );
   return resolved;
 }

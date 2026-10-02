@@ -1,6 +1,5 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
-  ConversationConfig,
   LiveDoc,
   ROOT_CONVERSATION_ID,
   watchEvents,
@@ -8,11 +7,12 @@ import {
   type Conversation,
   type Harness,
   type ConversationId,
+  type AgentChange,
   type ConversationRetryPolicy,
   type EntryRecord,
+  type HarnessSettings,
   type ModelRef,
   type SettledSubmissionRecord,
-  type Tx,
   type UserInput
 } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
@@ -91,6 +91,8 @@ export type PiHarnessContext = {
   readonly storage: SqliteStorage;
   /** Background context, for the open itself. */
   readonly context: Context;
+  /** Harness-wide settings supplied by `PiHarness`, such as its retry default. */
+  readonly settings?: Pick<HarnessSettings, "retry">;
 };
 
 /**
@@ -115,7 +117,7 @@ export type PiSessionDefaults = {
   /** Model for new sessions. Change one session's with `session.setModel`. */
   readonly model?: ModelRef;
   readonly thinkingLevel?: ModelThinkingLevel;
-  /** pi's generation retries for new sessions. */
+  /** Default generation retries; pi-durable applies this harness-wide. */
   readonly retry?: ConversationRetryPolicy;
 };
 
@@ -137,7 +139,7 @@ export type PiWakeTiming = {
 export type PiHarnessOptions = {
   /** Opens pi's `Harness` over the store this object prepared. */
   readonly harness: PiHarnessFactory;
-  /** Applied to new sessions. */
+  /** Model and thinking defaults apply to new sessions; retry applies harness-wide. */
   readonly defaults?: PiSessionDefaults;
   readonly store?: PiSessionStoreOptions;
   readonly timing?: PiWakeTiming;
@@ -329,11 +331,6 @@ export class PiHarness extends LifecycleCapability {
     return (await this.#open()).storage;
   }
 
-  /** @internal Configure a new session like the root. */
-  initSession(tx: Tx, id: ConversationId): Promise<void> {
-    return this.#init(tx, id);
-  }
-
   /** @internal */
   async enqueue(
     session: PiSessionId,
@@ -505,20 +502,28 @@ export class PiHarness extends LifecycleCapability {
       this.lifecycle.storage,
       this.#options.store
     );
-    const pi = await this.#options.harness({ storage, context: BG });
-    await pi.root(BG, { init: (tx, id) => this.#init(tx, id) });
+    const retry = this.#options.defaults?.retry;
+    const pi = await this.#options.harness({
+      storage,
+      context: BG,
+      ...(retry === undefined ? {} : { settings: { retry } })
+    });
+    await pi.root(BG, { agent: this.agentDefaults() });
     // Continue whatever the last isolate left: pi reconciles tasks that were
     // running to pending and schedules them again.
     pi.resume();
     return { pi, storage };
   }
 
-  async #init(tx: Tx, id: ConversationId): Promise<void> {
-    const config = await tx.doc(ConversationConfig, id);
+  /** @internal The per-conversation defaults supported by pi-durable. */
+  agentDefaults(): AgentChange {
     const defaults = this.#options.defaults;
-    if (defaults?.model) config.model = { ...defaults.model };
-    if (defaults?.thinkingLevel) config.thinkingLevel = defaults.thinkingLevel;
-    if (defaults?.retry) config.retry = { ...defaults.retry };
+    return {
+      ...(defaults?.model === undefined ? {} : { model: defaults.model }),
+      ...(defaults?.thinkingLevel === undefined
+        ? {}
+        : { thinkingLevel: defaults.thinkingLevel })
+    };
   }
 
   async #findSubmission(
@@ -633,7 +638,7 @@ export class PiSession {
   }
 
   async setModel(model: ModelRef): Promise<void> {
-    await (await this.#harness.conversation(this.id)).setModel(model, BG);
+    await (await this.#harness.conversation(this.id)).configure({ model }, BG);
   }
 
   /** The active transcript, as pi's entries since the newest reset. */
@@ -673,7 +678,7 @@ export class PiSessions {
     const conversation = await pi.createConversation(
       {
         ownership: { kind: "ownerless" },
-        init: (tx, id) => this.#harness.initSession(tx, id)
+        agent: this.#harness.agentDefaults()
       },
       BG
     );

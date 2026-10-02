@@ -1,10 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
 import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
-import { createGitClient } from "@cloudflare/computer/git";
 import {
   createRegistry,
+  defineExtension,
   Harness,
+  section,
   type Registry
 } from "@earendil-works/pi-durable";
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -21,17 +22,20 @@ const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 /** pi's registry for this app: the prompt and the workspace tools. */
 function createAppRegistry(workspace: Workspace): Registry {
   const registry = createRegistry();
-  registry.batch(() => {
-    registry.systemPrompt.section(
-      "preamble",
-      () =>
-        "You are a concise playground assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.",
-      { tag: false }
-    );
-    for (const tool of createWorkspaceTools(workspace)) {
-      registry.tools.add(tool);
-    }
-  });
+  registry.install(
+    defineExtension({
+      name: "playground",
+      sections: [
+        section(
+          "preamble",
+          () =>
+            "You are a concise playground assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.",
+          { tag: false }
+        )
+      ],
+      tools: createWorkspaceTools(workspace)
+    })
+  );
   return registry;
 }
 
@@ -58,12 +62,13 @@ export class PiAgent extends DurableObject<Env> {
   });
   readonly registry = createAppRegistry(this.workspace);
   readonly harness = new PiHarness({
-    harness: ({ storage, context }) =>
+    harness: ({ storage, context, settings }) =>
       Harness.open(
         storage,
         {
           models: this.#models(),
           registry: this.registry,
+          settings,
           onReport: (error) => console.warn("pi report", error)
         },
         context

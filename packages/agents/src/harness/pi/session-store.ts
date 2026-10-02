@@ -2,7 +2,7 @@ import {
   SQLITE_MIGRATIONS,
   SqliteStorage,
   type SqliteDatabase,
-  type SqliteStatement,
+  type SqliteExecutor,
   type SqliteValue
 } from "@earendil-works/pi-durable/storage/sqlite";
 
@@ -11,7 +11,7 @@ import {
  *
  * pi owns its sessions: conversations, entries, tasks, submissions, and
  * documents live in pi's own schema, created and migrated by pi's portable
- * `SqliteStorage`. This file only supplies the synchronous database facade
+ * `SqliteStorage`. This file only supplies the asynchronous database facade
  * pi asks for, over `ctx.storage.sql`, and moves pi's tables under a prefix
  * so they cannot collide with the SDK's or the host's tables in the same
  * object.
@@ -122,28 +122,52 @@ function row<T extends object>(raw: Record<string, SqlStorageValue>): T {
   return raw as T;
 }
 
-class DurableObjectSqliteStatement implements SqliteStatement {
+/** pi's asynchronous SQLite facade over a Durable Object's synchronous SQL API. */
+class DurableObjectSqliteExecutor implements SqliteExecutor {
   readonly #sql: SqlStorage;
-  readonly #query: string;
+  readonly #prefixer: Prefixer;
+  readonly #assertActive: () => void;
 
-  constructor(sql: SqlStorage, query: string) {
+  constructor(
+    sql: SqlStorage,
+    prefixer: Prefixer,
+    assertActive: () => void = () => {}
+  ) {
     this.#sql = sql;
-    this.#query = query;
+    this.#prefixer = prefixer;
+    this.#assertActive = assertActive;
   }
 
-  run(...params: SqliteValue[]): void {
-    this.#sql.exec(this.#query, ...params.map(binding));
+  async exec(sql: string): Promise<void> {
+    this.#assertActive();
+    this.#sql.exec(this.#prefixer.rewrite(sql));
   }
 
-  get<T extends object>(...params: SqliteValue[]): T | undefined {
-    const cursor = this.#sql.exec(this.#query, ...params.map(binding));
+  async run(sql: string, ...params: SqliteValue[]): Promise<void> {
+    this.#assertActive();
+    this.#sql.exec(this.#prefixer.rewrite(sql), ...params.map(binding));
+  }
+
+  async get<T extends object>(
+    sql: string,
+    ...params: SqliteValue[]
+  ): Promise<T | undefined> {
+    this.#assertActive();
+    const cursor = this.#sql.exec(
+      this.#prefixer.rewrite(sql),
+      ...params.map(binding)
+    );
     const first = cursor.next();
     return first.done ? undefined : row<T>(first.value);
   }
 
-  all<T extends object>(...params: SqliteValue[]): T[] {
+  async all<T extends object>(
+    sql: string,
+    ...params: SqliteValue[]
+  ): Promise<T[]> {
+    this.#assertActive();
     return this.#sql
-      .exec(this.#query, ...params.map(binding))
+      .exec(this.#prefixer.rewrite(sql), ...params.map(binding))
       .toArray()
       .map((raw) => row<T>(raw));
   }
@@ -152,13 +176,15 @@ class DurableObjectSqliteStatement implements SqliteStatement {
 /**
  * pi's `SqliteDatabase` facade over `DurableObjectStorage`.
  *
- * Durable Objects reject `BEGIN`, so transactions go through
- * `transactionSync`, which rolls back when the callback throws and rethrows
- * the same error, as pi's contract requires. Durable Objects have no
- * prepared statements either; a statement is the query text, executed on
- * each call.
+ * Durable Objects expose async `storage.transaction()` for SQLite-backed
+ * objects, which includes SQL operations made through `storage.sql` in the
+ * callback. SQL itself remains synchronous, so each adapter operation consumes
+ * its cursor before returning its promise.
  */
-export class DurableObjectSqliteDatabase implements SqliteDatabase {
+export class DurableObjectSqliteDatabase
+  extends DurableObjectSqliteExecutor
+  implements SqliteDatabase
+{
   readonly #storage: DurableObjectStorage;
   readonly #prefixer: Prefixer;
 
@@ -166,25 +192,36 @@ export class DurableObjectSqliteDatabase implements SqliteDatabase {
     storage: DurableObjectStorage,
     options: PiSessionStoreOptions = {}
   ) {
+    const prefixer = new Prefixer(options.prefix ?? DEFAULT_PREFIX);
+    super(storage.sql, prefixer);
     this.#storage = storage;
-    this.#prefixer = new Prefixer(options.prefix ?? DEFAULT_PREFIX);
+    this.#prefixer = prefixer;
   }
 
-  exec(sql: string): void {
-    this.#storage.sql.exec(this.#prefixer.rewrite(sql));
-  }
-
-  prepare(sql: string): SqliteStatement {
-    return new DurableObjectSqliteStatement(
-      this.#storage.sql,
-      this.#prefixer.rewrite(sql)
-    );
-  }
-
-  transaction<T>(callback: () => T): T {
-    return this.#storage.transactionSync(callback);
+  transaction<T>(
+    callback: (transaction: SqliteExecutor) => Promise<T>
+  ): Promise<T> {
+    return this.#storage.transaction(async () => {
+      let active = true;
+      const transaction = new DurableObjectSqliteExecutor(
+        this.#storage.sql,
+        this.#prefixer,
+        () => {
+          if (!active) {
+            throw new Error("The pi SQLite transaction is no longer active");
+          }
+        }
+      );
+      try {
+        return await callback(transaction);
+      } finally {
+        active = false;
+      }
+    });
   }
 
   /** The object owns the database; there is nothing to close. */
-  close(): void {}
+  close(): Promise<void> {
+    return Promise.resolve();
+  }
 }

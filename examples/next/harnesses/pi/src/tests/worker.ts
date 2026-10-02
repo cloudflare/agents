@@ -12,7 +12,9 @@ import {
 import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
 import {
   createRegistry,
+  defineExtension,
   Harness,
+  section,
   type AgentEvent,
   type Registry,
   type ToolRegistration
@@ -93,12 +95,13 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   });
   readonly registry = this.#registry();
   readonly harness = new PiHarness({
-    harness: ({ storage, context }) =>
+    harness: ({ storage, context, settings }) =>
       Harness.open(
         storage,
         {
           models: fauxModels(this.#faux.provider),
           registry: this.registry,
+          settings,
           onReport: (error) => console.warn("pi report", error)
         },
         context
@@ -191,14 +194,13 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 
   #registry(): Registry {
     const registry = createRegistry();
-    registry.batch(() => {
-      registry.systemPrompt.section(
-        "preamble",
-        () => "Use the supplied test tools.",
-        { tag: false }
-      );
-      for (const tool of this.#tools()) registry.tools.add(tool);
-    });
+    registry.install(
+      defineExtension({
+        name: "test-tools",
+        sections: [section("preamble", () => "Use the supplied test tools.", { tag: false })],
+        tools: this.#tools()
+      })
+    );
     return registry;
   }
 
