@@ -1,4 +1,5 @@
 import type {
+  Awaitable,
   Channel,
   ChannelChunkSource,
   ChannelDeliveryOptions,
@@ -29,6 +30,7 @@ import {
   type ChannelMessageSurfaceInput
 } from "./surface";
 import type { GatewayEvent } from "./conversations";
+import { WEB_IDENTITY_HEADER, type WebIdentity } from "./web/protocol";
 
 export type ChannelRouteEvent = {
   channelKey: string;
@@ -42,12 +44,31 @@ export type ChannelRouteEvent = {
 export type GatewayAgent = {
   /** Hand the agent an inbound event; Channels' `receive` serves it. */
   receive(event: GatewayEvent, origin: GatewayOrigin): Promise<unknown>;
+  fetch(request: Request): Promise<Response>;
+};
+
+/**
+ * Who a WebSocket upgrade is, which agent it reaches (`route`), and which
+ * conversation there it follows. Without `conversationId`, the agent's
+ * default for the route.
+ */
+export type GatewayWebIdentity = {
+  route: string;
+  conversationId?: string;
+  participant: Participant;
 };
 
 export type ChannelGatewayOptions = {
   channels: Record<string, Channel>;
   /** The agent that holds a route's conversation. */
   agent(route: string): GatewayAgent;
+  /**
+   * Resolve a WebSocket upgrade from trusted request data, such as a
+   * session cookie. Return null to refuse it, or undefined when the
+   * request is not for Channels. Default: `/channels/<route>` or
+   * `/channels/<route>/<conversation>` as an anonymous participant.
+   */
+  web?(request: Request): Awaitable<GatewayWebIdentity | null | undefined>;
   /** Used when a Channel does not provide a route. Default: event thread id. */
   defaultRoute?: ChannelRoute;
   /** Resolve an existing, explicitly linked application user. */
@@ -63,12 +84,13 @@ type OutboundOperation = (
 
 /**
  * The Worker's entry point for Channels. Authenticates and normalizes
- * webhooks, routes each to the agent that holds its conversation, and sends
- * to surfaces.
+ * webhooks, resolves WebSocket upgrades, routes each to the agent that
+ * holds its conversation, and sends to surfaces.
  */
 export class ChannelGateway {
   readonly #channels: Record<string, Channel>;
   readonly #agent: ChannelGatewayOptions["agent"];
+  readonly #web: NonNullable<ChannelGatewayOptions["web"]>;
   readonly #defaultRoute: ChannelRoute | undefined;
   readonly #findUser: ChannelGatewayOptions["findUser"];
   readonly #onRoute: ChannelGatewayOptions["onRoute"];
@@ -76,14 +98,41 @@ export class ChannelGateway {
   constructor(options: ChannelGatewayOptions) {
     this.#channels = { ...options.channels };
     this.#agent = options.agent;
+    this.#web = options.web ?? defaultWeb;
     this.#defaultRoute = options.defaultRoute;
     this.#findUser = options.findUser;
     this.#onRoute = options.onRoute;
   }
 
   /** Serve a request if it is for Channels, or return undefined. */
-  fetch(request: Request): Promise<Response | undefined> {
+  async fetch(request: Request): Promise<Response | undefined> {
+    if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+      const web = await this.#upgrade(request);
+      if (web) return web;
+    }
     return this.#webhook(request);
+  }
+
+  /**
+   * Forward a WebSocket upgrade to its conversation's agent with the
+   * resolved identity. Any identity header the client sent is replaced.
+   */
+  async #upgrade(request: Request): Promise<Response | undefined> {
+    const resolved = await this.#web(request);
+    if (resolved === undefined) return undefined;
+    if (resolved === null) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+    const identity: WebIdentity = {
+      route: resolved.route,
+      ...(resolved.conversationId !== undefined && {
+        conversationId: resolved.conversationId
+      }),
+      participant: resolved.participant
+    };
+    const headers = new Headers(request.headers);
+    headers.set(WEB_IDENTITY_HEADER, JSON.stringify(identity));
+    return this.#agent(resolved.route).fetch(new Request(request, { headers }));
   }
 
   async #webhook(request: Request): Promise<Response | undefined> {
@@ -151,7 +200,7 @@ export class ChannelGateway {
    * named by the surface.
    *
    * A Channel that can stream consumes the stream itself. A Channel that
-   * cannot never learns it was a stream, because the Gateway collects the answer
+   * cannot never learns it was a stream, because the Host collects the answer
    * and calls `deliver` once.
    */
   async stream(
@@ -293,6 +342,20 @@ export class ChannelGateway {
  * losing the partial answer helps nobody, but the result is downgraded to
  * `uncertain` since the reader received an incomplete answer.
  */
+const defaultWeb = (request: Request): GatewayWebIdentity | undefined => {
+  const match = /^\/channels\/([^/]+)(?:\/([^/]+))?$/.exec(
+    new URL(request.url).pathname
+  );
+  if (!match) return undefined;
+  return {
+    route: decodeURIComponent(match[1]),
+    ...(match[2] !== undefined && {
+      conversationId: decodeURIComponent(match[2])
+    }),
+    participant: { id: "anonymous" }
+  };
+};
+
 /** The provider's event as an inbound event, keyed by its dispatch id. */
 function toInboundEvent(
   event: ChannelIngressEvent,

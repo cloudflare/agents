@@ -68,7 +68,7 @@ expectTypeOf<WebSocketHandlers["onMessage"]>().toEqualTypeOf<
   | ((
       connection: Connection,
       message: WebSocketMessage
-    ) => void | Promise<void>)
+    ) => void | boolean | Promise<void | boolean>)
   | undefined
 >();
 expectTypeOf<WebSocketHandlers["onClose"]>().toEqualTypeOf<
