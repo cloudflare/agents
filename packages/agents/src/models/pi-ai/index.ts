@@ -24,7 +24,7 @@
  * metadata (`api`, `compat`, `thinkingLevelMap`, cost, limits) is whatever its
  * own registry says, and pi-ai's converters and stream processors do the rest.
  *
- * @experimental Everything exported here is experimental: the surface may
+ * @beta Everything exported here is in beta: the surface may
  * change in a minor release while the design settles.
  *
  * @module
@@ -107,7 +107,7 @@ export { CLOUDFLARE_DIAGNOSTIC } from "./wires/shared";
 /**
  * pi-agent-core's `streamFn` shape: what `Agent` calls to run a turn.
  *
- * @experimental This surface is experimental and may change.
+ * @beta This surface is in beta and may change.
  */
 export type StreamFn = (
   model: Model<string>,
@@ -121,7 +121,7 @@ export type StreamFn = (
  * run it, `streamFn` with pi-agent-core's `Agent`, and `provider` with a pi-ai
  * `Models` registry.
  *
- * @experimental This surface is experimental and may change.
+ * @beta This surface is in beta and may change.
  */
 export interface AI {
   /** A Workers AI model: Cloudflare's own catalog, on the run path. */
@@ -242,7 +242,7 @@ function buildModel(
  * new Agent({ streamFn: ai.streamFn, initialState: { model: ai(openaiModel) } });
  * ```
  *
- * @experimental This surface is experimental and may change.
+ * @beta This surface is in beta and may change.
  */
 export function createAI(settings: AISettings): AI {
   const transport = createTransport(settings);
