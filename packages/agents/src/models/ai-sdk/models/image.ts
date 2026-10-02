@@ -250,7 +250,14 @@ export class CloudflareImageModel
       providerMetadata: {
         [PROVIDER_OPTIONS_KEY]: {
           ...(first.providerMetadata[PROVIDER_OPTIONS_KEY] as JSONObject),
-          images: generated.map((image) => ({
+          // `generateImage` merges the calls it fans out into by spreading
+          // each block's `images` array, and only those entries survive. Each
+          // carries its own answer's metadata, which may come from a different
+          // fallback leg than the first image's.
+          images: generated.map((image, index) => ({
+            ...(answers[index]?.providerMetadata[
+              PROVIDER_OPTIONS_KEY
+            ] as JSONObject),
             mediaType: image.mediaType
           })) as JSONArray
         }

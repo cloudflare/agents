@@ -105,8 +105,8 @@ describe("image generation", () => {
       totalTokens: 0
     });
     // The bytes, not the model name, decide the media type: flux answers JPEG.
-    expect(result.providerMetadata?.cloudflare.images).toEqual([
-      { mediaType: "image/jpeg" }
+    expect(result.providerMetadata?.cloudflare.images).toMatchObject([
+      { mediaType: "image/jpeg", model: FLUX }
     ]);
     expect(result.warnings).toEqual([]);
   });
@@ -133,8 +133,8 @@ describe("image generation", () => {
     });
     expect(result.images[0]).toBeInstanceOf(Uint8Array);
     expect(result.images[0]).toEqual(PNG_BYTES);
-    expect(result.providerMetadata?.cloudflare.images).toEqual([
-      { mediaType: "image/png" }
+    expect(result.providerMetadata?.cloudflare.images).toMatchObject([
+      { mediaType: "image/png", model: SDXL }
     ]);
     expect(result.usage).toBeUndefined();
   });
@@ -300,7 +300,12 @@ describe("image generation", () => {
   });
 
   it("splits generateImage n across calls, one image per call", async () => {
-    const binding = fakeBinding(() => jsonResponse(fluxBody));
+    let call = 0;
+    const binding = fakeBinding(() =>
+      jsonResponse(fluxBody, {
+        headers: { "cf-aig-log-id": `log-${++call}` }
+      })
+    );
     const ai = createAI({ binding: asAi(binding) });
     const result = await generateImage({
       model: ai.image(FLUX),
@@ -310,6 +315,16 @@ describe("image generation", () => {
 
     expect(binding.calls).toHaveLength(2);
     expect(result.images).toHaveLength(2);
+    // generateImage merges the per-call metadata through `images`; each entry
+    // keeps its own call's gateway correlation.
+    const images = result.providerMetadata.cloudflare?.images as
+      | { logId?: string; mediaType?: string; model?: string }[]
+      | undefined;
+    expect(images?.map((image) => image.logId).sort()).toEqual([
+      "log-1",
+      "log-2"
+    ]);
+    expect(images?.every((image) => image.model === FLUX)).toBe(true);
   });
 });
 
