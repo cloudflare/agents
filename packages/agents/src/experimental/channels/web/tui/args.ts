@@ -13,9 +13,10 @@ Options:
   --as        Sets the "as" query parameter (demo agents read it as the participant)
   --header    Adds a header to the WebSocket upgrade; repeatable
 
-Environment:
-  CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET
-              Sent as an Access service token`;
+Cloudflare Access:
+  A URL behind Access gets a token from cloudflared, which logs in through
+  the browser the first time. Or set CF_ACCESS_CLIENT_ID and
+  CF_ACCESS_CLIENT_SECRET to send a service token instead.`;
 
 export type TuiArgs = {
   /** A ws(s) URL. */
