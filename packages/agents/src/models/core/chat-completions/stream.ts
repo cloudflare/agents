@@ -74,11 +74,16 @@ function normalizeDelta(delta: Record_, relabelReasoning: boolean): Record_ {
   if (Array.isArray(out.tool_calls)) {
     out.tool_calls = out.tool_calls.map((call, index) => {
       // Fragments and the null finalizer pass through untouched; only a
-      // native complete-object call needs lifting into the OpenAI shape.
+      // native complete call needs lifting into the OpenAI shape. A native
+      // call names its tool at the top level, where no OpenAI fragment does,
+      // and its arguments may be an object or already a string.
       if (!isRecord(call)) return call;
       const fn = isRecord(call.function) ? call.function : undefined;
       const args = fn !== undefined ? fn.arguments : call.arguments;
-      return isRecord(args) ? (normalizeToolCall(call, index) ?? call) : call;
+      const native = fn === undefined && typeof call.name === "string";
+      return native || isRecord(args)
+        ? (normalizeToolCall(call, index) ?? call)
+        : call;
     });
   }
   return out;

@@ -636,6 +636,35 @@ describe("core compat — stream normalization", () => {
     ]);
   });
 
+  it("lifts a native call with string arguments inside an OpenAI delta", async () => {
+    const delta = (toolCalls: unknown[]) =>
+      JSON.stringify({
+        choices: [
+          { delta: { tool_calls: toolCalls }, finish_reason: null, index: 0 }
+        ],
+        object: "chat.completion.chunk"
+      });
+    const out = (await normalize(
+      [
+        delta([{ arguments: '{"city":"London"}', name: "getWeather" }]),
+        delta([{ function: { arguments: '{"ci' }, index: 1 }])
+      ],
+      GLM
+    )) as { choices: { delta: { tool_calls: unknown[] } }[] }[];
+
+    expect(out[0]?.choices[0]?.delta.tool_calls).toEqual([
+      {
+        function: { arguments: '{"city":"London"}', name: "getWeather" },
+        index: 0,
+        type: "function"
+      }
+    ]);
+    // A genuine OpenAI fragment is not a native call and passes through.
+    expect(out[1]?.choices[0]?.delta.tool_calls).toEqual([
+      { function: { arguments: '{"ci' }, index: 1 }
+    ]);
+  });
+
   it("leaves a strict OpenAI vendor stream alone, including its final usage chunk", async () => {
     const first = JSON.stringify({
       choices: [{ delta: { content: "Hi" }, finish_reason: null, index: 0 }],
