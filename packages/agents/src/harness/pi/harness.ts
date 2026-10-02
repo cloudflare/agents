@@ -1,18 +1,16 @@
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
-  ConversationConfig,
   LiveDoc,
   ROOT_CONVERSATION_ID,
   watchEvents,
   type AgentEventStream,
   type Conversation,
-  type Harness,
   type ConversationId,
-  type ConversationRetryPolicy,
+  type AgentChange,
   type EntryRecord,
+  type Harness,
   type ModelRef,
   type SettledSubmissionRecord,
-  type Tx,
   type UserInput
 } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
@@ -23,10 +21,7 @@ import {
   type LifecycleJobOutcome
 } from "../../lifecycle";
 import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "./context";
-import {
-  openPiSessionStore,
-  type PiSessionStoreOptions
-} from "./session-store";
+import { openPiSessionStore } from "./session-store";
 import type {
   PiOperationResult,
   PiPendingOperation,
@@ -44,8 +39,9 @@ const BG = BACKGROUND_CONTEXT;
 export const ROOT_SESSION: PiSessionId = String(ROOT_CONVERSATION_ID);
 
 /**
- * Defaults for the three wake timings; a host overrides them with
- * `timing`, which is what the tests do to avoid the real heartbeat.
+ * The three wake timings. They suit a real deployment; only tests change
+ * them, with `setWakeTimingForTests`, so a suite does not sit on the real
+ * heartbeat.
  *
  * A pi long wait further away than this is handed to the alarm, so the
  * alarm, not pi's in-memory timer, is what wakes the object.
@@ -66,6 +62,19 @@ const WAIT_BUDGET_MS = 10 * 60_000;
  */
 const HEARTBEAT_MS = 30_000;
 
+let setWakeTiming: (harness: PiHarness, timing: WakeTiming) => void;
+
+/**
+ * @internal Shorten a harness's wake timings, so a test suite does not sit
+ * on the real heartbeat. Not exported from `agents/harness/pi`.
+ */
+export function setWakeTimingForTests(
+  harness: PiHarness,
+  timing: WakeTiming
+): void {
+  setWakeTiming(harness, timing);
+}
+
 const WAKE_FN = "wake";
 
 function wakeJobId(session: PiSessionId): string {
@@ -82,25 +91,26 @@ function sessionOfJob(payload: unknown): PiSessionId | undefined {
 }
 
 /**
- * What the harness factory is handed. The store is already open and pi's
- * migrations have run, so a factory only has to decide how to call
- * `Harness.open` — or call something else that satisfies the same contract.
+ * What the factory is handed: the two things only the harness can build.
+ * Everything else `Harness.open` takes (models, registry, settings, env,
+ * onReport) the factory builds itself.
  */
 export type PiHarnessContext = {
-  /** pi's storage over this object's SQLite, tables under the store prefix. */
+  /** pi's storage over this object's SQLite, its migrations already run. */
   readonly storage: SqliteStorage;
   /** Background context, for the open itself. */
   readonly context: Context;
 };
 
 /**
- * Builds pi's `Harness`. Return value is adopted as-is: the caller owns the
- * registry (tools, system prompt, hooks, skills), `models`, `env`,
- * `onReport` and anything else `HarnessOptions` grows.
+ * Opens pi's `Harness`. The harness adopts what it returns.
  *
  * ```ts
- * harness: ({ storage, context }) =>
- *   Harness.open(storage, { models, registry }, context)
+ * harness: async ({ storage, context }) => {
+ *   const registry = createRegistry();
+ *   registry.install(await skills(sources));
+ *   return Harness.open(storage, { models, registry }, context);
+ * }
  * ```
  */
 export type PiHarnessFactory = (
@@ -108,23 +118,32 @@ export type PiHarnessFactory = (
 ) => Harness | Promise<Harness>;
 
 /**
+ * A model, as pi-ai describes one: `createAI`'s `ai("@cf/…")` returns one.
+ *
+ * Only its `provider` and `id` are used. pi stores that reference with
+ * the session and resolves it, at each request, against the `Models` the
+ * factory opened pi with. So the model must be one those `Models` list,
+ * and options passed to `ai(id, options)` here, such as `fallback`, are not
+ * applied.
+ */
+export type PiModel = Pick<Model<Api>, "provider" | "id">;
+
+/**
  * Applied to a session the first time it is created. Without a model, a
  * session's generation fails as unanswered until `session.setModel` sets one.
  */
 export type PiSessionDefaults = {
-  /** Model for new sessions. Change one session's with `session.setModel`. */
-  readonly model?: ModelRef;
+  /**
+   * Model for new sessions, by its `provider` and `id`; it must be on the
+   * `Models` the factory opens pi with (see `PiModel`). Change one
+   * session's with `session.setModel`.
+   */
+  readonly model?: PiModel;
   readonly thinkingLevel?: ModelThinkingLevel;
-  /** pi's generation retries for new sessions. */
-  readonly retry?: ConversationRetryPolicy;
 };
 
-/**
- * How long the wake waits and when it hands a wait to the alarm. Defaults
- * suit a real deployment; a test shortens them so a suite does not sit on
- * the real heartbeat.
- */
-export type PiWakeTiming = {
+/** How long the wake waits, and when it hands a wait to the alarm. */
+type WakeTiming = {
   /** A pi wait further away than this goes to the alarm. Default 60_000. */
   readonly sleepThresholdMs?: number;
   /** Longest one wake waits inside an alarm. Default 600_000. */
@@ -135,18 +154,21 @@ export type PiWakeTiming = {
 
 /** `PiHarness`'s options. Only `harness`, which opens pi, is required. */
 export type PiHarnessOptions = {
-  /** Opens pi's `Harness` over the store this object prepared. */
+  /** Opens pi's `Harness` over the storage this object prepared. */
   readonly harness: PiHarnessFactory;
-  /** Applied to new sessions. */
+  /** What a new session starts with. */
   readonly defaults?: PiSessionDefaults;
-  readonly store?: PiSessionStoreOptions;
-  readonly timing?: PiWakeTiming;
 };
 
 type Opened = {
   readonly pi: Harness;
   readonly storage: SqliteStorage;
 };
+
+/** pi-durable's stored reference to a pi-ai model. */
+function modelRef(model: PiModel): ModelRef {
+  return { provider: model.provider, modelId: model.id };
+}
 
 function conversationId(session: PiSessionId): ConversationId {
   const id = Number(session);
@@ -188,7 +210,7 @@ function signalContext(signal: AbortSignal | undefined): Context {
  * restarts the object, pi reopens and resumes its own tasks, and the job
  * waits again.
  *
- * @experimental The API may change between releases.
+ * @beta The API may change between releases.
  */
 export class PiHarness extends LifecycleCapability {
   readonly sessions: PiSessions;
@@ -197,28 +219,30 @@ export class PiHarness extends LifecycleCapability {
   readonly #waits = new Map<PiSessionId, Promise<void>>();
   /** Submissions between their wake and pi's admission, per session. */
   readonly #admitting = new Map<PiSessionId, number>();
-  readonly #sleepThresholdMs: number;
-  readonly #waitBudgetMs: number;
-  readonly #heartbeatMs: number;
+  #sleepThresholdMs = SLEEP_THRESHOLD_MS;
+  #waitBudgetMs = WAIT_BUDGET_MS;
+  #heartbeatMs = HEARTBEAT_MS;
   #opening: Promise<Opened> | undefined;
+
+  static {
+    setWakeTiming = (harness, timing) => harness.#setWakeTiming(timing);
+  }
 
   constructor(options: PiHarnessOptions) {
     super("pi-harness");
     this.#options = options;
-    this.#sleepThresholdMs =
-      options.timing?.sleepThresholdMs ?? SLEEP_THRESHOLD_MS;
-    this.#waitBudgetMs = options.timing?.waitBudgetMs ?? WAIT_BUDGET_MS;
-    this.#heartbeatMs = options.timing?.heartbeatMs ?? HEARTBEAT_MS;
-    for (const [name, value] of [
-      ["sleepThresholdMs", this.#sleepThresholdMs],
-      ["waitBudgetMs", this.#waitBudgetMs],
-      ["heartbeatMs", this.#heartbeatMs]
-    ] as const) {
+    this.sessions = new PiSessions(this);
+  }
+
+  #setWakeTiming(timing: WakeTiming): void {
+    for (const [name, value] of Object.entries(timing)) {
       if (!Number.isFinite(value) || value <= 0) {
         throw new Error(`PiHarness timing.${name} must be a positive number`);
       }
     }
-    this.sessions = new PiSessions(this);
+    this.#sleepThresholdMs = timing.sleepThresholdMs ?? this.#sleepThresholdMs;
+    this.#waitBudgetMs = timing.waitBudgetMs ?? this.#waitBudgetMs;
+    this.#heartbeatMs = timing.heartbeatMs ?? this.#heartbeatMs;
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -327,11 +351,6 @@ export class PiHarness extends LifecycleCapability {
   /** @internal */
   async storage(): Promise<SqliteStorage> {
     return (await this.#open()).storage;
-  }
-
-  /** @internal Configure a new session like the root. */
-  initSession(tx: Tx, id: ConversationId): Promise<void> {
-    return this.#init(tx, id);
   }
 
   /** @internal */
@@ -492,7 +511,15 @@ export class PiHarness extends LifecycleCapability {
 
   // ── pi ───────────────────────────────────────────────────────────────────
 
-  #open(): Promise<Opened> {
+  /**
+   * pi, opened. Waits for Lifecycle startup first, so pi is only ever
+   * opened inside it: startup holds the input gate (`blockConcurrencyWhile`)
+   * and awaits the open in `onStart`, so an open begun before startup would
+   * be awaited behind a closed gate, with its timers and I/O held back, and
+   * never finish.
+   */
+  async #open(): Promise<Opened> {
+    await this.lifecycle.ready();
     this.#opening ??= this.#doOpen().catch((error: unknown) => {
       this.#opening = undefined;
       throw error;
@@ -501,24 +528,26 @@ export class PiHarness extends LifecycleCapability {
   }
 
   async #doOpen(): Promise<Opened> {
-    const storage = await openPiSessionStore(
-      this.lifecycle.storage,
-      this.#options.store
-    );
+    const storage = await openPiSessionStore(this.lifecycle.storage);
     const pi = await this.#options.harness({ storage, context: BG });
-    await pi.root(BG, { init: (tx, id) => this.#init(tx, id) });
+    await pi.root(BG, { agent: this.agentDefaults() });
     // Continue whatever the last isolate left: pi reconciles tasks that were
     // running to pending and schedules them again.
     pi.resume();
     return { pi, storage };
   }
 
-  async #init(tx: Tx, id: ConversationId): Promise<void> {
-    const config = await tx.doc(ConversationConfig, id);
+  /** @internal The per-conversation defaults supported by pi-durable. */
+  agentDefaults(): AgentChange {
     const defaults = this.#options.defaults;
-    if (defaults?.model) config.model = { ...defaults.model };
-    if (defaults?.thinkingLevel) config.thinkingLevel = defaults.thinkingLevel;
-    if (defaults?.retry) config.retry = { ...defaults.retry };
+    return {
+      ...(defaults?.model === undefined
+        ? {}
+        : { model: modelRef(defaults.model) }),
+      ...(defaults?.thinkingLevel === undefined
+        ? {}
+        : { thinkingLevel: defaults.thinkingLevel })
+    };
   }
 
   async #findSubmission(
@@ -632,8 +661,14 @@ export class PiSession {
     await (await this.#harness.conversation(this.id)).reset(handoff, BG);
   }
 
-  async setModel(model: ModelRef): Promise<void> {
-    await (await this.#harness.conversation(this.id)).setModel(model, BG);
+  /**
+   * Change this session's model, by its `provider` and `id`; it must be on
+   * the `Models` the factory opened pi with (see `PiModel`).
+   */
+  async setModel(model: PiModel): Promise<void> {
+    await (
+      await this.#harness.conversation(this.id)
+    ).configure({ model: modelRef(model) }, BG);
   }
 
   /** The active transcript, as pi's entries since the newest reset. */
@@ -673,7 +708,7 @@ export class PiSessions {
     const conversation = await pi.createConversation(
       {
         ownership: { kind: "ownerless" },
-        init: (tx, id) => this.#harness.initSession(tx, id)
+        agent: this.#harness.agentDefaults()
       },
       BG
     );

@@ -153,7 +153,7 @@ export function reduceView(
           })),
         queued: event.inbox.length,
         retry: event.generation?.retry ?? null,
-        model: event.config.model ?? null,
+        model: event.agent.model ?? null,
         error: null
       };
     }
@@ -210,8 +210,8 @@ export function reduceView(
       return { ...view, retry: { at: event.at, error: event.errorMessage } };
     case "auto_retry_end":
       return { ...view, retry: null };
-    case "config_changed":
-      return { ...view, model: event.config.model ?? null };
+    case "agent_changed":
+      return { ...view, model: event.agent.model ?? null };
     case "task_failed":
       return { ...view, error: event.message };
     case "submission":

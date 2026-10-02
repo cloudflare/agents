@@ -2,7 +2,7 @@ import {
   SQLITE_MIGRATIONS,
   SqliteStorage,
   type SqliteDatabase,
-  type SqliteStatement,
+  type SqliteExecutor,
   type SqliteValue
 } from "@earendil-works/pi-durable/storage/sqlite";
 
@@ -11,7 +11,7 @@ import {
  *
  * pi owns its sessions: conversations, entries, tasks, submissions, and
  * documents live in pi's own schema, created and migrated by pi's portable
- * `SqliteStorage`. This file only supplies the synchronous database facade
+ * `SqliteStorage`. This file only supplies the asynchronous database facade
  * pi asks for, over `ctx.storage.sql`, and moves pi's tables under a prefix
  * so they cannot collide with the SDK's or the host's tables in the same
  * object.
@@ -122,69 +122,207 @@ function row<T extends object>(raw: Record<string, SqlStorageValue>): T {
   return raw as T;
 }
 
-class DurableObjectSqliteStatement implements SqliteStatement {
+/**
+ * Orders calls on the one SQLite connection. A statement runs at once,
+ * directly, when nothing is waiting; while a transaction is open, it and
+ * every call after it wait, in call order, for the transaction to settle,
+ * so none runs inside it. A failure does not stop the calls behind it.
+ *
+ * The queue holds calls, not data: a caller has no result until its call
+ * runs, so an isolate that dies loses only calls nobody has seen succeed,
+ * as it would without the queue. pi's transactions await only their own
+ * synchronous statements, so a transaction holds the queue for microtasks,
+ * never for I/O.
+ */
+class OperationQueue {
+  #tail: Promise<void> = Promise.resolve();
+  /** Calls queued or holding the queue, not yet settled. */
+  #pending = 0;
+
+  /** A synchronous statement: runs now unless something is ahead of it. */
+  run<T>(statement: () => T): Promise<T> {
+    if (this.#pending > 0) return this.#enqueue(statement);
+    try {
+      return Promise.resolve(statement());
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  /** An asynchronous call that holds the queue until it settles. */
+  hold<T>(call: () => Promise<T>): Promise<T> {
+    return this.#enqueue(call);
+  }
+
+  #enqueue<T>(call: () => T | Promise<T>): Promise<T> {
+    this.#pending += 1;
+    const settled = this.#tail.then(call).finally(() => {
+      this.#pending -= 1;
+    });
+    this.#tail = settled.then(
+      () => undefined,
+      () => undefined
+    );
+    return settled;
+  }
+}
+
+/** One statement on a Durable Object's synchronous SQL API. */
+class Statements {
   readonly #sql: SqlStorage;
-  readonly #query: string;
+  readonly #prefixer: Prefixer;
 
-  constructor(sql: SqlStorage, query: string) {
+  constructor(sql: SqlStorage, prefixer: Prefixer) {
     this.#sql = sql;
-    this.#query = query;
+    this.#prefixer = prefixer;
   }
 
-  run(...params: SqliteValue[]): void {
-    this.#sql.exec(this.#query, ...params.map(binding));
+  exec(sql: string): void {
+    this.#sql.exec(this.#prefixer.rewrite(sql));
   }
 
-  get<T extends object>(...params: SqliteValue[]): T | undefined {
-    const cursor = this.#sql.exec(this.#query, ...params.map(binding));
-    const first = cursor.next();
+  run(sql: string, params: readonly SqliteValue[]): void {
+    this.#sql.exec(this.#prefixer.rewrite(sql), ...params.map(binding));
+  }
+
+  get<T extends object>(
+    sql: string,
+    params: readonly SqliteValue[]
+  ): T | undefined {
+    const first = this.#sql
+      .exec(this.#prefixer.rewrite(sql), ...params.map(binding))
+      .next();
     return first.done ? undefined : row<T>(first.value);
   }
 
-  all<T extends object>(...params: SqliteValue[]): T[] {
+  all<T extends object>(sql: string, params: readonly SqliteValue[]): T[] {
     return this.#sql
-      .exec(this.#query, ...params.map(binding))
+      .exec(this.#prefixer.rewrite(sql), ...params.map(binding))
       .toArray()
       .map((raw) => row<T>(raw));
   }
 }
 
 /**
+ * The handle pi's transaction callback gets. It runs statements directly:
+ * the transaction holds the database's queue for as long as it is open.
+ */
+class DurableObjectSqliteTransaction implements SqliteExecutor {
+  readonly #statements: Statements;
+  #active = true;
+
+  constructor(statements: Statements) {
+    this.#statements = statements;
+  }
+
+  /** Called once the transaction settles; the handle is unusable after. */
+  end(): void {
+    this.#active = false;
+  }
+
+  async exec(sql: string): Promise<void> {
+    this.#assertActive();
+    this.#statements.exec(sql);
+  }
+
+  async run(sql: string, ...params: SqliteValue[]): Promise<void> {
+    this.#assertActive();
+    this.#statements.run(sql, params);
+  }
+
+  async get<T extends object>(
+    sql: string,
+    ...params: SqliteValue[]
+  ): Promise<T | undefined> {
+    this.#assertActive();
+    return this.#statements.get<T>(sql, params);
+  }
+
+  async all<T extends object>(
+    sql: string,
+    ...params: SqliteValue[]
+  ): Promise<T[]> {
+    this.#assertActive();
+    return this.#statements.all<T>(sql, params);
+  }
+
+  #assertActive(): void {
+    if (!this.#active) {
+      throw new Error("The pi SQLite transaction is no longer active");
+    }
+  }
+}
+
+/**
  * pi's `SqliteDatabase` facade over `DurableObjectStorage`.
  *
- * Durable Objects reject `BEGIN`, so transactions go through
- * `transactionSync`, which rolls back when the callback throws and rethrows
- * the same error, as pi's contract requires. Durable Objects have no
- * prepared statements either; a statement is the query text, executed on
- * each call.
+ * Durable Object SQL is synchronous, but pi's facade is asynchronous and a
+ * transaction's callback awaits between statements. A statement issued
+ * outside the transaction while it waits would run inside it: it would see
+ * uncommitted rows, and roll back with it. pi's contract therefore has the
+ * adapter queue every other call until the transaction settles: every
+ * call goes through one `OperationQueue`, which runs a statement at once
+ * when no transaction is open. As the contract says, a call on the database from inside a
+ * transaction's callback waits for that transaction and never settles; the
+ * callback must use its handle.
+ *
+ * Transactions run in `storage.transaction()`, which rolls back when the
+ * callback rejects and rejects with the same error.
  */
 export class DurableObjectSqliteDatabase implements SqliteDatabase {
   readonly #storage: DurableObjectStorage;
-  readonly #prefixer: Prefixer;
+  readonly #statements: Statements;
+  readonly #queue = new OperationQueue();
 
   constructor(
     storage: DurableObjectStorage,
     options: PiSessionStoreOptions = {}
   ) {
     this.#storage = storage;
-    this.#prefixer = new Prefixer(options.prefix ?? DEFAULT_PREFIX);
-  }
-
-  exec(sql: string): void {
-    this.#storage.sql.exec(this.#prefixer.rewrite(sql));
-  }
-
-  prepare(sql: string): SqliteStatement {
-    return new DurableObjectSqliteStatement(
-      this.#storage.sql,
-      this.#prefixer.rewrite(sql)
+    this.#statements = new Statements(
+      storage.sql,
+      new Prefixer(options.prefix ?? DEFAULT_PREFIX)
     );
   }
 
-  transaction<T>(callback: () => T): T {
-    return this.#storage.transactionSync(callback);
+  exec(sql: string): Promise<void> {
+    return this.#queue.run(() => this.#statements.exec(sql));
+  }
+
+  run(sql: string, ...params: SqliteValue[]): Promise<void> {
+    return this.#queue.run(() => this.#statements.run(sql, params));
+  }
+
+  get<T extends object>(
+    sql: string,
+    ...params: SqliteValue[]
+  ): Promise<T | undefined> {
+    return this.#queue.run(() => this.#statements.get<T>(sql, params));
+  }
+
+  all<T extends object>(sql: string, ...params: SqliteValue[]): Promise<T[]> {
+    return this.#queue.run(() => this.#statements.all<T>(sql, params));
+  }
+
+  transaction<T>(
+    callback: (transaction: SqliteExecutor) => Promise<T>
+  ): Promise<T> {
+    return this.#queue.hold(() =>
+      this.#storage.transaction(async () => {
+        const transaction = new DurableObjectSqliteTransaction(
+          this.#statements
+        );
+        try {
+          return await callback(transaction);
+        } finally {
+          transaction.end();
+        }
+      })
+    );
   }
 
   /** The object owns the database; there is nothing to close. */
-  close(): void {}
+  close(): Promise<void> {
+    return this.#queue.run(() => undefined);
+  }
 }

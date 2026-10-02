@@ -31,11 +31,11 @@ import { emptyUsage } from "../wires/shared";
 /**
  * The `api` marker on image models from this provider.
  *
- * @experimental This surface is experimental and may change.
+ * @beta This surface is in beta and may change.
  */
 export const CLOUDFLARE_AI_IMAGES_API = "cloudflare-ai-images";
 
-/** @experimental This surface is experimental and may change. */
+/** @beta This surface is in beta and may change. */
 export type CloudflareImagesModel = ImageModel<typeof CLOUDFLARE_AI_IMAGES_API>;
 
 /**
@@ -43,7 +43,7 @@ export type CloudflareImagesModel = ImageModel<typeof CLOUDFLARE_AI_IMAGES_API>;
  * knobs Workers AI understands. Anything given here is the default for every
  * call; `generateImages` options override it.
  *
- * @experimental This surface is experimental and may change.
+ * @beta This surface is in beta and may change.
  */
 export interface PiImagesModelOptions extends ModelOptions {
   name?: string;
@@ -156,7 +156,7 @@ async function readImage(
  * drops is reported the way the language wires report theirs: as a diagnostic
  * of type {@link COMPAT_DIAGNOSTIC}.
  *
- * @experimental This surface is experimental and may change.
+ * @beta This surface is in beta and may change.
  */
 export interface CloudflareAssistantImages extends AssistantImages {
   diagnostics?: {

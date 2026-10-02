@@ -3,7 +3,7 @@
  * capability that opens pi over the object's SQLite database and wakes it
  * after eviction; pi owns the transcript, the inbox, and every run.
  *
- * @experimental The API may change between releases.
+ * @beta The API may change between releases.
  */
 export {
   PiHarness,
@@ -13,14 +13,14 @@ export {
   type PiHarnessContext,
   type PiHarnessFactory,
   type PiHarnessOptions,
-  type PiSessionDefaults,
-  type PiWakeTiming
+  type PiModel,
+  type PiSessionDefaults
 } from "./harness";
 export {
   openPiSessionStore,
   type PiSessionStoreOptions
 } from "./session-store";
-export { addSkills, type ResolvedSkills } from "./skills";
+export { skills } from "./skills";
 export type {
   PiOperationResult,
   PiPendingOperation,

@@ -90,21 +90,22 @@ export class PiAgent extends DurableObject<Env> {
       })
     ]
   });
-  // pi's own registry: system prompt and the workspace tools.
-  readonly registry = createAppRegistry(this.workspace);
+  // pi's own registry: the system prompt and the workspace tools.
+  readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    harness: ({ storage, context }) =>
-      Harness.open(
+    harness: ({ storage, context }) => {
+      this.registry.install({
+        name: "playground",
+        sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
+        tools: createWorkspaceTools(this.workspace)
+      });
+      return Harness.open(
         storage,
-        {
-          models: this.#models(), // createModels() with this.ai.provider set
-          registry: this.registry
-        },
+        { models: this.#models(), registry: this.registry },
         context
-      ),
-    defaults: {
-      model: { provider: "cloudflare", modelId: MODEL_ID }
-    }
+      );
+    },
+    defaults: { model: this.ai(MODEL_ID), thinkingLevel: "low" }
   });
   // App glue: this app's socket protocol, built on session.events().
   readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
@@ -126,25 +127,19 @@ const side = await this.harness.sessions.create();
 await side.submit("Summarise the repo", { whenBusy: "steer" });
 ```
 
-The system prompt, tools, hooks and tasks are composed on pi's own
-`Registry` (`createRegistry()` from `@earendil-works/pi-durable`); the
-harness never sees it. Tools are pi-durable `ToolRegistration`s.
-`replay: "safe"` lets pi run a call again after an eviction interrupted it;
-otherwise the model gets an interrupted result. For `agents/skills` sources,
-`await addSkills(registry, sources)` from `agents/harness/pi` in the
-factory, before `Harness.open`.
+The factory builds everything pi's `Harness.open` takes: models, the
+registry, and `settings` (this app retries model requests there). The
+harness hands it pi's storage over the object's SQLite database and a
+background context. The system prompt and tools are a pi extension on the
+app's registry; tools are pi-durable `ToolRegistration`s. `replay: "safe"`
+lets pi run a call again after an eviction interrupted it; otherwise the
+model gets an interrupted result. For `agents/skills` sources,
+`this.registry.install(await skills(sources))` in the factory. See the
+[Pi harness docs](../../../../docs/agents/harnesses/pi.md).
 
-### Options
-
-Only `harness` is required. It opens pi's `Harness` over the store the
-object prepared, so the registry, `models`, `env`, `onReport` and any other
-`Harness.open` option belong to it.
-
-`defaults` applies to new sessions only — change one session's model with
+`defaults` applies to new sessions only; change one session's model with
 `session.setModel`. Without a default model, a session's prompts end
-unanswered (`no_model`) until one is set. `timing` overrides how long the
-wake waits and when a long wait is handed to the alarm; the defaults suit a
-deployment and the tests shorten them.
+unanswered (`no_model`) until one is set.
 
 The harness does not choose a transport. `session.events()` returns pi's own
 `AgentEvent` stream: a `snapshot`, then one batch per commit. This app sends
@@ -188,7 +183,7 @@ files, so cloning works while the module itself has no network.
 ## Package sources
 
 Pi comes from npm: `@earendil-works/pi-durable`, `pi-ai`, `chord` and
-`pi-telemetry` at `^0.99.2`. Pi is MIT licensed; see
+`pi-telemetry` at `^1.0.0`. Pi is MIT licensed; see
 [`licenses/mit-earendil-pi.txt`](./licenses/mit-earendil-pi.txt).
 
 `@cloudflare/computer` comes from npm at `^0.4.0`, the first release with

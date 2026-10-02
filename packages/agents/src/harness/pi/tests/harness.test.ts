@@ -141,6 +141,58 @@ describe("PiHarness on pi-durable", () => {
     expect((await stub.prompt("again")).text).toBe("echo: again");
   });
 
+  it("answers every one of many submissions made to one session at once", async () => {
+    const stub = fresh();
+    const inputs = Array.from({ length: 12 }, (_, n) => `burst ${n}`);
+    const receipts = await Promise.all(
+      inputs.map((input) => stub.submit(input))
+    );
+    const results = await Promise.all(
+      receipts.map((receipt) => stub.wait(receipt.operationId))
+    );
+    expect(results.map((result) => result.text)).toEqual(
+      inputs.map((input) => `echo: ${input}`)
+    );
+    // Each input is followed by its own answer, whatever order they ran in.
+    const messages = await stub.messages();
+    expect(messages).toHaveLength(inputs.length * 2);
+    for (let i = 0; i < messages.length; i += 2) {
+      expect(messages[i + 1]).toBe(`echo: ${messages[i]}`);
+    }
+    expect(await stub.pending()).toEqual([]);
+  });
+
+  it("recovers every session's run after a crash, from one alarm", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const sessions = [
+      "1",
+      await stub.createSession(),
+      await stub.createSession()
+    ];
+    const receipts = await Promise.all(
+      sessions.map((session) => stub.submit("gate", { session }))
+    );
+    await stub.gateStarted(3);
+
+    await abortAllDurableObjects();
+    stub = fresh(name);
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    // Each session's safe tool runs again.
+    await stub.gateStarted(6);
+    await stub.release();
+
+    const results = await Promise.all(
+      receipts.map((receipt, i) => stub.wait(receipt.operationId, sessions[i]))
+    );
+    expect(results.map((result) => result.status)).toEqual([
+      "done",
+      "done",
+      "done"
+    ]);
+    expect(await stub.pending()).toEqual([]);
+  });
+
   it("keeps sessions separate", async () => {
     const stub = fresh();
     const other = await stub.createSession();

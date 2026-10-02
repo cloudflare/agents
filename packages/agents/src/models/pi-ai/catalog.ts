@@ -19,7 +19,7 @@
  * with this provider's defaults. Re-apply them with `ai(model, options)`
  * after loading if the model carried any.
  *
- * @experimental This surface is experimental and may change.
+ * @beta This surface is in beta and may change.
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -33,18 +33,18 @@ import type { ModelOptions } from "../core/settings";
  * wire format: Workers AI runs on `env.AI.run`, and the compat layer maps that
  * onto strict OpenAI chat completions.
  *
- * @experimental This surface is experimental and may change.
+ * @beta This surface is in beta and may change.
  */
 export const CLOUDFLARE_AI_API = "cloudflare-ai";
 
-/** @experimental This surface is experimental and may change. */
+/** @beta This surface is in beta and may change. */
 export type CloudflareAIApi = typeof CLOUDFLARE_AI_API;
 
 /**
  * The pi-ai provider id. A `Models` registry resolves specifiers as
  * `cloudflare/<id>`, e.g. `cloudflare/anthropic/claude-opus-4-8`.
  *
- * @experimental This surface is experimental and may change.
+ * @beta This surface is in beta and may change.
  */
 export const CLOUDFLARE_PROVIDER_ID = "cloudflare";
 
@@ -52,18 +52,18 @@ export const CLOUDFLARE_PROVIDER_ID = "cloudflare";
  * A Workers AI model produced by this provider. `id` is the `@cf/` id exactly
  * as given; `api` is {@link CLOUDFLARE_AI_API}.
  *
- * @experimental This surface is experimental and may change.
+ * @beta This surface is in beta and may change.
  */
 export type CloudflareModel = Model<CloudflareAIApi>;
 
-/** @experimental This surface is experimental and may change. */
+/** @beta This surface is in beta and may change. */
 export type ModelCost = Model<Api>["cost"];
 
 /**
  * A model this provider routes: a Workers AI model or any pi-ai model the
  * caller handed to `ai(model)`.
  *
- * @experimental This surface is experimental and may change.
+ * @beta This surface is in beta and may change.
  */
 export type RoutedModel = Model<Api>;
 
@@ -73,7 +73,7 @@ export type RoutedModel = Model<Api>;
  * deadline. Metadata overrides only apply to the `@cf/` form — a model object
  * brings its own metadata, and this module never second-guesses it.
  *
- * @experimental This surface is experimental and may change.
+ * @beta This surface is in beta and may change.
  */
 /**
  * A fallback leg: a Workers AI id, a `<slug>/<id>` pi-ai's gateway registry

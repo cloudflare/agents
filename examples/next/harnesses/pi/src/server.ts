@@ -2,38 +2,20 @@ import { DurableObject } from "cloudflare:workers";
 import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
 import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
 import { createGitClient } from "@cloudflare/computer/git";
-import {
-  createRegistry,
-  Harness,
-  type Registry
-} from "@earendil-works/pi-durable";
 import { createModels } from "@earendil-works/pi-ai/models";
+import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { routeAgentRequest } from "agents";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
-import { CLOUDFLARE_PROVIDER_ID, createAI } from "agents/models/pi-ai";
+import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
 import { PiSessionSockets } from "./sockets";
 import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "./workspace";
 
 const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 
-/** pi's registry for this app: the prompt and the workspace tools. */
-function createAppRegistry(workspace: Workspace): Registry {
-  const registry = createRegistry();
-  registry.batch(() => {
-    registry.systemPrompt.section(
-      "preamble",
-      () =>
-        "You are a concise playground assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.",
-      { tag: false }
-    );
-    for (const tool of createWorkspaceTools(workspace)) {
-      registry.tools.add(tool);
-    }
-  });
-  return registry;
-}
+const PREAMBLE =
+  "You are a concise playground assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.";
 
 /** Playable pi session backed by one Durable Object. */
 export class PiAgent extends DurableObject<Env> {
@@ -56,29 +38,34 @@ export class PiAgent extends DurableObject<Env> {
       })
     ]
   });
-  readonly registry = createAppRegistry(this.workspace);
+  readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    harness: ({ storage, context }) =>
-      Harness.open(
+    harness: async ({ storage, context }) => {
+      // pi's own extension: the system prompt and the workspace tools.
+      this.registry.install({
+        name: "playground",
+        sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
+        tools: createWorkspaceTools(this.workspace)
+      });
+      const models = createModels();
+      models.setProvider(this.ai.provider);
+      return Harness.open(
         storage,
         {
-          models: this.#models(),
+          models,
           registry: this.registry,
+          settings: {
+            // pi doubles the delay before each retry: 1, 2, 4, 8 and 16 seconds,
+            // so a rate-limited model gets about 30 seconds to recover.
+            retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 }
+          },
           onReport: (error) => console.warn("pi report", error)
         },
         context
-      ),
-    defaults: {
-      model: { provider: CLOUDFLARE_PROVIDER_ID, modelId: MODEL_ID },
-      thinkingLevel: "low",
-      retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 }
-    }
+      );
+    },
+    defaults: { model: this.ai(MODEL_ID), thinkingLevel: "low" }
   });
-  #models() {
-    const models = createModels();
-    models.setProvider(this.ai.provider);
-    return models;
-  }
 
   // App glue, not the harness: how this app puts sessions on a socket.
   readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>

@@ -5,34 +5,28 @@ import {
   fauxToolCall,
   Type,
   type AssistantMessage,
-  type JsonValue,
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
-import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
 import {
   createRegistry,
   Harness,
   type AgentEvent,
   type EntryRecord,
-  type Registry,
+  type Extension,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
+import { setWakeTimingForTests } from "../harness";
+import { TEST_TIMING } from "./timing";
+import { fauxModels, NO_RETRY } from "./faux";
 import {
   PiHarness,
   type PiOperationResult,
   type PiReceipt,
   type PiWhenBusy
 } from "../index";
-
-/** A pi-ai model registry holding only the faux provider. */
-function fauxModels(provider: Parameters<MutableModels["setProvider"]>[0]) {
-  const models = createModels();
-  models.setProvider(provider);
-  return models;
-}
 
 const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
@@ -102,32 +96,28 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     tokensPerSecond: 200,
     tokenSize: { min: 2, max: 4 }
   });
-  readonly registry = this.#registry();
+  readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    harness: ({ storage, context }) =>
-      Harness.open(
+    harness: async ({ storage, context }) => {
+      this.registry.install(this.#testTools());
+      return Harness.open(
         storage,
         {
           models: fauxModels(this.#faux.provider),
           registry: this.registry,
+          settings: { retry: NO_RETRY },
           onReport: (error) => console.warn("pi report", error)
         },
         context
-      ),
-    defaults: {
-      model: {
-        provider: this.#faux.getModel().provider,
-        modelId: this.#faux.getModel().id
-      },
-      retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
+      );
     },
-    // Short enough that a suite does not sit on the real 30s heartbeat.
-    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
+    defaults: { model: this.#faux.getModel() }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
+    setWakeTimingForTests(this.harness, TEST_TIMING);
     this.#faux.setResponses(Array.from({ length: 200 }, () => script));
   }
 
@@ -217,28 +207,16 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.getAlarm();
   }
 
-  #registry(): Registry {
-    const registry = createRegistry();
-    registry.batch(() => {
-      registry.systemPrompt.section(
-        "preamble",
-        () => "Use the supplied test tools.",
-        { tag: false }
-      );
-      for (const tool of this.#tools()) registry.tools.add(tool);
-    });
-    return registry;
-  }
-
-  #tools(): ToolRegistration[] {
+  /** The fixture's tools and preamble, as one pi extension. */
+  #testTools(): Extension {
     const storage = this.ctx.storage;
     const gate = (
       name: string,
       replay: "safe" | "unsafe"
-    ): ToolRegistration => ({
+    ): ToolRegistration<typeof NoParameters> => ({
       name,
       description: "Wait until the test releases it.",
-      parameters: Type.Object({}),
+      parameters: NoParameters,
       replay,
       async execute(_args, api, context) {
         const runs = ((await storage.get<number>(GATE_RUNS_KEY)) ?? 0) + 1;
@@ -253,23 +231,35 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         };
       }
     });
-    return [
-      multiplyTool(),
-      gate("gate", "safe"),
-      gate("gate_unsafe", "unsafe")
-    ];
+    return {
+      name: "test-tools",
+      sections: [
+        {
+          key: "preamble",
+          render: () => "Use the supplied test tools.",
+          tag: false
+        }
+      ],
+      tools: [
+        multiplyTool(),
+        gate("gate", "safe"),
+        gate("gate_unsafe", "unsafe")
+      ]
+    };
   }
 }
 
-/** The one tool the factory fixture needs: no gating, no storage. */
-function multiplyTool(): ToolRegistration {
+const NoParameters = Type.Object({});
+const MultiplyParameters = Type.Object({ value: Type.Number() });
+
+/** Multiplies by three: no gating, no storage. */
+function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
   return {
     name: "multiply",
     description: "Multiply by three.",
-    parameters: Type.Object({ value: Type.Number() }),
+    parameters: MultiplyParameters,
     replay: "safe",
-    async execute(args: JsonValue) {
-      const { value } = args as { value: number };
+    async execute({ value }) {
       return {
         content: [{ type: "text", text: String(value * 3) }],
         details: { result: value * 3 }
@@ -279,7 +269,7 @@ function multiplyTool(): ToolRegistration {
 }
 
 /**
- * A harness given only its factory: no `defaults`, so new sessions start
+ * A harness given only its providers: no `defaults`, so new sessions start
  * without a model until one is set.
  */
 export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
@@ -296,13 +286,13 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
           registry: createRegistry()
         },
         context
-      ),
-    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
+      )
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
+    setWakeTimingForTests(this.harness, TEST_TIMING);
     this.#faux.setResponses(Array.from({ length: 200 }, () => script));
   }
 
@@ -312,10 +302,7 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   async setFauxModel(): Promise<void> {
-    const model = this.#faux.getModel();
-    await this.harness
-      .session()
-      .setModel({ provider: model.provider, modelId: model.id });
+    await this.harness.session().setModel(this.#faux.getModel());
   }
 
   async alarmTime(): Promise<number | null> {
@@ -325,5 +312,10 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
 
 /** A bare object whose SQLite database the storage conformance suite uses. */
 export class PiStoreTestObject extends DurableObject<Cloudflare.Env> {}
+
+export {
+  PiFactoryTestObject,
+  PiFlakyFactoryTestObject
+} from "./factory-fixture";
 
 export default { fetch: () => new Response("Not found", { status: 404 }) };

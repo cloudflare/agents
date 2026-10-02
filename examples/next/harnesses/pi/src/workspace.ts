@@ -4,7 +4,6 @@ import {
   type CreatePiToolsOptions,
   type PiTool
 } from "@cloudflare/computer/tools/pi-ai";
-import type { Tool } from "@earendil-works/pi-ai";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 
 /** The id of the Workspace's one backend, which `exec` runs on. */
@@ -120,9 +119,9 @@ export function createWorkspaceTools(
     return {
       name: tool.name,
       description: tool.description,
-      // JSON Schema rather than TypeBox. pi validates with TypeBox, which
-      // accepts plain JSON Schema, so only the static type differs.
-      parameters: tool.parameters as unknown as Tool["parameters"],
+      // Plain JSON Schema: pi validates with TypeBox, which accepts it, but
+      // computer's schema type is untyped, so `args` is too.
+      parameters: tool.parameters,
       ...(tool.constrainedSampling
         ? { constrainedSampling: tool.constrainedSampling }
         : {}),

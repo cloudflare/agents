@@ -12,8 +12,8 @@
     "test:e2e": "vitest run --config e2e/vitest.config.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "^0.80.2",
-    "@earendil-works/pi-ai": "^0.99.2",
+    "@earendil-works/pi-agent-core": "^1.0.0",
+    "@earendil-works/pi-ai": "^1.0.0",
     "agents": "*"
   },
   "devDependencies": {

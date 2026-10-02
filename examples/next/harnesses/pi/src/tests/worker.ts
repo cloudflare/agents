@@ -5,16 +5,15 @@ import {
   fauxToolCall,
   Type,
   type AssistantMessage,
-  type JsonValue,
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
-import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
+import { createModels } from "@earendil-works/pi-ai/models";
 import {
   createRegistry,
   Harness,
   type AgentEvent,
-  type Registry,
+  type Extension,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
@@ -28,13 +27,6 @@ import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
 import { PiSessionSockets } from "../sockets";
 import { EMPTY_VIEW, reduceEvents } from "../view";
-
-/** A pi-ai model registry holding only the faux provider. */
-function fauxModels(provider: Parameters<MutableModels["setProvider"]>[0]) {
-  const models = createModels();
-  models.setProvider(provider);
-  return models;
-}
 
 const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
@@ -91,27 +83,26 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     tokensPerSecond: 200,
     tokenSize: { min: 2, max: 4 }
   });
-  readonly registry = this.#registry();
+  readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    harness: ({ storage, context }) =>
-      Harness.open(
+    harness: async ({ storage, context }) => {
+      this.registry.install(this.#testTools());
+      const models = createModels();
+      models.setProvider(this.#faux.provider);
+      return Harness.open(
         storage,
         {
-          models: fauxModels(this.#faux.provider),
+          models,
           registry: this.registry,
+          settings: {
+            retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
+          },
           onReport: (error) => console.warn("pi report", error)
         },
         context
-      ),
-    defaults: {
-      model: {
-        provider: this.#faux.getModel().provider,
-        modelId: this.#faux.getModel().id
-      },
-      retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
+      );
     },
-    // Short enough that a suite does not sit on the real 30s heartbeat.
-    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
+    defaults: { model: this.#faux.getModel() }
   });
   readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
     this.ctx.getWebSockets(tag)
@@ -189,28 +180,16 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     return JSON.stringify(reduceEvents(EMPTY_VIEW, [stream.snapshot]));
   }
 
-  #registry(): Registry {
-    const registry = createRegistry();
-    registry.batch(() => {
-      registry.systemPrompt.section(
-        "preamble",
-        () => "Use the supplied test tools.",
-        { tag: false }
-      );
-      for (const tool of this.#tools()) registry.tools.add(tool);
-    });
-    return registry;
-  }
-
-  #tools(): ToolRegistration[] {
+  /** The fixture's tools and preamble, as one pi extension. */
+  #testTools(): Extension {
     const storage = this.ctx.storage;
     const gate = (
       name: string,
       replay: "safe" | "unsafe"
-    ): ToolRegistration => ({
+    ): ToolRegistration<typeof NoParameters> => ({
       name,
       description: "Wait until the test releases it.",
-      parameters: Type.Object({}),
+      parameters: NoParameters,
       replay,
       async execute(_args, api, context) {
         const runs = ((await storage.get<number>(GATE_RUNS_KEY)) ?? 0) + 1;
@@ -225,23 +204,35 @@ export class PiHarnessTestObject extends DurableObject<Env> {
         };
       }
     });
-    return [
-      multiplyTool(),
-      gate("gate", "safe"),
-      gate("gate_unsafe", "unsafe")
-    ];
+    return {
+      name: "test-tools",
+      sections: [
+        {
+          key: "preamble",
+          render: () => "Use the supplied test tools.",
+          tag: false
+        }
+      ],
+      tools: [
+        multiplyTool(),
+        gate("gate", "safe"),
+        gate("gate_unsafe", "unsafe")
+      ]
+    };
   }
 }
 
+const NoParameters = Type.Object({});
+const MultiplyParameters = Type.Object({ value: Type.Number() });
+
 /** Multiplies by three. */
-function multiplyTool(): ToolRegistration {
+function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
   return {
     name: "multiply",
     description: "Multiply by three.",
-    parameters: Type.Object({ value: Type.Number() }),
+    parameters: MultiplyParameters,
     replay: "safe",
-    async execute(args: JsonValue) {
-      const { value } = args as { value: number };
+    async execute({ value }) {
       return {
         content: [{ type: "text", text: String(value * 3) }],
         details: { result: value * 3 }
