@@ -510,7 +510,15 @@ export class PiHarness extends LifecycleCapability {
 
   // ── pi ───────────────────────────────────────────────────────────────────
 
-  #open(): Promise<Opened> {
+  /**
+   * pi, opened. Waits for Lifecycle startup first, so pi is only ever
+   * opened inside it: startup holds the input gate (`blockConcurrencyWhile`)
+   * and awaits the open in `onStart`, so an open begun before startup would
+   * be awaited behind a closed gate, with its timers and I/O held back, and
+   * never finish.
+   */
+  async #open(): Promise<Opened> {
+    await this.lifecycle.ready();
     this.#opening ??= this.#doOpen().catch((error: unknown) => {
       this.#opening = undefined;
       throw error;
