@@ -11,6 +11,8 @@ import {
 import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
+import { setWakeTimingForTests } from "../harness";
+import { TEST_TIMING } from "./timing";
 import {
   PiHarness,
   type PiExtension,
@@ -97,14 +99,13 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
       model: this.#faux.getModel(),
       retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
     },
-    extensions: { "test-tools": this.#testTools() },
-    // Short enough that a suite does not sit on the real 30s heartbeat.
-    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
+    extensions: { "test-tools": this.#testTools() }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
+    setWakeTimingForTests(this.harness, TEST_TIMING);
     this.#faux.setResponses(Array.from({ length: 200 }, () => script));
   }
 
@@ -265,13 +266,13 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
     tokenSize: { min: 2, max: 4 }
   });
   readonly harness = new PiHarness({
-    providers: [this.#faux.provider],
-    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
+    providers: [this.#faux.provider]
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
+    setWakeTimingForTests(this.harness, TEST_TIMING);
     this.#faux.setResponses(Array.from({ length: 200 }, () => script));
   }
 

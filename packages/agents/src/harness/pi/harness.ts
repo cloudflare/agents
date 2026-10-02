@@ -33,10 +33,7 @@ import {
 } from "../../lifecycle";
 import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "./context";
 import { installExtensions, type PiExtensions } from "./extensions";
-import {
-  openPiSessionStore,
-  type PiSessionStoreOptions
-} from "./session-store";
+import { openPiSessionStore } from "./session-store";
 import type {
   PiOperationResult,
   PiPendingOperation,
@@ -54,8 +51,9 @@ const BG = BACKGROUND_CONTEXT;
 export const ROOT_SESSION: PiSessionId = String(ROOT_CONVERSATION_ID);
 
 /**
- * Defaults for the three wake timings; a host overrides them with
- * `timing`, which is what the tests do to avoid the real heartbeat.
+ * The three wake timings. They suit a real deployment; only tests change
+ * them, with `setWakeTimingForTests`, so a suite does not sit on the real
+ * heartbeat.
  *
  * A pi long wait further away than this is handed to the alarm, so the
  * alarm, not pi's in-memory timer, is what wakes the object.
@@ -75,6 +73,19 @@ const WAIT_BUDGET_MS = 10 * 60_000;
  * job is still due and its alarm restarts the object.
  */
 const HEARTBEAT_MS = 30_000;
+
+let setWakeTiming: (harness: PiHarness, timing: WakeTiming) => void;
+
+/**
+ * @internal Shorten a harness's wake timings, so a test suite does not sit
+ * on the real heartbeat. Not exported from `agents/harness/pi`.
+ */
+export function setWakeTimingForTests(
+  harness: PiHarness,
+  timing: WakeTiming
+): void {
+  setWakeTiming(harness, timing);
+}
 
 const WAKE_FN = "wake";
 
@@ -114,12 +125,8 @@ export type PiSessionDefaults = {
   readonly retry?: ConversationRetryPolicy;
 };
 
-/**
- * How long the wake waits and when it hands a wait to the alarm. Defaults
- * suit a real deployment; a test shortens them so a suite does not sit on
- * the real heartbeat.
- */
-export type PiWakeTiming = {
+/** How long the wake waits, and when it hands a wait to the alarm. */
+type WakeTiming = {
   /** A pi wait further away than this goes to the alarm. Default 60_000. */
   readonly sleepThresholdMs?: number;
   /** Longest one wake waits inside an alarm. Default 600_000. */
@@ -145,8 +152,6 @@ export type PiHarnessOptions = {
   readonly extensions?: PiExtensions;
   /** Model and thinking defaults apply to new sessions; retry applies harness-wide. */
   readonly defaults?: PiSessionDefaults;
-  readonly store?: PiSessionStoreOptions;
-  readonly timing?: PiWakeTiming;
   /** pi-durable's own `Harness.open` options, passed through as-is. */
   readonly harnessOptions?: PiOpenOptions;
 };
@@ -212,18 +217,18 @@ export class PiHarness extends LifecycleCapability {
   readonly #waits = new Map<PiSessionId, Promise<void>>();
   /** Submissions between their wake and pi's admission, per session. */
   readonly #admitting = new Map<PiSessionId, number>();
-  readonly #sleepThresholdMs: number;
-  readonly #waitBudgetMs: number;
-  readonly #heartbeatMs: number;
+  #sleepThresholdMs = SLEEP_THRESHOLD_MS;
+  #waitBudgetMs = WAIT_BUDGET_MS;
+  #heartbeatMs = HEARTBEAT_MS;
   #opening: Promise<Opened> | undefined;
+
+  static {
+    setWakeTiming = (harness, timing) => harness.#setWakeTiming(timing);
+  }
 
   constructor(options: PiHarnessOptions) {
     super("pi-harness");
     this.#options = options;
-    this.#sleepThresholdMs =
-      options.timing?.sleepThresholdMs ?? SLEEP_THRESHOLD_MS;
-    this.#waitBudgetMs = options.timing?.waitBudgetMs ?? WAIT_BUDGET_MS;
-    this.#heartbeatMs = options.timing?.heartbeatMs ?? HEARTBEAT_MS;
     if (
       options.defaults?.retry !== undefined &&
       options.harnessOptions?.settings?.retry !== undefined
@@ -232,16 +237,18 @@ export class PiHarness extends LifecycleCapability {
         "PiHarness: set retry in defaults.retry or harnessOptions.settings.retry, not both"
       );
     }
-    for (const [name, value] of [
-      ["sleepThresholdMs", this.#sleepThresholdMs],
-      ["waitBudgetMs", this.#waitBudgetMs],
-      ["heartbeatMs", this.#heartbeatMs]
-    ] as const) {
+    this.sessions = new PiSessions(this);
+  }
+
+  #setWakeTiming(timing: WakeTiming): void {
+    for (const [name, value] of Object.entries(timing)) {
       if (!Number.isFinite(value) || value <= 0) {
         throw new Error(`PiHarness timing.${name} must be a positive number`);
       }
     }
-    this.sessions = new PiSessions(this);
+    this.#sleepThresholdMs = timing.sleepThresholdMs ?? this.#sleepThresholdMs;
+    this.#waitBudgetMs = timing.waitBudgetMs ?? this.#waitBudgetMs;
+    this.#heartbeatMs = timing.heartbeatMs ?? this.#heartbeatMs;
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -535,10 +542,7 @@ export class PiHarness extends LifecycleCapability {
   }
 
   async #doOpen(): Promise<Opened> {
-    const storage = await openPiSessionStore(
-      this.lifecycle.storage,
-      this.#options.store
-    );
+    const storage = await openPiSessionStore(this.lifecycle.storage);
     await this.#installExtensions();
     const models = createModels();
     for (const provider of this.#options.providers) {

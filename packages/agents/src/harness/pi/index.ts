@@ -13,8 +13,7 @@ export {
   type PiModel,
   type PiOpenOptions,
   type PiHarnessOptions,
-  type PiSessionDefaults,
-  type PiWakeTiming
+  type PiSessionDefaults
 } from "./harness";
 export {
   openPiSessionStore,

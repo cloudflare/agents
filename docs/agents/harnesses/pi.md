@@ -54,8 +54,6 @@ export class Assistant extends Agent<Env> {
 | `defaults`       | What a new session starts with: `model` (a pi-ai `Model`, such as `ai("@cf/…")`), `thinkingLevel`, and `retry`.              |
 | `extensions`     | Tools and system prompt sections. Refer to [Pi harness extensions](./pi-extensions.md).                                      |
 | `harnessOptions` | pi-durable's own `Harness.open` options (`settings`, `env`, `onReport`, `conversationCreated`, `now`), passed through as-is. |
-| `store`          | The prefix for pi's tables. Default `pi_`.                                                                                   |
-| `timing`         | How long the wake waits on pi before handing a wait to the alarm.                                                            |
 
 ## Add tools and prompt sections
 

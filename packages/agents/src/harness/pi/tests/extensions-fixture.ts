@@ -10,6 +10,8 @@ import {
 } from "@earendil-works/pi-ai";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
+import { setWakeTimingForTests } from "../harness";
+import { TEST_TIMING } from "./timing";
 import { fromManifest } from "../../../skills/manifest";
 import { BACKGROUND_CONTEXT } from "../context";
 import {
@@ -156,13 +158,13 @@ export class PiExtensionsTestObject extends DurableObject<Cloudflare.Env> {
       conversationCreated: () => {
         this.created += 1;
       }
-    },
-    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
+    }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
+    setWakeTimingForTests(this.harness, TEST_TIMING);
     this.#faux.setResponses(Array.from({ length: 2_000 }, () => script));
   }
 
@@ -292,13 +294,13 @@ export class PiFlakyExtensionTestObject extends DurableObject<Cloudflare.Env> {
         if (this.#attempts === 1) throw new Error("extension failed to load");
         ctx.tools.transform((tools) => tools.set("shout", shout));
       }
-    },
-    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
+    }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
+    setWakeTimingForTests(this.harness, TEST_TIMING);
     this.#faux.setResponses(Array.from({ length: 20 }, () => script));
   }
 

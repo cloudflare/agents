@@ -87,9 +87,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
       model: this.#faux.getModel(),
       retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
     },
-    extensions: { "test-tools": this.#testTools() },
-    // Short enough that a suite does not sit on the real 30s heartbeat.
-    timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
+    extensions: { "test-tools": this.#testTools() }
   });
   readonly sockets = new PiSessionSockets(this.harness, (tag) =>
     this.ctx.getWebSockets(tag)

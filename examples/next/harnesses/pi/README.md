@@ -136,9 +136,7 @@ with models from `providers` and a registry from `extensions`. pi's other
 
 `defaults` applies to new sessions only — change one session's model with
 `session.setModel`. Without a default model, a session's prompts end
-unanswered (`no_model`) until one is set. `timing` overrides how long the
-wake waits and when a long wait is handed to the alarm; the defaults suit a
-deployment and the tests shorten them.
+unanswered (`no_model`) until one is set.
 
 The harness does not choose a transport. `session.events()` returns pi's own
 `AgentEvent` stream: a `snapshot`, then one batch per commit. This app sends
