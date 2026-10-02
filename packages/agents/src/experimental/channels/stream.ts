@@ -1,4 +1,6 @@
+import { TextSegmentJoiner } from "../../chat/text-segment-joiner";
 import type { Awaitable } from "./channel";
+import type { ResponseChunk } from "./protocol";
 
 /** Why a consumption loop stopped reading. */
 export type StreamOutcome =
@@ -9,6 +11,12 @@ export type ChunkConsumer<TChunk, TResult> = {
   onChunk(chunk: TChunk): Awaitable<void>;
   /** Runs exactly once, whether the stream closed or ended abnormally. */
   onFinish(outcome: StreamOutcome): Awaitable<TResult>;
+};
+
+/** The complete text of a stream, and whether it ended before its answer did. */
+export type CollectedText = {
+  text: string;
+  interrupted: boolean;
 };
 
 /**
@@ -44,6 +52,68 @@ export async function consumeChunks<TChunk, TResult>(
   } finally {
     await cancellation;
   }
+}
+
+/**
+ * Turn a response's chunks into answer text, one chunk at a time. Deltas of
+ * one part join directly; a new text part or tool activity in between adds a
+ * space. Metadata and data never split text. Returns the text each chunk adds.
+ */
+export function createTextCollector(): (chunk: ResponseChunk) => string {
+  const joiner = new TextSegmentJoiner();
+  return (chunk) => {
+    if (
+      chunk.type === "metadata" ||
+      chunk.type === "data" ||
+      chunk.type === "text-end"
+    ) {
+      return "";
+    }
+    let added = "";
+    for (const event of joiner.pushChunk(
+      chunk.type === "text-delta"
+        ? { type: "text-delta", text: chunk.delta }
+        : { type: chunk.type }
+    )) {
+      if (event.type === "text") added += event.text;
+    }
+    return added;
+  };
+}
+
+/**
+ * Collect a response's text into one Markdown answer.
+ *
+ * The result reports interruption instead of throwing, because a Channel that
+ * has partial text still has to decide what to deliver.
+ */
+export function collectText(
+  chunks: ReadableStream<ResponseChunk>
+): Promise<CollectedText> {
+  let text = "";
+  const collect = createTextCollector();
+  return consumeChunks(chunks, {
+    onChunk(chunk) {
+      text += collect(chunk);
+    },
+    onFinish: (outcome) => ({ text, interrupted: outcome.interrupted })
+  });
+}
+
+/** A finished message as a response's chunks. */
+export function messageChunks(markdown: string): ReadableStream<ResponseChunk> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue({ type: "text-start", id: "message" });
+      controller.enqueue({
+        type: "text-delta",
+        id: "message",
+        delta: markdown
+      });
+      controller.enqueue({ type: "text-end", id: "message" });
+      controller.close();
+    }
+  });
 }
 
 /**

@@ -131,6 +131,7 @@ import { withVoice } from "agents/voice";
 import { VoiceClient } from "agents/voice/client";
 import { useVoiceAgent } from "agents/voice/react";
 
+import { ChannelGateway, Channels } from "agents/experimental/channels";
 import { email } from "agents/experimental/channels/email";
 import { slack } from "agents/experimental/channels/slack";
 import { telegram } from "agents/experimental/channels/telegram";
