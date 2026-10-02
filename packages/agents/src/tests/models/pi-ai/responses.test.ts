@@ -229,6 +229,28 @@ describe("pi-ai: the reasoning level is the model's to decide", () => {
     );
   });
 
+  it("follows the call's level over the Workers AI reasoningEffort setting", async () => {
+    const binding = fakeBinding(() =>
+      sseResponse(gatewayPadded(responsesTextStream()))
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.streamSimple(
+        ai("openai/gpt-5.4", { reasoningEffort: "low" }),
+        userContext("hi"),
+        { reasoning: "high" }
+      )
+    );
+    expect(field(binding.universal[0]?.query, "reasoning.effort")).toBe("high");
+    const warnings = (
+      message.diagnostics?.find((d) => d.type === "cloudflare-compat")
+        ?.details as { warnings: { feature: string }[] } | undefined
+    )?.warnings;
+    expect(warnings?.map((warning) => warning.feature)).toContain(
+      "reasoning-effort"
+    );
+  });
+
   it("omits the effort but keeps reasoning replayable when the model declares `off: null`", async () => {
     const binding = fakeBinding(() =>
       sseResponse(gatewayPadded(responsesTextStream()))

@@ -207,8 +207,11 @@ export function buildRequest(
   // An explicitly named level goes through the same model-aware resolution as
   // `reasoning` does, so `"xhigh"` and `"minimal"` survive on a model whose
   // own metadata declares them; anything else a caller wrote is theirs.
+  // `reasoningEffort` in the model options is a Workers AI setting. A vendor
+  // model's reasoning follows the call's own level and the model's metadata;
+  // the wires record the dropped setting as a diagnostic.
   const reasoningEffort =
-    resolved.reasoningEffort !== undefined
+    resolved.reasoningEffort !== undefined && model.api === CLOUDFLARE_AI_API
       ? resolved.reasoningEffort
       : isThinkingLevel(explicitEffort)
         ? effortForLevel(model, explicitEffort)

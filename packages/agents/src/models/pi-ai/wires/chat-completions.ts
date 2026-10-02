@@ -439,6 +439,8 @@ function applyReasoning(
     model: Model<string>;
     compat: Compat;
     effort: string | null | undefined;
+    /** The Workers AI `reasoningEffort` setting, which a vendor model drops. */
+    workersAIEffort: unknown;
     chatTemplateKwargs: Record<string, unknown> | undefined;
     workersAI: boolean;
   }
@@ -471,11 +473,18 @@ function applyReasoning(
         message: `This model declares the "${thinkingFormat}" thinking format, which this wire does not build; its reasoning level was dropped. Reach it through pi-ai's own provider if you need that shape.`
       });
     }
-  } else if (effort === null) {
+  }
+  if (context.workersAIEffort === null) {
     ignored.push({
       feature: "reasoning-off",
       message:
         "`reasoningEffort: null` is a Workers AI setting; a model routed through AI Gateway decides its own reasoning, so it was dropped."
+    });
+  } else if (context.workersAIEffort !== undefined) {
+    ignored.push({
+      feature: "reasoning-effort",
+      message:
+        "`reasoningEffort` is a Workers AI setting and does not apply to a model routed through AI Gateway; use the pi `reasoning` level, which the model's own metadata maps."
     });
   }
   if (chatTemplateKwargs !== undefined) {
@@ -538,7 +547,8 @@ export function streamCompletions(
         compat,
         effort: request.reasoningEffort,
         model,
-        workersAI
+        workersAI,
+        workersAIEffort: resolved.reasoningEffort
       });
       const sampling = (options as { samplingParams?: Record<string, unknown> })
         .samplingParams;

@@ -576,6 +576,25 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
     ]);
   });
 
+  it("does not send the Workers AI reasoningEffort setting to a vendor model", async () => {
+    const binding = fakeBinding(() => sseResponse(workersAITextStream()));
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.stream(
+        ai(vendorModel(), { reasoningEffort: "low" }),
+        userContext("hi")
+      )
+    );
+    expect(binding.universal[0]?.query).not.toHaveProperty("reasoning_effort");
+    const warnings = (
+      message.diagnostics?.find((d) => d.type === "cloudflare-compat")
+        ?.details as { warnings: { feature: string }[] } | undefined
+    )?.warnings;
+    expect(warnings?.map((warning) => warning.feature)).toEqual([
+      "reasoning-effort"
+    ]);
+  });
+
   it("omits reasoning_effort when the model says it is unsupported", async () => {
     const binding = fakeBinding(() => sseResponse(workersAITextStream()));
     const ai = createAI({ binding: asAi(binding) });
