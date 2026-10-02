@@ -177,11 +177,6 @@
       "import": "./dist/harness/pi/index.js",
       "require": "./dist/harness/pi/index.js"
     },
-    "./harnesses/pi": {
-      "types": "./dist/harnesses/pi/index.d.ts",
-      "import": "./dist/harnesses/pi/index.js",
-      "require": "./dist/harnesses/pi/index.js"
-    },
     "./agent-tools": {
       "types": "./dist/agent-tools.d.ts",
       "import": "./dist/agent-tools.js",

@@ -13,7 +13,6 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/lifecycle`            | `src/lifecycle/index.ts`      | Composable Durable Object lifecycle and hibernating connections                                  |
 | `agents/harness`              | `src/harness/index.ts`        | Experimental: the extension shape every harness shares                                           |
 | `agents/harness/pi`           | `src/harness/pi/index.ts`     | Experimental: pi-durable hosted in a Durable Object (`PiHarness`)                                |
-| `agents/harnesses/pi`         | `src/harnesses/pi/index.ts`   | Deprecated alias for `agents/harness/pi`                                                         |
 | `agents/react`                | `src/react.tsx`               | `useAgent` React hook, state sync, RPC from components                                           |
 | `agents/chat`                 | `src/chat/index.ts`           | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think`                     |
 | `agents/chat/transport`       | `src/chat/transport.ts`       | Framework-neutral WebSocket chat transport for AI SDK clients                                    |
