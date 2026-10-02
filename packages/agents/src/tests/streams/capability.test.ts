@@ -354,6 +354,33 @@ describe("Streams capability", () => {
     });
   });
 
+  it("an append while the consumer holds a live batch is not a lost wakeup", async () => {
+    const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamHarnessObject) => {
+      const stream = await instance.streams.open("held-batch");
+      const order: string[] = [];
+      const reading = (async () => {
+        for await (const batch of instance.streams.readBatches("held-batch")) {
+          order.push(`batch:${batch.map((c) => c.seq).join(",")}`);
+          // The producer appends while this consumer still holds the batch
+          // (the generator is suspended at its yield, with no waiter).
+          if (batch[0].seq === 0) stream.append({ i: 1 });
+        }
+      })();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      stream.append({ i: 0 });
+
+      // The held-batch chunk must arrive with NO further append or close.
+      const deadline = Date.now() + 2_000;
+      while (!order.includes("batch:1") && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(order).toEqual(["batch:0", "batch:1"]);
+      stream.close();
+      await reading;
+    });
+  });
+
   it("deleting a live stream wakes tailing readers", async () => {
     const stub = env.StreamHarnessObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamHarnessObject) => {

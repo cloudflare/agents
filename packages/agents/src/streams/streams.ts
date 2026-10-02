@@ -350,6 +350,10 @@ export class Streams extends LifecycleCapability {
         continue;
       }
 
+      // The yield above was a suspension point: appends made while the
+      // consumer held the batch woke no waiter, so re-poll before sleeping.
+      if (rows.length > 0) continue;
+
       // Live tail: wait for the next append or settlement, then re-poll.
       // Wakeups carry no data, so there is nothing to buffer or dedupe.
       await this.#waitForWakeup(streamId, signal);
