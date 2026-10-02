@@ -8,7 +8,6 @@
     "src/voice/react-tests/**/*.ts",
     "src/voice/react-tests/**/*.tsx",
     "src/harness/pi/tests/**/*.ts",
-    "src/channels/__tests__/**/*.ts",
-    "src/channels/live-tests/**/*.ts"
+    "src/experimental/channels/__tests__/**/*.ts"
   ]
 }

@@ -21,7 +21,7 @@ describe("Voice and Channels bundle isolation", () => {
   it("keeps Voice and Channels out of the main agents entry", async () => {
     const inputs = await bundledInputs("src/index.ts");
     expect(inputs).not.toContain("src/voice/");
-    expect(inputs).not.toContain("src/channels/");
+    expect(inputs).not.toContain("src/experimental/channels/");
   });
 
   it("keeps the Voice types entry dependency-light", async () => {
@@ -40,26 +40,24 @@ describe("Voice and Channels bundle isolation", () => {
     expect(inputs).not.toContain("src/voice/index.ts");
   });
 
-  it("keeps provider and framework adapters out of Channels core", async () => {
-    const inputs = await bundledInputs("src/channels/index.ts");
+  it("keeps individual Channels and AI frameworks out of Channels core", async () => {
+    const inputs = await bundledInputs("src/experimental/channels/index.ts");
     expect(inputs).not.toContain("postal-mime");
     expect(inputs).not.toMatch(/node_modules[/+](ai|@tanstack)/);
-    expect(inputs).not.toContain("src/channels/adapters/");
+    for (const channel of ["slack", "telegram", "email"]) {
+      expect(inputs).not.toContain(`src/experimental/channels/${channel}/`);
+    }
+    // The gateway reads the Web Channel's identity header, nothing more.
+    expect(inputs).not.toContain("src/experimental/channels/web/channel.ts");
     expect(inputs).not.toContain("src/voice/");
   });
 
   it("confines MIME parsing to the Channels email entry", async () => {
-    const inputs = await bundledInputs("src/channels/email.ts");
+    const inputs = await bundledInputs(
+      "src/experimental/channels/email/index.ts"
+    );
     expect(inputs).toContain("postal-mime");
-    expect(inputs).not.toContain("src/channels/adapters/slack.ts");
-    expect(inputs).not.toContain("src/channels/adapters/telegram.ts");
-  });
-
-  it("keeps the Channels Voice adapter off the Voice server and client", async () => {
-    const inputs = await bundledInputs("src/channels/voice.ts");
-    expect(inputs).toContain("src/voice/types.ts");
-    expect(inputs).not.toContain("src/voice/index.ts");
-    expect(inputs).not.toContain("src/voice/client.ts");
-    expect(inputs).not.toContain("src/voice/react.tsx");
+    expect(inputs).not.toContain("src/experimental/channels/slack/");
+    expect(inputs).not.toContain("src/experimental/channels/telegram/");
   });
 });
