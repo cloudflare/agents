@@ -37,6 +37,9 @@ allowBuilds:
 minimumReleaseAge: 1440
 minimumReleaseAgeExclude:
   - "@cloudflare/*"
+  - miniflare
+  - workerd
+  - wrangler
   - "@typescript/*"
   - "@earendil-works/*"
 overrides:

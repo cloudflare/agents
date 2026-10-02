@@ -25,6 +25,6 @@
     "concurrently": "^10.0.3",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
-    "wrangler": "^4.115.0"
+    "wrangler": "^4.147.0"
   }
 }

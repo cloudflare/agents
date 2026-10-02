@@ -37,7 +37,7 @@
     "@changesets/changelog-github": "^0.7.0",
     "@changesets/cli": "^2.31.0",
     "@cloudflare/kumo": "^2.6.0",
-    "@cloudflare/vite-plugin": "^1.48.0",
+    "@cloudflare/vite-plugin": "^1.62.5",
     "@cloudflare/vitest-pool-workers": "^0.19.1",
     "@cloudflare/workers-types": "^5.20260729.1",
     "@modelcontextprotocol/sdk": "1.30.0",
@@ -73,7 +73,7 @@
     "vitest": "4.1.11",
     "vitest-browser-react": "^2.2.0",
     "workers-ai-provider": "^4.0.0",
-    "wrangler": "^4.115.0",
+    "wrangler": "^4.147.0",
     "zod": "^4.5.4"
   },
   "packageManager": "pnpm@11.19.0"
