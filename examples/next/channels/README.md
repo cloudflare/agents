@@ -12,9 +12,10 @@ Every agent has the same shape:
 3. The Worker's **`ChannelGateway`** routes each WebSocket upgrade to the
    agent that holds the conversation.
 
-| Path                               | Agent        | Harness                                     |
-| ---------------------------------- | ------------ | ------------------------------------------- |
-| `/channels/ai-sdk/<room>[/<conv>]` | `AiSdkAgent` | `AiSdkHarness` from `agents/harness/ai-sdk` |
+| Path                               | Agent        | Harness                                                          |
+| ---------------------------------- | ------------ | ---------------------------------------------------------------- |
+| `/channels/pi/<room>[/<conv>]`     | `PiAgent`    | `PiHarness` from `agents/harness/pi`, behind `piChannelsHarness` |
+| `/channels/ai-sdk/<room>[/<conv>]` | `AiSdkAgent` | `AiSdkHarness` from `agents/harness/ai-sdk`                      |
 
 ## Files
 
@@ -25,6 +26,8 @@ Every agent has the same shape:
 - `src/ai-sdk-agent.ts` is `AiSdkAgent`: `AiSdkHarness` runs each message
   with `streamText` on Workers AI. It has a client tool (`getLocation`, run
   by the participant who asked) and a tool that needs approval (`flipCoin`).
+- `src/pi/agent.ts` is `PiAgent`: `PiHarness` runs pi-durable sessions with
+  a `current_time` tool. See [The pi agent](#the-pi-agent).
 - `src/client.tsx` is a browser client built on `WebChannelClient` from
   `agents/experimental/channels/web/client`. The URL hash picks the agent and room
   (`#ai-sdk/lobby`); the harness picker switches between agents.
@@ -65,3 +68,35 @@ provide client-tool results, and can start, fork, list and switch
 conversations (`/new`, `/fork`, `/conversations`, `/switch <id>`). A
 conversation is also reachable directly at
 `/channels/<harness>/<room>/<conversation>`.
+
+## The pi agent
+
+`PiHarness` keeps pi's own shape. `src/pi/channels-harness.ts`,
+`piChannelsHarness(harness, { kv })`, is the harness adapter that puts it
+behind the shared harness interface. It only translates shapes: pi entries
+become transcript messages, pi events become session events, and pi
+submission ids become the caller's operation ids. `Channels.forHarness`
+knows nothing about pi:
+
+```ts
+readonly channels = Channels.forHarness(
+  piChannelsHarness(this.harness, { kv: this.ctx.storage.kv }),
+  { channels: { web: new WebChannel() } }
+);
+```
+
+| Channels                           | Harness                                               |
+| ---------------------------------- | ----------------------------------------------------- |
+| Conversation                       | Session, with the same id; the default is pi's root   |
+| Inbound `message` event            | `session.submit(input, { operationId: eventId })`     |
+| Turn                               | One operation; steers get their own turns             |
+| Response                           | One per run; turns that join a run share its response |
+| Transcript and snapshot            | The session watch's state, then its `message` events  |
+| `cancel`                           | `session.abort(turnId)`                               |
+| `conversation-create` / `-fork`    | `sessions.create()` / `sessions.fork(id)`             |
+| `conversation-reset`               | `session.reset(handoff)`                              |
+| `approval-response`, `tool-result` | Rejected: pi-durable has neither yet                  |
+
+Client tools and approvals therefore work only on the AI SDK agent. Try
+`pnpm tui2 pi lobby`, ask `What time is it?`, then `/fork`, `/new`, or
+`/reset <handoff note>`.
