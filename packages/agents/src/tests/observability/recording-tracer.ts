@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createTracer } from "../../observability/tracing/tracer";
 import type {
   TraceAttributeValue,
+  SpanStatusCode,
   SpanWriter,
   AgentTracer
 } from "../../observability/tracing/tracer";
@@ -72,6 +73,9 @@ export class RecordingSpan implements SpanWriter {
   readonly parent: RecordingSpan | undefined;
   readonly attributes: Record<string, TraceAttributeValue> = {};
   readonly children: RecordingSpan[] = [];
+  /** Exception events recorded on this span, in order. */
+  readonly exceptions: { readonly name: string }[] = [];
+  status: SpanStatusCode | undefined;
 
   #ended = false;
   #endCount = 0;
@@ -105,6 +109,16 @@ export class RecordingSpan implements SpanWriter {
     }
 
     this.attributes[key] = value;
+  }
+
+  recordException(exception: { readonly name: string }): void {
+    if (!this.isTraced) return;
+    this.exceptions.push(exception);
+  }
+
+  setStatus(status: { readonly code: SpanStatusCode }): void {
+    if (!this.isTraced) return;
+    this.status = status.code;
   }
 
   end(): void {
