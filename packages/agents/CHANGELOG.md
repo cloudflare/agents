@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.26.0
+
+### Minor Changes
+
+- [#2451](https://github.com/cloudflare/agents/pull/2451) [`df9c0ef`](https://github.com/cloudflare/agents/commit/df9c0ef6c4541c5552b5ce4d6ba292162dbd0908) Thanks [@aron-cf](https://github.com/aron-cf)! - Update pi-durable and pi-ai to `^1.0.0`. See [Pi harness](https://github.com/cloudflare/agents/blob/main/docs/agents/harnesses/pi.md) docs for details.
+
 ## 0.25.0
 
 ### Minor Changes
