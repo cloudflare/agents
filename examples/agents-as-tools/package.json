@@ -25,7 +25,7 @@
     "zod": "^4.5.4"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.48.0",
+    "@cloudflare/vite-plugin": "1.62.3",
     "@cloudflare/workers-types": "^5.20260729.1",
     "@playwright/test": "^1.61.1",
     "@tailwindcss/vite": "^4",
@@ -36,6 +36,6 @@
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
-    "wrangler": "^4.115.0"
+    "wrangler": "^4.145.0"
   }
 }
