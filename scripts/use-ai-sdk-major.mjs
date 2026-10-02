@@ -32,6 +32,7 @@ const ranges =
         "@ai-sdk/openai": "^3.0.0",
         "@ai-sdk/anthropic": "^3.0.0",
         "@ai-sdk/google": "^3.0.0",
+        "@ai-sdk/provider": "^3.0.0",
         "workers-ai-provider": "^3.3.0"
       }
     : {
@@ -40,6 +41,7 @@ const ranges =
         "@ai-sdk/openai": "^4.0.0",
         "@ai-sdk/anthropic": "^4.0.0",
         "@ai-sdk/google": "^4.0.0",
+        "@ai-sdk/provider": "^4.0.0",
         "workers-ai-provider": "^4.0.0"
       };
 
