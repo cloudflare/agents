@@ -21,6 +21,7 @@ lands.
 | [`harnesses/pi`](./harnesses/pi)                         | This PR   | Experimental: pi-durable sessions on `agents/harness/pi`, with Workspace tools and a JavaScript `exec` from `@cloudflare/computer`             |
 | [`harnesses/self-modifying`](./harnesses/self-modifying) | This PR   | A Lifecycle capability runs editable harness revisions in fresh Dynamic Workers with trusted System tools and auto-discovered Custom tools     |
 | [`models`](./models)                                     | This PR   | One `createAI` per framework (AI SDK and pi-ai): `@cf/` ids for Workers AI, vendor models routed through AI Gateway                            |
+| [`channels`](./channels)                                 | This PR   | Agents on different harnesses served through `Channels.forHarness` and one `ChannelGateway`, to a browser client and terminal clients          |
 
 Each example is an independent workspace package and should stay focused on one
 capability. Once the APIs are stable, move the examples into the main examples
