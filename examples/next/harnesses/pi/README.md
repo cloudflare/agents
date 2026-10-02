@@ -2,7 +2,7 @@
 
 An experimental example that runs [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable),
 pi's durable agent harness, inside a Durable Object. `PiHarness` and the
-session store come from `agents/harnesses/pi`, and the model provider from
+session store come from `agents/harness/pi`, and the model provider from
 `agents/models/pi-ai`. Both entry points are experimental. This example adds
 the app around them.
 
@@ -67,7 +67,7 @@ pnpm test
   it fold pi's events into the same view.
 
 The harness's own tests live with it in `packages/agents`
-(`pnpm run test:harnesses:pi` there): pi's storage conformance suite on a
+(`pnpm run test:harness:pi` there): pi's storage conformance suite on a
 real Durable Object, tool turns, follow-ups, abort, sessions, a harness
 without defaults, and a crash mid-tool-call that the wake job's alarm
 recovers.
@@ -131,7 +131,7 @@ The system prompt, tools, hooks and tasks are composed on pi's own
 harness never sees it. Tools are pi-durable `ToolRegistration`s.
 `replay: "safe"` lets pi run a call again after an eviction interrupted it;
 otherwise the model gets an interrupted result. For `agents/skills` sources,
-`await addSkills(registry, sources)` from `agents/harnesses/pi` in the
+`await addSkills(registry, sources)` from `agents/harness/pi` in the
 factory, before `Harness.open`.
 
 ### Options

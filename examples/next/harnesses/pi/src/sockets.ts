@@ -9,7 +9,7 @@ import {
   ROOT_SESSION,
   type PiHarness,
   type PiSessionId
-} from "agents/harnesses/pi";
+} from "agents/harness/pi";
 import type { PiClientMessage, PiServerMessage } from "./protocol";
 
 const SESSION_TAG_PREFIX = "pi-session:";

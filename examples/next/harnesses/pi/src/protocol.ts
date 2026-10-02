@@ -1,6 +1,6 @@
 import type { JsonValue } from "@earendil-works/pi-ai";
 import type { AgentEvent, UserInput } from "@earendil-works/pi-durable";
-import type { PiSessionId, PiWhenBusy } from "agents/harnesses/pi";
+import type { PiSessionId, PiWhenBusy } from "agents/harness/pi";
 
 /**
  * This app's WebSocket protocol, served by `sockets.ts`. The harness knows

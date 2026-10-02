@@ -1,34 +1,8 @@
 /**
- * pi-durable hosted in a Durable Object. `PiHarness` is a Lifecycle
- * capability that opens pi over the object's SQLite database and wakes it
- * after eviction; pi owns the transcript, the inbox, and every run.
+ * Deprecated alias for `agents/harness/pi`.
  *
+ * @deprecated Import from `agents/harness/pi` instead. This path will be
+ * removed in a future release.
  * @experimental The API may change between releases.
  */
-export {
-  PiHarness,
-  PiSession,
-  PiSessions,
-  ROOT_SESSION,
-  type PiHarnessContext,
-  type PiHarnessFactory,
-  type PiHarnessOptions,
-  type PiSessionDefaults,
-  type PiWakeTiming
-} from "./harness";
-export {
-  openPiSessionStore,
-  type PiSessionStoreOptions
-} from "./session-store";
-export { addSkills, type ResolvedSkills } from "./skills";
-export type {
-  PiOperationResult,
-  PiPendingOperation,
-  PiPromptResponse,
-  PiReceipt,
-  PiSessionId,
-  PiSessionInfo,
-  PiSessionOptions,
-  PiSubmitOptions,
-  PiWhenBusy
-} from "./types";
+export * from "../../harness/pi";

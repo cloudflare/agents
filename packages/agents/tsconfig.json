@@ -7,7 +7,7 @@
     "src/voice/tests/**/*.ts",
     "src/voice/react-tests/**/*.ts",
     "src/voice/react-tests/**/*.tsx",
-    "src/harnesses/pi/tests/**/*.ts",
+    "src/harness/pi/tests/**/*.ts",
     "src/channels/__tests__/**/*.ts",
     "src/channels/live-tests/**/*.ts"
   ]

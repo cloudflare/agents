@@ -17,7 +17,7 @@ export default defineConfig({
     dedupe: ["@earendil-works/pi-ai", "@earendil-works/pi-durable"]
   },
   test: {
-    name: "harnesses-pi",
+    name: "harness-pi",
     // harness.test.ts crashes objects with abortAllDurableObjects(), which
     // reaches every object in the runtime, including other files' objects.
     fileParallelism: false,

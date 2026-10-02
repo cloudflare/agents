@@ -167,6 +167,11 @@
       "import": "./dist/lifecycle/index.js",
       "require": "./dist/lifecycle/index.js"
     },
+    "./harness/pi": {
+      "types": "./dist/harness/pi/index.d.ts",
+      "import": "./dist/harness/pi/index.js",
+      "require": "./dist/harness/pi/index.js"
+    },
     "./harnesses/pi": {
       "types": "./dist/harnesses/pi/index.d.ts",
       "import": "./dist/harnesses/pi/index.js",
@@ -471,7 +476,7 @@
     "test:browser": "vitest run --config src/browser-tests/vitest.config.ts",
     "test:workers": "vitest --project workers",
     "test:chat": "vitest --project chat",
-    "test:harnesses:pi": "vitest --project harnesses-pi",
+    "test:harness:pi": "vitest --project harness-pi",
     "test:webmcp": "vitest --project webmcp",
     "test:x402": "vitest --project x402",
     "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts",

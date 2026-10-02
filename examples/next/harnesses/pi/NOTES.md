@@ -19,7 +19,7 @@ here is in `agents`.
 
 The harness went from about 3,600 lines to under 2,000, with no other SDK
 primitive besides Lifecycle jobs. It now lives in `packages/agents` as
-`agents/harnesses/pi`, with its models from `agents/models/pi-ai`. The client and the tests use the same
+`agents/harness/pi`, with its models from `agents/models/pi-ai`. The client and the tests use the same
 reducer.
 
 ## Decision: a Lifecycle job, not Tasks, a driver, or the state machine
