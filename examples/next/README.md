@@ -18,7 +18,7 @@ lands.
 | [`routing`](./routing)                                   | This PR   | `RoutedAgents` on a plain `DurableObject` hub: one Agent per chat, a per-user catalog with push-based metadata, forwarded requests and sockets |
 | [`dynamic-agents`](./dynamic-agents)                     | This PR   | A supervisor runs user-submitted code as facets: isolated storage, supervised abort, code upgrades over stable state                           |
 | [`harnesses/codex`](./harnesses/codex)                   | This PR   | A static Codex Rust/Wasm loop composed as a Lifecycle capability, using LanguageModelV4 and Shell Workspace                                    |
-| [`harnesses/pi`](./harnesses/pi)                         | This PR   | Experimental: pi-durable sessions on `agents/harness/pi`, with Workspace tools and a JavaScript `exec` from `@cloudflare/computer`           |
+| [`harnesses/pi`](./harnesses/pi)                         | This PR   | Experimental: pi-durable sessions on `agents/harness/pi`, with Workspace tools and a JavaScript `exec` from `@cloudflare/computer`             |
 | [`harnesses/self-modifying`](./harnesses/self-modifying) | This PR   | A Lifecycle capability runs editable harness revisions in fresh Dynamic Workers with trusted System tools and auto-discovered Custom tools     |
 | [`models`](./models)                                     | This PR   | One `createAI` per framework (AI SDK and pi-ai): `@cf/` ids for Workers AI, vendor models routed through AI Gateway                            |
 
