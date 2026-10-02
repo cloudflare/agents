@@ -57,3 +57,11 @@ pnpm tui [room]
 `getLocation` itself and asks for approvals with `y` / `n`. Set
 `AGENT_ORIGIN` if the dev server is not on `ws://localhost:5173`. The browser
 and the TUI can share a room; each is its own participant.
+
+`pnpm tui2 [harness] [room]` runs the Agents SDK terminal client built on Pi
+TUI (`npx agents tui <url>`) against either agent, for example
+`pnpm tui2 ai-sdk lobby`. It shows turns started from other surfaces, lets you
+provide client-tool results, and can start, fork, list and switch
+conversations (`/new`, `/fork`, `/conversations`, `/switch <id>`). A
+conversation is also reachable directly at
+`/channels/<harness>/<room>/<conversation>`.
