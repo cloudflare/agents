@@ -122,50 +122,53 @@ function row<T extends object>(raw: Record<string, SqlStorageValue>): T {
   return raw as T;
 }
 
-/** pi's asynchronous SQLite facade over a Durable Object's synchronous SQL API. */
-class DurableObjectSqliteExecutor implements SqliteExecutor {
+/**
+ * Runs operations one at a time, in call order. Each waits for every
+ * operation queued before it to settle, and a failure does not stop the
+ * operations behind it.
+ */
+class OperationQueue {
+  #tail: Promise<void> = Promise.resolve();
+
+  run<T>(operation: () => T | Promise<T>): Promise<T> {
+    const result = this.#tail.then(operation);
+    this.#tail = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+}
+
+/** One statement on a Durable Object's synchronous SQL API. */
+class Statements {
   readonly #sql: SqlStorage;
   readonly #prefixer: Prefixer;
-  readonly #assertActive: () => void;
 
-  constructor(
-    sql: SqlStorage,
-    prefixer: Prefixer,
-    assertActive: () => void = () => {}
-  ) {
+  constructor(sql: SqlStorage, prefixer: Prefixer) {
     this.#sql = sql;
     this.#prefixer = prefixer;
-    this.#assertActive = assertActive;
   }
 
-  async exec(sql: string): Promise<void> {
-    this.#assertActive();
+  exec(sql: string): void {
     this.#sql.exec(this.#prefixer.rewrite(sql));
   }
 
-  async run(sql: string, ...params: SqliteValue[]): Promise<void> {
-    this.#assertActive();
+  run(sql: string, params: readonly SqliteValue[]): void {
     this.#sql.exec(this.#prefixer.rewrite(sql), ...params.map(binding));
   }
 
-  async get<T extends object>(
+  get<T extends object>(
     sql: string,
-    ...params: SqliteValue[]
-  ): Promise<T | undefined> {
-    this.#assertActive();
-    const cursor = this.#sql.exec(
-      this.#prefixer.rewrite(sql),
-      ...params.map(binding)
-    );
-    const first = cursor.next();
+    params: readonly SqliteValue[]
+  ): T | undefined {
+    const first = this.#sql
+      .exec(this.#prefixer.rewrite(sql), ...params.map(binding))
+      .next();
     return first.done ? undefined : row<T>(first.value);
   }
 
-  async all<T extends object>(
-    sql: string,
-    ...params: SqliteValue[]
-  ): Promise<T[]> {
-    this.#assertActive();
+  all<T extends object>(sql: string, params: readonly SqliteValue[]): T[] {
     return this.#sql
       .exec(this.#prefixer.rewrite(sql), ...params.map(binding))
       .toArray()
@@ -174,54 +177,125 @@ class DurableObjectSqliteExecutor implements SqliteExecutor {
 }
 
 /**
+ * The handle pi's transaction callback gets. It runs statements directly:
+ * the transaction holds the database's queue for as long as it is open.
+ */
+class DurableObjectSqliteTransaction implements SqliteExecutor {
+  readonly #statements: Statements;
+  #active = true;
+
+  constructor(statements: Statements) {
+    this.#statements = statements;
+  }
+
+  /** Called once the transaction settles; the handle is unusable after. */
+  end(): void {
+    this.#active = false;
+  }
+
+  async exec(sql: string): Promise<void> {
+    this.#assertActive();
+    this.#statements.exec(sql);
+  }
+
+  async run(sql: string, ...params: SqliteValue[]): Promise<void> {
+    this.#assertActive();
+    this.#statements.run(sql, params);
+  }
+
+  async get<T extends object>(
+    sql: string,
+    ...params: SqliteValue[]
+  ): Promise<T | undefined> {
+    this.#assertActive();
+    return this.#statements.get<T>(sql, params);
+  }
+
+  async all<T extends object>(
+    sql: string,
+    ...params: SqliteValue[]
+  ): Promise<T[]> {
+    this.#assertActive();
+    return this.#statements.all<T>(sql, params);
+  }
+
+  #assertActive(): void {
+    if (!this.#active) {
+      throw new Error("The pi SQLite transaction is no longer active");
+    }
+  }
+}
+
+/**
  * pi's `SqliteDatabase` facade over `DurableObjectStorage`.
  *
- * Durable Objects expose async `storage.transaction()` for SQLite-backed
- * objects, which includes SQL operations made through `storage.sql` in the
- * callback. SQL itself remains synchronous, so each adapter operation consumes
- * its cursor before returning its promise.
+ * Durable Object SQL is synchronous, but pi's facade is asynchronous and a
+ * transaction's callback awaits between statements. A statement issued
+ * outside the transaction while it waits would run inside it: it would see
+ * uncommitted rows, and roll back with it. pi's contract therefore has the
+ * adapter queue every other call until the transaction settles, so every
+ * call, transaction or not, goes through one `OperationQueue`, in call
+ * order. As the contract says, a call on the database from inside a
+ * transaction's callback waits for that transaction and never settles; the
+ * callback must use its handle.
+ *
+ * Transactions run in `storage.transaction()`, which rolls back when the
+ * callback rejects and rejects with the same error.
  */
-export class DurableObjectSqliteDatabase
-  extends DurableObjectSqliteExecutor
-  implements SqliteDatabase
-{
+export class DurableObjectSqliteDatabase implements SqliteDatabase {
   readonly #storage: DurableObjectStorage;
-  readonly #prefixer: Prefixer;
+  readonly #statements: Statements;
+  readonly #queue = new OperationQueue();
 
   constructor(
     storage: DurableObjectStorage,
     options: PiSessionStoreOptions = {}
   ) {
-    const prefixer = new Prefixer(options.prefix ?? DEFAULT_PREFIX);
-    super(storage.sql, prefixer);
     this.#storage = storage;
-    this.#prefixer = prefixer;
+    this.#statements = new Statements(
+      storage.sql,
+      new Prefixer(options.prefix ?? DEFAULT_PREFIX)
+    );
+  }
+
+  exec(sql: string): Promise<void> {
+    return this.#queue.run(() => this.#statements.exec(sql));
+  }
+
+  run(sql: string, ...params: SqliteValue[]): Promise<void> {
+    return this.#queue.run(() => this.#statements.run(sql, params));
+  }
+
+  get<T extends object>(
+    sql: string,
+    ...params: SqliteValue[]
+  ): Promise<T | undefined> {
+    return this.#queue.run(() => this.#statements.get<T>(sql, params));
+  }
+
+  all<T extends object>(sql: string, ...params: SqliteValue[]): Promise<T[]> {
+    return this.#queue.run(() => this.#statements.all<T>(sql, params));
   }
 
   transaction<T>(
     callback: (transaction: SqliteExecutor) => Promise<T>
   ): Promise<T> {
-    return this.#storage.transaction(async () => {
-      let active = true;
-      const transaction = new DurableObjectSqliteExecutor(
-        this.#storage.sql,
-        this.#prefixer,
-        () => {
-          if (!active) {
-            throw new Error("The pi SQLite transaction is no longer active");
-          }
+    return this.#queue.run(() =>
+      this.#storage.transaction(async () => {
+        const transaction = new DurableObjectSqliteTransaction(
+          this.#statements
+        );
+        try {
+          return await callback(transaction);
+        } finally {
+          transaction.end();
         }
-      );
-      try {
-        return await callback(transaction);
-      } finally {
-        active = false;
-      }
-    });
+      })
+    );
   }
 
   /** The object owns the database; there is nothing to close. */
   close(): Promise<void> {
-    return Promise.resolve();
+    return this.#queue.run(() => undefined);
   }
 }
