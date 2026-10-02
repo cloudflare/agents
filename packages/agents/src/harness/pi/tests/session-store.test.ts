@@ -86,6 +86,20 @@ describe("pi session store", () => {
     });
   });
 
+  it("runs a statement at once when no transaction is open", async () => {
+    const stub = env.PI_STORE_TEST.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (_instance, state) => {
+      const db = new DurableObjectSqliteDatabase(state.storage);
+      await db.exec("CREATE TABLE notes (text TEXT)");
+      const written = db.run("INSERT INTO notes VALUES (?)", "now");
+      // Not awaited yet: the write already happened, in this tick.
+      expect(
+        state.storage.sql.exec("SELECT text FROM notes").toArray()
+      ).toEqual([{ text: "now" }]);
+      await written;
+    });
+  });
+
   it("runs calls in call order", async () => {
     const stub = env.PI_STORE_TEST.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (_instance, state) => {

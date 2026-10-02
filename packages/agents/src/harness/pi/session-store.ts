@@ -123,20 +123,47 @@ function row<T extends object>(raw: Record<string, SqlStorageValue>): T {
 }
 
 /**
- * Runs operations one at a time, in call order. Each waits for every
- * operation queued before it to settle, and a failure does not stop the
- * operations behind it.
+ * Orders calls on the one SQLite connection. A statement runs at once,
+ * directly, when nothing is waiting; while a transaction is open, it and
+ * every call after it wait, in call order, for the transaction to settle,
+ * so none runs inside it. A failure does not stop the calls behind it.
+ *
+ * The queue holds calls, not data: a caller has no result until its call
+ * runs, so an isolate that dies loses only calls nobody has seen succeed,
+ * as it would without the queue. pi's transactions await only their own
+ * synchronous statements, so a transaction holds the queue for microtasks,
+ * never for I/O.
  */
 class OperationQueue {
   #tail: Promise<void> = Promise.resolve();
+  /** Calls queued or holding the queue, not yet settled. */
+  #pending = 0;
 
-  run<T>(operation: () => T | Promise<T>): Promise<T> {
-    const result = this.#tail.then(operation);
-    this.#tail = result.then(
+  /** A synchronous statement: runs now unless something is ahead of it. */
+  run<T>(statement: () => T): Promise<T> {
+    if (this.#pending > 0) return this.#enqueue(statement);
+    try {
+      return Promise.resolve(statement());
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  /** An asynchronous call that holds the queue until it settles. */
+  hold<T>(call: () => Promise<T>): Promise<T> {
+    return this.#enqueue(call);
+  }
+
+  #enqueue<T>(call: () => T | Promise<T>): Promise<T> {
+    this.#pending += 1;
+    const settled = this.#tail.then(call).finally(() => {
+      this.#pending -= 1;
+    });
+    this.#tail = settled.then(
       () => undefined,
       () => undefined
     );
-    return result;
+    return settled;
   }
 }
 
@@ -233,9 +260,9 @@ class DurableObjectSqliteTransaction implements SqliteExecutor {
  * transaction's callback awaits between statements. A statement issued
  * outside the transaction while it waits would run inside it: it would see
  * uncommitted rows, and roll back with it. pi's contract therefore has the
- * adapter queue every other call until the transaction settles, so every
- * call, transaction or not, goes through one `OperationQueue`, in call
- * order. As the contract says, a call on the database from inside a
+ * adapter queue every other call until the transaction settles: every
+ * call goes through one `OperationQueue`, which runs a statement at once
+ * when no transaction is open. As the contract says, a call on the database from inside a
  * transaction's callback waits for that transaction and never settles; the
  * callback must use its handle.
  *
@@ -280,7 +307,7 @@ export class DurableObjectSqliteDatabase implements SqliteDatabase {
   transaction<T>(
     callback: (transaction: SqliteExecutor) => Promise<T>
   ): Promise<T> {
-    return this.#queue.run(() =>
+    return this.#queue.hold(() =>
       this.#storage.transaction(async () => {
         const transaction = new DurableObjectSqliteTransaction(
           this.#statements
