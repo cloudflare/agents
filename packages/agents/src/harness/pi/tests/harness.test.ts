@@ -8,6 +8,15 @@ async function crash(stub: DurableObjectStub<PiHarnessTestObject>) {
   await expect(stub.crash()).rejects.toThrow();
 }
 
+/**
+ * Run the wake job's alarm after a crash. It may already have fired on its
+ * own, so its result is not asserted; what the test asserts is that the
+ * work resumes.
+ */
+async function wake(stub: DurableObjectStub<PiHarnessTestObject>) {
+  await runDurableObjectAlarm(stub);
+}
+
 function fresh(
   name: string = crypto.randomUUID()
 ): DurableObjectStub<PiHarnessTestObject> {
@@ -73,7 +82,7 @@ describe("PiHarness on pi-durable", () => {
     await crash(stub);
     stub = fresh(name);
     // The alarm restarts the object; pi reopens and reruns the safe tool.
-    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    await wake(stub);
     await stub.gateStarted(2);
     await stub.release();
 
@@ -92,7 +101,7 @@ describe("PiHarness on pi-durable", () => {
     await stub.gateStarted(1);
     await crash(stub);
     stub = fresh(name);
-    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    await wake(stub);
 
     const result = await stub.wait(receipt.operationId);
     expect(result.status).toBe("done");
@@ -178,7 +187,7 @@ describe("PiHarness on pi-durable", () => {
 
     await crash(stub);
     stub = fresh(name);
-    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    await wake(stub);
     // Each session's safe tool runs again.
     await stub.gateStarted(6);
     await stub.release();
