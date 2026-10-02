@@ -517,6 +517,17 @@ describe("transcription", () => {
     expect(binding.calls).toHaveLength(0);
   });
 
+  it("falls back past an unsupported Deepgram model without calling it", async () => {
+    const binding = fakeBinding(() => jsonResponse(whisperBody));
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai
+      .transcription("@cf/deepgram/nova-3", { fallback: [WHISPER] })
+      .doGenerate({ audio: "AAEC", mediaType: "audio/mpeg" });
+
+    expect(binding.calls.map((call) => call.model)).toEqual([WHISPER]);
+    expect(result.text).toBe("Hello from Cloudflare.");
+  });
+
   it("works through transcribe and unwraps the Cloudflare envelope", async () => {
     const binding = fakeBinding(() =>
       jsonResponse({

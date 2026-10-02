@@ -158,22 +158,25 @@ export class CloudflareTranscriptionModel
   async doGenerate(
     options: TranscriptionModelV4CallOptions
   ): Promise<TranscriptionModelV4Result> {
-    if (UNSUPPORTED.has(this.modelId)) {
-      throw new CloudflareAIError({
-        code: "bad-request",
-        isRetryable: false,
-        message:
-          `${this.modelId} takes the audio as an object body, which the JSON ` +
-          "run path cannot carry. Use @cf/openai/whisper-large-v3-turbo.",
-        model: this.modelId,
-        requestBodyValues: undefined,
-        url: this.endpoint
-      });
-    }
-
     const answer = await this.send({
       abortSignal: options.abortSignal,
-      build: (modelId) => buildTranscriptionRequest(modelId, options),
+      // Checked per leg, so an unsupported model is skipped without a request
+      // and the next leg of a fallback chain still runs.
+      build: (modelId) => {
+        if (UNSUPPORTED.has(modelId)) {
+          throw new CloudflareAIError({
+            code: "bad-request",
+            isRetryable: false,
+            message:
+              `${modelId} takes the audio as an object body, which the JSON ` +
+              "run path cannot carry. Use @cf/openai/whisper-large-v3-turbo.",
+            model: modelId,
+            requestBodyValues: undefined,
+            url: this.endpoint
+          });
+        }
+        return buildTranscriptionRequest(modelId, options);
+      },
       headers: options.headers,
       providerOptions: options.providerOptions
     });
