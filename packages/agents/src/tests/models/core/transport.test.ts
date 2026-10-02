@@ -10,6 +10,7 @@ import {
   createTransport,
   errorFromGatewayEnvelope,
   isGatewayErrorEnvelope,
+  unwrapEnvelope,
   type UniversalRequest
 } from "../../../models/core/transport";
 
@@ -216,5 +217,40 @@ describe("core transport - gateway error envelopes", () => {
         { model: "m", requestBodyValues: undefined, status: 404, url: "u" }
       ).code
     ).toBe("not-found");
+  });
+});
+
+describe("core transport - run-path envelopes", () => {
+  const context = { model: "@cf/zai-org/glm-4.7-flash", status: 200, url: "u" };
+
+  it("unwraps a successful envelope and leaves a bare payload alone", () => {
+    expect(
+      unwrapEnvelope({ result: { a: 1 }, success: true }, context)
+    ).toEqual({
+      a: 1
+    });
+    expect(unwrapEnvelope({ choices: [] }, context)).toEqual({ choices: [] });
+  });
+
+  it("raises a 2xx failure envelope that carries no result", () => {
+    expect(() =>
+      unwrapEnvelope(
+        { error: [{ code: 2001, message: "no gateway" }], success: false },
+        context
+      )
+    ).toThrow(CloudflareAIError);
+    expect(() =>
+      unwrapEnvelope(
+        { error: [{ code: 2001, message: "no gateway" }], success: false },
+        context
+      )
+    ).toThrow("no gateway");
+  });
+
+  it("leaves a payload whose own `success` field is false", () => {
+    expect(unwrapEnvelope({ success: false, answer: "no" }, context)).toEqual({
+      answer: "no",
+      success: false
+    });
   });
 });

@@ -111,7 +111,10 @@ export function unwrapEnvelope(
     return value;
   }
   const record = value as Record<string, unknown>;
-  if ("success" in record && "result" in record) {
+  // A failure envelope may carry no `result` at all, only its errors.
+  const failed =
+    record.success === false && firstEnvelopeError(record) !== undefined;
+  if (failed || ("success" in record && "result" in record)) {
     if (record.success === true) return record.result;
     // A failure envelope can arrive with a 2xx status. Parsing it as a
     // provider payload would produce an empty result and no diagnostic.
