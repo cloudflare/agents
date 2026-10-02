@@ -1358,6 +1358,18 @@ For more details, see [Resumable Streaming](./resumable-streaming.md).
 
 ## Storage Management
 
+### Reconcile tool calls across transcript updates
+
+When a client resubmits a transcript, `AIChatAgent` reconciles assistant messages
+against server state before persisting them. This keeps tool results attached to
+the right turn when a provider reuses a `toolCallId`.
+
+Custom chat hosts that reconcile transcripts can use `reconcileMessages()` from
+`agents/chat`. It matches messages against server rows one-to-one and checks the
+tool name and input as well as the call ID. The older
+`resolveToolMergeId()` helper is deprecated because its conversation-wide
+lookup can match the wrong turn when call IDs repeat.
+
 ### Row Size Protection
 
 SQLite rows have a maximum size of 2 MB. When a message approaches this limit (for example, a tool returning a very large output), `AIChatAgent` automatically compacts the message:

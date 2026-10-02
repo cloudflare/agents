@@ -438,7 +438,14 @@ the public `async` methods your subclass exposes over RPC start the lifecycle
 before they run, so a cold instance does not serve those calls against
 uninitialized state. Synchronous methods are never deferred; if one reads state
 that `onStart` sets up, make it `async` or call `await this.lifecycle.start()`
-in it.
+in it. Concurrent calls to `start()` share the same startup operation, and
+`lifecycle.isStarted()` returns `true` only after capabilities and `onStart()`
+have finished.
+
+Startup resolves the Durable Object name. An async RPC to an Agent addressed
+with `newUniqueId()` or `idFromString()` fails instead of running before
+initialization. Address the Agent by name with `getAgentByName()`, `getByName()`,
+or `idFromName()`.
 
 ## Object names
 

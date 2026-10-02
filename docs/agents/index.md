@@ -81,6 +81,7 @@ The differentiator is not "we have durable state" — it is what happens when a 
 - TODO: [Using AI Models](./using-ai-models.md) - OpenAI, Anthropic, Workers AI, and other providers
 - [Models (Experimental)](./models.md) - `createAI` — one AI SDK provider for Workers AI and third-party catalog models, same string space
 - [Models for pi-ai (Experimental)](./models-pi-ai.md) - `createAI` for pi-ai: Workers AI ids and third-party models through AI Gateway, as a pi-ai provider
+- [Pi harness (Experimental)](./harnesses/pi.md) - Host pi-durable sessions in a Durable Object with durable storage and lifecycle wakeups
 - TODO: [RAG (Retrieval Augmented Generation)](./rag.md) - Vector search with Vectorize
 - [Sessions (Experimental)](./sessions.md) - Durable message trees, streamed history, compaction, search, and lossless attachment offload
 - [Context (Experimental)](./context.md) - System-prompt blocks, frozen prompts, writable/searchable/loadable providers, and their tools

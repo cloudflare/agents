@@ -470,6 +470,19 @@ const connector = new BrowserConnector(this.ctx, {
 });
 ```
 
+To load the normalized CDP protocol specification from Worker code, use `loadCdpSpec()`:
+
+```ts
+import { loadCdpSpec } from "agents/browser";
+
+const spec = await loadCdpSpec({
+  browser: this.env.BROWSER,
+  sessionId
+});
+```
+
+Pass a Browser Run binding in `browser` and the Browser Run session ID returned by `createBrowserSession()` in `sessionId`. If you omit `sessionId`, the helper creates a temporary session to fetch the specification, then deletes it. Pass an existing session ID to read the specification without creating another session. If you provide `cdpUrl`, the helper loads the specification from that URL instead; `cdpUrl` takes precedence over `browser` and `sessionId`.
+
 You can also manage Browser Rendering sessions directly. `createBrowserSession` accepts [hostname guardrails](https://developers.cloudflare.com/browser-run/features/guardrails/) that restrict which domains the session may reach — fixed at launch for every connection to the session, including Live View (not supported with Kitesurf):
 
 ```ts
