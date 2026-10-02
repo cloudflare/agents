@@ -8,8 +8,6 @@ import {
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { Harness } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
 import { fromManifest } from "../../../skills/manifest";
@@ -143,21 +141,20 @@ export class PiExtensionsTestObject extends DurableObject<Cloudflare.Env> {
   });
   /** How many times each extension ran in this isolate. */
   readonly runs: Record<string, number> = {};
+  /** Conversations pi reported creating, through a passed-through option. */
+  created = 0;
 
   readonly harness = new PiHarness({
-    harness: ({ storage, context, registry, settings }) => {
-      const models = createModels();
-      models.setProvider(this.#faux.provider);
-      return Harness.open(storage, { models, registry, settings }, context);
-    },
+    providers: [this.#faux.provider],
     defaults: {
-      model: {
-        provider: this.#faux.getModel().provider,
-        modelId: this.#faux.getModel().id
-      },
+      model: this.#faux.getModel(),
       retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
     },
     extensions: this.#extensions(),
+    // One of pi's own Harness.open options, passed through as-is.
+    conversationCreated: () => {
+      this.created += 1;
+    },
     timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
@@ -165,6 +162,10 @@ export class PiExtensionsTestObject extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.#faux.setResponses(Array.from({ length: 2_000 }, () => script));
+  }
+
+  conversationsCreated(): number {
+    return this.created;
   }
 
   #counted(name: string, extension: PiExtension): PiExtension {
@@ -281,17 +282,8 @@ export class PiFlakyExtensionTestObject extends DurableObject<Cloudflare.Env> {
   #attempts = 0;
 
   readonly harness = new PiHarness({
-    harness: ({ storage, context, registry, settings }) => {
-      const models = createModels();
-      models.setProvider(this.#faux.provider);
-      return Harness.open(storage, { models, registry, settings }, context);
-    },
-    defaults: {
-      model: {
-        provider: this.#faux.getModel().provider,
-        modelId: this.#faux.getModel().id
-      }
-    },
+    providers: [this.#faux.provider],
+    defaults: { model: this.#faux.getModel() },
     extensions: {
       flaky: (ctx) => {
         this.#attempts += 1;

@@ -8,8 +8,7 @@ import {
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
-import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
-import { Harness, type AgentEvent } from "@earendil-works/pi-durable";
+import type { AgentEvent } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
 import {
   PiHarness,
@@ -23,13 +22,6 @@ import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
 import { PiSessionSockets } from "../sockets";
 import { EMPTY_VIEW, reduceEvents } from "../view";
-
-/** A pi-ai model registry holding only the faux provider. */
-function fauxModels(provider: Parameters<MutableModels["setProvider"]>[0]) {
-  const models = createModels();
-  models.setProvider(provider);
-  return models;
-}
 
 const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
@@ -87,22 +79,10 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     tokenSize: { min: 2, max: 4 }
   });
   readonly harness = new PiHarness({
-    harness: ({ storage, context, registry, settings }) =>
-      Harness.open(
-        storage,
-        {
-          models: fauxModels(this.#faux.provider),
-          registry,
-          settings,
-          onReport: (error) => console.warn("pi report", error)
-        },
-        context
-      ),
+    providers: [this.#faux.provider],
+    onReport: (error) => console.warn("pi report", error),
     defaults: {
-      model: {
-        provider: this.#faux.getModel().provider,
-        modelId: this.#faux.getModel().id
-      },
+      model: this.#faux.getModel(),
       retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
     },
     extensions: { "test-tools": this.#testTools() },

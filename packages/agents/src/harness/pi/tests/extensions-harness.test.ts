@@ -100,6 +100,14 @@ describe("pi extensions on a Durable Object", () => {
     expect((await stub.inspect()).tools).toContain("activate_skill");
   });
 
+  it("passes pi's own Harness.open options through", async () => {
+    const stub = fresh();
+    await stub.prompt("hello");
+    const before = await stub.conversationsCreated();
+    await stub.createSession();
+    expect(await stub.conversationsCreated()).toBe(before + 1);
+  });
+
   it("runs extensions once per isolate, even when pi reopens", async () => {
     const stub = fresh();
     await stub.prompt("one");

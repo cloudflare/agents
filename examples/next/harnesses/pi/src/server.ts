@@ -2,12 +2,10 @@ import { DurableObject } from "cloudflare:workers";
 import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
 import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
 import { createGitClient } from "@cloudflare/computer/git";
-import { Harness } from "@earendil-works/pi-durable";
-import { createModels } from "@earendil-works/pi-ai/models";
 import { routeAgentRequest } from "agents";
 import { PiHarness, type PiExtension } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
-import { CLOUDFLARE_PROVIDER_ID, createAI } from "agents/models/pi-ai";
+import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
 import { PiSessionSockets } from "./sockets";
 import { JAVASCRIPT_BACKEND, workspaceTools } from "./workspace";
@@ -46,32 +44,18 @@ export class PiAgent extends DurableObject<Env> {
     ]
   });
   readonly harness = new PiHarness({
-    harness: ({ storage, context, registry, settings }) =>
-      Harness.open(
-        storage,
-        {
-          models: this.#models(),
-          registry,
-          settings,
-          onReport: (error) => console.warn("pi report", error)
-        },
-        context
-      ),
+    providers: [this.ai.provider],
     defaults: {
-      model: { provider: CLOUDFLARE_PROVIDER_ID, modelId: MODEL_ID },
+      model: this.ai(MODEL_ID),
       thinkingLevel: "low",
       retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 }
     },
     extensions: {
       playground,
       workspace: workspaceTools(this.workspace)
-    }
+    },
+    onReport: (error) => console.warn("pi report", error)
   });
-  #models() {
-    const models = createModels();
-    models.setProvider(this.ai.provider);
-    return models;
-  }
 
   // App glue, not the harness: how this app puts sessions on a socket.
   readonly sockets = new PiSessionSockets(this.harness, (tag) =>

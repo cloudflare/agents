@@ -1,17 +1,23 @@
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  Model,
+  ModelThinkingLevel,
+  Provider
+} from "@earendil-works/pi-ai";
+import { createModels } from "@earendil-works/pi-ai/models";
 import {
   createRegistry,
+  Harness,
   LiveDoc,
   ROOT_CONVERSATION_ID,
   watchEvents,
   type AgentEventStream,
   type Conversation,
-  type Harness,
   type ConversationId,
   type AgentChange,
   type ConversationRetryPolicy,
   type EntryRecord,
-  type HarnessSettings,
+  type HarnessOptions,
   type ModelRef,
   type Registry,
   type RegistryReader,
@@ -86,34 +92,14 @@ function sessionOfJob(payload: unknown): PiSessionId | undefined {
 }
 
 /**
- * What the harness factory is handed. The store is already open and pi's
- * migrations have run, so a factory only has to decide how to call
- * `Harness.open` — or call something else that satisfies the same contract.
+ * pi's own `Harness.open` options that `PiHarness` passes through as-is:
+ * `settings`, `env`, `onReport`, `conversationCreated`, `now`. It builds
+ * `models` from `providers` and `registry` from `extensions` itself.
  */
-export type PiHarnessContext = {
-  /** pi's storage over this object's SQLite, tables under the store prefix. */
-  readonly storage: SqliteStorage;
-  /** Background context, for the open itself. */
-  readonly context: Context;
-  /** pi's registry, with every extension in `extensions` installed. */
-  readonly registry: Registry;
-  /** Harness-wide settings supplied by `PiHarness`, such as its retry default. */
-  readonly settings?: Pick<HarnessSettings, "retry">;
-};
+export type PiOpenOptions = Omit<HarnessOptions, "models" | "registry">;
 
-/**
- * Builds pi's `Harness`. Return value is adopted as-is: the caller passes
- * on the registry and settings it is handed, and owns `models`, `env`,
- * `onReport` and anything else `HarnessOptions` grows.
- *
- * ```ts
- * harness: ({ storage, context, registry, settings }) =>
- *   Harness.open(storage, { models, registry, settings }, context)
- * ```
- */
-export type PiHarnessFactory = (
-  context: PiHarnessContext
-) => Harness | Promise<Harness>;
+/** A model, as pi-ai describes one: `createAI`'s `ai("@cf/…")` returns one. */
+export type PiModel = Pick<Model<Api>, "provider" | "id">;
 
 /**
  * Applied to a session the first time it is created. Without a model, a
@@ -121,7 +107,7 @@ export type PiHarnessFactory = (
  */
 export type PiSessionDefaults = {
   /** Model for new sessions. Change one session's with `session.setModel`. */
-  readonly model?: ModelRef;
+  readonly model?: PiModel;
   readonly thinkingLevel?: ModelThinkingLevel;
   /** Default generation retries; pi-durable applies this harness-wide. */
   readonly retry?: ConversationRetryPolicy;
@@ -141,10 +127,17 @@ export type PiWakeTiming = {
   readonly heartbeatMs?: number;
 };
 
-/** `PiHarness`'s options. Only `harness`, which opens pi, is required. */
-export type PiHarnessOptions = {
-  /** Opens pi's `Harness` over the store this object prepared. */
-  readonly harness: PiHarnessFactory;
+/**
+ * `PiHarness`'s options. Only `providers` is required. `defaults` applies
+ * to new sessions; everything else, including pi's own `Harness.open`
+ * options (`PiOpenOptions`), applies to the whole harness.
+ */
+export type PiHarnessOptions = PiOpenOptions & {
+  /**
+   * pi-ai providers the harness's models come from, such as `createAI`'s
+   * `ai.provider`.
+   */
+  readonly providers: readonly Provider[];
   /**
    * Tools and prompt sections, by extension name. They run in key order
    * the first time the harness opens. See `PiExtension`.
@@ -156,10 +149,31 @@ export type PiHarnessOptions = {
   readonly timing?: PiWakeTiming;
 };
 
+/**
+ * The options that are pi's, not `PiHarness`'s. A rest spread, so every
+ * `Harness.open` option passes through, including ones pi adds later.
+ */
+function piOpenOptions(options: PiHarnessOptions): PiOpenOptions {
+  const {
+    providers: _providers,
+    extensions: _extensions,
+    defaults: _defaults,
+    store: _store,
+    timing: _timing,
+    ...open
+  } = options;
+  return open;
+}
+
 type Opened = {
   readonly pi: Harness;
   readonly storage: SqliteStorage;
 };
+
+/** pi-durable's stored reference to a pi-ai model. */
+function modelRef(model: PiModel): ModelRef {
+  return { provider: model.provider, modelId: model.id };
+}
 
 function conversationId(session: PiSessionId): ConversationId {
   const id = Number(session);
@@ -224,6 +238,14 @@ export class PiHarness extends LifecycleCapability {
       options.timing?.sleepThresholdMs ?? SLEEP_THRESHOLD_MS;
     this.#waitBudgetMs = options.timing?.waitBudgetMs ?? WAIT_BUDGET_MS;
     this.#heartbeatMs = options.timing?.heartbeatMs ?? HEARTBEAT_MS;
+    if (
+      options.defaults?.retry !== undefined &&
+      options.settings?.retry !== undefined
+    ) {
+      throw new Error(
+        "PiHarness: set retry in defaults.retry or settings.retry, not both"
+      );
+    }
     for (const [name, value] of [
       ["sleepThresholdMs", this.#sleepThresholdMs],
       ["waitBudgetMs", this.#waitBudgetMs],
@@ -532,13 +554,22 @@ export class PiHarness extends LifecycleCapability {
       this.#options.store
     );
     await this.#installExtensions();
+    const models = createModels();
+    for (const provider of this.#options.providers) {
+      models.setProvider(provider);
+    }
+    const { settings, ...open } = piOpenOptions(this.#options);
     const retry = this.#options.defaults?.retry;
-    const pi = await this.#options.harness({
+    const pi = await Harness.open(
       storage,
-      context: BG,
-      registry: this.#registry,
-      ...(retry === undefined ? {} : { settings: { retry } })
-    });
+      {
+        ...open,
+        models,
+        registry: this.#registry,
+        settings: retry === undefined ? settings : { ...settings, retry }
+      },
+      BG
+    );
     await pi.root(BG, { agent: this.agentDefaults() });
     // Continue whatever the last isolate left: pi reconciles tasks that were
     // running to pending and schedules them again.
@@ -562,7 +593,9 @@ export class PiHarness extends LifecycleCapability {
   agentDefaults(): AgentChange {
     const defaults = this.#options.defaults;
     return {
-      ...(defaults?.model === undefined ? {} : { model: defaults.model }),
+      ...(defaults?.model === undefined
+        ? {}
+        : { model: modelRef(defaults.model) }),
       ...(defaults?.thinkingLevel === undefined
         ? {}
         : { thinkingLevel: defaults.thinkingLevel })
@@ -680,8 +713,10 @@ export class PiSession {
     await (await this.#harness.conversation(this.id)).reset(handoff, BG);
   }
 
-  async setModel(model: ModelRef): Promise<void> {
-    await (await this.#harness.conversation(this.id)).configure({ model }, BG);
+  async setModel(model: PiModel): Promise<void> {
+    await (
+      await this.#harness.conversation(this.id)
+    ).configure({ model: modelRef(model) }, BG);
   }
 
   /** The active transcript, as pi's entries since the newest reset. */

@@ -8,14 +8,13 @@ An extension adds tools and system prompt sections to a [`PiHarness`](./pi.md). 
 
 ## Write an extension
 
-Pass extensions to `PiHarness` by name. They run in key order the first time the harness opens, before pi's `Harness`. pi stores the names (a conversation selects its extensions by name), so keep them stable across deploys. A name must contain a letter: JavaScript orders integer-like keys such as `"2"` before every other key, so the harness rejects them. Pass the `registry` the factory receives to `Harness.open`:
+Pass extensions to `PiHarness` by name. They run in key order the first time the harness opens, before pi's `Harness`. pi stores the names (a conversation selects its extensions by name), so keep them stable across deploys. A name must contain a letter: JavaScript orders integer-like keys such as `"2"` before every other key, so the harness rejects them:
 
 ```ts
-import { DurableObject } from "cloudflare:workers";
 import { Type } from "@earendil-works/pi-ai";
-import { Harness } from "@earendil-works/pi-durable";
+import { Agent } from "agents";
 import { PiHarness, skills, type PiExtension } from "agents/harness/pi";
-import { Lifecycle } from "agents/lifecycle";
+import { createAI } from "agents/models/pi-ai";
 
 const WordCount = Type.Object({ text: Type.String() });
 
@@ -37,16 +36,22 @@ const writing: PiExtension = (ctx) => {
   );
 };
 
-export class Editor extends DurableObject<Env> {
-  readonly harness = new PiHarness({
-    harness: ({ storage, context, registry, settings }) =>
-      Harness.open(storage, { models, registry, settings }, context),
+export class Editor extends Agent<Env> {
+  ai = createAI({ binding: this.env.AI });
+
+  harness = new PiHarness({
+    providers: [this.ai.provider],
+    defaults: { model: this.ai("@cf/zai-org/glm-4.7-flash") },
     extensions: {
       writing,
       skills: skills(sources)
     }
   });
-  readonly lifecycle = Lifecycle.install(this).use(this.harness);
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.harness);
+  }
 }
 ```
 
@@ -104,4 +109,4 @@ pi-durable extensions can do more than `PiHarness` extensions do today. This tab
 | Choosing extensions per conversation                                                                                                                                                     | `configure({ extensions })`     | Through pi. Each extension is installed under its name, so `harness.registry.snapshot().extension(name)` returns the pi extension to pass to `configure` on a conversation from `await harness.pi()` |
 | Replacing or removing extensions while the object runs                                                                                                                                   | `registry.install`, `uninstall` | Not yet. Extensions run once per isolate, when the harness first opens                                                                                                                               |
 
-To use a feature that is not supported yet, open pi with your own registry in the factory instead of the one it receives. Extensions in `extensions` are then not applied.
+Features marked "Not yet" are added to the extension context as they are needed. Until then, `await harness.pi()` returns the opened pi `Harness` for anything at run time.

@@ -8,12 +8,7 @@ import {
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
-import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
-import {
-  Harness,
-  type AgentEvent,
-  type EntryRecord
-} from "@earendil-works/pi-durable";
+import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
 import {
@@ -24,13 +19,6 @@ import {
   type PiReceipt,
   type PiWhenBusy
 } from "../index";
-
-/** A pi-ai model registry holding only the faux provider. */
-function fauxModels(provider: Parameters<MutableModels["setProvider"]>[0]) {
-  const models = createModels();
-  models.setProvider(provider);
-  return models;
-}
 
 const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
@@ -101,22 +89,10 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     tokenSize: { min: 2, max: 4 }
   });
   readonly harness = new PiHarness({
-    harness: ({ storage, context, registry, settings }) =>
-      Harness.open(
-        storage,
-        {
-          models: fauxModels(this.#faux.provider),
-          registry,
-          settings,
-          onReport: (error) => console.warn("pi report", error)
-        },
-        context
-      ),
+    providers: [this.#faux.provider],
+    onReport: (error) => console.warn("pi report", error),
     defaults: {
-      model: {
-        provider: this.#faux.getModel().provider,
-        modelId: this.#faux.getModel().id
-      },
+      model: this.#faux.getModel(),
       retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
     },
     extensions: { "test-tools": this.#testTools() },
@@ -262,7 +238,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
 const NoParameters = Type.Object({});
 const MultiplyParameters = Type.Object({ value: Type.Number() });
 
-/** The one tool the factory fixture needs: no gating, no storage. */
+/** Multiplies by three: no gating, no storage. */
 function multiplyTool(): PiTool<typeof MultiplyParameters> {
   return {
     description: "Multiply by three.",
@@ -278,7 +254,7 @@ function multiplyTool(): PiTool<typeof MultiplyParameters> {
 }
 
 /**
- * A harness given only its factory: no `defaults`, so new sessions start
+ * A harness given only its providers: no `defaults`, so new sessions start
  * without a model until one is set.
  */
 export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
@@ -287,16 +263,7 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
     tokenSize: { min: 2, max: 4 }
   });
   readonly harness = new PiHarness({
-    harness: ({ storage, context, registry, settings }) =>
-      Harness.open(
-        storage,
-        {
-          models: fauxModels(this.#faux.provider),
-          registry,
-          settings
-        },
-        context
-      ),
+    providers: [this.#faux.provider],
     timing: { heartbeatMs: 1_000, sleepThresholdMs: 5_000 }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
@@ -312,10 +279,7 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   async setFauxModel(): Promise<void> {
-    const model = this.#faux.getModel();
-    await this.harness
-      .session()
-      .setModel({ provider: model.provider, modelId: model.id });
+    await this.harness.session().setModel(this.#faux.getModel());
   }
 
   async alarmTime(): Promise<number | null> {

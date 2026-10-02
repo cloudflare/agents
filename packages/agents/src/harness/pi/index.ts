@@ -10,8 +10,8 @@ export {
   PiSession,
   PiSessions,
   ROOT_SESSION,
-  type PiHarnessContext,
-  type PiHarnessFactory,
+  type PiModel,
+  type PiOpenOptions,
   type PiHarnessOptions,
   type PiSessionDefaults,
   type PiWakeTiming

@@ -91,19 +91,8 @@ export class PiAgent extends DurableObject<Env> {
     ]
   });
   readonly harness = new PiHarness({
-    harness: ({ storage, context, registry, settings }) =>
-      Harness.open(
-        storage,
-        {
-          models: this.#models(), // createModels() with this.ai.provider set
-          registry,
-          settings
-        },
-        context
-      ),
-    defaults: {
-      model: { provider: "cloudflare", modelId: MODEL_ID }
-    },
+    providers: [this.ai.provider],
+    defaults: { model: this.ai(MODEL_ID) },
     // The system prompt, and the workspace tools.
     extensions: {
       playground,
@@ -140,9 +129,10 @@ add `skills: skills(sources)` from `agents/harness/pi` to `extensions`.
 
 ### Options
 
-Only `harness` is required. It opens pi's `Harness` over the store the
-object prepared, with the registry and settings it is handed; `models`,
-`env`, `onReport` and any other `Harness.open` option belong to it.
+Only `providers` is required. `PiHarness` opens pi's `Harness` itself,
+with models from `providers` and a registry from `extensions`. pi's other
+`Harness.open` options (`settings`, `env`, `onReport`,
+`conversationCreated`) go at the top level and pass through as-is.
 
 `defaults` applies to new sessions only — change one session's model with
 `session.setModel`. Without a default model, a session's prompts end

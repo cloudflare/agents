@@ -20,42 +20,42 @@ Both pi packages are optional peer dependencies of `agents`. The example below u
 
 ## Create the harness
 
-Open pi's `Harness` with the storage and background context that `PiHarness` provides. Register the pi-ai provider on a `Models` registry, then attach the capability to the object's lifecycle:
+Give `PiHarness` the pi-ai providers its models come from, and the model new sessions start with. Then attach it to the object's lifecycle:
 
 ```ts
-import { DurableObject } from "cloudflare:workers";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { Harness } from "@earendil-works/pi-durable";
+import { Agent } from "agents";
 import { PiHarness } from "agents/harness/pi";
-import { Lifecycle } from "agents/lifecycle";
-import { CLOUDFLARE_PROVIDER_ID, createAI } from "agents/models/pi-ai";
+import { createAI } from "agents/models/pi-ai";
 
-export class Assistant extends DurableObject<Env> {
-  readonly ai = createAI({ binding: this.env.AI });
+export class Assistant extends Agent<Env> {
+  ai = createAI({ binding: this.env.AI });
 
-  readonly harness = new PiHarness({
-    harness: ({ storage, context, registry, settings }) => {
-      const models = createModels();
-      models.setProvider(this.ai.provider);
-      return Harness.open(storage, { models, registry, settings }, context);
-    },
-    defaults: {
-      model: {
-        provider: CLOUDFLARE_PROVIDER_ID,
-        modelId: "@cf/zai-org/glm-4.7-flash"
-      }
-    }
+  harness = new PiHarness({
+    providers: [this.ai.provider],
+    defaults: { model: this.ai("@cf/zai-org/glm-4.7-flash") }
   });
 
-  readonly lifecycle = Lifecycle.install(this).use(this.harness);
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.harness);
+  }
 
-  async prompt(input: string) {
-    return this.harness.prompt(input);
+  async ask(prompt: string) {
+    return (await this.harness.prompt(prompt)).text;
   }
 }
 ```
 
-The `harness` factory receives a pi storage adapter backed by the Durable Object's SQLite database, a background context for opening pi, pi's registry, and harness-wide settings. Pass the registry and settings to `Harness.open`, and configure pi's models and other `Harness.open` options in this factory.
+`PiHarness` opens pi's `Harness` itself, over the Durable Object's SQLite database. Only `providers` is required.
+
+| Option                                                      | What it sets                                                                                                    |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `providers`                                                 | The pi-ai providers models come from, such as `createAI`'s `ai.provider`.                                       |
+| `defaults`                                                  | What a new session starts with: `model` (a pi-ai `Model`, such as `ai("@cf/…")`), `thinkingLevel`, and `retry`. |
+| `extensions`                                                | Tools and system prompt sections. Refer to [Pi harness extensions](./pi-extensions.md).                         |
+| `settings`, `env`, `onReport`, `conversationCreated`, `now` | pi-durable's own `Harness.open` options, passed through as-is.                                                  |
+| `store`                                                     | The prefix for pi's tables. Default `pi_`.                                                                      |
+| `timing`                                                    | How long the wake waits on pi before handing a wait to the alarm.                                               |
 
 ## Add tools and prompt sections
 
@@ -73,7 +73,7 @@ extensions: {
 
 To write extensions, and for which pi-durable extension features `PiHarness` supports, refer to [Pi harness extensions](./pi-extensions.md).
 
-`defaults` applies when the harness creates a new session. You can change an individual session's model with `session.setModel()`. Without a model, the session cannot produce an answer until one is set.
+`defaults` applies when the harness creates a new session. You can change an individual session's model with `session.setModel(ai("@cf/…"))`. Without a model, the session cannot produce an answer until one is set.
 
 ## Work with sessions
 
