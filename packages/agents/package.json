@@ -417,6 +417,11 @@
       "import": "./dist/experimental/channels/web/client.js",
       "require": "./dist/experimental/channels/web/client.js"
     },
+    "./experimental/channels/web/ai-sdk": {
+      "types": "./dist/experimental/channels/web/ai-sdk.d.ts",
+      "import": "./dist/experimental/channels/web/ai-sdk.js",
+      "require": "./dist/experimental/channels/web/ai-sdk.js"
+    },
     "./tsconfig": "./agents.tsconfig.json",
     "./vite": {
       "types": "./dist/vite.d.ts",

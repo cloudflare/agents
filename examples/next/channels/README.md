@@ -43,3 +43,17 @@ Open the printed URL. Each browser is its own participant, so it runs only
 the `getLocation` calls from its own messages and shows the rest as not its
 to run. Messages sent while a turn runs are queued, and Stop cancels the
 running turn.
+
+## Chat from a terminal
+
+With the dev server running, in another terminal:
+
+```sh
+pnpm tui [room]
+```
+
+`src/ai-sdk-tui.ts` runs `@ai-sdk/tui` over `WebChannelChatTransport` from
+`agents/experimental/channels/web/ai-sdk`, against the AI SDK agent. The TUI runs
+`getLocation` itself and asks for approvals with `y` / `n`. Set
+`AGENT_ORIGIN` if the dev server is not on `ws://localhost:5173`. The browser
+and the TUI can share a room; each is its own participant.
