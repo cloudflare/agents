@@ -5,7 +5,6 @@ import {
   fauxToolCall,
   Type,
   type AssistantMessage,
-  type JsonValue,
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
@@ -197,7 +196,11 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     registry.install(
       defineExtension({
         name: "test-tools",
-        sections: [section("preamble", () => "Use the supplied test tools.", { tag: false })],
+        sections: [
+          section("preamble", () => "Use the supplied test tools.", {
+            tag: false
+          })
+        ],
         tools: this.#tools()
       })
     );
@@ -235,15 +238,16 @@ export class PiHarnessTestObject extends DurableObject<Env> {
   }
 }
 
+const MultiplyParameters = Type.Object({ value: Type.Number() });
+
 /** Multiplies by three. */
-function multiplyTool(): ToolRegistration {
+function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
   return {
     name: "multiply",
     description: "Multiply by three.",
-    parameters: Type.Object({ value: Type.Number() }),
+    parameters: MultiplyParameters,
     replay: "safe",
-    async execute(args: JsonValue) {
-      const { value } = args as { value: number };
+    async execute({ value }) {
       return {
         content: [{ type: "text", text: String(value * 3) }],
         details: { result: value * 3 }

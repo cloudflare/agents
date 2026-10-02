@@ -40,11 +40,6 @@ function textResult(text: string): ToolExecutionResult {
   return { content: [{ type: "text", text }] };
 }
 
-/** pi validates arguments against the schema before `execute` runs. */
-function argsOf<T>(args: unknown): T {
-  return args as T;
-}
-
 function attributes(
   pairs: ReadonlyArray<readonly [string, string | undefined]>
 ) {
@@ -163,14 +158,13 @@ export async function resolveSkillSources(
   );
 
   const activateParameters = Type.Object({ name: nameSchema });
-  const activateSkill: ToolRegistration = {
+  const activateSkill: ToolRegistration<typeof activateParameters> = {
     name: "activate_skill",
     description:
       "Activate a skill by name. Use this when the user's task matches one of the available skills; the response contains the skill's full instructions.",
     parameters: activateParameters,
     replay: "safe",
-    async execute(args) {
-      const input = argsOf<{ name: string }>(args);
+    async execute(input) {
       const skill = byName.get(input.name);
       return textResult(
         skill ? renderSkillContent(skill) : `Skill not found: ${input.name}`
@@ -182,14 +176,13 @@ export async function resolveSkillSources(
     name: Type.Optional(nameSchema),
     path: Type.String({ minLength: 1 })
   });
-  const readResource: ToolRegistration = {
+  const readResource: ToolRegistration<typeof resourceParameters> = {
     name: "read_skill_resource",
     description:
       "Read a file bundled with a skill, such as a reference document or template. Provide the skill name and the file's path from the skill's resource list.",
     parameters: resourceParameters,
     replay: "safe",
-    async execute(args) {
-      const input = argsOf<{ name?: string; path: string }>(args);
+    async execute(input) {
       const target = resolveResourceTarget(byName, input.name, input.path);
       if (!target) {
         return textResult(
@@ -279,8 +272,7 @@ export async function addSkills(
     defineExtension({
       name: "agents.skills",
       tools: resolved.tools,
-      sections:
-        catalog === null ? [] : [section("skills", () => catalog)]
+      sections: catalog === null ? [] : [section("skills", () => catalog)]
     })
   );
   return resolved;
