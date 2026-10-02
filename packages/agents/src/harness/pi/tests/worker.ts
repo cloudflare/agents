@@ -8,12 +8,19 @@ import {
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
-import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
+import {
+  createRegistry,
+  Harness,
+  type AgentEvent,
+  type EntryRecord
+} from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
 import { setWakeTimingForTests } from "../harness";
 import { TEST_TIMING } from "./timing";
+import { fauxModels, NO_RETRY } from "./faux";
 import {
+  piExtensions,
   PiHarness,
   type PiExtension,
   type PiOperationResult,
@@ -90,16 +97,26 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     tokensPerSecond: 200,
     tokenSize: { min: 2, max: 4 }
   });
+  readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    providers: [this.#faux.provider],
-    harnessOptions: {
-      onReport: (error) => console.warn("pi report", error)
+    harness: async ({ storage, context }) => {
+      this.registry.install(
+        await piExtensions({
+          "test-tools": this.#testTools()
+        })
+      );
+      return Harness.open(
+        storage,
+        {
+          models: fauxModels(this.#faux.provider),
+          registry: this.registry,
+          settings: { retry: NO_RETRY },
+          onReport: (error) => console.warn("pi report", error)
+        },
+        context
+      );
     },
-    defaults: {
-      model: this.#faux.getModel(),
-      retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
-    },
-    extensions: { "test-tools": this.#testTools() }
+    defaults: { model: this.#faux.getModel() }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
@@ -266,7 +283,15 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
     tokenSize: { min: 2, max: 4 }
   });
   readonly harness = new PiHarness({
-    providers: [this.#faux.provider]
+    harness: ({ storage, context }) =>
+      Harness.open(
+        storage,
+        {
+          models: fauxModels(this.#faux.provider),
+          registry: createRegistry()
+        },
+        context
+      )
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
 

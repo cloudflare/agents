@@ -1,8 +1,8 @@
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import type {
   PromptInput,
+  Extension as PiDurableExtension,
   PromptSection,
-  Registry,
   ToolExecutionApi,
   ToolExecutionResult,
   ToolRegistration
@@ -119,26 +119,15 @@ function promptSection(key: string, section: PiSection): PromptSection {
   };
 }
 
-type Transform<Draft> = {
-  readonly owner: string;
-  readonly change: (draft: Draft) => void;
-};
+/** The pi extension `piExtensions` builds. */
+export const PI_EXTENSIONS_NAME = "agents";
 
-/**
- * A draft that remembers which extension added each entry. A replaced
- * entry keeps its owner, so a later extension that rewrites another's tool
- * changes it where it lives.
- */
-class OwnedDraft<Value> implements ExtensionDraft<Value> {
-  readonly #entries = new Map<
-    string,
-    { readonly owner: string; readonly value: Value }
-  >();
-  /** The extension whose transform is running. */
-  owner = "";
+/** A named, ordered collection, as a transform edits it. */
+class Draft<Value> implements ExtensionDraft<Value> {
+  readonly #entries = new Map<string, Value>();
 
   get(name: string): Value | undefined {
-    return this.#entries.get(name)?.value;
+    return this.#entries.get(name);
   }
 
   has(name: string): boolean {
@@ -146,8 +135,7 @@ class OwnedDraft<Value> implements ExtensionDraft<Value> {
   }
 
   set(name: string, value: Value): void {
-    const owner = this.#entries.get(name)?.owner ?? this.owner;
-    this.#entries.set(name, { owner, value });
+    this.#entries.set(name, value);
   }
 
   delete(name: string): boolean {
@@ -158,35 +146,36 @@ class OwnedDraft<Value> implements ExtensionDraft<Value> {
     return this.#entries.keys();
   }
 
-  /** The entries `owner` added, in insertion order. */
-  owned(owner: string): [string, Value][] {
-    return [...this.#entries]
-      .filter(([, entry]) => entry.owner === owner)
-      .map(([name, entry]) => [name, entry.value]);
+  entries(): IterableIterator<[string, Value]> {
+    return this.#entries.entries();
   }
 }
 
-/** Run every transform once, in order, over an empty draft. */
-function build<Value, Draft>(
-  transforms: readonly Transform<Draft>[],
-  draft: OwnedDraft<Value> & Draft
-): OwnedDraft<Value> {
-  for (const { owner, change } of transforms) {
-    draft.owner = owner;
-    change(draft);
-  }
+/** Run every change once, in order, over an empty draft. */
+function build<Value, View>(
+  changes: readonly ((draft: View) => void)[],
+  draft: Draft<Value> & View
+): Draft<Value> {
+  for (const change of changes) change(draft);
   return draft;
 }
 
 /**
- * Run `extensions` in order, build the tools and prompt from their
- * transforms, and install one pi extension per extension that contributed
- * anything, under its name, so a conversation can still select it.
+ * Build `extensions` into one pi `Extension`, for pi's own registry: run
+ * them in key order, then build the tools and the prompt from empty by
+ * running every transform once, in registration order.
+ *
+ * ```ts
+ * const registry = createRegistry(); // pi-durable's
+ * registry.install(await piExtensions({ timers, skills: skills(sources) }));
+ * ```
+ *
+ * The result is named `"agents"`, so installing it again replaces it in
+ * place.
  */
-export async function installExtensions(
-  registry: Registry,
+export async function piExtensions(
   extensions: PiExtensions
-): Promise<void> {
+): Promise<PiDurableExtension> {
   for (const name of Object.keys(extensions)) {
     // JavaScript orders integer-like keys before every other key, so one
     // would silently run first.
@@ -196,40 +185,39 @@ export async function installExtensions(
       );
     }
   }
-  const tools: Transform<PiTools>[] = [];
-  const prompt: Transform<PiPrompt>[] = [];
+  const tools: ((draft: PiTools) => void)[] = [];
+  const prompt: ((draft: PiPrompt) => void)[] = [];
 
   for (const [name, extension] of Object.entries(extensions)) {
-    let installing = true;
-    const state = <Draft>(into: Transform<Draft>[]): ExtensionState<Draft> => ({
+    let running = true;
+    const state = <View>(
+      into: ((draft: View) => void)[]
+    ): ExtensionState<View> => ({
       transform(change) {
-        if (!installing) {
+        if (!running) {
           throw new Error(
-            `pi extension ${JSON.stringify(name)} registered a transform after it was installed`
+            `pi extension ${JSON.stringify(name)} registered a transform after it returned`
           );
         }
-        into.push({ owner: name, change });
+        into.push(change);
       }
     });
     try {
       await extension({ name, tools: state(tools), prompt: state(prompt) });
     } finally {
-      installing = false;
+      running = false;
     }
   }
 
-  const builtTools = build(tools, new OwnedDraft<PiTool>());
-  const builtPrompt = build(prompt, new OwnedDraft<PiSection>());
-  for (const name of Object.keys(extensions)) {
-    const owned = {
-      tools: builtTools
-        .owned(name)
-        .map(([key, tool]) => registration(key, tool)),
-      sections: builtPrompt
-        .owned(name)
-        .map(([key, section]) => promptSection(key, section))
-    };
-    if (owned.tools.length === 0 && owned.sections.length === 0) continue;
-    registry.install({ name, ...owned });
-  }
+  const builtTools = build(tools, new Draft<PiTool>());
+  const builtPrompt = build(prompt, new Draft<PiSection>());
+  return {
+    name: PI_EXTENSIONS_NAME,
+    tools: [...builtTools.entries()].map(([key, tool]) =>
+      registration(key, tool)
+    ),
+    sections: [...builtPrompt.entries()].map(([key, section]) =>
+      promptSection(key, section)
+    )
+  };
 }

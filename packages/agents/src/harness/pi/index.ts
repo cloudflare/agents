@@ -10,9 +10,10 @@ export {
   PiSession,
   PiSessions,
   ROOT_SESSION,
-  type PiModel,
-  type PiOpenOptions,
+  type PiHarnessContext,
+  type PiHarnessFactory,
   type PiHarnessOptions,
+  type PiModel,
   type PiSessionDefaults
 } from "./harness";
 export {
@@ -27,16 +28,17 @@ export type {
   ExtensionState,
   ToolContext
 } from "../extension";
-export type {
-  PiExtension,
-  PiExtensionContext,
-  PiExtensions,
-  PiPrompt,
-  PiSection,
-  PiSectionContext,
-  PiTool,
-  PiToolContext,
-  PiTools
+export {
+  piExtensions,
+  type PiExtension,
+  type PiExtensionContext,
+  type PiExtensions,
+  type PiPrompt,
+  type PiSection,
+  type PiSectionContext,
+  type PiTool,
+  type PiToolContext,
+  type PiTools
 } from "./extensions";
 export { skills } from "./skills";
 export type {

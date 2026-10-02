@@ -13,8 +13,10 @@ import { Lifecycle } from "../../../lifecycle";
 import { setWakeTimingForTests } from "../harness";
 import { TEST_TIMING } from "./timing";
 import { fromManifest } from "../../../skills/manifest";
-import { BACKGROUND_CONTEXT } from "../context";
+import { createRegistry, Harness } from "@earendil-works/pi-durable";
+import { fauxModels, NO_RETRY } from "./faux";
 import {
+  piExtensions,
   PiHarness,
   skills,
   type PiExtension,
@@ -146,19 +148,21 @@ export class PiExtensionsTestObject extends DurableObject<Cloudflare.Env> {
   /** Conversations pi reported creating, through a passed-through option. */
   created = 0;
 
+  readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    providers: [this.#faux.provider],
-    defaults: {
-      model: this.#faux.getModel(),
-      retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
+    harness: async ({ storage, context }) => {
+      this.registry.install(await piExtensions(this.#extensions()));
+      return Harness.open(
+        storage,
+        {
+          models: fauxModels(this.#faux.provider),
+          registry: this.registry,
+          settings: { retry: NO_RETRY }
+        },
+        context
+      );
     },
-    extensions: this.#extensions(),
-    // One of pi's own Harness.open options, passed through as-is.
-    harnessOptions: {
-      conversationCreated: () => {
-        this.created += 1;
-      }
-    }
+    defaults: { model: this.#faux.getModel() }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
@@ -166,10 +170,6 @@ export class PiExtensionsTestObject extends DurableObject<Cloudflare.Env> {
     super(ctx, env);
     setWakeTimingForTests(this.harness, TEST_TIMING);
     this.#faux.setResponses(Array.from({ length: 2_000 }, () => script));
-  }
-
-  conversationsCreated(): number {
-    return this.created;
   }
 
   #counted(name: string, extension: PiExtension): PiExtension {
@@ -247,19 +247,8 @@ export class PiExtensionsTestObject extends DurableObject<Cloudflare.Env> {
     return (await this.harness.sessions.create()).id;
   }
 
-  /** Stop offering `extension` in one session, through pi's own selection. */
-  async deselect(session: string, extension: string): Promise<void> {
-    const installed = this.harness.registry.snapshot().extension(extension);
-    if (!installed) throw new Error(`${extension} is not installed`);
-    const conversation = await this.harness.conversation(session);
-    await conversation.configure(
-      { extensions: { remove: [installed] } },
-      BACKGROUND_CONTEXT
-    );
-  }
-
   installed() {
-    return this.harness.registry
+    return this.registry
       .snapshot()
       .installed()
       .map((extension) => ({
@@ -285,16 +274,27 @@ export class PiFlakyExtensionTestObject extends DurableObject<Cloudflare.Env> {
   readonly #faux = fauxProvider();
   #attempts = 0;
 
+  readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    providers: [this.#faux.provider],
-    defaults: { model: this.#faux.getModel() },
-    extensions: {
-      flaky: (ctx) => {
-        this.#attempts += 1;
-        if (this.#attempts === 1) throw new Error("extension failed to load");
-        ctx.tools.transform((tools) => tools.set("shout", shout));
-      }
-    }
+    harness: async ({ storage, context }) => {
+      this.registry.install(
+        await piExtensions({
+          flaky: (ctx) => {
+            this.#attempts += 1;
+            if (this.#attempts === 1) {
+              throw new Error("extension failed to load");
+            }
+            ctx.tools.transform((tools) => tools.set("shout", shout));
+          }
+        })
+      );
+      return Harness.open(
+        storage,
+        { models: fauxModels(this.#faux.provider), registry: this.registry },
+        context
+      );
+    },
+    defaults: { model: this.#faux.getModel() }
   });
   readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
@@ -320,7 +320,7 @@ export class PiFlakyExtensionTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   tools(): string[] {
-    return this.harness.registry
+    return this.registry
       .snapshot()
       .tools()
       .map(({ tool }) => tool.name);

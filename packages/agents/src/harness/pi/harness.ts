@@ -1,13 +1,5 @@
-import type {
-  Api,
-  Model,
-  ModelThinkingLevel,
-  Provider
-} from "@earendil-works/pi-ai";
-import { createModels } from "@earendil-works/pi-ai/models";
+import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
-  createRegistry,
-  Harness,
   LiveDoc,
   ROOT_CONVERSATION_ID,
   watchEvents,
@@ -15,12 +7,9 @@ import {
   type Conversation,
   type ConversationId,
   type AgentChange,
-  type ConversationRetryPolicy,
   type EntryRecord,
-  type HarnessOptions,
+  type Harness,
   type ModelRef,
-  type Registry,
-  type RegistryReader,
   type SettledSubmissionRecord,
   type UserInput
 } from "@earendil-works/pi-durable";
@@ -32,7 +21,6 @@ import {
   type LifecycleJobOutcome
 } from "../../lifecycle";
 import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "./context";
-import { installExtensions, type PiExtensions } from "./extensions";
 import { openPiSessionStore } from "./session-store";
 import type {
   PiOperationResult,
@@ -103,12 +91,31 @@ function sessionOfJob(payload: unknown): PiSessionId | undefined {
 }
 
 /**
- * pi-durable's own `HarnessOptions`, which `PiHarness` passes to
- * `Harness.open` as-is: `settings`, `env`, `onReport`,
- * `conversationCreated`, `now`. It builds `models` from `providers` and
- * `registry` from `extensions` itself.
+ * What the factory is handed: the two things only the harness can build.
+ * Everything else `Harness.open` takes (models, registry, settings, env,
+ * onReport) the factory builds itself.
  */
-export type PiOpenOptions = Omit<HarnessOptions, "models" | "registry">;
+export type PiHarnessContext = {
+  /** pi's storage over this object's SQLite, its migrations already run. */
+  readonly storage: SqliteStorage;
+  /** Background context, for the open itself. */
+  readonly context: Context;
+};
+
+/**
+ * Opens pi's `Harness`. The harness adopts what it returns.
+ *
+ * ```ts
+ * harness: async ({ storage, context }) => {
+ *   const registry = createRegistry();
+ *   registry.install(await piExtensions({ skills: skills(sources) }));
+ *   return Harness.open(storage, { models, registry }, context);
+ * }
+ * ```
+ */
+export type PiHarnessFactory = (
+  context: PiHarnessContext
+) => Harness | Promise<Harness>;
 
 /** A model, as pi-ai describes one: `createAI`'s `ai("@cf/…")` returns one. */
 export type PiModel = Pick<Model<Api>, "provider" | "id">;
@@ -121,8 +128,6 @@ export type PiSessionDefaults = {
   /** Model for new sessions. Change one session's with `session.setModel`. */
   readonly model?: PiModel;
   readonly thinkingLevel?: ModelThinkingLevel;
-  /** Default generation retries; pi-durable applies this harness-wide. */
-  readonly retry?: ConversationRetryPolicy;
 };
 
 /** How long the wake waits, and when it hands a wait to the alarm. */
@@ -135,25 +140,12 @@ type WakeTiming = {
   readonly heartbeatMs?: number;
 };
 
-/**
- * `PiHarness`'s options. Only `providers` is required. `defaults` applies
- * to new sessions; `harnessOptions` are pi-durable's own, passed through.
- */
+/** `PiHarness`'s options. Only `harness`, which opens pi, is required. */
 export type PiHarnessOptions = {
-  /**
-   * pi-ai providers the harness's models come from, such as `createAI`'s
-   * `ai.provider`.
-   */
-  readonly providers: readonly Provider[];
-  /**
-   * Tools and prompt sections, by extension name. They run in key order
-   * the first time the harness opens. See `PiExtension`.
-   */
-  readonly extensions?: PiExtensions;
-  /** Model and thinking defaults apply to new sessions; retry applies harness-wide. */
+  /** Opens pi's `Harness` over the storage this object prepared. */
+  readonly harness: PiHarnessFactory;
+  /** What a new session starts with. */
   readonly defaults?: PiSessionDefaults;
-  /** pi-durable's own `Harness.open` options, passed through as-is. */
-  readonly harnessOptions?: PiOpenOptions;
 };
 
 type Opened = {
@@ -210,9 +202,7 @@ function signalContext(signal: AbortSignal | undefined): Context {
  */
 export class PiHarness extends LifecycleCapability {
   readonly sessions: PiSessions;
-  readonly #registry: Registry = createRegistry();
   readonly #options: PiHarnessOptions;
-  #extending: Promise<void> | undefined;
   /** In-memory waits on pi, per session, each inside an alarm's work. */
   readonly #waits = new Map<PiSessionId, Promise<void>>();
   /** Submissions between their wake and pi's admission, per session. */
@@ -229,14 +219,6 @@ export class PiHarness extends LifecycleCapability {
   constructor(options: PiHarnessOptions) {
     super("pi-harness");
     this.#options = options;
-    if (
-      options.defaults?.retry !== undefined &&
-      options.harnessOptions?.settings?.retry !== undefined
-    ) {
-      throw new Error(
-        "PiHarness: set retry in defaults.retry or harnessOptions.settings.retry, not both"
-      );
-    }
     this.sessions = new PiSessions(this);
   }
 
@@ -337,14 +319,6 @@ export class PiHarness extends LifecycleCapability {
         session: String(record.conversationId),
         status: record.status === "queued" ? "queued" : "running"
       }));
-  }
-
-  /**
-   * pi's registry, read-only: what the extensions installed. Empty until the
-   * harness first opens.
-   */
-  get registry(): RegistryReader {
-    return this.#registry;
   }
 
   /** The opened pi Harness, for anything the interface does not cover. */
@@ -543,40 +517,12 @@ export class PiHarness extends LifecycleCapability {
 
   async #doOpen(): Promise<Opened> {
     const storage = await openPiSessionStore(this.lifecycle.storage);
-    await this.#installExtensions();
-    const models = createModels();
-    for (const provider of this.#options.providers) {
-      models.setProvider(provider);
-    }
-    const { settings, ...open } = this.#options.harnessOptions ?? {};
-    const retry = this.#options.defaults?.retry;
-    const pi = await Harness.open(
-      storage,
-      {
-        ...open,
-        models,
-        registry: this.#registry,
-        settings: retry === undefined ? settings : { ...settings, retry }
-      },
-      BG
-    );
+    const pi = await this.#options.harness({ storage, context: BG });
     await pi.root(BG, { agent: this.agentDefaults() });
     // Continue whatever the last isolate left: pi reconciles tasks that were
     // running to pending and schedules them again.
     pi.resume();
     return { pi, storage };
-  }
-
-  /** Extensions run once per isolate; a failed run is retried on the next open. */
-  #installExtensions(): Promise<void> {
-    this.#extending ??= installExtensions(
-      this.#registry,
-      this.#options.extensions ?? {}
-    ).catch((error: unknown) => {
-      this.#extending = undefined;
-      throw error;
-    });
-    return this.#extending;
   }
 
   /** @internal The per-conversation defaults supported by pi-durable. */

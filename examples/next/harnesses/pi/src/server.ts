@@ -2,8 +2,10 @@ import { DurableObject } from "cloudflare:workers";
 import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
 import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
 import { createGitClient } from "@cloudflare/computer/git";
+import { createModels } from "@earendil-works/pi-ai/models";
+import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { routeAgentRequest } from "agents";
-import { PiHarness, type PiExtension } from "agents/harness/pi";
+import { piExtensions, PiHarness, type PiExtension } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
@@ -43,24 +45,36 @@ export class PiAgent extends DurableObject<Env> {
       })
     ]
   });
+  // pi's registry: the system prompt and the workspace tools.
+  readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    providers: [this.ai.provider],
-    defaults: {
-      model: this.ai(MODEL_ID),
-      thinkingLevel: "low",
-      retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 }
+    harness: async ({ storage, context }) => {
+      this.registry.install(
+        await piExtensions({
+          playground,
+          workspace: workspaceTools(this.workspace)
+        })
+      );
+      const models = createModels();
+      models.setProvider(this.ai.provider);
+      return Harness.open(
+        storage,
+        {
+          models,
+          registry: this.registry,
+          settings: {
+            retry: { enabled: true, maxRetries: 2, baseDelayMs: 500 }
+          },
+          onReport: (error) => console.warn("pi report", error)
+        },
+        context
+      );
     },
-    extensions: {
-      playground,
-      workspace: workspaceTools(this.workspace)
-    },
-    harnessOptions: {
-      onReport: (error) => console.warn("pi report", error)
-    }
+    defaults: { model: this.ai(MODEL_ID), thinkingLevel: "low" }
   });
 
   // App glue, not the harness: how this app puts sessions on a socket.
-  readonly sockets = new PiSessionSockets(this.harness, (tag) =>
+  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
     this.ctx.getWebSockets(tag)
   );
   readonly webSockets = new WebSockets(this.sockets.options());

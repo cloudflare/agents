@@ -8,9 +8,15 @@ import {
   type Message,
   type TranscriptContext
 } from "@earendil-works/pi-ai";
-import type { AgentEvent } from "@earendil-works/pi-durable";
+import { createModels } from "@earendil-works/pi-ai/models";
+import {
+  createRegistry,
+  Harness,
+  type AgentEvent
+} from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
 import {
+  piExtensions,
   PiHarness,
   type PiExtension,
   type PiOperationResult,
@@ -78,18 +84,32 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     tokensPerSecond: 200,
     tokenSize: { min: 2, max: 4 }
   });
+  readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    providers: [this.#faux.provider],
-    harnessOptions: {
-      onReport: (error) => console.warn("pi report", error)
+    harness: async ({ storage, context }) => {
+      this.registry.install(
+        await piExtensions({
+          "test-tools": this.#testTools()
+        })
+      );
+      const models = createModels();
+      models.setProvider(this.#faux.provider);
+      return Harness.open(
+        storage,
+        {
+          models,
+          registry: this.registry,
+          settings: {
+            retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
+          },
+          onReport: (error) => console.warn("pi report", error)
+        },
+        context
+      );
     },
-    defaults: {
-      model: this.#faux.getModel(),
-      retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
-    },
-    extensions: { "test-tools": this.#testTools() }
+    defaults: { model: this.#faux.getModel() }
   });
-  readonly sockets = new PiSessionSockets(this.harness, (tag) =>
+  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
     this.ctx.getWebSockets(tag)
   );
   readonly webSockets = new WebSockets(this.sockets.options());

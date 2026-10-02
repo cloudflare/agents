@@ -1,9 +1,8 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { PiHarness } from "../index";
 
 /**
- * `PiHarnessOptions` requires only `providers`. Without
+ * `PiHarnessOptions` requires only the `harness` factory. Without
  * `defaults`, a session has no model, so pi leaves its prompts unanswered
  * until one is set.
  */
@@ -30,19 +29,5 @@ describe("a harness without defaults", () => {
 
     expect(response.status).toBe("done");
     expect(response.text).toBe("echo: hello");
-  });
-});
-
-describe("PiHarness options", () => {
-  it("rejects retry set both as a default and in harnessOptions.settings", () => {
-    const retry = { enabled: true, maxRetries: 1, baseDelayMs: 10 };
-    expect(
-      () =>
-        new PiHarness({
-          providers: [],
-          defaults: { retry },
-          harnessOptions: { settings: { retry } }
-        })
-    ).toThrow("not both");
   });
 });

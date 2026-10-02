@@ -71,49 +71,30 @@ describe("pi extensions on a Durable Object", () => {
     expect(resource.text).toContain("An old silent pond");
   });
 
-  it("installs one pi extension per extension that contributed, under its name", async () => {
+  it("installs everything as one pi extension on the app's registry", async () => {
     const stub = fresh();
     await stub.prompt("hello");
     expect(await stub.installed()).toEqual([
-      // `exec` was removed by policy; `shout` stays base's after audit
-      // rewrote it, so audit, policy and quiet install nothing.
-      { name: "base", tools: ["shout"], sections: ["preamble"] },
-      { name: "where", tools: [], sections: ["where"] },
-      { name: "math", tools: ["sum"], sections: [] },
       {
-        name: "skills",
-        tools: ["activate_skill", "read_skill_resource"],
-        sections: ["skills"]
+        name: "agents",
+        // `exec` was removed by policy; `shout` was rewritten by audit.
+        tools: ["shout", "sum", "activate_skill", "read_skill_resource"],
+        sections: ["preamble", "where", "skills"]
       }
     ]);
   });
 
-  it("lets one session stop offering an extension through pi's selection", async () => {
-    const stub = fresh();
-    const session = await stub.createSession();
-    await stub.deselect(session, "skills");
-
-    const narrowed = await stub.inspect(session);
-    expect(narrowed.tools).toEqual(["shout", "sum"]);
-    expect(Object.keys(narrowed.sections)).not.toContain("skills");
-    // The root session still has it.
-    expect((await stub.inspect()).tools).toContain("activate_skill");
-  });
-
-  it("passes pi's own Harness.open options through", async () => {
+  it("installs the same extensions again when pi reopens", async () => {
     const stub = fresh();
     await stub.prompt("hello");
-    const before = await stub.conversationsCreated();
-    await stub.createSession();
-    expect(await stub.conversationsCreated()).toBe(before + 1);
-  });
-
-  it("runs extensions once per isolate, even when pi reopens", async () => {
-    const stub = fresh();
-    await stub.prompt("one");
+    const before = await stub.installed();
+    expect(before.length).toBeGreaterThan(0);
     await stub.reopen();
-    await stub.prompt("two");
-    expect((await stub.extensionRuns()).base).toBe(1);
+    expect(await stub.installed()).toEqual(before);
+    expect(await stub.prompt('call sum {"values":[1,1]}')).toEqual({
+      status: "done",
+      text: "tool said: 2"
+    });
   });
 
   it("runs extensions again in a new isolate, with the same result", async () => {
