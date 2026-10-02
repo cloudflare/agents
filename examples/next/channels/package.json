@@ -7,7 +7,8 @@
   "scripts": {
     "start": "vite dev",
     "deploy": "vite build && wrangler deploy",
-    "types": "wrangler types env.d.ts --include-runtime false"
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "tui": "node src/ai-sdk-tui.ts"
   },
   "dependencies": {
     "@cloudflare/kumo": "^2.6.0",
@@ -19,6 +20,7 @@
     "zod": "^4.5.4"
   },
   "devDependencies": {
+    "@ai-sdk/tui": "1.0.119",
     "@cloudflare/vite-plugin": "1.62.3",
     "@cloudflare/workers-types": "^5.20260729.1",
     "@tailwindcss/vite": "^4",

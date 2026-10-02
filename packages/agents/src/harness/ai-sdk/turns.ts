@@ -200,6 +200,37 @@ function metadata(value: unknown): ResponseChunk | undefined {
   return converted ? { type: "metadata", metadata: converted } : undefined;
 }
 
+/**
+ * Convert a response chunk into an AI SDK UI message chunk. Fields that only
+ * Channels has, such as a tool call's `owner`, are dropped.
+ */
+export function toUIMessageChunk(chunk: ResponseChunk): UIMessageChunk {
+  switch (chunk.type) {
+    case "tool-input-start":
+    case "tool-input-available": {
+      const { owner: _owner, ...rest } = chunk;
+      // SAFETY: as below, once the Channels-only owner is gone.
+      return rest as UIMessageChunk;
+    }
+    case "tool-input-delta":
+      return {
+        type: "tool-input-delta",
+        toolCallId: chunk.toolCallId,
+        inputTextDelta: chunk.delta
+      };
+    case "data": {
+      const { name, ...rest } = chunk;
+      return { ...rest, type: `data-${name}` };
+    }
+    case "metadata":
+      return { type: "message-metadata", messageMetadata: chunk.metadata };
+    default:
+      // SAFETY: the remaining chunks match their AI SDK shapes field for
+      // field.
+      return chunk as UIMessageChunk;
+  }
+}
+
 /** Convert a saved AI SDK UI message into a transcript message. */
 export function toTranscriptMessage(
   message: UIMessage,
