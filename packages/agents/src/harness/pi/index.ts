@@ -20,26 +20,6 @@ export {
   openPiSessionStore,
   type PiSessionStoreOptions
 } from "./session-store";
-export type {
-  Extension,
-  ExtensionContext,
-  ExtensionDraft,
-  Extensions,
-  ExtensionState,
-  ToolContext
-} from "../extension";
-export {
-  piExtensions,
-  type PiExtension,
-  type PiExtensionContext,
-  type PiExtensions,
-  type PiPrompt,
-  type PiSection,
-  type PiSectionContext,
-  type PiTool,
-  type PiToolContext,
-  type PiTools
-} from "./extensions";
 export { skills } from "./skills";
 export type {
   PiOperationResult,

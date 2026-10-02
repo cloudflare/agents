@@ -12,7 +12,9 @@ import {
   createRegistry,
   Harness,
   type AgentEvent,
-  type EntryRecord
+  type EntryRecord,
+  type Extension,
+  type ToolRegistration
 } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
@@ -20,11 +22,8 @@ import { setWakeTimingForTests } from "../harness";
 import { TEST_TIMING } from "./timing";
 import { fauxModels, NO_RETRY } from "./faux";
 import {
-  piExtensions,
   PiHarness,
-  type PiExtension,
   type PiOperationResult,
-  type PiTool,
   type PiReceipt,
   type PiWhenBusy
 } from "../index";
@@ -100,11 +99,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
     harness: async ({ storage, context }) => {
-      this.registry.install(
-        await piExtensions({
-          "test-tools": this.#testTools()
-        })
-      );
+      this.registry.install(this.#testTools());
       return Harness.open(
         storage,
         {
@@ -220,18 +215,23 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     this.ctx.abort("crashed by the test");
   }
 
-  #testTools(): PiExtension {
+  /** The fixture's tools and preamble, as one pi extension. */
+  #testTools(): Extension {
     const storage = this.ctx.storage;
-    const gate = (replay: "safe" | "unsafe"): PiTool<typeof NoParameters> => ({
+    const gate = (
+      name: string,
+      replay: "safe" | "unsafe"
+    ): ToolRegistration<typeof NoParameters> => ({
+      name,
       description: "Wait until the test releases it.",
       parameters: NoParameters,
       replay,
-      async execute(_args, { api, signal }) {
+      async execute(_args, api, context) {
         const runs = ((await storage.get<number>(GATE_RUNS_KEY)) ?? 0) + 1;
         await storage.put(GATE_RUNS_KEY, runs);
         api.output(`run ${runs}\n`);
         while (!(await storage.get<boolean>(RELEASE_KEY))) {
-          signal.throwIfAborted();
+          context.abortSignal?.throwIfAborted();
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
         return {
@@ -239,18 +239,20 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         };
       }
     });
-    return (ctx) => {
-      ctx.prompt.transform((prompt) =>
-        prompt.set("preamble", {
+    return {
+      name: "test-tools",
+      sections: [
+        {
+          key: "preamble",
           render: () => "Use the supplied test tools.",
           tag: false
-        })
-      );
-      ctx.tools.transform((tools) => {
-        tools.set("multiply", multiplyTool());
-        tools.set("gate", gate("safe"));
-        tools.set("gate_unsafe", gate("unsafe"));
-      });
+        }
+      ],
+      tools: [
+        multiplyTool(),
+        gate("gate", "safe"),
+        gate("gate_unsafe", "unsafe")
+      ]
     };
   }
 }
@@ -259,8 +261,9 @@ const NoParameters = Type.Object({});
 const MultiplyParameters = Type.Object({ value: Type.Number() });
 
 /** Multiplies by three: no gating, no storage. */
-function multiplyTool(): PiTool<typeof MultiplyParameters> {
+function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
   return {
+    name: "multiply",
     description: "Multiply by three.",
     parameters: MultiplyParameters,
     replay: "safe",
@@ -319,8 +322,8 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
 export class PiStoreTestObject extends DurableObject<Cloudflare.Env> {}
 
 export {
-  PiExtensionsTestObject,
-  PiFlakyExtensionTestObject
-} from "./extensions-fixture";
+  PiFactoryTestObject,
+  PiFlakyFactoryTestObject
+} from "./factory-fixture";
 
 export default { fetch: () => new Response("Not found", { status: 404 }) };

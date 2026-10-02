@@ -7,10 +7,10 @@
       { "name": "PI_HARNESS_TEST", "class_name": "PiHarnessTestObject" },
       { "name": "PI_STORE_TEST", "class_name": "PiStoreTestObject" },
       { "name": "PI_NO_DEFAULTS_TEST", "class_name": "PiNoDefaultsTestObject" },
-      { "name": "PI_EXTENSIONS_TEST", "class_name": "PiExtensionsTestObject" },
+      { "name": "PI_FACTORY_TEST", "class_name": "PiFactoryTestObject" },
       {
-        "name": "PI_FLAKY_EXTENSION_TEST",
-        "class_name": "PiFlakyExtensionTestObject"
+        "name": "PI_FLAKY_FACTORY_TEST",
+        "class_name": "PiFlakyFactoryTestObject"
       }
     ]
   },
@@ -21,8 +21,8 @@
         "PiHarnessTestObject",
         "PiStoreTestObject",
         "PiNoDefaultsTestObject",
-        "PiExtensionsTestObject",
-        "PiFlakyExtensionTestObject"
+        "PiFactoryTestObject",
+        "PiFlakyFactoryTestObject"
       ]
     }
   ]

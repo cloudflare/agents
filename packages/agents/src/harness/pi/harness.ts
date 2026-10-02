@@ -108,7 +108,7 @@ export type PiHarnessContext = {
  * ```ts
  * harness: async ({ storage, context }) => {
  *   const registry = createRegistry();
- *   registry.install(await piExtensions({ skills: skills(sources) }));
+ *   registry.install(await skills(sources));
  *   return Harness.open(storage, { models, registry }, context);
  * }
  * ```

@@ -13,16 +13,14 @@ import { Lifecycle } from "../../../lifecycle";
 import { setWakeTimingForTests } from "../harness";
 import { TEST_TIMING } from "./timing";
 import { fromManifest } from "../../../skills/manifest";
-import { createRegistry, Harness } from "@earendil-works/pi-durable";
-import { fauxModels, NO_RETRY } from "./faux";
 import {
-  piExtensions,
-  PiHarness,
-  skills,
-  type PiExtension,
-  type PiExtensions,
-  type PiTool
-} from "../index";
+  createRegistry,
+  Harness,
+  type Extension,
+  type ToolRegistration
+} from "@earendil-works/pi-durable";
+import { fauxModels, NO_RETRY } from "./faux";
+import { PiHarness, skills } from "../index";
 
 /** What one request offered the model, folded from its system messages. */
 export type Offered = {
@@ -92,7 +90,8 @@ function text(value: string) {
   return { content: [{ type: "text" as const, text: value }] };
 }
 
-const shout: PiTool<typeof Shout> = {
+const shout: ToolRegistration<typeof Shout> = {
+  name: "shout",
   description: "Upper-case the text.",
   parameters: Shout,
   replay: "safe",
@@ -101,20 +100,13 @@ const shout: PiTool<typeof Shout> = {
   }
 };
 
-const sum: PiTool<typeof Sum> = {
+const sum: ToolRegistration<typeof Sum> = {
+  name: "sum",
   description: "Add numbers.",
   parameters: Sum,
   replay: "safe",
   async execute({ values }) {
     return text(String(values.reduce((total, value) => total + value, 0)));
-  }
-};
-
-const exec: PiTool<typeof Shout> = {
-  description: "Run code.",
-  parameters: Shout,
-  async execute() {
-    return text("exec ran");
   }
 };
 
@@ -137,21 +129,21 @@ const notes = fromManifest({
   ]
 });
 
-/** Real Durable Object fixture: a harness with a realistic set of extensions. */
-export class PiExtensionsTestObject extends DurableObject<Cloudflare.Env> {
+/** Real Durable Object fixture: a factory that installs pi extensions and skills. */
+export class PiFactoryTestObject extends DurableObject<Cloudflare.Env> {
   readonly #faux = fauxProvider({
     tokensPerSecond: 1_000,
     tokenSize: { min: 8, max: 16 }
   });
-  /** How many times each extension ran in this isolate. */
-  readonly runs: Record<string, number> = {};
   /** Conversations pi reported creating, through a passed-through option. */
   created = 0;
 
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
     harness: async ({ storage, context }) => {
-      this.registry.install(await piExtensions(this.#extensions()));
+      for (const extension of await this.#extensions()) {
+        this.registry.install(extension);
+      }
       return Harness.open(
         storage,
         {
@@ -172,59 +164,19 @@ export class PiExtensionsTestObject extends DurableObject<Cloudflare.Env> {
     this.#faux.setResponses(Array.from({ length: 2_000 }, () => script));
   }
 
-  #counted(name: string, extension: PiExtension): PiExtension {
-    return (ctx) => {
-      this.runs[name] = (this.runs[name] ?? 0) + 1;
-      return extension(ctx);
-    };
-  }
-
-  #extensions(): PiExtensions {
-    return {
-      base: this.#counted("base", (ctx) => {
-        ctx.prompt.transform((prompt) =>
-          prompt.set("preamble", { render: () => "Be terse.", tag: false })
-        );
-        ctx.tools.transform((tools) => {
-          tools.set("shout", shout);
-          tools.set("exec", exec);
-        });
-      }),
-      // Renders from its input, per request.
-      where: (ctx) =>
-        ctx.prompt.transform((prompt) =>
-          prompt.set("where", {
-            render: (input) => `conversation ${input.conversationId}`
-          })
-        ),
-      // Loads before it contributes.
-      math: async (ctx) => {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        ctx.tools.transform((tools) => tools.set("sum", sum));
+  /** pi extensions, as an app would install them, loaded first. */
+  async #extensions(): Promise<Extension[]> {
+    // Loads before it contributes.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return [
+      {
+        name: "base",
+        sections: [{ key: "preamble", render: () => "Be terse.", tag: false }],
+        tools: [shout]
       },
-      skills: skills([notes]),
-      // Edits what came before it.
-      policy: (ctx) => ctx.tools.transform((tools) => tools.delete("exec")),
-      audit: (ctx) =>
-        ctx.tools.transform((tools) => {
-          const original = tools.get("shout");
-          if (!original) return;
-          tools.set("shout", {
-            ...original,
-            async execute(args, ctx) {
-              const result = await original.execute(args, ctx);
-              return {
-                ...result,
-                content: [
-                  { type: "text", text: "audited " },
-                  ...(result.content ?? [])
-                ]
-              };
-            }
-          });
-        }),
-      quiet: () => {}
-    };
+      { name: "math", tools: [sum] },
+      await skills([notes])
+    ];
   }
 
   async prompt(input: string, session?: string) {
@@ -246,48 +198,19 @@ export class PiExtensionsTestObject extends DurableObject<Cloudflare.Env> {
   async createSession(): Promise<string> {
     return (await this.harness.sessions.create()).id;
   }
-
-  installed() {
-    return this.registry
-      .snapshot()
-      .installed()
-      .map((extension) => ({
-        name: extension.name,
-        tools: (extension.tools ?? []).map((tool) => tool.name),
-        sections: (extension.sections ?? []).map((section) => section.key)
-      }));
-  }
-
-  /** Close pi and open it again in this isolate. */
-  async reopen(): Promise<void> {
-    await this.harness.dispose();
-    await this.harness.pi();
-  }
-
-  extensionRuns(): Record<string, number> {
-    return { ...this.runs };
-  }
 }
 
-/** A harness whose extension fails the first time it runs in an isolate. */
-export class PiFlakyExtensionTestObject extends DurableObject<Cloudflare.Env> {
+/** A harness whose factory fails the first time it runs in an isolate. */
+export class PiFlakyFactoryTestObject extends DurableObject<Cloudflare.Env> {
   readonly #faux = fauxProvider();
   #attempts = 0;
 
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
     harness: async ({ storage, context }) => {
-      this.registry.install(
-        await piExtensions({
-          flaky: (ctx) => {
-            this.#attempts += 1;
-            if (this.#attempts === 1) {
-              throw new Error("extension failed to load");
-            }
-            ctx.tools.transform((tools) => tools.set("shout", shout));
-          }
-        })
-      );
+      this.#attempts += 1;
+      if (this.#attempts === 1) throw new Error("extension failed to load");
+      this.registry.install({ name: "flaky", tools: [shout] });
       return Harness.open(
         storage,
         { models: fauxModels(this.#faux.provider), registry: this.registry },
@@ -317,12 +240,5 @@ export class PiFlakyExtensionTestObject extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
     }
-  }
-
-  tools(): string[] {
-    return this.registry
-      .snapshot()
-      .tools()
-      .map(({ tool }) => tool.name);
   }
 }

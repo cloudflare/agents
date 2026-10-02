@@ -90,17 +90,25 @@ export class PiAgent extends DurableObject<Env> {
       })
     ]
   });
+  // pi's own registry: the system prompt and the workspace tools.
+  readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    providers: [this.ai.provider],
-    defaults: { model: this.ai(MODEL_ID) },
-    // The system prompt, and the workspace tools.
-    extensions: {
-      playground,
-      workspace: workspaceTools(this.workspace)
-    }
+    harness: ({ storage, context }) => {
+      this.registry.install({
+        name: "playground",
+        sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
+        tools: createWorkspaceTools(this.workspace)
+      });
+      return Harness.open(
+        storage,
+        { models: this.#models(), registry: this.registry },
+        context
+      );
+    },
+    defaults: { model: this.ai(MODEL_ID), thinkingLevel: "low" }
   });
   // App glue: this app's socket protocol, built on session.events().
-  readonly sockets = new PiSessionSockets(this.harness, (tag) =>
+  readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
     this.ctx.getWebSockets(tag)
   );
   readonly webSockets = new WebSockets(this.sockets.options());
@@ -119,22 +127,17 @@ const side = await this.harness.sessions.create();
 await side.submit("Summarise the repo", { whenBusy: "steer" });
 ```
 
-The system prompt and tools come from extensions: plain functions that
-register transforms on the harness's tools and prompt (see
-[Pi harness extensions](../../../../docs/agents/harnesses/pi-extensions.md)).
-Tools are pi-durable `ToolRegistration`s, named by their key.
-`replay: "safe"` lets pi run a call again after an eviction interrupted it;
-otherwise the model gets an interrupted result. For `agents/skills` sources,
-add `skills: skills(sources)` from `agents/harness/pi` to `extensions`.
+The factory builds everything pi's `Harness.open` takes: models, the
+registry, and `settings` (this app retries model requests there). The
+harness hands it pi's storage over the object's SQLite database and a
+background context. The system prompt and tools are a pi extension on the
+app's registry; tools are pi-durable `ToolRegistration`s. `replay: "safe"`
+lets pi run a call again after an eviction interrupted it; otherwise the
+model gets an interrupted result. For `agents/skills` sources,
+`this.registry.install(await skills(sources))` in the factory. See the
+[Pi harness docs](../../../../docs/agents/harnesses/pi.md).
 
-### Options
-
-Only `providers` is required. `PiHarness` opens pi's `Harness` itself,
-with models from `providers` and a registry from `extensions`. pi's other
-`Harness.open` options (`settings`, `env`, `onReport`,
-`conversationCreated`) go in `harnessOptions` and pass through as-is.
-
-`defaults` applies to new sessions only — change one session's model with
+`defaults` applies to new sessions only; change one session's model with
 `session.setModel`. Without a default model, a session's prompts end
 unanswered (`no_model`) until one is set.
 
@@ -158,8 +161,8 @@ the object's SQLite database beside pi's tables. Its tools come from
 
 `createPiTools` returns pi-ai declarations and one `execute`, for an agent
 loop the caller writes. pi-durable runs the loop itself, so
-`workspaceTools` in `src/workspace.ts` is an extension that turns each
-declaration into a tool that calls `execute`. It marks `read`, `ls`, `find`,
+`createWorkspaceTools` in `src/workspace.ts` turns each declaration into a
+`ToolRegistration` that calls `execute`. It marks `read`, `ls`, `find`,
 `grep`, `write` and `delete` replay-safe. `edit` and `exec` are not: after
 an eviction the model gets an interrupted result rather than a second run.
 

@@ -5,24 +5,17 @@ import { createGitClient } from "@cloudflare/computer/git";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { routeAgentRequest } from "agents";
-import { piExtensions, PiHarness, type PiExtension } from "agents/harness/pi";
+import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";
 import { PiSessionSockets } from "./sockets";
-import { JAVASCRIPT_BACKEND, workspaceTools } from "./workspace";
+import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "./workspace";
 
 const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 
-/** The playground's system prompt. */
-const playground: PiExtension = (ctx) =>
-  ctx.prompt.transform((prompt) =>
-    prompt.set("preamble", {
-      render: () =>
-        "You are a concise playground assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.",
-      tag: false
-    })
-  );
+const PREAMBLE =
+  "You are a concise playground assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.";
 
 /** Playable pi session backed by one Durable Object. */
 export class PiAgent extends DurableObject<Env> {
@@ -45,16 +38,15 @@ export class PiAgent extends DurableObject<Env> {
       })
     ]
   });
-  // pi's registry: the system prompt and the workspace tools.
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
     harness: async ({ storage, context }) => {
-      this.registry.install(
-        await piExtensions({
-          playground,
-          workspace: workspaceTools(this.workspace)
-        })
-      );
+      // pi's own extension: the system prompt and the workspace tools.
+      this.registry.install({
+        name: "playground",
+        sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
+        tools: createWorkspaceTools(this.workspace)
+      });
       const models = createModels();
       models.setProvider(this.ai.provider);
       return Harness.open(
