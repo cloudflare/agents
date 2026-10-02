@@ -117,7 +117,15 @@ export type PiHarnessFactory = (
   context: PiHarnessContext
 ) => Harness | Promise<Harness>;
 
-/** A model, as pi-ai describes one: `createAI`'s `ai("@cf/…")` returns one. */
+/**
+ * A model, as pi-ai describes one: `createAI`'s `ai("@cf/…")` returns one.
+ *
+ * Only its `provider` and `id` are used. pi stores that reference with
+ * the session and resolves it, at each request, against the `Models` the
+ * factory opened pi with. So the model must be one those `Models` list,
+ * and options passed to `ai(id, options)` here, such as `fallback`, are not
+ * applied.
+ */
 export type PiModel = Pick<Model<Api>, "provider" | "id">;
 
 /**
@@ -125,7 +133,11 @@ export type PiModel = Pick<Model<Api>, "provider" | "id">;
  * session's generation fails as unanswered until `session.setModel` sets one.
  */
 export type PiSessionDefaults = {
-  /** Model for new sessions. Change one session's with `session.setModel`. */
+  /**
+   * Model for new sessions, by its `provider` and `id`; it must be on the
+   * `Models` the factory opens pi with (see `PiModel`). Change one
+   * session's with `session.setModel`.
+   */
   readonly model?: PiModel;
   readonly thinkingLevel?: ModelThinkingLevel;
 };
@@ -649,6 +661,10 @@ export class PiSession {
     await (await this.#harness.conversation(this.id)).reset(handoff, BG);
   }
 
+  /**
+   * Change this session's model, by its `provider` and `id`; it must be on
+   * the `Models` the factory opened pi with (see `PiModel`).
+   */
   async setModel(model: PiModel): Promise<void> {
     await (
       await this.#harness.conversation(this.id)

@@ -65,6 +65,8 @@ export class Assistant extends Agent<Env> {
 
 The factory runs as part of startup, once per isolate. If it throws the operation that triggered it fails and the next operation tries again.
 
+A model in `defaults` or `session.setModel()` is stored by its provider and id only. Pi resolves it at each request against the `Models` the factory opened Pi with, so it must be a model those `Models` list. Options passed to `ai(id, options)` there, such as `fallback`, are not applied.
+
 ## Add tools and prompt sections
 
 Tools and system prompt sections are Pi extensions. An extension is a plain object with a `name`, `tools` and `sections`:
