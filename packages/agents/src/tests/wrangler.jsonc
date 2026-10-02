@@ -69,6 +69,10 @@
         "name": "StreamHarnessObject"
       },
       {
+        "class_name": "ChannelsHarnessObject",
+        "name": "ChannelsHarnessObject"
+      },
+      {
         "class_name": "CutoverHarnessObject",
         "name": "CutoverHarnessObject"
       },
@@ -451,6 +455,7 @@
         "TaskHarnessObject",
         "TaskSchedulerCoexistObject",
         "StreamHarnessObject",
+        "ChannelsHarnessObject",
         "CutoverHarnessObject",
         "SqliteStrategiesBench",
         "TaskStreamComposeObject",

@@ -150,6 +150,8 @@ export class WebSockets extends LifecycleCapability {
   override readonly claims = "catch-all";
 
   readonly #handlers: WebSocketHandlers | undefined;
+  /** Handlers added with `use`, run before the configured ones. */
+  readonly #added: WebSocketHandlers[] = [];
   readonly #getConnectionTags: WebSocketsOptions["getConnectionTags"];
   readonly #protocol: WebSocketsOptions["protocol"];
   readonly #readonly: WebSocketsOptions["readonly"];
@@ -241,6 +243,15 @@ export class WebSockets extends LifecycleCapability {
     }
   }
 
+  /**
+   * Add handlers for another component sharing these connections, such as
+   * a protocol of its own. They run before the configured handlers, and
+   * their `onMessage` can claim a message by returning true.
+   */
+  use(handlers: WebSocketHandlers): void {
+    this.#added.push(handlers);
+  }
+
   // ── Connections ────────────────────────────────────────────────────────
 
   /** Open connections on either wire, optionally by tag. */
@@ -292,10 +303,12 @@ export class WebSockets extends LifecycleCapability {
         setConnectionProtocolEnabled(connection, false);
       }
     }
-    await this.lifecycle.runInHostContext(
-      () => this.#handlers?.onConnect?.(connection, ctx),
-      { connection, request: ctx.request }
-    );
+    for (const handlers of [...this.#added, this.#handlers]) {
+      await this.lifecycle.runInHostContext(
+        () => handlers?.onConnect?.(connection, ctx),
+        { connection, request: ctx.request }
+      );
+    }
   }
 
   async #message(
@@ -324,6 +337,13 @@ export class WebSockets extends LifecycleCapability {
     ) {
       return;
     }
+    for (const handlers of this.#added) {
+      const claimed = await this.lifecycle.runInHostContext(
+        () => handlers.onMessage?.(connection, message),
+        { connection }
+      );
+      if (claimed === true) return;
+    }
     await this.lifecycle.runInHostContext(
       () => this.#handlers?.onMessage?.(connection, message),
       { connection }
@@ -336,17 +356,28 @@ export class WebSockets extends LifecycleCapability {
     reason: string,
     wasClean: boolean
   ): Promise<unknown> {
-    return this.lifecycle.runInHostContext(
-      () => this.#handlers?.onClose?.(connection, code, reason, wasClean),
-      { connection }
+    return this.#each((handlers) =>
+      this.lifecycle.runInHostContext(
+        () => handlers?.onClose?.(connection, code, reason, wasClean),
+        { connection }
+      )
     );
   }
 
   #error(connection: Connection, error: unknown): Promise<unknown> {
-    return this.lifecycle.runInHostContext(
-      () => this.#handlers?.onError?.(connection, error),
-      { connection }
+    return this.#each((handlers) =>
+      this.lifecycle.runInHostContext(
+        () => handlers?.onError?.(connection, error),
+        { connection }
+      )
     );
+  }
+
+  async #each(
+    run: (handlers: WebSocketHandlers | undefined) => Promise<unknown>
+  ): Promise<void> {
+    for (const handlers of [...this.#added, this.#handlers])
+      await run(handlers);
   }
 
   // ── Hibernating wire ───────────────────────────────────────────────────

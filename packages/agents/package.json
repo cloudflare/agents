@@ -397,6 +397,16 @@
       "import": "./dist/experimental/channels/telegram/index.js",
       "require": "./dist/experimental/channels/telegram/index.js"
     },
+    "./experimental/channels/web": {
+      "types": "./dist/experimental/channels/web/index.d.ts",
+      "import": "./dist/experimental/channels/web/index.js",
+      "require": "./dist/experimental/channels/web/index.js"
+    },
+    "./experimental/channels/web/client": {
+      "types": "./dist/experimental/channels/web/client.d.ts",
+      "import": "./dist/experimental/channels/web/client.js",
+      "require": "./dist/experimental/channels/web/client.js"
+    },
     "./tsconfig": "./agents.tsconfig.json",
     "./vite": {
       "types": "./dist/vite.d.ts",
