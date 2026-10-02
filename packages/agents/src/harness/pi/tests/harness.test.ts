@@ -1,21 +1,11 @@
 import { env } from "cloudflare:workers";
-import { evictDurableObject, runDurableObjectAlarm } from "cloudflare:test";
+import {
+  abortAllDurableObjects,
+  evictDurableObject,
+  runDurableObjectAlarm
+} from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { PiHarnessTestObject } from "./worker";
-
-/** Crash one object. The call itself fails, since the object dies in it. */
-async function crash(stub: DurableObjectStub<PiHarnessTestObject>) {
-  await expect(stub.crash()).rejects.toThrow();
-}
-
-/**
- * Run the wake job's alarm after a crash. It may already have fired on its
- * own, so its result is not asserted; what the test asserts is that the
- * work resumes.
- */
-async function wake(stub: DurableObjectStub<PiHarnessTestObject>) {
-  await runDurableObjectAlarm(stub);
-}
 
 function fresh(
   name: string = crypto.randomUUID()
@@ -79,10 +69,10 @@ describe("PiHarness on pi-durable", () => {
 
     // Graceful eviction waits for the in-flight step, which is the point of
     // the heartbeat, so crash the object instead.
-    await crash(stub);
+    await abortAllDurableObjects();
     stub = fresh(name);
     // The alarm restarts the object; pi reopens and reruns the safe tool.
-    await wake(stub);
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
     await stub.gateStarted(2);
     await stub.release();
 
@@ -99,9 +89,9 @@ describe("PiHarness on pi-durable", () => {
     let stub = fresh(name);
     const receipt = await stub.submit("gate-unsafe");
     await stub.gateStarted(1);
-    await crash(stub);
+    await abortAllDurableObjects();
     stub = fresh(name);
-    await wake(stub);
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
 
     const result = await stub.wait(receipt.operationId);
     expect(result.status).toBe("done");
@@ -185,9 +175,9 @@ describe("PiHarness on pi-durable", () => {
     );
     await stub.gateStarted(3);
 
-    await crash(stub);
+    await abortAllDurableObjects();
     stub = fresh(name);
-    await wake(stub);
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
     // Each session's safe tool runs again.
     await stub.gateStarted(6);
     await stub.release();

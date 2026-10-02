@@ -19,7 +19,6 @@ import {
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
 import { setWakeTimingForTests } from "../harness";
-import { CRASH_REASON } from "./crash";
 import { TEST_TIMING } from "./timing";
 import { fauxModels, NO_RETRY } from "./faux";
 import {
@@ -206,14 +205,6 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   async alarmTime(): Promise<number | null> {
     return this.ctx.storage.getAlarm();
-  }
-
-  /**
-   * Crash this object, and only this one: in-flight work is dropped, as in
-   * an isolate crash, and the next call or alarm starts a new instance.
-   */
-  crash(): void {
-    this.ctx.abort(CRASH_REASON);
   }
 
   /** The fixture's tools and preamble, as one pi extension. */

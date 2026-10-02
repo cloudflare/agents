@@ -1,13 +1,7 @@
 import { defineConfig } from "vitest/config";
-import { CRASH_REASON } from "./src/harness/pi/tests/crash";
 
 export default defineConfig({
   test: {
-    // The pi harness tests crash an object on purpose, and its in-flight
-    // work rejects with the crash's reason. Vitest reads this only here, in
-    // the root config, so it matches that one reason exactly; any other
-    // unhandled error still fails the run.
-    onUnhandledError: (error) => error.message !== CRASH_REASON,
     projects: [
       "src/tests/vitest.config.ts",
       "src/react-tests/vitest.config.ts",

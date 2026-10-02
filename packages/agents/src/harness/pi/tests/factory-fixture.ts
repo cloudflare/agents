@@ -195,6 +195,18 @@ export class PiFactoryTestObject extends DurableObject<Cloudflare.Env> {
     return JSON.parse(response.text ?? "{}");
   }
 
+  /**
+   * The race behind a startup deadlock: an operation starts opening pi
+   * before Lifecycle startup, and startup begins while the factory is still
+   * waiting on I/O (its 5 ms timer).
+   */
+  async openWhileStarting(): Promise<string> {
+    const opening = this.harness.pi();
+    await this.lifecycle.start();
+    await opening;
+    return "opened";
+  }
+
   async createSession(): Promise<string> {
     return (await this.harness.sessions.create()).id;
   }

@@ -2,7 +2,6 @@ import path from "node:path";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { stripNodeModulesSourceMapReferences } from "../../../../../../scripts/vitest/strip-node-modules-source-map-references";
 import { defineConfig } from "vitest/config";
-import { CRASH_REASON } from "./crash";
 
 const testsDir = import.meta.dirname;
 
@@ -19,10 +18,10 @@ export default defineConfig({
   },
   test: {
     name: "harness-pi",
+    // harness.test.ts crashes objects with abortAllDurableObjects(), which
+    // reaches every object in the runtime, including other files' objects.
+    fileParallelism: false,
     include: [path.join(testsDir, "**/*.test.ts")],
-    // Also set in the root config, which is the one Vitest reads when this
-    // runs as a project; this one covers running the config on its own.
-    onUnhandledError: (error) => error.message !== CRASH_REASON,
     testTimeout: 30_000,
     hookTimeout: 30_000
   }
