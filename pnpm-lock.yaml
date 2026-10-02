@@ -4429,6 +4429,9 @@ importers:
       '@earendil-works/pi-durable':
         specifier: ^0.99.2
         version: 0.99.2(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@8.10.2)(ws@8.21.3)(zod@4.5.4)
+      '@earendil-works/pi-tui':
+        specifier: 0.99.1
+        version: 0.99.1
       '@modelcontextprotocol/client':
         specifier: 2.0.0
         version: 2.0.0
@@ -4465,6 +4468,9 @@ importers:
       glob:
         specifier: ^13.0.6
         version: 13.0.6
+      highlight.js:
+        specifier: 11.12.0
+        version: 11.12.0
       just-bash:
         specifier: ^3.0.2
         version: 3.0.2(supports-color@10.2.2)
@@ -5879,6 +5885,10 @@ packages:
 
   '@earendil-works/pi-telemetry@0.99.2':
     resolution: {integrity: sha512-WThYU4XM6jjjzH4FzLdreN7QAPS9SDdokL0W0Ldheg1ssCIJkfpK7PgebFm7/PoQub7OiXx+SRF6B/oF7z7lXA==}
+    engines: {node: '>=22.19.0'}
+
+  '@earendil-works/pi-tui@0.99.1':
+    resolution: {integrity: sha512-gZp0Guat96Fr1AuC/xqVz5B2lulZakp/PxD1lXx3lSgBdjiqmwYhJbcQ0HRrGAfy0WtMGn9b05RJr5qJf7oIuw==}
     engines: {node: '>=22.19.0'}
 
   '@elevenlabs/elevenlabs-js@2.54.0':
@@ -10007,6 +10017,10 @@ packages:
   headers-polyfill@5.0.1:
     resolution: {integrity: sha512-1TJ6Fih/b8h5TIcv+1+Hw0PDQWJTKDKzFZzcKOiW1wJza3XoAQlkCuXLbymPYB8+ZQyw8mHvdw560e8zVFIWyA==}
 
+  highlight.js@11.12.0:
+    resolution: {integrity: sha512-nbfWpyRMcMrPMmDwJB+dhX/eiaPKtc2RB+0QZskqJ3WjRA/FDS0e9hZrx8EC/lbEv8gXy98FcDbNa/dspAaJMg==}
+    engines: {node: '>=12.0.0'}
+
   hono@4.12.27:
     resolution: {integrity: sha512-1yrb/+w6HWQJrUCLkJ2IF5jNIPvvFkblV5RNOYl6bV+OA6p9GLcMpHFFGTosSvHvcAUibuUukRqhlYI4z32C7Q==}
     engines: {node: '>=16.9.0'}
@@ -10566,6 +10580,11 @@ packages:
 
   marked@17.0.6:
     resolution: {integrity: sha512-gB0gkNafnonOw0obSTEGZTT86IuhILt2Wfx0mWH/1Au83kybTayroZ/V6nS25mN7u8ASy+5fMhgB3XPNrOZdmA==}
+    engines: {node: '>= 20'}
+    hasBin: true
+
+  marked@18.0.11:
+    resolution: {integrity: sha512-HnslJfsZkRPBDJRHvVtAaWlZHEpSu7u8LgQuJCELjRKuWR+hpq4A7sLq3p8HaI9ypVoXDXxV34CsQJEe1+J5Aw==}
     engines: {node: '>= 20'}
     hasBin: true
 
@@ -14465,6 +14484,11 @@ snapshots:
       - zod
 
   '@earendil-works/pi-telemetry@0.99.2': {}
+
+  '@earendil-works/pi-tui@0.99.1':
+    dependencies:
+      get-east-asian-width: 1.6.0
+      marked: 18.0.11
 
   '@elevenlabs/elevenlabs-js@2.54.0':
     dependencies:
@@ -18890,6 +18914,8 @@ snapshots:
       '@types/set-cookie-parser': 2.4.10
       set-cookie-parser: 3.1.2
 
+  highlight.js@11.12.0: {}
+
   hono@4.12.27: {}
 
   hono@4.13.8: {}
@@ -19394,6 +19420,8 @@ snapshots:
   marked@16.4.2: {}
 
   marked@17.0.6: {}
+
+  marked@18.0.11: {}
 
   math-intrinsics@1.1.0: {}
 

@@ -9,6 +9,9 @@
     "durable objects"
   ],
   "type": "module",
+  "bin": {
+    "agents": "./dist/cli.js"
+  },
   "version": "0.25.0",
   "license": "MIT",
   "repository": {
@@ -42,6 +45,7 @@
     "@cloudflare/codemode": "workspace:*",
     "@earendil-works/pi-ai": "^0.99.2",
     "@earendil-works/pi-durable": "^0.99.2",
+    "@earendil-works/pi-tui": "0.99.1",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/conformance-v2": "npm:@modelcontextprotocol/conformance@0.2.0-alpha.10",
     "@modelcontextprotocol/sdk": "1.30.0",
@@ -54,6 +58,7 @@
     "ai": "^7.0.0",
     "chat": "^4.31.0",
     "glob": "^13.0.6",
+    "highlight.js": "11.12.0",
     "just-bash": "^3.0.2",
     "react": "^19.2.7",
     "teleproto": "^1.228.5",
