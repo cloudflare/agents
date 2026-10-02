@@ -48,6 +48,12 @@ export interface ModalityCall {
    * the body shape depends on which model ends up answering.
    */
   build(modelId: string): ModalityRequest;
+  /**
+   * Validates one leg's answer, throwing when it lacks what the modality
+   * needs. Runs inside the fallback loop, so an incomplete answer moves on to
+   * the next leg instead of failing the call.
+   */
+  check?(answer: ModalityAnswer): void;
 }
 
 /** What the run path answered, decoded by content type. */
@@ -178,7 +184,7 @@ export abstract class CloudflareModalityModel {
           request.input,
           mediaType
         );
-        return {
+        const answer: ModalityAnswer = {
           headers: headersToObject(response.headers),
           input: request.input,
           mediaType,
@@ -194,6 +200,8 @@ export abstract class CloudflareModalityModel {
           warnings: request.warnings,
           ...body
         };
+        call.check?.(answer);
+        return answer;
       }
     );
   }

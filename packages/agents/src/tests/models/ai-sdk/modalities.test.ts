@@ -695,6 +695,44 @@ describe("modality options and fallback", () => {
     expect(field(result.providerMetadata?.cloudflare, "model")).toBe(SDXL);
   });
 
+  it("falls back when an image answer comes back without an image", async () => {
+    const binding = fakeBinding((call) =>
+      call.model === FLUX
+        ? jsonResponse({})
+        : binaryResponse(PNG_BYTES, "image/png")
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai.image(FLUX, { fallback: [SDXL] }).doGenerate({
+      aspectRatio: undefined,
+      files: undefined,
+      mask: undefined,
+      n: 1,
+      prompt: "a fox",
+      providerOptions: {},
+      seed: undefined,
+      size: undefined
+    });
+
+    expect(binding.calls.map((call) => call.model)).toEqual([FLUX, SDXL]);
+    expect(result.images[0]).toEqual(PNG_BYTES);
+  });
+
+  it("falls back when a speech answer comes back without audio", async () => {
+    const AURA_2 = "@cf/deepgram/aura-2-en";
+    const binding = fakeBinding((call) =>
+      call.model === AURA
+        ? jsonResponse({})
+        : binaryResponse(MP3_BYTES, "audio/mpeg")
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai
+      .speech(AURA, { fallback: [AURA_2] })
+      .doGenerate({ text: "Hello" });
+
+    expect(binding.calls.map((call) => call.model)).toEqual([AURA, AURA_2]);
+    expect(result.audio).toEqual(MP3_BYTES);
+  });
+
   it("exposes every modality under both names", () => {
     const binding = fakeBinding(() => jsonResponse({}));
     const ai = createAI({ binding: asAi(binding) });

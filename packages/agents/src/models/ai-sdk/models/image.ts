@@ -230,6 +230,9 @@ export class CloudflareImageModel
         this.send({
           abortSignal: options.abortSignal,
           build: (modelId) => buildImageRequest(modelId, options),
+          check: (answer) => {
+            readImage(answer);
+          },
           headers: options.headers,
           providerOptions: options.providerOptions
         })

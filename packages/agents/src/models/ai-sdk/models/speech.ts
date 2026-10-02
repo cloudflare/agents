@@ -20,6 +20,7 @@ import { record, text } from "../wires/shared";
 import {
   CloudflareModalityModel,
   unsupported,
+  type ModalityAnswer,
   type ModalityConfig,
   type ModalityRequest
 } from "./modality";
@@ -108,6 +109,29 @@ export function buildSpeechRequest(
 }
 
 /**
+ * The audio in one answer. Bytes stay bytes and base64 stays base64: the AI
+ * SDK converts either way on demand, and converting here would only lose
+ * fidelity.
+ */
+function readAudio(answer: ModalityAnswer): string | Uint8Array {
+  if (answer.bytes !== undefined) return answer.bytes;
+  const body = record(answer.json) ?? {};
+  const encoded = text(body.audio);
+  if (encoded === undefined) {
+    throw new CloudflareAIError({
+      code: "provider-error",
+      data: answer.json,
+      isRetryable: false,
+      message: "The speech model answered JSON without an `audio` field.",
+      model: answer.modelId,
+      requestBodyValues: answer.input,
+      url: answer.url
+    });
+  }
+  return encoded;
+}
+
+/**
  * A `SpeechModelV4` over the Workers AI text-to-speech catalog.
  *
  * @experimental This surface is experimental and may change.
@@ -130,31 +154,14 @@ export class CloudflareSpeechModel
     const answer = await this.send({
       abortSignal: options.abortSignal,
       build: (modelId) => buildSpeechRequest(modelId, options),
+      check: (answer) => {
+        readAudio(answer);
+      },
       headers: options.headers,
       providerOptions: options.providerOptions
     });
 
-    // Bytes stay bytes and base64 stays base64: the AI SDK converts either
-    // way on demand, and converting here would only lose fidelity.
-    let audio: string | Uint8Array;
-    if (answer.bytes !== undefined) {
-      audio = answer.bytes;
-    } else {
-      const body = record(answer.json) ?? {};
-      const encoded = text(body.audio);
-      if (encoded === undefined) {
-        throw new CloudflareAIError({
-          code: "provider-error",
-          data: answer.json,
-          isRetryable: false,
-          message: "The speech model answered JSON without an `audio` field.",
-          model: answer.modelId,
-          requestBodyValues: answer.input,
-          url: answer.url
-        });
-      }
-      audio = encoded;
-    }
+    const audio = readAudio(answer);
 
     return {
       audio,
