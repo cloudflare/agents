@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { routeAgentRequest } from "agents";
-import { PiHarness } from "agents/harnesses/pi";
+import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { CLOUDFLARE_PROVIDER_ID, createAI } from "agents/models/pi-ai";
 import { WebSockets } from "agents/websockets";

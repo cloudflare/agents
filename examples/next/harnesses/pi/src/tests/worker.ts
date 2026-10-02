@@ -23,7 +23,7 @@ import {
   type PiOperationResult,
   type PiReceipt,
   type PiWhenBusy
-} from "agents/harnesses/pi";
+} from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
 import { PiSessionSockets } from "../sockets";
