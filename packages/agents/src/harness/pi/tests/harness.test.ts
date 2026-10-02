@@ -1,11 +1,12 @@
 import { env } from "cloudflare:workers";
-import {
-  abortAllDurableObjects,
-  evictDurableObject,
-  runDurableObjectAlarm
-} from "cloudflare:test";
+import { evictDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { PiHarnessTestObject } from "./worker";
+
+/** Crash one object. The call itself fails, since the object dies in it. */
+async function crash(stub: DurableObjectStub<PiHarnessTestObject>) {
+  await expect(stub.crash()).rejects.toThrow();
+}
 
 function fresh(
   name: string = crypto.randomUUID()
@@ -69,7 +70,7 @@ describe("PiHarness on pi-durable", () => {
 
     // Graceful eviction waits for the in-flight step, which is the point of
     // the heartbeat, so crash the object instead.
-    await abortAllDurableObjects();
+    await crash(stub);
     stub = fresh(name);
     // The alarm restarts the object; pi reopens and reruns the safe tool.
     expect(await runDurableObjectAlarm(stub)).toBe(true);
@@ -89,7 +90,7 @@ describe("PiHarness on pi-durable", () => {
     let stub = fresh(name);
     const receipt = await stub.submit("gate-unsafe");
     await stub.gateStarted(1);
-    await abortAllDurableObjects();
+    await crash(stub);
     stub = fresh(name);
     expect(await runDurableObjectAlarm(stub)).toBe(true);
 
@@ -139,6 +140,58 @@ describe("PiHarness on pi-durable", () => {
     expect(alarm).toBeNull();
     // The next submit wakes it again.
     expect((await stub.prompt("again")).text).toBe("echo: again");
+  });
+
+  it("answers every one of many submissions made to one session at once", async () => {
+    const stub = fresh();
+    const inputs = Array.from({ length: 12 }, (_, n) => `burst ${n}`);
+    const receipts = await Promise.all(
+      inputs.map((input) => stub.submit(input))
+    );
+    const results = await Promise.all(
+      receipts.map((receipt) => stub.wait(receipt.operationId))
+    );
+    expect(results.map((result) => result.text)).toEqual(
+      inputs.map((input) => `echo: ${input}`)
+    );
+    // Each input is followed by its own answer, whatever order they ran in.
+    const messages = await stub.messages();
+    expect(messages).toHaveLength(inputs.length * 2);
+    for (let i = 0; i < messages.length; i += 2) {
+      expect(messages[i + 1]).toBe(`echo: ${messages[i]}`);
+    }
+    expect(await stub.pending()).toEqual([]);
+  });
+
+  it("recovers every session's run after a crash, from one alarm", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const sessions = [
+      "1",
+      await stub.createSession(),
+      await stub.createSession()
+    ];
+    const receipts = await Promise.all(
+      sessions.map((session) => stub.submit("gate", { session }))
+    );
+    await stub.gateStarted(3);
+
+    await crash(stub);
+    stub = fresh(name);
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    // Each session's safe tool runs again.
+    await stub.gateStarted(6);
+    await stub.release();
+
+    const results = await Promise.all(
+      receipts.map((receipt, i) => stub.wait(receipt.operationId, sessions[i]))
+    );
+    expect(results.map((result) => result.status)).toEqual([
+      "done",
+      "done",
+      "done"
+    ]);
+    expect(await stub.pending()).toEqual([]);
   });
 
   it("keeps sessions separate", async () => {

@@ -191,12 +191,12 @@ export class PiHarnessTestObject extends DurableObject<Env> {
       description: "Wait until the test releases it.",
       parameters: NoParameters,
       replay,
-      async execute(_args, api, context) {
+      async execute(_args, { api, signal }) {
         const runs = ((await storage.get<number>(GATE_RUNS_KEY)) ?? 0) + 1;
         await storage.put(GATE_RUNS_KEY, runs);
         api.output(`run ${runs}\n`);
         while (!(await storage.get<boolean>(RELEASE_KEY))) {
-          context.abortSignal?.throwIfAborted();
+          signal.throwIfAborted();
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
         return {

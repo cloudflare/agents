@@ -21,9 +21,6 @@ export default defineConfig({
     ]
   },
   test: {
-    // harness.test.ts crashes objects with abortAllDurableObjects(), which
-    // reaches every object in the runtime, including other files' objects.
-    fileParallelism: false,
     name: "next-pi-harness",
     include: [path.join(testsDir, "**/*.test.ts")],
     testTimeout: 30_000,

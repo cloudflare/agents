@@ -9,5 +9,11 @@ declare namespace Cloudflare {
     PI_NO_DEFAULTS_TEST: DurableObjectNamespace<
       import("./worker").PiNoDefaultsTestObject
     >;
+    PI_EXTENSIONS_TEST: DurableObjectNamespace<
+      import("./worker").PiExtensionsTestObject
+    >;
+    PI_FLAKY_EXTENSION_TEST: DurableObjectNamespace<
+      import("./worker").PiFlakyExtensionTestObject
+    >;
   }
 }

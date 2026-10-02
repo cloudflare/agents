@@ -4,11 +4,11 @@ pcx_content_type: concept
 description: Add tools and system prompt sections to a PiHarness with extensions, plain functions that register transforms. See which pi-durable extension features PiHarness supports.
 ---
 
-An extension adds tools and system prompt sections to a [`PiHarness`](./pi.md). It is a plain function that receives an `ExtensionContext`. It does not edit the harness's tools or prompt directly; it registers transforms on them. The harness builds its tools and its prompt from empty by running every transform once, in order. The result depends only on which extensions are installed and in what order. The API is experimental and may change.
+An extension adds tools and system prompt sections to a [`PiHarness`](./pi.md). It is a plain function that receives the harness's extension context. It does not edit the harness's tools or prompt directly; it registers transforms on them. The harness builds its tools and its prompt from empty by running every transform once, in order. The result depends only on which extensions are installed and in what order. The API is experimental and may change.
 
 ## Write an extension
 
-Pass extensions to `PiHarness` by name. They run in key order the first time the harness opens, before pi's `Harness`. Pass the `registry` the factory receives to `Harness.open`:
+Pass extensions to `PiHarness` by name. They run in key order the first time the harness opens, before pi's `Harness`. pi stores the names (a conversation selects its extensions by name), so keep them stable across deploys. A name must contain a letter: JavaScript orders integer-like keys such as `"2"` before every other key, so the harness rejects them. Pass the `registry` the factory receives to `Harness.open`:
 
 ```ts
 import { DurableObject } from "cloudflare:workers";
@@ -50,7 +50,13 @@ export class Editor extends DurableObject<Env> {
 }
 ```
 
-A tool is a pi-durable `ToolRegistration` without `name`; its key in `tools` names it. A section is a pi `PromptSection` without `key`. An extension may be `async`, for example to load what it contributes, but it must register its transforms before it returns. `skills(sources)` is an extension for `agents/skills` sources: it adds the `activate_skill` and `read_skill_resource` tools and a `skills` section.
+A tool has everything a pi-durable `ToolRegistration` has (`replay`, `executionMode`, `prepareArguments`, `outputLimits`) except `name`: its key in `tools` names it. `execute(args, ctx)` gets its arguments and a context with:
+
+- `signal`: aborted when the call is.
+- `api`: pi's operations for the call (`output`, `details`, `diagnostic`, `memo`, `commit`, tasks, and `conversation` for subagents).
+- `context`: pi's context, to pass to `api`'s operations, as in `ctx.api.memo("startedAt", Date.now(), ctx.context)`.
+
+A section is `{ render(input, ctx), tag? }`, named by its key in `prompt`. `render` runs before each request with pi's input (the conversation, its agent and offered tools, and committed document reads); `tag: false` sends the text without `<key>` tags. An extension may be `async`, for example to load what it contributes, but it must register its transforms before it returns. `skills(sources)` is an extension for `agents/skills` sources: it adds the `activate_skill` and `read_skill_resource` tools and a `skills` section.
 
 ## Change another extension's contributions
 
@@ -65,6 +71,19 @@ extensions: {
 ```
 
 Each tool and section belongs to the extension that first added it, and a replaced entry keeps that owner. After the build, the harness installs one pi extension per extension that contributed anything, under its name. Rewriting another extension's tool therefore changes it wherever that extension applies.
+
+## The same shape on every harness
+
+`agents/harness` holds what every harness's extensions share: `Extension`, `ExtensionContext` (a `name`, and `tools` and `prompt` states with `transform`), `ExtensionDraft`, and `ToolContext` (a call's `signal`). `PiHarness` is the first harness built on them. Each harness types its own tools and sections, so the shape stays the same while the capabilities follow the harness:
+
+```ts
+import type { Extension, ExtensionContext } from "agents/harness";
+
+// pi: ExtensionContext<PiTools, PiPrompt>, and tools whose ctx adds pi's `api`.
+type PiExtension = Extension<PiExtensionContext>;
+```
+
+An extension for `PiHarness` is typed `PiExtension`, and can use everything in the table below.
 
 ## What PiHarness supports
 

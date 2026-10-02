@@ -128,10 +128,10 @@ export function workspaceTools(
             ? { constrainedSampling: tool.constrainedSampling }
             : {}),
           replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
-          async execute(args, api, context) {
+          async execute(args, { api, signal }) {
             const { content, isError } = await execute(
               { id: api.callId, name: tool.name, arguments: args },
-              { abortSignal: context.abortSignal }
+              { abortSignal: signal }
             );
             return { content, isError };
           }

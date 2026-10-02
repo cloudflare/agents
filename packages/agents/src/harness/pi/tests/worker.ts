@@ -216,18 +216,26 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.getAlarm();
   }
 
+  /**
+   * Crash this object, and only this one: in-flight work is dropped, as in
+   * an isolate crash, and the next call or alarm starts a new instance.
+   */
+  crash(): void {
+    this.ctx.abort("crashed by the test");
+  }
+
   #testTools(): PiExtension {
     const storage = this.ctx.storage;
     const gate = (replay: "safe" | "unsafe"): PiTool<typeof NoParameters> => ({
       description: "Wait until the test releases it.",
       parameters: NoParameters,
       replay,
-      async execute(_args, api, context) {
+      async execute(_args, { api, signal }) {
         const runs = ((await storage.get<number>(GATE_RUNS_KEY)) ?? 0) + 1;
         await storage.put(GATE_RUNS_KEY, runs);
         api.output(`run ${runs}\n`);
         while (!(await storage.get<boolean>(RELEASE_KEY))) {
-          context.abortSignal?.throwIfAborted();
+          signal.throwIfAborted();
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
         return {
@@ -317,5 +325,10 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
 
 /** A bare object whose SQLite database the storage conformance suite uses. */
 export class PiStoreTestObject extends DurableObject<Cloudflare.Env> {}
+
+export {
+  PiExtensionsTestObject,
+  PiFlakyExtensionTestObject
+} from "./extensions-fixture";
 
 export default { fetch: () => new Response("Not found", { status: 404 }) };

@@ -1,22 +1,68 @@
-import type { TSchema } from "@earendil-works/pi-ai";
+import type { Static, TSchema } from "@earendil-works/pi-ai";
 import type {
+  PromptInput,
   PromptSection,
   Registry,
+  ToolExecutionApi,
+  ToolExecutionResult,
   ToolRegistration
 } from "@earendil-works/pi-durable";
-import type { ExtensionDraft, ExtensionState } from "../extension";
+import type {
+  Extension,
+  ExtensionContext,
+  ExtensionDraft,
+  Extensions,
+  ExtensionState,
+  ToolContext
+} from "../extension";
+import type { Context } from "./context";
+
+/** What pi gives a running tool call, beyond every harness's `signal`. */
+export interface PiToolContext extends ToolContext {
+  /**
+   * pi's operations for this call: `output`, `details`, `diagnostic`,
+   * `memo`, `commit`, tasks, and `conversation` for subagents.
+   */
+  readonly api: ToolExecutionApi;
+  /** pi's context for this call, to pass to `api`'s operations. */
+  readonly context: Context;
+}
 
 /**
- * A pi tool, named by its key in `tools`. `execute`'s arguments are typed
- * by `parameters`, which pi validates them against first.
+ * A pi tool, named by its key in `tools`. Everything pi's
+ * `ToolRegistration` has (`replay`, `executionMode`, `prepareArguments`,
+ * `outputLimits`) except its name and calling convention: `execute` gets
+ * its arguments, typed by `parameters` and validated against them first,
+ * and a `PiToolContext`.
  */
 export type PiTool<Parameters extends TSchema = TSchema> = Omit<
   ToolRegistration<Parameters>,
-  "name"
->;
+  "name" | "execute"
+> & {
+  execute(
+    args: Static<Parameters>,
+    ctx: PiToolContext
+  ): Promise<ToolExecutionResult>;
+};
 
-/** A system prompt section, named by its key in `prompt`. */
-export type PiSection = Omit<PromptSection, "key">;
+/** What a section is given when it renders, beyond every harness's `signal`. */
+export interface PiSectionContext {
+  readonly signal: AbortSignal;
+}
+
+/**
+ * A system prompt section, named by its key in `prompt`. `render` runs
+ * before each request, with pi's input: the conversation, its agent and
+ * offered tools, and committed document reads. Wrapped in `<key>` tags
+ * unless `tag` is false.
+ */
+export type PiSection = {
+  readonly tag?: boolean;
+  render(
+    input: PromptInput,
+    ctx: PiSectionContext
+  ): string | undefined | Promise<string | undefined>;
+};
 
 /** The harness's tools, by name, as a transform edits them. */
 export interface PiTools extends Omit<ExtensionDraft<PiTool>, "set"> {
@@ -28,17 +74,10 @@ export interface PiTools extends Omit<ExtensionDraft<PiTool>, "set"> {
 export type PiPrompt = ExtensionDraft<PiSection>;
 
 /** What a pi extension is given. */
-export interface PiExtensionContext {
-  /** The key this extension was installed under. */
-  readonly name: string;
-  readonly tools: ExtensionState<PiTools>;
-  readonly prompt: ExtensionState<PiPrompt>;
-}
+export type PiExtensionContext = ExtensionContext<PiTools, PiPrompt>;
 
 /**
- * A pi extension: a function that registers transforms on the harness's
- * tools and prompt. It may be async, to load what it contributes; its
- * transforms must be registered before it returns.
+ * A pi extension.
  *
  * ```ts
  * const preamble: PiExtension = (ctx) =>
@@ -47,10 +86,38 @@ export interface PiExtensionContext {
  *   );
  * ```
  */
-export type PiExtension = (ctx: PiExtensionContext) => void | Promise<void>;
+export type PiExtension = Extension<PiExtensionContext>;
 
-/** Extensions by name, run and applied in key order. */
-export type PiExtensions = Readonly<Record<string, PiExtension>>;
+/**
+ * Extensions by name, run and applied in key order. Names are stored by pi
+ * (a conversation selects extensions by name), so keep them stable.
+ */
+export type PiExtensions = Extensions<PiExtensionContext>;
+
+/** A signal for pi's context, which may carry none. */
+function signalOf(context: Context): AbortSignal {
+  return context.abortSignal ?? new AbortController().signal;
+}
+
+/** pi's `ToolRegistration` for one of our tools. */
+function registration(name: string, tool: PiTool): ToolRegistration {
+  return {
+    ...tool,
+    name,
+    execute: (args, api, context) =>
+      tool.execute(args, { signal: signalOf(context), api, context })
+  };
+}
+
+/** pi's `PromptSection` for one of our sections. */
+function promptSection(key: string, section: PiSection): PromptSection {
+  return {
+    key,
+    ...(section.tag === undefined ? {} : { tag: section.tag }),
+    render: (input, context) =>
+      section.render(input, { signal: signalOf(context) })
+  };
+}
 
 type Transform<Draft> = {
   readonly owner: string;
@@ -120,6 +187,15 @@ export async function installExtensions(
   registry: Registry,
   extensions: PiExtensions
 ): Promise<void> {
+  for (const name of Object.keys(extensions)) {
+    // JavaScript orders integer-like keys before every other key, so one
+    // would silently run first.
+    if (/^(0|[1-9]\d*)$/.test(name)) {
+      throw new Error(
+        `pi extension name ${JSON.stringify(name)} looks like an array index, which would reorder the extensions; use a name with a letter in it`
+      );
+    }
+  }
   const tools: Transform<PiTools>[] = [];
   const prompt: Transform<PiPrompt>[] = [];
 
@@ -148,10 +224,10 @@ export async function installExtensions(
     const owned = {
       tools: builtTools
         .owned(name)
-        .map(([key, tool]) => ({ ...tool, name: key })),
+        .map(([key, tool]) => registration(key, tool)),
       sections: builtPrompt
         .owned(name)
-        .map(([key, section]) => ({ ...section, key }))
+        .map(([key, section]) => promptSection(key, section))
     };
     if (owned.tools.length === 0 && owned.sections.length === 0) continue;
     registry.install({ name, ...owned });

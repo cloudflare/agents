@@ -167,6 +167,11 @@
       "import": "./dist/lifecycle/index.js",
       "require": "./dist/lifecycle/index.js"
     },
+    "./harness": {
+      "types": "./dist/harness/index.d.ts",
+      "import": "./dist/harness/index.js",
+      "require": "./dist/harness/index.js"
+    },
     "./harness/pi": {
       "types": "./dist/harness/pi/index.d.ts",
       "import": "./dist/harness/pi/index.js",

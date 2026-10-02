@@ -105,6 +105,12 @@ describe("pi extensions", () => {
     expect(installed(registry)).toEqual([]);
   });
 
+  it("rejects an integer-like name, which would reorder the extensions", async () => {
+    await expect(
+      installExtensions(createRegistry(), { base: () => {}, "2": () => {} })
+    ).rejects.toThrow('pi extension name "2"');
+  });
+
   it("rejects a transform registered after its extension returned", async () => {
     let late: (() => void) | undefined;
     await installExtensions(createRegistry(), {
