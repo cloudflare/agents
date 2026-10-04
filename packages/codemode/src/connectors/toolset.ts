@@ -102,11 +102,9 @@ export class ToolSetConnector extends CodemodeConnector {
         rawSchema != null
           ? asSchema(rawSchema as Parameters<typeof asSchema>[0])
           : undefined;
-      const rawOutputSchema = (t as { outputSchema?: unknown }).outputSchema;
-      const outputSchema =
-        rawOutputSchema != null
-          ? asSchema(rawOutputSchema as Parameters<typeof asSchema>[0])
-          : undefined;
+      const outputSchema = outputJsonSchema(
+        (t as { outputSchema?: unknown }).outputSchema
+      );
 
       // boolean `false` means no approval; `true` or a function (which can't
       // be pre-evaluated against sandbox args) gates the call behind the
@@ -119,7 +117,7 @@ export class ToolSetConnector extends CodemodeConnector {
         description:
           typeof t.description === "function" ? undefined : t.description,
         inputSchema: schema?.jsonSchema as JSONSchema7 | undefined,
-        outputSchema: outputSchema?.jsonSchema as JSONSchema7 | undefined,
+        ...(outputSchema ? { outputSchema } : {}),
         ...(requiresApproval ? { requiresApproval: true } : {}),
         execute: schema?.validate
           ? async (args: unknown) => {
@@ -142,6 +140,25 @@ export class ToolSetConnector extends CodemodeConnector {
    */
   override async getTypeScriptTypes(): Promise<string> {
     return generateTypes(this.#executableTools(), this.name());
+  }
+}
+
+/**
+ * Convert a tool's output schema to JSON Schema for its descriptor. The
+ * output type is advisory, so a schema that cannot be converted (or only
+ * converts asynchronously) is left out and shows as `unknown`, matching
+ * `generateTypes`, instead of failing the whole toolset.
+ */
+function outputJsonSchema(raw: unknown): JSONSchema7 | undefined {
+  if (raw == null) return undefined;
+  try {
+    const json = asSchema(raw as Parameters<typeof asSchema>[0]).jsonSchema;
+    if (typeof (json as PromiseLike<unknown>).then === "function") {
+      return undefined;
+    }
+    return json as JSONSchema7;
+  } catch {
+    return undefined;
   }
 }
 
