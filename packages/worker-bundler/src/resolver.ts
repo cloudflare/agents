@@ -169,6 +169,12 @@ function resolvePackage(
     }
   }
 
+  // An exports map is the package's whole public surface: a subpath it
+  // does not export must not be reached by probing files on disk.
+  if (subpath && pkg.exports !== undefined) {
+    return { path: specifier, external: true };
+  }
+
   // Try index files directly
   const indexPath = resolveWithExtensions(
     `node_modules/${packageName}${subpath ? `/${subpath}` : ""}`,

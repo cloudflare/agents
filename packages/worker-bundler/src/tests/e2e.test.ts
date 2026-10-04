@@ -362,6 +362,65 @@ describe("createWorker transform-only mode (build + load + fetch)", () => {
       .fetch(new Request("http://worker/"));
     expect(await response.text()).toBe("root,internal,file,scoped");
   });
+
+  it("bundles package subpaths without an exports map from the subpath", async () => {
+    const result = await createWorker({
+      files: {
+        "index.js": [
+          'import { rootValue } from "fixture";',
+          'import { internalValue } from "fixture/internal";',
+          "export default {",
+          "  fetch() {",
+          "    return new Response([rootValue, internalValue].join(','));",
+          "  }",
+          "};"
+        ].join("\n"),
+        "node_modules/fixture/package.json": JSON.stringify({
+          name: "fixture",
+          main: "index.js"
+        }),
+        "node_modules/fixture/index.js": 'export const rootValue = "root";',
+        "node_modules/fixture/internal/index.js":
+          'export const internalValue = "internal";'
+      },
+      entryPoint: "index.js"
+    });
+
+    const id = "test-bundle-subpath-" + testId++;
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: result.mainModule,
+      modules: result.modules,
+      compatibilityDate: "2026-01-01"
+    }));
+
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(await response.text()).toBe("root,internal");
+  });
+
+  it("does not resolve subpaths an exports map leaves out", async () => {
+    const result = await createWorker({
+      files: {
+        "index.js":
+          'import { internalValue } from "fixture/internal"; export default internalValue;',
+        "node_modules/fixture/package.json": JSON.stringify({
+          name: "fixture",
+          main: "index.js",
+          exports: { ".": "./index.js" }
+        }),
+        "node_modules/fixture/index.js": 'export const rootValue = "root";',
+        "node_modules/fixture/internal.js":
+          'export const internalValue = "internal";'
+      },
+      entryPoint: "index.js",
+      bundle: false
+    });
+
+    const output = result.modules[result.mainModule] as string;
+    expect(output).not.toContain("/node_modules/fixture/internal.js");
+    expect(output).not.toContain("/node_modules/fixture/index.js");
+  });
 });
 
 describe("createWorker advanced bundler options", () => {
