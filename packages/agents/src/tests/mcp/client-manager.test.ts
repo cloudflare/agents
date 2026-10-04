@@ -1912,6 +1912,55 @@ describe("MCPClientManager OAuth Integration", () => {
     );
   });
 
+  describe("Server Removal", () => {
+    it(
+      "clears the removed server's saved OAuth credentials and keeps other servers'",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        const callbackUrl = "http://localhost:3000/callback";
+        for (const id of ["removed", "kept"]) {
+          saveServer({
+            id,
+            name: id,
+            server_url: `http://${id}.example.com`,
+            callback_url: callbackUrl,
+            client_id: `${id}-client`,
+            auth_url: "https://auth.example.com/authorize",
+            server_options: JSON.stringify({
+              transport: { type: "auto" },
+              client: {}
+            })
+          });
+        }
+
+        await manager.restoreConnectionsFromStorage("test-agent");
+
+        const keysFor = (id: string) => [
+          `/test-agent/${id}/${id}-client/token`,
+          `/test-agent/${id}/${id}-client/client_info/`,
+          `/test-agent/${id}/${id}-client/code_verifier/nonce`,
+          `/test-agent/${id}/oauth_discovery`
+        ];
+        for (const id of ["removed", "kept"]) {
+          for (const key of keysFor(id)) {
+            await harness.storage.put(key, { value: key });
+          }
+        }
+
+        await manager.removeServer("removed");
+
+        const removed = await harness.storage.list({
+          prefix: "/test-agent/removed/"
+        });
+        expect([...removed.keys()]).toEqual([]);
+
+        const kept = await harness.storage.list({
+          prefix: "/test-agent/kept/"
+        });
+        expect([...kept.keys()].sort()).toEqual(keysFor("kept").sort());
+      })
+    );
+  });
+
   describe("OAuth Connection Restoration", () => {
     it(
       "should restore OAuth connections from storage",

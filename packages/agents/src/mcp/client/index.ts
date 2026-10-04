@@ -2259,12 +2259,24 @@ export class MCPClientManager extends LifecycleCapability {
    * Remove an MCP server - closes connection if active and removes from storage.
    */
   async removeServer(serverId: string): Promise<void> {
+    const authProvider =
+      this.mcpConnections[serverId]?.options.transport.authProvider;
     if (this.mcpConnections[serverId]) {
       try {
         await this.closeConnection(serverId);
       } catch (_e) {
         // Ignore errors when closing
       }
+    }
+    // Clear saved OAuth tokens, client info and pending verifiers for this
+    // server. This only deletes local state; it does not revoke the tokens.
+    try {
+      await authProvider?.invalidateCredentials?.("all");
+    } catch (error) {
+      console.warn(
+        `[MCPClientManager] Failed to clear OAuth credentials for ${serverId}:`,
+        error
+      );
     }
     this.removeServerFromStorage(serverId);
     this._onServerStateChanged.fire();
