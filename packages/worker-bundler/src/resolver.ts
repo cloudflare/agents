@@ -157,11 +157,12 @@ function resolvePackage(
     // resolve.exports failed, try legacy resolution
   }
 
-  // Fall back to legacy resolution (main, module fields)
+  // Fall back to legacy resolution (main, module fields). These only
+  // describe the package root, so a subpath import skips them.
   const legacyEntry = resolveExports.legacy(pkg, {
     fields: ["module", "main"]
   });
-  if (legacyEntry && typeof legacyEntry === "string") {
+  if (!subpath && legacyEntry && typeof legacyEntry === "string") {
     const fullPath = `node_modules/${packageName}/${normalizeRelativePath(legacyEntry)}`;
     if (files.read(fullPath) !== null) {
       return { path: fullPath, external: false };

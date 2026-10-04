@@ -308,6 +308,60 @@ describe("createWorker transform-only mode (build + load + fetch)", () => {
       .fetch(new Request("http://worker/"));
     expect(await response.text()).toBe("Hello, world!");
   });
+
+  it("resolves package subpaths without an exports map to the subpath, not main", async () => {
+    const result = await createWorker({
+      files: {
+        "index.js": [
+          'import { rootValue } from "fixture";',
+          'import { internalValue } from "fixture/internal";',
+          'import { fileValue } from "fixture/lib/file";',
+          'import { scopedValue } from "@scope/fixture/sub";',
+          "export default {",
+          "  fetch() {",
+          "    return new Response([rootValue, internalValue, fileValue, scopedValue].join(','));",
+          "  }",
+          "};"
+        ].join("\n"),
+        "node_modules/fixture/package.json": JSON.stringify({
+          name: "fixture",
+          main: "index.js"
+        }),
+        "node_modules/fixture/index.js": 'export const rootValue = "root";',
+        "node_modules/fixture/internal/index.js":
+          'export const internalValue = "internal";',
+        "node_modules/fixture/lib/file.js": 'export const fileValue = "file";',
+        "node_modules/@scope/fixture/package.json": JSON.stringify({
+          name: "@scope/fixture",
+          main: "index.js"
+        }),
+        "node_modules/@scope/fixture/index.js":
+          'export const scopedRoot = "scoped-root";',
+        "node_modules/@scope/fixture/sub.js":
+          'export const scopedValue = "scoped";'
+      },
+      entryPoint: "index.js",
+      bundle: false
+    });
+
+    const output = result.modules[result.mainModule] as string;
+    expect(output).toContain("/node_modules/fixture/index.js");
+    expect(output).toContain("/node_modules/fixture/internal/index.js");
+    expect(output).toContain("/node_modules/fixture/lib/file.js");
+    expect(output).toContain("/node_modules/@scope/fixture/sub.js");
+
+    const id = "test-transform-" + testId++;
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: result.mainModule,
+      modules: result.modules,
+      compatibilityDate: "2026-01-01"
+    }));
+
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(await response.text()).toBe("root,internal,file,scoped");
+  });
 });
 
 describe("createWorker advanced bundler options", () => {
