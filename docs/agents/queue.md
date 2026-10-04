@@ -7,9 +7,8 @@ survives the object leaving memory.
 
 ## Queue Lifecycle capability
 
-> **Experimental.** The `Queue` capability and the `agents/lifecycle` surface
-> it builds on may change between releases. Agent's established queue methods
-> (`this.queue()` and friends) are stable.
+> **Experimental.** The `Queue` capability may change between releases.
+> Agent's queue methods (`this.queue()` and friends) are stable.
 
 `Queue` is a reusable Lifecycle capability. A plain Lifecycle Object can
 install it without extending `Agent`:

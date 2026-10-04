@@ -1111,8 +1111,6 @@ export class Agent<
 > extends DurableObject<Env> {
   /**
    * Runtime lifecycle and reusable durable capabilities for this Agent.
-   *
-   * @experimental The API surface may change before stabilizing.
    */
   readonly lifecycle = Lifecycle.install<Env, Props>(this, {
     maxAlarmMemoryLimitStrikes: this._resolvedOptions.maxAlarmMemoryLimitStrikes
@@ -1321,10 +1319,8 @@ export class Agent<
 
   /**
    * Durable scheduling capability installed into this Agent's Lifecycle.
-   *
-   * @experimental The API surface may change before stabilizing. Agent's
-   * schedule()/scheduleEvery()/getScheduleById()/listSchedules()/
-   * cancelSchedule() methods are the stable surface.
+   * Agent's schedule()/scheduleEvery()/getScheduleById()/listSchedules()/
+   * cancelSchedule() methods delegate to it.
    */
   readonly scheduler: Scheduler;
 

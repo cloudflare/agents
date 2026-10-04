@@ -142,8 +142,6 @@ function isRpcRequest(value: unknown): value is RpcRequest {
  * and client updates are validated and applied; the state owner
  * broadcasts changes with `broadcastState()`. Per-connection readonly
  * and no-protocol flags live here as well, for every host.
- *
- * @experimental The API surface may change before stabilizing.
  */
 export class WebSockets extends LifecycleCapability {
   /** Claims every upgrade, so Lifecycle dispatches it after all others. */

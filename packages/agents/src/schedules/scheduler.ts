@@ -160,8 +160,6 @@ function isSchedulerJobPayload(value: unknown): value is SchedulerJobPayload {
  * Lifecycle job queue; Lifecycle owns the physical alarm and the alarm
  * event loop, and Scheduler runs registered callbacks through Lifecycle's
  * host invocation boundary when its jobs come due.
- *
- * @experimental The API surface may change before stabilizing.
  */
 export class Scheduler<
   Handlers extends SchedulerHandlers = SchedulerCallbacks

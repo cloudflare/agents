@@ -1,7 +1,5 @@
 /**
  * Durable Object lifecycle composition.
- *
- * @experimental Every export here may change before stabilizing.
  */
 export {
   LifecycleCapability,
