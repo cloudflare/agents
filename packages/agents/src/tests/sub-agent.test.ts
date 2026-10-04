@@ -1013,6 +1013,15 @@ describe("SubAgent", () => {
     expect(row).toBeUndefined();
   });
 
+  it("returns no outcome for a routed Task wake whose owner facet is gone", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    expect(await agent.driveStaleRoutedTaskWake("task_stale_direct")).toBe(
+      "undefined"
+    );
+  });
+
   it("keepAlive() delegates heartbeat refs from a sub-agent to the root", async () => {
     // Regression: earlier versions banned keepAlive on facets, which
     // crashed every streaming turn in an AIChatAgent facet
