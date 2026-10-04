@@ -9,6 +9,7 @@ import type {
 } from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
 import { MessageType } from "../../types.ts";
+import type { Tasks } from "../../tasks/tasks.ts";
 
 const STALE_FRAME_PROBE = "stale-frame-probe";
 
@@ -1661,6 +1662,25 @@ export class TestSubAgentParent extends Agent {
   async backdateSchedule(id: string): Promise<void> {
     const past = Date.now() - 1_000;
     this.sql`UPDATE cf_agents_jobs SET time = ${past} WHERE id = ${id}`;
+  }
+
+  /** Drive a routed Task wake for a facet that is not in the registry. */
+  async driveStaleRoutedTaskWake(runId: string): Promise<string> {
+    const path = [
+      { className: "TestSubAgentParent", name: this.name },
+      { className: "CounterSubAgent", name: "gone-task-child" }
+    ];
+    const key = path
+      .map((p) => `${p.className}:${encodeURIComponent(p.name)}`)
+      .join("/");
+    const job = {
+      id: `task:${key}:${runId}`,
+      fn: "wake",
+      time: Date.now(),
+      payload: { runId, owner_path: JSON.stringify(path), owner_path_key: key }
+    } as unknown as Parameters<Tasks["onJob"]>[0]["job"];
+    const outcome = await this.tasks.onJob({ job, attempt: 1 });
+    return outcome === undefined ? "undefined" : JSON.stringify(outcome);
   }
 
   async forgetCounterSubAgentRegistry(subAgentName: string): Promise<void> {
