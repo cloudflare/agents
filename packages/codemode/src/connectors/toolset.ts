@@ -102,6 +102,11 @@ export class ToolSetConnector extends CodemodeConnector {
         rawSchema != null
           ? asSchema(rawSchema as Parameters<typeof asSchema>[0])
           : undefined;
+      const rawOutputSchema = (t as { outputSchema?: unknown }).outputSchema;
+      const outputSchema =
+        rawOutputSchema != null
+          ? asSchema(rawOutputSchema as Parameters<typeof asSchema>[0])
+          : undefined;
 
       // boolean `false` means no approval; `true` or a function (which can't
       // be pre-evaluated against sandbox args) gates the call behind the
@@ -114,6 +119,7 @@ export class ToolSetConnector extends CodemodeConnector {
         description:
           typeof t.description === "function" ? undefined : t.description,
         inputSchema: schema?.jsonSchema as JSONSchema7 | undefined,
+        outputSchema: outputSchema?.jsonSchema as JSONSchema7 | undefined,
         ...(requiresApproval ? { requiresApproval: true } : {}),
         execute: schema?.validate
           ? async (args: unknown) => {

@@ -57,6 +57,33 @@ describe("ToolSetConnector", () => {
     ).resolves.toBe("sunny in Lisbon");
   });
 
+  it("forwards output schemas into connector descriptors", async () => {
+    const connector = new ToolSetConnector(ctx, {
+      tools: {
+        getDashboard: tool({
+          inputSchema: z.object({ token: z.string() }),
+          outputSchema: z.object({ token: z.string(), title: z.string() }),
+          execute: async ({ token }) => ({ token, title: "Example" })
+        }),
+        noOutput: tool({
+          inputSchema: z.object({}),
+          execute: async () => "ok"
+        })
+      }
+    });
+
+    const desc = await connector.describe();
+    expect(desc.descriptors.getDashboard.outputSchema).toMatchObject({
+      type: "object",
+      properties: {
+        token: { type: "string" },
+        title: { type: "string" }
+      },
+      required: ["token", "title"]
+    });
+    expect(desc.descriptors.noOutput.outputSchema).toBeUndefined();
+  });
+
   it("validates args against the tool schema before executing", async () => {
     const execute = vi.fn(async () => "ok");
     const connector = new ToolSetConnector(ctx, {
