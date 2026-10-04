@@ -1938,6 +1938,8 @@ describe("MCPClientManager OAuth Integration", () => {
           `/test-agent/${id}/${id}-client/token`,
           `/test-agent/${id}/${id}-client/client_info/`,
           `/test-agent/${id}/${id}-client/code_verifier/nonce`,
+          `/test-agent/${id}/old-client/token`,
+          `/test-agent/${id}/state/pending-nonce`,
           `/test-agent/${id}/oauth_discovery`
         ];
         for (const id of ["removed", "kept"]) {
@@ -1957,6 +1959,39 @@ describe("MCPClientManager OAuth Integration", () => {
           prefix: "/test-agent/kept/"
         });
         expect([...kept.keys()].sort()).toEqual(keysFor("kept").sort());
+      })
+    );
+
+    it(
+      "clears saved OAuth credentials for a server whose connection was closed",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        saveServer({
+          id: "closed",
+          name: "closed",
+          server_url: "http://closed.example.com",
+          callback_url: "http://localhost:3000/callback",
+          client_id: "closed-client",
+          auth_url: "https://auth.example.com/authorize",
+          server_options: JSON.stringify({
+            transport: { type: "auto" },
+            client: {}
+          })
+        });
+
+        await manager.restoreConnectionsFromStorage("test-client");
+        await manager.closeConnection("closed");
+        expect(manager.mcpConnections.closed).toBeUndefined();
+
+        await harness.storage.put("/test-client/closed/closed-client/token", {
+          access_token: "secret"
+        });
+
+        await manager.removeServer("closed");
+
+        const left = await harness.storage.list({
+          prefix: "/test-client/closed/"
+        });
+        expect([...left.keys()]).toEqual([]);
       })
     );
   });
