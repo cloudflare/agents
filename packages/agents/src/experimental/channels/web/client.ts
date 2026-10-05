@@ -228,7 +228,9 @@ export class WebChannelClient {
       }
       this.#lists.clear();
       this.#update();
-      if (this.#closed) return;
+      // A subscriber may have closed the client, or followed another
+      // conversation, while it was told about the drop.
+      if (this.#closed || socket !== this.#socket) return;
       this.#reconnect = setTimeout(() => {
         this.#reconnect = undefined;
         this.#connect();

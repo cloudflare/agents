@@ -137,6 +137,26 @@ describe("WebChannelClient", () => {
       client.close();
     });
 
+    it("is not scheduled when a subscriber follows during the drop", () => {
+      const client = new WebChannelClient(
+        "ws://example.com/channels/room/main"
+      );
+      latest().receive(snapshot("main"));
+      const unsubscribe = client.subscribe((state) => {
+        if (state.connected) return;
+        unsubscribe();
+        client.follow("f1");
+      });
+      latest().close();
+
+      const followed = latest();
+      vi.advanceTimersByTime(5000);
+
+      expect(FakeSocket.sockets).toHaveLength(2);
+      expect(followed.url).toBe("ws://example.com/channels/room/f1");
+      client.close();
+    });
+
     it("is cancelled by close", () => {
       const client = new WebChannelClient(
         "ws://example.com/channels/room/main"
