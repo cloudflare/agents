@@ -260,6 +260,16 @@ describe("An AI SDK harness served through Channels", () => {
     expect(await stub.wait("b", "op-b")).toMatchObject({ status: "done" });
   });
 
+  it("rejects a wait whose signal is already aborted", async () => {
+    const stub = agent();
+    await stub.setScript([{ text: "slow", held: true }]);
+    await stub.submit("main", "hi", "o1");
+    // Held, so o1 is still pending when the wait begins.
+    expect(await stub.waitAborted("main", "o1")).toBe("rejected");
+    await stub.release();
+    expect(await stub.wait("main", "o1")).toMatchObject({ status: "done" });
+  });
+
   it("forks a conversation with its history", async () => {
     const stub = agent();
     await stub.setScript([{ text: "first" }]);

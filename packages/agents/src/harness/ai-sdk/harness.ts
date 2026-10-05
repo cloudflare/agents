@@ -243,6 +243,12 @@ export class AiSdkHarness<TOOLS extends ToolSet = ToolSet>
     }
     const settled = isPending(op)
       ? await new Promise<StoredOperation>((resolve, reject) => {
+          // An abort event fires once, so a signal aborted before the wait
+          // began would never reach the listener below.
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
           const key = waiterKey(session, operationId);
           const waiters = this.#waiters.get(key) ?? new Set();
           this.#waiters.set(key, waiters);
