@@ -367,6 +367,47 @@ describe("Channels over the Web Channel", () => {
     expect(await stub.responseState(others[1000])).toBe("streaming");
   });
 
+  it("settles a harness-side submission with its own message id", async () => {
+    const stub = harness();
+    const alice = await connect(stub);
+    const user = {
+      id: "m1",
+      role: "user" as const,
+      parts: [{ type: "text" as const, text: "hi" }]
+    };
+    const reply = {
+      id: "a1",
+      role: "assistant" as const,
+      parts: [{ type: "text" as const, text: "hello" }]
+    };
+    // Submitted to the harness directly, with a message id of its own.
+    await stub.emit([
+      { type: "operation", status: { operationId: "op1", status: "queued" } },
+      { type: "message", message: user },
+      { type: "operation", status: { operationId: "op1", status: "placed" } },
+      { type: "run-start", operations: ["op1"] },
+      { type: "message", message: reply },
+      { type: "run-end", operations: ["op1"] },
+      { type: "operation", status: { operationId: "op1", status: "done" } }
+    ]);
+    expect(
+      await until(
+        alice,
+        (f) => f.type === "channels:turn" && f.turn.status === "settled"
+      )
+    ).toEqual({
+      type: "channels:turn",
+      conversationId: "default",
+      turn: {
+        turnId: "op1",
+        startedBy: "op1",
+        status: "settled",
+        outcome: "completed",
+        messageIds: ["a1"]
+      }
+    });
+  });
+
   it("settles a turn the harness could not answer as failed", async () => {
     const stub = harness();
     const alice = await connect(stub);

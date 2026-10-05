@@ -344,6 +344,7 @@ export class HarnessConversations {
         }
         return;
       case "placed":
+        await this.#placed(conversationId, link, operationId);
         // A steer joins the running run.
         return this.#join(conversationId, link, operationId);
       case "done":
@@ -372,6 +373,36 @@ export class HarnessConversations {
         );
       }
     }
+  }
+
+  /**
+   * Learn the user message of an operation a client of the harness
+   * submitted. Its id is the caller's `messageId`, unknown until placed;
+   * the harness saves the message just before it reports the placement.
+   */
+  async #placed(
+    conversationId: string,
+    link: SessionLink,
+    operationId: string
+  ): Promise<void> {
+    const turn = this.#turn(conversationId, operationId);
+    if (
+      !turn ||
+      turn.turnId !== operationId ||
+      turn.startedBy !== operationId ||
+      turn.messageId !== operationId ||
+      link.messages.some((m) => m.id === operationId)
+    ) {
+      return;
+    }
+    const claimed = new Set(
+      this.#turns(conversationId).map((t) => t.messageId)
+    );
+    const message = [...link.messages]
+      .reverse()
+      .find((m) => m.role === "user" && !claimed.has(m.id));
+    if (!message) return;
+    await this.#save(conversationId, { ...turn, messageId: message.id });
   }
 
   async #join(
