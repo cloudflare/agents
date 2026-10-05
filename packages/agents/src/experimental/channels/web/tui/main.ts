@@ -1,4 +1,4 @@
-import { accessHeaders } from "./access";
+import { accessHeaders, type AccessHeaders } from "./access";
 import { parseArgs, usage, UsageError } from "./args";
 import { runTui } from "./app";
 
@@ -16,13 +16,14 @@ export async function main(argv: readonly string[]): Promise<number> {
     console.error(`${error.message}\n\n${usage}`);
     return 2;
   }
+  let access: AccessHeaders;
   try {
-    const access = await accessHeaders(args.url, args.headers);
-    args = { ...args, headers: { ...args.headers, ...access } };
+    access = await accessHeaders(args.url, args.headers);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     return 1;
   }
-  await runTui(args);
+  const { headers } = args;
+  await runTui(args, () => ({ ...headers, ...access() }));
   return 0;
 }

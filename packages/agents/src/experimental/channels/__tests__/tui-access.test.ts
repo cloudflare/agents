@@ -21,6 +21,13 @@ function deps(options: {
           })
         : new Response("ok");
     },
+    runSync: (command, args) => {
+      calls.push({ command: [command, ...args] });
+      const token = tokens.shift();
+      return token
+        ? { code: 0, stdout: `${token}\n` }
+        : { code: 1, stdout: "" };
+    },
     run: async (command, args) => {
       calls.push({ command: [command, ...args] });
       if (options.missing) throw new Error("Install cloudflared");
@@ -38,13 +45,17 @@ function deps(options: {
 describe("tui Access", () => {
   it("sends nothing to a URL that is not behind Access", async () => {
     const { value, calls } = deps({});
-    expect(await accessHeaders("wss://h/channels/r", {}, value)).toEqual({});
+    expect((await accessHeaders("wss://h/channels/r", {}, value))()).toEqual(
+      {}
+    );
     expect(calls).toEqual([{ url: "https://h/channels/r" }]);
   });
 
   it("gets a token from cloudflared for the address being opened", async () => {
     const { value, calls } = deps({ location: LOGIN, tokens: [TOKEN] });
-    expect(await accessHeaders("wss://h/channels/r?as=a", {}, value)).toEqual({
+    expect(
+      (await accessHeaders("wss://h/channels/r?as=a", {}, value))()
+    ).toEqual({
       "cf-access-token": TOKEN
     });
     expect(calls[1]).toEqual({
@@ -57,7 +68,7 @@ describe("tui Access", () => {
       location: LOGIN,
       tokens: [undefined, TOKEN]
     });
-    expect(await accessHeaders("wss://h/c", {}, value)).toEqual({
+    expect((await accessHeaders("wss://h/c", {}, value))()).toEqual({
       "cf-access-token": TOKEN
     });
     expect(calls.map((call) => call.command?.[2])).toEqual([
@@ -71,7 +82,9 @@ describe("tui Access", () => {
   it("leaves credentials the caller sends alone", async () => {
     const { value, calls } = deps({ location: LOGIN, tokens: [TOKEN] });
     expect(
-      await accessHeaders("wss://h/c", { "cf-access-client-id": "id" }, value)
+      (
+        await accessHeaders("wss://h/c", { "cf-access-client-id": "id" }, value)
+      )()
     ).toEqual({});
     expect(calls).toEqual([]);
   });
@@ -85,20 +98,22 @@ describe("tui Access", () => {
   it("still logs in when the caller's cookie is not Access's", async () => {
     const { value } = deps({ location: LOGIN, tokens: [TOKEN] });
     expect(
-      await accessHeaders("wss://h/c", { cookie: "theme=dark" }, value)
+      (await accessHeaders("wss://h/c", { cookie: "theme=dark" }, value))()
     ).toEqual({ "cf-access-token": TOKEN });
     expect(
-      await accessHeaders(
-        "wss://h/c",
-        { cookie: "theme=dark; CF_Authorization=x" },
-        value
-      )
+      (
+        await accessHeaders(
+          "wss://h/c",
+          { cookie: "theme=dark; CF_Authorization=x" },
+          value
+        )
+      )()
     ).toEqual({});
   });
 
   it("ignores redirects that are not to Access", async () => {
     const { value } = deps({ location: "https://h/login" });
-    expect(await accessHeaders("wss://h/c", {}, value)).toEqual({});
+    expect((await accessHeaders("wss://h/c", {}, value))()).toEqual({});
   });
 
   it("explains how to continue when cloudflared is missing", async () => {
@@ -106,5 +121,18 @@ describe("tui Access", () => {
     await expect(accessHeaders("wss://h/c", {}, value)).rejects.toThrow(
       "Install cloudflared"
     );
+  });
+
+  it("gets a fresh token, without logging in, each time headers are read", async () => {
+    const { value, calls } = deps({
+      location: LOGIN,
+      tokens: [TOKEN, "ddd.eee.fff", undefined]
+    });
+    const headers = await accessHeaders("wss://h/c", {}, value);
+    expect(headers()).toEqual({ "cf-access-token": TOKEN });
+    expect(headers()).toEqual({ "cf-access-token": "ddd.eee.fff" });
+    // A failed refresh keeps the last token; the upgrade reports the rest.
+    expect(headers()).toEqual({ "cf-access-token": "ddd.eee.fff" });
+    expect(calls.filter((call) => call.command?.[2] === "login")).toEqual([]);
   });
 });
