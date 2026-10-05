@@ -100,4 +100,74 @@ describe("WebChannelClient", () => {
     });
     client.close();
   });
+
+  it("rejects events and list requests made after close", async () => {
+    const client = new WebChannelClient("ws://example.com/channels/room/main");
+    latest().receive(snapshot("main"));
+    client.close();
+
+    await expect(client.send({ type: "conversation-create" })).rejects.toThrow(
+      "Closed"
+    );
+    await expect(client.listConversations()).rejects.toThrow("Closed");
+    expect(latest().sent).toEqual([]);
+  });
+
+  describe("a reconnect waiting after a drop", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it("is cancelled by follow, so the followed socket stays current", () => {
+      const client = new WebChannelClient(
+        "ws://example.com/channels/room/main"
+      );
+      latest().receive(snapshot("main"));
+      latest().close();
+
+      client.follow("f1");
+      const followed = latest();
+      vi.advanceTimersByTime(5000);
+
+      expect(FakeSocket.sockets).toHaveLength(2);
+      followed.receive(snapshot("f1"));
+      expect(client.state).toMatchObject({
+        connected: true,
+        conversationId: "f1"
+      });
+      client.close();
+    });
+
+    it("is not scheduled when a subscriber follows during the drop", () => {
+      const client = new WebChannelClient(
+        "ws://example.com/channels/room/main"
+      );
+      latest().receive(snapshot("main"));
+      const unsubscribe = client.subscribe((state) => {
+        if (state.connected) return;
+        unsubscribe();
+        client.follow("f1");
+      });
+      latest().close();
+
+      const followed = latest();
+      vi.advanceTimersByTime(5000);
+
+      expect(FakeSocket.sockets).toHaveLength(2);
+      expect(followed.url).toBe("ws://example.com/channels/room/f1");
+      client.close();
+    });
+
+    it("is cancelled by close", () => {
+      const client = new WebChannelClient(
+        "ws://example.com/channels/room/main"
+      );
+      latest().receive(snapshot("main"));
+      latest().close();
+
+      client.close();
+      vi.advanceTimersByTime(5000);
+
+      expect(FakeSocket.sockets).toHaveLength(1);
+    });
+  });
 });
