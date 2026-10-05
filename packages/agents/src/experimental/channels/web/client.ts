@@ -74,6 +74,8 @@ export class WebChannelClient {
   #socket: WebSocket | undefined;
   #closed = false;
   #connected = false;
+  /** The reconnect scheduled after a socket closed, until it runs. */
+  #reconnect: ReturnType<typeof setTimeout> | undefined;
   #you: Participant | undefined;
   #transcript: TranscriptMessage[] = [];
   readonly #turns = new Map<string, TurnStatus>();
@@ -133,8 +135,10 @@ export class WebChannelClient {
    * Resolves once the agent accepts the event, and rejects if it refuses.
    * While disconnected the event waits, and it is sent again after a
    * reconnect until acknowledged; Channels drops repeats by `eventId`.
+   * Rejects once the client is closed.
    */
   send(event: ClientEvent): Promise<void> {
+    if (this.#closed) return Promise.reject(new Error("Closed"));
     const eventId = event.eventId ?? crypto.randomUUID();
     // SAFETY: the same event, with its id filled in.
     const complete = { ...event, eventId } as InboundEvent;
@@ -152,8 +156,9 @@ export class WebChannelClient {
     });
   }
 
-  /** The agent's conversations. Rejects while disconnected. */
+  /** The agent's conversations. Rejects while disconnected or closed. */
   listConversations(): Promise<ConversationInfo[]> {
+    if (this.#closed) return Promise.reject(new Error("Closed"));
     if (!this.#connected) return Promise.reject(new Error("Not connected"));
     const requestId = crypto.randomUUID();
     return new Promise((resolve, reject) => {
@@ -173,6 +178,7 @@ export class WebChannelClient {
     this.#url = String(this.#followUrl(new URL(this.#url), conversationId));
     const previous = this.#socket;
     this.#connected = false;
+    this.#cancelReconnect();
     this.#connect();
     previous?.close();
     this.#update();
@@ -181,8 +187,14 @@ export class WebChannelClient {
   /** Closes the connection and rejects events still waiting for an ack. */
   close(): void {
     this.#closed = true;
+    this.#cancelReconnect();
     this.#socket?.close();
     this.#rejectPending(new Error("Closed"));
+  }
+
+  #cancelReconnect(): void {
+    clearTimeout(this.#reconnect);
+    this.#reconnect = undefined;
   }
 
   #rejectPending(error: Error): void {
@@ -216,7 +228,11 @@ export class WebChannelClient {
       }
       this.#lists.clear();
       this.#update();
-      if (!this.#closed) setTimeout(() => this.#connect(), 1000);
+      if (this.#closed) return;
+      this.#reconnect = setTimeout(() => {
+        this.#reconnect = undefined;
+        this.#connect();
+      }, 1000);
     });
   }
 
