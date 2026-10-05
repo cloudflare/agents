@@ -277,7 +277,11 @@ export class WebChannelClient {
         for (const { event } of this.#outbox.values()) {
           this.#send({ type: "channels:event", event });
         }
-        break;
+        this.#update();
+        // Listeners may have missed changes while disconnected, such as a
+        // turn restarted under a new response.
+        for (const turn of frame.turns) this.#emit({ type: "turn", turn });
+        return;
       case "channels:turn":
         this.#setTurn(frame.turn);
         this.#update();
@@ -362,7 +366,11 @@ export class WebChannelClient {
     for (const listener of this.#activity) listener(activity);
   }
 
-  /** After a reconnect, keep reading still-running responses where we were. */
+  /**
+   * After a reconnect, keep reading unended responses where we were. One
+   * whose turn has moved on is no longer shown, but its remaining chunks
+   * and end still reach activity listeners.
+   */
   #resume(turns: TurnStatus[]): void {
     const running = new Set(
       turns.flatMap((turn) =>
@@ -370,7 +378,8 @@ export class WebChannelClient {
       )
     );
     for (const [responseId, response] of this.#responses) {
-      if (!running.has(responseId)) {
+      if (!running.has(responseId)) response.shown = false;
+      if (response.ended) {
         this.#responses.delete(responseId);
         continue;
       }

@@ -47,8 +47,12 @@ const overlay: OverlayOptions = {
   maxHeight: "80%"
 };
 
-export function runTui(args: TuiArgs): Promise<void> {
-  sendHeadersOnUpgrade(args.headers);
+/** `headers` gives the upgrade headers for each connection; default `args.headers`. */
+export function runTui(
+  args: TuiArgs,
+  headers: () => Record<string, string> = () => args.headers
+): Promise<void> {
+  sendHeadersOnUpgrade(headers);
   const client = new WebChannelClient(args.url);
   const terminal = new ProcessTerminal();
   const tui = new TuiMainScreen(terminal);

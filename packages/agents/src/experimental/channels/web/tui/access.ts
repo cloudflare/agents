@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 /** What finding an Access token needs, replaceable in tests. */
 export type AccessDeps = {
@@ -9,8 +9,16 @@ export type AccessDeps = {
     args: readonly string[],
     interactive: boolean
   ): Promise<{ code: number; stdout: string }>;
+  /** Runs a command without the terminal, blocking until it exits. */
+  runSync(
+    command: string,
+    args: readonly string[]
+  ): { code: number; stdout: string };
   log(message: string): void;
 };
+
+/** Headers for the next WebSocket upgrade. */
+export type AccessHeaders = () => Record<string, string>;
 
 /** Whether the caller already sends Access credentials. */
 function authenticated(headers: Readonly<Record<string, string>>): boolean {
@@ -21,37 +29,41 @@ function authenticated(headers: Readonly<Record<string, string>>): boolean {
   );
 }
 
+/** A token in `cloudflared access token` output, if it printed one. */
+function tokenIn({ code, stdout }: { code: number; stdout: string }) {
+  const value = stdout.trim();
+  return code === 0 && /^[\w-]+\.[\w-]+\.[\w-]+$/.test(value)
+    ? value
+    : undefined;
+}
+
 /**
  * The `cf-access-token` header for a URL behind Cloudflare Access, from
  * `cloudflared`. Logs in through the browser when there is no token yet.
- * Returns no headers when the caller already sends credentials, or when the
+ * The returned function gives the header for each WebSocket upgrade: the
+ * first read uses the token found here, and later reads ask `cloudflared`
+ * again without the terminal, so a reconnect after the token expires sends
+ * the one `cloudflared` refreshed. If that fails, the last token is kept.
+ * Gives no headers when the caller already sends credentials, or when the
  * URL is not behind Access.
  */
 export async function accessHeaders(
   socketUrl: string,
   headers: Readonly<Record<string, string>>,
   deps: AccessDeps = nodeDeps
-): Promise<Record<string, string>> {
-  if (authenticated(headers)) return {};
+): Promise<AccessHeaders> {
+  const none = () => ({});
+  if (authenticated(headers)) return none;
   // Access can protect a path rather than the whole host, so probe and log
   // in to the address being opened.
   const url = new URL(socketUrl);
   url.protocol = url.protocol === "ws:" ? "http:" : "https:";
   url.search = "";
   const app = url.toString();
-  if (!(await behindAccess(app, deps))) return {};
+  if (!(await behindAccess(app, deps))) return none;
 
-  const token = async () => {
-    const { code, stdout } = await deps.run(
-      "cloudflared",
-      ["access", "token", `-app=${app}`],
-      false
-    );
-    const value = stdout.trim();
-    return code === 0 && /^[\w-]+\.[\w-]+\.[\w-]+$/.test(value)
-      ? value
-      : undefined;
-  };
+  const args = ["access", "token", `-app=${app}`];
+  const token = async () => tokenIn(await deps.run("cloudflared", args, false));
 
   let value = await token();
   if (value === undefined) {
@@ -64,7 +76,19 @@ export async function accessHeaders(
       `Could not get a Cloudflare Access token for ${app}. Run \`cloudflared access login ${app}\`, or pass --header cf-access-token=<token>.`
     );
   }
-  return { "cf-access-token": value };
+  let current = value;
+  let fresh = true;
+  return () => {
+    if (!fresh) {
+      try {
+        current = tokenIn(deps.runSync("cloudflared", args)) ?? current;
+      } catch {
+        // Keep the last token; the upgrade reports a rejection.
+      }
+    }
+    fresh = false;
+    return { "cf-access-token": current };
+  };
 }
 
 async function behindAccess(app: string, deps: AccessDeps) {
@@ -103,5 +127,13 @@ const nodeDeps: AccessDeps = {
       });
       child.on("close", (code) => resolve({ code: code ?? 1, stdout }));
     }),
+  runSync: (command, args) => {
+    const result = spawnSync(command, args, {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+      timeout: 10_000
+    });
+    return { code: result.status ?? 1, stdout: result.stdout ?? "" };
+  },
   log: (message) => console.error(message)
 };
