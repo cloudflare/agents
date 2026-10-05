@@ -30,6 +30,7 @@
   "devDependencies": {
     "@ai-sdk/tui": "1.0.119",
     "@cloudflare/vite-plugin": "1.62.3",
+    "@cloudflare/vitest-pool-workers": "^0.19.1",
     "@cloudflare/workers-types": "^5.20260729.1",
     "@tailwindcss/vite": "^4",
     "@types/node": "^26.0.1",
@@ -39,8 +40,7 @@
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
-    "wrangler": "^4.145.0",
-    "@cloudflare/vitest-pool-workers": "^0.19.1",
-    "vitest": "4.1.11"
+    "vitest": "4.1.11",
+    "wrangler": "^4.145.0"
   }
 }

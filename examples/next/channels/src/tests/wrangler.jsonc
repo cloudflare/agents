@@ -8,5 +8,7 @@
       { "name": "PI_CHANNELS_TEST", "class_name": "PiChannelsTestObject" }
     ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PiChannelsTestObject"] }]
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["PiChannelsTestObject"] }
+  ]
 }
