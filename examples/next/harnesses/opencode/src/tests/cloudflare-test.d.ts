@@ -1,3 +1,5 @@
+import "@cloudflare/vitest-pool-workers/types";
+
 import type { OpenCodeHarnessTestObject } from "./worker";
 
 declare global {

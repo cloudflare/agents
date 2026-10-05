@@ -19,7 +19,6 @@ import { Streams } from "../streams";
 
 declare const binding: Ai;
 
-/** The composition the example uses: one capability, a provider, defaults. */
 class OpenCodeObject extends DurableObject {
   readonly ai = createAI({ binding });
   readonly streams = new Streams();
@@ -36,7 +35,6 @@ class OpenCodeObject extends DurableObject {
 declare const object: OpenCodeObject;
 const harness = object.harness;
 
-// The same interface as PiHarness.
 harness.prompt("hi") satisfies Promise<OpenCodePromptResponse>;
 harness.submit("hi", {
   operationId: "op",
@@ -53,7 +51,6 @@ session.steer("more") satisfies Promise<OpenCodeReceipt>;
 session.events() satisfies Promise<OpenCodeEventStream>;
 session.busy() satisfies Promise<boolean>;
 
-// OpenCode's own HTTP API, for the CLI.
 harness.fetch(
   new Request("http://opencode/api/session")
 ) satisfies Promise<Response>;

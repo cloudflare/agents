@@ -12,7 +12,7 @@ import type { ToolInfo } from "./workspace";
 
 const SESSION_TAG_PREFIX = "opencode-session:";
 const SESSION_QUERY = "session";
-/** `WebSocket.OPEN`; the constant is not defined on every runtime's global. */
+
 const OPEN = 1;
 
 function sessionTag(session: OpenCodeSessionId): string {
@@ -43,20 +43,10 @@ function send(socket: WebSocket, message: OpenCodeServerMessage): void {
   try {
     socket.send(JSON.stringify(message));
   } catch {
-    // The socket closed between the state check and the send.
+    // The socket may close after the readyState check.
   }
 }
 
-/**
- * App glue: this app's session protocol over the `WebSockets` capability,
- * built only on the harness's public API. The same glue as the Pi example.
- *
- * Each socket follows one session, picked by `?session=`, through its own
- * `session.events()` stream: a `snapshot`, then the session's events.
- * Commands on the socket call `session.submit()` and `abort()`. Watches
- * live in memory, so the host calls `reattach()` from its `onStart` to give
- * sockets that outlived the last isolate a new watch and a fresh snapshot.
- */
 export class OpenCodeSessionSockets {
   readonly #harness: OpenCodeHarness;
   readonly #tools: readonly ToolInfo[];
@@ -65,7 +55,6 @@ export class OpenCodeSessionSockets {
 
   constructor(
     harness: OpenCodeHarness,
-    /** The tools OpenCode was given, for the tool list sent on connect. */
     tools: readonly ToolInfo[],
     getWebSockets: (tag?: string) => WebSocket[]
   ) {
@@ -89,11 +78,9 @@ export class OpenCodeSessionSockets {
     };
   }
 
-  /** Give every hibernated socket a new watch after the object restarts. */
   async reattach(): Promise<void> {
     if (this.#getWebSockets().length === 0) return;
-    // Sockets are found by tag, not tags by socket, so walk the sessions
-    // and look up each one's tag; the root's sockets are tagged by alias.
+
     const ids = [
       ROOT_SESSION,
       ...(await this.#harness.sessions.list()).map(({ id }) => id)
@@ -116,10 +103,6 @@ export class OpenCodeSessionSockets {
     await this.#watch(connection, session, { hello: true });
   }
 
-  /**
-   * Start a watch. On connect the hello goes first, with OpenCode's own id
-   * for the session, so the client can show the CLI command for it.
-   */
   async #watch(
     socket: WebSocket,
     session: OpenCodeSessionId,

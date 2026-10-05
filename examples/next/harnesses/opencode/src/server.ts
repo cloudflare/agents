@@ -17,14 +17,9 @@ const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 const PREAMBLE =
   "You are a concise playground assistant. You have a durable workspace at /workspace: read, write, edit, delete, list (ls), find and grep files there, and run JavaScript modules in it with exec, which can also use git. Paths are absolute. Use tools whenever they can answer the request, and explain their results plainly.";
 
-/** Playable OpenCode session backed by one Durable Object. */
 export class OpenCodeAgent extends DurableObject<Env> {
-  // Workers AI over the AI binding, as OpenCode's own Workers AI provider.
   readonly ai = createAI({ binding: this.env.AI });
-  // A durable filesystem on the object's SQLite, beside OpenCode's tables.
-  // `exec` runs JavaScript modules in a fresh Dynamic Worker per call, with
-  // no network of its own. `git` turns on `workspace.git`, which `ws:git`
-  // calls in the host; `allowGitNetwork` lets it clone, fetch and push.
+
   readonly workspace = new Workspace({
     storage: this.ctx.storage as unknown as DurableObjectStorageLike,
     git: createGitClient(),
@@ -38,7 +33,7 @@ export class OpenCodeAgent extends DurableObject<Env> {
       })
     ]
   });
-  // The Workspace tools, in place of OpenCode's local filesystem and shell.
+
   readonly tools = createWorkspaceTools(this.workspace);
   readonly streams = new Streams();
   readonly harness = new OpenCodeHarness({
@@ -49,7 +44,6 @@ export class OpenCodeAgent extends DurableObject<Env> {
     defaults: { model: this.ai(MODEL_ID) }
   });
 
-  // App glue, not the harness: how this app puts sessions on a socket.
   readonly sockets = new OpenCodeSessionSockets(
     this.harness,
     this.tools.tools,
@@ -61,12 +55,10 @@ export class OpenCodeAgent extends DurableObject<Env> {
     .use(this.streams)
     .use(this.webSockets);
 
-  /** Host startup, after the harness has booted OpenCode. */
   async onStart(): Promise<void> {
     await this.sockets.reattach();
   }
 
-  /** OpenCode's own HTTP API, for the OpenCode CLI. See `cli.ts`. */
   async onRequest(request: Request): Promise<Response> {
     return this.harness.fetch(openCodeRequest(request));
   }
@@ -75,7 +67,6 @@ export class OpenCodeAgent extends DurableObject<Env> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (new URL(request.url).pathname === "/api/session") {
-      // A fresh session id for the client to open its WebSocket against.
       return Response.json({ session: crypto.randomUUID() });
     }
     try {

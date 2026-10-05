@@ -1,6 +1,5 @@
 import type { OpenCodeJson, OpenCodeMessage, OpenCodePart } from "./types";
 
-/** How OpenCode's messages say one operation ended. */
 export type SettledResult = {
   readonly operationId: string;
   readonly status: "completed" | "aborted" | "failed" | "declined";
@@ -8,23 +7,15 @@ export type SettledResult = {
   readonly error?: { readonly code: string; readonly message: string };
 };
 
-/**
- * One OpenCode session message, as `message.list` returns it: a tagged
- * union on `type`. Only the fields the harness reads are named here.
- */
 export type RawMessage = {
   readonly id: string;
   readonly type: string;
   readonly time?: { readonly created?: number; readonly completed?: number };
-  /** A user message's prompt. */
   readonly text?: string;
-  /** An assistant message's parts. */
   readonly content?: ReadonlyArray<Record<string, unknown>>;
-  /** Set when an assistant message ended in a provider or runtime error. */
   readonly error?: { readonly type?: string; readonly message?: string };
 };
 
-/** The messages in a `message.list` response, oldest first as listed. */
 export function rawMessages(response: unknown): readonly RawMessage[] {
   if (Array.isArray(response)) return response as RawMessage[];
   if (
@@ -84,7 +75,6 @@ function projectPart(part: Record<string, unknown>): OpenCodePart | undefined {
   }
 }
 
-/** The transcript: user prompts and assistant replies, for display. */
 export function projectMessages(response: unknown): readonly OpenCodeMessage[] {
   const messages: OpenCodeMessage[] = [];
   for (const message of rawMessages(response)) {
@@ -110,7 +100,6 @@ export function projectMessages(response: unknown): readonly OpenCodeMessage[] {
   return messages;
 }
 
-/** True when the response holds this operation's prompt. */
 export function hasOpenCodeOperation(
   response: unknown,
   operationId: string
@@ -119,25 +108,10 @@ export function hasOpenCodeOperation(
   return rawMessages(response).some((message) => message.id === id);
 }
 
-/** The operation's message id in OpenCode. Admission uses the same id. */
 export function messageIdOf(operationId: string): string {
   return `msg_${operationId}`;
 }
 
-/**
- * Where one operation stands in a session's messages.
- *
- * `"absent"` means OpenCode has never seen it: not in the messages at all.
- * `"active"` means its prompt is there but the reply has not completed.
- * A `result` means the reply completed, and the operation can settle.
- *
- * The reply is the last assistant message between the operation's own user
- * message and the next user message — the boundary that separates one
- * turn's answer from the next prompt's. A turn with tool calls writes one
- * assistant message per step, so the last one holds the answer. With queued
- * follow-ups several of our prompts can sit in the messages at once, so the
- * boundary is what keeps each operation reading only its own reply.
- */
 export function inspectOperation(
   response: unknown,
   operationId: string
@@ -156,7 +130,7 @@ export function inspectOperation(
     .filter((message) => message.type === "assistant");
   const reply = replies.at(-1);
   if (!reply?.time?.completed) return "active";
-  // A step that called tools completes before the next step starts.
+
   if (
     nextUser < 0 &&
     reply.content?.some(
@@ -204,14 +178,6 @@ function inboxRows(response: unknown): readonly InboxRow[] {
   return [];
 }
 
-/**
- * Our queued prompts in a session's inbox, oldest first.
- *
- * Only `msg_*` user items are ours. Steering text gets a random id, so an
- * `inboxID` with no matching operation is somebody else's and is skipped.
- * `text` comes back because re-sending a prompt needs it: the schema
- * requires `text`, even when the id already exists.
- */
 export function inboxOperations(response: unknown): ReadonlyArray<{
   readonly operationId: string;
   readonly inboxId: string;
@@ -244,7 +210,6 @@ export function inboxOperations(response: unknown): ReadonlyArray<{
   return rows.sort((left, right) => left.submittedAt - right.submittedAt);
 }
 
-/** The text of one projected message, for an operation's result. */
 export function messageText(
   messages: readonly OpenCodeMessage[],
   messageId: string | undefined

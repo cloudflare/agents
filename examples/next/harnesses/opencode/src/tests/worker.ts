@@ -33,7 +33,6 @@ function textOf(content: unknown): string {
     .join("");
 }
 
-/** An OpenAI-compatible stream: one text answer, or one tool call. */
 function stream(
   delta: Record<string, unknown>,
   finish: "stop" | "tool_calls"
@@ -69,17 +68,8 @@ function toolCall(name: string, args: unknown): Response {
   );
 }
 
-/**
- * The scripted model, derived from the request alone so it answers the same
- * after an eviction as before:
- *
- * - `multiply N` calls `multiply`, `gate` calls `gate`; anything else is
- *   echoed back.
- * - After a tool result it answers `tool said: <result>`.
- */
 function script(input: Record<string, unknown>): Response {
   if (input.stream !== true) {
-    // A title or another side request.
     return Response.json({
       choices: [
         {
@@ -113,7 +103,6 @@ const TOOLS = [
   { name: "gate", description: "Wait until the test releases it." }
 ];
 
-/** The fixture's tools, as one OpenCode plugin. */
 function testTools(storage: DurableObjectStorage): Plugin.Plugin {
   return {
     id: "opencode-harness-example.test-tools",
@@ -154,7 +143,6 @@ function testTools(storage: DurableObjectStorage): Plugin.Plugin {
   };
 }
 
-/** Real Durable Object fixture: the example's composition with a scripted model. */
 export class OpenCodeHarnessTestObject extends DurableObject<Env> {
   readonly ai = createAI({ binding: scriptedBinding });
   readonly streams = new Streams();
@@ -182,7 +170,6 @@ export class OpenCodeHarnessTestObject extends DurableObject<Env> {
     return this.harness.fetch(openCodeRequest(request));
   }
 
-  /** Prompt the root session; the result without its transcript. */
   async prompt(text: string): Promise<OpenCodeOperationResult> {
     const { messages: _messages, ...result } = await this.harness.prompt(text);
     return result;
@@ -199,7 +186,6 @@ export class OpenCodeHarnessTestObject extends DurableObject<Env> {
     return this.harness.wait(operationId);
   }
 
-  /** Resolve once the gate tool has started `runs` times. */
   async gateStarted(runs: number): Promise<number> {
     for (let i = 0; i < 500; i++) {
       const count = (await this.ctx.storage.get<number>(GATE_RUNS_KEY)) ?? 0;
@@ -209,10 +195,6 @@ export class OpenCodeHarnessTestObject extends DurableObject<Env> {
     throw new Error("The gate tool never started");
   }
 
-  /**
-   * Close OpenCode before an eviction. A booted OpenCode always has a request
-   * in flight (its live event stream), and eviction waits for those to drain.
-   */
   dispose(): Promise<void> {
     return this.harness.dispose();
   }
@@ -223,7 +205,6 @@ export class OpenCodeHarnessTestObject extends DurableObject<Env> {
 
   #watching: Promise<{ view: string; types: string[] }> | undefined;
 
-  /** Start watching the root session; `watched()` resolves once a turn ends. */
   async watch(): Promise<void> {
     const stream = await this.harness.session().events();
     const view = reduceEvents(EMPTY_VIEW, [stream.snapshot]);
@@ -256,7 +237,7 @@ export class OpenCodeHarnessTestObject extends DurableObject<Env> {
         if (events.some((event) => event.type === "operation_end")) {
           ended = true;
         }
-        // The snapshot after the end carries the final transcript.
+
         if (ended && events.some((event) => event.type === "snapshot")) {
           resolve();
         }
@@ -264,11 +245,10 @@ export class OpenCodeHarnessTestObject extends DurableObject<Env> {
       started();
     });
     await stream.stop();
-    // JSON, so the RPC type stays shallow for the test's type checker.
+
     return { view: JSON.stringify(view), types };
   }
 
-  /** The view folded from a fresh snapshot, as a client joining now sees it. */
   async snapshotView(): Promise<string> {
     const stream = await this.harness.session().events();
     await stream.stop();

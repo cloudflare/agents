@@ -20,7 +20,6 @@ async function connect(name: string, query = ""): Promise<WebSocket> {
   return socket;
 }
 
-/** Folds every `events` frame into a view, as the browser hook does. */
 function follow(socket: WebSocket) {
   let view: OpenCodeSessionView = EMPTY_VIEW;
   const frames: OpenCodeServerMessage[] = [];
@@ -76,7 +75,7 @@ describe("the session WebSocket protocol", () => {
     expect(
       client.frames.find((frame) => frame.type === "result")
     ).toMatchObject({ id: "c1", result: { accepted: true } });
-    // The tool's call and its result are in the transcript.
+
     expect(
       client.view().messages.flatMap((message) => message.parts)
     ).toContainEqual(
@@ -119,7 +118,7 @@ describe("the session WebSocket protocol", () => {
 
     await stub.dispose();
     await evictDurableObject(stub);
-    // The next call restarts the object; its start re-watches the socket.
+
     const result = await stub.prompt("after hibernation");
     expect(result.text).toBe("echo: after hibernation");
     await client.until(() => says(client.view(), "echo: after hibernation"));
@@ -133,8 +132,6 @@ describe("the OpenCode CLI's route", () => {
     const stub = env.OPENCODE_HARNESS_TEST.getByName(name);
     await stub.prompt("hello");
 
-    // What `opencode --server https://example.com/agents/<class>/<name>`
-    // sends to list the sessions.
     const response = await routeAgentRequest(
       new Request(`https://example.com/agents/${AGENT}/${name}/api/session`),
       env

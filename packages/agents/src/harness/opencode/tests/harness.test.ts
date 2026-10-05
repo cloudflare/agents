@@ -15,18 +15,14 @@ describe("OpenCodeHarness sessions", () => {
     const stub = bare();
     const session = await stub.createSession();
 
-    // No model here, so admit without waking: the item stays in the inbox,
-    // which is what this asserts. submit() would start a turn.
     await stub.admitPrompt(session, "op-1", "hello");
     expect(await stub.pending(session)).toMatchObject([
       { operationId: "op-1", session, status: "queued" }
     ]);
 
-    // Re-admitting the same id reconciles to the existing item.
     await stub.admitPrompt(session, "op-1", "hello again");
     expect(await stub.pending(session)).toHaveLength(1);
 
-    // Admission alone holds no lease.
     expect(await stub.leases()).toEqual([]);
     await stub.dispose();
   });
@@ -81,7 +77,7 @@ describe("OpenCodeHarness turns, through agents/models/opencode", () => {
     expect(await stub.bindingCalls()).toContain(
       "@cf/moonshotai/kimi-k2.7-code"
     );
-    // A healthy turn leaves no lease behind.
+
     expect(await stub.leases()).toBe(0);
 
     await stub.dispose();
@@ -128,7 +124,7 @@ describe("OpenCodeHarness turns, through agents/models/opencode", () => {
     expect(types[0]).toBe("snapshot");
     expect(types.slice(1, 3)).toEqual(["operation_start", "snapshot"]);
     expect(types).toContain("text_delta");
-    // Each operation's end is followed by a fresh snapshot of the transcript.
+
     expect(types.indexOf("operation_end")).toBeGreaterThan(0);
     await stub.dispose();
   });
@@ -143,7 +139,6 @@ describe("OpenCodeHarness turns, through agents/models/opencode", () => {
       (JSON.parse(sessions.body) as { data: { id: string }[] }).data.length
     ).toBeGreaterThan(0);
 
-    // The provider is OpenCode's own Workers AI one, catalog and all.
     const models = await stub.api("/api/model");
     expect(models.status).toBe(200);
     expect(

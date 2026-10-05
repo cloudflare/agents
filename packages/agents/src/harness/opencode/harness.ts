@@ -58,68 +58,40 @@ type HostFetch = (request: Request) => Promise<Response>;
 type Opened = { readonly host: Host; readonly fetch: HostFetch };
 type Plugin = NonNullable<OpenCodeWorkerd.CreateOptions["plugins"]>[number];
 
-/**
- * The root session. OpenCode names sessions itself, so this is an alias the
- * harness resolves to the object's first session, created on first use.
- */
+// OpenCode allocates session IDs; "root" is an alias for the first session.
 export const ROOT_SESSION: OpenCodeSessionId = "root";
 
-/** OpenCode's own config, as `OpenCodeWorkerd.create` takes it. */
 export type OpenCodeConfig = OpenCodeWorkerd.Configuration;
 
-/** What a new session starts with. */
 export type OpenCodeSessionDefaults = {
-  /**
-   * Model for new sessions. It must be one a provider serves: `ai(id)`
-   * from `agents/models/opencode`, with `ai.provider` in `providers`.
-   */
   readonly model?: OpenCodeModel;
-  /** The OpenCode agent prompts run as, unless a submission names one. */
   readonly agent?: string;
 };
 
-/** `OpenCodeHarness`'s options. Only `streams` is required. */
 export type OpenCodeHarnessOptions = {
-  /**
-   * Where each operation's events are recorded. An operation's stream is
-   * its record: open while it runs, closed or errored once it settles.
-   */
   readonly streams: Streams;
-  /** Model providers, such as `ai.provider` from `agents/models/opencode`. */
   readonly providers?: readonly OpenCodeProvider[];
-  /** OpenCode plugins: tools, hooks, agents. */
   readonly plugins?: readonly Plugin[];
-  /** OpenCode's own config: permissions, agents, instructions. */
   readonly config?: OpenCodeConfig;
   readonly defaults?: OpenCodeSessionDefaults;
-  /** Options for OpenCode's workerd profile, other than what the harness sets. */
   readonly workerd?: Omit<
     OpenCodeWorkerd.CreateOptions,
     "storage" | "config" | "plugins"
   >;
-  /**
-   * The per-session lease: one Lifecycle job whose only work is to bring the
-   * object back after an unplanned death, so OpenCode can resume the turn.
-   */
   readonly lease?: {
-    /** Silence before the lease fires, in ms. Default 60_000. */
     readonly ttlMs?: number;
-    /** Fires with no log progress before giving up. Default 5. */
     readonly stallLimit?: number;
   };
 };
 
-/** What an emitted event belongs to. */
 type EventContext = {
   readonly session?: OpenCodeSessionId;
   readonly operationId?: string;
-  /** Set when the event was also written to the operation's stream. */
   readonly streamId?: string;
 };
 
 type Listener = (event: OpenCodeEvent, context: EventContext) => void;
 
-/** Why an operation was declined, recorded on its stream. */
 type DeclineCode = "aborted" | "not_admitted";
 
 const DECLINE_MESSAGE: Record<DeclineCode, string> = {
@@ -127,7 +99,6 @@ const DECLINE_MESSAGE: Record<DeclineCode, string> = {
   not_admitted: "Prompt was never admitted"
 };
 
-/** Events after which a watcher gets a fresh snapshot. */
 const RESNAPSHOT = new Set<OpenCodeEvent["type"]>([
   "operation_start",
   "operation_end",
@@ -135,23 +106,9 @@ const RESNAPSHOT = new Set<OpenCodeEvent["type"]>([
 ]);
 
 /**
- * OpenCode's embedded SDK hosted in a Durable Object, behind the same small
- * interface as `PiHarness`: `harness.prompt()`, `harness.sessions`,
- * `harness.session(id)`. How a session reaches a client (sockets, SSE, RPC)
- * is the host's glue, built on `session.events()`; `harness.fetch()` serves
- * OpenCode's own HTTP API, which is what the OpenCode CLI speaks.
- *
- * OpenCode owns the run: admission through its inbox, the durable execution
- * claim, the boot sweep that resumes a claimed turn, and retries. The
- * harness owns the two things it cannot do here: waking the object after an
- * unplanned death (the lease, see `lease.ts`), and projecting its event log
- * onto durable streams so a turn can be read back after an eviction.
- *
- * One operation is one prompt, and an operation's stream is its record:
- * while the stream is `streaming` the operation is open, and closing or
- * erroring it settles the operation exactly once.
- *
- * @beta The API may change between releases.
+ * OpenCode owns the run, inbox, and crash recovery. This capability wakes a
+ * stopped object with a lease and records operations in durable streams.
+ * @beta
  */
 export class OpenCodeHarness extends LifecycleCapability {
   readonly sessions: OpenCodeSessions;
@@ -162,16 +119,13 @@ export class OpenCodeHarness extends LifecycleCapability {
   readonly #readers = new LogReaders();
   #rootSession: string | undefined;
   #leases: SessionLeases | undefined;
-  /** One writer per open operation. */
   readonly #writers = new Map<string, OperationStreamWriter>();
-  /** The operation a session's events currently belong to. */
   readonly #current = new Map<string, string>();
-  /** Submits between arming the lease and OpenCode's `started`, per session. */
   readonly #admitting = new Map<string, number>();
   readonly #settlement = new SettlementWaiters(RESULT_POLL_MS);
   readonly #permissions = new Map<string, OpenCodePermission>();
   readonly #listeners = new Set<Listener>();
-  /** Told when a session starts or stops running, whoever started it. */
+  // CLI turns bypass harness operations but still need to refresh UI watches.
   readonly #changes = new Set<(session: string) => void>();
 
   constructor(options: OpenCodeHarnessOptions) {
@@ -181,12 +135,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     this.sessions = new OpenCodeSessions(this);
   }
 
-  // ── Lifecycle ────────────────────────────────────────────────────────────
-
-  /**
-   * Boot OpenCode, which starts its own sweep of claimed sessions, and start
-   * a log reader for every session that still holds a lease.
-   */
   override async onStart(_context: CapabilityStartContext): Promise<void> {
     await this.#host();
     for (const lease of this.#lease().list()) {
@@ -203,7 +151,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     return this.#onLeaseFired(held);
   }
 
-  /** Close OpenCode's in-memory resources. Durable state is untouched. */
   async dispose(): Promise<void> {
     this.#live?.abort();
     this.#live = undefined;
@@ -215,14 +162,10 @@ export class OpenCodeHarness extends LifecycleCapability {
     await opened?.host.close();
   }
 
-  // ── The harness interface ────────────────────────────────────────────────
-
-  /** A handle on one session. No I/O until you call it. */
   session(id: OpenCodeSessionId = ROOT_SESSION): OpenCodeSession {
     return new OpenCodeSession(this, id);
   }
 
-  /** Submit a prompt and wait for its answer. */
   prompt(
     input: string,
     options: OpenCodeSubmitOptions = {}
@@ -230,7 +173,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     return this.session(options.session).prompt(input, options);
   }
 
-  /** Durably submit a prompt. Resolves before the model runs. */
   submit(
     input: string,
     options: OpenCodeSubmitOptions = {}
@@ -238,7 +180,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     return this.session(options.session).submit(input, options);
   }
 
-  /** Stop one operation, or everything running in a session. */
   abort(
     options: OpenCodeSessionOptions & { readonly operationId?: string } = {}
   ): Promise<boolean> {
@@ -252,12 +193,10 @@ export class OpenCodeHarness extends LifecycleCapability {
     return this.session(options.session).wait(operationId, options.signal);
   }
 
-  /** The session's transcript. */
   messages(options: OpenCodeSessionOptions = {}): Promise<OpenCodeMessage[]> {
     return this.session(options.session).messages();
   }
 
-  /** Our prompts OpenCode has not settled yet, oldest first. */
   async pending(
     options: OpenCodeSessionOptions = {}
   ): Promise<OpenCodePendingOperation[]> {
@@ -279,30 +218,20 @@ export class OpenCodeHarness extends LifecycleCapability {
     ];
   }
 
-  /** The opened OpenCode SDK, for anything the interface does not cover. */
   async opencode(): Promise<Host> {
     return this.#host();
   }
 
-  /**
-   * OpenCode's own HTTP API, served in-process. Paths are OpenCode's
-   * (`/api/session`, `/api/event`, ...); the host strips any prefix it
-   * routed the request under. This is what the OpenCode CLI connects to.
-   */
   async fetch(request: Request): Promise<Response> {
     await this.lifecycle.ready();
     return (await this.#open()).fetch(request);
   }
 
-  // ── Used by OpenCodeSession and OpenCodeSessions ─────────────────────────
-
-  /** @internal The OpenCode session id a handle's id names. */
   async resolve(id: OpenCodeSessionId | undefined): Promise<string> {
     if (id === undefined || id === ROOT_SESSION) return this.#root();
     return id;
   }
 
-  /** @internal */
   async create(parent?: string): Promise<string> {
     await this.lifecycle.ready();
     const host = await this.#host();
@@ -314,7 +243,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     return created.id;
   }
 
-  /** @internal */
   async list(): Promise<OpenCodeSessionInfo[]> {
     const root = await this.#root();
     const host = await this.#host();
@@ -333,15 +261,6 @@ export class OpenCodeHarness extends LifecycleCapability {
       : [{ id: root, busy: active[root]?.type === "running" }, ...infos];
   }
 
-  /**
-   * @internal Admit one prompt as an operation.
-   *
-   * The ordering is load-bearing: arm the lease, open the stream, then
-   * prompt. An eviction at any point after the lease is armed leaves a job
-   * whose alarm restarts the object, and the fire reconciles whatever
-   * actually happened. Re-submitting the same operation id is a no-op that
-   * reports `accepted: false`.
-   */
   async enqueue(
     id: OpenCodeSessionId,
     input: string,
@@ -363,14 +282,13 @@ export class OpenCodeHarness extends LifecycleCapability {
     await this.#readLog(session);
     this.#admitting.set(session, (this.#admitting.get(session) ?? 0) + 1);
     try {
-      // The lease first, so a crash before the prompt still leaves an alarm.
+      // Arm the lease before OpenCode sees the prompt: a crash after admission
+      // must leave a durable way to restart the object.
       await this.#lease().arm(
         session,
         "admitting",
         await this.#position(session)
       );
-      // Opening the stream is admission: it is the operation's record, so a
-      // failure here must fail the submit rather than lose the operation.
       const writer = await this.#openOperation(session, operationId);
       const agent = options.agent ?? this.#options.defaults?.agent;
       if (agent) {
@@ -396,13 +314,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     }
   }
 
-  /**
-   * @internal Wait for one operation to settle.
-   *
-   * Reads the messages, so a turn that settled while this isolate was gone
-   * still returns, and the operation's own stream, which records a decline
-   * or a failure with no reply.
-   */
   async settled(
     id: OpenCodeSessionId,
     operationId: string,
@@ -439,12 +350,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     }
   }
 
-  /**
-   * @internal Withdraw a queued prompt, or interrupt the turn it is.
-   *
-   * When `interrupt` reports it stopped nothing, the stream is left open and
-   * the lease settles the operation from whatever OpenCode publishes next.
-   */
   async withdraw(id: OpenCodeSessionId, operationId: string): Promise<boolean> {
     await this.lifecycle.ready();
     const session = await this.resolve(id);
@@ -464,7 +369,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     return this.interrupt(session);
   }
 
-  /** @internal Interrupt whatever the session is running. */
   async interrupt(id: OpenCodeSessionId): Promise<boolean> {
     await this.lifecycle.ready();
     const session = await this.resolve(id);
@@ -481,20 +385,17 @@ export class OpenCodeHarness extends LifecycleCapability {
     return interrupted?.interrupted === true;
   }
 
-  /** @internal */
   async transcript(id: OpenCodeSessionId): Promise<OpenCodeMessage[]> {
     const session = await this.resolve(id);
     return [...projectMessages(await this.#listMessages(session))];
   }
 
-  /** @internal */
   async busy(id: OpenCodeSessionId): Promise<boolean> {
     const session = await this.resolve(id);
     const active = await (await this.#host()).sessions.active();
     return active[session]?.type === "running";
   }
 
-  /** @internal */
   async replyPermission(
     id: OpenCodeSessionId,
     permissionId: string,
@@ -511,7 +412,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     this.#permissions.delete(permissionId);
   }
 
-  /** @internal */
   async setModel(id: OpenCodeSessionId, model: OpenCodeModel): Promise<void> {
     const session = await this.resolve(id);
     await (
@@ -522,7 +422,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     });
   }
 
-  /** @internal A session as a client first sees it. */
   async snapshot(id: OpenCodeSessionId): Promise<OpenCodeSnapshot> {
     const session = await this.resolve(id);
     const host = await this.#host();
@@ -548,10 +447,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     };
   }
 
-  /**
-   * @internal One session's events: a snapshot now, then each projected
-   * event, with a fresh snapshot after every operation starts and ends.
-   */
   async events(id: OpenCodeSessionId): Promise<OpenCodeEventStream> {
     const session = await this.resolve(id);
     const snapshot = {
@@ -573,8 +468,7 @@ export class OpenCodeHarness extends LifecycleCapability {
           listener([event]);
           if (RESNAPSHOT.has(event.type)) resnapshot();
         });
-        // A turn the CLI started has no operation here; OpenCode's own
-        // start and end still refresh the watcher.
+
         const onChange = (changed: string) => {
           if (changed === session) resnapshot();
         };
@@ -591,15 +485,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     };
   }
 
-  /**
-   * Admit a prompt with no lease and no stream, the way a crash between the
-   * inbox write and `session.execution.started` leaves one.
-   *
-   * There is no other way to reach that state from outside: `submit` arms
-   * the lease first, by design. Only the lease tests use this.
-   *
-   * @internal
-   */
   async admitWithoutLease(
     session: string,
     operationId: string,
@@ -615,15 +500,12 @@ export class OpenCodeHarness extends LifecycleCapability {
     });
   }
 
-  // ── Sessions ─────────────────────────────────────────────────────────────
-
-  /** Every message in a session, oldest first, across pages. */
   async #listMessages(session: string): Promise<RawMessage[]> {
     const host = await this.#host();
     const messages: RawMessage[] = [];
     let cursor: string | undefined;
     do {
-      // A cursor carries its own order and limit.
+      // OpenCode rejects an explicit order or limit when a cursor is passed.
       const page = await host.message.list(
         cursor
           ? { sessionID: session, cursor }
@@ -653,13 +535,10 @@ export class OpenCodeHarness extends LifecycleCapability {
     return created.id;
   }
 
-  /** Apply the defaults to a session the harness just created. */
   async #configure(session: string): Promise<void> {
     const model = this.#options.defaults?.model;
     if (model) await this.setModel(session, model);
   }
-
-  // ── The lease ────────────────────────────────────────────────────────────
 
   #lease(): SessionLeases {
     this.#leases ??= new SessionLeases({
@@ -670,24 +549,18 @@ export class OpenCodeHarness extends LifecycleCapability {
     return this.#leases;
   }
 
-  /**
-   * One run of a session's lease job, after `ttl` of silence.
-   *
-   * It never concludes "idle" from memory. Either durable state says there
-   * is work (so extend), or it says the prompt was never admitted (so
-   * re-send or decline), or there is nothing left (so complete).
-   */
   async #onLeaseFired(held: LeasePayload): Promise<LifecycleJobOutcome> {
     const session = held.session;
     const host = await this.#host();
-    // A reader that died leaves no retry loop of its own; this is it.
+
     await this.#readLog(session);
-    await this.#reconcile(session, { keep: this.#current.get(session) });
+    await this.#reconcile(session, {
+      inFlightOperationId: this.#current.get(session)
+    });
 
     const active = await host.sessions.active();
     const position = await this.#position(session);
     if (active[session]) {
-      // A long silent tool: active with no log progress. Never count these.
       await this.#lease().renew(session, held.kind, position, 0);
       return undefined;
     }
@@ -696,8 +569,6 @@ export class OpenCodeHarness extends LifecycleCapability {
       await host.sessions.inbox.list({ sessionID: session })
     );
     if (queued.length > 0) {
-      // Admitted but never started: re-sending with the same id reconciles
-      // to the existing item and rings OpenCode's doorbell again.
       const first = queued[0];
       await host.sessions.prompt({
         sessionID: session,
@@ -735,18 +606,12 @@ export class OpenCodeHarness extends LifecycleCapability {
     return undefined;
   }
 
-  /**
-   * Drop the lease, but only when durable state agrees there is nothing
-   * left. The in-memory `#admitting` count can only hold the lease open,
-   * never cancel it: losing it to an eviction costs one extra fire, where
-   * trusting it could strand a prompt.
-   */
   async #release(session: string): Promise<void> {
-    // The session's current operation is never declined here. A terminal
-    // event can arrive before the reply is written to the messages, so the
-    // operation reads as neither queued nor answered for a moment —
-    // declining it then would reject a turn that in fact succeeded.
-    await this.#reconcile(session, { keep: this.#current.get(session) });
+    // The terminal event can precede the reply's message write. Keep the
+    // current operation open until durable state can settle it.
+    await this.#reconcile(session, {
+      inFlightOperationId: this.#current.get(session)
+    });
     const host = await this.#host();
     const [inbox, open] = await Promise.all([
       host.sessions.inbox.list({ sessionID: session }),
@@ -767,13 +632,10 @@ export class OpenCodeHarness extends LifecycleCapability {
     );
   }
 
-  // ── Operations and their streams ─────────────────────────────────────────
-
   #streamId(operationId: string, session: string): string {
     return `oc:${session}:${operationId}`;
   }
 
-  /** Operation ids whose streams are still open, oldest first. */
   async #openOperations(session: string): Promise<string[]> {
     const rows = await this.#streams.list({
       tag: session,
@@ -787,15 +649,9 @@ export class OpenCodeHarness extends LifecycleCapability {
     return ids;
   }
 
-  /**
-   * Settle or decline every open operation the messages have an answer for.
-   *
-   * With `whenBusy: "followUp"` several of our prompts can be open at once,
-   * so this walks all of them rather than just the current one.
-   */
   async #reconcile(
     session: string,
-    options: { readonly keep?: string | undefined } = {}
+    options: { readonly inFlightOperationId?: string | undefined } = {}
   ): Promise<void> {
     const host = await this.#host();
     const [messages, inbox, open] = await Promise.all([
@@ -813,22 +669,15 @@ export class OpenCodeHarness extends LifecycleCapability {
         continue;
       }
       if (inspected === "active" || queued.has(operationId)) continue;
-      // A prompt being handed to OpenCode is briefly in neither the inbox
-      // nor the messages: `inbox.delivered` fires once the item leaves the
-      // inbox, before its user message is written. Declining there would
-      // kill the turn we just started, so the caller names the operation it
-      // is mid-handover for, and an in-flight `submit` protects its own.
-      if (operationId === options.keep) continue;
+
+      // Delivery removes an item from the inbox before writing the user
+      // message. Do not decline the operation in that handoff window.
+      if (operationId === options.inFlightOperationId) continue;
       if (this.#admitting.has(session)) continue;
       await this.#decline(session, operationId, "not_admitted");
     }
   }
 
-  /**
-   * Settle an operation from its result. One with a reply closes its
-   * stream; one that failed before any reply errors it with the reason, so
-   * `wait` can report it after a restart.
-   */
   async #settle(session: string, result: SettledResult): Promise<void> {
     const writer = this.#writers.get(result.operationId);
     const streamId = this.#streamId(result.operationId, session);
@@ -863,7 +712,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     this.#settlement.notify(result.operationId);
   }
 
-  /** Record a decline on the operation's own stream. Idempotent. */
   async #decline(
     session: string,
     operationId: string,
@@ -896,7 +744,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     }
   }
 
-  /** Close a stream this isolate never opened a writer for. */
   async #closeDetached(session: string, operationId: string): Promise<void> {
     const streamId = this.#streamId(operationId, session);
     const status = await this.#streams.status(streamId);
@@ -919,12 +766,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     writer.error(reason);
   }
 
-  /**
-   * Open an operation's stream and make it the session's current one.
-   *
-   * Errors propagate: on the admission path the stream *is* the operation
-   * record, so a submit that cannot open one must fail.
-   */
   async #openOperation(
     session: string,
     operationId: string
@@ -949,7 +790,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     return operationWriter;
   }
 
-  /** The operation a session's events belong to, after a restart. */
   async #owner(session: string): Promise<string | undefined> {
     const current = this.#current.get(session);
     if (current) return current;
@@ -985,8 +825,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     };
   }
 
-  // ── OpenCode and its readers ─────────────────────────────────────────────
-
   async #host(): Promise<Host> {
     return (await this.#open()).host;
   }
@@ -1003,7 +841,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     const { host, fetch } = await captureOpenCodeFetch(() =>
       OpenCodeWorkerd.create({
         ...this.#options.workerd,
-        // OpenCode creates its schema only in a database it thinks is empty.
         storage: openCodeStorage(this.lifecycle.storage),
         config: this.#config(),
         plugins: [
@@ -1018,7 +855,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     return { host, fetch: (request) => fetch(request) };
   }
 
-  /** OpenCode's config, with the providers and the default model merged in. */
   #config(): OpenCodeConfig {
     const config = this.#options.config ?? {};
     const providers = this.#options.providers ?? [];
@@ -1039,13 +875,8 @@ export class OpenCodeHarness extends LifecycleCapability {
     } as OpenCodeConfig;
   }
 
-  /**
-   * The live reader: deltas for the stream and the UI.
-   *
-   * Durable events are skipped here — the log reader is the one that may
-   * touch the lease or settle anything, because its delivery survives a
-   * restart.
-   */
+  // Live deltas are for display. Only the durable log may settle an
+  // operation or change its lease, since those events survive eviction.
   #readLive(host: Host): void {
     const controller = new AbortController();
     this.#live = controller;
@@ -1065,12 +896,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     })();
   }
 
-  /**
-   * The log reader: durable events, at least once, from a saved position.
-   *
-   * This is the load-bearing one. It extends the lease on every event,
-   * relabels it on `started`, and releases it on a terminal.
-   */
   async #readLog(session: string): Promise<void> {
     await this.#readers.start(
       session,
@@ -1095,7 +920,6 @@ export class OpenCodeHarness extends LifecycleCapability {
           });
       },
       (error) => {
-        // The next lease fire restarts the reader.
         this.lifecycle.events.emit("opencode:log_error", {
           session,
           error: error instanceof Error ? error.message : String(error)
@@ -1115,11 +939,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     );
   }
 
-  /**
-   * One durable log event.
-   *
-   * Projection first, so a client sees the turn, then the lease bookkeeping.
-   */
   async #onDurableEvent(
     session: string,
     event: OpenCodeDurableEvent
@@ -1139,11 +958,9 @@ export class OpenCodeHarness extends LifecycleCapability {
         this.#changed(session);
         return;
       case "session.inbox.delivered": {
-        // This prompt is now the turn. Earlier ones may already have an
-        // answer, so reconcile before switching.
         const operationId = this.#operationOf(data.inboxID);
         if (!operationId) return;
-        await this.#reconcile(session, { keep: operationId });
+        await this.#reconcile(session, { inFlightOperationId: operationId });
         if (this.#writers.has(operationId)) {
           this.#current.set(session, operationId);
         }
@@ -1159,7 +976,6 @@ export class OpenCodeHarness extends LifecycleCapability {
         await this.#settleTerminal(session, event.type, data.error);
         return;
       case "session.execution.interrupted":
-        // Shutdown keeps the claim: OpenCode's own sweep continues the turn.
         if (data.reason === "shutdown") return;
         await this.#settleTerminal(session, event.type, data.reason);
         return;
@@ -1171,7 +987,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     }
   }
 
-  /** Settle whatever is in flight, then decide the lease's fate. */
   async #settleTerminal(
     session: string,
     type: string,
@@ -1216,8 +1031,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     }
     return inboxId.slice("msg_".length);
   }
-
-  // ── Projection ───────────────────────────────────────────────────────────
 
   async #project(raw: {
     type: string;
@@ -1280,7 +1093,6 @@ function failureMessage(error: unknown): string {
   return "OpenCode execution failed";
 }
 
-/** One OpenCode session, addressed through the harness. */
 export class OpenCodeSession {
   readonly #harness: OpenCodeHarness;
   readonly id: OpenCodeSessionId;
@@ -1290,7 +1102,6 @@ export class OpenCodeSession {
     this.id = id;
   }
 
-  /** Durably submit a prompt. Resolves before the model runs. */
   submit(
     input: string,
     options: OpenCodeSubmitOptions = {}
@@ -1298,7 +1109,6 @@ export class OpenCodeSession {
     return this.#harness.enqueue(this.id, input, options);
   }
 
-  /** Submit and wait for the answer and the updated transcript. */
   async prompt(
     input: string,
     options: OpenCodeSubmitOptions = {}
@@ -1308,7 +1118,6 @@ export class OpenCodeSession {
     return { ...result, messages: await this.messages() };
   }
 
-  /** Join the running turn. */
   steer(
     input: string,
     options: Omit<OpenCodeSubmitOptions, "whenBusy"> = {}
@@ -1316,7 +1125,6 @@ export class OpenCodeSession {
     return this.submit(input, { ...options, whenBusy: "steer" });
   }
 
-  /** Wait for an operation to settle. Aborting `signal` stops only the wait. */
   wait(
     operationId: string,
     signal?: AbortSignal
@@ -1324,22 +1132,16 @@ export class OpenCodeSession {
     return this.#harness.settled(this.id, operationId, signal);
   }
 
-  /**
-   * Withdraw one queued operation (or interrupt the turn it is), or, with
-   * no id, interrupt whatever the session is running.
-   */
   abort(operationId?: string): Promise<boolean> {
     return operationId === undefined
       ? this.#harness.interrupt(this.id)
       : this.#harness.withdraw(this.id, operationId);
   }
 
-  /** Change this session's model, to one a provider serves. */
   setModel(model: OpenCodeModel): Promise<void> {
     return this.#harness.setModel(this.id, model);
   }
 
-  /** Answer a permission OpenCode asked for. */
   replyPermission(
     permissionId: string,
     decision: "once" | "always" | "reject"
@@ -1347,12 +1149,10 @@ export class OpenCodeSession {
     return this.#harness.replyPermission(this.id, permissionId, decision);
   }
 
-  /** The session's transcript. */
   messages(): Promise<OpenCodeMessage[]> {
     return this.#harness.transcript(this.id);
   }
 
-  /** This session's events: a snapshot, then a batch per event. */
   events(): Promise<OpenCodeEventStream> {
     return this.#harness.events(this.id);
   }
@@ -1362,7 +1162,6 @@ export class OpenCodeSession {
   }
 }
 
-/** Every OpenCode session in this object. */
 export class OpenCodeSessions {
   readonly #harness: OpenCodeHarness;
 
@@ -1374,19 +1173,16 @@ export class OpenCodeSessions {
     return this.#harness.session(id);
   }
 
-  /** A new top-level session, configured like the root. */
   async create(): Promise<OpenCodeSession> {
     return this.get(await this.#harness.create());
   }
 
-  /** A new session that starts with a copy of another's transcript. */
   async fork(from: OpenCodeSessionId): Promise<OpenCodeSession> {
     return this.get(
       await this.#harness.create(await this.#harness.resolve(from))
     );
   }
 
-  /** Every session, the root first. */
   list(): Promise<OpenCodeSessionInfo[]> {
     return this.#harness.list();
   }

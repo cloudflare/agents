@@ -295,11 +295,6 @@ function Message({
   }
 }
 
-/**
- * The one thing the Pi example has no counterpart for: the same session,
- * from the OpenCode CLI. The CLI talks to OpenCode's HTTP API, which this
- * object serves under its own URL.
- */
 function CliPanel({
   object,
   opencodeSession
@@ -409,7 +404,6 @@ function App() {
 
   const connected = status === "open";
 
-  /** While a run is going, Enter queues a follow-up and Steer joins the run. */
   const submit = (whenBusy: "followUp" | "steer" = "followUp") => {
     const text = prompt.trim();
     if (!text || !connected) return;

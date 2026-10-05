@@ -6,7 +6,6 @@ import {
   projectMessages
 } from "../messages";
 
-/** `message.list` as OpenCode 2 returns it: tagged on `type`, oldest first. */
 const listed = {
   data: [
     { id: "msg_op-1", type: "user", text: "hi", time: { created: 1 } },

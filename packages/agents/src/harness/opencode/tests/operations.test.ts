@@ -1,13 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { inboxOperations, inspectOperation, messageIdOf } from "../messages";
 
-/**
- * The boundary logic the lease settles on, tested against plain data.
- *
- * No host, no provider, no workerd: just the message and inbox records
- * OpenCode would have written.
- */
-
 type Msg = {
   id: string;
   type: string;
@@ -47,15 +40,13 @@ describe("inspectOperation", () => {
 
   it("reports a prompt with no completed reply as active", () => {
     expect(inspectOperation([user("op-1")], "op-1")).toBe("active");
-    // A reply that has started but not completed is still active.
+
     expect(inspectOperation([user("op-1"), assistant("a-1")], "op-1")).toBe(
       "active"
     );
   });
 
   it("reads the result from the matching turn boundary", () => {
-    // Two queued prompts, each with its own reply: op-1 must read a-1, not
-    // a-2. This is what lets delivery: "queue" keep several operations open.
     const messages = [
       user("op-1"),
       assistant("a-1", { completed: 2 }),
@@ -101,7 +92,6 @@ describe("inspectOperation", () => {
   });
 
   it("does not read past the next user message", () => {
-    // op-1 was interrupted and never answered; op-2's reply is not its own.
     const messages = [
       user("op-1"),
       user("op-2"),
@@ -141,8 +131,6 @@ describe("inboxOperations", () => {
   }
 
   it("returns our queued prompts oldest first, with their text", () => {
-    // The text matters: re-sending a prompt needs it, because OpenCode's
-    // schema requires `text` even when the id already exists.
     expect(
       inboxOperations([
         item(messageIdOf("op-2"), { text: "second", created: 20 }),
@@ -165,8 +153,6 @@ describe("inboxOperations", () => {
   });
 
   it("ignores items that are not ours", () => {
-    // Steering text gets a random id, and compaction/synthetic items are
-    // not user prompts. An inboxID with no msg_ prefix is somebody else's.
     expect(
       inboxOperations([
         item("itm_steer", { text: "steer" }),

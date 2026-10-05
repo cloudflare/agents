@@ -143,7 +143,6 @@ export class OperationStreamWriter {
   constructor(options: {
     readonly streamId: string;
     readonly operationId: string;
-
     readonly writer: StreamWriter | undefined;
     readonly onChunk?: (chunk: OperationChunk) => void;
   }) {
@@ -202,13 +201,6 @@ export class OperationStreamWriter {
     this.#closed = true;
   }
 
-  /**
-   * Settle the stream as errored, recording why.
-   *
-   * The reason is durable (`streams.status().error`), which is how a
-   * declined operation still rejects after a restart. Idempotent, because
-   * OpenCode publishes `inbox.cancelled` for our own `abort` too.
-   */
   error(reason: string): void {
     if (this.#closed) return;
     this.flush();

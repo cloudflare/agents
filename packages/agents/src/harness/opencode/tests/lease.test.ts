@@ -11,15 +11,6 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { Lifecycle, LifecycleCapability } from "../../../lifecycle";
 
-/**
- * The lease's own rules, over a real Lifecycle job queue.
- *
- * `SessionLeases` is the whole durable surface of the lease: one job per
- * session, armed on admission, pushed out by log events, cancelled by a
- * terminal. Testing it directly needs no OpenCode host and no model.
- */
-
-/** A bare capability, just to own a job queue. */
 class Owner extends LifecycleCapability {
   constructor() {
     super("opencode-harness");
@@ -37,7 +28,6 @@ async function withLeases<T>(
     jobs: Lifecycle["jobs"];
   }) => Promise<T>
 ): Promise<T> {
-  // A bare object, so the lease runs over a real Lifecycle job queue.
   const stub = env.OPENCODE_LEASE_TEST.getByName(crypto.randomUUID());
   return runInDurableObject(stub, async (instance) => {
     const capability = new Owner();
@@ -72,15 +62,12 @@ describe("SessionLeases", () => {
         stalls: 0
       });
 
-      // One job per session, not one per arm.
       await leases.arm("ses_1", "admitting", 6);
       expect(jobs.list().filter((row) => row.fn === LEASE_FN)).toHaveLength(1);
     });
   });
 
   it("never downgrades a claimed lease to admitting", async () => {
-    // Once OpenCode owns the turn, a later submit must not make the lease
-    // think it still has a prompt to hand over.
     await withLeases({}, async ({ leases, jobs }) => {
       await leases.arm("ses_1", "claimed", 1);
       await leases.arm("ses_1", "admitting", 2);
@@ -93,12 +80,9 @@ describe("SessionLeases", () => {
       await leases.arm("ses_1", "claimed", 1);
       const armed = jobs.get(leaseJobId("ses_1"))!.time;
 
-      // Fresh lease, no progress: the write is skipped, so a busy turn does
-      // not write storage once per log event.
       await leases.extend("ses_1", 1);
       expect(jobs.get(leaseJobId("ses_1"))?.time).toBe(armed);
 
-      // Progress always extends, so the position in the payload advances.
       await leases.extend("ses_1", 9);
       expect(payloadOf(jobs, "ses_1")?.position).toBe(9);
     });
@@ -121,9 +105,6 @@ describe("SessionLeases", () => {
   });
 
   it("counts a stall only when the log did not move", async () => {
-    // A long silent tool keeps the session active with no new events, so
-    // those fires must not count — otherwise the lease would be dropped in
-    // the middle of the tool.
     await withLeases({ stallLimit: 5 }, async ({ leases }) => {
       const held: LeasePayload = {
         session: "ses_1",
@@ -139,15 +120,11 @@ describe("SessionLeases", () => {
   });
 
   it("keeps the stall count when arming a lease it already holds", async () => {
-    // A fire reconciles — and so may re-arm — before deciding whether the
-    // lease has stalled. Arming must not wipe the counter that decision
-    // needs, or the backstop could never trigger.
     await withLeases({}, async ({ leases, jobs }) => {
       await leases.renew("ses_1", "claimed", 4, 3);
       await leases.arm("ses_1", "admitting", 4);
       expect(payloadOf(jobs, "ses_1")?.stalls).toBe(3);
 
-      // Real progress still resets it.
       await leases.arm("ses_1", "admitting", 5);
       expect(payloadOf(jobs, "ses_1")?.stalls).toBe(0);
     });

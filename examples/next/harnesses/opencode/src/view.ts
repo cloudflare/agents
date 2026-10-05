@@ -5,27 +5,18 @@ import {
   type OpenCodeTranscriptMessage
 } from "./transcript";
 
-/** A tool call running now, with its streamed output. */
 export type OpenCodeRunningTool = {
   readonly callId: string;
   readonly name: string;
   readonly output: string;
 };
 
-/**
- * Everything a UI shows for one session, derived from the harness's events
- * by `reduceView` on either side of the wire. The same shape as the Pi
- * example's view.
- */
 export type OpenCodeSessionView = {
   readonly messages: readonly OpenCodeTranscriptMessage[];
-  /** The assistant message being streamed, or null. */
   readonly live: OpenCodeTranscriptMessage | null;
   readonly running: boolean;
   readonly tools: readonly OpenCodeRunningTool[];
-  /** Prompts queued in OpenCode's inbox behind the running turn. */
   readonly queued: number;
-  /** Retry backoff OpenCode is waiting out, if any. */
   readonly retry: { readonly at: number; readonly error: string } | null;
   readonly model: {
     readonly provider: string;
@@ -34,10 +25,6 @@ export type OpenCodeSessionView = {
   readonly error: string | null;
 };
 
-/**
- * Folds the harness's events into what a UI shows. Pure, so the browser and
- * the tests run the same code. App glue, not part of the harness.
- */
 export const EMPTY_VIEW: OpenCodeSessionView = {
   messages: [],
   live: null,
@@ -53,15 +40,14 @@ function modelOf(model: OpenCodeModel | null): OpenCodeSessionView["model"] {
   return model ? { provider: model.providerID, modelId: model.id } : null;
 }
 
-/** Append a delta to the live message's last part of the same kind. */
 function appendDelta(
   view: OpenCodeSessionView,
   messageId: string,
   type: "text" | "thinking",
   delta: string
 ): OpenCodeSessionView {
-  // A delta for a message the transcript already has is late: live events
-  // can trail the durable log that settled the turn.
+  // The live stream can trail the durable log; never reopen a finalized
+  // message because a late delta arrived.
   if (view.messages.some((message) => message.id === messageId)) return view;
   const live =
     view.live?.id === messageId
@@ -97,7 +83,6 @@ export function reduceView(
   switch (event.type) {
     case "snapshot": {
       const messages = projectMessages(event.messages);
-      // Keep the message being streamed until the transcript has it.
       const live =
         event.running &&
         view.live &&
@@ -134,7 +119,6 @@ export function reduceView(
     case "reasoning_delta":
       return appendDelta(view, event.messageId, "thinking", event.delta);
     case "message_end": {
-      // A step that called tools ends before the next starts: keep it.
       const live = view.live;
       if (!live || live.id !== event.messageId) return view;
       return { ...view, messages: [...view.messages, live], live: null };

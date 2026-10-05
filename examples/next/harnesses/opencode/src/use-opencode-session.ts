@@ -12,9 +12,7 @@ export type ConnectionStatus = "connecting" | "open" | "closed";
 
 type State = SessionView & {
   readonly status: ConnectionStatus;
-  /** Every registered tool, from the server's hello. */
   readonly catalog: readonly ToolInfo[];
-  /** OpenCode's own id for the session, from the hello, for the CLI. */
   readonly opencodeSession: string | null;
 };
 
@@ -25,12 +23,6 @@ const INITIAL_STATE: State = {
   opencodeSession: null
 };
 
-/**
- * One OpenCode session over the harness's WebSocket protocol, connected with
- * `useAgent`. The server sends the harness's events; this folds them with
- * the same `reduceEvents` the server tests use. A reconnect gets a fresh
- * snapshot, so there is nothing to resume from.
- */
 export function useOpenCodeSession(object: string) {
   const [state, setState] = useState<State>(INITIAL_STATE);
 
@@ -82,7 +74,6 @@ export function useOpenCodeSession(object: string) {
     [agent]
   );
 
-  /** Idle: starts a run. Busy: queued as a follow-up, or steers the run. */
   const submit = useCallback(
     (text: string, whenBusy: "followUp" | "steer" = "followUp") =>
       send({ type: "submit", id: crypto.randomUUID(), input: text, whenBusy }),

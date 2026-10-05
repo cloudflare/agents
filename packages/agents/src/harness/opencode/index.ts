@@ -1,11 +1,3 @@
-/**
- * OpenCode's embedded SDK hosted in a Durable Object. `OpenCodeHarness` is a
- * Lifecycle capability that boots OpenCode over the object's SQLite database
- * and wakes it after eviction; OpenCode owns the transcript, the inbox, and
- * every run.
- *
- * @beta The API may change between releases.
- */
 export {
   OpenCodeHarness,
   OpenCodeSession,

@@ -6,14 +6,8 @@ import {
 } from "@cloudflare/computer/tools/pi-ai";
 import type { Plugin } from "@opencode/plugin";
 
-/** The id of the Workspace's one backend, which `exec` runs on. */
 export const JAVASCRIPT_BACKEND = "javascript";
 
-/**
- * OpenCode's built-in tools that expect a local filesystem or a shell. The
- * workerd profile has neither, and the Workspace tools replace them, some
- * under the same names.
- */
 const LOCAL_TOOLS = new Set([
   "edit",
   "execute",
@@ -29,10 +23,6 @@ const LOCAL_TOOLS = new Set([
   "write"
 ]);
 
-/**
- * The shared `exec` description is written for a choice of shell backends.
- * This Workspace has one JavaScript backend, so say what that is instead.
- */
 const EXEC_DESCRIPTION = `Run JavaScript in the workspace. \`command\` is the source of an ES module, run in a fresh sandboxed isolate with no network access. If the module default-exports a function, it is called with \`input\` and its return value comes back as \`result\`. console.log and console.error go to stdout and stderr. There is no shell, npm or package install: the only imports are these two, plus relative imports of .js files in the workspace.
 
 - \`node:fs/promises\`: the workspace files, async only (readFile, writeFile, mkdir, rm, readdir, stat, lstat, access). readFile takes "utf8" for text.
@@ -40,27 +30,27 @@ const EXEC_DESCRIPTION = `Run JavaScript in the workspace. \`command\` is the so
 
 \`\`\`ts
 function clone(options: {
-  url: string; // HTTPS only
-  dir?: string; // working tree to create
-  ref?: string; // branch, tag or commit; default: the remote's default branch
-  depth?: number; // shallow clone; default: full history
-  paths?: string[]; // check out only these paths
-  singleBranch?: boolean; // default true
-  noTags?: boolean; // default true
+  url: string;
+  dir?: string;
+  ref?: string;
+  depth?: number;
+  paths?: string[];
+  singleBranch?: boolean;
+  noTags?: boolean;
 }): Promise<void>;
 function status(options?: { dir?: string }): Promise<
   { path: string; index: " " | "A" | "M" | "D"; worktree: " " | "A" | "M" | "D" | "?" }[]
 >;
-// A unified diff of \`ref\` (default HEAD) against the working tree, or against \`to\` when set.
+
 function diff(options?: { dir?: string; ref?: string; to?: string; paths?: string[] }): Promise<string>;
-// Newest first, from \`ref\` (default HEAD); \`depth\` caps the count.
+
 function log(options?: { dir?: string; ref?: string; depth?: number }): Promise<
   {
     oid: string;
     message: string;
     tree: string;
     parent: string[];
-    author: { name: string; email: string; timestamp: number; timezoneOffset: number }; // timestamp in seconds
+    author: { name: string; email: string; timestamp: number; timezoneOffset: number };
     committer: { name: string; email: string; timestamp: number; timezoneOffset: number };
   }[]
 >;
@@ -78,7 +68,6 @@ Prefer the read, write and edit tools for plain file changes.`;
 const COMMAND_DESCRIPTION =
   "ES module source to run. Default-export a function to receive `input` and return a result.";
 
-/** `exec`'s declaration, described for the JavaScript backend. */
 function describeExec(tool: PiTool): PiTool {
   const properties = tool.parameters.properties ?? {};
   const command = properties.command;
@@ -98,22 +87,11 @@ function describeExec(tool: PiTool): PiTool {
   };
 }
 
-/** A tool's name and description, for the client's tool list. */
 export type ToolInfo = {
   readonly name: string;
   readonly description: string;
 };
 
-/**
- * The Workspace tools from `@cloudflare/computer`, as an OpenCode plugin,
- * and their names and descriptions for the client.
- *
- * `createPiTools` returns plain JSON Schema declarations and one `execute`
- * that runs a call; despite its name it needs nothing from pi. OpenCode
- * takes JSON Schema as a tool's input, so each declaration becomes an
- * OpenCode tool whose `execute` runs that call. A failed call throws, which
- * OpenCode records as the tool's error.
- */
 export function createWorkspaceTools(
   workspace: Workspace,
   options: Omit<CreatePiToolsOptions, "workspace" | "shell"> = {}
@@ -138,6 +116,8 @@ export function createWorkspaceTools(
     id: "opencode-harness-example.workspace",
     async setup(context) {
       const registration = await context.tool.transform((editor) => {
+        // OpenCode's built-in file and shell tools have no local runtime in
+        // workerd. Replace them with tools backed by this Workspace.
         for (const tool of editor.list()) {
           if (LOCAL_TOOLS.has(tool.name)) editor.remove(tool.id);
         }

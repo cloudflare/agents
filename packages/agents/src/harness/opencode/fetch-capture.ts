@@ -4,19 +4,11 @@ import { OpenCode } from "@opencode/client";
 type OpenCodeMake = typeof OpenCode.make;
 type OpenCodeFetch = NonNullable<Parameters<OpenCodeMake>[0]["fetch"]>;
 
+// The workerd SDK gives its in-process HTTP handler to OpenCode.make but does
+// not expose it. Capture that handler during boot so the CLI can reach it.
 const captures = new AsyncLocalStorage<(fetch: OpenCodeFetch) => void>();
 let installed = false;
 
-/**
- * `OpenCodeWorkerd.create` serves OpenCode's HTTP API over an in-process
- * `fetch`, hands that to `OpenCode.make` for the typed client it returns,
- * and keeps no other reference to it. The OpenCode CLI talks to the same
- * API over HTTP, so the harness needs that `fetch`.
- *
- * This wraps `OpenCode.make` once, and while `create` runs inside
- * `captureOpenCodeFetch` reports the `fetch` it was given. Calls outside a
- * capture pass straight through.
- */
 function installCapture(): void {
   if (installed) return;
   const mutable = OpenCode as { make: OpenCodeMake };
@@ -43,7 +35,6 @@ function installCapture(): void {
   installed = true;
 }
 
-/** Run `create` and return what it made, with OpenCode's HTTP `fetch`. */
 export async function captureOpenCodeFetch<
   Host extends { close(): Promise<void> }
 >(create: () => Promise<Host>): Promise<{ host: Host; fetch: OpenCodeFetch }> {

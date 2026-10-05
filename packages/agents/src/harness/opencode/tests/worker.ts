@@ -4,15 +4,10 @@ import { Lifecycle } from "../../../lifecycle";
 import { createAI } from "../../../models/opencode";
 import { Streams } from "../../../streams";
 
-/**
- * Short, so a test can wait a lease out; long enough that the admission
- * tests here never fire one.
- */
 const LEASE_TTL_MS = 1_000;
 
 const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 
-/** OpenCode's chat-completions chunks for one streamed answer. */
 function streamed(text: string): Response {
   const chunks = [
     { choices: [{ index: 0, delta: { role: "assistant", content: text } }] },
@@ -43,11 +38,6 @@ function lastUserText(input: Record<string, unknown>): string {
   return "";
 }
 
-/**
- * An `Ai` binding that answers like Workers AI, from the request alone:
- * `fail` is an upstream error, anything else is echoed back. Every call is
- * recorded, so a test can see the request reached the binding.
- */
 function scriptedBinding(calls: string[]): Ai {
   return {
     aiGatewayLogId: null,
@@ -61,7 +51,6 @@ function scriptedBinding(calls: string[]): Ai {
         );
       }
       if (input.stream !== true) {
-        // A title or other side request: answer it plainly.
         return Response.json({
           choices: [
             {
@@ -76,7 +65,6 @@ function scriptedBinding(calls: string[]): Ai {
   } as unknown as Ai;
 }
 
-/** No model: for admission and session bookkeeping. */
 export class OpenCodeHarnessTestObject extends DurableObject<Cloudflare.Env> {
   readonly streams = new Streams();
   readonly harness = new OpenCodeHarness({
@@ -100,13 +88,6 @@ export class OpenCodeHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.sessions.list();
   }
 
-  /**
-   * Admit a prompt without waking OpenCode.
-   *
-   * There is no model here, so a woken session would start a turn that
-   * never finishes. `resume: false` leaves the item in the inbox, which is
-   * the state the admission assertions are about.
-   */
   admitPrompt(session: string, operationId: string, text: string) {
     return this.harness.admitWithoutLease(session, operationId, text);
   }
@@ -115,7 +96,6 @@ export class OpenCodeHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.pending({ session });
   }
 
-  /** The snapshot's plain fields; the transcript as a count. */
   async snapshot(session?: string) {
     const snapshot = await this.harness.snapshot(session ?? "root");
     return {
@@ -125,7 +105,6 @@ export class OpenCodeHarnessTestObject extends DurableObject<Cloudflare.Env> {
     };
   }
 
-  /** Every lease job this object holds. */
   leases() {
     return this.lifecycle.jobs
       .list()
@@ -138,7 +117,6 @@ export class OpenCodeHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 }
 
-/** A full composition: Workers AI through `agents/models/opencode`. */
 export class OpenCodeModelTestObject extends DurableObject<Cloudflare.Env> {
   readonly calls: string[] = [];
   readonly ai = createAI({ binding: scriptedBinding(this.calls) });
@@ -154,7 +132,6 @@ export class OpenCodeModelTestObject extends DurableObject<Cloudflare.Env> {
     .use(this.harness)
     .use(this.streams);
 
-  /** The answer, with the transcript as its roles. */
   async prompt(text: string) {
     const { messages, ...result } = await this.harness.prompt(text);
     return { ...result, roles: messages.map((message) => message.role) };
@@ -176,11 +153,6 @@ export class OpenCodeModelTestObject extends DurableObject<Cloudflare.Env> {
     return [...this.calls];
   }
 
-  /**
-   * The events one watch sees for a turn, by type: until the operation has
-   * ended and its text has streamed. Live deltas can trail the durable log
-   * that settles the operation, so neither waits on the other.
-   */
   async watch(text: string): Promise<string[]> {
     const stream = await this.harness.session().events();
     const types: string[] = [stream.snapshot.type];
@@ -198,7 +170,6 @@ export class OpenCodeModelTestObject extends DurableObject<Cloudflare.Env> {
     return types;
   }
 
-  /** A request to OpenCode's own HTTP API, as the CLI would send it. */
   async api(path: string, init?: RequestInit) {
     const response = await this.harness.fetch(
       new Request(`http://opencode.local${path}`, init)
@@ -216,10 +187,6 @@ export class OpenCodeModelTestObject extends DurableObject<Cloudflare.Env> {
   }
 }
 
-/**
- * A database that already has someone else's tables before OpenCode first
- * boots, as a `Workspace` or the Lifecycle's job table can leave it.
- */
 export class OpenCodeSharedDatabaseTestObject extends DurableObject<Cloudflare.Env> {
   readonly streams = new Streams();
   readonly harness = new OpenCodeHarness({
@@ -255,5 +222,4 @@ export class OpenCodeSharedDatabaseTestObject extends DurableObject<Cloudflare.E
   }
 }
 
-/** Bare: the lease tests install their own capability. */
 export class OpenCodeLeaseTestObject extends DurableObject<Cloudflare.Env> {}

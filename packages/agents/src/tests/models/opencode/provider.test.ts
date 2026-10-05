@@ -11,12 +11,10 @@ const answer = {
   ]
 };
 
-/** The base URL OpenCode's Workers AI provider is pointed at. */
 function baseURL(config: Record<string, unknown>): string {
   return (config.settings as { baseURL: string }).baseURL;
 }
 
-/** Start the provider's plugin, as OpenCode does when it boots. */
 async function start(plugin: Plugin.Plugin) {
   const cleanup = await plugin.setup({} as Plugin.Context);
   return async () => {
@@ -42,7 +40,7 @@ describe("createAI for OpenCode", () => {
           /^https:\/\/workers-ai\.binding\.invalid\/[^/]+\/v1$/
         )
       },
-      // A model asked for by id carries the output cap.
+
       models: { [MODEL]: { limit: { output: 4096 } } }
     });
   });

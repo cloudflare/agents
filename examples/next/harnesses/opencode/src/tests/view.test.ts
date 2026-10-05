@@ -2,12 +2,6 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { OpenCodeSessionView } from "../view";
 
-/**
- * `reduceEvents` folds the harness's events into this app's view, on the
- * server for a snapshot and in the browser for streamed batches. A client
- * that follows a turn and one that joins after it must end up with the same
- * view.
- */
 describe("the session view", () => {
   it("folds a turn's events into the same view a late joiner gets", async () => {
     const stub = env.OPENCODE_HARNESS_TEST.getByName(crypto.randomUUID());

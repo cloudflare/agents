@@ -109,9 +109,7 @@ stream, and OpenCode's HTTP API.
 
 ```ts
 export class OpenCodeAgent extends DurableObject<Env> {
-  // Workers AI over the AI binding, as OpenCode's own Workers AI provider.
   readonly ai = createAI({ binding: this.env.AI });
-  // A durable filesystem with git; `exec` runs JavaScript in a Dynamic Worker.
   readonly workspace = new Workspace({
     storage: this.ctx.storage,
     git: createGitClient(),
@@ -123,7 +121,6 @@ export class OpenCodeAgent extends DurableObject<Env> {
       })
     ]
   });
-  // The workspace tools, as an OpenCode plugin.
   readonly tools = createWorkspaceTools(this.workspace);
   readonly streams = new Streams();
   readonly harness = new OpenCodeHarness({
@@ -133,7 +130,6 @@ export class OpenCodeAgent extends DurableObject<Env> {
     config: { agents: { build: { system: PREAMBLE } } },
     defaults: { model: this.ai(MODEL_ID) }
   });
-  // App glue: this app's socket protocol, built on session.events().
   readonly sockets = new OpenCodeSessionSockets(
     this.harness,
     this.tools.tools,
@@ -146,19 +142,20 @@ export class OpenCodeAgent extends DurableObject<Env> {
     .use(this.webSockets);
 
   async onStart() {
-    await this.sockets.reattach(); // watches are in memory
+    await this.sockets.reattach();
   }
 
-  // OpenCode's HTTP API, for the CLI.
   async onRequest(request: Request) {
     return this.harness.fetch(openCodeRequest(request));
   }
-}
 
-// Anywhere in the object:
-const { text } = await this.harness.prompt("What is 47 × 19?");
-const side = await this.harness.sessions.create();
-await side.submit("Summarise the repo", { whenBusy: "steer" });
+  async answer() {
+    const { text } = await this.harness.prompt("What is 47 × 19?");
+    const side = await this.harness.sessions.create();
+    await side.submit("Summarise the repo", { whenBusy: "steer" });
+    return text;
+  }
+}
 ```
 
 The options are OpenCode's own pieces. `providers` are model providers:

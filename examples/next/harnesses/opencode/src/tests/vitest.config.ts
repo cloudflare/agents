@@ -7,8 +7,8 @@ const testsDir = import.meta.dirname;
 export default defineConfig({
   plugins: [
     {
-      // effect's HTTP API docs page inlines a Scalar bundle Vite cannot
-      // parse. OpenCode never serves that page here, so it loads as empty.
+      // Effect's bundled Scalar page is not used here and cannot be parsed
+      // by this workerd test build.
       name: "empty-http-api-scalar",
       enforce: "pre",
       load: (id) =>
@@ -21,7 +21,6 @@ export default defineConfig({
     })
   ],
   resolve: {
-    // One copy of OpenCode's client for the SDK and the harness.
     dedupe: ["@opencode/client", "@opencode/sdk"]
   },
   test: {

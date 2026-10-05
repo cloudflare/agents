@@ -12,8 +12,6 @@ export default defineConfig({
     tailwindcss()
   ],
   resolve: {
-    // One copy of OpenCode's client for the SDK and the harness: the harness
-    // reaches OpenCode's HTTP API through the client the SDK makes.
     dedupe: ["react", "react-dom", "@opencode/client", "@opencode/sdk"]
   }
 });
