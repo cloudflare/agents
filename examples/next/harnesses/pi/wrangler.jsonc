@@ -5,7 +5,10 @@
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "ai": { "binding": "AI", "remote": true },
-  // `exec` runs JavaScript in Dynamic Workers minted through this.
+  // Browser Run, for the browser tool. Remote even in `vite dev`.
+  "browser": { "binding": "BROWSER", "remote": true },
+  // `exec` and the browser tool run JavaScript in Dynamic Workers minted
+  // through this.
   "worker_loaders": [{ "binding": "LOADER" }],
   "assets": {
     "not_found_handling": "single-page-application",

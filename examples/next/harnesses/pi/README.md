@@ -19,6 +19,9 @@ The example composes:
   entries and events into what the UI shows;
 - a `Workspace` from `@cloudflare/computer` on the same SQLite database,
   and its tools for the model (see [Workspace](#workspace));
+- a persistent `Browser` from `agents/browser` and `browserTool` from
+  `agents/browser/pi`, so the model can drive a real browser (see
+  [Browser](#browser));
 - `createAI` from `agents/models/pi-ai`: Workers AI, and other vendors through
   AI Gateway, all over the `AI` binding, registered on pi's `Models`.
 
@@ -36,8 +39,8 @@ pnpm install
 pnpm run start
 ```
 
-The example uses the remote Workers AI binding and may incur Workers AI
-usage. It needs no API key. If your Wrangler login has access to more than
+The example uses the remote Workers AI and Browser Run bindings and may
+incur Workers AI and Browser Run usage. It needs no API key. If your Wrangler login has access to more than
 one account, set `CLOUDFLARE_ACCOUNT_ID` when starting.
 
 Each session is its own Durable Object with its own workspace. pi fixes a
@@ -49,6 +52,8 @@ before a tool was added never sees it; start a new session instead.
 - `Write a haiku about Durable Objects to /workspace/haiku.txt, then read it back.`
 - `Use exec to run JavaScript that lists /workspace and returns the size of each file.`
 - `Clone https://github.com/octocat/Hello-World into /workspace/hello, then show its git log.`
+- `Open https://developers.cloudflare.com/agents/ in the browser and take a screenshot.`
+  Then `Click the first link in the sidebar and tell me where you ended up.`
 - While a turn runs, type and press Enter to queue a follow-up, or Steer to
   join the running turn.
 
@@ -90,14 +95,23 @@ export class PiAgent extends DurableObject<Env> {
       })
     ]
   });
-  // pi's own registry: the system prompt and the workspace tools.
+  // A persistent browser, kept alive between turns.
+  readonly browser = new Browser({ provider: browserRun(this.env.BROWSER) });
+  // pi's own registry: the system prompt, workspace tools and browser tool.
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
     harness: ({ storage, context }) => {
       this.registry.install({
         name: "playground",
         sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
-        tools: createWorkspaceTools(this.workspace)
+        tools: [
+          ...createWorkspaceTools(this.workspace),
+          browserTool({
+            ctx: this.ctx,
+            browser: this.browser,
+            loader: this.env.LOADER
+          })
+        ]
       });
       return Harness.open(
         storage,
@@ -114,6 +128,7 @@ export class PiAgent extends DurableObject<Env> {
   readonly webSockets = new WebSockets(this.sockets.options());
   readonly lifecycle = Lifecycle.install(this)
     .use(this.webSockets)
+    .use(this.browser)
     .use(this.harness);
 
   async onStart() {
@@ -179,6 +194,27 @@ Git needs two things besides the backend: `git: createGitClient()` from
 `@platformatic/vfs` peer, and `allowGitNetwork: true` on the backend for
 `clone`. Git runs in the host, through isomorphic-git on the workspace
 files, so cloning works while the module itself has no network.
+
+## Browser
+
+The model also has a `browser` tool: `browserTool` from `agents/browser/pi`
+over a `Browser` from `agents/browser`. The model writes JavaScript that
+drives the browser through the Chrome DevTools Protocol, and the code runs in
+a Dynamic Worker through the same `LOADER` binding, in the `CodemodeRuntime`
+facet that `src/server.ts` exports.
+
+The browser is a Browser Run session on the `BROWSER` binding. The `Browser`
+is on the object's Lifecycle, so it outlives a turn and an eviction: tabs,
+cookies and logins carry over, and `sessionId: "active"` points at the tab
+the model last worked in. If Browser Run replaced the browser, the result
+says `restarted: true` and the model starts again from a new tab.
+
+A screenshot the model returns comes back as an image in the tool result.
+Kimi K2.7 Code accepts images, so the model sees it, and the UI shows it in
+the tool card from the transcript. The tool is not replay-safe: its code may
+have clicked or submitted something, so after an eviction the model gets an
+interrupted result rather than a second run. See
+[Persistent browser](../../../../docs/agents/browse-the-web.md#persistent-browser).
 
 ## Package sources
 
