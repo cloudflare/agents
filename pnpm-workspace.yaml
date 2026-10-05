@@ -34,10 +34,17 @@ allowBuilds:
   "@openrouter/sdk": false
   # agent-think's unit tests mock GitHub over MSW; its postinstall is not needed.
   msw: false
+  # Native deps of @opencode/sdk's node profile. The workerd profile the
+  # OpenCode harness uses never loads them, so their builds are skipped.
+  "@parcel/watcher": false
+  msgpackr-extract: false
+  tree-sitter-bash: false
+  tree-sitter-powershell: false
 minimumReleaseAge: 1440
 minimumReleaseAgeExclude:
   - "@cloudflare/*"
   - "@typescript/*"
   - "@earendil-works/*"
+  - "@opencode/*"
 overrides:
   "@earendil-works/pi-agent-core>@earendil-works/pi-ai": "^1.0.0"
