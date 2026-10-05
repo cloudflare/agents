@@ -1,6 +1,6 @@
 /**
  * Helpers shared by the browser tools: `createBrowserTools` in `ai.ts`, and
- * `browserTool` in `ai-sdk.ts` and `tanstack-ai.ts`. Internal — not an entry
+ * `browserTool` in `ai-sdk.ts`, `tanstack-ai.ts`, and `pi.ts`. Internal — not an entry
  * point.
  */
 import type { JSONValue } from "ai";

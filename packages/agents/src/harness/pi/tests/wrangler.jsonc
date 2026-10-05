@@ -11,9 +11,16 @@
       {
         "name": "PI_FLAKY_FACTORY_TEST",
         "class_name": "PiFlakyFactoryTestObject"
-      }
+      },
+      { "name": "PI_BROWSER_TEST", "class_name": "PiBrowserTestObject" },
+      // The browser tool's codemode runtime facet. The test pool needs a
+      // binding for ctx.exports to hand it out; it stays out of
+      // new_sqlite_classes, since the host owns the SQLite store.
+      { "name": "CodemodeRuntime", "class_name": "CodemodeRuntime" }
     ]
   },
+  // The browser tool runs model code in Dynamic Workers minted through this.
+  "worker_loaders": [{ "binding": "LOADER" }],
   "migrations": [
     {
       "tag": "v1",
@@ -22,7 +29,8 @@
         "PiStoreTestObject",
         "PiNoDefaultsTestObject",
         "PiFactoryTestObject",
-        "PiFlakyFactoryTestObject"
+        "PiFlakyFactoryTestObject",
+        "PiBrowserTestObject"
       ]
     }
   ]

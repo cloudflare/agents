@@ -347,6 +347,11 @@
       "import": "./dist/browser/tanstack-ai.js",
       "require": "./dist/browser/tanstack-ai.js"
     },
+    "./browser/pi": {
+      "types": "./dist/browser/pi.d.ts",
+      "import": "./dist/browser/pi.js",
+      "require": "./dist/browser/pi.js"
+    },
     "./voice": {
       "types": "./dist/voice/index.d.ts",
       "import": "./dist/voice/index.js",

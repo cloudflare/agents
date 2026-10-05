@@ -313,6 +313,8 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
 /** A bare object whose SQLite database the storage conformance suite uses. */
 export class PiStoreTestObject extends DurableObject<Cloudflare.Env> {}
 
+export { PiBrowserTestObject } from "./browser-fixture";
+export { CodemodeRuntime } from "@cloudflare/codemode";
 export {
   PiFactoryTestObject,
   PiFlakyFactoryTestObject

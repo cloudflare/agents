@@ -1,7 +1,7 @@
 /**
  * The harness-neutral core of `browserTool`, shared by the AI SDK
- * (`agents/browser/ai-sdk`) and TanStack AI (`agents/browser/tanstack-ai`)
- * adapters. Internal — not an entry point.
+ * (`agents/browser/ai-sdk`), TanStack AI (`agents/browser/tanstack-ai`), and
+ * pi-durable (`agents/browser/pi`) adapters. Internal — not an entry point.
  */
 import {
   createCodemodeRuntime,

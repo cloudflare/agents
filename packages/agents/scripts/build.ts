@@ -40,6 +40,7 @@ const entries = [
   "src/browser/ai.ts",
   "src/browser/ai-sdk.ts",
   "src/browser/tanstack-ai.ts",
+  "src/browser/pi.ts",
   "src/experimental/webmcp.ts",
   "src/voice/index.ts",
   "src/voice/types.ts",
