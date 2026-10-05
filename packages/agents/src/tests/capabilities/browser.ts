@@ -21,7 +21,11 @@ class FakeBrowserSocket {
   constructor(readonly sessionId: string) {}
   accept(): void {}
   send(data: string): void {
-    const { id, method } = JSON.parse(data) as { id: number; method: string };
+    const { id, method, params } = JSON.parse(data) as {
+      id: number;
+      method: string;
+      params?: { fakeBytes?: number };
+    };
     const targetId = `target-${this.sessionId}`;
     const result =
       method === "Target.getTargets"
@@ -34,7 +38,10 @@ class FakeBrowserSocket {
           ? { sessionId: `cdp-${targetId}` }
           : method === "Runtime.evaluate"
             ? { result: { value: `evaluated in ${targetId}` } }
-            : {};
+            : method === "Page.captureScreenshot"
+              ? // `fakeBytes` (not a CDP param) sizes the base64 data.
+                { data: "A".repeat(params?.fakeBytes ?? 8) }
+              : {};
     queueMicrotask(() => {
       for (const fn of this.#listeners.get("message") ?? []) {
         fn({ data: JSON.stringify({ id, result }) });

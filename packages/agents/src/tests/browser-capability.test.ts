@@ -359,6 +359,43 @@ describe("browserTool over a Browser", () => {
       expect(modelOutput.value).not.toHaveProperty("calls");
     });
   });
+
+  it("puts the cdp rules and the run time limit in its description", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const { description } = instance.browserTool();
+      // No discovery pass needed: the rules are right there.
+      expect(description).toContain("don't need codemode.search");
+      expect(description).toContain('sessionId: "active"');
+      expect(description).toContain("document.readyState");
+      expect(description).toContain("times out after 60s");
+      expect(description).not.toContain("file or workspace");
+    });
+  });
+
+  it("explains how to take a smaller screenshot when one is too large", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const capture = (bytes: number) =>
+        instance.browserTool().execute(
+          {
+            code: `async () => (await cdp.send({ method: "Page.captureScreenshot", params: { fakeBytes: ${bytes} }, sessionId: "active" })).data.length`
+          },
+          {}
+        );
+
+      const small = await capture(500_000);
+      expect(small.status === "completed" && small.result).toBe(500_000);
+
+      const large = await capture(1_500_000);
+      expect(large.status).toBe("error");
+      expect(large.status === "error" && large.error).toMatch(
+        /1\.5 MB of base64.*viewport.*jpeg/s
+      );
+    });
+  });
 });
 
 describe("TanStack AI browserTool over a Browser", () => {

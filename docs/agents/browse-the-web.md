@@ -239,6 +239,8 @@ export class MyAgent extends Think<Env> {
 - If the browser was lost (idle past `keepAliveMs`, closed, or crashed), the code still runs in a new browser and the result includes `restarted: true`.
 - Call `this.browser.liveView()` to give a person a Live View link into the same browser, and `this.browser.close()` to shut it down.
 - Set `keepAliveMs`, `recording`, and `guardrails` on `browserRun(binding, options)`. Use a different `name` for each extra browser on the same agent.
+- Each run times out after `timeoutMs` (default 60 seconds). The tool's description includes the CDP rules and this limit, so the model can start working without a discovery pass.
+- A single `cdp.send` result can be at most 1 MB, so a full-page screenshot of a long page fails. The model is told to capture the viewport or use JPEG instead.
 
 Only Chromium on a Browser Run binding is supported. It needs the same `LOADER` binding and `CodemodeRuntime` export as `createBrowserTools`.
 

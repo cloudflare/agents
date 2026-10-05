@@ -1,5 +1,6 @@
 import {
   CodemodeConnector,
+  MAX_DURABLE_VALUE_BYTES,
   type ConnectorTool,
   type ConnectorTools,
   type ToolExecuteContext
@@ -61,6 +62,26 @@ const ATTACH_HANDLE_PREFIX = "target:";
 /** Chrome's JSON-RPC code for a CDP session id it doesn't know. */
 const CDP_SESSION_NOT_FOUND = -32001;
 
+/**
+ * Codemode records every `send` result for replay and fails the run when one
+ * is over {@link MAX_DURABLE_VALUE_BYTES}, telling the model to write to a
+ * file, which this sandbox can't. A full-page screenshot is the usual
+ * culprit, so say how to take a smaller one instead.
+ */
+function assertScreenshotFits(result: unknown): void {
+  const data = (result as { data?: unknown } | undefined)?.data;
+  if (typeof data !== "string" || data.length < MAX_DURABLE_VALUE_BYTES) {
+    return;
+  }
+  const megabytes = (data.length / 1_000_000).toFixed(1);
+  throw new Error(
+    `The screenshot is ${megabytes} MB of base64, over the 1 MB limit on a ` +
+      `cdp.send result. Capture just the viewport (no captureBeyondViewport ` +
+      `or clip larger than the window), or pass format: "jpeg" with ` +
+      `quality: 60.`
+  );
+}
+
 /** {@link BrowserSessionConnector} `#liveParams`: nothing to detach. */
 const DETACHED = Symbol("detached");
 
@@ -108,7 +129,12 @@ interface ExecutionState {
   activeResolved: boolean;
 }
 
-const INSTRUCTIONS = [
+/**
+ * How to use the `cdp` connector, one rule per line. `codemode.describe("cdp")`
+ * returns these; `browserTool` also puts them in its description, so the
+ * model doesn't need a discovery pass.
+ */
+export const BROWSER_INSTRUCTIONS = [
   "This browser persists between executions: tabs, cookies, and logins you leave behind are still there next time. It is managed for you — there is nothing to start, close, or reset.",
   "The browser can still be replaced between runs (idle timeout, crash) — even between the passes of a run that paused for approval. The tool result then says restarted: true, and earlier tabs, cookies, and logins are gone. Don't assume a page from an earlier run is still there: check where you are before an action that matters (submitting a form, making a purchase).",
   'Page-scoped commands (Page.*, Runtime.*, DOM.*, Input.*, Network.*, Emulation.*) need sessionId: "active" — the tab you are working in, which stays the same across executions. Example: await cdp.send({ method: "Page.navigate", params: { url }, sessionId: "active" }).',
@@ -119,7 +145,7 @@ const INSTRUCTIONS = [
   "Issue CDP calls sequentially — never in parallel (no Promise.all): call order is recorded for durable replay.",
   "Page.navigate resolves before the page finishes loading. Poll Runtime.evaluate of document.readyState until it is 'complete' before reading the page.",
   "Use cdp.spec() to discover commands, events, and types when unsure. If a command fails or times out, check cdp.getDebugLog() for recent protocol traffic.",
-  "Return small results. Write large page dumps to a file or workspace and pass references around."
+  "Keep results small: a cdp.send result over 1 MB (a full-page screenshot, say) fails the run. Pick out what you need inside Runtime.evaluate instead of returning whole pages. There is no file system to write to."
 ].join("\n");
 
 /**
@@ -165,7 +191,7 @@ export class BrowserSessionConnector extends CodemodeConnector {
   }
 
   protected instructions(): string {
-    return INSTRUCTIONS;
+    return BROWSER_INSTRUCTIONS;
   }
 
   protected override tool(name: string, tool: ConnectorTool): ConnectorTool {
@@ -228,6 +254,9 @@ export class BrowserSessionConnector extends CodemodeConnector {
             throw await this.#teach(state, error, method, sessionId);
           }
           this.#observe(state, method, liveParams, result);
+          if (method === "Page.captureScreenshot") {
+            assertScreenshotFits(result);
+          }
           return result;
         }
       },

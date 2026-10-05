@@ -9,6 +9,7 @@ import {
   type ProxyToolOutput
 } from "@cloudflare/codemode";
 import {
+  BROWSER_INSTRUCTIONS,
   BrowserSessionConnector,
   type BrowserExecutionReport,
   type BrowserNewTab,
@@ -30,7 +31,7 @@ export interface BrowserToolOptions {
    */
   loader: WorkerLoader;
 
-  /** Sandbox execution timeout in milliseconds. Defaults to 30000 (30s). */
+  /** Sandbox execution timeout in milliseconds. Defaults to 60000 (60s). */
   timeoutMs?: number;
 
   /**
@@ -61,6 +62,8 @@ export type BrowserToolOutput = ProxyToolOutput & {
   /** Tabs the page opened itself (popups, `target=_blank` links). */
   newTabs?: BrowserNewTab[];
 };
+
+const DEFAULT_TIMEOUT_MS = 60_000;
 
 const RESTARTED_NOTICE =
   "The browser was restarted before this run (it expired or was closed): earlier tabs, logins, and page state are gone. Your code ran in a fresh browser — navigate again before relying on page state.";
@@ -123,6 +126,7 @@ export function createBrowserToolCore(
     );
   }
 
+  const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const connector = new BrowserSessionConnector(ctx, {
     browser: options.browser
   });
@@ -130,16 +134,28 @@ export function createBrowserToolCore(
     ctx,
     executor: new DynamicWorkerExecutor({
       loader: options.loader,
-      timeout: options.timeoutMs
+      timeout
     }),
     connectors: [connector],
     name: browserRuntimeName(options.browser.name),
     transformResult: transformBrowserResult
   });
 
+  // The connector rules go in the description itself. Otherwise the model
+  // only finds them with codemode.describe("cdp"), and codemode.search
+  // indexes the cdp.* methods, not CDP commands, so its queries come up empty.
+  const rules = [
+    BROWSER_INSTRUCTIONS,
+    `Each run times out after ${Math.round(timeout / 1000)}s, so split long jobs (such as crawling a site) across several runs.`,
+    adapter.screenshotHint
+  ]
+    .join("\n")
+    .split("\n")
+    .map((rule) => `  - ${rule}`)
+    .join("\n");
   const codemodeTool = runtime.tool({
     connectorHints: {
-      cdp: `A persistent browser over CDP — tabs and logins carry over between runs. Use sessionId: "active" for page commands. ${adapter.screenshotHint}`
+      cdp: `A persistent browser over the Chrome DevTools Protocol. Its rules are below, so you don't need codemode.search or codemode.describe for it; codemode.search doesn't cover CDP commands such as Page.navigate (use cdp.spec() to look those up).\n${rules}`
     }
   });
 
