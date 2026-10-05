@@ -2097,6 +2097,9 @@ importers:
       '@cloudflare/vite-plugin':
         specifier: 1.62.3
         version: 1.62.3(@types/node@26.4.0)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(wrangler@4.145.0(@cloudflare/workers-types@5.20260812.1)(@types/node@26.4.0))
+      '@cloudflare/vitest-pool-workers':
+        specifier: ^0.19.1
+        version: 0.19.1(@cloudflare/workers-types@5.20260812.1)(@vitest/runner@4.1.11)(@vitest/snapshot@4.1.11)(vitest@4.1.11)
       '@cloudflare/workers-types':
         specifier: ^5.20260729.1
         version: 5.20260812.1
@@ -2124,6 +2127,9 @@ importers:
       vite:
         specifier: ^8.1.0
         version: 8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.4.0)(@vitest/browser-playwright@4.1.11)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@26.4.0)(typescript@6.0.3))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
       wrangler:
         specifier: ^4.145.0
         version: 4.145.0(@cloudflare/workers-types@5.20260812.1)(@types/node@26.4.0)
@@ -14235,6 +14241,21 @@ snapshots:
   '@cloudflare/vitest-pool-workers@0.19.1(@cloudflare/workers-types@5.20260812.1)(@vitest/runner@4.1.10)(@vitest/snapshot@4.1.11)(vitest@4.1.11)':
     dependencies:
       '@vitest/runner': 4.1.10
+      '@vitest/snapshot': 4.1.11
+      cjs-module-lexer: 1.2.3
+      esbuild: 0.28.1
+      miniflare: 4.20260730.0
+      vitest: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.4.0)(@vitest/browser-playwright@4.1.11)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@26.4.0)(typescript@6.0.3))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      wrangler: 4.116.0(@cloudflare/workers-types@5.20260812.1)
+      zod: 3.25.76
+    transitivePeerDependencies:
+      - '@cloudflare/workers-types'
+      - bufferutil
+      - utf-8-validate
+
+  '@cloudflare/vitest-pool-workers@0.19.1(@cloudflare/workers-types@5.20260812.1)(@vitest/runner@4.1.11)(@vitest/snapshot@4.1.11)(vitest@4.1.11)':
+    dependencies:
+      '@vitest/runner': 4.1.11
       '@vitest/snapshot': 4.1.11
       cjs-module-lexer: 1.2.3
       esbuild: 0.28.1
