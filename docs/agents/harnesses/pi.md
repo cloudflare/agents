@@ -164,7 +164,7 @@ const result = await session.wait(receipt.operationId);
 
 ## How recovery works
 
-The harness schedules one lifecycle job per session with work. The job waits on Pi's tasks, refreshes itself as a heartbeat while they run, and completes when they settle. If the object is evicted or crashes, the job is still due, so its alarm restarts the object. Pi reopens its stored state and resumes the session's work: a replay-safe tool call runs again, and an unsafe one is reported to the model as interrupted.
+The harness schedules one lifecycle job per session with work. Pi does the work; the job only checks on it. While Pi has work in the session, the job stays due on a 30-second heartbeat. When Pi settles, the job completes, so no alarm is left and the object can hibernate. The harness sets no timers of its own: Pi's model requests, tool calls, and retry timers keep the object running while there is work. If the object restarts mid-run, after a crash, a deploy, or a memory-limit reset, the job is still due, so its alarm restarts the object. Pi reopens its stored state and resumes the session's work: a replay-safe tool call runs again, and an unsafe one is reported to the model as interrupted. A Pi wait more than 60 seconds away, such as a long retry, is handed to the alarm.
 
 Every operation waits for the object's startup, which runs the factory. A call over RPC that arrives first waits for it rather than opening Pi on its own.
 

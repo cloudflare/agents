@@ -11,8 +11,9 @@ The example composes:
 - `PiHarness extends LifecycleCapability`, the harness interface:
   `harness.prompt()`, `harness.submit()`, `harness.sessions`,
   `harness.session(id)`, and `session.events()` for pi's live events;
-- one Lifecycle job per session as the wake: it keeps the object alive while
-  pi has live tasks in the session, and completes when there are none;
+- one Lifecycle job per session as the wake: while pi has live tasks in the
+  session it stays due on a heartbeat, so an object that restarts mid-run
+  is brought back by its alarm, and it completes when there are none;
 - a pi session store on the object's SQLite database;
 - app glue that is not part of the harness: `sockets.ts` puts one session
   per socket on `WebSockets`, and `view.ts` and `transcript.ts` fold pi's

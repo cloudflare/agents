@@ -141,6 +141,26 @@ describe("PiHarness on pi-durable", () => {
     expect((await stub.prompt("again")).text).toBe("echo: again");
   });
 
+  it("completes the wake as soon as pi is idle, not at the next heartbeat", async () => {
+    const stub = fresh();
+    // A heartbeat far beyond the test, so only pi going idle can end it.
+    await stub.setHeartbeat(10 * 60_000);
+    const receipt = await stub.submit("gate");
+    await stub.gateStarted(1);
+    const alarm = await stub.alarmTime();
+    expect(alarm).not.toBeNull();
+    expect(alarm! - Date.now()).toBeGreaterThan(60_000);
+
+    await stub.release();
+    await stub.wait(receipt.operationId);
+    let after = await stub.alarmTime();
+    for (let i = 0; i < 50 && after !== null; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      after = await stub.alarmTime();
+    }
+    expect(after).toBeNull();
+  });
+
   it("answers every one of many submissions made to one session at once", async () => {
     const stub = fresh();
     const inputs = Array.from({ length: 12 }, (_, n) => `burst ${n}`);

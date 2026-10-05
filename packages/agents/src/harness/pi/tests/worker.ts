@@ -207,6 +207,11 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.getAlarm();
   }
 
+  /** Change the wake's heartbeat for this instance. */
+  setHeartbeat(heartbeatMs: number): void {
+    setWakeTimingForTests(this.harness, { ...TEST_TIMING, heartbeatMs });
+  }
+
   /** The fixture's tools and preamble, as one pi extension. */
   #testTools(): Extension {
     const storage = this.ctx.storage;
