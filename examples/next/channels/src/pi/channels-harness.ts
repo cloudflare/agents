@@ -232,9 +232,28 @@ class PiChannelsSession implements HarnessSession {
 
   /** The active transcript, with user messages under the caller's ids. */
   async transcript(): Promise<TranscriptMessage[]> {
-    const messages = projectEntries(await this.session.messages());
-    const users = messages.filter((m) => m.role === "user").map((m) => m.id);
-    const ids = await this.ids.resolve(this.id, users);
+    const entries = await this.session.messages();
+    const messages = projectEntries(entries);
+    const users = new Set(
+      messages.filter((m) => m.role === "user").map((m) => m.id)
+    );
+    // A fork inherits its parent's entries, which keep the parent's
+    // conversation id: resolve each against the session that placed it.
+    const bySession = new Map<string, string[]>();
+    for (const entry of entries) {
+      if (!users.has(String(entry.id))) continue;
+      const session = String(entry.conversationId);
+      bySession.set(session, [
+        ...(bySession.get(session) ?? []),
+        String(entry.id)
+      ]);
+    }
+    const ids = new Map<string, string>();
+    for (const [session, entryIds] of bySession) {
+      for (const [entry, id] of await this.ids.resolve(session, entryIds)) {
+        ids.set(entry, id);
+      }
+    }
     return toTranscript(messages, (entryId) => ids.get(entryId));
   }
 
