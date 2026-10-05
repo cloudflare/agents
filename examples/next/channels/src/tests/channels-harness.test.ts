@@ -24,6 +24,20 @@ describe("piChannelsHarness input", () => {
     });
   });
 
+  it("passes inline text files to pi as text", async () => {
+    const result = await stub().send(
+      [
+        {
+          type: "file",
+          mediaType: "text/plain",
+          url: `data:text/plain;base64,${btoa("notes")}`
+        }
+      ],
+      "m1"
+    );
+    expect(JSON.parse(result)).toMatchObject({ text: "echo: notes" });
+  });
+
   it("rejects attachments pi cannot take instead of dropping them", async () => {
     const pdf = await stub().send(
       [
