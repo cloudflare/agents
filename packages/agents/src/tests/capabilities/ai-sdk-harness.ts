@@ -63,7 +63,10 @@ function stream(reply: ScriptedReply) {
  */
 export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
   #script: ScriptedReply[] = [];
-  #held = Promise.withResolvers<void>();
+  #release!: () => void;
+  readonly #held = new Promise<void>((resolve) => {
+    this.#release = resolve;
+  });
   /** Model calls so far, with the prompt each saw. */
   readonly prompts: unknown[] = [];
 
@@ -72,7 +75,7 @@ export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
       doStream: async ({ prompt }) => {
         this.prompts.push(prompt);
         const reply = this.#script.shift() ?? { text: "(no script)" };
-        if ("held" in reply && reply.held) await this.#held.promise;
+        if ("held" in reply && reply.held) await this.#held;
         return { stream: stream(reply) };
       }
     }),
@@ -104,7 +107,7 @@ export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
 
   /** Let a `held` reply start. */
   release(): void {
-    this.#held.resolve();
+    this.#release();
   }
 
   getPromptCount(): number {
