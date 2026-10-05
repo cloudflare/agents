@@ -2261,7 +2261,7 @@ export class MCPClientManager extends LifecycleCapability {
   async removeServer(serverId: string): Promise<void> {
     const connection = this.mcpConnections[serverId];
     let authProvider = connection?.options.transport.authProvider;
-    if (!connection) {
+    if (!authProvider) {
       // A user-supplied provider factory can throw; that must not stop the
       // server from being removed.
       try {

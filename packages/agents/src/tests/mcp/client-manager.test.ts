@@ -2002,6 +2002,38 @@ describe("MCPClientManager OAuth Integration", () => {
       })
     );
 
+    it(
+      "clears saved OAuth credentials when the live connection has no auth provider",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        saveServer({
+          id: "plain",
+          name: "plain",
+          server_url: "http://plain.example.com",
+          callback_url: "http://localhost:3000/callback",
+          client_id: "plain-client",
+          auth_url: null,
+          server_options: null
+        });
+        const connection = new MCPClientConnection(
+          new URL("http://plain.example.com"),
+          { name: "test-client", version: "1.0.0" },
+          { transport: { type: "auto" }, client: {} }
+        );
+        connection.client.close = vi.fn().mockResolvedValue(undefined);
+        manager.mcpConnections.plain = connection;
+        await harness.storage.put("/test-client/plain/plain-client/token", {
+          access_token: "secret"
+        });
+
+        await manager.removeServer("plain");
+
+        const left = await harness.storage.list({
+          prefix: "/test-client/plain/"
+        });
+        expect(left.size).toBe(0);
+      })
+    );
+
     it("removes a closed server even when the auth provider factory throws", () =>
       withMcpHarness(async (harness) => {
         const manager = createTestManager(harness, {
