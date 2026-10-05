@@ -1,5 +1,6 @@
 import type { Tool, ToolSet } from "ai";
 import type { ServerTool } from "@tanstack/ai";
+import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { expectTypeOf } from "vitest";
 import {
   browserTool,
@@ -7,6 +8,7 @@ import {
   type BrowserToolOutput
 } from "../browser/tools/ai-sdk";
 import { Browser, browserRun } from "../browser";
+import { browserTool as piBrowserTool } from "../browser/tools/pi";
 import { browserTool as tanStackBrowserTool } from "../browser/tools/tanstack-ai";
 
 declare const env: { BROWSER: Fetcher; LOADER: WorkerLoader };
@@ -44,6 +46,25 @@ expectTypeOf(tanStackTool).toExtend<ServerTool>();
 expectTypeOf(tanStackTool.name).toEqualTypeOf<"browser">();
 expectTypeOf(
   tanStackBrowserTool({
+    browser: new Browser({ provider: browserRun(env.BROWSER) }),
+    loader: env.LOADER,
+    name: "web"
+  }).name
+).toEqualTypeOf<"web">();
+
+// The pi-durable adapter: a ToolRegistration an extension can carry, named
+// `browser` unless the host picks.
+const piTool = piBrowserTool({
+  ctx: {} as DurableObjectState,
+  browser: new Browser({ provider: browserRun(env.BROWSER) }),
+  loader: env.LOADER
+});
+expectTypeOf(piTool).toExtend<ToolRegistration>();
+expectTypeOf(piTool.name).toEqualTypeOf<"browser">();
+const piExtension: Extension = { name: "browser", tools: [piTool] };
+void piExtension;
+expectTypeOf(
+  piBrowserTool({
     browser: new Browser({ provider: browserRun(env.BROWSER) }),
     loader: env.LOADER,
     name: "web"

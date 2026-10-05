@@ -42,6 +42,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/browser/ai`                       | `src/browser/ai.ts`                           | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools`                                                                  |
 | `agents/browser/ai-sdk`                   | `src/browser/tools/ai-sdk.ts`                 | AI SDK `browserTool` for a persistent `Browser` (+ `createQuickActionTools` re-export)                                                        |
 | `agents/browser/tanstack-ai`              | `src/browser/tools/tanstack-ai.ts`            | TanStack AI `browserTool` for a persistent `Browser` (+ legacy `createBrowserTools`)                                                          |
+| `agents/browser/pi`                       | `src/browser/tools/pi.ts`                     | pi-durable `browserTool` for a persistent `Browser`                                                                                           |
 | `agents/websearch`                        | `src/websearch/index.ts`                      | Web Search API sources (`createAIWebSearch`, `createHTTPWebSearch`), `WebSearchError`, renderer                                               |
 | `agents/websearch/pi`                     | `src/websearch/tools/pi.ts`                   | pi harness `webSearchTool`                                                                                                                    |
 | `agents/websearch/ai-sdk`                 | `src/websearch/tools/ai-sdk.ts`               | AI SDK `webSearchTool`                                                                                                                        |
@@ -189,7 +190,7 @@ src/
     browser-tool.ts     # harness-neutral browserTool core shared by the tools/ adapters
     tool-helpers.ts     # model-output + ctx helpers shared by ai.ts and the tools/ adapters
     tanstack-ai.ts      # legacy createBrowserTools for TanStack AI (re-exported by tools/tanstack-ai.ts)
-    tools/              # browserTool adapters for a persistent Browser: ai-sdk.ts, tanstack-ai.ts
+    tools/              # browserTool adapters for a persistent Browser: ai-sdk.ts, tanstack-ai.ts, pi.ts
 
   websearch/            # web_search tool over Cloudflare's Web Search API (beta)
     index.ts            # Barrel for agents/websearch
