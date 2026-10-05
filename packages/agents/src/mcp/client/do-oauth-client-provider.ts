@@ -355,6 +355,25 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     }
   }
 
+  /**
+   * Delete every key this provider stores for its server: tokens and client
+   * info for any client ID, verifiers, pending states and discovery state.
+   * Used when the server is removed. Other servers' keys are untouched.
+   */
+  async clearServerStorage(): Promise<void> {
+    const keys = [
+      ...(
+        await this.storage.list({
+          prefix: `/${this.clientName}/${this.serverId}/`
+        })
+      ).keys()
+    ];
+    // DO storage caps a multi-key delete at 128 keys.
+    for (let i = 0; i < keys.length; i += 128) {
+      await this.storage.delete(keys.slice(i, i + 128));
+    }
+  }
+
   codeVerifierKey(clientId: string) {
     return `${this.keyPrefix(clientId)}/code_verifier`;
   }

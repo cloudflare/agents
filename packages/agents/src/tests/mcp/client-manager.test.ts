@@ -1912,6 +1912,188 @@ describe("MCPClientManager OAuth Integration", () => {
     );
   });
 
+  describe("Server Removal", () => {
+    it(
+      "clears the removed server's saved OAuth credentials and keeps other servers'",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        const callbackUrl = "http://localhost:3000/callback";
+        for (const id of ["removed", "kept"]) {
+          saveServer({
+            id,
+            name: id,
+            server_url: `http://${id}.example.com`,
+            callback_url: callbackUrl,
+            client_id: `${id}-client`,
+            auth_url: "https://auth.example.com/authorize",
+            server_options: JSON.stringify({
+              transport: { type: "auto" },
+              client: {}
+            })
+          });
+        }
+
+        await manager.restoreConnectionsFromStorage("test-agent");
+
+        const keysFor = (id: string) => [
+          `/test-agent/${id}/${id}-client/token`,
+          `/test-agent/${id}/${id}-client/client_info/`,
+          `/test-agent/${id}/${id}-client/code_verifier/nonce`,
+          `/test-agent/${id}/old-client/token`,
+          `/test-agent/${id}/state/pending-nonce`,
+          `/test-agent/${id}/oauth_discovery`
+        ];
+        for (const id of ["removed", "kept"]) {
+          for (const key of keysFor(id)) {
+            await harness.storage.put(key, { value: key });
+          }
+        }
+
+        await manager.removeServer("removed");
+
+        const removed = await harness.storage.list({
+          prefix: "/test-agent/removed/"
+        });
+        expect([...removed.keys()]).toEqual([]);
+
+        const kept = await harness.storage.list({
+          prefix: "/test-agent/kept/"
+        });
+        expect([...kept.keys()].sort()).toEqual(keysFor("kept").sort());
+      })
+    );
+
+    it(
+      "clears more than 128 saved OAuth keys for a removed server",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        for (const id of ["many", "other"]) {
+          saveServer({
+            id,
+            name: id,
+            server_url: `http://${id}.example.com`,
+            callback_url: "http://localhost:3000/callback",
+            client_id: `${id}-client`,
+            auth_url: "https://auth.example.com/authorize",
+            server_options: null
+          });
+        }
+        await manager.restoreConnectionsFromStorage("test-client");
+
+        const entries: Record<string, unknown> = {};
+        for (let i = 0; i < 130; i++) {
+          entries[`/test-client/many/state/nonce-${i}`] = { i };
+        }
+        // storage.put also caps batches at 128 keys.
+        const all = Object.entries(entries);
+        for (let i = 0; i < all.length; i += 100) {
+          await harness.storage.put(Object.fromEntries(all.slice(i, i + 100)));
+        }
+        await harness.storage.put("/test-client/other/state/keep", { i: 0 });
+
+        await manager.removeServer("many");
+
+        const left = await harness.storage.list({
+          prefix: "/test-client/many/"
+        });
+        expect(left.size).toBe(0);
+        const other = await harness.storage.list({
+          prefix: "/test-client/other/"
+        });
+        expect([...other.keys()]).toEqual(["/test-client/other/state/keep"]);
+      })
+    );
+
+    it(
+      "clears saved OAuth credentials when the live connection has no auth provider",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        saveServer({
+          id: "plain",
+          name: "plain",
+          server_url: "http://plain.example.com",
+          callback_url: "http://localhost:3000/callback",
+          client_id: "plain-client",
+          auth_url: null,
+          server_options: null
+        });
+        const connection = new MCPClientConnection(
+          new URL("http://plain.example.com"),
+          { name: "test-client", version: "1.0.0" },
+          { transport: { type: "auto" }, client: {} }
+        );
+        connection.client.close = vi.fn().mockResolvedValue(undefined);
+        manager.mcpConnections.plain = connection;
+        await harness.storage.put("/test-client/plain/plain-client/token", {
+          access_token: "secret"
+        });
+
+        await manager.removeServer("plain");
+
+        const left = await harness.storage.list({
+          prefix: "/test-client/plain/"
+        });
+        expect(left.size).toBe(0);
+      })
+    );
+
+    it("removes a closed server even when the auth provider factory throws", () =>
+      withMcpHarness(async (harness) => {
+        const manager = createTestManager(harness, {
+          createAuthProvider: () => {
+            throw new Error("provider config unavailable");
+          }
+        });
+        saveServerRow(harness.storage, {
+          id: "broken",
+          name: "broken",
+          server_url: "http://broken.example.com",
+          callback_url: "http://localhost:3000/callback",
+          client_id: null,
+          auth_url: null,
+          server_options: null
+        });
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        await manager.removeServer("broken");
+
+        expect(
+          harness.serverRows().find((row) => row.id === "broken")
+        ).toBeUndefined();
+        warn.mockRestore();
+      }));
+
+    it(
+      "clears saved OAuth credentials for a server whose connection was closed",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        saveServer({
+          id: "closed",
+          name: "closed",
+          server_url: "http://closed.example.com",
+          callback_url: "http://localhost:3000/callback",
+          client_id: "closed-client",
+          auth_url: "https://auth.example.com/authorize",
+          server_options: JSON.stringify({
+            transport: { type: "auto" },
+            client: {}
+          })
+        });
+
+        await manager.restoreConnectionsFromStorage("test-client");
+        await manager.closeConnection("closed");
+        expect(manager.mcpConnections.closed).toBeUndefined();
+
+        await harness.storage.put("/test-client/closed/closed-client/token", {
+          access_token: "secret"
+        });
+
+        await manager.removeServer("closed");
+
+        const left = await harness.storage.list({
+          prefix: "/test-client/closed/"
+        });
+        expect([...left.keys()]).toEqual([]);
+      })
+    );
+  });
+
   describe("OAuth Connection Restoration", () => {
     it(
       "should restore OAuth connections from storage",
