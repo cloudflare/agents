@@ -156,6 +156,46 @@ Host-specific bindings, authentication, and protocol adapters remain explicit
 constructor dependencies. Lifecycle never grants a capability the complete
 host implicitly.
 
+A capability's public operations can run before startup, because
+[native RPC](#native-rpc) bypasses the automatic startup on fetch, alarm and
+WebSocket events. If an operation starts work that `onStart` also awaits, such
+as lazily opening a store, it must call `await this.lifecycle.ready()` first:
+
+```ts
+class Store extends LifecycleCapability {
+  #opening: Promise<Database> | undefined;
+
+  constructor() {
+    super("store");
+  }
+
+  async onStart(): Promise<void> {
+    await this.#open();
+  }
+
+  async get(key: string): Promise<string | undefined> {
+    const db = await this.#open();
+    return db.get(key);
+  }
+
+  async #open(): Promise<Database> {
+    // Without this, an RPC that calls get() before startup begins the open
+    // outside startup, and onStart then waits on it behind a closed gate.
+    await this.lifecycle.ready();
+    this.#opening ??= openDatabase(this.lifecycle.storage);
+    return this.#opening;
+  }
+}
+```
+
+Startup holds the input gate (`blockConcurrencyWhile`) while `onStart` runs, so
+work begun outside startup has its timers and I/O held back and never finishes.
+`onStart` waits on it until startup times out after 30 seconds and the object
+is reset. Whether it happens depends on whether the RPC arrives first, so it
+shows up as an intermittent timeout. `ready()` resolves immediately inside
+startup, so `onStart` can call the same guarded method. `Tasks`, `Streams`,
+`Scheduler`, `Queue` and `PiHarness` guard their operations this way.
+
 Capability hooks run outside host context, but user callbacks run through
 `this.lifecycle.runInHostContext(fn)` inside the host invocation context.
 Scheduler and Queue dispatch their registered callbacks through this
