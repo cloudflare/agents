@@ -19,7 +19,8 @@ const usage = {
 
 /** What the scripted model answers with, one entry per model call. */
 export type ScriptedReply =
-  | { text: string; delayMs?: number }
+  /** A `held` reply starts only once the test calls `release()`. */
+  | { text: string; delayMs?: number; held?: boolean }
   | { call: string; toolCallId: string };
 
 const finish = (reason: "stop" | "tool-calls") => ({
@@ -62,6 +63,7 @@ function stream(reply: ScriptedReply) {
  */
 export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
   #script: ScriptedReply[] = [];
+  #held = Promise.withResolvers<void>();
   /** Model calls so far, with the prompt each saw. */
   readonly prompts: unknown[] = [];
 
@@ -70,6 +72,7 @@ export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
       doStream: async ({ prompt }) => {
         this.prompts.push(prompt);
         const reply = this.#script.shift() ?? { text: "(no script)" };
+        if ("held" in reply && reply.held) await this.#held.promise;
         return { stream: stream(reply) };
       }
     }),
@@ -97,6 +100,11 @@ export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
 
   setScript(script: ScriptedReply[]): void {
     this.#script = script;
+  }
+
+  /** Let a `held` reply start. */
+  release(): void {
+    this.#held.resolve();
   }
 
   getPromptCount(): number {
