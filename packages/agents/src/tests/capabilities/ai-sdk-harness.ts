@@ -114,6 +114,21 @@ export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
     return this.harness.session(session).wait(operationId);
   }
 
+  /** Wait with a signal aborted before the wait begins. */
+  async waitAborted(
+    session: string,
+    operationId: string
+  ): Promise<"rejected" | OperationResult["status"]> {
+    try {
+      const result = await this.harness
+        .session(session)
+        .wait(operationId, AbortSignal.abort(new Error("stop")));
+      return result.status;
+    } catch {
+      return "rejected";
+    }
+  }
+
   async state(session: string) {
     const watch = await this.harness.session(session).watch();
     await watch.stop();
