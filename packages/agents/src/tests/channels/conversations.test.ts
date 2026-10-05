@@ -353,6 +353,20 @@ describe("Channels over the Web Channel", () => {
     expect(await stub.responseState(responseId)).toBe("errored");
   });
 
+  it("interrupts every Channels response on wake, past a page of other streams", async () => {
+    const stub = harness();
+    const alice = await connect(stub);
+    const responseId = await startRun(stub, alice);
+    // More newer streaming streams than one page, from another capability.
+    const others = await stub.openForeignStreams(1001);
+
+    await stub.wake();
+    expect(await stub.responseState(responseId)).toBe("errored");
+    // Streams Channels does not own are left alone.
+    expect(await stub.responseState(others[0])).toBe("streaming");
+    expect(await stub.responseState(others[1000])).toBe("streaming");
+  });
+
   it("settles a turn the harness could not answer as failed", async () => {
     const stub = harness();
     const alice = await connect(stub);
