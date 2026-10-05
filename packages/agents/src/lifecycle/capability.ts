@@ -83,6 +83,14 @@ export type LifecycleServices = {
    * Resolve once Lifecycle startup has finished, starting it if needed, and
    * reject if that startup fails. Calls made from inside startup resolve
    * immediately.
+   *
+   * Await it first in any operation that can run before startup and starts
+   * work `onStart` also awaits, such as lazily opening a store. Native RPC
+   * bypasses the automatic startup on fetch, alarm and WebSocket events, so
+   * such an operation can begin that work outside startup. `onStart` then
+   * awaits it while startup holds the input gate (`blockConcurrencyWhile`),
+   * which holds back the work's timers and I/O, and startup times out after
+   * 30 seconds and resets the object.
    */
   readonly ready: () => Promise<void>;
   /**
