@@ -361,11 +361,16 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
    * Used when the server is removed. Other servers' keys are untouched.
    */
   async clearServerStorage(): Promise<void> {
-    const keys = await this.storage.list({
-      prefix: `/${this.clientName}/${this.serverId}/`
-    });
-    if (keys.size > 0) {
-      await this.storage.delete([...keys.keys()]);
+    const keys = [
+      ...(
+        await this.storage.list({
+          prefix: `/${this.clientName}/${this.serverId}/`
+        })
+      ).keys()
+    ];
+    // DO storage caps a multi-key delete at 128 keys.
+    for (let i = 0; i < keys.length; i += 128) {
+      await this.storage.delete(keys.slice(i, i + 128));
     }
   }
 

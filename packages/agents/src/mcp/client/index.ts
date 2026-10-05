@@ -2259,10 +2259,21 @@ export class MCPClientManager extends LifecycleCapability {
    * Remove an MCP server - closes connection if active and removes from storage.
    */
   async removeServer(serverId: string): Promise<void> {
-    const authProvider =
-      this.mcpConnections[serverId]?.options.transport.authProvider ??
-      this.authProviderFromStorage(serverId);
-    if (this.mcpConnections[serverId]) {
+    const connection = this.mcpConnections[serverId];
+    let authProvider = connection?.options.transport.authProvider;
+    if (!connection) {
+      // A user-supplied provider factory can throw; that must not stop the
+      // server from being removed.
+      try {
+        authProvider = this.authProviderFromStorage(serverId);
+      } catch (error) {
+        console.warn(
+          `[MCPClientManager] Failed to create auth provider for ${serverId}:`,
+          error
+        );
+      }
+    }
+    if (connection) {
       try {
         await this.closeConnection(serverId);
       } catch (_e) {

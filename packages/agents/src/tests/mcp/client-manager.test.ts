@@ -1963,6 +1963,72 @@ describe("MCPClientManager OAuth Integration", () => {
     );
 
     it(
+      "clears more than 128 saved OAuth keys for a removed server",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        for (const id of ["many", "other"]) {
+          saveServer({
+            id,
+            name: id,
+            server_url: `http://${id}.example.com`,
+            callback_url: "http://localhost:3000/callback",
+            client_id: `${id}-client`,
+            auth_url: "https://auth.example.com/authorize",
+            server_options: null
+          });
+        }
+        await manager.restoreConnectionsFromStorage("test-client");
+
+        const entries: Record<string, unknown> = {};
+        for (let i = 0; i < 130; i++) {
+          entries[`/test-client/many/state/nonce-${i}`] = { i };
+        }
+        // storage.put also caps batches at 128 keys.
+        const all = Object.entries(entries);
+        for (let i = 0; i < all.length; i += 100) {
+          await harness.storage.put(Object.fromEntries(all.slice(i, i + 100)));
+        }
+        await harness.storage.put("/test-client/other/state/keep", { i: 0 });
+
+        await manager.removeServer("many");
+
+        const left = await harness.storage.list({
+          prefix: "/test-client/many/"
+        });
+        expect(left.size).toBe(0);
+        const other = await harness.storage.list({
+          prefix: "/test-client/other/"
+        });
+        expect([...other.keys()]).toEqual(["/test-client/other/state/keep"]);
+      })
+    );
+
+    it("removes a closed server even when the auth provider factory throws", () =>
+      withMcpHarness(async (harness) => {
+        const manager = createTestManager(harness, {
+          createAuthProvider: () => {
+            throw new Error("provider config unavailable");
+          }
+        });
+        saveServerRow(harness.storage, {
+          id: "broken",
+          name: "broken",
+          server_url: "http://broken.example.com",
+          callback_url: "http://localhost:3000/callback",
+          client_id: null,
+          auth_url: null,
+          server_options: null
+        });
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        await manager.removeServer("broken");
+
+        expect(
+          harness.serverRows().find((row) => row.id === "broken")
+        ).toBeUndefined();
+        warn.mockRestore();
+      }));
+
+    it(
       "clears saved OAuth credentials for a server whose connection was closed",
       managerTest(async ({ harness, manager, saveServer }) => {
         saveServer({
