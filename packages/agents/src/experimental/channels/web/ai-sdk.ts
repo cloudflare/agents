@@ -280,6 +280,8 @@ export class WebChannelChatTransport implements ChatTransport<UIMessage> {
             });
           }
           answering = false;
+          // The continuation may have settled while the answers were sent.
+          settle();
         };
 
         const settle = () => {
