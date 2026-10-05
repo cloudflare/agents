@@ -25,13 +25,6 @@ export type {
 } from "../browser-tool";
 export type { BrowserNewTab, BrowserSource } from "../session-connector";
 
-/**
- * The largest screenshot, in base64 characters, sent to the model as an
- * image. Anthropic rejects images over 5 MB, and anything larger costs more
- * context than a screenshot is worth; a bigger one comes back as a note.
- */
-const MAX_SCREENSHOT_BASE64_LENGTH = 5 * 1024 * 1024;
-
 export interface PiBrowserToolOptions<
   TName extends string = "browser"
 > extends BrowserToolOptions {
@@ -106,15 +99,14 @@ function browserToolResult(
     };
   }
 
+  // No size check: a screenshot comes from one cdp.send result, which
+  // codemode caps at 1 MB, well under what model providers accept.
   const bytes = Math.floor((screenshot.data.length * 3) / 4).toLocaleString();
-  const fits = screenshot.data.length <= MAX_SCREENSHOT_BASE64_LENGTH;
   // Keep the rest of the result (status, restarted, notice, newTabs) around
   // the sentence that replaces the screenshot.
   const summary = browserExecuteModelOutput({
     ...output,
-    result: fits
-      ? `Screenshot attached as an image (${screenshot.mediaType}, approximately ${bytes} bytes). If you can't see it, read the page with Runtime.evaluate instead.`
-      : `Screenshot captured (${screenshot.mediaType}, approximately ${bytes} bytes), but it is too large to attach. Capture a smaller one (a viewport rather than the full page, or format: "jpeg" with a lower quality), or read the page with Runtime.evaluate instead.`
+    result: `Screenshot attached as an image (${screenshot.mediaType}, approximately ${bytes} bytes). If you can't see it, read the page with Runtime.evaluate instead.`
   }).value;
   const image: ImageContent = {
     type: "image",
@@ -122,7 +114,7 @@ function browserToolResult(
     mimeType: screenshot.mediaType
   };
   return {
-    content: fits ? [text(summary), image] : [text(summary)],
+    content: [text(summary), image],
     details: details(output)
   };
 }

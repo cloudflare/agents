@@ -278,7 +278,7 @@ this.registry.install({
 });
 ```
 
-- A returned screenshot comes back as an image in the tool result, so the model can see the page and a UI can show it from the transcript. pi-ai only sends the image to models that accept images; other models get the text alone. A screenshot over 5 MB is replaced by a note asking for a smaller one.
+- A returned screenshot comes back as an image in the tool result, so the model can see the page and a UI can show it from the transcript. pi-ai only sends the image to models that accept images; other models get the text alone.
 - The tool's calls run one at a time, since they share the active tab.
 - pi doesn't rerun a browser call cut off by an eviction, because the code may have clicked or submitted something. The model gets an interrupted result and can try again; the browser itself is still there.
 - Stopping a conversation doesn't stop a browser call already running. It finishes or times out (`timeoutMs`, default 30 seconds).

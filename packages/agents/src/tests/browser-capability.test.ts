@@ -631,21 +631,6 @@ describe("pi browserTool over a Browser", () => {
     });
   });
 
-  it("leaves out a screenshot too large to attach", async () => {
-    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
-
-    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
-      const result = await run(
-        instance.piBrowserTool(),
-        `async () => ({ type: "browser_screenshot", mediaType: "image/png", data: "A".repeat(5 * 1024 * 1024 + 4) })`
-      );
-      expect(result.content).toHaveLength(1);
-      expect(textOf(result)).toMatchObject({
-        result: expect.stringMatching(/too large to attach/)
-      });
-    });
-  });
-
   it("marks a failed run as an error result", async () => {
     const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
 
