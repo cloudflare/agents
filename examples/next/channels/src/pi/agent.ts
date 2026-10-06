@@ -13,9 +13,8 @@ import {
 import { WebChannel } from "agents/experimental/channels/web";
 import { Lifecycle } from "agents/lifecycle";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { PiHarness } from "agents/harness/pi";
+import { PiHarness, piChannelsHarness } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
-import { piChannelsHarness } from "./channels-harness";
 
 const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 

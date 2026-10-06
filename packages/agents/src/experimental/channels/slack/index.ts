@@ -9,7 +9,7 @@ import {
 } from "../ingress";
 import { emptyIngressResponse, encodeUtf8, isRecord } from "../internal";
 
-/** The subset of a Slack event used by the adapter, with unknown fields retained. */
+/** The subset of a Slack event the Slack Channel uses, with unknown fields retained. */
 export type SlackEvent = {
   type?: string;
   user?: string;

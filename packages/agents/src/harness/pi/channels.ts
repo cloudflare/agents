@@ -1,9 +1,7 @@
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type {
   AgentEvent,
   EntryRecord,
-  MessageChange,
   SubmissionId,
   SubmissionRecord,
   UserInput
@@ -14,29 +12,27 @@ import type {
   HarnessInputFrom,
   HarnessSession,
   HarnessSessions,
-  Json,
-  MessagePart,
   OperationResult,
   OperationStatus,
-  ResponseChunk,
   SessionEvent,
   SessionInfo,
   SessionState,
   SessionWatch,
   SubmitOptions,
-  ToolAnswer,
-  ToolPart,
-  TranscriptMessage
-} from "agents/experimental/channels";
-import type {
-  PiHarness,
-  PiOperationResult,
-  PiSession
-} from "agents/harness/pi";
+  ToolAnswer
+} from "../../experimental/channels/harness";
 import {
-  projectEntries,
-  type PiMessage
-} from "../../../harnesses/pi/src/transcript";
+  PiChunkProjection,
+  toToolOutputChunk,
+  toTranscriptMessages
+} from "../../experimental/channels/projections/pi";
+import type {
+  ResponseChunk,
+  TranscriptMessage
+} from "../../experimental/channels/protocol";
+import { BACKGROUND_CONTEXT } from "./context";
+import type { PiHarness, PiSession } from "./harness";
+import type { PiOperationResult } from "./types";
 
 const BG = BACKGROUND_CONTEXT;
 
@@ -49,13 +45,15 @@ export type PiChannelsHarnessOptions = {
 };
 
 /**
- * `PiHarness` behind the shared harness interface (`AgentHarness`). Only a
- * shape translation: pi entries become transcript messages, pi events become
- * session events, and pi's submission ids become the caller's operation ids
- * (pi's `requestId`). It knows nothing about how sessions reach clients.
+ * `PiHarness` behind the shared harness interface (`AgentHarness`), so
+ * `Channels.forHarness` can serve it. pi events become session events, and
+ * pi's submission ids become the caller's operation ids (pi's `requestId`).
+ * Message formats are the pi projection's. It knows nothing about how
+ * sessions reach clients.
  *
- * Opt-in and permanent: `PiHarness` keeps pi's own shape, and this adapter
- * would ship next to it (for example as `agents/harness/pi/channels`).
+ * Opt-in: `PiHarness` keeps pi's own shape.
+ *
+ * @experimental The shared harness interface may change between releases.
  */
 export function piChannelsHarness(
   pi: PiHarness,
@@ -231,10 +229,12 @@ class PiChannelsSession implements HarnessSession {
 
   /** The active transcript, with user messages under the caller's ids. */
   async transcript(): Promise<TranscriptMessage[]> {
-    const messages = projectEntries(await this.session.messages());
+    const messages = toTranscriptMessages(await this.session.messages());
     const users = messages.filter((m) => m.role === "user").map((m) => m.id);
     const ids = await this.ids.resolve(this.id, users);
-    return toTranscript(messages, (entryId) => ids.get(entryId));
+    return messages.map((m) =>
+      m.role === "user" ? { ...m, id: ids.get(m.id) ?? m.id } : m
+    );
   }
 
   /** Cache the caller's message id once pi places the input. */
@@ -260,7 +260,7 @@ class PiChannelsSession implements HarnessSession {
  */
 class EventTranslator {
   #messages: Map<string, string>;
-  #run: RunChunks | undefined;
+  #run: PiChunkProjection | undefined;
 
   constructor(
     private readonly session: PiChannelsSession,
@@ -275,9 +275,9 @@ class EventTranslator {
    * continue them.
    */
   attachToRun(partial: AssistantMessage | undefined): ResponseChunk[] {
-    this.#run = new RunChunks();
-    this.#run.nextMessage();
-    return partial ? this.#run.seed(partial) : [];
+    this.#run = new PiChunkProjection();
+    this.#run.startMessage();
+    return partial ? this.#run.resume(partial) : [];
   }
 
   async translate(event: AgentEvent): Promise<SessionEvent[]> {
@@ -285,61 +285,33 @@ class EventTranslator {
       case "submission":
         return this.#submission(event.record);
       case "run_start": {
-        this.#run = new RunChunks();
+        this.#run = new PiChunkProjection();
         const operations = await this.session.operations(event.inputs);
         return [{ type: "run-start", operations }];
       }
       case "message_start":
-        if (event.message.role === "assistant") this.#run?.nextMessage();
+        if (event.message.role === "assistant") this.#run?.startMessage();
         return [];
       case "message_update":
-        return this.#chunks(this.#run?.apply(event.changes) ?? []);
+        return this.#chunks(this.#run?.changes(event.changes) ?? []);
       case "message_end": {
-        const chunks = this.#run?.closeParts() ?? [];
-        const message = event.entry.model?.[0];
-        if (message?.role === "assistant") {
-          for (const part of message.content) {
-            if (part.type === "toolCall") {
-              chunks.push(
-                ...(this.#run?.toolCall(
-                  part.id,
-                  part.name,
-                  part.arguments as Json
-                ) ?? [])
-              );
-            }
-          }
-        }
+        const chunks = this.#run?.endMessage(event.entry.model?.[0]) ?? [];
         return [...this.#chunks(chunks), ...(await this.#saved(event.entry))];
       }
       case "tool_execution_end": {
-        const chunks: ResponseChunk[] = [];
-        const result = event.entry?.model?.[0];
-        if (result?.role === "toolResult") {
-          const text = toolText(result.content);
-          chunks.push(
-            result.isError
-              ? {
-                  type: "tool-output-error",
-                  toolCallId: event.toolCallId,
-                  errorText: text
-                }
-              : {
-                  type: "tool-output-available",
-                  toolCallId: event.toolCallId,
-                  output: toolOutput(result.content, result.details)
-                }
-          );
-        }
+        const chunk = toToolOutputChunk(
+          event.toolCallId,
+          event.entry?.model?.[0]
+        );
         return [
-          ...this.#chunks(chunks),
+          ...this.#chunks(chunk ? [chunk] : []),
           ...(event.entry ? await this.#saved(event.entry) : [])
         ];
       }
       case "entry_appended":
         return this.#saved(event.entry);
       case "run_end": {
-        const chunks = this.#run?.closeParts() ?? [];
+        const chunks = this.#run?.end() ?? [];
         this.#run = undefined;
         const operations = await this.session.operations(event.inputs);
         return [
@@ -405,101 +377,6 @@ class EventTranslator {
   }
 }
 
-/** Part ids for one run: unique across the run's assistant messages. */
-class RunChunks {
-  #open = new Map<number, { kind: "text" | "reasoning"; id: string }>();
-  #message = 0;
-  readonly #calls = new Set<string>();
-
-  nextMessage(): void {
-    this.#message += 1;
-    this.#open.clear();
-  }
-
-  apply(changes: readonly MessageChange[]): ResponseChunk[] {
-    const out: ResponseChunk[] = [];
-    for (const change of changes) {
-      switch (change.type) {
-        case "text_start":
-        case "thinking_start": {
-          const kind = change.block.type === "thinking" ? "reasoning" : "text";
-          const part = this.#start(change.contentIndex, kind, out);
-          const text = blockText(change.block);
-          if (text)
-            out.push({ type: `${kind}-delta`, id: part.id, delta: text });
-          break;
-        }
-        case "text_delta":
-        case "thinking_delta": {
-          const kind = change.type === "text_delta" ? "text" : "reasoning";
-          const part = this.#start(change.contentIndex, kind, out);
-          out.push({ type: `${kind}-delta`, id: part.id, delta: change.delta });
-          break;
-        }
-        case "block":
-          if (change.block.type === "toolCall") {
-            const { id, name, arguments: input } = change.block;
-            out.push(...this.toolCall(id, name, input as Json));
-          } else this.#close(change.contentIndex, out);
-          break;
-        default:
-          // Tool call deltas: the call is shown once its block completes.
-          break;
-      }
-    }
-    return out;
-  }
-
-  /**
-   * The message so far. Text and reasoning stay open under the ids later
-   * deltas use. Tool calls wait for their block or the message end, as
-   * when streaming.
-   */
-  seed(message: AssistantMessage): ResponseChunk[] {
-    const out: ResponseChunk[] = [];
-    message.content.forEach((block, index) => {
-      if (block.type === "toolCall") return;
-      const kind = block.type === "thinking" ? "reasoning" : "text";
-      const part = this.#start(index, kind, out);
-      const text = blockText(block);
-      if (text) out.push({ type: `${kind}-delta`, id: part.id, delta: text });
-    });
-    return out;
-  }
-
-  /** A tool call, once. pi may complete it in a block or only at message end. */
-  toolCall(toolCallId: string, toolName: string, input: Json): ResponseChunk[] {
-    if (this.#calls.has(toolCallId)) return [];
-    this.#calls.add(toolCallId);
-    return [
-      { type: "tool-input-start", toolCallId, toolName },
-      { type: "tool-input-available", toolCallId, toolName, input }
-    ];
-  }
-
-  closeParts(): ResponseChunk[] {
-    const out: ResponseChunk[] = [];
-    for (const index of [...this.#open.keys()]) this.#close(index, out);
-    return out;
-  }
-
-  #start(index: number, kind: "text" | "reasoning", out: ResponseChunk[]) {
-    const open = this.#open.get(index);
-    if (open) return open;
-    const part = { kind, id: `${this.#message}:${index}` };
-    this.#open.set(index, part);
-    out.push({ type: `${kind}-start`, id: part.id });
-    return part;
-  }
-
-  #close(index: number, out: ResponseChunk[]): void {
-    const part = this.#open.get(index);
-    if (!part) return;
-    this.#open.delete(index);
-    out.push({ type: `${part.kind}-end`, id: part.id });
-  }
-}
-
 function toUserInput(input: HarnessInput): UserInput {
   const parts = input.parts.flatMap(
     (part): Exclude<UserInput, string>[number][] => {
@@ -531,92 +408,4 @@ function toResult(result: PiOperationResult): OperationResult {
 
 function digest(messages: readonly TranscriptMessage[]): Map<string, string> {
   return new Map(messages.map((m) => [m.id, JSON.stringify(m)]));
-}
-
-function blockText(block: AssistantMessage["content"][number]): string {
-  if (block.type === "text") return block.text;
-  if (block.type === "thinking") return block.thinking;
-  return "";
-}
-
-/** pi's projected messages as a transcript. Tool results fold into their call. */
-function toTranscript(
-  messages: readonly PiMessage[],
-  userId: (entryId: string) => string | undefined
-): TranscriptMessage[] {
-  const out: TranscriptMessage[] = [];
-  const calls = new Map<string, ToolPart>();
-  for (const message of messages) {
-    if (message.role === "tool") {
-      for (const part of message.parts) {
-        const call = part.type === "tool-result" && calls.get(part.id);
-        if (!call || part.type !== "tool-result") continue;
-        if (part.error) {
-          call.state = "output-error";
-          call.errorText = toolText(part.content);
-        } else {
-          call.state = "output-available";
-          call.output = toolOutput(part.content, part.details);
-        }
-      }
-      continue;
-    }
-    const parts: MessagePart[] = [];
-    for (const part of message.parts) {
-      switch (part.type) {
-        case "text":
-          parts.push({ type: "text", text: part.text });
-          break;
-        case "thinking":
-          parts.push({ type: "reasoning", text: part.text });
-          break;
-        case "image":
-          parts.push({
-            type: "file",
-            mediaType: part.mimeType,
-            url: `data:${part.mimeType};base64,${part.data}`
-          });
-          break;
-        case "tool-call": {
-          const call: ToolPart = {
-            type: "tool",
-            toolCallId: part.id,
-            toolName: part.name,
-            state: "input-available",
-            input: part.arguments as Json
-          };
-          calls.set(part.id, call);
-          parts.push(call);
-          break;
-        }
-      }
-    }
-    if (message.error) {
-      parts.push({ type: "text", text: `Error: ${message.error}` });
-    }
-    if (message.role === "notice") {
-      if (parts.length) out.push({ id: message.id, role: "system", parts });
-      continue;
-    }
-    out.push({
-      id:
-        message.role === "user"
-          ? (userId(message.id) ?? message.id)
-          : message.id,
-      role: message.role,
-      parts
-    });
-  }
-  return out;
-}
-
-function toolText(content: readonly { type: string; text?: string }[]): string {
-  return content.map((part) => part.text ?? "").join("");
-}
-
-function toolOutput(
-  content: readonly { type: string; text?: string }[],
-  details: unknown
-): Json {
-  return (details ?? toolText(content)) as Json;
 }

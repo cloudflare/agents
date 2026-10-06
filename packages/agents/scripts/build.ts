@@ -55,7 +55,9 @@ const entries = [
   "src/experimental/channels/telegram/index.ts",
   "src/experimental/channels/web/index.ts",
   "src/experimental/channels/web/client.ts",
-  "src/experimental/channels/web/ai-sdk.ts"
+  "src/experimental/channels/web/ai-sdk.ts",
+  "src/experimental/channels/projections/ai-sdk.ts",
+  "src/experimental/channels/projections/pi.ts"
 ];
 
 for (const entry of entries) {

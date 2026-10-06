@@ -1,11 +1,7 @@
-import { asSchema, type UIMessage, type UIMessageChunk } from "ai";
+import { asSchema, type UIMessage } from "ai";
 import { describe, expect, it, vi } from "vitest";
 import { ChannelGateway, type ChannelMessage, type DeliveryResult } from "..";
-import {
-  answerToolCall,
-  createSendMessageTool,
-  toResponseChunks
-} from "../../../harness/ai-sdk";
+import { answerToolCall, createSendMessageTool } from "../../../harness/ai-sdk";
 
 function executable(tool: ReturnType<typeof createSendMessageTool>) {
   return tool.execute as unknown as (
@@ -36,7 +32,7 @@ function host(
   };
 }
 
-describe("AI SDK message adapter", () => {
+describe("AI SDK send-message tool", () => {
   it("adapts a Host-resolved surface to a caller-described tool", async () => {
     const deliver = vi.fn(
       async (): Promise<DeliveryResult> => ({
@@ -84,7 +80,7 @@ describe("AI SDK message adapter", () => {
   });
 });
 
-describe("AI SDK turn conversions", () => {
+describe("AI SDK turns", () => {
   const asked = (state: string, extra: Record<string, unknown> = {}) =>
     ({
       id: "m1",
@@ -130,20 +126,5 @@ describe("AI SDK turn conversions", () => {
       state: "output-available",
       output: "here"
     });
-  });
-
-  it("throws after an aborted stream, keeping what it produced", async () => {
-    async function* stream(): AsyncGenerator<UIMessageChunk> {
-      yield { type: "text-start", id: "a" };
-      yield { type: "text-delta", id: "a", delta: "Half" };
-      yield { type: "abort" };
-    }
-    const seen: string[] = [];
-    await expect(async () => {
-      for await (const chunk of toResponseChunks(stream())) {
-        seen.push(chunk.type);
-      }
-    }).rejects.toThrow("aborted");
-    expect(seen).toEqual(["text-start", "text-delta"]);
   });
 });

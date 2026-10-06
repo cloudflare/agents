@@ -16,11 +16,10 @@ import type {
   LifecycleJobOutcome
 } from "../../lifecycle/job-queue";
 import {
-  answerToolCall,
   toResponseChunks,
-  toTranscriptMessage,
-  type ToolCallAnswer
-} from "./turns";
+  toTranscriptMessage
+} from "../../experimental/channels/projections/ai-sdk";
+import { answerToolCall, type ToolCallAnswer } from "./turns";
 import type {
   AgentHarness,
   HarnessInput,

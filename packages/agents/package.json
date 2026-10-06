@@ -422,6 +422,16 @@
       "import": "./dist/experimental/channels/web/ai-sdk.js",
       "require": "./dist/experimental/channels/web/ai-sdk.js"
     },
+    "./experimental/channels/projections/ai-sdk": {
+      "types": "./dist/experimental/channels/projections/ai-sdk.d.ts",
+      "import": "./dist/experimental/channels/projections/ai-sdk.js",
+      "require": "./dist/experimental/channels/projections/ai-sdk.js"
+    },
+    "./experimental/channels/projections/pi": {
+      "types": "./dist/experimental/channels/projections/pi.d.ts",
+      "import": "./dist/experimental/channels/projections/pi.js",
+      "require": "./dist/experimental/channels/projections/pi.js"
+    },
     "./tsconfig": "./agents.tsconfig.json",
     "./vite": {
       "types": "./dist/vite.d.ts",

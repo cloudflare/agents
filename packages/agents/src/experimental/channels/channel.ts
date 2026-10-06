@@ -58,7 +58,7 @@ export type ChannelChunkSource = ReadableStream<ResponseChunk>;
 
 /** Caller options for one finished delivery. */
 export type ChannelDeliveryOptions = {
-  /** Caller-owned correlation an Adapter may use where the provider supports it. */
+  /** Caller-owned correlation a Channel may use where the provider supports it. */
   delivery?: ChannelDeliveryContext;
 };
 
@@ -70,14 +70,14 @@ export type ChannelStreamOptions = {
    * provider call.
    */
   title?: string;
-  /** Caller-owned correlation an Adapter may use where the provider supports it. */
+  /** Caller-owned correlation a Channel may use where the provider supports it. */
   delivery?: ChannelDeliveryContext;
 };
 
 /**
  * Caller-owned correlation supplied to one provider delivery attempt.
  *
- * This is not an idempotency guarantee. An Adapter may map it to a provider
+ * This is not an idempotency guarantee. A Channel may map it to a provider
  * idempotency primitive when one exists, or otherwise use it for observability.
  */
 export type ChannelDeliveryContext = {
