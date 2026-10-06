@@ -34,8 +34,7 @@ export interface PiBrowserToolOptions<
 
 const browserToolParameters = Type.Object({
   code: Type.String({
-    description:
-      "JavaScript async arrow function that uses the `cdp` connector to drive the browser"
+    description: "An async arrow function that drives the browser with `cdp`"
   })
 });
 
@@ -168,7 +167,7 @@ export function browserTool<TName extends string = "browser">(
 ): PiBrowserTool<TName> {
   const core = createBrowserToolCore(options, {
     screenshotHint:
-      "Return screenshots as { type: 'browser_screenshot', mediaType: 'image/png', data: screenshot.data }; the image is attached to the result for you to see."
+      "To see a screenshot, return { type: 'browser_screenshot', mediaType, data } with data from Page.captureScreenshot and mediaType 'image/png', or 'image/jpeg' if you captured with format: 'jpeg'. The image is attached to the result."
   });
   return {
     name: options.name ?? ("browser" as TName),
