@@ -294,6 +294,8 @@ export class Cell extends DurableObject<Env> {
     request.signal.addEventListener("abort", () => hangUp.abort(), {
       once: true
     });
+    // It may have hung up before the listener existed.
+    if (request.signal.aborted) hangUp.abort();
 
     const pump = async () => {
       for (const item of items) {
