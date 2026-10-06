@@ -19,27 +19,23 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   type AnthropicRequest,
+  type Continuation,
   type Script,
   type StreamItem,
   checkpointsOf,
   DEFAULT_SCRIPT,
   marksTurn,
-  renderFallback,
-  renderStep,
+  renderReply,
   resolveStep,
+  restarts,
   scriptProblem,
   toolCheckpoint,
   turnForToolKey
 } from "./script";
 
-export type Pause = { id: string; drop?: boolean };
+export type { Continuation } from "./script";
 
-/**
- * How the model answers an agent that asks it to continue an interrupted
- * reply: with the rest of the step, or, like a model that ignores the
- * instruction, with the whole step again.
- */
-export type Continuation = "faithful" | "restart";
+export type Pause = { id: string; drop?: boolean };
 
 /** What a room is created with. Everything is optional. */
 export type RoomSpec = {
@@ -170,7 +166,10 @@ export class Cell extends DurableObject<Env> {
    * Whether the stream stops at this checkpoint. Each pause fires once, so an
    * agent that retries after a fault streams straight through.
    */
-  async #checkpoint(id: string): Promise<"continue" | "drop"> {
+  async #checkpoint(
+    id: string,
+    signal?: AbortSignal
+  ): Promise<"continue" | "drop" | "cancelled"> {
     const pause = this.#config()?.pauses.find((p) => p.id === id);
     if (!pause) return "continue";
     const fired = this.#fired();
@@ -178,10 +177,20 @@ export class Cell extends DurableObject<Env> {
     fired.push(id);
     this.ctx.storage.kv.put("fired", fired);
     if (pause.drop) return "drop";
-    await new Promise<void>((resolve) => {
-      this.#paused.set(id, resolve);
+    if (signal?.aborted) return "cancelled";
+    return new Promise((resolve) => {
+      // An agent that hangs up while held ends the hold: nobody is waiting.
+      const cancel = () => {
+        if (this.#paused.get(id) === release) this.#paused.delete(id);
+        resolve("cancelled");
+      };
+      const release = () => {
+        signal?.removeEventListener("abort", cancel);
+        resolve("continue");
+      };
+      this.#paused.set(id, release);
+      signal?.addEventListener("abort", cancel, { once: true });
     });
-    return "continue";
   }
 
   /** Logs a request the room has no route for. False if there is no room. */
@@ -217,8 +226,22 @@ export class Cell extends DurableObject<Env> {
         "No such room: create it with POST /rooms first."
       );
     }
-    const body = (await request.json()) as AnthropicRequest;
-    if (body.stream !== true) {
+    let body: AnthropicRequest;
+    try {
+      body = (await request.json()) as AnthropicRequest;
+    } catch {
+      this.#log({
+        at: Date.now(),
+        reason: "invalid JSON",
+        outcome: "rejected"
+      });
+      return anthropicError(
+        400,
+        "invalid_request_error",
+        "The request body is not valid JSON."
+      );
+    }
+    if (body?.stream !== true) {
       this.#log({
         at: Date.now(),
         reason: "not streaming",
@@ -233,7 +256,6 @@ export class Cell extends DurableObject<Env> {
     }
     const { script } = config;
     const resolved = resolveStep(body, script);
-    const restart = config.continuation === "restart";
     const index = this.#log(
       resolved.ok
         ? {
@@ -241,7 +263,9 @@ export class Cell extends DurableObject<Env> {
             turn: resolved.turn.id,
             step: resolved.step,
             ...(resolved.resume && { continued: true }),
-            ...(resolved.resume && restart && { restarted: true }),
+            ...(restarts(resolved, config.continuation) && {
+              restarted: true
+            }),
             ...(resolved.nothingLeft && { nothingLeft: true }),
             tail: requestTail(body, script)
           }
@@ -251,33 +275,39 @@ export class Cell extends DurableObject<Env> {
             tail: requestTail(body, script)
           }
     );
-    const items: StreamItem[] = resolved.ok
-      ? restart && resolved.resume
-        ? // Generated again from scratch, with new tool call IDs.
-          renderStep(resolved.turn, resolved.step, undefined, index)
-        : renderStep(resolved.turn, resolved.step, resolved.resume)
-      : renderFallback(resolved.reason);
+    // Restarted steps get new tool call IDs, numbered by the request.
+    const items: StreamItem[] = renderReply(
+      resolved,
+      config.continuation,
+      index
+    );
 
     const encoder = new TextEncoder();
-    let cancelled = false;
+    const hangUp = new AbortController();
     let controller!: ReadableStreamDefaultController<Uint8Array>;
     const stream = new ReadableStream<Uint8Array>({
       start(c) {
         controller = c;
       },
-      cancel: () => {
-        cancelled = true;
-      }
+      cancel: () => hangUp.abort()
+    });
+    request.signal.addEventListener("abort", () => hangUp.abort(), {
+      once: true
     });
 
     const pump = async () => {
       for (const item of items) {
-        if (cancelled) {
+        if (hangUp.signal.aborted) {
           this.#settle(index, "cancelled");
           return;
         }
         if (item.type === "checkpoint") {
-          if ((await this.#checkpoint(item.id)) === "drop") {
+          const result = await this.#checkpoint(item.id, hangUp.signal);
+          if (result === "cancelled" || hangUp.signal.aborted) {
+            this.#settle(index, "cancelled");
+            return;
+          }
+          if (result === "drop") {
             this.#settle(index, "dropped");
             controller.error(new Error(`fake-model: dropped at ${item.id}`));
             return;

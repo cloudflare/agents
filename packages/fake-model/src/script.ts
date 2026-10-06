@@ -488,7 +488,8 @@ export function renderStep(
     }
   });
   // Checkpoints keep the step's block numbers; the stream numbers its own.
-  remainingBlocks(step, resume).forEach(({ block, index: original }, index) => {
+  const blocks = remainingBlocks(step, resume);
+  blocks.forEach(({ block, index: original }, index) => {
     const at = (edge: string) =>
       items.push({
         type: "checkpoint",
@@ -540,7 +541,8 @@ export function renderStep(
     event("content_block_stop", { type: "content_block_stop", index });
     at("end");
   });
-  const usesTools = step.blocks.some((b) => b.kind === "tool");
+  // A continuation that only finishes text calls no tools, even if the step did.
+  const usesTools = blocks.some(({ block }) => block.kind === "tool");
   event("message_delta", {
     type: "message_delta",
     delta: {
@@ -552,6 +554,39 @@ export function renderStep(
   event("message_stop", { type: "message_stop" });
   items.push({ type: "checkpoint", id: `${prefix}.done` });
   return items;
+}
+
+/**
+ * How the model answers to continue an interrupted reply: with the rest of the
+ * step, or, like a model that ignores the instruction, with the whole step
+ * again.
+ */
+export type Continuation = "faithful" | "restart";
+
+/** Whether a resolved request is answered by generating its step again. */
+export function restarts(resolved: Resolved, continuation: Continuation) {
+  // A complete reply has nothing to restart: both policies answer empty.
+  return (
+    resolved.ok &&
+    continuation === "restart" &&
+    resolved.resume !== undefined &&
+    !resolved.nothingLeft
+  );
+}
+
+/**
+ * The stream answering a resolved request. `generation` tells apart the tool
+ * call IDs of a restarted step, as a model mints new IDs every generation.
+ */
+export function renderReply(
+  resolved: Resolved,
+  continuation: Continuation,
+  generation: number
+): StreamItem[] {
+  if (!resolved.ok) return renderFallback(resolved.reason);
+  return restarts(resolved, continuation)
+    ? renderStep(resolved.turn, resolved.step, undefined, generation)
+    : renderStep(resolved.turn, resolved.step, resolved.resume);
 }
 
 /** A reply for requests the script does not cover. */
