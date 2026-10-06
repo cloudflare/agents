@@ -3,14 +3,14 @@ import type { z } from "zod";
 import {
   WebSearchError,
   renderWebSearchResults,
-  webSearchFromAI,
-  webSearchFromRest,
+  createAIWebSearch,
+  createHTTPWebSearch,
   type WebSearchResponse,
   type WebSearchSource
 } from "../websearch";
-import { webSearchTool as aiSdkWebSearchTool } from "../websearch/ai-sdk";
-import { webSearchTool as piWebSearchTool } from "../websearch/pi";
-import { webSearchTool as tanstackWebSearchTool } from "../websearch/tanstack-ai";
+import { webSearchTool as aiSdkWebSearchTool } from "../websearch/tools/ai-sdk";
+import { webSearchTool as piWebSearchTool } from "../websearch/tools/pi";
+import { webSearchTool as tanstackWebSearchTool } from "../websearch/tools/tanstack-ai";
 import { createWebSearchToolCore } from "../websearch/tool";
 
 const RESPONSE: WebSearchResponse = {
@@ -141,10 +141,10 @@ describe("renderWebSearchResults", () => {
   });
 });
 
-describe("webSearchFromAI", () => {
+describe("createAIWebSearch", () => {
   it("sends the host's gateway, provider, and alias with the model's query", async () => {
     const ai = fakeAI(() => json(RESPONSE));
-    const source = webSearchFromAI({
+    const source = createAIWebSearch({
       binding: ai.binding,
       gateway: "my-gateway",
       provider: "exa",
@@ -167,7 +167,7 @@ describe("webSearchFromAI", () => {
 
   it("defaults the gateway to 'default' and leaves provider to the platform", async () => {
     const ai = fakeAI(() => json(RESPONSE));
-    const source = webSearchFromAI({ binding: ai.binding });
+    const source = createAIWebSearch({ binding: ai.binding });
     await source({ query: "q", limit: 5 });
     expect(ai.calls[0]).toMatchObject({ gatewayId: "default" });
     expect(ai.calls[0].provider).toBeUndefined();
@@ -175,7 +175,7 @@ describe("webSearchFromAI", () => {
   });
 
   it("explains which runtime is needed when the binding has no websearch()", async () => {
-    const source = webSearchFromAI({ binding: {} as Ai });
+    const source = createAIWebSearch({ binding: {} as Ai });
     const failure = source({ query: "q", limit: 5 });
     await expect(failure).rejects.toMatchObject({
       name: "WebSearchError",
@@ -188,7 +188,7 @@ describe("webSearchFromAI", () => {
 
   it("rejects bad requests before calling the API", async () => {
     const ai = fakeAI(() => json(RESPONSE));
-    const source = webSearchFromAI({ binding: ai.binding });
+    const source = createAIWebSearch({ binding: ai.binding });
     await expect(source({ query: "   ", limit: 5 })).rejects.toMatchObject({
       name: "WebSearchError",
       code: "invalid_web_search_input"
@@ -238,7 +238,7 @@ describe("webSearchFromAI", () => {
     ]
   ])("maps %s errors", async (_label, body, status, expected, message) => {
     const ai = fakeAI(() => json(body, status));
-    const source = webSearchFromAI({ binding: ai.binding });
+    const source = createAIWebSearch({ binding: ai.binding });
     const error = await source({ query: "q", limit: 1 }).catch((e) => e);
     expect(error).toBeInstanceOf(WebSearchError);
     expect(error).toMatchObject(expected);
@@ -247,7 +247,7 @@ describe("webSearchFromAI", () => {
 
   it("treats a non-JSON failure as retryable when it's a server error", async () => {
     const ai = fakeAI(() => new Response("upstream down", { status: 502 }));
-    const source = webSearchFromAI({ binding: ai.binding });
+    const source = createAIWebSearch({ binding: ai.binding });
     await expect(source({ query: "q", limit: 1 })).rejects.toMatchObject({
       status: 502,
       retryable: true,
@@ -257,17 +257,17 @@ describe("webSearchFromAI", () => {
 
   it("rejects a 200 that isn't a search response", async () => {
     const ai = fakeAI(() => json({ hello: "world" }));
-    const source = webSearchFromAI({ binding: ai.binding });
+    const source = createAIWebSearch({ binding: ai.binding });
     await expect(source({ query: "q", limit: 1 })).rejects.toBeInstanceOf(
       WebSearchError
     );
   });
 });
 
-describe("webSearchFromRest", () => {
+describe("createHTTPWebSearch", () => {
   it("posts to the account's websearch endpoint with the gateway in the body", async () => {
     const requests: { url: string; init: RequestInit }[] = [];
-    const source = webSearchFromRest({
+    const source = createHTTPWebSearch({
       accountId: "acct",
       apiToken: "tok",
       gateway: "gw",

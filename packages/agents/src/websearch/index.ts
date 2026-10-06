@@ -25,10 +25,10 @@ export {
 } from "./contract";
 export {
   WebSearchError,
-  webSearchFromAI,
-  webSearchFromRest,
-  type AIWebSearchSourceOptions,
-  type RestWebSearchSourceOptions,
+  createAIWebSearch,
+  createHTTPWebSearch,
+  type AIWebSearchOptions,
+  type HTTPWebSearchOptions,
   type WebSearchGatewayOptions,
   type WebSearchProvider,
   type WebSearchRequest,

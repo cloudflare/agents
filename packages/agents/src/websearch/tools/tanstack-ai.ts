@@ -5,17 +5,17 @@
  */
 import { toolDefinition } from "@tanstack/ai";
 import { z } from "zod";
-import { MAX_WEBSEARCH_QUERY_LENGTH } from "./contract";
-import { createWebSearchToolCore, type WebSearchToolOptions } from "./tool";
+import { MAX_WEBSEARCH_QUERY_LENGTH } from "../contract";
+import { createWebSearchToolCore, type WebSearchToolOptions } from "../tool";
 
 export type {
   WebSearchResponse,
   WebSearchResult,
   WebSearchToolInput,
   WebSearchToolOutput
-} from "./contract";
-export type { WebSearchProvider, WebSearchSource } from "./source";
-export type { WebSearchToolOptions } from "./tool";
+} from "../contract";
+export type { WebSearchProvider, WebSearchSource } from "../source";
+export type { WebSearchToolOptions } from "../tool";
 
 export type TanStackWebSearchToolOptions<TName extends string = "websearch"> =
   WebSearchToolOptions & {

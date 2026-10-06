@@ -10,17 +10,17 @@ import {
   renderWebSearchResults,
   type WebSearchToolInput,
   type WebSearchToolOutput
-} from "./contract";
-import { createWebSearchToolCore, type WebSearchToolOptions } from "./tool";
+} from "../contract";
+import { createWebSearchToolCore, type WebSearchToolOptions } from "../tool";
 
 export type {
   WebSearchResponse,
   WebSearchResult,
   WebSearchToolInput,
   WebSearchToolOutput
-} from "./contract";
-export type { WebSearchProvider, WebSearchSource } from "./source";
-export type { WebSearchToolOptions } from "./tool";
+} from "../contract";
+export type { WebSearchProvider, WebSearchSource } from "../source";
+export type { WebSearchToolOptions } from "../tool";
 
 /**
  * The AI SDK tool {@link webSearchTool} returns. Assignable to the AI SDK's

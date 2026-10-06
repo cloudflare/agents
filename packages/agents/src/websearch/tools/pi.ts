@@ -8,17 +8,17 @@ import type { ToolRegistration } from "@earendil-works/pi-durable";
 import {
   MAX_WEBSEARCH_QUERY_LENGTH,
   type WebSearchToolOutput
-} from "./contract";
-import { createWebSearchToolCore, type WebSearchToolOptions } from "./tool";
+} from "../contract";
+import { createWebSearchToolCore, type WebSearchToolOptions } from "../tool";
 
 export type {
   WebSearchResponse,
   WebSearchResult,
   WebSearchToolInput,
   WebSearchToolOutput
-} from "./contract";
-export type { WebSearchProvider, WebSearchSource } from "./source";
-export type { WebSearchToolOptions } from "./tool";
+} from "../contract";
+export type { WebSearchProvider, WebSearchSource } from "../source";
+export type { WebSearchToolOptions } from "../tool";
 
 /** The model's input schema; `limit` tops out at the host's cap. */
 function webSearchParameters(maxLimit: number) {

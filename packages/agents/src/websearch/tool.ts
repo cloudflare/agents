@@ -14,14 +14,14 @@ import {
 } from "./contract";
 import {
   WebSearchError,
-  webSearchFromAI,
-  type AIWebSearchSourceOptions,
+  createAIWebSearch,
+  type AIWebSearchOptions,
   type WebSearchSource
 } from "./source";
 
 /** Options every `websearch` tool adapter accepts. */
 export type WebSearchToolOptions = (
-  | AIWebSearchSourceOptions
+  | AIWebSearchOptions
   | {
       /** Where searches run, instead of the Workers AI binding. */
       source: WebSearchSource;
@@ -59,7 +59,7 @@ export function createWebSearchToolCore(
 ): WebSearchToolCore {
   const limit = clampLimit(options.limit ?? DEFAULT_WEBSEARCH_LIMIT);
   const source =
-    "source" in options ? options.source : webSearchFromAI(options);
+    "source" in options ? options.source : createAIWebSearch(options);
   const provider = source.provider;
   const render = { maxDescriptionChars: options.maxDescriptionChars };
 

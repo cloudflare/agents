@@ -1,7 +1,7 @@
 /**
  * Where searches run. A {@link WebSearchSource} turns a query into a
  * {@link WebSearchResponse}; the tool core is written against it, so the
- * same tool works over the Workers AI binding, the REST API, or a fake in
+ * same tool works over the Workers AI binding, the HTTP API, or a fake in
  * tests.
  */
 import { DEFAULT_GATEWAY_ID } from "../models/core/settings";
@@ -38,7 +38,7 @@ export type WebSearchSource = ((
   readonly provider?: WebSearchProvider;
 };
 
-/** Options shared by the AI-binding and REST sources. */
+/** Options shared by the AI-binding and HTTP sources. */
 export interface WebSearchGatewayOptions {
   /** AI Gateway id. Defaults to `"default"`, which Cloudflare creates on first use. */
   gateway?: string;
@@ -57,7 +57,7 @@ export interface WebSearchGatewayOptions {
 }
 
 /** A search over the Workers AI binding (`env.AI.websearch`). */
-export interface AIWebSearchSourceOptions extends WebSearchGatewayOptions {
+export interface AIWebSearchOptions extends WebSearchGatewayOptions {
   /** The Workers AI binding. Requires `"ai": { "binding": "AI" }` in wrangler.jsonc. */
   binding: Ai;
 }
@@ -82,8 +82,8 @@ interface AiWebSearchBinding {
  * Search through the Workers AI binding. The Worker's own account and the
  * named gateway are billed.
  */
-export function webSearchFromAI(
-  options: AIWebSearchSourceOptions
+export function createAIWebSearch(
+  options: AIWebSearchOptions
 ): WebSearchSource {
   const binding = options.binding as unknown as AiWebSearchBinding;
   const source: WebSearchSource = async (request) => {
@@ -106,8 +106,8 @@ export function webSearchFromAI(
   return withProvider(source, options.provider);
 }
 
-/** A search over the REST API, from any runtime with `fetch`. */
-export interface RestWebSearchSourceOptions extends WebSearchGatewayOptions {
+/** A search over the HTTP API, from any runtime with `fetch`. */
+export interface HTTPWebSearchOptions extends WebSearchGatewayOptions {
   /** The Cloudflare account the gateway belongs to. */
   accountId: string;
   /** An API token with `Workers AI: Read` and `AI Gateway: Read` on that account. */
@@ -122,8 +122,8 @@ export interface RestWebSearchSourceOptions extends WebSearchGatewayOptions {
  * Search through `POST /accounts/{account_id}/ai/websearch`. Use this
  * outside Workers, or to search through a gateway in another account.
  */
-export function webSearchFromRest(
-  options: RestWebSearchSourceOptions
+export function createHTTPWebSearch(
+  options: HTTPWebSearchOptions
 ): WebSearchSource {
   const doFetch = options.fetch ?? fetch;
   const url = `${options.baseUrl ?? "https://api.cloudflare.com"}/client/v4/accounts/${options.accountId}/ai/websearch/`;
