@@ -5,7 +5,10 @@
  */
 import { Type } from "@earendil-works/pi-ai";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
-import { MAX_WEBSEARCH_LIMIT, type WebSearchToolOutput } from "./contract";
+import {
+  MAX_WEBSEARCH_QUERY_LENGTH,
+  type WebSearchToolOutput
+} from "./contract";
 import { createWebSearchToolCore, type WebSearchToolOptions } from "./tool";
 
 export type {
@@ -17,20 +20,25 @@ export type {
 export type { WebSearchProvider, WebSearchSource } from "./source";
 export type { WebSearchToolOptions } from "./tool";
 
-const parameters = Type.Object({
-  query: Type.String({
-    minLength: 1,
-    maxLength: 1024,
-    description: "What to search for."
-  }),
-  limit: Type.Optional(
-    Type.Integer({
-      minimum: 1,
-      maximum: MAX_WEBSEARCH_LIMIT,
-      description: "How many results to return."
-    })
-  )
-});
+/** The model's input schema; `limit` tops out at the host's cap. */
+function webSearchParameters(maxLimit: number) {
+  return Type.Object({
+    query: Type.String({
+      minLength: 1,
+      maxLength: MAX_WEBSEARCH_QUERY_LENGTH,
+      description: "What to search for."
+    }),
+    limit: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        maximum: maxLimit,
+        description: `How many results to return (at most ${maxLimit}).`
+      })
+    )
+  });
+}
+
+type WebSearchParameters = ReturnType<typeof webSearchParameters>;
 
 /**
  * Host-side details pi stores with each `websearch` result: the full API
@@ -69,12 +77,12 @@ export type WebSearchToolDetails =
  */
 export function webSearchTool(
   options: WebSearchToolOptions
-): ToolRegistration<typeof parameters, WebSearchToolDetails> {
+): ToolRegistration<WebSearchParameters, WebSearchToolDetails> {
   const core = createWebSearchToolCore(options);
   return {
     name: core.name,
     description: core.description,
-    parameters,
+    parameters: webSearchParameters(core.limit),
     replay: "safe",
     async execute(input) {
       const run = await core.run(input);

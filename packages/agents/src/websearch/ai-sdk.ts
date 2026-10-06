@@ -6,7 +6,7 @@
 import type { FlexibleSchema } from "ai";
 import { z } from "zod";
 import {
-  MAX_WEBSEARCH_LIMIT,
+  MAX_WEBSEARCH_QUERY_LENGTH,
   renderWebSearchResults,
   type WebSearchToolInput,
   type WebSearchToolOutput
@@ -39,16 +39,23 @@ export interface WebSearchTool {
   };
 }
 
-const inputSchema = z.object({
-  query: z.string().min(1).max(1024).describe("What to search for."),
-  limit: z
-    .number()
-    .int()
-    .min(1)
-    .max(MAX_WEBSEARCH_LIMIT)
-    .optional()
-    .describe("How many results to return.")
-});
+/** The model's input schema; `limit` tops out at the host's cap. */
+function webSearchInputSchema(maxLimit: number) {
+  return z.object({
+    query: z
+      .string()
+      .min(1)
+      .max(MAX_WEBSEARCH_QUERY_LENGTH)
+      .describe("What to search for."),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(maxLimit)
+      .optional()
+      .describe(`How many results to return (at most ${maxLimit}).`)
+  });
+}
 
 /**
  * Create an AI SDK tool that searches the web through Cloudflare's Web
@@ -73,7 +80,7 @@ export function webSearchTool(options: WebSearchToolOptions): WebSearchTool {
   const render = { maxDescriptionChars: options.maxDescriptionChars };
   return {
     description: core.description,
-    inputSchema,
+    inputSchema: webSearchInputSchema(core.limit),
     async execute(input) {
       const run = await core.run(input);
       if (!run.ok) throw run.error;

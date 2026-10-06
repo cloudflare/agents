@@ -88,6 +88,12 @@ export function webSearchFromAI(
   const binding = options.binding as unknown as AiWebSearchBinding;
   const source: WebSearchSource = async (request) => {
     validateRequest(request);
+    if (typeof binding.websearch !== "function") {
+      throw new WebSearchError(
+        "This Workers runtime has no env.AI.websearch(). Web search needs workerd 1.20260924.1 or later (wrangler 4.141.0 or later, @cloudflare/vite-plugin 1.60.2 or later).",
+        { status: 501, code: "websearch_unsupported_runtime" }
+      );
+    }
     const response = await binding.websearch({
       gatewayId: options.gateway ?? DEFAULT_GATEWAY_ID,
       query: request.query,

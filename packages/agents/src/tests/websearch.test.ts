@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { z } from "zod";
 import {
   WebSearchError,
   renderWebSearchResults,
@@ -171,6 +172,18 @@ describe("webSearchFromAI", () => {
     expect(ai.calls[0]).toMatchObject({ gatewayId: "default" });
     expect(ai.calls[0].provider).toBeUndefined();
     expect(source.provider).toBeUndefined();
+  });
+
+  it("explains which runtime is needed when the binding has no websearch()", async () => {
+    const source = webSearchFromAI({ binding: {} as Ai });
+    const failure = source({ query: "q", limit: 5 });
+    await expect(failure).rejects.toMatchObject({
+      name: "WebSearchError",
+      status: 501,
+      code: "websearch_unsupported_runtime",
+      retryable: false
+    });
+    await expect(failure).rejects.toThrow(/workerd 1\.20260924\.1/);
   });
 
   it("rejects bad requests before calling the API", async () => {
@@ -403,6 +416,23 @@ describe("adapters", () => {
     await expect(
       aiSdkWebSearchTool({ source: failingSource }).execute({ query: "a" }, {})
     ).rejects.toBeInstanceOf(WebSearchError);
+  });
+
+  it("tells the model the host's limit as the schema maximum", () => {
+    const pi = piWebSearchTool({ source: okSource, limit: 3 });
+    expect(pi.parameters.properties.limit.maximum).toBe(3);
+    expect(
+      piWebSearchTool({ source: okSource }).parameters.properties.limit.maximum
+    ).toBe(5);
+
+    for (const schema of [
+      aiSdkWebSearchTool({ source: okSource, limit: 3 }).inputSchema,
+      tanstackWebSearchTool({ source: okSource, limit: 3 }).inputSchema
+    ]) {
+      const zod = schema as z.ZodType;
+      expect(zod.safeParse({ query: "a", limit: 3 }).success).toBe(true);
+      expect(zod.safeParse({ query: "a", limit: 4 }).success).toBe(false);
+    }
   });
 
   it("tanstack: named websearch by default, returns the rendered text", async () => {
