@@ -1,0 +1,36 @@
+{
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "OPENCODE_HARNESS_TEST",
+        "class_name": "OpenCodeHarnessTestObject"
+      },
+      {
+        "name": "OPENCODE_MODEL_TEST",
+        "class_name": "OpenCodeModelTestObject"
+      },
+      {
+        "name": "OPENCODE_LEASE_TEST",
+        "class_name": "OpenCodeLeaseTestObject"
+      },
+      {
+        "name": "OPENCODE_SHARED_DATABASE_TEST",
+        "class_name": "OpenCodeSharedDatabaseTestObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "OpenCodeHarnessTestObject",
+        "OpenCodeModelTestObject",
+        "OpenCodeLeaseTestObject",
+        "OpenCodeSharedDatabaseTestObject"
+      ]
+    }
+  ]
+}
