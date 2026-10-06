@@ -12,6 +12,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/client`                           | `src/client.ts`                               | Browser/Node WebSocket client (`AgentClient`) via partysocket                                    |
 | `agents/lifecycle`                        | `src/lifecycle/index.ts`                      | Composable Durable Object lifecycle and hibernating connections                                  |
 | `agents/harness/ai-sdk`                   | `src/harness/ai-sdk/index.ts`                 | Experimental: `AiSdkHarness`, AI SDK turn conversions and `createSendMessageTool`                |
+| `agents/harness/opencode`                 | `src/harness/opencode/index.ts`               | Experimental: OpenCode v2 hosted in a Durable Object (`OpenCodeHarness`)                         |
 | `agents/harness/pi`                       | `src/harness/pi/index.ts`                     | Experimental: pi-durable hosted in a Durable Object (`PiHarness`)                                |
 | `agents/react`                            | `src/react.tsx`                               | `useAgent` React hook, state sync, RPC from components                                           |
 | `agents/chat`                             | `src/chat/index.ts`                           | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think`                     |
@@ -26,6 +27,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/schedules/parser`                 | `src/schedules/parser.ts`                     | Zod-based natural-language scheduling prompt and schema helpers                                  |
 | `agents/observability`                    | `src/observability/index.ts`                  | Observability event types and emitters                                                           |
 | `agents/models/ai-sdk`                    | `src/models/ai-sdk/index.ts`                  | Experimental `createAI` for the AI SDK — Workers AI ids, vendor models routed through AI Gateway |
+| `agents/models/opencode`                  | `src/models/opencode/index.ts`                | Experimental `createAI` for OpenCode — Workers AI over the binding, as an OpenCode plugin        |
 | `agents/models/pi-ai`                     | `src/models/pi-ai/index.ts`                   | Experimental `createAI` for pi-ai — Workers AI ids, vendor models routed through AI Gateway      |
 | `agents/ai-chat-agent`                    | `src/ai-chat-agent.ts`                        | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                                              |
 | `agents/ai-react`                         | `src/ai-react.tsx`                            | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                                             |
@@ -145,6 +147,7 @@ src/
       models/           #   language.ts (Workers AI), gateway.ts (vendor models routed), embedding/image/
                         #   transcription/speech/reranking/modality.ts, fallback.ts
       wires/            #   chat-completions.ts, shared.ts (Workers AI only — vendors bring their own wire)
+    opencode/           # agents/models/opencode — OpenCode provider plugin over ai-sdk
     pi-ai/              # agents/models/pi-ai — pi-ai models over core
       index.ts          #   createAI + public types
       settings.ts       #   pi call options -> resolved request
