@@ -17,6 +17,12 @@ import type {
   Client as MCPClient
 } from "@modelcontextprotocol/client";
 import type {
+  CallToolResult as V2CallToolResult,
+  McpServer as V2McpServer,
+  RegisteredTool as V2RegisteredTool,
+  ServerContext as V2ServerContext
+} from "@modelcontextprotocol/server";
+import type {
   CallToolResult,
   ToolAnnotations
 } from "@modelcontextprotocol/sdk/types.js";
@@ -26,7 +32,7 @@ import {
   type CompatibleMcpClient,
   type LegacyCallToolResultSchema
 } from "./invoker";
-import type { ZodRawShape } from "zod";
+import type { z, ZodRawShape } from "zod";
 
 // v2 imports from @x402/core
 import { x402ResourceServer, HTTPFacilitatorClient } from "@x402/core/server";
@@ -90,21 +96,102 @@ export type X402Config = {
   version?: number;
 };
 
-export interface X402AugmentedServer {
+/**
+ * The tool body passed to `paidTool`. On an SDK v1 server it is the v1
+ * `ToolCallback`; on an SDK v2 server it receives the v2 `ServerContext`.
+ */
+export type PaidToolCallback<
+  Args extends ZodRawShape,
+  Server extends McpServer | V2McpServer = McpServer
+> = Server extends V2McpServer
+  ? (
+      args: z.infer<z.ZodObject<Args>>,
+      ctx: V2ServerContext
+    ) => V2CallToolResult | Promise<V2CallToolResult>
+  : ToolCallback<Args>;
+
+export interface X402AugmentedServer<
+  Server extends McpServer | V2McpServer = McpServer
+> {
   paidTool<Args extends ZodRawShape>(
     name: string,
     description: string,
     priceUSD: number,
     paramsSchema: Args,
     annotations: ToolAnnotations,
-    cb: ToolCallback<Args>
-  ): RegisteredTool;
+    cb: PaidToolCallback<Args, Server>
+  ): Server extends V2McpServer ? V2RegisteredTool : RegisteredTool;
 }
 
+type RequestMeta = Record<string, unknown>;
+type HeaderGetter = { get(name: string): string | null };
+type HeaderRecord = Record<string, string | string[] | undefined>;
+
+/**
+ * The parts of a tool handler's second argument that x402 reads. SDK v1
+ * passes `{ _meta, requestInfo: { headers } }`, where headers is a plain
+ * object (every SDK v1 transport lowercases the keys). SDK v2 passes
+ * `{ mcpReq: { _meta }, http: { req } }`, where `req` is the web `Request`.
+ */
+type ToolHandlerContext = {
+  _meta?: RequestMeta;
+  requestInfo?: { headers?: HeaderGetter | HeaderRecord };
+  mcpReq?: { _meta?: RequestMeta };
+  http?: { req?: { headers?: HeaderGetter } };
+};
+
+function readHeader(
+  headers: HeaderGetter | HeaderRecord | undefined,
+  name: string
+): string | undefined {
+  if (!headers) return undefined;
+  if (typeof headers.get === "function") {
+    return (headers as HeaderGetter).get(name) ?? undefined;
+  }
+  const wanted = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers as HeaderRecord)) {
+    if (key.toLowerCase() !== wanted) continue;
+    const first = Array.isArray(value) ? value[0] : value;
+    if (typeof first === "string") return first;
+  }
+  return undefined;
+}
+
+/**
+ * Read the x402 payment token from a tool handler context of either SDK
+ * generation. Request `_meta` wins over headers, and header names match
+ * case-insensitively. `PAYMENT-SIGNATURE` is x402 v2; `X-PAYMENT` is v1.
+ */
+function readPaymentToken(extra: unknown): unknown {
+  const ctx = (extra ?? {}) as ToolHandlerContext;
+  const meta = ctx.mcpReq?._meta ?? ctx._meta;
+  const headers = ctx.http?.req?.headers ?? ctx.requestInfo?.headers;
+  return (
+    meta?.["x402/payment"] ??
+    readHeader(headers, "PAYMENT-SIGNATURE") ??
+    readHeader(headers, "X-PAYMENT")
+  );
+}
+
+/**
+ * Add `paidTool` to an MCP server. Accepts an SDK v1 `McpServer`
+ * (`@modelcontextprotocol/sdk`) or an SDK v2 `McpServer`
+ * (`@modelcontextprotocol/server`).
+ */
+export function withX402<T extends V2McpServer>(
+  server: T,
+  cfg: X402Config
+): T & X402AugmentedServer<V2McpServer>;
+// The SDK v1 overload is last so `ReturnType<typeof withX402>` and generic
+// v1 callers resolve to exactly the pre-v2 types.
 export function withX402<T extends McpServer>(
   server: T,
   cfg: X402Config
-): T & X402AugmentedServer {
+): T & X402AugmentedServer;
+export function withX402(
+  server: McpServer | V2McpServer,
+  cfg: X402Config
+): (McpServer | V2McpServer) & X402AugmentedServer<McpServer | V2McpServer> {
   const network = normalizeNetwork(cfg.network);
   const facilitatorConfig: FacilitatorConfig = cfg.facilitator ?? {
     url: "https://x402.org/facilitator"
@@ -133,9 +220,17 @@ export function withX402<T extends McpServer>(
     priceUSD: number,
     paramsSchema: Args,
     annotations: ToolAnnotations,
-    cb: ToolCallback<Args>
-  ): RegisteredTool {
-    return server.registerTool(
+    toolCb: PaidToolCallback<Args, McpServer | V2McpServer>
+  ) {
+    // Both SDK generations accept a raw Zod shape and call the handler as
+    // (args, ctx), so one registration serves either server. The public
+    // callback type is enforced by X402AugmentedServer; internally the
+    // context is opaque and forwarded to the tool body unchanged.
+    const cb = toolCb as unknown as (
+      args: unknown,
+      extra: unknown
+    ) => CallToolResult | Promise<CallToolResult>;
+    return (server as McpServer).registerTool(
       name,
       {
         description,
@@ -177,13 +272,7 @@ export function withX402<T extends McpServer>(
           mimeType: "application/json"
         };
 
-        // Get payment token from MCP _meta or HTTP headers
-        // Support both v2 (PAYMENT-SIGNATURE) and v1 (X-PAYMENT) header names
-        const headers = extra?.requestInfo?.headers ?? {};
-        const token =
-          (extra?._meta?.["x402/payment"] as string | undefined) ??
-          headers["PAYMENT-SIGNATURE"] ??
-          headers["X-PAYMENT"];
+        const token = readPaymentToken(extra);
 
         const paymentRequired = (
           reason = "PAYMENT_REQUIRED",
@@ -296,7 +385,8 @@ export function withX402<T extends McpServer>(
   });
 
   // Tell TS the object now also has the paidTool method
-  return server as T & X402AugmentedServer;
+  return server as (McpServer | V2McpServer) &
+    X402AugmentedServer<McpServer | V2McpServer>;
 }
 
 /*
