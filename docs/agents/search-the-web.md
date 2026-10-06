@@ -1,6 +1,6 @@
 # Search the Web (Beta)
 
-`agents/websearch` gives a model a `websearch` tool over Cloudflare's [Web Search API](https://developers.cloudflare.com/web-search/), called through the `AI` binding and billed by the account's AI Gateway. The same tool is available for the pi harness, the AI SDK, and TanStack AI, with the same options.
+`agents/websearch` gives a model a `websearch` tool over Cloudflare's [Web Search API](https://developers.cloudflare.com/web-search/), called through the `AI` binding and billed by the account's AI Gateway. The same tool is available for the pi harness, the AI SDK, and TanStack AI.
 
 This page covers what the SDK adds on top of the API. For the binding, the providers, pricing, payment, and the error codes, see the [Web Search API docs](https://developers.cloudflare.com/web-search/).
 
@@ -14,7 +14,7 @@ You need:
 - workerd 1.20260924.1 or later, which is where `env.AI.websearch()` arrived. It ships with wrangler 4.141.0 and `@cloudflare/vite-plugin` 1.60.2.
 - AI Gateway credits or a provider key on the gateway, in the account the Worker runs in. That account pays for every search. The `AI` binding always calls Cloudflare, so under `wrangler dev` searches run against, and bill, the account you are logged in to.
 
-Then add the tool to your harness. Every adapter takes the same options.
+Then add the tool to your harness. Every adapter takes the same options; the TanStack AI adapter also takes `name`, because TanStack AI tools carry their name in the definition.
 
 Pi harness:
 
@@ -79,7 +79,7 @@ Today we are launching the Web Search API in open beta…
 
 The host gets the API response untouched — `items` with every field the provider returned, `metadata` with `requestId` and `latencyMs`, plus `provider` — as `WebSearchToolOutput`:
 
-- **Pi**: in the tool result's `details`, as `{ ok: true, output }`. The tool is `replay: "safe"`, so a session resumed after an eviction reuses the stored result instead of searching again.
+- **Pi**: in the tool result's `details`, as `{ ok: true, output }`. The tool is `replay: "safe"`: if a search is interrupted mid-call, for example by an eviction, pi runs it again when the session recovers, and that is a second billed search. Completed results are stored and not searched again.
 - **AI SDK**: as the return value of `execute`, so `onFinish`, UI message parts, and logs see the full response. `toModelOutput` renders the text for the model.
 - **TanStack AI**: the server tool returns the rendered text.
 
@@ -89,11 +89,11 @@ The host gets the API response untouched — `items` with every field the provid
 
 A failed search becomes a `WebSearchError` with `status`, `code`, `retryable`, and `requestId` (AI Gateway's id for the request, for the gateway log). The `code` is the API's, for example `web_search_payment_required`. On a runtime older than the one above, the binding has no `websearch()` and the search fails with code `websearch_unsupported_runtime`.
 
-The pi and TanStack tools do not throw. The model gets `Web search failed: <message> (<code>)` as an error result and the turn continues; in pi, `details` is `{ ok: false, status, code, retryable, requestId }`. The AI SDK tool throws the `WebSearchError`, which is how AI SDK tools report errors.
+The pi and TanStack tools do not throw. The model gets `Web search failed: <message>` as an error result and the turn continues; in pi, `details` is `{ ok: false, status, code, retryable, requestId }`. The AI SDK tool throws the `WebSearchError`, which is how AI SDK tools report errors.
 
 ## Other sources
 
-`createAIWebSearch` and `createHTTPWebSearch` from `agents/websearch` return a `WebSearchSource`: a function from `{ query, limit? }` to the API response, with no model involved. Use them from scheduled jobs, or outside Workers:
+`createAIWebSearch` and `createHTTPWebSearch` from `agents/websearch` return a `WebSearchSource`: a function from `{ query, limit? }` to the API response (`limit` defaults to 5), with no model involved. Use them from scheduled jobs, or outside Workers:
 
 ```ts
 import { createHTTPWebSearch } from "agents/websearch";

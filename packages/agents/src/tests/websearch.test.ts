@@ -165,11 +165,11 @@ describe("createAIWebSearch", () => {
     expect(source.provider).toBe("exa");
   });
 
-  it("defaults the gateway to 'default' and leaves provider to the platform", async () => {
+  it("defaults the gateway to 'default', the limit to 5, and leaves provider to the platform", async () => {
     const ai = fakeAI(() => json(RESPONSE));
     const source = createAIWebSearch({ binding: ai.binding });
-    await source({ query: "q", limit: 5 });
-    expect(ai.calls[0]).toMatchObject({ gatewayId: "default" });
+    await source({ query: "q" });
+    expect(ai.calls[0]).toMatchObject({ gatewayId: "default", limit: 5 });
     expect(ai.calls[0].provider).toBeUndefined();
     expect(source.provider).toBeUndefined();
   });

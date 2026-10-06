@@ -59,9 +59,10 @@ export type WebSearchToolDetails =
  * API. Install it on a registry like any other pi tool.
  *
  * The model chooses the query and (within the host's `limit`) how many
- * results; the host chooses the gateway, provider, and billing. Results are
- * replay-safe: a resumed session reuses stored results rather than searching
- * again.
+ * results; the host chooses the gateway, provider, and billing. The tool is
+ * `replay: "safe"`: a search interrupted mid-call (say, by an eviction) runs
+ * again when the session recovers, which is a second billed search.
+ * Completed results are stored and not searched again.
  *
  * @example
  * ```ts

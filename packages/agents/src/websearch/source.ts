@@ -6,6 +6,7 @@
  */
 import { DEFAULT_GATEWAY_ID } from "../models/core/settings";
 import {
+  DEFAULT_WEBSEARCH_LIMIT,
   MAX_WEBSEARCH_LIMIT,
   MAX_WEBSEARCH_QUERY_LENGTH,
   type WebSearchResponse
@@ -23,8 +24,8 @@ export type WebSearchProvider = "ceramic" | "exa" | "linkup";
 export interface WebSearchRequest {
   /** 1–1024 characters. */
   query: string;
-  /** 1–10. */
-  limit: number;
+  /** 1–10. Defaults to 5. */
+  limit?: number;
 }
 
 /**
@@ -86,8 +87,8 @@ export function createAIWebSearch(
   options: AIWebSearchOptions
 ): WebSearchSource {
   const binding = options.binding as unknown as AiWebSearchBinding;
-  const source: WebSearchSource = async (request) => {
-    validateRequest(request);
+  const source: WebSearchSource = async (input) => {
+    const request = validateRequest(input);
     if (typeof binding.websearch !== "function") {
       throw new WebSearchError(
         "This Workers runtime has no env.AI.websearch(). Web search needs workerd 1.20260924.1 or later (wrangler 4.141.0 or later, @cloudflare/vite-plugin 1.60.2 or later).",
@@ -127,8 +128,8 @@ export function createHTTPWebSearch(
 ): WebSearchSource {
   const doFetch = options.fetch ?? fetch;
   const url = `${options.baseUrl ?? "https://api.cloudflare.com"}/client/v4/accounts/${options.accountId}/ai/websearch/`;
-  const source: WebSearchSource = async (request) => {
-    validateRequest(request);
+  const source: WebSearchSource = async (input) => {
+    const request = validateRequest(input);
     const response = await doFetch(url, {
       method: "POST",
       headers: {
@@ -186,8 +187,10 @@ export class WebSearchError extends Error {
   }
 }
 
-function validateRequest(request: WebSearchRequest): void {
+/** Check a request against the API's limits and fill in the default limit. */
+function validateRequest(request: WebSearchRequest): Required<WebSearchRequest> {
   const query = request.query.trim();
+  const limit = request.limit ?? DEFAULT_WEBSEARCH_LIMIT;
   if (query.length === 0) {
     throw new WebSearchError("Query must not be empty.", {
       status: 400,
@@ -200,16 +203,13 @@ function validateRequest(request: WebSearchRequest): void {
       { status: 400, code: "invalid_web_search_input" }
     );
   }
-  if (
-    !Number.isInteger(request.limit) ||
-    request.limit < 1 ||
-    request.limit > MAX_WEBSEARCH_LIMIT
-  ) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_WEBSEARCH_LIMIT) {
     throw new WebSearchError(
       `Limit must be an integer from 1 to ${MAX_WEBSEARCH_LIMIT}.`,
       { status: 400, code: "invalid_web_search_input" }
     );
   }
+  return { query: request.query, limit };
 }
 
 async function readResponse(response: Response): Promise<WebSearchResponse> {
