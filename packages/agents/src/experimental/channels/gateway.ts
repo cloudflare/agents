@@ -37,7 +37,7 @@ export type ChannelRouteEvent = {
   dispatchId: string;
 };
 
-/** The conversation's agent, as the gateway reaches it. */
+/** The agent object a route names, as the gateway reaches it. */
 export type GatewayAgent = {
   /** Hand the agent an inbound event; Channels' `receive` serves it. */
   receive(event: GatewayEvent, origin: GatewayOrigin): Promise<unknown>;
@@ -64,8 +64,8 @@ type OutboundOperation = (
 
 /**
  * The Worker's entry point for Channels. Authenticates and normalizes
- * webhooks, resolves WebSocket upgrades, routes each to the agent that
- * holds its conversation, and sends to surfaces.
+ * webhooks, resolves WebSocket upgrades, routes each to the agent object
+ * its route names, and sends to surfaces.
  *
  * The gateway is the trust boundary. It alone decides who a sender is and
  * tells the agent, so an agent serving Channels must be reachable only
