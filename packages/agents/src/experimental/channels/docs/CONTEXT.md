@@ -30,7 +30,7 @@ _Avoid_: User (when several people share a conversation), connection, tab
 The Worker's entry point for Channels, and the trust boundary. It alone resolves who a sender is and tells the agent, so an agent serving Channels must be reachable only through it.
 
 **Agent object**:
-The Durable Object a route names, holding any number of conversations. It is the authorization boundary: whoever a Channel routes to it may list, join, create, fork and reset every conversation in it. By default each participant gets an agent object of their own; an application shares one by routing several participants to it.
+The Durable Object a route names, holding any number of conversations. It is the authorization boundary: whoever a Channel routes to it may list, join, create, fork and reset every conversation in it. By default each participant gets an agent object of their own; an application shares one by routing several participants to it. A surface that names no conversation, such as a Slack thread or an email, joins the object's default conversation, so a participant keeps one history wherever they write from.
 _Avoid_: Room (outside an application's own naming)
 
 ## Inbound events
