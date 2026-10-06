@@ -401,7 +401,9 @@ export class AiSdkHarness<TOOLS extends ToolSet = ToolSet>
         ...(system !== undefined && { system }),
         ...(tools && { tools }),
         stopWhen: this.#options.stopWhen ?? stepCountIs(5),
-        messages: await convertToModelMessages(messages),
+        // `tools` lets `toModelOutput` shape earlier results; without it
+        // they go back to the model as raw JSON.
+        messages: await convertToModelMessages(messages, tools && { tools }),
         abortSignal: run.abort.signal
       });
       const stream = toUIMessageStream<TOOLS, Message>({

@@ -89,6 +89,12 @@ export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
         inputSchema: z.object({}),
         needsApproval: true,
         execute: async () => "Heads"
+      }),
+      lookUp: tool({
+        description: "Look something up",
+        inputSchema: z.object({}),
+        execute: async () => ({ raw: "full host-side output" }),
+        toModelOutput: () => ({ type: "text", value: "shaped for the model" })
       })
     }
   });
@@ -112,6 +118,11 @@ export class AiSdkHarnessObject extends DurableObject<Cloudflare.Env> {
 
   getPromptCount(): number {
     return this.prompts.length;
+  }
+
+  /** The prompt the model saw on call `index`, as JSON. */
+  getPrompt(index: number): string {
+    return JSON.stringify(this.prompts[index]);
   }
 
   /** Submit straight to the harness, bypassing Channels. */

@@ -64,6 +64,10 @@ function webSearchInputSchema(maxLimit: number) {
  * via `toModelOutput`. A failed search throws a `WebSearchError`, which the
  * AI SDK reports to the model as a tool error.
  *
+ * `toModelOutput` only applies to earlier turns when the tools are passed to
+ * `convertToModelMessages(messages, { tools })`; otherwise the AI SDK sends
+ * the full response back to the model as JSON. `AiSdkHarness` passes them.
+ *
  * @example
  * ```ts
  * import { webSearchTool } from "agents/websearch/ai-sdk";

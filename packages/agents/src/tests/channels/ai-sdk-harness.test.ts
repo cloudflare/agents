@@ -133,6 +133,24 @@ describe("An AI SDK harness served through Channels", () => {
     ]);
   });
 
+  it("shapes earlier tool results with toModelOutput on later turns", async () => {
+    const stub = agent();
+    await stub.setScript([
+      { call: "lookUp", toolCallId: "c1" },
+      { text: "Found it" },
+      { text: "Still here" }
+    ]);
+    await stub.submit("main", "look it up", "o1");
+    expect(await stub.wait("main", "o1")).toMatchObject({ status: "done" });
+    await stub.submit("main", "and again", "o2");
+    expect(await stub.wait("main", "o2")).toMatchObject({ status: "done" });
+
+    // The third call rebuilds the history from the saved transcript.
+    const prompt = await stub.getPrompt(2);
+    expect(prompt).toContain("shaped for the model");
+    expect(prompt).not.toContain("full host-side output");
+  });
+
   it("queues a message sent while a turn runs", async () => {
     const stub = agent();
     await stub.setScript([{ text: "first", delayMs: 20 }, { text: "second" }]);
