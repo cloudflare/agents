@@ -51,6 +51,12 @@ describe("OpenCodeHarness on OpenCode v2", () => {
 
     const second = await stub.prompt("again");
     expect(second).toMatchObject({ status: "done", text: "echo: again" });
+    expect(await stub.history()).toEqual([
+      "hello",
+      "echo: hello",
+      "again",
+      "echo: again"
+    ]);
   });
 
   it("keeps OpenCode's tables under its prefix, beside the host's own", async () => {
@@ -128,6 +134,11 @@ describe("OpenCodeHarness on OpenCode v2", () => {
     // The alarm restarts the object, unless it already fired on its own;
     // OpenCode boots and replays the turn.
     await runDurableObjectAlarm(stub);
+    // Busy from the moment the object is back, before OpenCode's background
+    // resume has started the turn again.
+    expect(
+      (await stub.listSessions()).find((info) => info.id === "ses_root")?.busy
+    ).toBe(true);
     await stub.holdStarted(2);
     await stub.release();
 

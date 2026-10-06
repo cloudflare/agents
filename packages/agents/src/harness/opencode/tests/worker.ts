@@ -97,6 +97,10 @@ export class OpenCodeHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return texts(await this.harness.messages(session ? { session } : {}));
   }
 
+  async history(session?: string): Promise<string[]> {
+    return texts(await this.harness.session(session).history());
+  }
+
   pending() {
     return this.harness.pending();
   }

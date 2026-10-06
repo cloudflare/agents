@@ -4,7 +4,7 @@
  * it after eviction; OpenCode owns the transcript, the inbox, and every run.
  * It has the same interface as `agents/harness/pi`.
  *
- * @beta The API may change between releases.
+ * @experimental The API may change between releases.
  */
 export {
   OpenCodeHarness,

@@ -1,0 +1,37 @@
+{
+  "name": "@cloudflare/agents-next-opencode-harness-example",
+  "description": "Experimental: OpenCode v2 hosted on a Durable Object with OpenCodeHarness",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "build": "vite build",
+    "deploy": "vite build && wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/kumo": "^2.6.0",
+    "@opencode/plugin": "2.0.24",
+    "@opencode/sdk": "2.0.24",
+    "@phosphor-icons/react": "^2.1.10",
+    "@streamdown/code": "^1.1.1",
+    "agents": "*",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "streamdown": "^2.5.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.62.3",
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "@tailwindcss/vite": "^4",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.1.0",
+    "wrangler": "^4.145.0"
+  }
+}

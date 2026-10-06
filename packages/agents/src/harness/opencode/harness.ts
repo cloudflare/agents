@@ -237,7 +237,7 @@ function sessionIdOf(
  * to do. An eviction mid-run leaves the job due, so its alarm restarts the
  * object, OpenCode boots and resumes the turn, and the job waits again.
  *
- * @beta The API may change between releases.
+ * @experimental The API may change between releases.
  */
 export class OpenCodeHarness extends LifecycleCapability {
   /** Every session in this object. */
@@ -374,7 +374,10 @@ export class OpenCodeHarness extends LifecycleCapability {
     const active = await opencode.sessions.active();
     const pending: OpenCodePendingOperation[] = [];
     for (const session of sessions) {
-      if (active[session] !== undefined) {
+      if (
+        active[session] !== undefined ||
+        (await unsettled(opencode, session))
+      ) {
         for (const operationId of await this.#running(opencode, session)) {
           pending.push({ operationId, session, status: "running" });
         }
@@ -650,7 +653,7 @@ export class OpenCodeHarness extends LifecycleCapability {
     // writes the user message, and only while the session is running. So
     // whatever moment the reads straddle, one of them sees the work.
     const inbox = await opencode.sessions.inbox.list({ sessionID: session });
-    const unsettled = await this.#unsettled(opencode, session);
+    const open = await unsettled(opencode, session);
     const running = (await opencode.sessions.active())[session] !== undefined;
     if (!running) {
       const first = inbox[0];
@@ -658,7 +661,7 @@ export class OpenCodeHarness extends LifecycleCapability {
         // Admitted but not running: the object died between OpenCode's
         // admission and the turn's start. Ring OpenCode's doorbell again.
         await this.#ring(opencode, session, first);
-      } else if (unsettled) {
+      } else if (open) {
         // A turn the last isolate left open. OpenCode resumes it on boot,
         // in the background; check again on the next heartbeat.
         return heartbeat;
@@ -885,32 +888,6 @@ export class OpenCodeHarness extends LifecycleCapability {
     }
   }
 
-  /** Whether the transcript ends in a turn with no idle marker after it. */
-  async #unsettled(
-    opencode: OpenCode,
-    session: OpenCodeSessionId
-  ): Promise<boolean> {
-    let cursor: string | undefined;
-    for (;;) {
-      const page = await this.#call(() =>
-        opencode.message.list(
-          cursor === undefined
-            ? { sessionID: session, order: "desc", limit: MESSAGE_PAGE }
-            : { sessionID: session, cursor }
-        )
-      );
-      for (const message of page.data) {
-        if (message.type === "idle") return false;
-        if (message.type === "user" || message.type === "synthetic") {
-          return true;
-        }
-      }
-      const next = page.cursor.next;
-      if (next === undefined || next === null) return false;
-      cursor = next;
-    }
-  }
-
   /**
    * Operations the running turn is answering: the newest user messages, back
    * to the assistant message or idle marker before them. Earlier inputs of
@@ -947,7 +924,49 @@ export class OpenCodeHarness extends LifecycleCapability {
   }
 }
 
-/** Every session, with whether OpenCode is running it. */
+/**
+ * Whether the transcript ends in a turn with no idle marker after it: a run
+ * in progress, or one a restart cut off that OpenCode resumes on boot.
+ */
+async function unsettled(
+  opencode: OpenCode,
+  session: OpenCodeSessionId
+): Promise<boolean> {
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await opencode.message.list(
+      cursor === undefined
+        ? { sessionID: session, order: "desc", limit: MESSAGE_PAGE }
+        : { sessionID: session, cursor }
+    );
+    for (const message of page.data) {
+      if (message.type === "idle") return false;
+      if (message.type === "user" || message.type === "synthetic") {
+        return true;
+      }
+    }
+    const next = page.cursor.next;
+    if (next === undefined || next === null) return false;
+    cursor = next;
+  }
+}
+
+/**
+ * Whether the session has work: running, input waiting in its inbox, or a
+ * turn a restart cut off, which OpenCode resumes in the background on boot
+ * and so is not running yet.
+ */
+async function sessionBusy(
+  opencode: OpenCode,
+  session: OpenCodeSessionId,
+  active: Readonly<Record<string, unknown>>
+): Promise<boolean> {
+  if (active[session] !== undefined) return true;
+  const inbox = await opencode.sessions.inbox.list({ sessionID: session });
+  return inbox.length > 0 || (await unsettled(opencode, session));
+}
+
+/** Every session, with whether it has work. */
 async function listSessions(
   opencode: OpenCode
 ): Promise<OpenCodeSessionInfo[]> {
@@ -963,7 +982,8 @@ async function listSessions(
       sessions.push({
         id: info.id,
         ...(parent === undefined ? {} : { parent }),
-        busy: active[info.id] !== undefined
+        ...(info.title === undefined ? {} : { title: info.title }),
+        busy: await sessionBusy(opencode, info.id, active)
       });
     }
     const next = page.cursor.next;
@@ -1092,6 +1112,30 @@ export class OpenCodeSession {
   }
 
   /**
+   * The whole transcript, oldest first, compacted messages included.
+   * OpenCode compacts a long session on its own; `messages()` is what the
+   * model sees after that, this is everything the session has said.
+   */
+  history(): Promise<OpenCodeMessage[]> {
+    return this.#harness.use(async (opencode) => {
+      const messages: OpenCodeMessage[] = [];
+      let cursor: string | undefined;
+      for (;;) {
+        // OpenCode rejects an explicit order or limit alongside a cursor.
+        const page = await opencode.message.list(
+          cursor === undefined
+            ? { sessionID: this.id, order: "asc", limit: 100 }
+            : { sessionID: this.id, cursor }
+        );
+        messages.push(...page.data);
+        const next = page.cursor.next;
+        if (next === undefined || next === null) return messages;
+        cursor = next;
+      }
+    });
+  }
+
+  /**
    * OpenCode's events for this session as they happen, durable and live
    * (text deltas, tool input), until `signal` aborts. Read the transcript
    * with `messages()` first for a snapshot; use `log()` to resume from a
@@ -1139,11 +1183,13 @@ export class OpenCodeSession {
     }
   }
 
-  /** Whether OpenCode is running this session. */
+  /**
+   * Whether the session has work: running, input waiting, or a turn a
+   * restart cut off that OpenCode is about to resume.
+   */
   async busy(): Promise<boolean> {
-    return this.#harness.use(
-      async (opencode) =>
-        (await opencode.sessions.active())[this.id] !== undefined
+    return this.#harness.use(async (opencode) =>
+      sessionBusy(opencode, this.id, await opencode.sessions.active())
     );
   }
 }

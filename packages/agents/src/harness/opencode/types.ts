@@ -114,5 +114,8 @@ export type OpenCodeSessionInfo = {
   readonly id: OpenCodeSessionId;
   /** The session this one was forked from, or the one that spawned it. */
   readonly parent?: OpenCodeSessionId;
+  /** The title OpenCode generated for the session, once it has one. */
+  readonly title?: string;
+  /** Running, input waiting, or a turn a restart cut off, about to resume. */
   readonly busy: boolean;
 };

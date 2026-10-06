@@ -18,7 +18,7 @@
  * the `AI` binding: no account id, API token, or HTTP route to Workers AI in
  * your Worker, and nothing patched globally.
  *
- * @beta The surface may change in a minor release while the design settles.
+ * @experimental The surface may change in any release.
  *
  * @module
  */
