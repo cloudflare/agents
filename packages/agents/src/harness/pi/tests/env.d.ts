@@ -15,5 +15,8 @@ declare namespace Cloudflare {
     PI_FLAKY_FACTORY_TEST: DurableObjectNamespace<
       import("./worker").PiFlakyFactoryTestObject
     >;
+    PI_EXTENSIONS_TEST: DurableObjectNamespace<
+      import("./worker").PiPortableExtensionsTestObject
+    >;
   }
 }

@@ -21,6 +21,11 @@ export {
   type PiSessionStoreOptions
 } from "./session-store";
 export { skills } from "./skills";
+export {
+  piExtensions,
+  type PiExtensions,
+  type PiExtensionsOptions
+} from "./extensions";
 export type {
   PiOperationResult,
   PiPendingOperation,
