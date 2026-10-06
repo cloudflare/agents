@@ -9,6 +9,7 @@
 export {
   classifyContextOverflow,
   ROOT_SESSION,
+  SteerNotSupportedError,
   ThinkHarness,
   ThinkSession,
   ThinkSessions

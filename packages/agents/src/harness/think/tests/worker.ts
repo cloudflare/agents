@@ -3,6 +3,7 @@ import { tool, type UIMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { z } from "zod";
 import type {
+  HarnessSession,
   SessionEvent,
   ToolAnswer
 } from "../../../experimental/channels/harness";
@@ -14,6 +15,7 @@ import { ThinkChat } from "../chat";
 import {
   classifyContextOverflow,
   setWakeTimingForTests,
+  SteerNotSupportedError,
   ThinkHarness
 } from "../harness";
 import type {
@@ -314,6 +316,20 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   ): Promise<ThinkReceipt> {
     const { session, ...rest } = options;
     return this.harness.session(session).submit(text, rest);
+  }
+
+  /** Submit through the shared harness interface, asking to steer. */
+  async steer(text: string): Promise<string> {
+    const session: HarnessSession = this.harness.session();
+    try {
+      await session.submit(
+        { parts: [{ type: "text", text }] },
+        { whenBusy: "steer" }
+      );
+      return "accepted";
+    } catch (error) {
+      return error instanceof SteerNotSupportedError ? error._tag : "other";
+    }
   }
 
   answer(answer: ToolAnswer, session?: string): Promise<ThinkReceipt> {

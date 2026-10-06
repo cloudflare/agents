@@ -96,6 +96,13 @@ describe("ThinkHarness turns", () => {
     expect(await stub.inspect("nope")).toBeUndefined();
   });
 
+  it("refuses to steer instead of queueing the input", async () => {
+    const stub = fresh();
+    expect(await stub.steer("hello")).toBe("SteerNotSupportedError");
+    expect(await stub.messages()).toEqual([]);
+    expect(await stub.pending()).toEqual([]);
+  });
+
   it("dedupes a submission by operation id", async () => {
     const stub = fresh();
     const first = await stub.submit("hello", { operationId: "op-1" });

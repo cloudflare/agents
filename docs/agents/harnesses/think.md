@@ -87,7 +87,7 @@ const result = await session.wait(receipt.operationId);
 const { text, messages } = await session.prompt("Hello");
 ```
 
-`submit()` accepts a string, a `UIMessage` or an array of them, the shared harness input `{ parts }`, or a tool answer. A submission made while the session is busy waits its turn.
+`submit()` accepts a string, a `UIMessage` or an array of them, the shared harness input `{ parts }`, or a tool answer. A submission made while the session is busy waits its turn. Steering the running turn is not supported: `whenBusy: "steer"` throws `SteerNotSupportedError`.
 
 | Method                       | What it does                                                                                             |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------- |
@@ -196,7 +196,7 @@ It handles chat requests (`submit-message` and `regenerate-message`), cancel, cl
 
 Not supported yet:
 
-- `steer` is accepted but queues like a follow-up. It is meant to join the running turn at its next model call.
+- Steering a running turn. `submit()` throws `SteerNotSupportedError` for `whenBusy: "steer"` rather than queue the input as a follow-up.
 - `messageConcurrency` strategies other than queueing (`latest`, `merge`, `drop`, debounce).
 - Context blocks from `configureContext()`. Compute the system prompt in `system` or `beforeTurn`.
 - Read-time truncation of older tool results and media eviction.

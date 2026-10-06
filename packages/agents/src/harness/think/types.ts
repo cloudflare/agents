@@ -53,15 +53,15 @@ export type ThinkInput =
   | ToolAnswer;
 
 /**
- * What a submission does when the session is already running.
- *
- * - `followUp` (default): answered after the current turn, as its own turn.
- * - `steer`: meant to join the running turn at its next model call. Not
- *   supported yet: it queues like `followUp`.
+ * What a submission does when the session is already running. Only
+ * `followUp` (the default) is supported: the input is answered after the
+ * current turn, as its own turn. Steering a running turn is not supported,
+ * and a `"steer"` passed through the shared harness interface is refused
+ * with `SteerNotSupportedError`.
  *
  * @experimental
  */
-export type ThinkWhenBusy = "followUp" | "steer";
+export type ThinkWhenBusy = "followUp";
 
 /** Options for `submit()` and `prompt()`. @experimental */
 export type ThinkSubmitOptions = {

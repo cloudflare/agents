@@ -88,6 +88,26 @@ import type {
   ToolRecovery
 } from "./types";
 
+/**
+ * Thrown by `submit()` when asked to steer a running turn, which
+ * ThinkHarness does not support. Submit without `whenBusy` to queue the
+ * input behind the running turn instead.
+ *
+ * @experimental
+ */
+export class SteerNotSupportedError extends Error {
+  /** Stable tag for matching without `instanceof`. */
+  readonly _tag = "SteerNotSupportedError" as const;
+
+  /** @param session - The session the submission was for. */
+  constructor(readonly session: ThinkSessionId) {
+    super(
+      'ThinkHarness does not support whenBusy: "steer". Submit without it to queue the input behind the running turn.'
+    );
+    this.name = "SteerNotSupportedError";
+  }
+}
+
 /** The root session's id: the Sessions capability's default session. */
 export const ROOT_SESSION: ThinkSessionId = "";
 
@@ -435,6 +455,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     input: OperationInput,
     options: ThinkSubmitOptions
   ): Promise<ThinkReceipt> {
+    // The shared harness interface lets a caller ask to steer. Refuse it
+    // rather than queue it as a follow-up, which is not what was asked.
+    const whenBusy: unknown = options.whenBusy;
+    if (whenBusy === "steer") throw new SteerNotSupportedError(session);
     await this.lifecycle.ready();
     const operationId = options.operationId ?? crypto.randomUUID();
     const store = this.#tables();
@@ -1818,17 +1842,6 @@ export class ThinkSession implements HarnessSession {
     const receipt = await this.submit(input, options);
     const result = await this.wait(receipt.operationId);
     return { ...result, messages: await this.messages() };
-  }
-
-  /**
-   * Meant to join the running turn at its next model call. Not supported
-   * yet: it queues like a follow-up.
-   */
-  steer(
-    input: ThinkInput,
-    options: Omit<ThinkSubmitOptions, "whenBusy"> = {}
-  ): Promise<ThinkReceipt> {
-    return this.submit(input, { ...options, whenBusy: "steer" });
   }
 
   /**
