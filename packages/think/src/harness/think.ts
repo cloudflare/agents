@@ -36,7 +36,7 @@ import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
 import { ThinkSession } from "../session";
 import { Think as LegacyThink } from "../think";
-import type { SessionMessage } from "agents/sessions";
+import type { Session, SessionMessage } from "agents/sessions";
 import type {
   AddMessagesOptions,
   CancelSubmissionResult,
@@ -138,6 +138,7 @@ export class Think<
   session!: ThinkSession;
 
   #messages: UIMessage[] = [];
+  #handle: Session | undefined;
   #defaultProvider: ReturnType<typeof createWorkersAI> | undefined;
 
   constructor(ctx: AgentContext, env: Env) {
@@ -146,6 +147,10 @@ export class Think<
     this.harness = new ThinkHarness({
       // Think's reserved keys, so client writes are stripped the same way.
       reservedMetadataKeys: ["channel", "turnMetadata"],
+      // Think's own API writes and configures the Sessions handle directly.
+      configureSession: (handle, id) => {
+        if (id === this.harness.session().id) this.#handle = handle;
+      },
       model: async () => this.resolveModel(await this.getModel()),
       system: () => this.getSystemPrompt(),
       tools: () => this.getTools(),
@@ -212,7 +217,7 @@ export class Think<
     const onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
       this.session = await this.configureSession(
-        new ThinkSession(this.harness.session().transcript, () => {
+        new ThinkSession(await this.#rootHandle(), () => {
           throw new Error(
             "Context blocks are not supported by the harness-backed Think yet"
           );
@@ -417,7 +422,7 @@ export class Think<
     await this.#sync();
     const resolved =
       typeof messages === "function" ? await messages(this.messages) : messages;
-    const handle = this.harness.session().transcript;
+    const handle = await this.#rootHandle();
     let parentId = options?.parentId;
     for (const message of resolved) {
       const stored = message as unknown as SessionMessage;
@@ -435,11 +440,11 @@ export class Think<
     message: UIMessage,
     parentId?: string | null
   ): Promise<UIMessage> {
-    await this.harness
-      .session()
-      .transcript.appendMessage(message as unknown as SessionMessage, {
-        parentId
-      });
+    await (
+      await this.#rootHandle()
+    ).appendMessage(message as unknown as SessionMessage, {
+      parentId
+    });
     await this.#sync();
     return message;
   }
@@ -735,6 +740,14 @@ export class Think<
   #classify(error: unknown): ThinkErrorClass {
     const classification = this.classifyChatError(error);
     return classification === "context_overflow" ? "context-overflow" : "fail";
+  }
+
+  /** The root session's Sessions handle, which the harness hands over on first use. */
+  async #rootHandle(): Promise<Session> {
+    if (!this.#handle) await this.harness.session().messages();
+    if (!this.#handle)
+      throw new Error("The harness did not configure the root session");
+    return this.#handle;
   }
 
   async #sync(): Promise<void> {

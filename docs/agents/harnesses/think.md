@@ -6,7 +6,7 @@ description: Run Think's agent loop in a Durable Object with the experimental Th
 
 `ThinkHarness` runs Think's agent loop as a Lifecycle capability. It has the same shape as the [Pi harness](./pi.md): `harness.prompt()`, `harness.sessions` and `harness.session(id)`. The engine is the AI SDK. The harness owns its storage, so you install only the harness:
 
-- Each session's transcript is kept as AI SDK `UIMessage`s, in the same tables the `Sessions` capability uses. `session.transcript` is that session's `Session` handle.
+- Each session's transcript is kept as AI SDK `UIMessage`s, in the same tables the `Sessions` capability uses.
 - The output of a model call is kept while it streams, in the same tables the `Streams` capability uses.
 - One Lifecycle job per session wakes the object after an eviction.
 
@@ -102,7 +102,15 @@ const { text, messages } = await session.prompt("Hello");
 
 `harness.sessions` has `create()`, `fork(from)` and `list()`. A fork copies the source session's active path.
 
-`session.transcript` is the session's `Session` handle from `agents/sessions`. Use it to read branches (`getBranches`), search (`search`), compact, or write messages without starting a turn.
+A session also reads and shapes its transcript:
+
+| Method                     | What it does                                                                                            |
+| -------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `branches(messageId)`      | The answers to a message, its children in the tree. A regenerated answer is a branch beside the others. |
+| `search(query, { limit })` | Full-text search over the session's messages.                                                           |
+| `compact()`                | Summarize older messages with the compaction function set in `configureSession`.                        |
+
+`configureSession` receives each session's `Session` handle from `agents/sessions`, for compaction settings and for writing messages without starting a turn. Those writes still reach `subscribe()` listeners and `ThinkChat` clients.
 
 ## Tools, approvals and client tools
 

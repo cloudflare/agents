@@ -8,6 +8,7 @@ import type {
   ToolAnswer
 } from "../../../experimental/channels/harness";
 import { Lifecycle } from "../../../lifecycle";
+import type { Session } from "../../../sessions/handle";
 import { WebSockets } from "../../../websockets/websockets";
 import { ThinkChat } from "../chat";
 import {
@@ -128,6 +129,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     this.#releaseSlow = resolve;
   });
   #overflowed = false;
+  /** Sessions handles, as configureSession hands them over. */
+  readonly #handles = new Map<string, Session>();
 
   readonly harness = new ThinkHarness({
     system: "You are a test.",
@@ -196,7 +199,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         this.ctx.storage.kv.put(ENDED_KEY, [...ended, status]);
       }
     },
-    configureSession: (session) => {
+    configureSession: (session, id) => {
+      this.#handles.set(id, session);
       session.onCompaction(async (history) => {
         // Everything but the newest message.
         const last = history.at(-2);
@@ -385,16 +389,15 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.session().regenerate();
   }
 
-  /** Write through the transcript handle; the event types a listener saw. */
+  /** Write on the Sessions handle directly; the event types a listener saw. */
   async writeDirectly(text: string): Promise<string[]> {
     const seen: string[] = [];
-    const session = this.harness.session();
-    const stop = session.subscribe((event) => {
+    const stop = this.harness.session().subscribe((event) => {
       seen.push(
         event.type === "message" ? `message:${event.message.id}` : event.type
       );
     });
-    await session.transcript.appendMessage({
+    await this.#handles.get("")?.appendMessage({
       id: "direct",
       role: "user",
       parts: [{ type: "text", text }]
@@ -403,9 +406,12 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return seen;
   }
 
+  async search(query: string): Promise<number> {
+    return (await this.harness.session().search(query)).length;
+  }
+
   async branches(messageId: string): Promise<number> {
-    return (await this.harness.session().transcript.getBranches(messageId))
-      .length;
+    return (await this.harness.session().branches(messageId)).length;
   }
 
   async createSession(): Promise<string> {

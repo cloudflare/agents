@@ -158,8 +158,12 @@ function parseOperation(row: OperationRow): OperationRecord {
   };
 }
 
-/** The harness's tables, over the object's SQLite. */
-export class HarnessStore {
+/**
+ * The harness's own tables, over the object's SQLite: sessions, the
+ * operation queue, and started tool calls. Named apart from the shared
+ * `agents/harness/store`, which is a different, harness-agnostic store.
+ */
+export class OperationRecords {
   readonly #sql: SqlStorage;
   #ready = false;
 

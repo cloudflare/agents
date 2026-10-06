@@ -37,8 +37,9 @@ import type {
   SessionWatch,
   ToolAnswer
 } from "../../experimental/channels/harness";
+import type { CompactResult } from "../../sessions/compaction-helpers";
 import type { Session } from "../../sessions/handle";
-import type { SessionMessage } from "../../sessions/types";
+import type { SearchResult, SessionMessage } from "../../sessions/types";
 import type { StreamJson } from "../../streams/types";
 import {
   answerToolCall,
@@ -54,10 +55,10 @@ import {
   type ThinkSessionListener
 } from "./events";
 import {
-  HarnessStore,
+  OperationRecords,
   type OperationInput,
   type OperationRecord
-} from "./store";
+} from "./records";
 import {
   executeTool,
   isServerTool,
@@ -382,15 +383,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   /**
    * The transcripts. The harness writes every message, and its operations
    * point at them, so it owns the Sessions capability too; a second one
-   * writing the same tables would leave this one's caches stale. Read and
-   * shape a transcript through `session.transcript`.
+   * writing the same tables would leave this one's caches stale. A
+   * session's branches, search and compaction are on `ThinkSession`.
    */
   readonly #sessions: Sessions;
   #bound = false;
   /** Sessions with a write of the harness's own in progress. */
   readonly #ownWrites = new Map<ThinkSessionId, number>();
   #heartbeatMs = HEARTBEAT_MS;
-  #store: HarnessStore | undefined;
+  #records: OperationRecords | undefined;
 
   static {
     setWakeTiming = (harness, timing) => harness.#setWakeTiming(timing);
@@ -1607,10 +1608,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   // ── Storage ──────────────────────────────────────────────────────────────
 
-  #tables(): HarnessStore {
-    this.#store ??= new HarnessStore(this.lifecycle.storage.sql);
-    this.#store.ensureTables();
-    return this.#store;
+  #tables(): OperationRecords {
+    this.#records ??= new OperationRecords(this.lifecycle.storage.sql);
+    this.#records.ensureTables();
+    return this.#records;
   }
 
   /** The Sessions handle for a session, configured on first use. */
@@ -1625,9 +1626,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     bindLifecycleCapability(this.#sessions, this.lifecycle);
     bindLifecycleCapability(this.#streams, this.lifecycle);
     this.#bound = true;
-    // Writes made through `session.transcript` go around the harness; pass
-    // them on as events, so listeners and chat clients see them too. The
-    // harness's own writes already emitted theirs.
+    // Writes made on a session's Sessions handle (from `configureSession`)
+    // go around the harness; pass them on as events, so listeners and chat
+    // clients see them too. The harness's own writes already emitted theirs.
     this.#sessions.subscribe((change) => {
       if ((this.#ownWrites.get(change.sessionId) ?? 0) > 0) return;
       switch (change.type) {
@@ -1660,9 +1661,34 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     }
   }
 
-  /** @internal The transcript handle for a session. */
-  transcript(session: ThinkSessionId): Session {
-    return this.#handle(session);
+  /** @internal The answers to a message: its children in the tree. */
+  async branches(
+    session: ThinkSessionId,
+    messageId: string
+  ): Promise<UIMessage[]> {
+    return asUIMessages(await this.#handle(session).getBranches(messageId));
+  }
+
+  /** @internal Full-text search over a session's messages. */
+  search(
+    session: ThinkSessionId,
+    query: string,
+    options?: { readonly limit?: number }
+  ): Promise<SearchResult[]> {
+    return this.#handle(session).search(
+      query,
+      options?.limit === undefined ? undefined : { limit: options.limit }
+    );
+  }
+
+  /** @internal Compact a session with its compaction function. */
+  async compact(session: ThinkSessionId): Promise<CompactResult | null> {
+    const result = await this.#own(session, () =>
+      this.#handle(session).compact()
+    );
+    // The model's view of the transcript changed; re-read it.
+    if (result) this.#events.emit(session, { type: "reset" });
+    return result;
   }
 
   #handle(session: ThinkSessionId): Session {
@@ -1994,12 +2020,29 @@ export class ThinkSession implements HarnessSession {
   }
 
   /**
-   * This session's transcript, as the Sessions capability's handle: read
-   * branches (`getBranches`), search (`search`), compact, or write
-   * messages directly. Writes made here do not start a turn.
+   * The answers to a message: its children in the transcript tree. A
+   * regenerated answer is a branch beside the earlier ones.
+   *
+   * @param messageId - The message, usually a user message.
    */
-  get transcript(): Session {
-    return this.#harness.transcript(this.id);
+  branches(messageId: string): Promise<UIMessage[]> {
+    return this.#harness.branches(this.id, messageId);
+  }
+
+  /** Full-text search over this session's messages. */
+  search(
+    query: string,
+    options?: { readonly limit?: number }
+  ): Promise<SearchResult[]> {
+    return this.#harness.search(this.id, query, options);
+  }
+
+  /**
+   * Summarize older messages with the compaction function set in
+   * `configureSession`. Resolves to null when there was nothing to compact.
+   */
+  compact(): Promise<CompactResult | null> {
+    return this.#harness.compact(this.id);
   }
 
   /** Listen to the session's events in the AI SDK's vocabulary. */
