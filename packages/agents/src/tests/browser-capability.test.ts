@@ -396,7 +396,13 @@ describe("browserTool over a Browser", () => {
       const large = await capture(1_500_000);
       expect(large.status).toBe("error");
       expect(large.status === "error" && large.error).toMatch(
-        /1\.5 MB of base64.*viewport.*jpeg/s
+        /1\.5 MB.*viewport.*jpeg/s
+      );
+
+      // The data alone fits, but the stored result ({"data":"..."}) doesn't.
+      const nearLimit = await capture(999_995);
+      expect(nearLimit.status === "error" && nearLimit.error).toMatch(
+        /viewport.*jpeg/s
       );
     });
   });

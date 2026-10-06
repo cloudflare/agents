@@ -69,13 +69,13 @@ const CDP_SESSION_NOT_FOUND = -32001;
  * culprit, so say how to take a smaller one instead.
  */
 function assertScreenshotFits(result: unknown): void {
-  const data = (result as { data?: unknown } | undefined)?.data;
-  if (typeof data !== "string" || data.length < MAX_DURABLE_VALUE_BYTES) {
-    return;
-  }
-  const megabytes = (data.length / 1_000_000).toFixed(1);
+  // Measure the result as codemode stores it (JSON), not just the data, so a
+  // screenshot just under the limit can't slip past with its JSON framing.
+  const size = JSON.stringify(result ?? null).length;
+  if (size <= MAX_DURABLE_VALUE_BYTES) return;
+  const megabytes = (size / 1_000_000).toFixed(1);
   throw new Error(
-    `The screenshot is ${megabytes} MB of base64, over the 1 MB limit on a ` +
+    `The screenshot result is ${megabytes} MB, over the 1 MB limit on a ` +
       `cdp.send result. Capture just the viewport (no captureBeyondViewport ` +
       `or clip larger than the window), or pass format: "jpeg" with ` +
       `quality: 60.`
