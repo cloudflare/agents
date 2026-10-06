@@ -206,6 +206,21 @@ export class OperationRecords {
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (session_id, operation_id)
     )`);
+    // Columns added after the table first shipped. CREATE TABLE IF NOT
+    // EXISTS leaves an existing table as it was, so add them here.
+    const columns = new Set(
+      this.#sql
+        .exec<{ name: string }>(
+          `PRAGMA table_info(cf_think_harness_operations)`
+        )
+        .toArray()
+        .map((column) => column.name)
+    );
+    if (!columns.has("abandon_reason")) {
+      this.#sql.exec(
+        `ALTER TABLE cf_think_harness_operations ADD COLUMN abandon_reason TEXT`
+      );
+    }
     this.#sql.exec(`CREATE INDEX IF NOT EXISTS cf_think_harness_operations_open
       ON cf_think_harness_operations (session_id, status, seq)`);
     this.#sql.exec(`CREATE TABLE IF NOT EXISTS cf_think_harness_tool_calls (

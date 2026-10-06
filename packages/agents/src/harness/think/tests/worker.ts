@@ -439,6 +439,20 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return seen;
   }
 
+  /** Create the operations table as it was before `abandon_reason`. */
+  createOldOperationsTable(): void {
+    this.ctx.storage.sql.exec(`CREATE TABLE cf_think_harness_operations (
+      session_id TEXT NOT NULL, operation_id TEXT NOT NULL, seq INTEGER NOT NULL,
+      input TEXT NOT NULL, status TEXT NOT NULL, source TEXT NOT NULL,
+      parent_id TEXT, message_id TEXT, stream_id TEXT,
+      pending_model INTEGER NOT NULL DEFAULT 0, steps INTEGER NOT NULL DEFAULT 0,
+      interruptions INTEGER NOT NULL DEFAULT 0,
+      overflow_retries INTEGER NOT NULL DEFAULT 0,
+      reason TEXT, text TEXT,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      PRIMARY KEY (session_id, operation_id))`);
+  }
+
   /** What the alarm memory-limit breaker does when it seals. */
   sealMemoryLimit(): void {
     this.harness.onMemoryLimit({ sealed: true });

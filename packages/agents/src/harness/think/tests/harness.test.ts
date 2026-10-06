@@ -2,7 +2,8 @@ import { env } from "cloudflare:workers";
 import {
   abortAllDurableObjects,
   evictDurableObject,
-  runDurableObjectAlarm
+  runDurableObjectAlarm,
+  runInDurableObject
 } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { ThinkHarnessTestObject } from "./worker";
@@ -336,6 +337,26 @@ describe("ThinkHarness durability", () => {
     expect((await stub.messages()).at(-1)).toMatch(
       /\[gate_safe output-error\]/
     );
+  });
+
+  it("adds columns to an operations table created by an earlier version", async () => {
+    const name = crypto.randomUUID();
+    let stub = env.THINK_HARNESS_TEST.getByName(name);
+    // Before the harness first starts, create the table as it once was.
+    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
+      instance.createOldOperationsTable()
+    );
+    await evictDurableObject(stub);
+    stub = fresh(name);
+    const receipt = await stub.submit("gate-safe");
+    await stub.gateStarted(1);
+    await stub.sealMemoryLimit();
+    stub = await crash(name);
+    await runDurableObjectAlarm(stub);
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "out_of_memory"
+    });
   });
 
   it("finishes queued work after a restart, woken by the alarm", async () => {
