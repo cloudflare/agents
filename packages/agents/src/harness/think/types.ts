@@ -24,7 +24,6 @@ import type {
 } from "../../experimental/channels/harness";
 import type { Session } from "../../sessions/handle";
 import type { Sessions } from "../../sessions/sessions";
-import type { Streams } from "../../streams/streams";
 
 /**
  * A session id. The root session is `""`, the Sessions capability's default
@@ -156,16 +155,26 @@ export type ThinkSessionInfo = {
 };
 
 /**
- * What the harness does with a tool call an eviction interrupted.
+ * What the harness does with a tool call an eviction interrupted, set on
+ * the tool as its `recovery` field.
  *
  * - `report` (default): record the call as failed with an "interrupted"
  *   error, so the model sees it and decides. Right for any tool whose
  *   effect may have happened.
  * - `rerun`: run it again. Only for tools that are safe to repeat.
  *
+ * ```ts
+ * tools: {
+ *   search: { ...tool({ description, inputSchema, execute }), recovery: "rerun" }
+ * }
+ * ```
+ *
  * @experimental
  */
 export type ToolRecovery = "report" | "rerun";
+
+/** The optional field a tool carries to set its recovery. @experimental */
+export type RecoverableTool = { readonly recovery?: ToolRecovery };
 
 /** Recovery policy. @experimental */
 export type ThinkRecoveryOptions = {
@@ -185,10 +194,6 @@ export type ThinkRecoveryOptions = {
    * interrupted and recovered. `0` turns the watchdog off. Default 120000.
    */
   readonly stallTimeoutMs?: number;
-  /** Per tool, what to do with an interrupted call. */
-  readonly tools?: Readonly<Record<string, ToolRecovery>>;
-  /** For tools not in `tools`. Default `"report"`. */
-  readonly defaultTool?: ToolRecovery;
 };
 
 /** Context for every hook. @experimental */
@@ -368,17 +373,12 @@ export type PerSession<T> =
 export type ThinkHarnessOptions<TOOLS extends ToolSet = ToolSet> = {
   /** The Sessions capability that keeps transcripts. Install it first. */
   readonly sessions: Sessions;
-  /**
-   * The Streams capability that keeps in-flight model output. Install it
-   * first. `createChatStreams()` from `agents/chat` raises the per-chunk
-   * ceiling; plain `new Streams()` also works.
-   */
-  readonly streams: Streams;
   readonly model: PerSession<LanguageModel>;
   readonly system?: PerSession<string | undefined>;
   /**
    * Server tools, which the harness runs itself, one durable call at a
-   * time, and tools without `execute`, which a client runs.
+   * time, and tools without `execute`, which a client runs. A server tool
+   * may carry `recovery: "rerun"` (see `ToolRecovery`).
    */
   readonly tools?: PerSession<TOOLS>;
   /** Most model calls one operation makes. Default 10. */
@@ -393,6 +393,7 @@ export type ThinkHarnessOptions<TOOLS extends ToolSet = ToolSet> = {
     readonly toolCallId: string;
     readonly input: unknown;
   }) => boolean | Promise<boolean>;
+  /** The budget for recovering interrupted work. */
   readonly recovery?: ThinkRecoveryOptions;
   /**
    * Configure a session's Sessions handle the first time the harness uses

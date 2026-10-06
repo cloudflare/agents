@@ -9,7 +9,6 @@ import type {
 } from "../../../experimental/channels/harness";
 import { Lifecycle } from "../../../lifecycle";
 import { Sessions } from "../../../sessions/sessions";
-import { Streams } from "../../../streams/streams";
 import { WebSockets } from "../../../websockets/websockets";
 import { ThinkChat } from "../chat";
 import {
@@ -132,10 +131,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   #overflowed = false;
 
   readonly sessions = new Sessions();
-  readonly streams = new Streams();
   readonly harness = new ThinkHarness({
     sessions: this.sessions,
-    streams: this.streams,
     system: "You are a test.",
     model: new MockLanguageModelV4({
       doStream: async ({ prompt }) => {
@@ -156,11 +153,14 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         inputSchema: z.object({}),
         execute: () => this.#gate()
       }),
-      gate_safe: tool({
-        description: "Wait until released; safe to rerun",
-        inputSchema: z.object({}),
-        execute: () => this.#gate()
-      }),
+      gate_safe: {
+        ...tool({
+          description: "Wait until released; safe to rerun",
+          inputSchema: z.object({}),
+          execute: () => this.#gate()
+        }),
+        recovery: "rerun"
+      },
       dangerous: tool({
         description: "Needs approval",
         inputSchema: z.object({}),
@@ -177,7 +177,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         inputSchema: z.object({ question: z.string() })
       })
     },
-    recovery: { tools: { gate_safe: "rerun" }, backoffMs: 10 },
+    recovery: { backoffMs: 10 },
     hooks: {
       classifyError: classifyContextOverflow,
       beforeTurn: () => {
@@ -220,7 +220,6 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   });
   readonly lifecycle = Lifecycle.install(this)
     .use(this.sessions)
-    .use(this.streams)
     .use(this.harness)
     .use(this.webSockets)
     .use(this.chat);

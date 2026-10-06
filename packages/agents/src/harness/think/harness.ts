@@ -10,7 +10,11 @@ import {
 } from "ai";
 // Imported from their modules, not "../../lifecycle", which loads
 // cloudflare:workers.
-import { LifecycleCapability } from "../../lifecycle/capability";
+import {
+  bindLifecycleCapability,
+  LifecycleCapability
+} from "../../lifecycle/capability";
+import { Streams } from "../../streams/streams";
 import type {
   LifecycleJobContext,
   LifecycleJobOutcome
@@ -119,6 +123,8 @@ const DEFAULT_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 60_000;
 const DEFAULT_STALL_TIMEOUT_MS = 120_000;
 const MAX_OVERFLOW_RETRIES = 1;
+/** Ceiling for one stored segment, under the 2 MB SQLite row limit. */
+const STREAM_MAX_CHUNK_BYTES = 1_900_000;
 /** Chunks packed into one stored stream segment. */
 const SEGMENT_CHUNKS = 10;
 /** Raw bytes packed into one stored segment before it is written. */
@@ -335,8 +341,8 @@ function asSessionMessage(message: UIMessage): SessionMessage {
  * interface, so a Channels host can serve its sessions.
  *
  * Transcripts live in the Sessions capability, in-flight model output in
- * the Streams capability, and the harness's queue of operations in its own
- * table. The harness runs every server tool call itself, so after an
+ * a Streams capability the harness owns, and the harness's queue of
+ * operations in its own table. The harness runs every server tool call itself, so after an
  * eviction it knows exactly which call was cut short and applies that
  * tool's recovery policy.
  *
@@ -361,6 +367,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   readonly #live = new Map<ThinkSessionId, LiveRun>();
   readonly #waiters = new Map<string, Set<() => void>>();
   readonly #configured = new Set<ThinkSessionId>();
+  /**
+   * In-flight model output. Only the harness reads it, so the harness owns
+   * it rather than asking the host to install a Streams capability. It
+   * shares the `cf_agents_streams` tables with any Streams the host has.
+   */
+  readonly #streams = new Streams({ maxChunkBytes: STREAM_MAX_CHUNK_BYTES });
   #heartbeatMs = HEARTBEAT_MS;
   #store: HarnessStore | undefined;
 
@@ -369,9 +381,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /**
-   * @param options - The model, tools, hooks, and the Sessions and Streams
-   *   capabilities the harness stores into. Install those two on the
-   *   Lifecycle before the harness.
+   * @param options - The model, tools, hooks, and the Sessions capability
+   *   the harness keeps transcripts in. Install Sessions on the Lifecycle
+   *   before the harness.
    */
   constructor(options: ThinkHarnessOptions<TOOLS>) {
     super("think-harness");
@@ -393,6 +405,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** Create the harness's tables and wake every session with open work. */
   override async onStart(): Promise<void> {
+    bindLifecycleCapability(this.#streams, this.lifecycle);
+    await this.#streams.onStart();
     const store = this.#tables();
     store.ensureSession(ROOT_SESSION);
     const sessions = new Set(store.open().map((op) => op.session));
@@ -1040,7 +1054,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // any point leaves evidence the next wake recovers from.
     const streamId = `think:${crypto.randomUUID()}`;
     this.#tables().update(session, operationId, { streamId, messageId });
-    const writer = await this.#options.streams.open(streamId, {
+    const writer = await this.#streams.open(streamId, {
       tag: streamTag(session, operationId),
       metadata: { session, operationId, messageId }
     });
@@ -1369,7 +1383,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         if (started) {
           // Started before, with no result in the transcript: an eviction
           // cut it short.
-          const policy = this.#toolRecovery(toolName);
+          const policy = toolRecovery(tool);
           const maxAttempts =
             this.#options.recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
           if (policy === "report" || started.attempts >= maxAttempts) {
@@ -1454,16 +1468,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           operationId
         });
       })
-    );
-  }
-
-  #toolRecovery(toolName: string): ToolRecovery {
-    const recovery = this.#options.recovery;
-    const tools = recovery?.tools;
-    return (
-      (tools && Object.hasOwn(tools, toolName) ? tools[toolName] : undefined) ??
-      recovery?.defaultTool ??
-      "report"
     );
   }
 
@@ -1639,7 +1643,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     try {
       const settled =
         streamId !== undefined &&
-        this.#options.streams
+        this.#streams
           .__DO_NOT_USE_WILL_BREAK__sync()
           .settle(streamId, "completed", null, { commit, discard: true });
       if (!settled) this.lifecycle.storage.transactionSync(commit);
@@ -1653,7 +1657,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** Every chunk a stream holds, without waiting for more. */
   #streamChunks(streamId: string): UIMessageChunk[] {
-    const streams = this.#options.streams.__DO_NOT_USE_WILL_BREAK__sync();
+    const streams = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();
     if (!streams.getStream(streamId)) return [];
     const chunks: UIMessageChunk[] = [];
     let from = 0;
@@ -1764,6 +1768,11 @@ export function classifyContextOverflow(error: unknown): ThinkErrorClass {
 
 const CONTEXT_OVERFLOW_PATTERN =
   /prompt is too long|context[_ ]length[_ ]exceeded|maximum context length|exceeds the maximum number of tokens|input token count|reduce the length of|input is too long|too many (?:input )?tokens|context window/i;
+
+/** A tool's own recovery field, or the default. */
+function toolRecovery(tool: object): ToolRecovery {
+  return "recovery" in tool && tool.recovery === "rerun" ? "rerun" : "report";
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;

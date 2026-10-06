@@ -1,26 +1,25 @@
 ---
 title: Think harness (Experimental)
 pcx_content_type: reference
-description: Run Think's agent loop in a Durable Object with the experimental ThinkHarness lifecycle capability. Transcripts in Sessions, in-flight output in Streams, and turns that survive eviction.
+description: Run Think's agent loop in a Durable Object with the experimental ThinkHarness lifecycle capability. Transcripts in Sessions, and turns that survive eviction.
 ---
 
 `ThinkHarness` runs Think's agent loop as a Lifecycle capability. It has the same shape as the [Pi harness](./pi.md): `harness.prompt()`, `harness.sessions` and `harness.session(id)`. The engine is the AI SDK, and storage uses the Agents SDK's own capabilities:
 
 - The `Sessions` capability keeps each session's transcript as AI SDK `UIMessage`s.
-- The `Streams` capability keeps the output of a model call while it streams.
+- The harness keeps the output of a model call while it streams, in the same tables the `Streams` capability uses. You do not install `Streams` for it.
 - One Lifecycle job per session wakes the object after an eviction.
 
 It is experimental. The API may change in any release.
 
 ## Create the harness
 
-Install `Sessions` and `Streams` on the Lifecycle before the harness:
+Install `Sessions` on the Lifecycle before the harness:
 
 ```ts
 import { DurableObject } from "cloudflare:workers";
 import { tool } from "ai";
 import { z } from "zod";
-import { createChatStreams } from "agents/chat";
 import { ThinkHarness } from "agents/harness/think";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/ai-sdk";
@@ -29,26 +28,25 @@ import { Sessions } from "agents/sessions";
 export class Assistant extends DurableObject<Env> {
   ai = createAI({ binding: this.env.AI });
   sessions = new Sessions();
-  streams = createChatStreams();
 
   harness = new ThinkHarness({
     sessions: this.sessions,
-    streams: this.streams,
     model: this.ai("@cf/moonshotai/kimi-k2.7-code"),
     system: "You are a helpful assistant.",
     tools: {
-      weather: tool({
-        description: "Get the weather for a city",
-        inputSchema: z.object({ city: z.string() }),
-        execute: async ({ city }) => `Sunny in ${city}`
-      })
+      weather: {
+        ...tool({
+          description: "Get the weather for a city",
+          inputSchema: z.object({ city: z.string() }),
+          execute: async ({ city }) => `Sunny in ${city}`
+        }),
+        // Safe to run again if an eviction cuts a call short.
+        recovery: "rerun"
+      }
     }
   });
 
-  lifecycle = Lifecycle.install(this)
-    .use(this.sessions)
-    .use(this.streams)
-    .use(this.harness);
+  lifecycle = Lifecycle.install(this).use(this.sessions).use(this.harness);
 
   async ask(prompt: string) {
     const result = await this.harness.prompt(prompt);
@@ -57,20 +55,19 @@ export class Assistant extends DurableObject<Env> {
 }
 ```
 
-On an `Agent`, call `this.lifecycle.use(...)` with the same three capabilities in the constructor.
+On an `Agent`, call `this.lifecycle.use(this.sessions).use(this.harness)` in the constructor.
 
-| Option             | What it is                                                                                                                                      |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sessions`         | Required. The `Sessions` capability that keeps transcripts.                                                                                     |
-| `streams`          | Required. The `Streams` capability that keeps in-flight output. `createChatStreams()` raises the per-chunk ceiling.                             |
-| `model`            | Required. An AI SDK `LanguageModel`, or a function of `{ session }` that returns one.                                                           |
-| `system`           | The system prompt, or a function of `{ session }`.                                                                                              |
-| `tools`            | An AI SDK `ToolSet`, or a function of `{ session }`. Tools with `execute` run on the server. Tools without it run on a client.                  |
-| `maxSteps`         | Most model calls one operation makes. Default 10.                                                                                               |
-| `toolApproval`     | Decide per call whether a tool needs approval. A tool's own `needsApproval` also applies.                                                       |
-| `recovery`         | What to do after an eviction. Refer to [Recovery](#recovery).                                                                                   |
-| `configureSession` | Called with each session's `Session` handle the first time the harness uses it. Set compaction here with `onCompaction()` and `compactAfter()`. |
-| `hooks`            | Callbacks into the turn loop. Refer to [Hooks](#hooks).                                                                                         |
+| Option             | What it is                                                                                                                                                                  |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sessions`         | Required. The `Sessions` capability that keeps transcripts.                                                                                                                 |
+| `model`            | Required. An AI SDK `LanguageModel`, or a function of `{ session }` that returns one.                                                                                       |
+| `system`           | The system prompt, or a function of `{ session }`.                                                                                                                          |
+| `tools`            | An AI SDK `ToolSet`, or a function of `{ session }`. Tools with `execute` run on the server. Tools without it run on a client. A server tool may carry `recovery: "rerun"`. |
+| `maxSteps`         | Most model calls one operation makes. Default 10.                                                                                                                           |
+| `toolApproval`     | Decide per call whether a tool needs approval. A tool's own `needsApproval` also applies.                                                                                   |
+| `recovery`         | The budget for recovering interrupted work: `maxAttempts`, `backoffMs`, `stallTimeoutMs`. Refer to [Recovery](#recovery).                                                   |
+| `configureSession` | Called with each session's `Session` handle the first time the harness uses it. Set compaction here with `onCompaction()` and `compactAfter()`.                             |
+| `hooks`            | Callbacks into the turn loop. Refer to [Hooks](#hooks).                                                                                                                     |
 
 ## Submit and wait
 
@@ -130,7 +127,7 @@ A client tool call works the same way: the operation settles with the call `inpu
 Every step of a turn reads only durable state, so a restarted object continues where the last write left off.
 
 - **During a model call.** Chunks are written to a stream as they arrive. When the call ends, the harness persists the message and deletes the stream in one SQLite transaction. After an eviction, the harness rebuilds the partial message from the stream, keeps it, and calls the model again to continue the same message. Tool calls whose input never finished streaming are dropped.
-- **During a tool call.** The harness records each call before it runs. After an eviction, a call with a record and no result was cut short. With `recovery.tools[name]: "rerun"` it runs again. With `"report"`, the default, it is recorded as failed with an "interrupted" error and the model decides what to do. Use `rerun` only for tools that are safe to repeat.
+- **During a tool call.** The harness records each call before it runs. After an eviction, a call with a record and no result was cut short. A tool that carries `recovery: "rerun"` runs again. Any other tool (`"report"`, the default) has the call recorded as failed with an "interrupted" error and the model decides what to do. Use `rerun` only for tools that are safe to repeat.
 - **Budget.** `recovery.maxAttempts` (default 10) counts interruptions without progress. A finished model call or tool call resets the count. Past the budget the operation settles `unanswered` with reason `interrupted`. Retries after the first back off from `recovery.backoffMs` (default 1000), doubling up to a minute.
 - **Stalls.** A model stream that sends nothing for `recovery.stallTimeoutMs` (default 120000) is treated as interrupted.
 - **Memory limits.** The wake jobs are flagged for the Lifecycle's alarm memory-limit breaker, so a turn that keeps running out of memory is backed off and then stopped.
@@ -164,7 +161,6 @@ chat = new ThinkChat({ harness: this.harness, webSockets: this.webSockets });
 
 lifecycle = Lifecycle.install(this)
   .use(this.sessions)
-  .use(this.streams)
   .use(this.harness)
   .use(this.webSockets)
   .use(this.chat);
@@ -174,25 +170,25 @@ It handles chat requests (`submit-message` and `regenerate-message`), cancel, cl
 
 ## Compared with Think
 
-`ThinkHarness` is meant to replace the engine inside `@cloudflare/think`. It reads and writes the same Sessions and Streams tables, and the root session is Think's conversation. Work in flight when an agent moves over is not carried across.
+`ThinkHarness` is meant to replace the engine inside `@cloudflare/think`. It reads and writes the same Sessions and Streams tables Think uses, and the root session is Think's conversation. Work in flight when an agent moves over is not carried across.
 
-| Think                                                                      | ThinkHarness                                                |
-| -------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `getModel()`, `getSystemPrompt()`, `getTools()`                            | `model`, `system`, `tools` options                          |
-| `beforeTurn`, `beforeToolCall`, `afterToolCall`, `onStepFinish`, `onChunk` | Hooks of the same names                                     |
-| `beforeStep`                                                               | `beforeTurn`, which runs before every model call            |
-| `onChatResponse`, `onChatError`, `classifyChatError`                       | `onTurnEnd`, `onError`, `classifyError`                     |
-| `onChatRecovery`, `chatRecovery`                                           | `onRecovery`, `recovery`                                    |
-| `submitMessages`, `waitForSubmission`, `inspectSubmission`                 | `submit`, `wait`, `inspect`                                 |
-| `saveMessages`, `runTurn`                                                  | `prompt`                                                    |
-| `chat(message, callback)`                                                  | `session.chat(input, callback)`                             |
-| `cancelChat`, `cancelSubmission`, `cancelAllChats`                         | `abort(operationId)`, `abort()`                             |
-| `continueLastTurn`, regeneration                                           | `continue()`, `regenerate()`                                |
-| `clearMessages`, `getMessages`, `messages`                                 | `reset()`, `messages()`                                     |
-| `configureSession`, compaction                                             | `configureSession`                                          |
-| `useAgentChat` protocol                                                    | `ThinkChat`                                                 |
-| One conversation per Durable Object                                        | Many sessions per object, with `create`, `fork` and `list`  |
-| Tools run inside `streamText`; interrupted calls are repaired              | The harness runs each call, with a recovery policy per tool |
+| Think                                                                      | ThinkHarness                                                        |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `getModel()`, `getSystemPrompt()`, `getTools()`                            | `model`, `system`, `tools` options                                  |
+| `beforeTurn`, `beforeToolCall`, `afterToolCall`, `onStepFinish`, `onChunk` | Hooks of the same names                                             |
+| `beforeStep`                                                               | `beforeTurn`, which runs before every model call                    |
+| `onChatResponse`, `onChatError`, `classifyChatError`                       | `onTurnEnd`, `onError`, `classifyError`                             |
+| `onChatRecovery`, `chatRecovery`                                           | `onRecovery`, `recovery`                                            |
+| `submitMessages`, `waitForSubmission`, `inspectSubmission`                 | `submit`, `wait`, `inspect`                                         |
+| `saveMessages`, `runTurn`                                                  | `prompt`                                                            |
+| `chat(message, callback)`                                                  | `session.chat(input, callback)`                                     |
+| `cancelChat`, `cancelSubmission`, `cancelAllChats`                         | `abort(operationId)`, `abort()`                                     |
+| `continueLastTurn`, regeneration                                           | `continue()`, `regenerate()`                                        |
+| `clearMessages`, `getMessages`, `messages`                                 | `reset()`, `messages()`                                             |
+| `configureSession`, compaction                                             | `configureSession`                                                  |
+| `useAgentChat` protocol                                                    | `ThinkChat`                                                         |
+| One conversation per Durable Object                                        | Many sessions per object, with `create`, `fork` and `list`          |
+| Tools run inside `streamText`; interrupted calls are repaired              | The harness runs each call; a tool can opt into `recovery: "rerun"` |
 
 Not supported yet:
 

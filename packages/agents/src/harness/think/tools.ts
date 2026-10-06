@@ -24,6 +24,8 @@ export function modelTools(
       needsApproval: _needsApproval,
       ...definition
     } = tool;
+    // A tool's `recovery` field is the harness's, not the model's.
+    if ("recovery" in definition) delete definition.recovery;
     // SAFETY: a tool without `execute` and `needsApproval` is still a tool
     // of the same kind; both fields are optional on every Tool variant.
     offered[name] = definition as ToolSet[string];

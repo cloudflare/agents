@@ -26,6 +26,7 @@ export type {
 } from "./events";
 export type {
   PerSession,
+  RecoverableTool,
   ThinkChunkContext,
   ThinkErrorClass,
   ThinkHarnessHooks,

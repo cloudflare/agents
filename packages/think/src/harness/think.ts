@@ -14,7 +14,6 @@ import {
   type WSMessage
 } from "agents";
 import type { ChatResponseResult, SaveMessagesResult } from "agents/chat";
-import { createChatStreams } from "agents/chat";
 import {
   ThinkChat,
   ThinkHarness,
@@ -136,7 +135,6 @@ export class Think<
   readonly sessions = new Sessions({
     reservedMetadataKeys: ["channel", "turnMetadata"]
   });
-  readonly streams = createChatStreams();
   readonly harness: ThinkHarness;
   readonly #chat: ThinkChat;
   readonly #handlers: WebSocketHandlers[] = [];
@@ -152,7 +150,6 @@ export class Think<
     const self = this;
     this.harness = new ThinkHarness({
       sessions: this.sessions,
-      streams: this.streams,
       model: async () => this.resolveModel(await this.getModel()),
       system: () => this.getSystemPrompt(),
       tools: () => this.getTools(),
@@ -214,7 +211,7 @@ export class Think<
     this.harness.observe((_session, event) => {
       if (event.type === "run-end") this.#running = undefined;
     });
-    this.lifecycle.use(this.sessions).use(this.streams).use(this.harness);
+    this.lifecycle.use(this.sessions).use(this.harness);
 
     const onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
