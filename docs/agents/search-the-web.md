@@ -6,11 +6,15 @@ This page covers what the SDK adds on top of the API. For the binding, the provi
 
 > **Beta** — this feature may have breaking changes in future releases.
 
-## Add the tool
+## Quick Start
 
-The tool needs the `AI` binding (`"ai": { "binding": "AI" }` in `wrangler.jsonc`). Every adapter takes the same `WebSearchToolOptions`.
+You need:
 
-`env.AI.websearch()` exists from workerd 1.20260924.1, which ships with wrangler 4.141.0 and `@cloudflare/vite-plugin` 1.60.2. Searches bill the AI Gateway of the account the Worker runs in. The `AI` binding has no local implementation, so `wrangler dev` sends searches to Cloudflare through your logged-in account and bills that account.
+- An `AI` binding: `"ai": { "binding": "AI" }` in `wrangler.jsonc`.
+- workerd 1.20260924.1 or later, which is where `env.AI.websearch()` arrived. It ships with wrangler 4.141.0 and `@cloudflare/vite-plugin` 1.60.2.
+- AI Gateway credits or a provider key on the gateway, in the account the Worker runs in. That account pays for every search. The `AI` binding always calls Cloudflare, so under `wrangler dev` searches run against, and bill, the account you are logged in to.
+
+Then add the tool to your harness. Every adapter takes the same options.
 
 Pi harness:
 
@@ -43,7 +47,7 @@ import { webSearchTool } from "agents/websearch/tanstack-ai";
 const tools = [webSearchTool({ binding: this.env.AI })];
 ```
 
-## Who decides what
+## Options
 
 The model's input is `{ query, limit? }` and nothing else. The host fixes everything that affects cost or data handling:
 
@@ -57,7 +61,7 @@ The model's input is `{ query, limit? }` and nothing else. The host fixes everyt
 | `maxDescriptionChars` | `600`                | Per-result description length in the model's view. `Infinity` passes descriptions through whole.                                        |
 | `description`         | built-in description | Replaces the tool description the model sees.                                                                                           |
 
-## What the model sees, and what you get
+## Model Interface
 
 The model gets text: a numbered list of title, URL, and description, with descriptions trimmed to `maxDescriptionChars`. Some providers return descriptions of several thousand characters per result, so the default keeps a five-result search to a few kilobytes of context.
 
@@ -87,12 +91,12 @@ The pi and TanStack tools do not throw. The model gets `Web search failed: <mess
 
 ## Other sources
 
-`webSearchFromAI` and `webSearchFromRest` from `agents/websearch` return a `WebSearchSource`: a function from `{ query, limit? }` to the API response, with no model involved. Use them from scheduled jobs, or outside Workers:
+`createAIWebSearch` and `createHTTPWebSearch` from `agents/websearch` return a `WebSearchSource`: a function from `{ query, limit? }` to the API response, with no model involved. Use them from scheduled jobs, or outside Workers:
 
 ```ts
-import { webSearchFromRest } from "agents/websearch";
+import { createHTTPWebSearch } from "agents/websearch";
 
-const search = webSearchFromRest({
+const search = createHTTPWebSearch({
   accountId: env.CF_ACCOUNT_ID,
   apiToken: env.CF_API_TOKEN,
   provider: "linkup"
