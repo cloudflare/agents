@@ -23,7 +23,6 @@ import type {
   ToolAnswer
 } from "../../experimental/channels/harness";
 import type { Session } from "../../sessions/handle";
-import type { Sessions } from "../../sessions/sessions";
 
 /**
  * A session id. The root session is `""`, the Sessions capability's default
@@ -371,8 +370,11 @@ export type PerSession<T> =
 
 /** `ThinkHarness`'s options. @experimental */
 export type ThinkHarnessOptions<TOOLS extends ToolSet = ToolSet> = {
-  /** The Sessions capability that keeps transcripts. Install it first. */
-  readonly sessions: Sessions;
+  /**
+   * Message-metadata keys only the server may write. The transcript strips
+   * them from input submitted with `source: "client"`. Default: none.
+   */
+  readonly reservedMetadataKeys?: readonly string[];
   readonly model: PerSession<LanguageModel>;
   readonly system?: PerSession<string | undefined>;
   /**
@@ -396,8 +398,8 @@ export type ThinkHarnessOptions<TOOLS extends ToolSet = ToolSet> = {
   /** The budget for recovering interrupted work. */
   readonly recovery?: ThinkRecoveryOptions;
   /**
-   * Configure a session's Sessions handle the first time the harness uses
-   * it, for example its compaction function and threshold.
+   * Configure a session's transcript handle the first time the harness
+   * uses it, for example its compaction function and threshold.
    */
   readonly configureSession?: (session: Session, id: ThinkSessionId) => void;
   readonly hooks?: ThinkHarnessHooks;

@@ -111,7 +111,7 @@ function clientToolsOf(
  * readonly webSockets = new WebSockets();
  * readonly chat = new ThinkChat({ harness: this.harness, webSockets: this.webSockets });
  * readonly lifecycle = Lifecycle.install(this)
- *   .use(this.sessions).use(this.streams).use(this.harness)
+ *   .use(this.harness)
  *   .use(this.webSockets).use(this.chat);
  * ```
  *

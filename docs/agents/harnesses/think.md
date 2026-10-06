@@ -1,20 +1,20 @@
 ---
 title: Think harness (Experimental)
 pcx_content_type: reference
-description: Run Think's agent loop in a Durable Object with the experimental ThinkHarness lifecycle capability. Transcripts in Sessions, and turns that survive eviction.
+description: Run Think's agent loop in a Durable Object with the experimental ThinkHarness lifecycle capability. Durable transcripts and turns that survive eviction.
 ---
 
-`ThinkHarness` runs Think's agent loop as a Lifecycle capability. It has the same shape as the [Pi harness](./pi.md): `harness.prompt()`, `harness.sessions` and `harness.session(id)`. The engine is the AI SDK, and storage uses the Agents SDK's own capabilities:
+`ThinkHarness` runs Think's agent loop as a Lifecycle capability. It has the same shape as the [Pi harness](./pi.md): `harness.prompt()`, `harness.sessions` and `harness.session(id)`. The engine is the AI SDK. The harness owns its storage, so you install only the harness:
 
-- The `Sessions` capability keeps each session's transcript as AI SDK `UIMessage`s.
-- The harness keeps the output of a model call while it streams, in the same tables the `Streams` capability uses. You do not install `Streams` for it.
+- Each session's transcript is kept as AI SDK `UIMessage`s, in the same tables the `Sessions` capability uses. `session.transcript` is that session's `Session` handle.
+- The output of a model call is kept while it streams, in the same tables the `Streams` capability uses.
 - One Lifecycle job per session wakes the object after an eviction.
 
 It is experimental. The API may change in any release.
 
 ## Create the harness
 
-Install `Sessions` on the Lifecycle before the harness:
+Install the harness on the Lifecycle:
 
 ```ts
 import { DurableObject } from "cloudflare:workers";
@@ -23,14 +23,11 @@ import { z } from "zod";
 import { ThinkHarness } from "agents/harness/think";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/ai-sdk";
-import { Sessions } from "agents/sessions";
 
 export class Assistant extends DurableObject<Env> {
   ai = createAI({ binding: this.env.AI });
-  sessions = new Sessions();
 
   harness = new ThinkHarness({
-    sessions: this.sessions,
     model: this.ai("@cf/moonshotai/kimi-k2.7-code"),
     system: "You are a helpful assistant.",
     tools: {
@@ -46,7 +43,7 @@ export class Assistant extends DurableObject<Env> {
     }
   });
 
-  lifecycle = Lifecycle.install(this).use(this.sessions).use(this.harness);
+  lifecycle = Lifecycle.install(this).use(this.harness);
 
   async ask(prompt: string) {
     const result = await this.harness.prompt(prompt);
@@ -55,19 +52,19 @@ export class Assistant extends DurableObject<Env> {
 }
 ```
 
-On an `Agent`, call `this.lifecycle.use(this.sessions).use(this.harness)` in the constructor.
+On an `Agent`, call `this.lifecycle.use(this.harness)` in the constructor. Do not also install a `Sessions` capability that writes the harness's sessions: the harness caches what it wrote.
 
-| Option             | What it is                                                                                                                                                                  |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sessions`         | Required. The `Sessions` capability that keeps transcripts.                                                                                                                 |
-| `model`            | Required. An AI SDK `LanguageModel`, or a function of `{ session }` that returns one.                                                                                       |
-| `system`           | The system prompt, or a function of `{ session }`.                                                                                                                          |
-| `tools`            | An AI SDK `ToolSet`, or a function of `{ session }`. Tools with `execute` run on the server. Tools without it run on a client. A server tool may carry `recovery: "rerun"`. |
-| `maxSteps`         | Most model calls one operation makes. Default 10.                                                                                                                           |
-| `toolApproval`     | Decide per call whether a tool needs approval. A tool's own `needsApproval` also applies.                                                                                   |
-| `recovery`         | The budget for recovering interrupted work: `maxAttempts`, `backoffMs`, `stallTimeoutMs`. Refer to [Recovery](#recovery).                                                   |
-| `configureSession` | Called with each session's `Session` handle the first time the harness uses it. Set compaction here with `onCompaction()` and `compactAfter()`.                             |
-| `hooks`            | Callbacks into the turn loop. Refer to [Hooks](#hooks).                                                                                                                     |
+| Option                 | What it is                                                                                                                                                                  |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`                | Required. An AI SDK `LanguageModel`, or a function of `{ session }` that returns one.                                                                                       |
+| `system`               | The system prompt, or a function of `{ session }`.                                                                                                                          |
+| `tools`                | An AI SDK `ToolSet`, or a function of `{ session }`. Tools with `execute` run on the server. Tools without it run on a client. A server tool may carry `recovery: "rerun"`. |
+| `maxSteps`             | Most model calls one operation makes. Default 10.                                                                                                                           |
+| `toolApproval`         | Decide per call whether a tool needs approval. A tool's own `needsApproval` also applies.                                                                                   |
+| `recovery`             | The budget for recovering interrupted work: `maxAttempts`, `backoffMs`, `stallTimeoutMs`. Refer to [Recovery](#recovery).                                                   |
+| `reservedMetadataKeys` | Message-metadata keys only the server may write; stripped from input submitted with `source: "client"`.                                                                     |
+| `configureSession`     | Called with each session's `Session` handle the first time the harness uses it. Set compaction here with `onCompaction()` and `compactAfter()`.                             |
+| `hooks`                | Callbacks into the turn loop. Refer to [Hooks](#hooks).                                                                                                                     |
 
 ## Submit and wait
 
@@ -104,6 +101,8 @@ const { text, messages } = await session.prompt("Hello");
 | `watch()`                    | The shared harness interface's watch, so a Channels host can serve the session.                          |
 
 `harness.sessions` has `create()`, `fork(from)` and `list()`. A fork copies the source session's active path.
+
+`session.transcript` is the session's `Session` handle from `agents/sessions`. Use it to read branches (`getBranches`), search (`search`), compact, or write messages without starting a turn.
 
 ## Tools, approvals and client tools
 
@@ -160,7 +159,6 @@ webSockets = new WebSockets();
 chat = new ThinkChat({ harness: this.harness, webSockets: this.webSockets });
 
 lifecycle = Lifecycle.install(this)
-  .use(this.sessions)
   .use(this.harness)
   .use(this.webSockets)
   .use(this.chat);

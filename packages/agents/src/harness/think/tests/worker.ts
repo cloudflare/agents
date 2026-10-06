@@ -8,7 +8,6 @@ import type {
   ToolAnswer
 } from "../../../experimental/channels/harness";
 import { Lifecycle } from "../../../lifecycle";
-import { Sessions } from "../../../sessions/sessions";
 import { WebSockets } from "../../../websockets/websockets";
 import { ThinkChat } from "../chat";
 import {
@@ -130,9 +129,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   });
   #overflowed = false;
 
-  readonly sessions = new Sessions();
   readonly harness = new ThinkHarness({
-    sessions: this.sessions,
     system: "You are a test.",
     model: new MockLanguageModelV4({
       doStream: async ({ prompt }) => {
@@ -219,7 +216,6 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     webSockets: this.webSockets
   });
   readonly lifecycle = Lifecycle.install(this)
-    .use(this.sessions)
     .use(this.harness)
     .use(this.webSockets)
     .use(this.chat);
@@ -389,8 +385,27 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.session().regenerate();
   }
 
+  /** Write through the transcript handle; the event types a listener saw. */
+  async writeDirectly(text: string): Promise<string[]> {
+    const seen: string[] = [];
+    const session = this.harness.session();
+    const stop = session.subscribe((event) => {
+      seen.push(
+        event.type === "message" ? `message:${event.message.id}` : event.type
+      );
+    });
+    await session.transcript.appendMessage({
+      id: "direct",
+      role: "user",
+      parts: [{ type: "text", text }]
+    });
+    stop();
+    return seen;
+  }
+
   async branches(messageId: string): Promise<number> {
-    return (await this.sessions.session().getBranches(messageId)).length;
+    return (await this.harness.session().transcript.getBranches(messageId))
+      .length;
   }
 
   async createSession(): Promise<string> {

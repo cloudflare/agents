@@ -4,12 +4,11 @@ An experimental example of `ThinkHarness` from `agents/harness/think`: Think's
 agent loop as a Lifecycle capability on a plain Durable Object, served to
 `useAgentChat` by `ThinkChat`.
 
-`src/server.ts` composes four capabilities:
+`src/server.ts` composes three capabilities:
 
-- `Sessions` keeps the transcript.
-- `ThinkHarness` runs turns with the AI SDK. It keeps each model call's
-  output in storage while it streams, and one Lifecycle job per session wakes
-  the object after an eviction.
+- `ThinkHarness` keeps the transcript and runs turns with the AI SDK. It
+  keeps each model call's output in storage while it streams, and one
+  Lifecycle job per session wakes the object after an eviction.
 - `WebSockets` accepts the browser's connection.
 - `ThinkChat` speaks Think's `cf_agent_chat_*` protocol over it, so the
   client is the stock `useAgentChat` from `agents/chat/react`.

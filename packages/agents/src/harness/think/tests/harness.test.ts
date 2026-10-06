@@ -426,6 +426,13 @@ describe("ThinkHarness sessions", () => {
     expect(await stub.branches(before[0] ?? "")).toBe(2);
   });
 
+  it("passes writes made through the transcript on to listeners", async () => {
+    const stub = fresh();
+    await stub.prompt("hello");
+    expect(await stub.writeDirectly("noted")).toEqual(["message:direct"]);
+    expect((await stub.messages()).at(-1)).toBe("user: noted");
+  });
+
   it("resets a session", async () => {
     const stub = fresh();
     await stub.prompt("hello");

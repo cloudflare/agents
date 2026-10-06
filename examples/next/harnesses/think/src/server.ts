@@ -5,21 +5,18 @@ import { routeAgentRequest } from "agents";
 import { ThinkChat, ThinkHarness } from "agents/harness/think";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/ai-sdk";
-import { Sessions } from "agents/sessions";
 import { WebSockets } from "agents/websockets";
 
 const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 
 /**
- * Think's agent loop on a plain Durable Object: the Sessions capability
- * keeps the transcript, ThinkHarness runs turns and brings them back after
- * an eviction, and ThinkChat speaks the protocol `useAgentChat` expects.
+ * Think's agent loop on a plain Durable Object: ThinkHarness keeps the
+ * transcript, runs turns and brings them back after an eviction, and
+ * ThinkChat speaks the protocol `useAgentChat` expects.
  */
 export class ThinkAgent extends DurableObject<Env> {
   readonly ai = createAI({ binding: this.env.AI });
-  readonly sessions = new Sessions();
   readonly harness = new ThinkHarness({
-    sessions: this.sessions,
     model: this.ai(MODEL_ID),
     system:
       "You are a concise assistant. Use getWeather for weather questions, getUserTimezone when you need the user's time zone, and sendNotification when asked to notify someone.",
@@ -64,7 +61,6 @@ export class ThinkAgent extends DurableObject<Env> {
     webSockets: this.webSockets
   });
   readonly lifecycle = Lifecycle.install(this)
-    .use(this.sessions)
     .use(this.harness)
     .use(this.webSockets)
     .use(this.chat);

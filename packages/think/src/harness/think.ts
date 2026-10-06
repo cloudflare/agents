@@ -25,7 +25,6 @@ import {
   type ThinkTurnContext
 } from "agents/harness/think";
 import type { WebSocketHandlers } from "agents/websockets";
-import { Sessions } from "agents/sessions";
 import {
   convertToModelMessages,
   type LanguageModel,
@@ -131,10 +130,6 @@ export class Think<
   /** Model calls per turn. Read per call, so a subclass field applies. */
   maxSteps = 10;
 
-  /** The same capability and options as Think, so the same rows. */
-  readonly sessions = new Sessions({
-    reservedMetadataKeys: ["channel", "turnMetadata"]
-  });
   readonly harness: ThinkHarness;
   readonly #chat: ThinkChat;
   readonly #handlers: WebSocketHandlers[] = [];
@@ -149,7 +144,8 @@ export class Think<
     super(ctx, env);
     const self = this;
     this.harness = new ThinkHarness({
-      sessions: this.sessions,
+      // Think's reserved keys, so client writes are stripped the same way.
+      reservedMetadataKeys: ["channel", "turnMetadata"],
       model: async () => this.resolveModel(await this.getModel()),
       system: () => this.getSystemPrompt(),
       tools: () => this.getTools(),
@@ -211,19 +207,36 @@ export class Think<
     this.harness.observe((_session, event) => {
       if (event.type === "run-end") this.#running = undefined;
     });
-    this.lifecycle.use(this.sessions).use(this.harness);
+    this.lifecycle.use(this.harness);
 
     const onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
       this.session = await this.configureSession(
-        new ThinkSession(this.sessions.session(), () => {
+        new ThinkSession(this.harness.session().transcript, () => {
           throw new Error(
             "Context blocks are not supported by the harness-backed Think yet"
           );
         })
       );
-      this.sessions.subscribe(async (event) => {
-        if (event.sessionId === this.session.sessionId) await this.#sync();
+      this.harness.observe((session, event) => {
+        if (session !== this.harness.session().id) return;
+        if (event.type === "reset") this.#messages = [];
+        if (event.type === "message") {
+          // Apply it now, so a synchronous read right after a turn sees it;
+          // the re-read that follows picks up compaction and branching.
+          const index = this.#messages.findIndex(
+            (message) => message.id === event.message.id
+          );
+          this.#messages =
+            index === -1
+              ? [...this.#messages, event.message]
+              : this.#messages.map((message, i) =>
+                  i === index ? event.message : message
+                );
+        }
+        if (event.type === "message" || event.type === "reset") {
+          void this.#sync();
+        }
       });
       await this.#sync();
       this.#installProtocol();
@@ -404,7 +417,7 @@ export class Think<
     await this.#sync();
     const resolved =
       typeof messages === "function" ? await messages(this.messages) : messages;
-    const handle = this.sessions.session();
+    const handle = this.harness.session().transcript;
     let parentId = options?.parentId;
     for (const message of resolved) {
       const stored = message as unknown as SessionMessage;
@@ -422,9 +435,11 @@ export class Think<
     message: UIMessage,
     parentId?: string | null
   ): Promise<UIMessage> {
-    await this.sessions
+    await this.harness
       .session()
-      .appendMessage(message as unknown as SessionMessage, { parentId });
+      .transcript.appendMessage(message as unknown as SessionMessage, {
+        parentId
+      });
     await this.#sync();
     return message;
   }

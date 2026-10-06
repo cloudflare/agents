@@ -14,6 +14,7 @@ import {
   bindLifecycleCapability,
   LifecycleCapability
 } from "../../lifecycle/capability";
+import { Sessions } from "../../sessions/sessions";
 import { Streams } from "../../streams/streams";
 import type {
   LifecycleJobContext,
@@ -328,6 +329,11 @@ function asUIMessages(messages: readonly SessionMessage[]): UIMessage[] {
   return messages as unknown as UIMessage[];
 }
 
+function asUIMessage(message: SessionMessage): UIMessage {
+  // SAFETY: as for asUIMessages, one message at a time.
+  return message as unknown as UIMessage;
+}
+
 function asSessionMessage(message: UIMessage): SessionMessage {
   // SAFETY: SessionMessage is the structural subset of UIMessage that
   // Sessions reads; a UIMessage is accepted as is.
@@ -340,9 +346,9 @@ function asSessionMessage(message: UIMessage): SessionMessage {
  * `harness.session(id)`. It implements the shared `AgentHarness`
  * interface, so a Channels host can serve its sessions.
  *
- * Transcripts live in the Sessions capability, in-flight model output in
- * a Streams capability the harness owns, and the harness's queue of
- * operations in its own table. The harness runs every server tool call itself, so after an
+ * Transcripts live in a Sessions capability and in-flight model output in
+ * a Streams capability, both owned by the harness, and the harness's queue
+ * of operations in its own table. The harness runs every server tool call itself, so after an
  * eviction it knows exactly which call was cut short and applies that
  * tool's recovery policy.
  *
@@ -373,6 +379,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * shares the `cf_agents_streams` tables with any Streams the host has.
    */
   readonly #streams = new Streams({ maxChunkBytes: STREAM_MAX_CHUNK_BYTES });
+  /**
+   * The transcripts. The harness writes every message, and its operations
+   * point at them, so it owns the Sessions capability too; a second one
+   * writing the same tables would leave this one's caches stale. Read and
+   * shape a transcript through `session.transcript`.
+   */
+  readonly #sessions: Sessions;
+  #bound = false;
+  /** Sessions with a write of the harness's own in progress. */
+  readonly #ownWrites = new Map<ThinkSessionId, number>();
   #heartbeatMs = HEARTBEAT_MS;
   #store: HarnessStore | undefined;
 
@@ -381,13 +397,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /**
-   * @param options - The model, tools, hooks, and the Sessions capability
-   *   the harness keeps transcripts in. Install Sessions on the Lifecycle
-   *   before the harness.
+   * @param options - The model, tools and hooks.
    */
   constructor(options: ThinkHarnessOptions<TOOLS>) {
     super("think-harness");
     this.#options = options;
+    this.#sessions = new Sessions({
+      ...(options.reservedMetadataKeys && {
+        reservedMetadataKeys: options.reservedMetadataKeys
+      })
+    });
     this.sessions = new ThinkSessions(this);
   }
 
@@ -405,7 +424,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** Create the harness's tables and wake every session with open work. */
   override async onStart(): Promise<void> {
-    bindLifecycleCapability(this.#streams, this.lifecycle);
+    this.#bindOwned();
+    await this.#sessions.onStart();
     await this.#streams.onStart();
     const store = this.#tables();
     store.ensureSession(ROOT_SESSION);
@@ -602,7 +622,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     await this.abort(session);
     await this.#drives.get(session);
     const handle = this.#handle(session);
-    await handle.clearMessages();
+    await this.#own(session, () => handle.clearMessages());
     this.#tables().deleteSettled(session);
     this.#events.emit(session, { type: "reset" });
     if (handoff) {
@@ -611,7 +631,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         role: "system",
         parts: [{ type: "text", text: handoff }]
       };
-      await handle.appendMessage(asSessionMessage(note));
+      await this.#own(session, () =>
+        handle.appendMessage(asSessionMessage(note))
+      );
       this.#events.emit(session, { type: "message", message: note });
     }
   }
@@ -1592,8 +1614,60 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /** The Sessions handle for a session, configured on first use. */
+  /**
+   * Give the Sessions and Streams the harness owns this capability's
+   * Lifecycle services. Done on first use, not only in `onStart`, because an
+   * RPC can read a transcript before startup (the read itself then waits
+   * for startup).
+   */
+  #bindOwned(): void {
+    if (this.#bound) return;
+    bindLifecycleCapability(this.#sessions, this.lifecycle);
+    bindLifecycleCapability(this.#streams, this.lifecycle);
+    this.#bound = true;
+    // Writes made through `session.transcript` go around the harness; pass
+    // them on as events, so listeners and chat clients see them too. The
+    // harness's own writes already emitted theirs.
+    this.#sessions.subscribe((change) => {
+      if ((this.#ownWrites.get(change.sessionId) ?? 0) > 0) return;
+      switch (change.type) {
+        case "append":
+        case "update":
+        case "import":
+          this.#events.emit(change.sessionId, {
+            type: "message",
+            message: asUIMessage(change.message)
+          });
+          return;
+        case "clear":
+          this.#events.emit(change.sessionId, { type: "reset" });
+          return;
+        default:
+          return;
+      }
+    });
+  }
+
+  /** Run a write of the harness's own, which emits its own events. */
+  async #own<T>(session: ThinkSessionId, write: () => Promise<T>): Promise<T> {
+    this.#ownWrites.set(session, (this.#ownWrites.get(session) ?? 0) + 1);
+    try {
+      return await write();
+    } finally {
+      const left = (this.#ownWrites.get(session) ?? 1) - 1;
+      if (left === 0) this.#ownWrites.delete(session);
+      else this.#ownWrites.set(session, left);
+    }
+  }
+
+  /** @internal The transcript handle for a session. */
+  transcript(session: ThinkSessionId): Session {
+    return this.#handle(session);
+  }
+
   #handle(session: ThinkSessionId): Session {
-    const handle = this.#options.sessions.session(session);
+    this.#bindOwned();
+    const handle = this.#sessions.session(session);
     if (!this.#configured.has(session)) {
       this.#configured.add(session);
       this.#options.configureSession?.(handle, session);
@@ -1652,7 +1726,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       sync.abandon();
       throw error;
     }
-    for (const after of afters) await after();
+    await this.#own(session, async () => {
+      for (const after of afters) await after();
+    });
   }
 
   /** Every chunk a stream holds, without waiting for more. */
@@ -1915,6 +1991,15 @@ export class ThinkSession implements HarnessSession {
    */
   inFlight(): Promise<ThinkInFlight | undefined> {
     return this.#harness.inFlight(this.id);
+  }
+
+  /**
+   * This session's transcript, as the Sessions capability's handle: read
+   * branches (`getBranches`), search (`search`), compact, or write
+   * messages directly. Writes made here do not start a turn.
+   */
+  get transcript(): Session {
+    return this.#harness.transcript(this.id);
   }
 
   /** Listen to the session's events in the AI SDK's vocabulary. */
