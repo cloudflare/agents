@@ -19,13 +19,28 @@ import {
   type WebSearchSource
 } from "./source";
 
+/** Search through the Workers AI binding; the tool builds the source. */
+export type WebSearchToolBindingOptions = AIWebSearchOptions & {
+  source?: never;
+};
+
+/**
+ * Search through a source you built. Gateway, provider, and billing belong
+ * to the source, so the binding options are not accepted here.
+ */
+export type WebSearchToolSourceOptions = {
+  /** Where searches run, instead of the Workers AI binding. */
+  source: WebSearchSource;
+  binding?: never;
+  gateway?: never;
+  provider?: never;
+  byokAlias?: never;
+};
+
 /** Options every `websearch` tool adapter accepts. */
 export type WebSearchToolOptions = (
-  | AIWebSearchOptions
-  | {
-      /** Where searches run, instead of the Workers AI binding. */
-      source: WebSearchSource;
-    }
+  | WebSearchToolBindingOptions
+  | WebSearchToolSourceOptions
 ) & {
   /**
    * Results per search when the model doesn't ask for a count, and the most
@@ -59,7 +74,7 @@ export function createWebSearchToolCore(
 ): WebSearchToolCore {
   const limit = clampLimit(options.limit ?? DEFAULT_WEBSEARCH_LIMIT);
   const source =
-    "source" in options ? options.source : createAIWebSearch(options);
+    options.source === undefined ? createAIWebSearch(options) : options.source;
   const provider = source.provider;
   const render = { maxDescriptionChars: options.maxDescriptionChars };
 
