@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-`useAgentChat` no longer keeps a cut-off assistant reply after the WebSocket drops mid-stream.
+`useAgentChat` replaces a cut-off assistant reply with the server's copy after the WebSocket drops mid-stream. Think sends that copy on reconnect; AIChatAgent doesn't yet.
