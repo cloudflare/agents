@@ -188,6 +188,78 @@ function createSlowClientToolMockModel(
   } as LanguageModel;
 }
 
+// Chains client tool calls across steps (#2443): `tc-chain-1` on the user
+// turn, `tc-chain-2` on the first continuation, then text. The second call
+// holds its stream open after the tool call until `holdSecondCall` resolves,
+// so a test can answer that tool while the continuation still streams.
+function createChainedClientToolModel(hooks: {
+  holdSecondCall: () => Promise<void>;
+  onCall: (toolResultCount: number) => void;
+}): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-chained-client-tool",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream(options: Record<string, unknown>) {
+      const prompt = (options as { prompt?: Array<{ role?: string }> }).prompt;
+      const results = (prompt ?? []).filter((m) => m.role === "tool").length;
+      hooks.onCall(results);
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (results < 2) {
+            const id = `tc-chain-${results + 1}`;
+            const input = JSON.stringify({ action: id });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: id,
+              toolName: "client_action",
+              input
+            });
+            if (results === 1) await hooks.holdSecondCall();
+          } else {
+            controller.enqueue({ type: "text-start", id: "t-chain" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-chain",
+              delta: "Both steps done"
+            });
+            controller.enqueue({ type: "text-end", id: "t-chain" });
+          }
+          controller.enqueue({
+            type: "finish",
+            finishReason: results < 2 ? "tool-calls" : "stop",
+            usage: { inputTokens: 10, outputTokens: 5 }
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+/** A test-controlled gate: `wait()` resolves once `open()` is called. */
+class LatchForTest {
+  #open = false;
+  #waiters: Array<() => void> = [];
+  get isWaiting(): boolean {
+    return this.#waiters.length > 0;
+  }
+  wait(): Promise<void> {
+    if (this.#open) return Promise.resolve();
+    return new Promise((resolve) => this.#waiters.push(resolve));
+  }
+  open(): void {
+    this.#open = true;
+    for (const resolve of this.#waiters.splice(0)) resolve();
+  }
+}
+
 // Reproduces #1649's headline race (abhagsain's debug-log analysis): the model
 // emits parallel client tool calls SEQUENTIALLY within one step. It streams a
 // FAST tool's `tool-input-available` first, then holds the stream open (trailing
@@ -847,6 +919,11 @@ export class ThinkClientToolsAgent extends Think {
   private _stampMetadata = false;
   private _failContinuationBeforeStream = false;
   private _chatErrorLog: ChatErrorContext[] = [];
+  private _useChainedClientTool = false;
+  private _chainedModelCalls: number[] = [];
+  private _chainedStreamLatch = new LatchForTest();
+  private _continuationStartLatch: LatchForTest | null = null;
+  private _coalesceArmHeld: { requested: boolean } | null = null;
 
   override onChatError(error: unknown, ctx: ChatErrorContext): unknown {
     this._chatErrorLog.push(ctx);
@@ -861,8 +938,9 @@ export class ThinkClientToolsAgent extends Think {
     return this._chatErrorLog;
   }
 
-  override beforeTurn(ctx: TurnContext): TurnConfig | void {
+  override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
     this._lastTurnToolNames = Object.keys(ctx.tools);
+    if (ctx.continuation) await this._continuationStartLatch?.wait();
     if (ctx.continuation && this._failContinuationBeforeStream) {
       throw new Error("continuation failed before streaming");
     }
@@ -937,6 +1015,12 @@ export class ThinkClientToolsAgent extends Think {
   }
 
   getModel(): LanguageModel {
+    if (this._useChainedClientTool)
+      return createChainedClientToolModel({
+        holdSecondCall: () => this._chainedStreamLatch.wait(),
+        onCall: (toolResultCount) =>
+          this._chainedModelCalls.push(toolResultCount)
+      });
     if (this._useParallelExecutableClientTool)
       return createParallelExecutableClientToolMockModel();
     if (this._useMultiStepExecutableClientTool)
@@ -1452,6 +1536,70 @@ export class ThinkClientToolsAgent extends Think {
 
   async clearResponseLog(): Promise<void> {
     this._responseLog.length = 0;
+  }
+
+  // ── Chained client tools (#2443) ──
+
+  async setChainedClientToolMode(value: boolean): Promise<void> {
+    this._useChainedClientTool = value;
+    this._chainedModelCalls = [];
+    this._chainedStreamLatch = new LatchForTest();
+  }
+
+  /** Tool results in the prompt of each chained model call. */
+  async getChainedModelCallsForTest(): Promise<number[]> {
+    return this._chainedModelCalls;
+  }
+
+  async isChainedStreamHeldForTest(): Promise<boolean> {
+    return this._chainedStreamLatch.isWaiting;
+  }
+
+  async releaseChainedStreamForTest(): Promise<void> {
+    this._chainedStreamLatch.open();
+  }
+
+  /** Park continuation turns in `beforeTurn`, before their stream starts. */
+  async holdContinuationStartForTest(): Promise<void> {
+    this._continuationStartLatch = new LatchForTest();
+  }
+
+  async isContinuationStartHeldForTest(): Promise<boolean> {
+    return this._continuationStartLatch?.isWaiting ?? false;
+  }
+
+  async releaseContinuationStartForTest(): Promise<void> {
+    this._continuationStartLatch?.open();
+  }
+
+  /**
+   * Stop the 50ms coalesce timer from arming until released, so a test can
+   * order "the turn settles" before "the timer fires" without racing it.
+   */
+  async holdCoalesceTimerForTest(): Promise<void> {
+    const held = { requested: false };
+    this._coalesceArmHeld = held;
+    this["_autoContinuation"].armTimer = () => {
+      held.requested = true;
+    };
+  }
+
+  async releaseCoalesceTimerForTest(): Promise<void> {
+    const controller = this["_autoContinuation"];
+    delete (controller as { armTimer?: unknown }).armTimer;
+    if (this._coalesceArmHeld?.requested) controller.armTimer();
+    this._coalesceArmHeld = null;
+  }
+
+  async getContinuationSlotsForTest(): Promise<{
+    pending: boolean;
+    deferred: boolean;
+  }> {
+    const continuation = this["_continuation"];
+    return {
+      pending: continuation.pending !== null,
+      deferred: continuation.deferred !== null
+    };
   }
 
   /**
