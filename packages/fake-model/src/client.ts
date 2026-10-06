@@ -11,10 +11,15 @@ export type ControlOptions = {
 };
 
 export class ModelControl {
+  /** The Worker's URL, without a trailing slash. */
+  readonly url: string;
+
   constructor(
-    readonly url: string,
+    url: string,
     private readonly options: ControlOptions = {}
-  ) {}
+  ) {
+    this.url = url.replace(/\/+$/, "");
+  }
 
   /** Creates a room. Its `baseUrl` is the model URL for the agent under test. */
   create(spec: RoomSpec = {}): Promise<Room> {

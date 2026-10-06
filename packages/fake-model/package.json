@@ -12,12 +12,14 @@
   "scripts": {
     "deploy": "cf deploy",
     "dev": "cf dev",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260729.1",
     "cf": "^1.0.0-beta.12",
     "typescript": "^6.0.3",
+    "vitest": "4.1.11",
     "wrangler": "^4.145.0"
   }
 }

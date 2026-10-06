@@ -7,7 +7,11 @@ export default defineConfig({
   worker: {
     name,
     compatibilityDate: "2026-06-11",
-    compatibilityFlags: ["nodejs_compat"],
+    compatibilityFlags: [
+      "nodejs_compat",
+      // An agent that hangs up aborts its request, which ends any hold on it.
+      "enable_request_signal"
+    ],
     entrypoint,
     env: { Cell: bindings.durableObject({ worker: name, exportName: "Cell" }) },
     exports: { Cell: exports.durableObject({ storage: "sqlite" }) },

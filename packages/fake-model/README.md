@@ -131,7 +131,8 @@ t2.tool.alpha              while a tool probes with key alpha
 Block kinds are `thinking`, `text` and `tool`. `POST /rooms` returns every
 checkpoint of the room's script.
 
-- **Hold:** a pause without `drop` holds there until released.
+- **Hold:** a pause without `drop` holds there until released, or until the
+  agent hangs up, which logs the request as `cancelled`.
 - **Drop:** a pause with `drop: true` errors the response body there.
 - **Once:** each pause fires once per room, so a retry streams straight
   through.
