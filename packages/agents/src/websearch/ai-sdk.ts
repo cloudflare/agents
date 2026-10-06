@@ -1,0 +1,87 @@
+/**
+ * `agents/websearch/ai-sdk` — the `websearch` tool for the AI SDK.
+ *
+ * @beta
+ */
+import type { FlexibleSchema } from "ai";
+import { z } from "zod";
+import {
+  MAX_WEBSEARCH_LIMIT,
+  renderWebSearchResults,
+  type WebSearchToolInput,
+  type WebSearchToolOutput
+} from "./contract";
+import { createWebSearchToolCore, type WebSearchToolOptions } from "./tool";
+
+export type {
+  WebSearchResponse,
+  WebSearchResult,
+  WebSearchToolInput,
+  WebSearchToolOutput
+} from "./contract";
+export type { WebSearchProvider, WebSearchSource } from "./source";
+export type { WebSearchToolOptions } from "./tool";
+
+/**
+ * The AI SDK tool {@link webSearchTool} returns. Assignable to the AI SDK's
+ * `Tool`; `execute` and `toModelOutput` are always present.
+ */
+export interface WebSearchTool {
+  description: string;
+  inputSchema: FlexibleSchema<WebSearchToolInput>;
+  execute(
+    input: WebSearchToolInput,
+    options: unknown
+  ): Promise<WebSearchToolOutput>;
+  toModelOutput(options: { output: WebSearchToolOutput }): {
+    type: "text";
+    value: string;
+  };
+}
+
+const inputSchema = z.object({
+  query: z.string().min(1).max(1024).describe("What to search for."),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_WEBSEARCH_LIMIT)
+    .optional()
+    .describe("How many results to return.")
+});
+
+/**
+ * Create an AI SDK tool that searches the web through Cloudflare's Web
+ * Search API. The host gets the full response as the tool's output (whole
+ * descriptions, provider metadata); the model gets a trimmed text rendering
+ * via `toModelOutput`. A failed search throws a `WebSearchError`, which the
+ * AI SDK reports to the model as a tool error.
+ *
+ * @example
+ * ```ts
+ * import { webSearchTool } from "agents/websearch/ai-sdk";
+ *
+ * const result = streamText({
+ *   model,
+ *   tools: { websearch: webSearchTool({ binding: env.AI }) },
+ *   messages
+ * });
+ * ```
+ */
+export function webSearchTool(options: WebSearchToolOptions): WebSearchTool {
+  const core = createWebSearchToolCore(options);
+  const render = { maxDescriptionChars: options.maxDescriptionChars };
+  return {
+    description: core.description,
+    inputSchema,
+    async execute(input) {
+      const run = await core.run(input);
+      if (!run.ok) throw run.error;
+      return run.output;
+    },
+    toModelOutput: ({ output }) => ({
+      type: "text",
+      value: renderWebSearchResults(output, render)
+    })
+  };
+}
