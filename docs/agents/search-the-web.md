@@ -62,6 +62,7 @@ The model's input is `{ query, limit? }` and nothing else. The host fixes everyt
 | `limit`               | `5`                  | Results per search when the model does not ask for a count, and the most it may ask for. The input schema tells the model this maximum. |
 | `maxDescriptionChars` | `600`                | Per-result description length in the model's view. `Infinity` passes descriptions through whole.                                        |
 | `description`         | built-in description | Replaces the tool description the model sees.                                                                                           |
+| `timeoutMs`           | `30000`              | Give up on a search after this long, as a retryable `web_search_timeout` failure.                                                       |
 
 ## Model Interface
 
@@ -81,15 +82,20 @@ The host gets the API response untouched — `items` with every field the provid
 
 - **Pi**: in the tool result's `details`, as `{ ok: true, output }`. The tool is `replay: "safe"`: if a search is interrupted mid-call, for example by an eviction, pi runs it again when the session recovers, and that is a second billed search. Completed results are stored and not searched again.
 - **AI SDK**: as the return value of `execute`, so `onFinish`, UI message parts, and logs see the full response. `toModelOutput` renders the text for the model.
-- **TanStack AI**: the server tool returns the rendered text.
+- **TanStack AI**: the server tool returns the rendered text, so the host gets the same text the model does.
 
 `renderWebSearchResults(output, { maxDescriptionChars })` from `agents/websearch` is the renderer, if you want the same text elsewhere.
 
 ## Failures
 
-A failed search becomes a `WebSearchError` with `status`, `code`, `retryable`, and `requestId` (AI Gateway's id for the request, for the gateway log). The `code` is the API's, for example `web_search_payment_required`. On a runtime older than the one above, the binding has no `websearch()` and the search fails with code `websearch_unsupported_runtime`.
+A failed search becomes a `WebSearchError` with `status`, `code`, `retryable`, and `requestId` (AI Gateway's id for the request, for the gateway log). Every error has a `code`: the API's own when it sends one, for example `web_search_payment_required`, otherwise one derived from the HTTP status, such as `web_search_rate_limited` or `web_search_unavailable`. On a runtime older than the one above, the binding has no `websearch()` and the search fails with code `websearch_unsupported_runtime`.
 
-The pi and TanStack tools do not throw. The model gets `Web search failed: <message>` as an error result and the turn continues; in pi, `details` is `{ ok: false, status, code, retryable, requestId }`. The AI SDK tool throws the `WebSearchError`, which is how AI SDK tools report errors.
+The error's `message` is written for you, and can say to top up credits or configure a key. The model gets different text that tells it what to do next: fix the query, retry once, or carry on without search.
+
+- **Pi**: the tool returns an error result with the model's text, and `details` is `{ ok: false, message, status, code, retryable, requestId }`.
+- **AI SDK** and **TanStack AI**: the tool throws a `WebSearchError`, which is how those frameworks report tool errors. Its `message` is the model's text, and its `cause` is the original error with the API's detail.
+
+If the harness cancels the call, the search is aborted and the abort propagates instead of becoming a failed result.
 
 ## Other sources
 

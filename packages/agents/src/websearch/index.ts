@@ -29,9 +29,16 @@ export {
   createHTTPWebSearch,
   type AIWebSearchOptions,
   type HTTPWebSearchOptions,
+  type WebSearchCallOptions,
+  type WebSearchErrorCode,
   type WebSearchGatewayOptions,
   type WebSearchProvider,
   type WebSearchRequest,
   type WebSearchSource
 } from "./source";
-export type { WebSearchToolOptions } from "./tool";
+export {
+  DEFAULT_WEBSEARCH_TIMEOUT_MS,
+  type WebSearchToolBindingOptions,
+  type WebSearchToolOptions,
+  type WebSearchToolSourceOptions
+} from "./tool";

@@ -48,6 +48,8 @@ export type WebSearchToolDetails =
   | { ok: true; output: WebSearchToolOutput }
   | {
       ok: false;
+      /** The source's error message, with the API's detail. */
+      message: string;
       status: number;
       code?: string;
       retryable: boolean;
@@ -85,8 +87,8 @@ export function webSearchTool(
     description: core.description,
     parameters: webSearchParameters(core.limit),
     replay: "safe",
-    async execute(input) {
-      const run = await core.run(input);
+    async execute(input, _api, context) {
+      const run = await core.run(input, { signal: context.abortSignal });
       if (run.ok) {
         return {
           content: [{ type: "text", text: run.text }],
@@ -98,6 +100,7 @@ export function webSearchTool(
         isError: true,
         details: {
           ok: false,
+          message: run.error.message,
           status: run.error.status,
           code: run.error.code,
           retryable: run.error.retryable,

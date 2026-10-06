@@ -11,7 +11,11 @@ import {
   type WebSearchToolInput,
   type WebSearchToolOutput
 } from "../contract";
-import { createWebSearchToolCore, type WebSearchToolOptions } from "../tool";
+import {
+  createWebSearchToolCore,
+  toolFailure,
+  type WebSearchToolOptions
+} from "../tool";
 
 export type {
   WebSearchResponse,
@@ -23,6 +27,14 @@ export type { WebSearchProvider, WebSearchSource } from "../source";
 export type { WebSearchToolOptions } from "../tool";
 
 /**
+ * The part of the AI SDK's tool execution options the tool reads. Spelled
+ * out rather than imported so it fits every supported `ai` major.
+ */
+export interface WebSearchToolExecuteOptions {
+  abortSignal?: AbortSignal;
+}
+
+/**
  * The AI SDK tool {@link webSearchTool} returns. Assignable to the AI SDK's
  * `Tool`; `execute` and `toModelOutput` are always present.
  */
@@ -31,7 +43,7 @@ export interface WebSearchTool {
   inputSchema: FlexibleSchema<WebSearchToolInput>;
   execute(
     input: WebSearchToolInput,
-    options: unknown
+    options: WebSearchToolExecuteOptions
   ): Promise<WebSearchToolOutput>;
   toModelOutput(options: { output: WebSearchToolOutput }): {
     type: "text";
@@ -62,7 +74,8 @@ function webSearchInputSchema(maxLimit: number) {
  * Search API. The host gets the full response as the tool's output (whole
  * descriptions, provider metadata); the model gets a trimmed text rendering
  * via `toModelOutput`. A failed search throws a `WebSearchError`, which the
- * AI SDK reports to the model as a tool error.
+ * AI SDK reports to the model as a tool error: its `message` is written for
+ * the model, and its `cause` is the source's error with the API's detail.
  *
  * `toModelOutput` only applies to earlier turns when the tools are passed to
  * `convertToModelMessages(messages, { tools })`; otherwise the AI SDK sends
@@ -85,9 +98,9 @@ export function webSearchTool(options: WebSearchToolOptions): WebSearchTool {
   return {
     description: core.description,
     inputSchema: webSearchInputSchema(core.limit),
-    async execute(input) {
-      const run = await core.run(input);
-      if (!run.ok) throw run.error;
+    async execute(input, { abortSignal }) {
+      const run = await core.run(input, { signal: abortSignal });
+      if (!run.ok) throw toolFailure(run);
       return run.output;
     },
     toModelOutput: ({ output }) => ({

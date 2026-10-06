@@ -54,9 +54,21 @@ export type WebSearchToolOptions = (
    * characters; `Infinity` passes descriptions through whole.
    */
   maxDescriptionChars?: number;
+  /**
+   * Give up on a search after this many milliseconds, as a retryable
+   * `web_search_timeout` failure. Defaults to 30 seconds.
+   */
+  timeoutMs?: number;
 };
 
-/** What one run returns to the adapter: the host output, and the model's text. */
+/** The default for {@link WebSearchToolOptions.timeoutMs}. */
+export const DEFAULT_WEBSEARCH_TIMEOUT_MS = 30_000;
+
+/**
+ * What one run returns to the adapter: the host output, and the model's
+ * text. On failure, `error` is the source's error, with the API's detail for
+ * the host, and `text` is what the model should read instead.
+ */
 export type WebSearchToolRun =
   | { ok: true; output: WebSearchToolOutput; text: string }
   | { ok: false; error: WebSearchError; text: string };
@@ -66,13 +78,21 @@ export interface WebSearchToolCore {
   description: string;
   /** The host's `limit`: the default and the cap for the model's `limit`. */
   limit: number;
-  run(input: WebSearchToolInput): Promise<WebSearchToolRun>;
+  /**
+   * Run one search. Aborting `signal` rejects with its reason rather than
+   * producing a failed run, so the harness sees a cancelled call.
+   */
+  run(
+    input: WebSearchToolInput,
+    options?: { signal?: AbortSignal }
+  ): Promise<WebSearchToolRun>;
 }
 
 export function createWebSearchToolCore(
   options: WebSearchToolOptions
 ): WebSearchToolCore {
   const limit = clampLimit(options.limit ?? DEFAULT_WEBSEARCH_LIMIT);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_WEBSEARCH_TIMEOUT_MS;
   const source =
     options.source === undefined ? createAIWebSearch(options) : options.source;
   const provider = source.provider;
@@ -82,13 +102,18 @@ export function createWebSearchToolCore(
     name: WEBSEARCH_TOOL_NAME,
     description: options.description ?? WEBSEARCH_TOOL_DESCRIPTION,
     limit,
-    async run(input) {
+    async run(input, { signal } = {}) {
+      signal?.throwIfAborted();
       const request = {
         query: input.query,
         limit: Math.min(clampLimit(input.limit ?? limit), limit)
       };
+      const timeout = AbortSignal.timeout(timeoutMs);
+      const searchSignal = signal
+        ? AbortSignal.any([signal, timeout])
+        : timeout;
       try {
-        const response = await source(request);
+        const response = await source(request, { signal: searchSignal });
         const output: WebSearchToolOutput = provider
           ? { ...response, provider }
           : response;
@@ -98,21 +123,66 @@ export function createWebSearchToolCore(
           text: renderWebSearchResults(response, render)
         };
       } catch (cause) {
-        const error =
-          cause instanceof WebSearchError
-            ? cause
-            : new WebSearchError(
-                cause instanceof Error ? cause.message : String(cause),
-                { status: 500, retryable: true }
-              );
-        return {
-          ok: false,
-          error,
-          text: `Web search failed: ${error.message}`
-        };
+        if (signal?.aborted) throw signal.reason;
+        const error = toToolError(cause, timeout.aborted, timeoutMs);
+        return { ok: false, error, text: describeFailureForModel(error) };
       }
     }
   };
+}
+
+/**
+ * The error a throwing adapter (AI SDK, TanStack AI) raises for a failed
+ * run. Those frameworks show the model the error's `message`, so it carries
+ * the model's text; the source's error, with the API's detail, is `cause`.
+ */
+export function toolFailure(
+  run: Extract<WebSearchToolRun, { ok: false }>
+): WebSearchError {
+  const { error } = run;
+  return new WebSearchError(run.text, {
+    status: error.status,
+    code: error.code,
+    retryable: error.retryable,
+    requestId: error.requestId,
+    apiCode: error.apiCode,
+    cause: error
+  });
+}
+
+function toToolError(
+  cause: unknown,
+  timedOut: boolean,
+  timeoutMs: number
+): WebSearchError {
+  if (timedOut) {
+    return new WebSearchError(`Web search timed out after ${timeoutMs} ms.`, {
+      status: 504,
+      code: "web_search_timeout",
+      retryable: true,
+      cause
+    });
+  }
+  if (cause instanceof WebSearchError) return cause;
+  return new WebSearchError(
+    cause instanceof Error ? cause.message : String(cause),
+    { status: 500, code: "web_search_unavailable", retryable: true, cause }
+  );
+}
+
+/**
+ * What the model reads when a search fails: whether to retry, change the
+ * query, or carry on without search. The operator's detail (credits, keys,
+ * gateway setup) stays on the error for the host.
+ */
+function describeFailureForModel(error: WebSearchError): string {
+  if (error.code === "invalid_web_search_input") {
+    return `Web search rejected the query (${error.message.replace(/\.$/, "")}). Fix the query and try again.`;
+  }
+  if (error.retryable) {
+    return `Web search failed temporarily (${error.code}). You may retry once.`;
+  }
+  return `Web search is unavailable here (${error.code}). Do not retry; answer without it and say that web search was unavailable.`;
 }
 
 function clampLimit(value: number): number {

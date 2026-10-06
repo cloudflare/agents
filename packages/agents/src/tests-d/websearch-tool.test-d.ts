@@ -1,4 +1,7 @@
-import type { WebSearchSource } from "../websearch";
+import type { Tool, ToolSet } from "ai";
+import type { ServerTool } from "@tanstack/ai";
+import { expectTypeOf } from "vitest";
+import type { WebSearchSource, WebSearchToolOutput } from "../websearch";
 import { webSearchTool } from "../websearch/tools/ai-sdk";
 import { webSearchTool as piWebSearchTool } from "../websearch/tools/pi";
 import { webSearchTool as tanStackWebSearchTool } from "../websearch/tools/tanstack-ai";
@@ -27,3 +30,14 @@ webSearchTool({ source, binding: env.AI });
 
 // @ts-expect-error one of binding or source is required
 webSearchTool({ limit: 3 });
+
+// A plain AI SDK tool the host can put under any key, with a typed execute.
+const aiSdkTool = webSearchTool({ source });
+expectTypeOf(aiSdkTool).toExtend<
+  Tool<{ query: string; limit?: number }, WebSearchToolOutput>
+>();
+const tools: ToolSet = { web_search: aiSdkTool };
+void tools;
+
+// The TanStack AI adapter is a ServerTool.
+expectTypeOf(tanStackWebSearchTool({ source })).toExtend<ServerTool>();
