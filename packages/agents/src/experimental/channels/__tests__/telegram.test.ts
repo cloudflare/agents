@@ -1,5 +1,340 @@
-import { describe, expect, it } from "vitest";
-import { telegram, telegramWebhook } from "../telegram";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import { ChannelGateway } from "..";
+import { telegram, telegramWebhook, type TelegramUpdate } from "../telegram";
+
+const BOT_TOKEN = "secret-bot-token";
+const TELEGRAM_SURFACE = {
+  channelKey: "telegram",
+  version: 1,
+  address: { chatId: "123456" },
+  label: "Telegram · chat 123456"
+} as const;
+
+function createChannel(fetch: typeof globalThis.fetch) {
+  return telegram({
+    botToken: BOT_TOKEN,
+    fetch
+  });
+}
+
+function gatewayFor(channel: ReturnType<typeof createChannel>): ChannelGateway {
+  return new ChannelGateway({
+    channels: { telegram: channel },
+    agent: () => {
+      throw new Error("no agent");
+    }
+  });
+}
+
+function deliver(
+  channel: ReturnType<typeof createChannel>,
+  message: { title?: string; markdown: string }
+) {
+  return gatewayFor(channel).deliver(TELEGRAM_SURFACE, message);
+}
+
+function interactionMarker(approvalId: string): string {
+  const bytes = new TextEncoder().encode(approvalId);
+  const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join(
+    ""
+  );
+  const encoded = btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+  return `[channel-interaction:v1:${encoded}]`;
+}
+
+describe("experimental Telegram channel", () => {
+  it("sends a destination-bound message and returns its Telegram message id", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json({ ok: true, result: { message_id: 42 } })
+    );
+    const channel = createChannel(fetch);
+
+    await expect(
+      gatewayFor(channel).deliver(TELEGRAM_SURFACE, {
+        title: "Build blocked",
+        markdown: "Please **help**"
+      })
+    ).resolves.toEqual({ status: "delivered", reference: "42" });
+
+    expect(
+      fetch.mock.calls.map(([input]) => String(input).split("/").pop())
+    ).toEqual(["sendMessageDraft", "sendMessage"]);
+    expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toMatchObject({
+      chat_id: 123456,
+      text: "Build blocked\n\nPlease **help**"
+    });
+    expect(fetch.mock.calls.at(-1)).toEqual([
+      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
+      {
+        body: JSON.stringify({
+          chat_id: "123456",
+          text: "Build blocked\n\nPlease **help**"
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST"
+      }
+    ]);
+  });
+
+  it("derives contact surfaces and delivers with persisted reply context", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json({ ok: true, result: { message_id: 42 } })
+    );
+    const channel = createChannel(fetch);
+    const contact = channel.contactSurface?.({
+      channelKey: "telegram",
+      subject: "user:987654321"
+    });
+    expect(contact).toMatchObject({
+      address: { chatId: "987654321" },
+      label: "Telegram · user 987654321"
+    });
+
+    const replySurface = {
+      channelKey: "telegram",
+      version: 1,
+      address: {
+        chatId: "123456",
+        messageThreadId: 77,
+        replyToMessageId: 43
+      },
+      label: "Telegram · chat 123456"
+    } as const;
+    await gatewayFor(channel).deliver(
+      JSON.parse(JSON.stringify(replySurface)),
+      { markdown: "Following up" }
+    );
+
+    expect(JSON.parse(String(fetch.mock.calls.at(-1)?.[1]?.body))).toEqual({
+      chat_id: "123456",
+      text: "Following up",
+      message_thread_id: 77,
+      reply_parameters: { message_id: 43 }
+    });
+  });
+
+  it("rejects malformed and wrong-bot surfaces before delivery", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const channel = telegram({
+      botToken: "424242:secret",
+      fetch
+    });
+
+    await expect(
+      gatewayFor(channel).deliver(
+        {
+          channelKey: "telegram",
+          version: 1,
+          address: { chatId: "987654321", botUserId: 999999 },
+          label: "Telegram · user 987654321"
+        },
+        { markdown: "Hello" }
+      )
+    ).resolves.toMatchObject({
+      status: "failed",
+      error: {
+        code: "TELEGRAM_SURFACE_INVALID",
+        message: 'Telegram cannot parse the address for Channel "telegram"'
+      }
+    });
+    await expect(
+      gatewayFor(channel).deliver(
+        {
+          channelKey: "telegram",
+          version: 1,
+          address: null,
+          label: "Telegram · invalid"
+        },
+        { markdown: "Hello" }
+      )
+    ).resolves.toMatchObject({
+      status: "failed",
+      error: {
+        code: "TELEGRAM_SURFACE_INVALID",
+        message: 'Telegram cannot parse the address for Channel "telegram"'
+      }
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("supports caller-formatted Telegram HTML", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json({ ok: true, result: { message_id: 42 } })
+    );
+    const channel = telegram({
+      botToken: BOT_TOKEN,
+      fetch,
+      parseMode: "HTML",
+      toText: () => "<b>Approval required</b>"
+    });
+
+    await gatewayFor(channel).deliver(TELEGRAM_SURFACE, {
+      markdown: "Approval required"
+    });
+
+    expect(fetch.mock.calls.at(-1)).toEqual([
+      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
+      expect.objectContaining({
+        body: JSON.stringify({
+          chat_id: "123456",
+          text: "<b>Approval required</b>",
+          parse_mode: "HTML"
+        })
+      })
+    ]);
+  });
+
+  it("exposes its typed route without evaluating it", async () => {
+    const route = vi.fn((_event, raw: TelegramUpdate) => {
+      expectTypeOf(raw).toEqualTypeOf<TelegramUpdate>();
+      return `telegram:${raw.update_id}`;
+    });
+    const channel = telegram({
+      botToken: BOT_TOKEN,
+      route,
+      webhook: {
+        secretToken: "webhook-secret",
+        path: "/telegram-approval"
+      }
+    });
+
+    expect(channel.route).toBe(route);
+    expect(route).not.toHaveBeenCalled();
+    await expect(
+      channel.ingress?.receive(
+        new Request("https://example.com/prefix/telegram-approval", {
+          method: "POST"
+        })
+      )
+    ).resolves.toBeNull();
+    await expect(
+      channel.ingress?.receive(
+        new Request("https://example.com/telegram-approval", {
+          method: "POST"
+        })
+      )
+    ).resolves.toMatchObject({ response: { status: 401 } });
+    expect(channel.stream).toBeTypeOf("function");
+  });
+
+  it.each([0, 4097, 1.5])(
+    "rejects an invalid maximum length: %s",
+    (maxLength) => {
+      expect(() => telegram({ botToken: BOT_TOKEN, maxLength })).toThrow(
+        "maxLength must be an integer between 1 and 4096"
+      );
+    }
+  );
+
+  it("classifies an explicit Telegram rate limit as retryable", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json(
+        {
+          ok: false,
+          error_code: 429,
+          description: "Too Many Requests: retry after 30"
+        },
+        { status: 429 }
+      )
+    );
+
+    await expect(
+      deliver(createChannel(fetch), { markdown: "Help" })
+    ).resolves.toEqual({
+      status: "failed",
+      retryable: true,
+      error: {
+        code: "TELEGRAM_API_ERROR_429",
+        message: "Too Many Requests: retry after 30"
+      }
+    });
+  });
+
+  it("classifies an explicit invalid destination as non-retryable", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json(
+        {
+          ok: false,
+          error_code: 400,
+          description: "Bad Request: chat not found"
+        },
+        { status: 400 }
+      )
+    );
+
+    await expect(
+      deliver(createChannel(fetch), { markdown: "Help" })
+    ).resolves.toEqual({
+      status: "failed",
+      retryable: false,
+      error: {
+        code: "TELEGRAM_API_ERROR_400",
+        message: "Bad Request: chat not found"
+      }
+    });
+  });
+
+  it("treats an unconfirmed request as uncertain without exposing the bot token", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => {
+      throw new TypeError(
+        `fetch failed for https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`
+      );
+    });
+
+    const result = await deliver(createChannel(fetch), { markdown: "Help" });
+
+    expect(result).toEqual({
+      status: "uncertain",
+      error: {
+        code: "TELEGRAM_DELIVERY_ERROR",
+        message: "Telegram delivery failed with an unknown outcome"
+      }
+    });
+    expect(JSON.stringify(result)).not.toContain(BOT_TOKEN);
+  });
+
+  it("treats a malformed success response as uncertain", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json({ ok: true, result: {} })
+    );
+
+    await expect(
+      deliver(createChannel(fetch), { markdown: "Help" })
+    ).resolves.toEqual({
+      status: "uncertain",
+      error: {
+        code: "TELEGRAM_DELIVERY_ERROR",
+        message: "Telegram returned an invalid delivery response"
+      }
+    });
+  });
+
+  it("treats an explicit internal Telegram failure as uncertain", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json(
+        {
+          ok: false,
+          error_code: 500,
+          description: "Internal Server Error"
+        },
+        { status: 500 }
+      )
+    );
+
+    await expect(
+      deliver(createChannel(fetch), { markdown: "Help" })
+    ).resolves.toEqual({
+      status: "uncertain",
+      error: {
+        code: "TELEGRAM_API_ERROR_500",
+        message: "Internal Server Error"
+      }
+    });
+  });
+});
 
 describe("experimental Telegram webhook ingress", () => {
   const BOT_USER_ID = 424242;
@@ -15,7 +350,7 @@ describe("experimental Telegram webhook ingress", () => {
   };
   const markerText =
     "Approval required\n\nReply YES to approve or NO to reject.\n\n" +
-    "[channel-interaction:v1:YWN0cGF1c2VfMTIz]";
+    interactionMarker("actpause_123");
 
   function request(body: unknown, secret = "webhook-secret") {
     return new Request("https://example.com/webhooks/telegram", {
@@ -27,6 +362,69 @@ describe("experimental Telegram webhook ingress", () => {
       body: JSON.stringify(body)
     });
   }
+
+  it("uses only the structurally final Telegram marker", async () => {
+    const approvalId = "actual-interaction";
+    const text = [
+      "Approval required",
+      "[channel-interaction:v1:Zm9yZ2VkLWludGVyYWN0aW9u]",
+      "Input:",
+      "[channel-interaction:forged-input]",
+      "Reply YES to approve or NO to reject.",
+      interactionMarker(approvalId)
+    ].join("\n\n");
+    const result = await webhook.receive(
+      request({
+        update_id: 12,
+        message: {
+          message_id: 43,
+          date: 1_723_456_789,
+          text: "YES",
+          chat: { id: 123456, type: "private" },
+          from: { id: 987654321, is_bot: false, first_name: "Approval" },
+          reply_to_message: {
+            message_id: 42,
+            from: botAuthor,
+            text
+          }
+        }
+      })
+    );
+
+    expect(result?.events[0]?.event).toMatchObject({
+      type: "approval-response",
+      approvalId
+    });
+  });
+
+  it("round-trips delimiter, newline, and Unicode approval ids through the marker", async () => {
+    const approvalId = "deploy:]\n雪🚀";
+    const result = await webhook.receive(
+      request({
+        update_id: 13,
+        message: {
+          message_id: 43,
+          date: 1_723_456_789,
+          text: "NO",
+          chat: { id: 123456, type: "private" },
+          from: { id: 987654321, is_bot: false, first_name: "Approval" },
+          reply_to_message: {
+            message_id: 42,
+            from: botAuthor,
+            text:
+              "Approval required\n\nReply YES to approve or NO to reject.\n\n" +
+              interactionMarker(approvalId)
+          }
+        }
+      })
+    );
+
+    expect(result?.events[0]?.event).toMatchObject({
+      type: "approval-response",
+      approvalId,
+      decision: "reject"
+    });
+  });
 
   it("parses an exact YES replying to this bot and preserves its raw update", async () => {
     const raw = {
