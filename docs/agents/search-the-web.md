@@ -10,6 +10,8 @@ This page covers what the SDK adds on top of the API. For the binding, the provi
 
 The tool needs the `AI` binding (`"ai": { "binding": "AI" }` in `wrangler.jsonc`). Every adapter takes the same `WebSearchToolOptions`.
 
+`env.AI.websearch()` exists from workerd 1.20260924.1, which ships with wrangler 4.141.0 and `@cloudflare/vite-plugin` 1.60.2. Searches bill the AI Gateway of the account the Worker runs in. The `AI` binding has no local implementation, so `wrangler dev` sends searches to Cloudflare through your logged-in account and bills that account.
+
 Pi harness:
 
 ```ts
@@ -45,15 +47,15 @@ const tools = [webSearchTool({ binding: this.env.AI })];
 
 The model's input is `{ query, limit? }` and nothing else. The host fixes everything that affects cost or data handling:
 
-| Option                | Default              | Notes                                                                                                                          |
-| --------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `binding`             | —                    | The `AI` binding. Or pass `source` instead (see [Other sources](#other-sources)).                                              |
-| `gateway`             | `"default"`          | AI Gateway id.                                                                                                                 |
-| `provider`            | platform default     | `"ceramic"`, `"exa"`, or `"linkup"`. The model cannot choose or change it.                                                     |
-| `byokAlias`           | —                    | Bill a provider key stored on the gateway. Passed through as the API defines it.                                               |
-| `limit`               | `5`                  | Results per search when the model does not ask for a count, and the most it may ask for. The model's `limit` is clamped to it. |
-| `maxDescriptionChars` | `600`                | Per-result description length in the model's view. `Infinity` passes descriptions through whole.                               |
-| `description`         | built-in description | Replaces the tool description the model sees.                                                                                  |
+| Option                | Default              | Notes                                                                                                                                   |
+| --------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `binding`             | —                    | The `AI` binding. Or pass `source` instead (see [Other sources](#other-sources)).                                                       |
+| `gateway`             | `"default"`          | AI Gateway id.                                                                                                                          |
+| `provider`            | platform default     | `"ceramic"`, `"exa"`, or `"linkup"`. The model cannot choose or change it.                                                              |
+| `byokAlias`           | —                    | Bill a provider key stored on the gateway. Passed through as the API defines it.                                                        |
+| `limit`               | `5`                  | Results per search when the model does not ask for a count, and the most it may ask for. The input schema tells the model this maximum. |
+| `maxDescriptionChars` | `600`                | Per-result description length in the model's view. `Infinity` passes descriptions through whole.                                        |
+| `description`         | built-in description | Replaces the tool description the model sees.                                                                                           |
 
 ## What the model sees, and what you get
 
@@ -79,7 +81,7 @@ The host gets the API response untouched — `items` with every field the provid
 
 ## Failures
 
-A failed search becomes a `WebSearchError` with `status`, `code`, `retryable`, and `requestId` (AI Gateway's id for the request, for the gateway log). The `code` is the API's, for example `web_search_payment_required`.
+A failed search becomes a `WebSearchError` with `status`, `code`, `retryable`, and `requestId` (AI Gateway's id for the request, for the gateway log). The `code` is the API's, for example `web_search_payment_required`. On a runtime older than the one above, the binding has no `websearch()` and the search fails with code `websearch_unsupported_runtime`.
 
 The pi and TanStack tools do not throw. The model gets `Web search failed: <message> (<code>)` as an error result and the turn continues; in pi, `details` is `{ ok: false, status, code, retryable, requestId }`. The AI SDK tool throws the `WebSearchError`, which is how AI SDK tools report errors.
 
