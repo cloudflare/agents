@@ -360,16 +360,20 @@ describe("browserTool over a Browser", () => {
     });
   });
 
-  it("puts the cdp rules and the run time limit in its description", async () => {
+  it("describes cdp and its rules without codemode's generic text", async () => {
     const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
 
     await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
       const { description } = instance.browserTool();
       // No discovery pass needed: the rules are right there.
-      expect(description).toContain("don't need codemode.search");
       expect(description).toContain('sessionId: "active"');
+      expect(description).toContain("returnByValue: true");
       expect(description).toContain("document.readyState");
       expect(description).toContain("times out after 60s");
+      // None of codemode's generic text, which doesn't fit this tool.
+      expect(description).not.toContain("codemode.search");
+      expect(description).not.toContain("paused");
+      expect(description).not.toContain("Snippets");
       expect(description).not.toContain("file or workspace");
     });
   });
@@ -412,12 +416,12 @@ describe("TanStack AI browserTool over a Browser", () => {
       expect(instance.tanStackBrowserTool().name).toBe("browser");
       expect(instance.tanStackBrowserTool("web").name).toBe("web");
       expect(instance.tanStackBrowserTool().description).toContain("`cdp`");
-      // The model is told screenshots can't come back, not that the UI keeps them.
+      // The model is told screenshots can't come back, not that the user sees them.
       expect(instance.tanStackBrowserTool().description).toContain(
         "can't return images"
       );
       expect(instance.tanStackBrowserTool().description).not.toContain(
-        "the UI keeps the image"
+        "The user sees the image"
       );
     });
   });

@@ -82,7 +82,7 @@ export interface BrowserTool {
 export function browserTool(options: BrowserToolOptions): BrowserTool {
   const core = createBrowserToolCore(options, {
     screenshotHint:
-      "Return screenshots as { type: 'browser_screenshot', mediaType: 'image/png', data: screenshot.data }; the UI keeps the image while the model receives a compact summary."
+      "To show a screenshot, return { type: 'browser_screenshot', mediaType: 'image/png', data } with data from Page.captureScreenshot. The user sees the image; you get a short text summary."
   });
   return {
     description: core.description,

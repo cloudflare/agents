@@ -131,21 +131,19 @@ interface ExecutionState {
 
 /**
  * How to use the `cdp` connector, one rule per line. `codemode.describe("cdp")`
- * returns these; `browserTool` also puts them in its description, so the
- * model doesn't need a discovery pass.
+ * returns these, and `browserTool` puts them in its description. Each rule
+ * fixes a mistake models make with CDP, or states something about this
+ * browser they can't know; leave out what a model knows already.
  */
 export const BROWSER_INSTRUCTIONS = [
-  "This browser persists between executions: tabs, cookies, and logins you leave behind are still there next time. It is managed for you — there is nothing to start, close, or reset.",
-  "The browser can still be replaced between runs (idle timeout, crash) — even between the passes of a run that paused for approval. The tool result then says restarted: true, and earlier tabs, cookies, and logins are gone. Don't assume a page from an earlier run is still there: check where you are before an action that matters (submitting a form, making a purchase).",
-  'Page-scoped commands (Page.*, Runtime.*, DOM.*, Input.*, Network.*, Emulation.*) need sessionId: "active" — the tab you are working in, which stays the same across executions. Example: await cdp.send({ method: "Page.navigate", params: { url }, sessionId: "active" }).',
-  "Browser- and Target-scoped commands (Target.getTargets, Target.createTarget, Browser.getVersion) take no sessionId.",
-  'Opening a tab with Target.createTarget makes it the active tab. To switch to another open tab, call cdp.attachToTarget({ targetId }): it becomes active, and the returned sessionId works like "active" for that tab, in this run and later ones. A raw Target.attachToTarget sent through cdp.send returns Chrome\'s own sessionId, which only lasts for the current run.',
-  "Tabs a page opens on its own (popups, target=_blank links) do not become active; the tool result lists them as newTabs.",
-  "cdp.send returns the CDP method result directly, not the JSON-RPC envelope: Target.createTarget returns { targetId }, Runtime.evaluate returns { result: { value } }, Page.captureScreenshot returns { data }.",
-  "Issue CDP calls sequentially — never in parallel (no Promise.all): call order is recorded for durable replay.",
-  "Page.navigate resolves before the page finishes loading. Poll Runtime.evaluate of document.readyState until it is 'complete' before reading the page.",
-  "Use cdp.spec() to discover commands, events, and types when unsure. If a command fails or times out, check cdp.getDebugLog() for recent protocol traffic.",
-  "Keep results small: a cdp.send result over 1 MB (a full-page screenshot, say) fails the run. Pick out what you need inside Runtime.evaluate instead of returning whole pages. There is no file system to write to."
+  "The browser persists between runs: tabs, cookies, and logins are still there next time. You never start or close it.",
+  "If the browser was replaced (idle timeout, crash), the result says restarted: true and earlier tabs and logins are gone. Before an action that matters (submitting a form, a purchase), check you're on the page you expect.",
+  'Page-scoped commands (Page.*, Runtime.*, DOM.*, Input.*, Network.*, Emulation.*) need sessionId: "active", the tab you\'re working in, which is remembered between runs. Browser.* and Target.* commands take no sessionId.',
+  "Target.createTarget opens a tab and makes it active. To switch to another open tab, call cdp.attachToTarget({ targetId }); the sessionId it returns keeps working in later runs, while one from a raw Target.attachToTarget only works in the current run.",
+  "Tabs a page opens itself (popups, target=_blank links) don't become active; the result lists them as newTabs.",
+  "Runtime.evaluate: pass returnByValue: true, or objects come back as a remote reference with no value, and awaitPromise: true for async expressions. The value is at result.value. A thrown error doesn't reject: check exceptionDetails.",
+  "Page.navigate returns before the page loads and doesn't throw when it fails: check errorText, then poll document.readyState with Runtime.evaluate until it is 'complete'.",
+  "Pick out what you need inside Runtime.evaluate and return only that. Results over about 24,000 characters are cut short, and a single cdp.send result over 1 MB (a full-page screenshot, say) fails the run."
 ].join("\n");
 
 /**
