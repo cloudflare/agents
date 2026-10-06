@@ -14,6 +14,7 @@ const MSG_MESSAGE_UPDATED = "cf_agent_message_updated";
 const MSG_STREAM_RESUME_REQUEST = "cf_agent_stream_resume_request";
 const MSG_STREAM_RESUME_NONE = "cf_agent_stream_resume_none";
 const MSG_STREAM_RESUMING = "cf_agent_stream_resuming";
+const MSG_STREAM_PENDING = "cf_agent_stream_pending";
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -2972,6 +2973,80 @@ describe("resume coordination during pending continuation", () => {
     expect(result).toBe("resuming");
 
     await waitForDone(ws, 10000);
+    await closeWS(ws);
+  });
+
+  it("releases a held STREAM_RESUME_REQUEST when the continuation fails before streaming", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await delay(100);
+
+    const userMsg: UIMessage = {
+      id: "msg-resume-fail-user",
+      role: "user",
+      parts: [{ type: "text", text: "hi" }]
+    } as UIMessage;
+
+    const initialDone = waitForDone(ws, 10000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_CHAT_REQUEST,
+        id: "req-resume-fail",
+        init: {
+          method: "POST",
+          body: JSON.stringify({ messages: [userMsg] })
+        }
+      })
+    );
+    await initialDone;
+
+    await agent.persistToolCallMessage([
+      userMsg,
+      {
+        id: "assistant-resume-fail",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-resume-fail",
+            state: "input-available",
+            input: { action: "test" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+
+    // Park the continuation before its stream starts, so the resume request
+    // is held against it rather than racing the failure.
+    await agent.setFailContinuationBeforeStream(true);
+    await agent.holdContinuationStartForTest();
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-resume-fail",
+        toolName: "client_action",
+        output: "done",
+        autoContinue: true
+      })
+    );
+    await waitUntil(() => agent.isContinuationStartHeldForTest(), 8000);
+
+    const pendingPromise = waitForMessageOfType(ws, MSG_STREAM_PENDING, 3000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_STREAM_RESUME_REQUEST,
+        probeId: "probe-failed-continuation"
+      })
+    );
+    await pendingPromise;
+
+    // Without STREAM_RESUME_NONE the client keeps waiting for a stream that
+    // never starts.
+    const nonePromise = waitForMessageOfType(ws, MSG_STREAM_RESUME_NONE, 3000);
+    await agent.releaseContinuationStartForTest();
+    expect(await nonePromise).toMatchObject({ type: MSG_STREAM_RESUME_NONE });
+
     await closeWS(ws);
   });
 
