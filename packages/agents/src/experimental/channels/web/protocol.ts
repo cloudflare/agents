@@ -19,6 +19,12 @@ export type WebIdentity = {
   /** The conversation to follow. Default: the agent's default for the route. */
   conversationId?: string;
   participant: Participant;
+  /**
+   * The key of the gateway Channel that took the upgrade. The agent's
+   * channel mounted under the same key serves the connection. Without it,
+   * the Web Channel does.
+   */
+  channel?: string;
 };
 
 /**

@@ -4,6 +4,7 @@ import {
   type GatewayEvent,
   type GatewayOrigin
 } from "agents/experimental/channels";
+import { AcpChannel } from "agents/experimental/channels/acp";
 import { WebChannel } from "agents/experimental/channels/web";
 import { AiSdkHarness } from "agents/harness/ai-sdk";
 import { Lifecycle } from "agents/lifecycle";
@@ -27,9 +28,9 @@ const tools = {
 };
 
 /**
- * An AI SDK agent served to browsers and terminals through Channels. The
- * harness keeps the transcript and runs one message at a time, queueing the
- * rest; Channels carries events in and responses out.
+ * An AI SDK agent served to browsers, terminals and ACP clients through
+ * Channels. The harness keeps the transcript and runs one message at a time,
+ * queueing the rest; Channels carries events in and responses out.
  */
 export class AiSdkAgent extends DurableObject<Env> {
   readonly harness = new AiSdkHarness({
@@ -40,7 +41,16 @@ export class AiSdkAgent extends DurableObject<Env> {
     stopWhen: stepCountIs(5)
   });
   readonly channels = Channels.forHarness(this.harness, {
-    channels: { web: new WebChannel() }
+    channels: {
+      web: new WebChannel(),
+      acp: new AcpChannel({
+        agentInfo: {
+          name: "ai-sdk-agent",
+          title: "AI SDK agent",
+          version: "0.0.0"
+        }
+      })
+    }
   });
   readonly lifecycle = Lifecycle.install(this)
     .use(this.harness)

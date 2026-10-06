@@ -105,8 +105,10 @@ export class WebChannel implements ConversationChannel {
     // There is no further authorization here: the agent object is the
     // boundary, so a connection may use every conversation in it.
     // SAFETY: only the gateway sets this header, with a WebIdentity.
-    const resolved = JSON.parse(header) as WebIdentity;
+    const { channel, ...resolved } = JSON.parse(header) as WebIdentity;
     const host = this.#mounted();
+    // Another of the agent's channels serves this connection.
+    if (channel !== undefined && channel !== host.channelKey) return;
     const identity: Identity = {
       ...resolved,
       conversationId: resolved.conversationId ?? host.defaultConversation(),

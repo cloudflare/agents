@@ -140,7 +140,8 @@ export class ChannelGateway {
       ...(match.conversationId !== undefined && {
         conversationId: match.conversationId
       }),
-      participant
+      participant,
+      channel: channelKey
     };
     const headers = new Headers(request.headers);
     headers.set(WEB_IDENTITY_HEADER, JSON.stringify(identity));

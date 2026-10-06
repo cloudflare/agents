@@ -2,6 +2,7 @@ import {
   ChannelGateway,
   type GatewayAgent
 } from "agents/experimental/channels";
+import { acp } from "agents/experimental/channels/acp";
 import { web } from "agents/experimental/channels/web";
 
 export { AiSdkAgent } from "./ai-sdk-agent";
@@ -28,6 +29,22 @@ function parse(request: Request) {
   };
 }
 
+/**
+ * `/acp/<harness>/<room>`: the same agents, for ACP clients through
+ * `npx agents acp`. An ACP client opens sessions itself, so the path names
+ * no conversation.
+ */
+function parseAcp(request: Request) {
+  const match = /^\/acp\/([^/]+)\/([^/]+)$/.exec(new URL(request.url).pathname);
+  if (!match || !Object.hasOwn(harnesses, match[1])) return undefined;
+  return `${match[1]}/${decodeURIComponent(match[2])}`;
+}
+
+// Demo only: the client names itself with `?as=`. A real app resolves the
+// participant from a session it can verify.
+const demoParticipant = (request: Request) =>
+  new URL(request.url).searchParams.get("as") ?? crypto.randomUUID();
+
 function gatewayFor(env: Env) {
   return new ChannelGateway({
     agent: (route) => {
@@ -43,15 +60,19 @@ function gatewayFor(env: Env) {
             ? { conversationId: parsed.conversationId }
             : {};
         },
-        // Demo only: the client names itself with `?as=`. A real app
-        // resolves the participant from a session it can verify.
-        participant: (request) =>
-          new URL(request.url).searchParams.get("as") ?? crypto.randomUUID(),
+        participant: demoParticipant,
         // Demo only: anyone may join any room. The agent object is the
         // authorization boundary, so a real app checks that the
         // participant may enter the room, or leaves out `route` to give
         // each participant a room of their own.
         route: (request) => parse(request)?.route ?? null
+      }),
+      // Mounted under the same key as each agent's `AcpChannel`.
+      acp: acp({
+        match: (request) => parseAcp(request) !== undefined,
+        participant: demoParticipant,
+        // Demo only: anyone may join any room, as on the web.
+        route: (request) => parseAcp(request) ?? null
       })
     }
   });

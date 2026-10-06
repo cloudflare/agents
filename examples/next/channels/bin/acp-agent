@@ -1,0 +1,16 @@
+#!/bin/sh
+# Starts `agents acp` against this example's ACP channel, for ACP clients
+# that launch an agent as a local command (Zed, T3 Code).
+#
+# T3 Code's ACP Registry provider runs this as an executable override and
+# appends the registry agent's own arguments, so arguments are ignored here.
+# Configure it with environment variables instead:
+#
+#   ACP_URL          Default: ws://localhost:5173/acp/$ACP_HARNESS/$ACP_ROOM
+#   ACP_HARNESS      ai-sdk (default) or pi
+#   ACP_ROOM         Default: lobby
+#   ACP_PARTICIPANT  Sent as ?as=; default: acp
+here=$(cd "$(dirname "$0")" && pwd)
+exec node "$here/../node_modules/agents/dist/cli.js" acp \
+  "${ACP_URL:-ws://localhost:5173/acp/${ACP_HARNESS:-ai-sdk}/${ACP_ROOM:-lobby}}" \
+  --as "${ACP_PARTICIPANT:-acp}"
