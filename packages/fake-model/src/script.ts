@@ -1,13 +1,15 @@
 /**
- * The scripted conversation the fake model plays, and the checkpoints it can
- * hold or drop at. Shared by the model (which streams it) and whoever drives
- * it (which sends the turns and picks checkpoints).
+ * Scripts the fake model plays, and the checkpoints it can hold or drop at.
  *
- * The fake model picks its reply from the request contents, not from a
- * request counter: the newest user message carrying a `[tN]` marker names the
- * turn, and the number of assistant messages after it names the step. A
- * harness that retries a request therefore gets the same reply, and one that
- * keeps an interrupted reply and asks to continue gets the rest of it.
+ * A script is a list of turns. Each turn has an id and the steps the model
+ * replies with: one step per model call, so a step that calls tools is
+ * followed by the step that answers their results.
+ *
+ * The model picks its reply from the request contents, not from a request
+ * counter: the newest user message carrying a `[<turn id>]` marker names the
+ * turn, and the assistant messages after it name the step. An agent that
+ * retries a request therefore gets the same reply, and one that keeps an
+ * interrupted reply and asks to continue gets the rest of it.
  */
 
 export type Json =
@@ -25,30 +27,15 @@ export type Block =
 
 export type Step = { blocks: Block[] };
 
-export type Capability = "approvals" | "client-tools";
-
-export type TurnAnswer =
-  | { type: "approval"; approved: boolean }
-  | { type: "client-result"; output: Json };
-
 export type Turn = {
+  /** Letters, digits, `_` and `-`. A user message names it as `[<id>]`. */
   id: string;
-  text: string;
+  /** A user message that starts the turn. Documentation only: the model ignores it. */
+  prompt?: string;
   steps: Step[];
-  /** Harnesses without this capability skip the turn. */
-  needs?: Capability;
-  /** What the client answers when the turn waits for input. */
-  answer?: TurnAnswer;
-  /**
-   * Send this turn while the named checkpoint of an earlier turn holds, so it
-   * arrives while the harness is busy.
-   */
-  sendWhilePausedAt?: string;
 };
 
-/** Server tools that record an execution with the fake model's counter. */
-export const RECORDING_TOOLS = ["record", "guarded_record"] as const;
-export const CLIENT_TOOL = "client_lookup";
+export type Script = Turn[];
 
 const thinking = (text: string): Block => ({ kind: "thinking", text });
 const text = (value: string): Block => ({ kind: "text", text: value });
@@ -58,10 +45,10 @@ const record = (key: string): Block => ({
   input: { key }
 });
 
-export const SCRIPT: Turn[] = [
+export const DEFAULT_SCRIPT: Script = [
   {
     id: "t1",
-    text: "[t1] Say hello.",
+    prompt: "[t1] Say hello.",
     steps: [
       {
         blocks: [
@@ -73,7 +60,7 @@ export const SCRIPT: Turn[] = [
   },
   {
     id: "t2",
-    text: "[t2] Record alpha.",
+    prompt: "[t2] Record alpha.",
     steps: [
       {
         blocks: [
@@ -92,7 +79,7 @@ export const SCRIPT: Turn[] = [
   },
   {
     id: "t3",
-    text: "[t3] Record beta and gamma.",
+    prompt: "[t3] Record beta and gamma.",
     steps: [
       {
         blocks: [
@@ -111,9 +98,7 @@ export const SCRIPT: Turn[] = [
   },
   {
     id: "t4",
-    text: "[t4] Record delta, with my approval.",
-    needs: "approvals",
-    answer: { type: "approval", approved: true },
+    prompt: "[t4] Record delta, with my approval.",
     steps: [
       {
         blocks: [
@@ -126,9 +111,7 @@ export const SCRIPT: Turn[] = [
   },
   {
     id: "t5",
-    text: "[t5] Record epsilon, with my approval.",
-    needs: "approvals",
-    answer: { type: "approval", approved: false },
+    prompt: "[t5] Record epsilon, with my approval.",
     steps: [
       {
         blocks: [
@@ -140,14 +123,12 @@ export const SCRIPT: Turn[] = [
   },
   {
     id: "t6",
-    text: "[t6] Ask my client for the zeta value.",
-    needs: "client-tools",
-    answer: { type: "client-result", output: { value: 42 } },
+    prompt: "[t6] Ask my client for the zeta value.",
     steps: [
       {
         blocks: [
           thinking("Only the client knows zeta, so I will ask it."),
-          { kind: "tool", name: CLIENT_TOOL, input: { key: "zeta" } }
+          { kind: "tool", name: "client_lookup", input: { key: "zeta" } }
         ]
       },
       { blocks: [text("Your client says zeta is 42.")] }
@@ -155,7 +136,7 @@ export const SCRIPT: Turn[] = [
   },
   {
     id: "t7",
-    text: "[t7] Record eta.",
+    prompt: "[t7] Record eta.",
     steps: [
       {
         blocks: [thinking("One more record, for eta."), record("eta")]
@@ -165,30 +146,12 @@ export const SCRIPT: Turn[] = [
   },
   {
     id: "t8",
-    text: "[t8] Then say goodbye.",
-    sendWhilePausedAt: "t7.tool.eta",
+    prompt: "[t8] Then say goodbye.",
     steps: [{ blocks: [text("Goodbye!")] }]
   }
 ];
 
-export function turnsFor(capabilities: readonly Capability[]): Turn[] {
-  return SCRIPT.filter(
-    (turn) => turn.needs === undefined || capabilities.includes(turn.needs)
-  );
-}
-
 // ── Checkpoints ──────────────────────────────────────────────────────────
-
-/** Where a checkpoint is observed, which decides how a fault is applied. */
-export type CheckpointKind =
-  /** The fake model holds its stream here. */
-  | "model"
-  /** A server tool holds its execution here. */
-  | "tool"
-  /** The runner applies the fault itself, before acting. */
-  | "client";
-
-export type Checkpoint = { id: string; kind: CheckpointKind; turn: string };
 
 export function stepCheckpointPrefix(turn: string, step: number): string {
   return `${turn}.s${step}`;
@@ -214,46 +177,91 @@ export function toolCheckpoint(turn: string, key: string): string {
   return `${turn}.tool.${key}`;
 }
 
-export function checkpointsFor(turns: readonly Turn[]): Checkpoint[] {
-  const out: Checkpoint[] = [];
-  for (const turn of turns) {
-    if (!turn.sendWhilePausedAt) {
-      out.push({ id: `${turn.id}.before-send`, kind: "client", turn: turn.id });
-    }
+/**
+ * Every checkpoint of a script, in the order a run passes them. A tool call
+ * with a string `key` input gets a tool checkpoint, held when the tool calls
+ * the room's tool probe.
+ */
+export function checkpointsOf(script: Script): string[] {
+  const out: string[] = [];
+  for (const turn of script) {
     turn.steps.forEach((step, i) => {
-      for (const id of modelCheckpoints(turn.id, i, step)) {
-        out.push({ id, kind: "model", turn: turn.id });
-      }
-      // One tool hold per step: the first recording tool call.
-      const tool = step.blocks.find(
-        (b): b is Extract<Block, { kind: "tool" }> =>
-          b.kind === "tool" &&
-          (RECORDING_TOOLS as readonly string[]).includes(b.name)
-      );
-      if (tool && typeof tool.input.key === "string") {
-        // Approved tools run after the answer; rejected ones never run.
-        if (turn.answer?.type === "approval" && !turn.answer.approved) return;
-        out.push({
-          id: toolCheckpoint(turn.id, tool.input.key),
-          kind: "tool",
-          turn: turn.id
-        });
+      out.push(...modelCheckpoints(turn.id, i, step));
+      for (const block of step.blocks) {
+        if (block.kind === "tool" && typeof block.input.key === "string") {
+          out.push(toolCheckpoint(turn.id, block.input.key));
+        }
       }
     });
-    if (turn.answer) {
-      out.push({
-        id: `${turn.id}.awaiting-input`,
-        kind: "client",
-        turn: turn.id
-      });
-    }
   }
   return out;
 }
 
+/** The turn a tool probe's `key` belongs to: the first tool call with it. */
+export function turnForToolKey(script: Script, key: string): Turn | undefined {
+  return script.find((t) =>
+    t.steps.some((s) =>
+      s.blocks.some((b) => b.kind === "tool" && b.input.key === key)
+    )
+  );
+}
+
+/** Why a value is not a script, or undefined if it is one. */
+export function scriptProblem(value: unknown): string | undefined {
+  if (!Array.isArray(value) || value.length === 0) {
+    return "script must be a non-empty array of turns";
+  }
+  const ids = new Set<string>();
+  for (const [t, turn] of value.entries()) {
+    const at = `script[${t}]`;
+    if (typeof turn !== "object" || turn === null) return `${at} is not a turn`;
+    const { id, steps, prompt } = turn as Record<string, unknown>;
+    if (typeof id !== "string" || !TURN_ID.test(id)) {
+      return `${at}.id must be letters, digits, _ or -`;
+    }
+    if (ids.has(id)) return `${at}.id ${id} is not unique`;
+    ids.add(id);
+    if (prompt !== undefined && typeof prompt !== "string") {
+      return `${at}.prompt must be a string`;
+    }
+    if (!Array.isArray(steps) || steps.length === 0) {
+      return `${at}.steps must be a non-empty array`;
+    }
+    for (const [i, step] of steps.entries()) {
+      const blocks = (step as { blocks?: unknown } | null)?.blocks;
+      if (!Array.isArray(blocks) || blocks.length === 0) {
+        return `${at}.steps[${i}].blocks must be a non-empty array`;
+      }
+      for (const [j, block] of blocks.entries()) {
+        const where = `${at}.steps[${i}].blocks[${j}]`;
+        const b = (block ?? {}) as Record<string, unknown>;
+        if (b.kind === "thinking" || b.kind === "text") {
+          if (typeof b.text !== "string" || b.text === "") {
+            return `${where}.text must be a non-empty string`;
+          }
+        } else if (b.kind === "tool") {
+          if (typeof b.name !== "string" || b.name === "") {
+            return `${where}.name must be a non-empty string`;
+          }
+          if (
+            typeof b.input !== "object" ||
+            b.input === null ||
+            Array.isArray(b.input)
+          ) {
+            return `${where}.input must be an object`;
+          }
+        } else {
+          return `${where}.kind must be thinking, text or tool`;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
 // ── Resolving a request to a step ────────────────────────────────────────
 
-type AnthropicContent =
+export type AnthropicContent =
   | string
   | Array<{ type: string; text?: string; [key: string]: unknown }>;
 
@@ -261,6 +269,19 @@ export type AnthropicRequest = {
   messages?: Array<{ role: string; content: AnthropicContent }>;
   stream?: boolean;
 };
+
+const TURN_ID = /^[A-Za-z0-9_-]+$/;
+
+/** The script's turns a text names with `[<id>]` markers, in script order. */
+function markedTurns(text: string, script: Script): Turn[] {
+  const ids = [...text.matchAll(/\[([A-Za-z0-9_-]+)\]/g)].map((m) => m[1]);
+  return ids.length ? script.filter((t) => ids.includes(t.id)) : [];
+}
+
+/** Whether a user message names one of the script's turns. */
+export function marksTurn(content: AnthropicContent, script: Script): boolean {
+  return markedTurns(textOf(content), script).length > 0;
+}
 
 function textOf(content: AnthropicContent): string {
   if (typeof content === "string") return content;
@@ -321,7 +342,8 @@ function assistantOutput(
 
 /** A user message of plain text with no turn marker: the harness's own. */
 function isContinuePrompt(
-  message: { role: string; content: AnthropicContent } | undefined
+  message: { role: string; content: AnthropicContent } | undefined,
+  script: Script
 ): boolean {
   if (message?.role !== "user") return false;
   const { content } = message;
@@ -329,21 +351,20 @@ function isContinuePrompt(
     return false;
   }
   const text = textOf(content);
-  return text.trim() !== "" && !/\[t\d+\]/.test(text);
+  return text.trim() !== "" && markedTurns(text, script).length === 0;
 }
 
-export function resolveStep(request: AnthropicRequest): Resolved {
+export function resolveStep(
+  request: AnthropicRequest,
+  script: Script
+): Resolved {
   const messages = request.messages ?? [];
   let markerIndex = -1;
   let markerTurn: Turn | undefined;
   messages.forEach((message, index) => {
     if (message.role !== "user") return;
-    const markers = [...textOf(message.content).matchAll(/\[(t\d+)\]/g)].map(
-      (m) => m[1]
-    );
-    if (markers.length === 0) return;
     // A message that merges several user inputs answers to the newest.
-    const newest = SCRIPT.filter((t) => markers.includes(t.id)).at(-1);
+    const newest = markedTurns(textOf(message.content), script).at(-1);
     if (newest) {
       markerIndex = index;
       markerTurn = newest;
@@ -374,7 +395,7 @@ export function resolveStep(request: AnthropicRequest): Resolved {
   if (step >= markerTurn.steps.length) {
     // A harness that lost the end of a complete reply may ask to continue
     // it. A model would have nothing to add: an empty reply.
-    if (isContinuePrompt(messages.at(-1))) {
+    if (isContinuePrompt(messages.at(-1), script)) {
       const final = markerTurn.steps.length - 1;
       const last = markerTurn.steps[final];
       return {

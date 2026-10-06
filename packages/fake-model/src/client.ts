@@ -1,5 +1,5 @@
-/** A client for the fake model's control API. */
-import type { CellState, ModelConfig } from "./worker";
+/** A client for the fake model's HTTP API. */
+import type { CellState, Room, RoomSpec } from "./worker";
 
 export type ControlOptions = {
   /** Extra request headers, such as Access credentials, per URL. */
@@ -16,30 +16,33 @@ export class ModelControl {
     private readonly options: ControlOptions = {}
   ) {}
 
-  /** The base URL to give an Anthropic client for this room. */
+  /** Creates a room. Its `baseUrl` is the model URL for the agent under test. */
+  create(spec: RoomSpec = {}): Promise<Room> {
+    return this.#call("/rooms", spec);
+  }
+
+  /** The base URL to give an Anthropic client for a room. */
   baseUrl(room: string): string {
-    return `${this.url}/c/${encodeURIComponent(room)}`;
+    return `${this.url}/rooms/${encodeURIComponent(room)}`;
   }
 
   /** What the room's model has seen: requests, fired and held checkpoints, tool counts. */
   state(room: string): Promise<CellState> {
-    return this.#call(room);
-  }
-
-  /** Sets the room's holds, drops and continuation policy. */
-  configure(room: string, config: ModelConfig): Promise<CellState> {
-    return this.#call(room, "/configure", config);
+    return this.#call(`/rooms/${encodeURIComponent(room)}`);
   }
 
   /** Lets a held stream or tool go on past a checkpoint. */
-  release(room: string, id: string): Promise<CellState> {
-    return this.#call(room, "/release", { id });
+  release(room: string, checkpoint: string): Promise<CellState> {
+    return this.#call(`/rooms/${encodeURIComponent(room)}/release`, {
+      checkpoint
+    });
   }
 
-  async #call(room: string, rest = "", body?: unknown): Promise<CellState> {
-    const url = `${this.url}/control/${encodeURIComponent(room)}${rest}`;
+  async #call<T>(path: string, body?: unknown): Promise<T> {
+    const url = `${this.url}${path}`;
+    const method = body === undefined ? "GET" : "POST";
     const response = await fetch(url, {
-      method: body === undefined ? "GET" : "POST",
+      method,
       headers: {
         "content-type": "application/json",
         ...(await this.options.headers?.(url))
@@ -50,9 +53,9 @@ export class ModelControl {
     });
     if (!response.ok) {
       throw new Error(
-        `${body === undefined ? "GET" : "POST"} ${url}: ${response.status} ${(await response.text()).slice(0, 300)}`
+        `${method} ${url}: ${response.status} ${(await response.text()).slice(0, 300)}`
       );
     }
-    return (await response.json()) as CellState;
+    return (await response.json()) as T;
   }
 }
