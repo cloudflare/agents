@@ -14,6 +14,10 @@ export const routes = {
   /**
    * Give each participant an agent object of their own. The default for every
    * Channel, so that a group chat never shares an object by accident.
+   *
+   * A surface that names no conversation, such as a Slack thread or an
+   * email, joins the object's default conversation, so a participant keeps
+   * one history wherever they write from.
    */
   perParticipant(
     _event: ChannelIngressEvent,
