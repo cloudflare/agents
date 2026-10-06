@@ -2259,15 +2259,67 @@ export class MCPClientManager extends LifecycleCapability {
    * Remove an MCP server - closes connection if active and removes from storage.
    */
   async removeServer(serverId: string): Promise<void> {
-    if (this.mcpConnections[serverId]) {
+    const connection = this.mcpConnections[serverId];
+    let authProvider = connection?.options.transport.authProvider;
+    if (!authProvider) {
+      // A user-supplied provider factory can throw; that must not stop the
+      // server from being removed.
+      try {
+        authProvider = this.authProviderFromStorage(serverId);
+      } catch (error) {
+        console.warn(
+          `[MCPClientManager] Failed to create auth provider for ${serverId}:`,
+          error
+        );
+      }
+    }
+    if (connection) {
       try {
         await this.closeConnection(serverId);
       } catch (_e) {
         // Ignore errors when closing
       }
     }
+    // Clear this server's saved OAuth state. This only deletes local state;
+    // it does not revoke tokens at the OAuth provider.
+    try {
+      if (authProvider instanceof DurableObjectOAuthClientProvider) {
+        await authProvider.clearServerStorage();
+      } else {
+        await authProvider?.invalidateCredentials?.("all");
+      }
+    } catch (error) {
+      console.warn(
+        `[MCPClientManager] Failed to clear OAuth credentials for ${serverId}:`,
+        error
+      );
+    }
     this.removeServerFromStorage(serverId);
     this._onServerStateChanged.fire();
+  }
+
+  /**
+   * Rebuild a server's auth provider from its stored row, as restore does,
+   * for a server with no live connection.
+   */
+  private authProviderFromStorage(
+    serverId: string
+  ): AgentMcpOAuthProvider | undefined {
+    const server = this.getServersFromStorage().find((s) => s.id === serverId);
+    if (!server?.callback_url) return undefined;
+    const authProvider = this._createAuthProviderFn
+      ? this._createAuthProviderFn(server.callback_url)
+      : this.createAuthProvider(
+          server.id,
+          server.callback_url,
+          this._name,
+          server.client_id ?? undefined
+        );
+    authProvider.serverId = server.id;
+    if (server.client_id) {
+      authProvider.clientId = server.client_id;
+    }
+    return authProvider;
   }
 
   /**

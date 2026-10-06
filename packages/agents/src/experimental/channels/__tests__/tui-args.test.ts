@@ -12,6 +12,15 @@ describe("tui args", () => {
     expect(parseArgs(["wss://example.com/c"]).url).toBe("wss://example.com/c");
   });
 
+  it("drops a URL fragment, which a WebSocket URL cannot carry", () => {
+    expect(parseArgs(["https://example.com/c?x=1#top"]).url).toBe(
+      "wss://example.com/c?x=1"
+    );
+    expect(parseArgs(["https://example.com/c#top", "--as", "ann"]).url).toBe(
+      "wss://example.com/c?as=ann"
+    );
+  });
+
   it("sets the participant with --as", () => {
     expect(parseArgs(["https://h/c", "--as", "ann"]).url).toBe(
       "wss://h/c?as=ann"

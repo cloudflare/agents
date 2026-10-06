@@ -95,6 +95,8 @@ function toSocketUrl(raw: string): URL {
   }[url.protocol];
   if (!protocol) throw new UsageError(`Unsupported protocol ${url.protocol}`);
   url.protocol = protocol;
+  // WebSocket URLs cannot carry a fragment, and the constructor throws on one.
+  url.hash = "";
   return url;
 }
 

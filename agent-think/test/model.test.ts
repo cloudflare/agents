@@ -69,7 +69,7 @@ const anthropicCompletion = {
   id: "msg-test",
   type: "message",
   role: "assistant",
-  model: "claude-opus-4-8",
+  model: "claude-opus-5-5",
   content: [{ type: "text", text: "fallback" }],
   stop_reason: "end_turn",
   stop_sequence: null,
@@ -141,7 +141,7 @@ describe("createAgentThinkModel", () => {
     });
   });
 
-  it("falls back from a failed GPT request to Opus 4.8", async () => {
+  it("falls back from a failed GPT request to Opus 5.5", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
       if (String(input).includes("/openai/")) {
         return Response.json(
@@ -173,7 +173,7 @@ describe("createAgentThinkModel", () => {
       JSON.stringify({ project: "agents-team-agent-think" })
     );
     expect(JSON.parse(String(fallbackInit?.body))).toMatchObject({
-      model: "claude-opus-4-8",
+      model: "claude-opus-5-5",
       thinking: { type: "adaptive" },
       output_config: { effort: "medium" }
     });
