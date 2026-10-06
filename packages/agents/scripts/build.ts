@@ -12,6 +12,7 @@ const entries = [
   "src/lifecycle/index.ts",
   "src/harness/ai-sdk/index.ts",
   "src/harness/pi/index.ts",
+  "src/harness/think/index.ts",
   "src/routing/index.ts",
   "src/chat/index.ts",
   "src/chat/transport.ts",
