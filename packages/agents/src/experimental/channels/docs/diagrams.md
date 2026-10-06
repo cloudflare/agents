@@ -131,7 +131,7 @@ sequenceDiagram
 
 ## Gateway and agent
 
-Webhooks and WebSocket upgrades both go through the `ChannelGateway` in the Worker, which routes each to a conversation's agent. `publish` pushes turn statuses and transcript updates to each channel; the channel reads response output from Streams itself.
+Webhooks and WebSocket upgrades both go through the `ChannelGateway` in the Worker, which routes each to the agent object a route names. That object holds any number of conversations. `publish` pushes turn statuses and transcript updates to each channel; the channel reads response output from Streams itself.
 
 ```mermaid
 flowchart LR

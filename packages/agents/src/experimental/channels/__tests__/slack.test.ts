@@ -108,6 +108,7 @@ describe("Slack signed ingress", () => {
     const channel = slack({
       botToken: BOT_TOKEN,
       webhook: { signingSecret: SIGNING_SECRET, botUserId: "UBOT" },
+      participant: (event) => event.actor?.id ?? null,
       route
     });
     const payload: SlackEventCallback = {
@@ -173,11 +174,15 @@ describe("Slack signed ingress", () => {
     });
 
     if (!envelope) throw new Error("Expected a Slack ingress envelope");
-    const context = { findUser: async () => null };
+    const participant = { id: "UHUMAN" };
     await expect(
-      channel.route?.(envelope.event, envelope.raw, context)
+      channel.route?.(envelope.event, envelope.raw, participant)
     ).resolves.toBe("workspace-route");
-    expect(route).toHaveBeenCalledWith(envelope.event, envelope.raw, context);
+    expect(route).toHaveBeenCalledWith(
+      envelope.event,
+      envelope.raw,
+      participant
+    );
   });
 
   it("uses the DM channel for unthreaded continuity and the root for threaded DMs", async () => {
@@ -359,7 +364,8 @@ describe("Slack approval ingress", () => {
   it("normalizes a hand-built versioned button value", async () => {
     const channel = slack({
       botToken: BOT_TOKEN,
-      webhook: { signingSecret: SIGNING_SECRET }
+      webhook: { signingSecret: SIGNING_SECRET },
+      participant: (event) => event.actor?.id ?? null
     });
     const payload: SlackBlockActions = {
       type: "block_actions",

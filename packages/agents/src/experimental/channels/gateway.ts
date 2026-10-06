@@ -1,20 +1,15 @@
 import type {
-  Awaitable,
   Channel,
   ChannelChunkSource,
   ChannelDeliveryOptions,
   ChannelMessage,
-  ChannelRoute,
-  ChannelRouteContext,
   ChannelStreamOptions,
+  ChannelUpgrade,
+  ChannelUpgradeMatch,
   DeliveryResult
 } from "./channel";
-import type {
-  ChannelIdentity,
-  ChannelIdentityInput,
-  UserIdentity
-} from "./identity";
-import { unsupported } from "./internal";
+import type { ChannelIdentity, ChannelIdentityInput } from "./identity";
+import { participantRoute, toParticipant, unsupported } from "./internal";
 import { collectText, messageChunks } from "./stream";
 import type {
   ChannelEmailInput,
@@ -22,7 +17,6 @@ import type {
   ChannelIngressEvent,
   ChannelIngressEventInput
 } from "./ingress";
-import { identityKey } from "./identity";
 import type { GatewayOrigin, MessagePart, Participant } from "./protocol";
 import {
   isChannelMessageSurface,
@@ -35,44 +29,30 @@ import { WEB_IDENTITY_HEADER, type WebIdentity } from "./web/protocol";
 export type ChannelRouteEvent = {
   channelKey: string;
   event: ChannelIngressEvent;
+  /** Who the Channel resolved the sender as; null when it refused them. */
+  participant: Participant | null;
+  /** The agent object the event reaches; null when it is ignored or refused. */
   route: string | null;
   /** Stable identity derived only from the configured Channel and eventId. */
   dispatchId: string;
 };
 
-/** The conversation's agent, as the gateway reaches it. */
+/** The agent object a route names, as the gateway reaches it. */
 export type GatewayAgent = {
   /** Hand the agent an inbound event; Channels' `receive` serves it. */
   receive(event: GatewayEvent, origin: GatewayOrigin): Promise<unknown>;
   fetch(request: Request): Promise<Response>;
 };
 
-/**
- * Who a WebSocket upgrade is, which agent it reaches (`route`), and which
- * conversation there it follows. Without `conversationId`, the agent's
- * default for the route.
- */
-export type GatewayWebIdentity = {
-  route: string;
-  conversationId?: string;
-  participant: Participant;
-};
-
 export type ChannelGatewayOptions = {
-  channels: Record<string, Channel>;
-  /** The agent that holds a route's conversation. */
-  agent(route: string): GatewayAgent;
   /**
-   * Resolve a WebSocket upgrade from trusted request data, such as a
-   * session cookie. Return null to refuse it, or undefined when the
-   * request is not for Channels. Default: `/channels/<route>` or
-   * `/channels/<route>/<conversation>` as an anonymous participant.
+   * The Channels this Worker serves. Each one that takes ingress says who
+   * its senders are (`participant`) and which agent object they reach
+   * (`route`).
    */
-  web?(request: Request): Awaitable<GatewayWebIdentity | null | undefined>;
-  /** Used when a Channel does not provide a route. Default: event thread id. */
-  defaultRoute?: ChannelRoute;
-  /** Resolve an existing, explicitly linked application user. */
-  findUser?(identity: ChannelIdentity): Promise<UserIdentity | null>;
+  channels: Record<string, Channel>;
+  /** The agent object a route names. */
+  agent(route: string): GatewayAgent;
   /** Observes every valid route outcome before it is sent to the agent. */
   onRoute?(event: ChannelRouteEvent): void | Promise<void>;
 };
@@ -84,23 +64,35 @@ type OutboundOperation = (
 
 /**
  * The Worker's entry point for Channels. Authenticates and normalizes
- * webhooks, resolves WebSocket upgrades, routes each to the agent that
- * holds its conversation, and sends to surfaces.
+ * webhooks, resolves WebSocket upgrades, routes each to the agent object
+ * its route names, and sends to surfaces.
+ *
+ * The gateway is the trust boundary. It alone decides who a sender is and
+ * tells the agent, so an agent serving Channels must be reachable only
+ * through it: an app that forwards an upgrade to the agent some other way
+ * (another fetch handler, `routeAgentRequest`, RPC) lets the caller pick
+ * its own participant and conversation.
+ *
+ * The agent object is the authorization boundary. Whoever a Channel routes
+ * to an object may list, join, create, fork and reset every conversation in
+ * it. To keep people apart, route them to different objects; by default
+ * each participant gets an object of their own.
  */
 export class ChannelGateway {
   readonly #channels: Record<string, Channel>;
   readonly #agent: ChannelGatewayOptions["agent"];
-  readonly #web: NonNullable<ChannelGatewayOptions["web"]>;
-  readonly #defaultRoute: ChannelRoute | undefined;
-  readonly #findUser: ChannelGatewayOptions["findUser"];
   readonly #onRoute: ChannelGatewayOptions["onRoute"];
 
   constructor(options: ChannelGatewayOptions) {
     this.#channels = { ...options.channels };
+    for (const [channelKey, channel] of Object.entries(this.#channels)) {
+      if ((channel.ingress || channel.emailIngress) && !channel.participant) {
+        throw new Error(
+          `Channel "${channelKey}" takes ingress but has no participant; say who its senders are`
+        );
+      }
+    }
     this.#agent = options.agent;
-    this.#web = options.web ?? defaultWeb;
-    this.#defaultRoute = options.defaultRoute;
-    this.#findUser = options.findUser;
     this.#onRoute = options.onRoute;
   }
 
@@ -114,25 +106,45 @@ export class ChannelGateway {
   }
 
   /**
-   * Forward a WebSocket upgrade to its conversation's agent with the
-   * resolved identity. Any identity header the client sent is replaced.
+   * Forward a WebSocket upgrade to its agent with the resolved identity.
+   * Any identity header the client sent is replaced. An upgrade no Channel
+   * takes is left to the Worker, header and all, so the Worker must not
+   * forward it to a Channels agent.
    */
   async #upgrade(request: Request): Promise<Response | undefined> {
-    const resolved = await this.#web(request);
-    if (resolved === undefined) return undefined;
-    if (resolved === null) {
-      return new Response("Unauthorized", { status: 401 });
+    for (const [channelKey, channel] of Object.entries(this.#channels)) {
+      const upgrade = channel.upgrade;
+      const match = upgrade?.match(request);
+      if (!upgrade || !match) continue;
+      return this.#forwardUpgrade(channelKey, upgrade, match, request);
     }
+    return undefined;
+  }
+
+  async #forwardUpgrade(
+    channelKey: string,
+    upgrade: ChannelUpgrade,
+    match: ChannelUpgradeMatch,
+    request: Request
+  ): Promise<Response> {
+    const source = `Channel "${channelKey}"`;
+    const participant = toParticipant(
+      await upgrade.participant(request),
+      source
+    );
+    if (!participant) return new Response("Unauthorized", { status: 401 });
+    const route = checkRoute(await upgrade.route(request, participant), source);
+    if (route === null) return new Response("Forbidden", { status: 403 });
     const identity: WebIdentity = {
-      route: resolved.route,
-      ...(resolved.conversationId !== undefined && {
-        conversationId: resolved.conversationId
+      route,
+      ...(match.conversationId !== undefined && {
+        conversationId: match.conversationId
       }),
-      participant: resolved.participant
+      participant
     };
     const headers = new Headers(request.headers);
     headers.set(WEB_IDENTITY_HEADER, JSON.stringify(identity));
-    return this.#agent(resolved.route).fetch(new Request(request, { headers }));
+    return this.#agent(route).fetch(new Request(request, { headers }));
   }
 
   async #webhook(request: Request): Promise<Response | undefined> {
@@ -275,10 +287,29 @@ export class ChannelGateway {
   ): Promise<void> {
     const rawEvent = envelope.event;
     const event = stampEvent(channelKey, rawEvent);
-    const route = await this.#route(channelKey, channel, event, envelope.raw);
+    const source = `Channel "${channelKey}"`;
+    // The constructor checked that every Channel with ingress has one.
+    const participant = toParticipant(
+      await channel.participant!(event, envelope.raw),
+      source
+    );
+    const route = participant
+      ? checkRoute(
+          channel.route
+            ? await channel.route(event, envelope.raw, participant)
+            : participantRoute(participant),
+          source
+        )
+      : null;
     const dispatchId = await createDispatchId(channelKey, event.eventId);
-    await this.#onRoute?.({ channelKey, event, route, dispatchId });
-    if (route === null) return;
+    await this.#onRoute?.({
+      channelKey,
+      event,
+      participant,
+      route,
+      dispatchId
+    });
+    if (!participant || route === null) return;
     if (!event.replySurface) {
       throw new Error(
         `Channel "${channelKey}" produced an event without a reply surface`
@@ -286,75 +317,24 @@ export class ChannelGateway {
     }
     await this.#agent(route).receive(toInboundEvent(event, dispatchId), {
       route,
-      participant: participantOf(channelKey, event),
+      participant,
       surface: event.replySurface
     });
   }
-
-  async #route(
-    channelKey: string,
-    channel: Channel,
-    event: ChannelIngressEvent,
-    raw: unknown
-  ): Promise<string | null> {
-    const context = this.#routeContext(event);
-    const route = channel.route
-      ? await channel.route(event, raw, context)
-      : this.#defaultRoute
-        ? await this.#defaultRoute(event, raw, context)
-        : event.thread.id;
-
-    if (route === undefined) {
-      throw new Error(
-        `Channel route for "${channelKey}" returned undefined; return null to ignore an event`
-      );
-    }
-    if (route !== null && typeof route !== "string") {
-      throw new Error(
-        `Channel route for "${channelKey}" must return a string or null`
-      );
-    }
-    return route;
-  }
-
-  #routeContext(event: ChannelIngressEvent): ChannelRouteContext {
-    let linkedUser: Promise<UserIdentity | null> | undefined;
-    return {
-      findUser: () => {
-        if (!linkedUser) {
-          const identity = event.actor?.identity;
-          const findUser = this.#findUser;
-          linkedUser =
-            identity && findUser
-              ? Promise.resolve().then(() => findUser(identity))
-              : Promise.resolve(null);
-        }
-        return linkedUser;
-      }
-    };
-  }
 }
 
-/**
- * Serve a Channel that cannot stream by collecting the answer first.
- *
- * A generation that failed part-way still delivers what it produced, because
- * losing the partial answer helps nobody, but the result is downgraded to
- * `uncertain` since the reader received an incomplete answer.
- */
-const defaultWeb = (request: Request): GatewayWebIdentity | undefined => {
-  const match = /^\/channels\/([^/]+)(?:\/([^/]+))?$/.exec(
-    new URL(request.url).pathname
-  );
-  if (!match) return undefined;
-  return {
-    route: decodeURIComponent(match[1]),
-    ...(match[2] !== undefined && {
-      conversationId: decodeURIComponent(match[2])
-    }),
-    participant: { id: "anonymous" }
-  };
-};
+/** Check what an application's `route` callback returned. */
+function checkRoute(route: unknown, source: string): string | null {
+  if (route === undefined) {
+    throw new Error(
+      `${source} route returned undefined; return null to ignore an event`
+    );
+  }
+  if (route !== null && typeof route !== "string") {
+    throw new Error(`${source} route must return a string or null`);
+  }
+  return route;
+}
 
 /** The provider's event as an inbound event, keyed by its dispatch id. */
 function toInboundEvent(
@@ -390,20 +370,6 @@ function toInboundEvent(
   };
 }
 
-function participantOf(
-  channelKey: string,
-  event: ChannelIngressEvent
-): Participant {
-  const actor = event.actor;
-  const name = actor?.fullName ?? actor?.username;
-  return {
-    id: actor?.identity
-      ? identityKey(actor.identity)
-      : `${channelKey}:${actor?.id ?? "unknown"}`,
-    ...(name !== undefined && { name })
-  };
-}
-
 function invalidSurface(): DeliveryResult {
   return unsupported(
     "CHANNEL_SURFACE_INVALID",
@@ -411,6 +377,13 @@ function invalidSurface(): DeliveryResult {
   );
 }
 
+/**
+ * Serve a Channel that cannot stream by collecting the answer first.
+ *
+ * A generation that failed part-way still delivers what it produced, because
+ * losing the partial answer helps nobody, but the result is downgraded to
+ * `uncertain` since the reader received an incomplete answer.
+ */
 async function collectAndDeliver(
   channel: Channel,
   surface: ChannelMessageSurface,

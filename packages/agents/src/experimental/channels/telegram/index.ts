@@ -1,4 +1,9 @@
-import type { Channel, ChannelMessage, ChannelRoute } from "../channel";
+import type {
+  Channel,
+  ChannelMessage,
+  ChannelParticipant,
+  ChannelRoute
+} from "../channel";
 import type { ChannelIdentity } from "../identity";
 import type { ChannelMessageSurface } from "../surface";
 import {
@@ -78,7 +83,15 @@ export type TelegramChannelOptions = {
    * inside one interval are replaced rather than sent. @default 500
    */
   streamIntervalMs?: number;
-  /** Select an application route from the event, raw update, and Host context. */
+  /**
+   * Who sent a verified Telegram update, such as your user linked to
+   * `event.actor`. Return null to drop the update. Required with `webhook`.
+   */
+  participant?: ChannelParticipant<TelegramUpdate>;
+  /**
+   * Pick the agent object an update reaches. Default: a room of the
+   * participant's own, so a group chat is not shared by accident.
+   */
   route?: ChannelRoute<TelegramUpdate>;
   /** Add secret-verified Telegram webhook ingress to the returned Channel. */
   webhook?: {
@@ -387,12 +400,16 @@ export function telegram(
   if (!options.botToken.trim()) {
     throw new Error("botToken is required to create a Telegram channel");
   }
+  if (options.webhook && !options.participant) {
+    throw new Error("participant is required with a Telegram webhook");
+  }
   const botUserId = telegramBotUserId(options.botToken);
   const ingress = options.webhook
     ? telegramWebhook({ ...options.webhook, botUserId })
     : undefined;
 
   return {
+    ...(options.participant && { participant: options.participant }),
     ...(options.route && { route: options.route }),
     ...(ingress && { ingress }),
     contactSurface(identity: ChannelIdentity) {

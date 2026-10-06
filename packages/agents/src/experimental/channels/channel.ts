@@ -3,8 +3,8 @@ import type {
   ChannelIngress,
   ChannelIngressEvent
 } from "./ingress";
-import type { ChannelIdentity, UserIdentity } from "./identity";
-import type { ResponseChunk } from "./protocol";
+import type { ChannelIdentity } from "./identity";
+import type { Participant, ResponseChunk } from "./protocol";
 import type {
   ChannelMessageSurface,
   ChannelMessageSurfaceInput
@@ -84,24 +84,66 @@ export type ChannelDeliveryContext = {
   deliveryId: string;
 };
 
-export type ChannelRouteContext = {
-  /** Lazily resolve the application user explicitly linked to the event actor. */
-  findUser(): Promise<UserIdentity | null>;
-};
+/**
+ * Who a sender is, as the application decides it. A string is shorthand
+ * for `{ id }`; `null` refuses the sender. Participants that share an id
+ * are the same participant.
+ */
+export type ParticipantResult = Participant | string | null;
 
+/**
+ * Resolve who sent an authenticated event. Channels has no opinion on
+ * identity: this is the only place a webhook sender becomes a participant.
+ */
+export type ChannelParticipant<TRaw = unknown> = (
+  event: ChannelIngressEvent,
+  raw: TRaw
+) => Awaitable<ParticipantResult>;
+
+/**
+ * Pick the agent object an event reaches, or return null to ignore it.
+ *
+ * The agent object is the authorization boundary: anyone who reaches one
+ * may use every conversation in it. Default: an agent object of the
+ * participant's own (`routes.perParticipant`).
+ */
 export type ChannelRoute<TRaw = unknown> = (
   event: ChannelIngressEvent,
   raw: TRaw,
-  context: ChannelRouteContext
+  participant: Participant
 ) => Awaitable<string | null>;
+
+/** A WebSocket upgrade's conversation, once it is known to be for Channels. */
+export type ChannelUpgradeMatch = {
+  /** The conversation to follow. Default: the agent's default conversation. */
+  conversationId?: string;
+};
+
+/** How a Channel takes WebSocket upgrades in the gateway. */
+export interface ChannelUpgrade {
+  /** Return undefined for an upgrade that is not for this Channel. */
+  match(request: Request): ChannelUpgradeMatch | undefined;
+  /** Who is connecting. Return null to refuse the upgrade. */
+  participant(request: Request): Awaitable<ParticipantResult>;
+  /** The agent object the upgrade reaches, or null to refuse it. */
+  route(request: Request, participant: Participant): Awaitable<string | null>;
+}
 
 /** A configured delivery route with optional ingress support. */
 export interface Channel<TRaw = unknown> {
-  /** Select an opaque application route, or return null to ignore the event. */
+  /**
+   * Who sent an ingress event. Required when the Channel has `ingress` or
+   * `emailIngress`; the gateway refuses to start without it.
+   */
+  participant?(
+    event: ChannelIngressEvent,
+    raw: TRaw
+  ): Awaitable<ParticipantResult>;
+  /** Pick the agent object an event reaches. See `ChannelRoute`. */
   route?(
     event: ChannelIngressEvent,
     raw: TRaw,
-    context: ChannelRouteContext
+    participant: Participant
   ): Awaitable<string | null>;
   /** Derive a direct destination from this configured Channel's identity. */
   contactSurface?(identity: ChannelIdentity): ChannelMessageSurfaceInput | null;
@@ -129,4 +171,6 @@ export interface Channel<TRaw = unknown> {
   ): Promise<DeliveryResult>;
   readonly ingress?: ChannelIngress<TRaw>;
   readonly emailIngress?: ChannelEmailIngress<TRaw>;
+  /** WebSocket upgrades this Channel takes, such as the Web Channel's. */
+  readonly upgrade?: ChannelUpgrade;
 }

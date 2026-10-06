@@ -2,6 +2,7 @@ import {
   ChannelGateway,
   type GatewayAgent
 } from "agents/experimental/channels";
+import { web } from "agents/experimental/channels/web";
 
 export { AiSdkAgent } from "./ai-sdk-agent";
 export { PiAgent } from "./pi/agent";
@@ -13,30 +14,45 @@ const harnesses: Record<string, (env: Env, name: string) => GatewayAgent> = {
 };
 
 /**
- * A route is `<harness>/<room>`: `/channels/ai-sdk/lobby` reaches the
- * AiSdkAgent named `lobby`. The gateway hands routes back to `agent`, which
- * picks the namespace.
+ * `/channels/<harness>/<room>[/<conversation>]`: `/channels/ai-sdk/lobby`
+ * reaches the AiSdkAgent named `lobby`.
  */
+function parse(request: Request) {
+  const match = /^\/channels\/([^/]+)\/([^/]+)(?:\/([^/]+))?$/.exec(
+    new URL(request.url).pathname
+  );
+  if (!match || !Object.hasOwn(harnesses, match[1])) return undefined;
+  return {
+    route: `${match[1]}/${decodeURIComponent(match[2])}`,
+    conversationId: match[3] && decodeURIComponent(match[3])
+  };
+}
+
 function gatewayFor(env: Env) {
   return new ChannelGateway({
-    channels: {},
     agent: (route) => {
       const slash = route.indexOf("/");
       return harnesses[route.slice(0, slash)](env, route.slice(slash + 1));
     },
-    // Demo only: the client names itself with `?as=`. A real app resolves
-    // the participant from a session it can verify.
-    web: (request) => {
-      const url = new URL(request.url);
-      const match = /^\/channels\/([^/]+)\/([^/]+)(?:\/([^/]+))?$/.exec(
-        url.pathname
-      );
-      if (!match || !Object.hasOwn(harnesses, match[1])) return undefined;
-      return {
-        route: `${match[1]}/${decodeURIComponent(match[2])}`,
-        ...(match[3] && { conversationId: decodeURIComponent(match[3]) }),
-        participant: { id: url.searchParams.get("as") ?? "anonymous" }
-      };
+    channels: {
+      web: web({
+        match: (request) => {
+          const parsed = parse(request);
+          if (!parsed) return undefined;
+          return parsed.conversationId
+            ? { conversationId: parsed.conversationId }
+            : {};
+        },
+        // Demo only: the client names itself with `?as=`. A real app
+        // resolves the participant from a session it can verify.
+        participant: (request) =>
+          new URL(request.url).searchParams.get("as") ?? crypto.randomUUID(),
+        // Demo only: anyone may join any room. The agent object is the
+        // authorization boundary, so a real app checks that the
+        // participant may enter the room, or leaves out `route` to give
+        // each participant a room of their own.
+        route: (request) => parse(request)?.route ?? null
+      })
     }
   });
 }

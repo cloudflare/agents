@@ -1,4 +1,9 @@
-import type { Channel, ChannelMessage, ChannelRoute } from "../channel";
+import type {
+  Channel,
+  ChannelMessage,
+  ChannelParticipant,
+  ChannelRoute
+} from "../channel";
 import type { ChannelIdentity } from "../identity";
 import type { ChannelMessageSurface } from "../surface";
 import {
@@ -125,7 +130,15 @@ export type SlackChannelOptions = {
   streamIntervalMs?: number;
   /** Add signed Slack HTTP ingress to the returned Channel. */
   webhook?: SlackWebhookOptions;
-  /** Select an application route from the event, exact payload, and Host context. */
+  /**
+   * Who sent a verified Slack event, such as your user linked to
+   * `event.actor`. Return null to drop the event. Required with `webhook`.
+   */
+  participant?: ChannelParticipant<SlackIngressPayload>;
+  /**
+   * Pick the agent object an event reaches. Default: a room of the
+   * participant's own, so a shared thread is not shared by accident.
+   */
   route?: ChannelRoute<SlackIngressPayload>;
   /** Override fetch for testing or custom network routing. */
   fetch?: typeof globalThis.fetch;
@@ -577,9 +590,13 @@ export function slack(
   if (!options.botToken.trim()) {
     throw new Error("botToken is required to create a Slack channel");
   }
+  if (options.webhook && !options.participant) {
+    throw new Error("participant is required with a Slack webhook");
+  }
   const ingress = options.webhook ? slackWebhook(options.webhook) : undefined;
 
   return {
+    ...(options.participant && { participant: options.participant }),
     ...(options.route && { route: options.route }),
     ...(ingress && { ingress }),
     contactSurface(identity: ChannelIdentity) {
