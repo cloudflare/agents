@@ -108,6 +108,7 @@ describe("Slack signed ingress", () => {
     const channel = slack({
       botToken: BOT_TOKEN,
       webhook: { signingSecret: SIGNING_SECRET, botUserId: "UBOT" },
+      participant: (event) => event.actor?.id ?? null,
       route
     });
     const payload: SlackEventCallback = {
@@ -359,7 +360,8 @@ describe("Slack approval ingress", () => {
   it("normalizes a hand-built versioned button value", async () => {
     const channel = slack({
       botToken: BOT_TOKEN,
-      webhook: { signingSecret: SIGNING_SECRET }
+      webhook: { signingSecret: SIGNING_SECRET },
+      participant: (event) => event.actor?.id ?? null
     });
     const payload: SlackBlockActions = {
       type: "block_actions",

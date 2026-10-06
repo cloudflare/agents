@@ -1,5 +1,10 @@
-import type { ChannelMessage, DeliveryResult } from "./channel";
+import type {
+  ChannelMessage,
+  DeliveryResult,
+  ParticipantResult
+} from "./channel";
 import type { ChannelIngressResult } from "./ingress";
+import type { Participant } from "./protocol";
 
 const textEncoder = new TextEncoder();
 
@@ -57,4 +62,32 @@ export function unsupported(
     retryable: false,
     error: { code, message }
   };
+}
+
+/** The agent object of a participant's own, namespaced so app routes cannot collide. */
+export function participantRoute(participant: Participant): string {
+  return `participant:${participant.id}`;
+}
+
+/** Check what an application's `participant` callback returned. */
+export function toParticipant(
+  result: ParticipantResult,
+  source: string
+): Participant | null {
+  if (result === null) return null;
+  if (typeof result === "string") {
+    if (result.length > 0) return { id: result };
+  } else if (
+    isRecord(result) &&
+    typeof result.id === "string" &&
+    result.id.length > 0 &&
+    (result.name === undefined || typeof result.name === "string")
+  ) {
+    return result.name === undefined
+      ? { id: result.id }
+      : { id: result.id, name: result.name };
+  }
+  throw new Error(
+    `${source} participant must return a non-empty id, a participant, or null`
+  );
 }

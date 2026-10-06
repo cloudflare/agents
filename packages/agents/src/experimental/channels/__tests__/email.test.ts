@@ -165,6 +165,7 @@ describe("experimental email channel", () => {
       binding: { send: vi.fn() as EmailSendBinding["send"] },
       from: "agent@example.com",
       inbound: { from: "support@example.com" },
+      participant: (event) => event.actor?.id ?? null,
       route
     });
     const raw = new TextEncoder().encode(
@@ -202,7 +203,8 @@ describe("experimental email channel", () => {
   it("does not infer inbound recipient or sender filters from outbound configuration", async () => {
     const channel = email({
       binding: { send: vi.fn() as EmailSendBinding["send"] },
-      from: "agent@example.com"
+      from: "agent@example.com",
+      participant: (event) => event.actor?.id ?? null
     });
     const raw = new TextEncoder().encode(
       [

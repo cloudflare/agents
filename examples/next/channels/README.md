@@ -21,8 +21,10 @@ Every agent has the same shape:
 
 - `src/server.ts` is the Worker. It builds a `ChannelGateway` whose `agent`
   picks the Durable Object namespace from the first segment of the route, so
-  one Worker serves several agent classes. Its `web` resolver lets the client
-  name itself with `?as=`, which only a demo should trust.
+  one Worker serves several agent classes. Its `web()` Channel lets the
+  client name itself with `?as=` and join any room, which only a demo
+  should allow: the agent object is the authorization boundary, so whoever
+  reaches a room may use every conversation in it.
 - `src/ai-sdk-agent.ts` is `AiSdkAgent`: `AiSdkHarness` runs each message
   with `streamText` on Workers AI. It has a client tool (`getLocation`, run
   by the participant who asked) and a tool that needs approval (`flipCoin`).

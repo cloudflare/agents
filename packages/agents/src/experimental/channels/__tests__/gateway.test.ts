@@ -7,13 +7,14 @@ import {
   type ChannelApprovalResponseInput,
   type ChannelEmailIngress,
   type ChannelEmailInput,
-  type ChannelIdentityInput,
   type ChannelInboundMessageInput,
   type ChannelIngress,
   type ChannelIngressEnvelope,
-  type ChannelRouteContext,
+  type ChannelIngressEvent,
   type ChannelRouteEvent
 } from "..";
+import { web } from "../web/ingress";
+import { WEB_IDENTITY_HEADER } from "../web/protocol";
 
 const delivered = async () => ({ status: "delivered" as const });
 const surface = {
@@ -77,6 +78,9 @@ function httpIngress<TRaw>(
   };
 }
 
+/** The app's participant callback in these tests: the provider's actor id. */
+const byActor = (event: ChannelIngressEvent) => event.actor?.id ?? null;
+
 function emailInput(): ChannelEmailInput {
   return {
     from: "operator@example.com",
@@ -123,6 +127,7 @@ describe("stateless ChannelGateway", () => {
     const gateway = host(
       {
         inbound: {
+          participant: byActor,
           ingress: httpIngress("/inbound", [{ event: message(), raw: null }])
         }
       },
@@ -144,8 +149,8 @@ describe("stateless ChannelGateway", () => {
         }
       }),
       expect.objectContaining({
-        route: "provider-thread-1",
-        participant: { id: "inbound:actor-1", name: "operator" },
+        route: "participant:actor-1",
+        participant: { id: "actor-1" },
         surface: expect.objectContaining({ channelKey: "inbound" })
       })
     );
@@ -156,9 +161,13 @@ describe("stateless ChannelGateway", () => {
     const first = httpIngress("/webhook", []);
     const duplicate = httpIngress("/webhook", []);
     const gateway = host({
-      declines: { deliver: delivered, ingress: declines },
-      first: { deliver: delivered, ingress: first },
-      duplicate: { deliver: delivered, ingress: duplicate }
+      declines: { deliver: delivered, participant: byActor, ingress: declines },
+      first: { deliver: delivered, participant: byActor, ingress: first },
+      duplicate: {
+        deliver: delivered,
+        participant: byActor,
+        ingress: duplicate
+      }
     });
 
     await expect(
@@ -175,7 +184,7 @@ describe("stateless ChannelGateway", () => {
   it("returns undefined when every HTTP ingress declines an exact pathname", async () => {
     const ingress = httpIngress("/webhooks/telegram", []);
     const gateway = host({
-      telegram: { deliver: delivered, ingress }
+      telegram: { deliver: delivered, participant: byActor, ingress }
     });
 
     await expect(
@@ -197,8 +206,12 @@ describe("stateless ChannelGateway", () => {
     };
     const later = httpIngress("/webhook", []);
     const gateway = host({
-      rejection: { deliver: delivered, ingress: rejection },
-      later: { deliver: delivered, ingress: later }
+      rejection: {
+        deliver: delivered,
+        participant: byActor,
+        ingress: rejection
+      },
+      later: { deliver: delivered, participant: byActor, ingress: later }
     });
 
     await expect(
@@ -209,29 +222,29 @@ describe("stateless ChannelGateway", () => {
     expect(later.receive).not.toHaveBeenCalled();
   });
 
-  it("uses Channel route before Host default route and passes the exact raw value only to routing", async () => {
+  it("passes the participant and the exact raw value only to routing", async () => {
     const raw = { authenticatedUpdate: 42 };
     const receive = vi.fn<GatewayAgent["receive"]>(async () => undefined);
-    const defaultRoute = vi.fn(() => "host-default");
-    const route = vi.fn((_event, receivedRaw: typeof raw) => {
+    const participant = vi.fn((_event, receivedRaw: typeof raw) => {
       expect(receivedRaw).toBe(raw);
-      return "channel-route";
+      return { id: "user-1", name: "Operator" };
     });
+    const route = vi.fn(
+      (_event, receivedRaw: typeof raw, { id }: { id: string }) => {
+        expect(receivedRaw).toBe(raw);
+        return `team-of:${id}`;
+      }
+    );
     const channel: Channel<typeof raw> = {
+      participant,
       route,
       deliver: delivered,
       ingress: httpIngress("/webhook", [{ event: message(), raw }])
     };
-    const channels: Record<string, Channel> = {
-      webhook: channel,
-      outputOnly: { deliver: delivered }
-    };
-    const findUser = vi.fn();
-    const gateway = host(channels, {
-      defaultRoute,
-      findUser,
-      agent: () => fakeAgent(receive)
-    });
+    const gateway = host(
+      { webhook: channel, outputOnly: { deliver: delivered } },
+      { agent: () => fakeAgent(receive) }
+    );
 
     const response = await gateway.fetch(
       new Request("https://example.com/webhook", { method: "POST" })
@@ -239,154 +252,98 @@ describe("stateless ChannelGateway", () => {
 
     expect(response?.status).toBe(202);
     expect(await response?.text()).toBe("acknowledged");
-    expect(defaultRoute).not.toHaveBeenCalled();
-    expect(findUser).not.toHaveBeenCalled();
     expect(receive).toHaveBeenCalledOnce();
     expect(receive.mock.calls[0]?.[1]).toMatchObject({
-      route: "channel-route"
+      route: "team-of:user-1",
+      participant: { id: "user-1", name: "Operator" }
     });
     expect(receive.mock.calls[0]?.[0]).not.toHaveProperty("raw");
   });
 
-  it("uses the Host default route before falling back to the provider thread id", async () => {
-    const event = message();
-    const defaultMessage = vi.fn<GatewayAgent["receive"]>(
-      async () => undefined
-    );
-    const threadMessage = vi.fn<GatewayAgent["receive"]>(async () => undefined);
-    const withDefault = host(
+  it("routes each participant to an agent object of their own by default", async () => {
+    const receive = vi.fn<GatewayAgent["receive"]>(async () => undefined);
+    // Two people in one provider thread reach two objects.
+    const second: ChannelInboundMessageInput = {
+      ...message("event-2"),
+      actor: { id: "actor-2" }
+    };
+    const gateway = host(
       {
         inbound: {
-          deliver: delivered,
-          ingress: httpIngress("/default", [{ event, raw: null }])
+          participant: byActor,
+          ingress: httpIngress("/inbound", [
+            { event: message(), raw: null },
+            { event: second, raw: null }
+          ])
         }
       },
-      {
-        defaultRoute: () => "host-default",
-        agent: () => fakeAgent(defaultMessage)
-      }
-    );
-    const withThreadFallback = host(
-      {
-        inbound: {
-          deliver: delivered,
-          ingress: httpIngress("/thread", [{ event, raw: null }])
-        }
-      },
-      { agent: () => fakeAgent(threadMessage) }
+      { agent: () => fakeAgent(receive) }
     );
 
-    await withDefault.fetch(
-      new Request("https://example.com/default", { method: "POST" })
-    );
-    await withThreadFallback.fetch(
-      new Request("https://example.com/thread", { method: "POST" })
+    await gateway.fetch(
+      new Request("https://example.com/inbound", { method: "POST" })
     );
 
-    expect(defaultMessage.mock.calls[0]?.[1].route).toBe("host-default");
-    expect(threadMessage.mock.calls[0]?.[1].route).toBe("provider-thread-1");
+    expect(receive.mock.calls.map(([, origin]) => origin.route)).toEqual([
+      "participant:actor-1",
+      "participant:actor-2"
+    ]);
   });
 
-  it("stamps an identity before lazily resolving and memoizing its user", async () => {
-    const identity = {
-      subject: "actor-1"
-    } satisfies ChannelIdentityInput;
-    const stampedIdentity = {
-      channelKey: "inbound",
-      ...identity
-    } as const;
-    const event: ChannelInboundMessageInput = {
-      ...message(),
-      actor: { id: "actor-1", identity }
-    };
-    const user = { id: "user-1", channelIdentities: [stampedIdentity] };
-    const findUser = vi.fn(async () => user);
-    const route = vi.fn(
-      async (_event: unknown, _raw: unknown, context: ChannelRouteContext) => {
-        const first = await context.findUser();
-        const second = await context.findUser();
-        expect(second).toBe(first);
-        return first ? `user:${first.id}` : null;
-      }
+  it("drops an event whose sender the app refuses, and observes it", async () => {
+    const receive = vi.fn<GatewayAgent["receive"]>(async () => undefined);
+    const onRoute = vi.fn();
+    const route = vi.fn(() => "never");
+    const gateway = host(
+      {
+        inbound: {
+          participant: () => null,
+          route,
+          ingress: httpIngress("/refused", [{ event: message(), raw: null }])
+        }
+      },
+      { onRoute, agent: () => fakeAgent(receive) }
     );
+
+    const response = await gateway.fetch(
+      new Request("https://example.com/refused", { method: "POST" })
+    );
+
+    expect(response?.status).toBe(202);
+    expect(route).not.toHaveBeenCalled();
+    expect(receive).not.toHaveBeenCalled();
+    expect(onRoute).toHaveBeenCalledWith(
+      expect.objectContaining({ participant: null, route: null })
+    );
+  });
+
+  it("turns an invalid participant into an HTTP 500", async () => {
     const receive = vi.fn<GatewayAgent["receive"]>(async () => undefined);
     const gateway = host(
       {
         inbound: {
-          route,
-          deliver: delivered,
-          ingress: httpIngress("/identity", [{ event, raw: null }])
+          participant: () => ({ id: "" }),
+          ingress: httpIngress("/invalid", [{ event: message(), raw: null }])
         }
       },
-      { findUser, agent: () => fakeAgent(receive) }
+      { agent: () => fakeAgent(receive) }
     );
 
-    await gateway.fetch(
-      new Request("https://example.com/identity", { method: "POST" })
+    const response = await gateway.fetch(
+      new Request("https://example.com/invalid", { method: "POST" })
     );
 
-    expect(findUser).toHaveBeenCalledOnce();
-    expect(findUser).toHaveBeenCalledWith(stampedIdentity);
-    expect(receive).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "message" }),
-      expect.objectContaining({
-        route: "user:user-1",
-        participant: {
-          id: JSON.stringify(["inbound", "default", "actor-1"])
-        }
-      })
-    );
+    expect(response?.status).toBe(500);
+    expect(receive).not.toHaveBeenCalled();
   });
 
-  it("returns null from route context without a lookup or actor identity", async () => {
-    const findUser = vi.fn();
-    const withoutIdentity = vi.fn(
-      async (_event: unknown, _raw: unknown, context: ChannelRouteContext) => {
-        expect(await context.findUser()).toBeNull();
-        return "without-identity";
-      }
-    );
-    const withoutLookup = vi.fn(
-      async (_event: unknown, _raw: unknown, context: ChannelRouteContext) => {
-        expect(await context.findUser()).toBeNull();
-        return "without-lookup";
-      }
-    );
-    const withIdentity: ChannelInboundMessageInput = {
-      ...message("event-with-identity"),
-      actor: {
-        id: "actor-1",
-        identity: { subject: "actor-1" }
-      }
-    };
-
-    await host(
-      {
-        inbound: {
-          route: withoutIdentity,
-          deliver: delivered,
-          ingress: httpIngress("/without-identity", [
-            { event: message(), raw: null }
-          ])
-        }
-      },
-      { findUser }
-    ).fetch(
-      new Request("https://example.com/without-identity", { method: "POST" })
-    );
-    await host({
-      inbound: {
-        route: withoutLookup,
-        deliver: delivered,
-        ingress: httpIngress("/without-lookup", [
-          { event: withIdentity, raw: null }
-        ])
-      }
-    }).fetch(
-      new Request("https://example.com/without-lookup", { method: "POST" })
-    );
-
-    expect(findUser).not.toHaveBeenCalled();
+  it("refuses to start with ingress but no participant", () => {
+    expect(() =>
+      host({ inbound: { ingress: httpIngress("/inbound", []) } })
+    ).toThrow('Channel "inbound" takes ingress but has no participant');
+    expect(() =>
+      host({ email: { emailIngress: { receive: async () => null } } })
+    ).toThrow('Channel "email" takes ingress but has no participant');
   });
 
   it("awaits onRoute before dispatching an identical routed outcome", async () => {
@@ -404,6 +361,7 @@ describe("stateless ChannelGateway", () => {
             return "application-route";
           },
           deliver: delivered,
+          participant: byActor,
           ingress: httpIngress("/routed", [
             { event, raw: { authenticated: true } }
           ])
@@ -429,6 +387,7 @@ describe("stateless ChannelGateway", () => {
         eventId: event.eventId,
         replySurface: expect.objectContaining({ channelKey: "inbound" })
       }),
+      participant: { id: "actor-1" },
       route: "application-route",
       dispatchId: expect.stringMatching(/^sha256:[\da-f]{64}$/)
     });
@@ -452,7 +411,6 @@ describe("stateless ChannelGateway", () => {
     });
     const onRoute = vi.fn(async (_event: ChannelRouteEvent) => routeFinished);
     const receive = vi.fn<GatewayAgent["receive"]>(async () => undefined);
-    const defaultRoute = vi.fn(() => "host-default");
     const gateway = host(
       {
         inbound: {
@@ -460,10 +418,11 @@ describe("stateless ChannelGateway", () => {
             return null;
           },
           deliver: delivered,
+          participant: byActor,
           ingress: httpIngress("/ignored", [{ event, raw: { ignored: true } }])
         }
       },
-      { defaultRoute, onRoute, agent: () => fakeAgent(receive) }
+      { onRoute, agent: () => fakeAgent(receive) }
     );
 
     let responded = false;
@@ -485,11 +444,11 @@ describe("stateless ChannelGateway", () => {
         eventId: event.eventId,
         replySurface: expect.objectContaining({ channelKey: "inbound" })
       }),
+      participant: { id: "actor-1" },
       route: null,
       dispatchId: expect.stringMatching(/^sha256:[\da-f]{64}$/)
     });
     expect(onRoute.mock.calls[0]?.[0]).not.toHaveProperty("raw");
-    expect(defaultRoute).not.toHaveBeenCalled();
     expect(receive).not.toHaveBeenCalled();
   });
 
@@ -502,10 +461,11 @@ describe("stateless ChannelGateway", () => {
             return undefined as never;
           },
           deliver: delivered,
+          participant: byActor,
           ingress: httpIngress("/invalid", [{ event: message(), raw: null }])
         }
       },
-      { defaultRoute: () => "host-default", agent: () => fakeAgent(receive) }
+      { agent: () => fakeAgent(receive) }
     );
 
     const response = await gateway.fetch(
@@ -527,6 +487,7 @@ describe("stateless ChannelGateway", () => {
             return route;
           },
           deliver: delivered,
+          participant: byActor,
           ingress: httpIngress("/rerouted", [{ event, raw: null }])
         }
       },
@@ -561,9 +522,13 @@ describe("stateless ChannelGateway", () => {
       receive: vi.fn(async () => ({ events: [] }))
     };
     const gateway = host({
-      declines: { deliver: delivered, emailIngress: declines },
-      first: { deliver: delivered, emailIngress: first },
-      later: { deliver: delivered, emailIngress: later }
+      declines: {
+        deliver: delivered,
+        participant: byActor,
+        emailIngress: declines
+      },
+      first: { deliver: delivered, participant: byActor, emailIngress: first },
+      later: { deliver: delivered, participant: byActor, emailIngress: later }
     });
 
     await expect(gateway.handleEmail(emailInput())).resolves.toBe(true);
@@ -572,7 +537,11 @@ describe("stateless ChannelGateway", () => {
     expect(later.receive).not.toHaveBeenCalled();
 
     const allDecline = host({
-      first: { deliver: delivered, emailIngress: declines },
+      first: {
+        deliver: delivered,
+        participant: byActor,
+        emailIngress: declines
+      },
       outputOnly: { deliver: delivered }
     });
     await expect(allDecline.handleEmail(emailInput())).resolves.toBe(false);
@@ -594,6 +563,7 @@ describe("stateless ChannelGateway", () => {
       {
         http: {
           deliver: delivered,
+          participant: byActor,
           ingress: httpIngress("/message", [
             { event: message(), raw: { update: 1 } }
           ])
@@ -601,6 +571,7 @@ describe("stateless ChannelGateway", () => {
         email: {
           route: emailRoute,
           deliver: delivered,
+          participant: byActor,
           emailIngress
         }
       },
@@ -621,8 +592,8 @@ describe("stateless ChannelGateway", () => {
       }
     });
     expect(receive.mock.calls[0]?.[1]).toMatchObject({
-      route: "provider-thread-1",
-      participant: { id: "http:actor-1", name: "operator" },
+      route: "participant:actor-1",
+      participant: { id: "actor-1" },
       surface: { channelKey: "http" }
     });
     expect(receive.mock.calls[1]?.[0]).toMatchObject({
@@ -632,7 +603,7 @@ describe("stateless ChannelGateway", () => {
     });
     expect(receive.mock.calls[1]?.[1]).toMatchObject({
       route: "approval-route",
-      participant: { id: "email:actor-2" },
+      participant: { id: "actor-2" },
       surface: { channelKey: "email" }
     });
     expect(receive.mock.calls[1]?.[0]).not.toHaveProperty("raw");
@@ -653,6 +624,7 @@ describe("stateless ChannelGateway", () => {
       {
         support: {
           route,
+          participant: byActor,
           ingress: httpIngress("/support", [{ event, raw: null }])
         }
       },
@@ -772,9 +744,10 @@ describe("stateless ChannelGateway", () => {
       {
         http: {
           deliver: delivered,
+          participant: byActor,
           ingress: httpIngress("/failing", [{ event: message(), raw: null }])
         },
-        email: { deliver: delivered, emailIngress }
+        email: { deliver: delivered, participant: byActor, emailIngress }
       },
       { agent: () => fakeAgent(receive) }
     );
@@ -787,5 +760,121 @@ describe("stateless ChannelGateway", () => {
     await expect(gateway.handleEmail(emailInput())).rejects.toThrow(
       "durable handoff failed"
     );
+  });
+});
+
+describe("ChannelGateway Web upgrades", () => {
+  function upgrade(path: string, headers: Record<string, string> = {}) {
+    return new Request(`https://example.com${path}`, {
+      headers: { Upgrade: "websocket", ...headers }
+    });
+  }
+
+  function gatewayWith(options: Parameters<typeof web>[0]) {
+    const fetch = vi.fn<GatewayAgent["fetch"]>(async () => new Response());
+    const agent = vi.fn(() => ({ receive: vi.fn(), fetch }));
+    const gateway = new ChannelGateway({
+      channels: { web: web(options) },
+      agent
+    });
+    const forwarded = () => {
+      const header = fetch.mock.calls[0]?.[0].headers.get(WEB_IDENTITY_HEADER);
+      return header ? JSON.parse(header) : undefined;
+    };
+    return { gateway, agent, fetch, forwarded };
+  }
+
+  it("forwards an upgrade to the participant's own agent object by default", async () => {
+    const { gateway, agent, forwarded } = gatewayWith({
+      participant: () => ({ id: "user-1", name: "Ada" })
+    });
+
+    await gateway.fetch(upgrade("/channels"));
+
+    expect(agent).toHaveBeenCalledWith("participant:user-1");
+    expect(forwarded()).toEqual({
+      route: "participant:user-1",
+      participant: { id: "user-1", name: "Ada" }
+    });
+  });
+
+  it("follows the conversation the path names, and accepts a plain id", async () => {
+    const { gateway, forwarded } = gatewayWith({
+      participant: () => "anonymous"
+    });
+
+    await gateway.fetch(upgrade("/channels/conversation%201"));
+
+    expect(forwarded()).toEqual({
+      route: "participant:anonymous",
+      conversationId: "conversation 1",
+      participant: { id: "anonymous" }
+    });
+  });
+
+  it("replaces an identity header the client sent", async () => {
+    const { gateway, forwarded } = gatewayWith({ participant: () => "user-1" });
+
+    await gateway.fetch(
+      upgrade("/channels", {
+        [WEB_IDENTITY_HEADER]: JSON.stringify({
+          route: "someone-else",
+          participant: { id: "admin" }
+        })
+      })
+    );
+
+    expect(forwarded()).toMatchObject({ participant: { id: "user-1" } });
+  });
+
+  it("refuses an unauthenticated upgrade before routing it", async () => {
+    const route = vi.fn(() => "room");
+    const { gateway, fetch } = gatewayWith({ participant: () => null, route });
+
+    const response = await gateway.fetch(upgrade("/channels"));
+
+    expect(response?.status).toBe(401);
+    expect(route).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("lets the app route a participant to a shared object, or refuse them", async () => {
+    const { gateway, agent, fetch } = gatewayWith({
+      participant: (request) => request.headers.get("x-user"),
+      route: (request, participant) => {
+        const room = new URL(request.url).searchParams.get("room");
+        return room === "team" && participant.id === "member" ? "team" : null;
+      }
+    });
+
+    const member = await gateway.fetch(
+      upgrade("/channels?room=team", { "x-user": "member" })
+    );
+    const outsider = await gateway.fetch(
+      upgrade("/channels?room=team", { "x-user": "outsider" })
+    );
+
+    expect(member?.status).toBe(200);
+    expect(agent).toHaveBeenCalledWith("team");
+    expect(outsider?.status).toBe(403);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("leaves an upgrade no Channel matches to the Worker", async () => {
+    const participant = vi.fn(() => "user-1");
+    const { gateway } = gatewayWith({
+      participant,
+      match: (request) =>
+        new URL(request.url).pathname === "/chat" ? {} : undefined
+    });
+
+    expect(await gateway.fetch(upgrade("/channels"))).toBeUndefined();
+    expect(participant).not.toHaveBeenCalled();
+    expect(
+      await new ChannelGateway({
+        channels: {},
+        agent: () => fakeAgent()
+      }).fetch(upgrade("/channels"))
+    ).toBeUndefined();
   });
 });

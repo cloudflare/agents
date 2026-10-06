@@ -544,7 +544,10 @@ export class AiSdkHarness<TOOLS extends ToolSet = ToolSet>
     return this.session(session.id);
   }
 
-  /** Sessions are created on first use, so any id names one. */
+  /**
+   * Sessions are created on first use, so any id names one. That is not an
+   * authorization gap: whoever reaches the agent may create sessions anyway.
+   */
   #ensure(session: SessionId): void {
     if (this.#kv.get(`${PREFIX}s:${session}`) === undefined) {
       this.#create({ id: session });

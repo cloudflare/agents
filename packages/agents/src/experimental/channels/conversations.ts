@@ -395,9 +395,9 @@ export class Channels extends LifecycleCapability {
   }
 
   /**
-   * Act on the conversation itself. Authorization belongs here, next to the
-   * gateway's trust boundary: for now any participant may create, fork or
-   * reset a conversation.
+   * Act on the conversation itself. Any participant may create, fork or
+   * reset: the agent object is the authorization boundary, and the gateway
+   * decides who reaches it.
    */
   async #operate(
     event: InboundEvent,

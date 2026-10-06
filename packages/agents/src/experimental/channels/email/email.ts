@@ -1,5 +1,6 @@
 import type {
   Channel,
+  ChannelParticipant,
   ChannelRoute,
   DeliveryFailure,
   DeliveryResult
@@ -43,9 +44,18 @@ export type EmailChannelOptions = {
   from: EmailAddress;
   /** Subject used when a message does not provide a title. */
   defaultTitle?: string;
-  /** Select an application route from the event, parsed email, and Host context. */
+  /**
+   * Who sent an inbound email. Set it to receive email. The envelope sender
+   * is not authenticated, so decide how far to trust it. Return null to drop
+   * the email.
+   */
+  participant?: ChannelParticipant<InboundEmailRaw>;
+  /**
+   * Pick the agent object an email reaches. Default: a room of the
+   * participant's own.
+   */
   route?: ChannelRoute<InboundEmailRaw>;
-  /** Override inferred Workers Email ingress addresses. */
+  /** Override inferred Workers Email ingress addresses. Needs `participant`. */
   inbound?: InboundEmailOptions;
 };
 
@@ -236,13 +246,20 @@ export function email(options: EmailChannelOptions): Channel<InboundEmailRaw> {
     }
   }
 
+  if (options.inbound && !options.participant) {
+    throw new Error("participant is required to receive email");
+  }
+
   return {
-    ...(options.route && { route: options.route }),
-    emailIngress: inboundEmail({
-      to: options.inbound?.to,
-      from: options.inbound?.from,
-      replyFrom: options.from
+    ...(options.participant && {
+      participant: options.participant,
+      emailIngress: inboundEmail({
+        to: options.inbound?.to,
+        from: options.inbound?.from,
+        replyFrom: options.from
+      })
     }),
+    ...(options.route && { route: options.route }),
     contactSurface(identity: ChannelIdentity) {
       if ((identity.scope ?? "default") !== "default") return null;
       return {

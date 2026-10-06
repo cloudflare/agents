@@ -18,6 +18,9 @@ function hook(threadId: string): Channel {
     message: { id: "message-1", text: "Hello", attachments: [] }
   };
   return {
+    participant: (event) => event.actor?.id ?? null,
+    // The agent object these tests read back is named by the thread.
+    route: (event) => event.thread.id,
     ingress: {
       receive: async (request) =>
         matchesPath(request, "/hook")
@@ -51,7 +54,7 @@ describe("ChannelGateway to the agent over RPC", () => {
       session: "default",
       input: {
         parts: [{ type: "text", text: "Hello" }],
-        from: { participantId: "hook:actor-1" }
+        from: { participantId: "actor-1" }
       }
     });
   });
