@@ -1,0 +1,24 @@
+{
+  "name": "repro-2498-submission-recovery-window",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-10-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RecoveryWindowAgent",
+        "class_name": "RecoveryWindowAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RecoveryWindowAgent"]
+    }
+  ]
+}
