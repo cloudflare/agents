@@ -174,11 +174,15 @@ describe("Slack signed ingress", () => {
     });
 
     if (!envelope) throw new Error("Expected a Slack ingress envelope");
-    const context = { findUser: async () => null };
+    const participant = { id: "UHUMAN" };
     await expect(
-      channel.route?.(envelope.event, envelope.raw, context)
+      channel.route?.(envelope.event, envelope.raw, participant)
     ).resolves.toBe("workspace-route");
-    expect(route).toHaveBeenCalledWith(envelope.event, envelope.raw, context);
+    expect(route).toHaveBeenCalledWith(
+      envelope.event,
+      envelope.raw,
+      participant
+    );
   });
 
   it("uses the DM channel for unthreaded continuity and the root for threaded DMs", async () => {
