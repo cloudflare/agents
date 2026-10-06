@@ -207,7 +207,8 @@ describe("experimental Telegram webhook ingress", () => {
   it("infers this bot's user id from its BotFather token", async () => {
     const channel = telegram({
       botToken: "424242:AAHfake-token",
-      webhook: { secretToken: "webhook-secret" }
+      webhook: { secretToken: "webhook-secret" },
+      participant: (event) => event.actor?.id ?? null
     });
 
     const result = await channel.ingress?.receive(

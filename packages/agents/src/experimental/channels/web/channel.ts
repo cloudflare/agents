@@ -102,8 +102,8 @@ export class WebChannel implements ConversationChannel {
     // The gateway is the trust boundary: it resolves who is connecting and
     // sets this header. The agent must only be reachable through the
     // gateway, or a caller could forge the header and join as anyone.
-    // Authorization of conversation operations (create, fork, reset) would
-    // also go here, or in the gateway: for now any connection may send them.
+    // There is no further authorization here: the agent object is the
+    // boundary, so a connection may use every conversation in it.
     // SAFETY: only the gateway sets this header, with a WebIdentity.
     const resolved = JSON.parse(header) as WebIdentity;
     const host = this.#mounted();
@@ -180,8 +180,8 @@ export class WebChannel implements ConversationChannel {
     identity: Identity,
     requestId: string
   ): Promise<void> {
-    // Authorization would go here too: for now any connection may list every
-    // conversation the agent has.
+    // The agent object is the authorization boundary, so every connection
+    // may list every conversation in it.
     const frame = {
       type: "channels:conversations" as const,
       conversationId: identity.conversationId,
