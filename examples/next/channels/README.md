@@ -10,7 +10,7 @@ Every agent has the same shape:
 2. `Channels.forHarness(harness, { channels: { web: new WebChannel() } })`
    serves each harness session as a conversation through the Web Channel.
 3. The Worker's **`ChannelGateway`** routes each WebSocket upgrade to the
-   agent that holds the conversation.
+   agent object its route names, which holds the room's conversations.
 
 | Path                               | Agent        | Harness                                                          |
 | ---------------------------------- | ------------ | ---------------------------------------------------------------- |
