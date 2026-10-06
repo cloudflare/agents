@@ -18,8 +18,7 @@ pi-shaped follow-up). Each has its own way to extend it:
 Someone who writes a guard that refuses `rm -rf`, an MCP bridge, or a web
 search tool has to write it once per harness. We already pay this cost
 inside the SDK: `browserTool` ships three adapters (`browser/ai-sdk.ts`,
-`browser/tanstack-ai.ts`, and `browser/pi.ts` in #2484), and every new tool
-would need one per harness.
+`browser/tanstack-ai.ts`, and `browser/pi.ts` in #2484).
 
 We want one top-level extension format, so switching harness does not mean
 rewriting extensions. Native extensions stay. The portable format covers
@@ -33,164 +32,195 @@ none of it applies.
 
 ## The proposal
 
-`agents/harness/extensions` (experimental). Extensions are code. The shape
-is a subset of OpenCode 2's plugin API, with the same names, because
-OpenCode solved the part that is hard: [hot reload without stacked
-state](https://anoma.ly/notes/opencode-reloaded/).
+`agents/harness/extensions` (experimental). An extension is a function of
+its context. A harness takes an array of them.
 
 ```ts
-import { defineExtension, defineTool } from "agents/harness/extensions";
+import type { ExtensionContext } from "agents/harness/extensions";
 import { z } from "zod";
 
-export const guard = defineExtension({
-  id: "guard",
-  async setup(ctx) {
-    await ctx.tool.transform((tools) =>
-      tools.add(
-        defineTool({
-          id: "add",
-          description: "Add two numbers.",
-          input: z.object({ a: z.number(), b: z.number() }),
-          replay: "safe",
-          execute: ({ a, b }) => ({ content: String(a + b) })
-        })
-      )
-    );
-    await ctx.instructions.transform((sections) =>
-      sections.set("guard", "Never run destructive commands.")
-    );
-    await ctx.tool.hook("execute.before", (event) => {
-      if (/\brm\s+-rf\b/.test(String(event.input.command))) {
-        event.block = "destructive command";
-      }
-    });
+function guard(ctx: ExtensionContext) {
+  ctx.tool.add({
+    id: "add",
+    description: "Add two numbers.",
+    input: z.object({ a: z.number(), b: z.number() }),
+    replay: "safe",
+    execute: ({ a, b }) => ({ content: String(a + b) })
+  });
+  ctx.instructions.set("guard", "Never run destructive commands.");
+  ctx.tool.hook("execute.before", (event) => {
+    const command = String(event.input.command ?? "");
+    if (/\brm\s+-rf\b/.test(command)) event.block = "destructive command";
+    else if (/\bdeploy\b/.test(command)) event.ask = `Run "${command}"?`;
+  });
+}
+
+new PiHarness({
+  extensions: [guard, webAccess({ search }), mcp],
+  harness: ({ storage, context, registry }) => {
+    registry.install(nativePiExtension);
+    return Harness.open(storage, { models, registry }, context);
   }
 });
 ```
 
-On pi:
+The names follow OpenCode 2's plugin API, because OpenCode solved the part
+that is hard: [hot reload without stacked
+state](https://anoma.ly/notes/opencode-reloaded/). Registration is
+synchronous; nothing in an extension needs `await` unless it fetches.
 
-```ts
-harness: async ({ storage, context }) => {
-  const registry = createRegistry();
-  const { failures } = await piExtensions({ registry, extensions: [guard] });
-  if (failures.length > 0) throw new AggregateError(failures);
-  return Harness.open(storage, { models, registry }, context);
-};
-```
+### What an extension can do
 
-### Two kinds of registration
+| `ctx.`                                           | Kind      | What it is                                                                |
+| ------------------------------------------------ | --------- | ------------------------------------------------------------------------- |
+| `tool.add(tool)`, `tool.transform(draft => …)`   | transform | the tool catalog: native tools first, then every transform                |
+| `tool.hook("execute.before" \| "execute.after")` | hook      | edit a call's input, block it, ask the person, or replace its result      |
+| `instructions.set(key, text)`, `.transform`      | transform | named system prompt sections                                              |
+| `skill.add(source)`, `.transform`                | transform | `agents/skills` sources, offered through `activate_skill`                 |
+| `command.add(command)`, `.transform`             | transform | slash commands, resolved before anything is stored                        |
+| `event.on(name, handler)`                        | handler   | `session.created`, `message.end`, `tool.end`, `turn.end`; observe only    |
+| `storage(namespace)`                             |           | synchronous durable KV, with `.session(id)` scoping                       |
+| `session(id)`                                    |           | `submit`, `note`, and `tools.activate/deactivate/offered` for one session |
+| `supports(feature)`                              |           | whether the harness honours a feature                                     |
 
-**Transforms** edit a domain's draft. v1 has three domains:
+Inside a tool, `call` has `signal`, `progress(text)`, `update(metadata)`
+and `ask(request)`. A result has `content`, `isError`, `metadata` (never
+shown to the model) and `activate` (deferred tools to offer this session).
 
-| Domain         | Draft                                 | Becomes                          |
-| -------------- | ------------------------------------- | -------------------------------- |
-| `tool`         | `list/get/add/update/remove` of tools | the tools the model is offered   |
-| `instructions` | `list/get/set/remove` of keyed text   | system prompt sections, in order |
-| `skill`        | `list/add/remove` of `SkillSource`s   | `activate_skill` and a catalog   |
+### Transforms rebuild from scratch
 
-A rebuild starts from an empty draft and runs every transform once: by
-extension order, then registration order. A refresh cannot undo a policy,
-an edit cannot apply twice, and a removed source's tools disappear. Those
-are the three bugs in the OpenCode post, and `host.test.ts` reproduces each
-one. Rebuilds of a domain are serialized and coalesced. A setup's
-registrations rebuild once, after it. A transform cannot register anything
-while it replays.
+A rebuild starts from the domain's base (the harness's native tools for
+`tool`, empty for the rest) and runs every transform once: by extension
+order, then registration order. A refresh cannot undo a policy, an edit
+cannot apply twice, and a removed source's tools disappear. Those are the
+three bugs in the OpenCode post, and `host.test.ts` reproduces each one.
+Rebuilds of a domain are serialized and coalesced. An extension's start is
+batched into one rebuild per domain, and extensions start one at a time. A
+transform cannot register anything while it replays.
 
-**Hooks** edit a running operation's event in place. Later hooks see
-earlier edits. Hooks never replay. v1 has two:
+Keep network calls outside transforms. A domain's rebuild replays every
+extension's transforms, so a transform that fetched would fetch whenever
+any extension reloaded. Fetch, keep the result, then `reload()`. A
+transform may read `ctx.storage`, which is synchronous, so a rebuild is a
+function of stored state.
 
-- `tool.hook("execute.before")`: edit `event.input`, or set `event.block`.
-  The first block stops the chain. A hook that throws blocks the call
-  (fail closed).
-- `tool.hook("execute.after")`: replace `event.result`. A hook that throws
-  is reported and skipped.
+### Hooks and events
 
-Hooks see every tool call, native tools included. That is what a policy
-extension needs.
+`execute.before` hooks edit `event.input`, set `event.block`, or set
+`event.ask`. The first block stops the chain. A hook that throws blocks the
+call (fail closed). Once every hook has run, the harness asks `event.ask`
+and blocks the call on a refusal. `execute.after` hooks replace
+`event.result`; one that throws is reported and skipped. Hooks see every
+tool call, native tools included.
 
-Every registration returns `{ dispose }`. `host.remove(id)` disposes all of
-an extension's registrations, runs the cleanup `setup` returned, and
-rebuilds once.
+Event handlers observe and cannot change anything. Delivery is at least
+once: after an eviction a harness may deliver an event again.
 
-### Tool schemas
+### Per-session tools
 
-`input` is any Standard Schema that also implements Standard JSON Schema
-(Zod 4, Valibot, ArkType). The harness shows the model the JSON Schema and
-the tool parses the model's input with the schema itself, so `execute` gets
-typed, parsed input. `jsonSchema(raw)` wraps a schema only known at runtime,
-such as an MCP server's tool list.
+A tool marked `deferred` is in the catalog but not offered. A session
+offers it once activated, either by a tool's result (`activate: [...]`,
+which is how a loader like `web_enable` works) or by
+`ctx.session(id).tools.activate()`. The selection is per session and
+durable, so it survives evictions, and forks inherit it.
+
+### Asking the person
+
+`call.ask({ kind: "confirm" | "select" | "input", ... })` stores the
+question and waits. The harness lists open questions in `requests()`, and
+`reply(id, answer)` answers one. The answer must fit the kind. If the
+object dies while waiting, the harness reruns the tool's `execute` from
+the top after it restarts, and `ask` finds the same question and its
+stored answer. So a tool that asks must be `replay: "safe"`, and asking
+from any other tool throws. The same mechanism serves `event.ask`.
+
+### Commands and injected messages
+
+`/name args` sent to a session runs the command before anything is stored.
+A command that returns `{ prompt }` becomes that prompt's ordinary durable
+submission, so prompt templates survive eviction like any prompt. One that
+returns `{ text }` or nothing is settled by the harness as that text. The
+outcome is recorded by operation id, so a retried submit neither reruns
+the command nor submits twice. `session.submit()` and `session.note()`
+require an `operationId` for the same reason; a note goes in the transcript
+for clients and never reaches the model.
 
 ### Rules for a Durable Object
 
-- `setup` runs on every cold start. On a Durable Object that means after
-  every eviction. State that must survive goes in storage the extension
-  owns.
+- Extensions run every time the harness opens, which on a Durable Object
+  means after every eviction. State that must survive goes in
+  `ctx.storage`.
 - Tool ids must be stable across restarts. pi resumes an interrupted tool
   call by its tool's name.
 - `replay: "safe"` lets a harness rerun an interrupted call. The default,
   `unsafe`, reports it interrupted.
-- Keep network calls outside transforms. A domain's rebuild replays every
-  extension's transforms, so a transform that fetched would fetch whenever
-  any extension reloads. Fetch, store the result in a closure, then call
-  `reload()`.
+- `ctx.session()` works from tools, hooks, commands and handlers, not
+  while extensions start: the harness is not open yet.
 
 ### Features and failure
 
-A harness declares which features it honours (`tool`,
-`tool.execute.before`, `tool.execute.after`, `instructions`, `skill`).
-Registering one it lacks throws `ExtensionFeatureUnsupported` inside setup.
-`host.add()` returns it as the cause of an `ExtensionSetupFailed` value and
-rolls the setup back. An extension that wants to degrade checks
-`ctx.supports(feature)` first. Nothing is silently dropped.
+A harness declares the features it honours. Using one it lacks throws
+`ExtensionFeatureUnsupported`; while an extension starts, that fails it,
+the harness rolls it back and reports it, and the rest run. Editing a
+native tool where the harness cannot is reported as a failed transform.
+An extension that wants to degrade checks `ctx.supports(feature)` first.
+Nothing is silently dropped.
 
 ## How it maps onto each harness
 
-| Portable              | Pi (built)                                              | OpenCode                                                          | Think                                                | Container (Claude Code)                                                          |
-| --------------------- | ------------------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `tool` transform      | one pi `Extension` reinstalled per rebuild              | `ctx.tool.transform` `add` (schema conversion, see below)         | `tools(turn)` returns the snapshot as AI SDK tools   | host tools on the daemon's MCP server; the DO runs `execute`                     |
-| `tool.execute.before` | `hook(ToolTask, { beforeTool })`: `block` / `arguments` | `ctx.tool.hook("execute.before")`; block by throwing (to confirm) | `hooks.beforeToolCall`: `block` / `allow` with input | `PreToolUse`, answered by the DO: deny or `updatedInput`                         |
-| `tool.execute.after`  | `afterTool` returns the replaced result                 | `ctx.tool.hook("execute.after")`, `result` on `completed`         | not yet: `afterToolCall` returns void                | not for built-in tools; `PostToolUse` can add context, not replace output        |
-| `instructions`        | one `PromptSection` per key                             | `ctx.session.hook("context")` pushes `system` parts               | `system(turn)` joins the sections                    | `appendSystemPrompt` when a query starts                                         |
-| `skill`               | `resolveSkillSources` tools and catalog section         | `ctx.skill.transform` `add`                                       | the same `activate_skill` tools                      | `SKILL.md` files in the container, or host tools                                 |
-| reload takes effect   | next request and next tool call, mid-run included       | at once, every session (OpenCode's own reload)                    | next turn (`tools()` runs per turn)                  | next query, or sooner if Claude Code honours MCP `tools/list_changed` (untested) |
+Pi is built. The rest are designs to check against those harnesses as
+they land.
 
-Notes per harness:
+| Portable                  | Pi (built)                                                            | OpenCode                                                          | Think                                          | Container (Claude Code)                                               |
+| ------------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------- |
+| tool catalog              | one projected pi extension, rebuilt per rebuild                       | `ctx.tool.transform` (schema conversion to confirm)               | `tools(turn)` from the snapshot                | host tools on the daemon's MCP server; the DO runs `execute`          |
+| native tools in the draft | composed from the factory's registry; remove, rename, re-describe     | OpenCode's tool editor already lists them                         | whatever `tools()` returns                     | remove (`disallowedTools`); no re-describing built-ins                |
+| `deferred` + `activate`   | a pi extension per deferred tool, selected in the session's agent doc | per-session agent tools (to confirm)                              | `activeTools` in `beforeTurn`, from storage    | `allowedTools` on the next query                                      |
+| `execute.before`          | `ToolTask` `beforeTool`: `block` / `arguments`                        | `ctx.tool.hook("execute.before")`; block by throwing (to confirm) | `beforeToolCall`: `block` / `allow` with input | `PreToolUse`, answered by the DO: deny or `updatedInput`              |
+| `execute.after`           | `afterTool` returns the replaced result                               | `ctx.tool.hook("execute.after")`                                  | needs `afterToolCall` to return a replacement  | not for built-in tools; `PostToolUse` cannot replace their output     |
+| `ask` / `event.ask`       | stored request; the id is a memo on the tool task                     | OpenCode's permission and question flow                           | park the turn, as Think parks on approvals     | #2285's `requests()` / `reply()`, natively                            |
+| `metadata`                | pi `details`                                                          | `metadata`                                                        | the tool output object                         | stored DO-side only                                                   |
+| instructions              | one `PromptSection` per key                                           | `ctx.session.hook("context")` pushes `system` parts               | `system(turn)` joins the sections              | `appendSystemPrompt` when a query starts                              |
+| skills                    | `activate_skill` tools and catalog section                            | `ctx.skill.transform`                                             | the same `activate_skill` tools                | `SKILL.md` files in the container, or host tools                      |
+| commands                  | resolved in `submit()`, recorded by operation id                      | `ctx.command.transform`                                           | resolved before a turn is queued               | resolved DO-side before the prompt                                    |
+| events                    | tool hooks and `GenerationTask` `afterResponse` / `onYield`           | `ctx.event.subscribe`                                             | `afterToolCall`, `onStepFinish`, `onTurnEnd`   | the daemon's frames                                                   |
+| `storage`                 | the object's `ctx.storage.kv`                                         | the object's `ctx.storage.kv`                                     | the object's `ctx.storage.kv`                  | the object's `ctx.storage.kv` (extensions run in the DO)              |
+| `submit` / `note`         | pi input and write submissions, deduplicated by request id            | `session.prompt` / `session.synthetic`                            | queue a turn / write a display part            | `prompt()` / a DO-side transcript entry                               |
+| reload takes effect       | next request and next tool call, mid-run included                     | at once (OpenCode's own reload)                                   | next turn                                      | next query, or sooner if Claude Code honours MCP `tools/list_changed` |
 
-- **Pi.** The match is close. pi resolves the agent's tools at every tool
-  call and every request, so a reload applies mid-run. The test
-  "lets the agent make a tool and call it in the same run" does what the
-  OpenCode post demos. pi validates the call against the JSON Schema
-  before the hooks and again after them; the tool's schema then parses it a
-  third time, which is how refinements JSON Schema cannot express still
-  hold.
-- **OpenCode.** The adapter is thin because the names are OpenCode's. One
-  open point: OpenCode's `Tool.Info` takes an Effect `ValueSchema`, so a
-  portable tool's JSON Schema needs converting or wrapping. The
-  OpenCode harness agent should confirm whether `Tool.Info` accepts raw
-  JSON Schema.
-- **Think.** ThinkHarness has no native extension system, so this format
-  would be its only one. `execute.after` needs `afterToolCall` to return a
-  replacement (a small change in #2396), or the adapter wraps `execute` for
-  portable tools only, which misses native ones. The same mapping fits
-  `AiSdkHarness`.
-- **Container.** Extension code stays in the DO, and the agent loop runs in
-  the container. Anything per-call goes over the daemon's park-and-reply
-  path from #2285, which costs a round trip per tool call. Anything
-  per-request, such as rewriting the messages sent to the model, cannot be
-  ported, because Claude Code does not expose its request to a hook.
+How pi does it, since it is the one that is built:
+
+- `PiHarness` hands the factory a registry view. Native pi extensions go
+  into it as before. pi sees exactly one installed extension,
+  `agents.extensions`, so it is every conversation's default selection. It
+  carries the native extensions' sections, hooks and wraps, and the tools
+  the portable `tool` domain produced. Native extensions stay registered
+  underneath, so their tasks still resolve.
+- Each deferred tool is its own pi extension, resolvable by name but not
+  installed. Activation adds it to the session's `pi.agent` document,
+  either in the tool's own commit (a result's `activate`) or in a commit of
+  its own (`session.tools.activate`). pi resolves the agent at every
+  request and every tool call, so activation and reloads apply mid-run.
+  The test "a loader's result offers deferred tools to its session only"
+  enables and calls a deferred tool in the same run.
+- `ask` keys its request on a memo of the asking tool task. After a crash
+  pi reruns the safe tool from `execute`, the memo returns the same id, and
+  the stored answer comes back.
+- If the factory opens pi with its own registry instead of the one it was
+  handed, `PiHarness` refuses to open, rather than run without the
+  extensions.
 
 ## What cannot be ported
 
-| Native capability                                                  | Where                                                                           | Why not                                                                                                           |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Message/context rewriting before a request                         | pi `beforeRequest`, OpenCode `session.hook("context")`, Think `beforeStep`      | Message types differ per harness, and Claude Code has no request hook. Candidate for v2 (see below).              |
-| Provider request, header and HTTP hooks                            | OpenCode `aisdk`, `session.hook("http.*")`, pi-coding-agent `before_provider_*` | Provider layers stay native ([rfc-harness-model-provider-boundary.md](./rfc-harness-model-provider-boundary.md)). |
-| Custom durable tasks, memos, `ToolControl` (`addTools`, `handoff`) | pi-durable                                                                      | pi's task engine has no counterpart elsewhere.                                                                    |
-| Section and tool wraps that see native config                      | pi `wraps`                                                                      | The draft only holds portable tools (see findings).                                                               |
-| Agents, models, providers, MCP, permissions as domains             | OpenCode                                                                        | Out of v1. MCP is expressible as tools (see the port below).                                                      |
-| Streaming chunks (`onChunk`, `onModelChunk`)                       | Think                                                                           | Chunk types differ per harness. Observability belongs on the harness's event stream.                              |
-| Terminal UI: widgets, footers, shortcuts, custom renderers         | pi coding-agent                                                                 | No terminal. A browser client is the harness's concern.                                                           |
+| Native capability                                          | Where                                                                           | Why not                                                                                                           |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Message/context rewriting before a request                 | pi `beforeRequest`, OpenCode `session.hook("context")`, Think `beforeStep`      | Message types differ per harness, and Claude Code has no request hook.                                            |
+| Provider request, header and HTTP hooks                    | OpenCode `aisdk`, `session.hook("http.*")`, pi-coding-agent `before_provider_*` | Provider layers stay native ([rfc-harness-model-provider-boundary.md](./rfc-harness-model-provider-boundary.md)). |
+| Compaction control                                         | pi `beforeCompact`, OpenCode `session.hook("compaction")`                       | Compaction policy differs per harness, and Claude Code compacts inside the container.                             |
+| Custom durable tasks, memos, `ToolControl.handoff`         | pi-durable                                                                      | pi's task engine has no counterpart elsewhere.                                                                    |
+| Streaming chunks (`onChunk`, `onModelChunk`)               | Think                                                                           | Chunk types differ per harness. Observability belongs on the harness's event stream.                              |
+| Terminal UI: widgets, footers, shortcuts, custom renderers | pi coding-agent                                                                 | No terminal. A browser client renders `metadata`, requests and notes.                                             |
+| Agents, models, providers and MCP as domains               | OpenCode                                                                        | Out of scope. MCP is expressible as deferred tools (see the port below).                                          |
 
 ## Trying it: the five most downloaded pi packages
 
@@ -198,115 +228,103 @@ I took the five most downloaded pi packages by weekly npm downloads (week
 ending 2026-10-05, from the `pi-package` keyword) and counted, with grep
 over each published tarball, which pi `ExtensionAPI` calls each makes:
 
-| Package                              | Weekly | `registerTool` sites | Hooks used                                                  | Also needs                                                                   | Ported?    |
-| ------------------------------------ | ------ | -------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------- | ---------- |
-| `pi-mcp-adapter`                     | 534k   | 6                    | `tool_result`, `before_agent_start`, `input`                | `setActiveTools` (9), `ui.*` (50+), commands, flags, `exec`, stdio servers   | tools, yes |
-| `billion-context`                    | 388k   | 2                    | `before_provider_request/headers`, `session_before_compact` | a local proxy process, `registerProvider`, patched `globalThis.fetch`        | no         |
-| `pi-web-access`                      | 230k   | 10                   | `tool_call`, `before_agent_start`                           | `setActiveTools` (8), model registry API keys, `appendEntry`, `ui.*`         | tools, yes |
-| `pi-subagents`                       | 190k   | 14                   | `tool_result`, `agent_end`, `before_agent_start`            | child `pi` processes, 18 `registerCommand` sites, renderers, skills, prompts | core, yes  |
-| `@juicesharp/rpiv-ask-user-question` | 96k    | 1                    | `before_agent_start`                                        | `ui.custom` blocking dialog, `setActiveTools`                                | no         |
+| Package                              | Weekly | `registerTool` sites | Hooks used                                                  | Also needs                                                                   |
+| ------------------------------------ | ------ | -------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `pi-mcp-adapter`                     | 534k   | 6                    | `tool_result`, `before_agent_start`, `input`                | `setActiveTools` (9), `ui.*` (50+), commands, flags, `exec`, stdio servers   |
+| `billion-context`                    | 388k   | 2                    | `before_provider_request/headers`, `session_before_compact` | a local proxy process, `registerProvider`, patched `globalThis.fetch`        |
+| `pi-web-access`                      | 230k   | 10                   | `tool_call`, `before_agent_start`                           | `setActiveTools` (8), model registry API keys, `appendEntry`, `ui.*`         |
+| `pi-subagents`                       | 190k   | 14                   | `tool_result`, `agent_end`, `before_agent_start`            | child `pi` processes, 18 `registerCommand` sites, renderers, skills, prompts |
+| `@juicesharp/rpiv-ask-user-question` | 96k    | 1                    | `before_agent_start`                                        | `ui.custom` blocking dialog, `setActiveTools`                                |
 
 None of them runs on `PiHarness` as published. They target pi
-coding-agent's `ExtensionAPI`, and `PiHarness` runs pi-durable, which has a
-different extension model. They also import Node APIs (`child_process`,
-`fs`, the OS keyring) that a Worker does not have.
+coding-agent's `ExtensionAPI`, and `PiHarness` runs pi-durable. They also
+import Node APIs (`child_process`, `fs`, the OS keyring).
 
-So I ported each package's model-facing core to the portable format
+So I ported each package's model-facing behaviour to the portable format
 (`packages/agents/src/harness/pi/tests/ported-extensions.ts`) and ran the
 ports on `PiHarness` with pi's faux model (`extensions.test.ts`):
 
-- **pi-mcp-adapter** became `mcpAdapter`: one transform over a fetched
-  catalog, adding `mcp__<server>__<tool>`. The original needs an
-  undocumented `unregisterTool` to drop tools when a server changes; with
-  transforms that bug cannot happen. The test changes the server's tool
-  list and the next request sees exactly the new list.
-- **pi-web-access** became two tools and an instructions section. The
-  search backend and `fetch` are injected, which also covers the API keys
-  it reads from pi's model registry.
-- **pi-subagents** became a `subagent` tool and its skills. The host
-  injects `run`, which creates a `PiHarness` session and prompts it. That
-  worked from inside a tool call with no deadlock.
-- **billion-context** has nothing portable. It is a fetch-patching proxy.
-  Its manifest-fed tools would be the same transform as `mcpAdapter`.
-- **rpiv-ask-user-question** has nothing portable. Its tool holds a call
-  open on a terminal dialog.
-- A `guard` extension, in the shape of the permission packages, blocks
-  `rm -rf` on a native pi tool and redacts secrets from its result.
+| Package                | Port                                                                                                                         | Left out                                                  |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| pi-mcp-adapter         | server tools as deferred tools behind `mcp_enable`; one transform over a fetched catalog, so no `unregisterTool`; `/mcp`     | stdio servers, OS keyring OAuth, the TUI panel            |
+| billion-context        | nothing; its manifest tools and `/acp` commands would be the same shapes as the MCP port                                     | the proxy, provider hooks, compaction cancelling          |
+| pi-web-access          | `web_enable` loader activating deferred `web_search`/`fetch_content`/`get_search_content`; pages kept per session in storage | curator UI and widgets; API keys come in through `search` |
+| pi-subagents           | `subagent` tool running a child `PiHarness` session, live `update()` metadata, its skills, a prompt template as a command    | workflow TUI, intercom, watchdog, renderers               |
+| rpiv-ask-user-question | `ask_user_question` with `call.ask({ kind: "select" })`, answered through `reply()`, across a crash                          | TUI rendering, i18n                                       |
 
-## Findings: what broke or was not expressive enough
+A `guard` extension, in the shape of the permission packages, blocks
+`rm -rf` on a native pi tool, asks before `deploy`, and redacts secrets
+from results.
 
-1. **Per-session tool selection is the biggest gap.** Three of the five
-   call `setActiveTools` to load tools lazily for one session
-   (`web_enable`, the MCP proxy, ask-user's reconcile). Portable transforms
-   are global. pi-durable has `ToolControl.addTools` and OpenCode has
-   per-agent tool lists, so a v2 could add `ToolResult.activate` plus a
-   `deferred` flag on a tool.
-2. **Commands, UI and injected messages are missing, and four of five use
-   them.** Slash commands, `ctx.ui.notify/select/confirm`, and
-   `sendMessage`/`sendUserMessage`. On a durable harness a dialog has to
-   be a persisted request with a `reply()` (the shape in #2285), not a
-   promise. Adding `request` and `command` domains should wait for
-   `PiHarness` and OpenCode to share a request model.
-3. **Every package subscribes to lifecycle events.** `session_start`,
-   `agent_end` and `session_tree` reset in-memory state. The portable
-   format has no event subscription. A read-only `ctx.event.subscribe`
-   mapped onto each harness's event stream would cover it.
-4. **The tool draft cannot see native tools.** Hooks see every call, but
-   `draft.remove("shell")` on a native pi tool does nothing. On pi the fix
-   is pi `wraps` and the conversation's `tools.remove`. On OpenCode the
-   draft already holds native tools. The semantics have to be the same
-   everywhere, so v1 states "portable tools only" and the gap stays open.
-5. **One pi extension holds everything.** Transforms run across
-   extensions over one draft (B may edit A's tools), so the result cannot
-   be split per extension. A conversation can select the whole portable
-   set or none of it, not one portable extension.
-6. **Dynamic state does not survive an eviction by itself.** The
-   tool-maker test makes a tool and calls it in the same run. After an
-   eviction that tool is gone, because setup reran with empty closures. A
-   portable `ctx.storage` would make the right pattern obvious.
-7. **Tool results have no structured details.** pi-mcp-adapter flips
-   `isError` from `details` in a `tool_result` hook. Portable results carry
-   content and `isError` only. A JSON `metadata` field maps to pi
-   `details` and OpenCode `metadata`.
-8. **JSON types differ.** pi-ai's JSON arrays are readonly and chord's are
-   mutable, so neither assigns to the other. The portable `JsonValue` is
-   mutable, and the pi adapter copies arguments with one documented cast.
-9. **Subagents are not durable.** The ported `subagent` tool is
-   `replay: "unsafe"`. If the object is evicted mid-call, the parent gets
-   "interrupted" while the child session keeps running. pi-durable's own
-   child-conversation tasks avoid this, but no other harness has them.
+## The gaps the first version found, and what closed them
 
-What worked without trouble: rebuild-from-empty, tools appearing mid-run,
-hooks over native tools, extension removal, skills, and setup rerunning
-after an eviction.
+The first version had tools, instructions and skills only. Running the
+ports against it found six gaps. Each is now closed:
+
+1. **Per-session tool selection** (3 of 5 call `setActiveTools`):
+   `deferred` tools, `activate` on results, `session.tools`.
+2. **Commands, asking the user, injected messages** (4 of 5): the
+   `command` domain, `call.ask` and `event.ask` with `requests()` /
+   `reply()`, `session.submit` and `session.note`.
+3. **Lifecycle events** (all 5): `ctx.event.on`.
+4. **Native tools in the draft**: the tool draft starts with the
+   harness's tools, gated by `tool.native.remove` / `tool.native.update`.
+5. **Tool-result metadata**: `metadata` on results, `call.update()`.
+6. **State across evictions**: `ctx.storage`. The tool-maker test makes
+   a tool, crashes the object, and calls the tool again.
+
+## Known limits
+
+- **A parked `ask` keeps the object awake.** `PiHarness`'s wake job waits
+  on live pi work with a heartbeat, and a tool waiting on a person is live
+  work. A graceful eviction also waits for it, which is why the crash test
+  aborts the object instead. Letting the object sleep needs a parked task
+  state in pi-durable.
+- **`activate` is read from the tool's own result.** An `execute.after`
+  hook runs where pi has no commit, so a hook calls
+  `ctx.session(id).tools.activate()` instead.
+- **Explicit selections bypass the projection.** A conversation whose pi
+  agent selects extensions by an explicit array sees only what it names,
+  and no portable extension unless it names `agents.extensions`.
+- **`session.created` covers the harness's own API.** Conversations that
+  pi tools create themselves do not report it.
+- **A command's `run` is not durable.** It runs before anything is stored.
+  Its outcome is recorded, but a crash during `run` reruns it on retry.
+- **Per-session storage outlives the session on pi.** `PiHarness` has no
+  session delete yet; `deleteSessionStorage` is there for harnesses that
+  do.
 
 ## The alternatives
 
 - **Adopt `@opencode/plugin`'s types as the portable format.** OpenCode
   plugins would run on pi unchanged. But the types pull in Effect schemas
-  and branded ids, and they expose 20 domains no other harness can honour.
+  and branded ids, and they expose domains no other harness can honour.
   Mirroring the names gets most of the benefit without the dependency.
 - **Port pi's `ExtensionAPI` to every harness (#2229's direction).** It
   has the largest ecosystem, but it is imperative (`registerTool`,
   `setActiveTools`, `unregisterTool`) and terminal-shaped. The stacking
   bugs OpenCode fixed come back, and half its API is `ctx.ui`.
+- **Extensions as objects (`defineExtension({ id, setup })`).** The first
+  version of this PR. An id per extension buys little: the host keys
+  extensions by reference, reports use the function's name, and storage
+  takes an explicit namespace.
+- **Per-session transforms (`transform((draft, session) => …)`)** for
+  tool selection. One rebuild per session, and the result would depend on
+  mutable session state.
+- **Ask as a separate `{ request }` result plus a `resume(reply)`
+  handler.** No re-execution, but a tool's logic splits in two and its
+  local state has to be serialized by hand.
 - **A declarative manifest, like Think's sandboxed extensions.** Portable
-  across processes, but tools and hooks become RPC stubs, and it is not
-  code. Extensions are code.
-- **Keep per-tool adapters (`browser/pi.ts` and siblings).** Fine for one
-  tool, but it grows as tools times harnesses, and it does not cover hooks.
+  across processes, but it is not code.
 
 ## Open questions
 
-- Does OpenCode's `Tool.Info` accept a raw JSON Schema, or does the adapter
-  build an Effect schema?
-- Should `execute.after` be mandatory? Think and the container cannot fully
-  honour it today.
-- Is `instructions` static text enough? pi and OpenCode can render per
-  request; Think per turn; Claude Code only per query. Static text with
-  `reload()` is the one shape all four honour.
-- Where should v2 start: per-session tool selection (finding 1) or
-  requests and commands (finding 2)?
+- Does OpenCode's `Tool.Info` accept a raw JSON Schema, and does OpenCode
+  have per-session tool selection?
+- ThinkHarness needs `afterToolCall` to return a replacement for
+  `execute.after`.
+- Should pi-durable grow a parked task state, so an `ask` lets the object
+  sleep?
 
 ## The decision
 

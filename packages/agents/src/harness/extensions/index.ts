@@ -1,19 +1,29 @@
 /**
  * Portable harness extensions: one extension format that runs on every
- * harness. Write an extension once with `defineExtension`, then hand it to
- * a harness adapter such as `piExtensions` from `agents/harness/pi`.
+ * harness. An extension is a function of its context; pass an array of
+ * them to a harness, such as `new PiHarness({ extensions })`.
  *
  * @experimental The API may change between releases.
  */
 export {
-  defineExtension,
-  defineTool,
+  isNativeTool,
+  tool,
   type Cleanup,
+  type Command,
+  type CommandDomain,
+  type CommandDraft,
+  type CommandResult,
+  type EventDomain,
   type Extension,
   type ExtensionContext,
   type ExtensionFeature,
+  type ExtensionSession,
+  type ExtensionStorage,
+  type HarnessEvents,
   type InstructionsDomain,
   type InstructionsDraft,
+  type NativeTool,
+  type NativeToolHandle,
   type Registration,
   type SkillDomain,
   type SkillDraft,
@@ -24,20 +34,29 @@ export {
   type ToolContentPart,
   type ToolDomain,
   type ToolDraft,
+  type ToolEntry,
   type ToolHookEvents,
   type ToolReplay,
   type ToolResult,
-  type TransformDomain
+  type TransformDomain,
+  type UserReply,
+  type UserRequest
 } from "./extension";
 export {
   ExtensionAlreadyInstalled,
   ExtensionFeatureUnsupported,
   ExtensionHost,
   ExtensionSetupFailed,
+  type DomainName,
   type ExtensionHostOptions,
   type ExtensionReport,
   type ExtensionSnapshot
 } from "./host";
+export {
+  RequestStore,
+  type PendingRequest,
+  type ReplyRejected
+} from "./requests";
 export {
   jsonSchema,
   type InferInput,
@@ -46,3 +65,9 @@ export {
   type SchemaIssue,
   type ToolInputSchema
 } from "./schema";
+export {
+  deleteSessionStorage,
+  extensionStorage,
+  memoryKeyValueStore,
+  type KeyValueStore
+} from "./storage";

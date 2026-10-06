@@ -9,9 +9,9 @@
 import { z } from "zod";
 import type { SkillSource } from "../../../skills";
 import {
-  defineExtension,
-  defineTool,
   jsonSchema,
+  type Extension,
+  type ExtensionContext,
   type JsonObject,
   type ToolResult
 } from "../../extensions";
@@ -32,19 +32,19 @@ export type McpServer = {
 };
 
 /**
- * pi-mcp-adapter's direct tools: every tool of every server, as
- * `mcp__<server>__<tool>`. The original registers tools imperatively and
- * unregisters them through an undocumented `unregisterTool` when a server
- * changes. Here the tool list is one transform over a fetched catalog, so
- * `refresh()` gives exactly the servers' current tools.
+ * pi-mcp-adapter's tools: every tool of every server, as
+ * `mcp__<server>__<tool>`, deferred behind one `mcp_enable` loader, as the
+ * original keeps them out of context until the model asks. The original
+ * registers tools imperatively and drops them through an undocumented
+ * `unregisterTool` when a server changes; here the list is one transform
+ * over a fetched catalog, so `refresh()` gives exactly the servers' tools.
  *
- * The network call stays outside the transform. A rebuild of the tool
+ * The network call stays outside the transform: a rebuild of the tool
  * domain replays every extension's transforms, so a transform that listed
  * the servers itself would re-list them whenever any extension reloaded.
  *
- * Not ported: stdio servers (no child processes), OAuth with the OS
- * keyring, the TUI panel, `/mcp` commands, the `mcp` proxy tool's lazy
- * per-session activation (`setActiveTools`).
+ * Not ported: stdio servers (no child processes) and OAuth with the OS
+ * keyring, which are process-local; the TUI panel.
  */
 export function mcpAdapter(servers: () => readonly McpServer[]) {
   type Listed = Awaited<ReturnType<McpServer["listTools"]>>;
@@ -58,33 +58,52 @@ export function mcpAdapter(servers: () => readonly McpServer[]) {
     );
   };
   let reload: (() => Promise<void>) | undefined;
-  const extension = defineExtension({
-    id: "pi-mcp-adapter",
-    async setup(ctx) {
-      await fetchCatalog();
-      await ctx.tool.transform((tools) => {
-        for (const { server, tools: listed } of catalog) {
-          for (const tool of listed) {
-            tools.add({
-              id: `mcp__${server.name}__${tool.name}`.replace(/-/g, "_"),
-              description: tool.description,
-              input: jsonSchema(tool.inputSchema),
-              execute: (args) => server.callTool(tool.name, args)
-            });
-          }
+  const ids = () =>
+    catalog.flatMap(({ server, tools }) =>
+      tools.map((tool) =>
+        `mcp__${server.name}__${tool.name}`.replace(/-/g, "_")
+      )
+    );
+
+  async function piMcpAdapter(ctx: ExtensionContext): Promise<void> {
+    await fetchCatalog();
+    ctx.tool.add({
+      id: "mcp_enable",
+      description: "Load the MCP servers' tools for this session.",
+      input: z.object({}),
+      execute: () => ({
+        content: `Enabled: ${ids().join(", ")}`,
+        activate: ids()
+      })
+    });
+    ctx.tool.transform((tools) => {
+      for (const { server, tools: listed } of catalog) {
+        for (const tool of listed) {
+          tools.add({
+            id: `mcp__${server.name}__${tool.name}`.replace(/-/g, "_"),
+            description: tool.description,
+            input: jsonSchema(tool.inputSchema),
+            deferred: true,
+            execute: async (args) => server.callTool(tool.name, args)
+          });
         }
-      });
-      reload = () => ctx.tool.reload();
-    }
-  });
-  return {
-    extension,
+      }
+    });
+    ctx.command.add({
+      name: "mcp",
+      description: "List MCP tools.",
+      run: () => ({ text: ids().join("\n") })
+    });
+    reload = () => ctx.tool.reload();
+  }
+
+  return Object.assign(piMcpAdapter, {
     /** Call after a server's tool list changes. */
     async refresh() {
       await fetchCatalog();
       await reload?.();
     }
-  };
+  });
 }
 
 // ── 2. billion-context (388k/week) ────────────────────────────────────────
@@ -93,10 +112,10 @@ export function mcpAdapter(servers: () => readonly McpServer[]) {
 // WebSocket to route model traffic through a local proxy process it
 // spawns, stamps provider headers (`before_provider_headers`), rewrites
 // the payload (`before_provider_request`), and cancels pi's compaction
-// (`session_before_compact`). The portable format has no model-request or
-// compaction domain yet, and the proxy is a process. Its one portable
-// piece, tools read from the proxy's manifest, is the same transform as
-// `mcpAdapter`.
+// (`session_before_compact`). Provider and compaction hooks stay native
+// to each harness, and the proxy is a process. Its portable pieces, tools
+// read from the proxy's manifest and the `/acp` status commands, are the
+// same transform and command as `mcpAdapter`.
 
 // ── 3. pi-web-access (230k/week) ──────────────────────────────────────────
 
@@ -107,68 +126,81 @@ export type WebSearch = (
 ) => Promise<readonly { title: string; url: string; snippet: string }[]>;
 
 /**
- * pi-web-access's `web_search` and `fetch_content`, with an instructions
- * section telling the model when to use them.
+ * pi-web-access: `web_search` and `fetch_content`, deferred behind the
+ * `web_enable` loader exactly as the original does with `setActiveTools`,
+ * and an instructions section telling the model to load them. Fetched
+ * pages are kept per session, as the original keeps them with
+ * `appendEntry`, for `get_search_content`.
  *
- * Not ported: lazy activation (`web_enable` calls `setActiveTools` for one
- * session; the portable format has no per-session tool selection), the
- * curator UI and widgets, reading API keys from pi's model registry
- * (inject them into `search`), `appendEntry` storage of fetched pages for
- * `get_search_content`.
+ * Not ported: the curator UI and widgets. API keys come in through
+ * `search`, not pi's model registry.
  */
 export function webAccess(options: {
   readonly search: WebSearch;
   readonly fetch: typeof fetch;
-}) {
-  return defineExtension({
-    id: "pi-web-access",
-    async setup(ctx) {
-      await ctx.instructions.transform((sections) => {
-        sections.set(
-          "web",
-          "Use web_search for current or external information, and fetch_content to read a page."
-        );
-      });
-      await ctx.tool.transform((tools) => {
-        tools.add(
-          defineTool({
-            id: "web_search",
-            description: "Search the web.",
-            input: z.object({ query: z.string().min(1) }),
-            replay: "safe",
-            async execute({ query }, call) {
-              const results = await options.search(query, call.signal);
-              return {
-                content: results
-                  .map((r) => `${r.title}\n${r.url}\n${r.snippet}`)
-                  .join("\n\n")
-              };
-            }
-          })
-        );
-        tools.add(
-          defineTool({
-            id: "fetch_content",
-            description: "Fetch a URL and return its text.",
-            input: z.object({ url: z.url() }),
-            replay: "safe",
-            async execute({ url }, call) {
-              const response = await options.fetch(url, {
-                signal: call.signal
-              });
-              if (!response.ok) {
-                return {
-                  content: `Fetch failed: ${response.status}`,
-                  isError: true
-                };
-              }
-              return { content: await response.text() };
-            }
-          })
-        );
-      });
-    }
-  });
+}): Extension {
+  const tools = ["web_search", "fetch_content", "get_search_content"];
+  return function piWebAccess(ctx) {
+    const pages = ctx.storage("pi-web-access");
+    ctx.instructions.set(
+      "web",
+      "For current or external information, call web_enable, then web_search and fetch_content."
+    );
+    ctx.tool.add({
+      id: "web_enable",
+      description: "Enable web search and fetching for this session.",
+      input: z.object({}),
+      execute: () => ({
+        content: `Enabled: ${tools.join(", ")}`,
+        activate: tools
+      })
+    });
+    ctx.tool.add({
+      id: "web_search",
+      description: "Search the web.",
+      input: z.object({ query: z.string().min(1) }),
+      replay: "safe",
+      deferred: true,
+      async execute({ query }, call) {
+        const results = await options.search(query, call.signal);
+        return {
+          content: results
+            .map((r) => `${r.title}\n${r.url}\n${r.snippet}`)
+            .join("\n\n"),
+          metadata: { results: results.length }
+        };
+      }
+    });
+    ctx.tool.add({
+      id: "fetch_content",
+      description: "Fetch a URL and return its text.",
+      input: z.object({ url: z.url() }),
+      replay: "safe",
+      deferred: true,
+      async execute({ url }, call) {
+        const response = await options.fetch(url, { signal: call.signal });
+        if (!response.ok) {
+          return { content: `Fetch failed: ${response.status}`, isError: true };
+        }
+        const text = await response.text();
+        pages.session(call.session).put(url, text);
+        return { content: text };
+      }
+    });
+    ctx.tool.add({
+      id: "get_search_content",
+      description: "Read a page fetched earlier in this session.",
+      input: z.object({ url: z.string() }),
+      replay: "safe",
+      deferred: true,
+      execute: ({ url }, call) => {
+        const page = pages.session(call.session).get<string>(url);
+        return page === undefined
+          ? { content: `Not fetched: ${url}`, isError: true }
+          : { content: page };
+      }
+    });
+  };
 }
 
 // ── 4. pi-subagents (190k/week) ───────────────────────────────────────────
@@ -181,75 +213,96 @@ export type RunSubagent = (
 ) => Promise<string>;
 
 /**
- * pi-subagents' `subagent` tool and its bundled skills. The original
- * spawns `pi` child processes; here the host injects `run`, which on a
- * harness is "create a session and prompt it".
+ * pi-subagents: the `subagent` tool, its bundled skills, and its prompt
+ * templates as commands. The original spawns `pi` child processes; here
+ * the host injects `run`, which on a harness is "create a session and
+ * prompt it".
  *
- * Not ported: parallel/chain workflows and their TUI, background runs
- * (`bg_wait`), intercom between children, the watchdog, prompt templates
- * (`registerCommand`), custom message renderers.
+ * Not ported: parallel/chain workflow TUI, intercom between children, the
+ * watchdog, custom message renderers.
  */
 export function subagents(options: {
   readonly run: RunSubagent;
   readonly skills: SkillSource;
-}) {
-  return defineExtension({
-    id: "pi-subagents",
-    async setup(ctx) {
-      await ctx.skill.transform((skills) => skills.add(options.skills));
-      await ctx.tool.transform((tools) => {
-        tools.add(
-          defineTool({
-            id: "subagent",
-            description: "Delegate a self-contained task to a fresh agent.",
-            input: z.object({ agent: z.string(), task: z.string() }),
-            async execute({ agent, task }, call) {
-              call.progress(`running ${agent}\n`);
-              return { content: await options.run(agent, task, call.signal) };
-            }
-          })
-        );
+}): Extension {
+  return function piSubagents(ctx) {
+    ctx.skill.add(options.skills);
+    ctx.tool.add({
+      id: "subagent",
+      description: "Delegate a self-contained task to a fresh agent.",
+      input: z.object({ agent: z.string(), task: z.string() }),
+      async execute({ agent, task }, call) {
+        call.progress(`running ${agent}\n`);
+        await call.update({ agent, status: "running" });
+        const answer = await options.run(agent, task, call.signal);
+        return { content: answer, metadata: { agent, status: "done" } };
+      }
+    });
+    // prompts/parallel-review.md, as a prompt template.
+    ctx.command.add({
+      name: "parallel-review",
+      description: "Review the change with parallel subagents.",
+      run: (args) => ({ prompt: `Review in parallel: ${args}` })
+    });
+  };
+}
+
+// ── 5. @juicesharp/rpiv-ask-user-question (96k/week) ──────────────────────
+
+/**
+ * rpiv-ask-user-question: a structured question the model can put to the
+ * person. The original blocks on a terminal dialog; here `call.ask` stores
+ * the question, the client answers with `reply()`, and the call resumes,
+ * across an eviction too.
+ *
+ * Not ported: the TUI rendering, the free-text "Type something." row (use
+ * an `input` request), i18n.
+ */
+export function askUserQuestion(ctx: ExtensionContext): void {
+  ctx.tool.add({
+    id: "ask_user_question",
+    description: "Ask the user to choose one option.",
+    input: z.object({
+      question: z.string(),
+      options: z.array(z.string()).min(1)
+    }),
+    replay: "safe",
+    async execute({ question, options }, call) {
+      const answer = await call.ask({
+        kind: "select",
+        message: question,
+        options
       });
+      return { content: `The user chose: ${answer}` };
     }
   });
 }
 
-// ── 5. @juicesharp/rpiv-ask-user-question (96k/week) ──────────────────────
-//
-// Not ported. Its `ask_user_question` tool blocks on a terminal dialog
-// (`ctx.ui.custom`) until the user answers. A durable harness cannot hold a
-// tool call open on a person: it needs a request the harness persists and
-// a `reply()` that resumes the call after an eviction (the harness RFC's
-// `requests()`/`reply()`). The portable format has no user-request domain
-// yet, and pi-durable has no parked tool call to map one onto.
-
 // ── A policy extension, in the shape of the permission extensions ─────────
 
 /**
- * Refuse destructive shell commands and redact secrets from results, as
- * @gotgenes/pi-permission-system and cc-safety-net do with `tool_call` and
- * `tool_result`. Applies to every tool, native ones included.
+ * Refuse destructive shell commands, ask before deploys, and redact
+ * secrets from results, as @gotgenes/pi-permission-system and
+ * cc-safety-net do with `tool_call` and `tool_result`. Applies to every
+ * tool, native ones included.
  */
-export const guard = defineExtension({
-  id: "guard",
-  async setup(ctx) {
-    await ctx.tool.hook("execute.before", (event) => {
-      const command = event.input["command"];
-      if (typeof command === "string" && /\brm\s+-rf\b/.test(command)) {
-        event.block = "destructive command";
-      }
-    });
-    await ctx.tool.hook("execute.after", (event) => {
-      const content = event.result.content;
-      if (typeof content === "string") return;
-      event.result = {
-        ...event.result,
-        content: content.map((part) =>
-          part.type === "text"
-            ? { ...part, text: part.text.replace(/sk-\w+/g, "[redacted]") }
-            : part
-        )
-      };
-    });
-  }
-});
+export function guard(ctx: ExtensionContext): void {
+  ctx.tool.hook("execute.before", (event) => {
+    const command = event.input["command"];
+    if (typeof command !== "string") return;
+    if (/\brm\s+-rf\b/.test(command)) event.block = "destructive command";
+    else if (/\bdeploy\b/.test(command)) event.ask = `Run "${command}"?`;
+  });
+  ctx.tool.hook("execute.after", (event) => {
+    const content = event.result.content;
+    if (typeof content === "string") return;
+    event.result = {
+      ...event.result,
+      content: content.map((part) =>
+        part.type === "text"
+          ? { ...part, text: part.text.replace(/sk-\w+/g, "[redacted]") }
+          : part
+      )
+    };
+  });
+}

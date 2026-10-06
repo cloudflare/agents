@@ -9,6 +9,7 @@ import {
   type AgentChange,
   type EntryRecord,
   type Harness,
+  type Registry,
   type ModelRef,
   type SettledSubmissionRecord,
   type UserInput
@@ -21,6 +22,14 @@ import {
   type LifecycleJobOutcome
 } from "../../lifecycle";
 import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "./context";
+import type { Extension, ExtensionSession } from "../extensions/extension";
+import type { ExtensionHost } from "../extensions/host";
+import type { PendingRequest, ReplyRejected } from "../extensions/requests";
+import {
+  NOTE_ENTRY,
+  PORTABLE_EXTENSION,
+  PiExtensionRuntime
+} from "./extensions";
 import { openPiSessionStore } from "./session-store";
 import type {
   PiOperationResult,
@@ -100,14 +109,19 @@ export type PiHarnessContext = {
   readonly storage: SqliteStorage;
   /** Background context, for the open itself. */
   readonly context: Context;
+  /**
+   * The registry to open pi with. Install native pi extensions into it.
+   * With `extensions` set, pi must be opened with this registry: it is how
+   * the portable extensions reach pi.
+   */
+  readonly registry: Registry;
 };
 
 /**
  * Opens pi's `Harness`. The harness adopts what it returns.
  *
  * ```ts
- * harness: async ({ storage, context }) => {
- *   const registry = createRegistry();
+ * harness: async ({ storage, context, registry }) => {
  *   registry.install(await skills(sources));
  *   return Harness.open(storage, { models, registry }, context);
  * }
@@ -158,12 +172,52 @@ export type PiHarnessOptions = {
   readonly harness: PiHarnessFactory;
   /** What a new session starts with. */
   readonly defaults?: PiSessionDefaults;
+  /**
+   * Portable extensions (`agents/harness/extensions`), in order. They run
+   * each time pi opens, after the factory. One that fails to start is
+   * reported as a `pi:extension_failed` Lifecycle event; the rest run.
+   */
+  readonly extensions?: readonly Extension[];
 };
 
 type Opened = {
   readonly pi: Harness;
   readonly storage: SqliteStorage;
+  readonly runtime: PiExtensionRuntime;
 };
+
+/** What a slash command left behind, so a retried submit does not rerun it. */
+type CommandRecord =
+  | { readonly kind: "prompt"; readonly prompt: string }
+  | { readonly kind: "handled"; readonly text: string };
+
+function commandKey(session: PiSessionId, operationId: string): string {
+  return `agents.commands/${encodeURIComponent(session)}/${encodeURIComponent(operationId)}`;
+}
+
+function parseCommandRecord(value: unknown): CommandRecord | undefined {
+  if (typeof value !== "object" || value === null || !("kind" in value)) {
+    return undefined;
+  }
+  if (value.kind === "prompt" && "prompt" in value) {
+    return typeof value.prompt === "string"
+      ? { kind: "prompt", prompt: value.prompt }
+      : undefined;
+  }
+  if (value.kind === "handled" && "text" in value) {
+    return typeof value.text === "string"
+      ? { kind: "handled", text: value.text }
+      : undefined;
+  }
+  return undefined;
+}
+
+/** The text of an input that could be a slash command. */
+function commandText(input: UserInput): string | undefined {
+  if (typeof input === "string") return input;
+  const [only, ...rest] = input;
+  return rest.length === 0 && only?.type === "text" ? only.text : undefined;
+}
 
 /** pi-durable's stored reference to a pi-ai model. */
 function modelRef(model: PiModel): ModelRef {
@@ -223,6 +277,8 @@ export class PiHarness extends LifecycleCapability {
   #waitBudgetMs = WAIT_BUDGET_MS;
   #heartbeatMs = HEARTBEAT_MS;
   #opening: Promise<Opened> | undefined;
+  /** pi is open and resumed: extensions may drive sessions. */
+  #opened = false;
 
   static {
     setWakeTiming = (harness, timing) => harness.#setWakeTiming(timing);
@@ -338,6 +394,39 @@ export class PiHarness extends LifecycleCapability {
     return (await this.#open()).pi;
   }
 
+  /** The running portable extensions: add or remove them at runtime. */
+  async extensions(): Promise<ExtensionHost> {
+    return (await this.#open()).runtime.host;
+  }
+
+  /** The slash commands extensions registered. */
+  async commands(): Promise<
+    { readonly name: string; readonly description: string }[]
+  > {
+    const { runtime } = await this.#open();
+    return runtime.host
+      .snapshot()
+      .commands.map(({ name, description }) => ({ name, description }));
+  }
+
+  /** Questions extensions asked that nobody has answered, oldest first. */
+  async requests(options: PiSessionOptions = {}): Promise<PendingRequest[]> {
+    const { runtime } = await this.#open();
+    return runtime.host.requests.pending(options.session);
+  }
+
+  /**
+   * Answer a question. The waiting tool call resumes, in this isolate or,
+   * after an eviction, when pi reruns it.
+   */
+  async reply(
+    requestId: string,
+    reply: boolean | string
+  ): Promise<{ readonly accepted: true } | ReplyRejected> {
+    const { runtime } = await this.#open();
+    return runtime.host.requests.reply(requestId, reply);
+  }
+
   // ── Used by PiSession and PiSessions ─────────────────────────────────────
 
   /** @internal */
@@ -354,13 +443,32 @@ export class PiHarness extends LifecycleCapability {
   }
 
   /** @internal */
+  async created(session: PiSessionId, parent?: PiSessionId): Promise<void> {
+    const { runtime } = await this.#open();
+    await runtime.host.emit("session.created", {
+      session,
+      ...(parent === undefined ? {} : { parent })
+    });
+  }
+
+  /** @internal */
   async enqueue(
     session: PiSessionId,
-    input: UserInput,
+    submitted: UserInput,
     options: PiSubmitOptions
   ): Promise<PiReceipt> {
     const operationId = options.operationId ?? crypto.randomUUID();
-    const { storage } = await this.#open();
+    const { storage, runtime } = await this.#open();
+    const command = await this.#command(
+      runtime,
+      session,
+      submitted,
+      operationId
+    );
+    if (command.kind === "handled") {
+      return { operationId, session, accepted: command.accepted };
+    }
+    const input = command.input;
     const conversation = await this.conversation(session);
     this.#admitting.set(session, (this.#admitting.get(session) ?? 0) + 1);
     let accepted: boolean;
@@ -395,6 +503,38 @@ export class PiHarness extends LifecycleCapability {
     return { operationId, session, accepted };
   }
 
+  /**
+   * Run a slash command before anything reaches pi. A command that returns
+   * a prompt becomes that prompt's ordinary submission; one that does not
+   * is settled here. Either way the record is stored by operation id, so a
+   * retried submit neither reruns the command nor submits twice.
+   */
+  async #command(
+    runtime: PiExtensionRuntime,
+    session: PiSessionId,
+    input: UserInput,
+    operationId: string
+  ): Promise<
+    | { readonly kind: "input"; readonly input: UserInput }
+    | { readonly kind: "handled"; readonly accepted: boolean }
+  > {
+    const text = commandText(input);
+    const matched = text === undefined ? undefined : runtime.host.command(text);
+    if (!matched) return { kind: "input", input };
+    const kv = this.lifecycle.storage.kv;
+    const key = commandKey(session, operationId);
+    const prior = parseCommandRecord(kv.get(key));
+    if (prior?.kind === "handled") return { kind: "handled", accepted: false };
+    if (prior?.kind === "prompt") return { kind: "input", input: prior.prompt };
+    const result = await matched.command.run(matched.args, { session });
+    if (result && "prompt" in result) {
+      kv.put(key, { kind: "prompt", prompt: result.prompt });
+      return { kind: "input", input: result.prompt };
+    }
+    kv.put(key, { kind: "handled", text: result?.text ?? "" });
+    return { kind: "handled", accepted: true };
+  }
+
   /** @internal Withdraw a queued input, or abort the run it joined. */
   async withdraw(session: PiSessionId, operationId: string): Promise<boolean> {
     const { pi, storage } = await this.#open();
@@ -416,6 +556,13 @@ export class PiHarness extends LifecycleCapability {
     operationId: string,
     signal?: AbortSignal
   ): Promise<PiOperationResult> {
+    await this.#open();
+    const command = parseCommandRecord(
+      this.lifecycle.storage.kv.get(commandKey(session, operationId))
+    );
+    if (command?.kind === "handled") {
+      return { operationId, session, status: "done", text: command.text };
+    }
     const conversation = await this.conversation(session);
     const context = signalContext(signal);
     const submission = await this.#findSubmission(
@@ -528,13 +675,108 @@ export class PiHarness extends LifecycleCapability {
   }
 
   async #doOpen(): Promise<Opened> {
+    this.#opened = false;
     const storage = await openPiSessionStore(this.lifecycle.storage);
-    const pi = await this.#options.harness({ storage, context: BG });
-    await pi.root(BG, { agent: this.agentDefaults() });
+    const runtime = new PiExtensionRuntime({
+      store: this.lifecycle.storage.kv,
+      session: (id) => this.#extensionSession(id),
+      onReport: (report) =>
+        this.lifecycle.events.emit("pi:extension_report", {
+          report: report._tag,
+          ...("extension" in report ? { extension: report.extension } : {}),
+          error:
+            report.cause instanceof Error
+              ? report.cause.message
+              : String(report.cause)
+        })
+    });
+    const pi = await this.#options.harness({
+      storage,
+      context: BG,
+      registry: runtime.registry
+    });
+    const extensions = this.#options.extensions ?? [];
+    for (const failure of await runtime.start(extensions)) {
+      console.error(failure);
+      this.lifecycle.events.emit("pi:extension_failed", {
+        extension: failure.extension,
+        error: failure.message
+      });
+    }
+    const root = await pi.root(BG, { agent: this.agentDefaults() });
+    if (extensions.length > 0) {
+      const agent = await root.agent(BG);
+      if (!agent.extensions.some((each) => each.name === PORTABLE_EXTENSION)) {
+        await pi.close(BG);
+        throw new Error(
+          "PiHarness has extensions, but its factory opened pi without context.registry"
+        );
+      }
+    }
     // Continue whatever the last isolate left: pi reconciles tasks that were
     // running to pending and schedules them again.
     pi.resume();
-    return { pi, storage };
+    this.#opened = true;
+    return { pi, storage, runtime };
+  }
+
+  /** A session as extensions drive it. Usable once pi is open. */
+  #extensionSession(id: PiSessionId): ExtensionSession {
+    const ready = async () => {
+      if (!this.#opened) {
+        throw new Error(
+          "ctx.session() is not available while extensions start; use it from tools, hooks, commands or handlers"
+        );
+      }
+      return this.conversation(id);
+    };
+    const select = async (
+      tools: readonly string[],
+      offer: "offer" | "withdraw"
+    ) => {
+      const conversation = await ready();
+      await conversation.commit(
+        (tx) => PiExtensionRuntime.select(tx, conversation.id, tools, offer),
+        BG
+      );
+    };
+    return {
+      id,
+      submit: async (input, options) => {
+        await ready();
+        const receipt = await this.enqueue(id, input, options);
+        return { accepted: receipt.accepted };
+      },
+      note: async (text, options) => {
+        const conversation = await ready();
+        const { storage } = await this.#open();
+        const accepted =
+          (await storage.submissionByRequest(
+            conversation.id,
+            options.operationId,
+            BG
+          )) === undefined;
+        if (accepted) {
+          await conversation.submit(
+            {
+              type: "write",
+              entry: { kind: NOTE_ENTRY, data: { text } },
+              requestId: options.operationId
+            },
+            BG
+          );
+        }
+        return { accepted };
+      },
+      tools: {
+        activate: (tools) => select(tools, "offer"),
+        deactivate: (tools) => select(tools, "withdraw"),
+        offered: async () => {
+          const agent = await (await ready()).agent(BG);
+          return agent.tools.map((tool) => tool.name);
+        }
+      }
+    };
   }
 
   /** @internal The per-conversation defaults supported by pi-durable. */
@@ -712,6 +954,7 @@ export class PiSessions {
       },
       BG
     );
+    await this.#harness.created(String(conversation.id));
     return this.#harness.session(String(conversation.id));
   }
 
@@ -726,6 +969,7 @@ export class PiSessions {
       { ownership: { kind: "ownerless" } },
       BG
     );
+    await this.#harness.created(String(fork.id), from);
     return this.#harness.session(String(fork.id));
   }
 
