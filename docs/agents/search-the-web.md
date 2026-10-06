@@ -1,0 +1,110 @@
+# Search the Web (Beta)
+
+`agents/websearch` gives a model a `websearch` tool over Cloudflare's [Web Search API](https://developers.cloudflare.com/web-search/), called through the `AI` binding and billed by the account's AI Gateway. The same tool is available for the pi harness, the AI SDK, and TanStack AI, with the same options.
+
+This page covers what the SDK adds on top of the API. For the binding, the providers, pricing, payment, and the error codes, see the [Web Search API docs](https://developers.cloudflare.com/web-search/).
+
+> **Beta** — this feature may have breaking changes in future releases.
+
+## Add the tool
+
+The tool needs the `AI` binding (`"ai": { "binding": "AI" }` in `wrangler.jsonc`). Every adapter takes the same `WebSearchToolOptions`.
+
+Pi harness:
+
+```ts
+import { webSearchTool } from "agents/websearch/pi";
+
+this.registry.install({
+  name: "tools",
+  tools: [webSearchTool({ binding: this.env.AI, provider: "exa" })]
+});
+```
+
+AI SDK:
+
+```ts
+import { webSearchTool } from "agents/websearch/ai-sdk";
+
+const result = streamText({
+  model,
+  tools: { websearch: webSearchTool({ binding: this.env.AI }) },
+  messages
+});
+```
+
+TanStack AI:
+
+```ts
+import { webSearchTool } from "agents/websearch/tanstack-ai";
+
+const tools = [webSearchTool({ binding: this.env.AI })];
+```
+
+## Who decides what
+
+The model's input is `{ query, limit? }` and nothing else. The host fixes everything that affects cost or data handling:
+
+| Option                | Default              | Notes                                                                                                                          |
+| --------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `binding`             | —                    | The `AI` binding. Or pass `source` instead (see [Other sources](#other-sources)).                                              |
+| `gateway`             | `"default"`          | AI Gateway id.                                                                                                                 |
+| `provider`            | platform default     | `"ceramic"`, `"exa"`, or `"linkup"`. The model cannot choose or change it.                                                     |
+| `byokAlias`           | —                    | Bill a provider key stored on the gateway. Passed through as the API defines it.                                               |
+| `limit`               | `5`                  | Results per search when the model does not ask for a count, and the most it may ask for. The model's `limit` is clamped to it. |
+| `maxDescriptionChars` | `600`                | Per-result description length in the model's view. `Infinity` passes descriptions through whole.                               |
+| `description`         | built-in description | Replaces the tool description the model sees.                                                                                  |
+
+## What the model sees, and what you get
+
+The model gets text: a numbered list of title, URL, and description, with descriptions trimmed to `maxDescriptionChars`. Some providers return descriptions of several thousand characters per result, so the default keeps a five-result search to a few kilobytes of context.
+
+```
+3 results for "cloudflare web search api":
+
+1. Introducing the Web Search API
+https://blog.cloudflare.com/introducing-web-search-api/
+Today we are launching the Web Search API in open beta…
+
+2. …
+```
+
+The host gets the API response untouched — `items` with every field the provider returned, `metadata` with `requestId` and `latencyMs`, plus `provider` — as `WebSearchToolOutput`:
+
+- **Pi**: in the tool result's `details`, as `{ ok: true, output }`. The tool is `replay: "safe"`, so a session resumed after an eviction reuses the stored result instead of searching again.
+- **AI SDK**: as the return value of `execute`, so `onFinish`, UI message parts, and logs see the full response. `toModelOutput` renders the text for the model.
+- **TanStack AI**: the server tool returns the rendered text.
+
+`renderWebSearchResults(output, { maxDescriptionChars })` from `agents/websearch` is the renderer, if you want the same text elsewhere.
+
+## Failures
+
+A failed search becomes a `WebSearchError` with `status`, `code`, `retryable`, and `requestId` (AI Gateway's id for the request, for the gateway log). The `code` is the API's, for example `web_search_payment_required`.
+
+The pi and TanStack tools do not throw. The model gets `Web search failed: <message> (<code>)` as an error result and the turn continues; in pi, `details` is `{ ok: false, status, code, retryable, requestId }`. The AI SDK tool throws the `WebSearchError`, which is how AI SDK tools report errors.
+
+## Other sources
+
+`webSearchFromAI` and `webSearchFromRest` from `agents/websearch` return a `WebSearchSource`: a function from `{ query, limit? }` to the API response, with no model involved. Use them from scheduled jobs, or outside Workers:
+
+```ts
+import { webSearchFromRest } from "agents/websearch";
+
+const search = webSearchFromRest({
+  accountId: env.CF_ACCOUNT_ID,
+  apiToken: env.CF_API_TOKEN,
+  provider: "linkup"
+});
+const { items } = await search({ query: "cloudflare agents sdk", limit: 3 });
+```
+
+Any `WebSearchSource` can be passed to a tool as `source` instead of `binding`, which is also how tests substitute a fake:
+
+```ts
+webSearchTool({
+  source: async ({ query }) => ({
+    items: [{ url: "https://example.com", title: query }],
+    metadata: { query, requestId: "test", latencyMs: 0 }
+  })
+});
+```
