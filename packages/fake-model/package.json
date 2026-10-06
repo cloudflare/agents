@@ -1,0 +1,23 @@
+{
+  "name": "@cloudflare/fake-model",
+  "description": "A deterministic, scripted Anthropic Messages model on Workers, with holds and drops at named points of the stream",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "exports": {
+    ".": "./src/index.ts",
+    "./script": "./src/script.ts",
+    "./worker": "./src/worker.ts"
+  },
+  "scripts": {
+    "deploy": "cf deploy",
+    "dev": "cf dev",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "cf": "^1.0.0-beta.12",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.145.0"
+  }
+}
