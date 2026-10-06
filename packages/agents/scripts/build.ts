@@ -11,6 +11,7 @@ const entries = [
   "src/skills/compile.ts",
   "src/lifecycle/index.ts",
   "src/harness/ai-sdk/index.ts",
+  "src/harness/extensions/index.ts",
   "src/harness/pi/index.ts",
   "src/routing/index.ts",
   "src/chat/index.ts",

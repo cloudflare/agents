@@ -28,7 +28,8 @@ export type Offered = {
   readonly tools: string[];
 };
 
-function offered(context: TranscriptContext): Offered {
+/** What one request offered the model. */
+export function offered(context: TranscriptContext): Offered {
   const sections: Record<string, string> = {};
   const tools = new Set<string>();
   for (const message of context.messages) {
@@ -61,7 +62,7 @@ function textOf(content: Message["content"] | undefined): string {
  * - After a tool result it answers `tool said: <result>`.
  * - Anything else is echoed back.
  */
-function script(context: TranscriptContext): AssistantMessage {
+export function script(context: TranscriptContext): AssistantMessage {
   const last = context.messages.filter((m) => m.role !== "system").at(-1);
   if (last?.role === "toolResult") {
     return fauxAssistantMessage([

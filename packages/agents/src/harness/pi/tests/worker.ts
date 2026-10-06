@@ -317,5 +317,6 @@ export {
   PiFactoryTestObject,
   PiFlakyFactoryTestObject
 } from "./factory-fixture";
+export { PiPortableExtensionsTestObject } from "./extensions-fixture";
 
 export default { fetch: () => new Response("Not found", { status: 404 }) };

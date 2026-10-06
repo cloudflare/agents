@@ -177,6 +177,11 @@
       "import": "./dist/harness/ai-sdk/index.js",
       "require": "./dist/harness/ai-sdk/index.js"
     },
+    "./harness/extensions": {
+      "types": "./dist/harness/extensions/index.d.ts",
+      "import": "./dist/harness/extensions/index.js",
+      "require": "./dist/harness/extensions/index.js"
+    },
     "./harness/pi": {
       "types": "./dist/harness/pi/index.d.ts",
       "import": "./dist/harness/pi/index.js",

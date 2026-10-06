@@ -22,3 +22,4 @@ The goal is to give contributors (and future-us) a quick way to understand _why_
 | [rfc-harness-model-provider-boundary.md](./rfc-harness-model-provider-boundary.md) | RFC: LanguageModelV4 for Codex and pi-ai providers for Pi in v1               |
 | [test-coverage-matrix.md](./test-coverage-matrix.md)                               | Feature × test-layer coverage rollup, CI mapping, skipped-test debt, hygiene  |
 | [rfc-pi-harness-example.md](./rfc-pi-harness-example.md)                           | RFC: pi-durable as an example-local Lifecycle capability                      |
+| [rfc-portable-harness-extensions.md](./rfc-portable-harness-extensions.md)         | RFC: one extension format for every harness                                   |

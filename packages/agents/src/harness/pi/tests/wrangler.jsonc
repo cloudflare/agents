@@ -11,6 +11,10 @@
       {
         "name": "PI_FLAKY_FACTORY_TEST",
         "class_name": "PiFlakyFactoryTestObject"
+      },
+      {
+        "name": "PI_EXTENSIONS_TEST",
+        "class_name": "PiPortableExtensionsTestObject"
       }
     ]
   },
@@ -22,7 +26,8 @@
         "PiStoreTestObject",
         "PiNoDefaultsTestObject",
         "PiFactoryTestObject",
-        "PiFlakyFactoryTestObject"
+        "PiFlakyFactoryTestObject",
+        "PiPortableExtensionsTestObject"
       ]
     }
   ]
