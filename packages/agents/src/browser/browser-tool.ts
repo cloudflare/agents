@@ -9,6 +9,7 @@ import {
   type ProxyToolOutput
 } from "@cloudflare/codemode";
 import {
+  BROWSER_INSTRUCTIONS,
   BrowserSessionConnector,
   type BrowserExecutionReport,
   type BrowserNewTab,
@@ -30,7 +31,7 @@ export interface BrowserToolOptions {
    */
   loader: WorkerLoader;
 
-  /** Sandbox execution timeout in milliseconds. Defaults to 30000 (30s). */
+  /** Sandbox execution timeout in milliseconds. Defaults to 60000 (60s). */
   timeoutMs?: number;
 
   /**
@@ -61,6 +62,8 @@ export type BrowserToolOutput = ProxyToolOutput & {
   /** Tabs the page opened itself (popups, `target=_blank` links). */
   newTabs?: BrowserNewTab[];
 };
+
+const DEFAULT_TIMEOUT_MS = 60_000;
 
 const RESTARTED_NOTICE =
   "The browser was restarted before this run (it expired or was closed): earlier tabs, logins, and page state are gone. Your code ran in a fresh browser — navigate again before relying on page state.";
@@ -123,6 +126,7 @@ export function createBrowserToolCore(
     );
   }
 
+  const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const connector = new BrowserSessionConnector(ctx, {
     browser: options.browser
   });
@@ -130,18 +134,44 @@ export function createBrowserToolCore(
     ctx,
     executor: new DynamicWorkerExecutor({
       loader: options.loader,
-      timeout: options.timeoutMs
+      timeout
     }),
     connectors: [connector],
     name: browserRuntimeName(options.browser.name),
     transformResult: transformBrowserResult
   });
 
-  const codemodeTool = runtime.tool({
-    connectorHints: {
-      cdp: `A persistent browser over CDP — tabs and logins carry over between runs. Use sessionId: "active" for page commands. ${adapter.screenshotHint}`
-    }
-  });
+  // Our own description, not codemode's generic one: that one tells the
+  // model to search before every new connector (search doesn't cover CDP
+  // commands), and describes approvals, snippets, and replay, which this
+  // tool doesn't use.
+  const rules = [
+    BROWSER_INSTRUCTIONS,
+    `Each run times out after ${Math.round(timeout / 1000)}s, so split long jobs (crawling a site, say) across runs.`,
+    adapter.screenshotHint
+  ]
+    .join("\n")
+    .split("\n")
+    .map((rule) => `- ${rule}`)
+    .join("\n");
+  const description = [
+    "Run JavaScript that drives a persistent Chrome browser over the Chrome DevTools Protocol (CDP).",
+    "",
+    "Write an async arrow function, `async () => { ... }`, and return a small JSON value. Use the `cdp` global to reach the browser. `fetch` is blocked and there is no file system or Node.js API.",
+    "",
+    "## cdp",
+    "",
+    "- `cdp.send({ method, params?, sessionId?, timeoutMs? })` sends a CDP command and returns its result without the JSON-RPC envelope: `Page.navigate` returns `{ frameId, errorText? }`, `Runtime.evaluate` returns `{ result: { value }, exceptionDetails? }`.",
+    "- `cdp.attachToTarget({ targetId })` makes an open tab active and returns `{ sessionId }`.",
+    '- `cdp.spec()` returns the whole protocol (about 650 KB) as `{ domains: [{ name, commands, events, types }] }`. Filter it in code, for example `spec.domains.find((d) => d.name === "Page").commands.find((c) => c.name === "navigate")`.',
+    "- `cdp.getDebugLog()` returns recent protocol traffic, for when a command fails or times out.",
+    "",
+    "## Rules",
+    "",
+    rules,
+    '- A `SyntaxError` from "Failed to start Worker" means your code didn\'t parse; its line number points into wrapper code, not yours. Check regex literals and escapes.'
+  ].join("\n");
+  const codemodeTool = runtime.tool({ description });
 
   return {
     description: codemodeTool.description,
