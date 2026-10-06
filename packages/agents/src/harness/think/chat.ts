@@ -482,6 +482,9 @@ export class ThinkChat extends LifecycleCapability {
         void this.#finish(status, framing).then(() => this.#resolveProbes());
         return;
       }
+      case "transcript":
+        void this.#broadcastTranscript();
+        return;
       case "reset":
         for (const connection of this.#webSockets.getConnections()) {
           send(connection, { type: CHAT_MESSAGE_TYPES.CHAT_CLEAR });

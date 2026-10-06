@@ -428,6 +428,31 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return seen;
   }
 
+  /** Delete a message, then compact, on the Sessions handle; the events seen. */
+  async deleteAndCompact(messageId: string): Promise<string[]> {
+    const seen: string[] = [];
+    const session = this.harness.session();
+    const stop = session.subscribe((event) => seen.push(event.type));
+    await this.#handles.get("")?.deleteMessages([messageId]);
+    await session.compact();
+    stop();
+    return seen;
+  }
+
+  /** What the alarm memory-limit breaker does when it seals. */
+  sealMemoryLimit(): void {
+    this.harness.onMemoryLimit({ sealed: true });
+  }
+
+  answerAsClient(
+    answer: ToolAnswer,
+    autoContinue = true
+  ): Promise<ThinkReceipt> {
+    return this.harness
+      .session()
+      .submit(answer, { source: "client", autoContinue });
+  }
+
   async search(query: string): Promise<number> {
     return (await this.harness.session().search(query)).length;
   }

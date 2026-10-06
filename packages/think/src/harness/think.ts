@@ -239,7 +239,11 @@ export class Think<
                   i === index ? event.message : message
                 );
         }
-        if (event.type === "message" || event.type === "reset") {
+        if (
+          event.type === "message" ||
+          event.type === "reset" ||
+          event.type === "transcript"
+        ) {
           void this.#sync();
         }
       });

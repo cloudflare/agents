@@ -391,8 +391,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    */
   readonly #sessions: Sessions;
   #bound = false;
-  /** Sessions with a write of the harness's own in progress. */
-  readonly #ownWrites = new Map<ThinkSessionId, number>();
+  /**
+   * Messages the harness is writing, per session, by id, so the change feed
+   * skips their events (the harness emits its own) without also skipping a
+   * direct write that lands meanwhile.
+   */
+  readonly #ownMessages = new Map<ThinkSessionId, Map<string, number>>();
+  /** Clears of the harness's own in progress, per session. */
+  readonly #ownClears = new Map<ThinkSessionId, number>();
   #heartbeatMs = HEARTBEAT_MS;
   #records: OperationRecords | undefined;
 
@@ -446,25 +452,21 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /**
    * The alarm memory-limit breaker sealed: the work it stopped would only
-   * run out of memory again. Its wake jobs are already gone; settle the
-   * running operations, so the next startup does not wake them again.
+   * run out of memory again. Mark the running operations to be settled
+   * `unanswered` with reason `"out_of_memory"` rather than run again.
    * Queued operations behind them still run. Runs after the isolate's
    * work unwound, so it keeps to small synchronous writes.
    */
   onMemoryLimit(context: MemoryLimitContext): void {
     if (!context.sealed) return;
+    // Only mark them: rebuilding a partial answer here could run out of
+    // memory again. The next drive settles each marked operation through
+    // the usual path, which keeps the partial and tells clients.
     const store = this.#tables();
     for (const op of store.open()) {
       if (op.status !== "running") continue;
-      if (op.streamId !== undefined) {
-        this.#streams
-          .__DO_NOT_USE_WILL_BREAK__sync()
-          .deleteUnchecked(op.streamId);
-      }
       store.update(op.session, op.operationId, {
-        status: "unanswered",
-        reason: "out_of_memory",
-        streamId: null
+        abandonReason: "out_of_memory"
       });
     }
   }
@@ -658,7 +660,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     await this.abort(session);
     await this.#drives.get(session);
     const handle = this.#handle(session);
-    await this.#own(session, () => handle.clearMessages());
+    this.#ownClears.set(session, (this.#ownClears.get(session) ?? 0) + 1);
+    try {
+      await handle.clearMessages();
+    } finally {
+      const left = (this.#ownClears.get(session) ?? 1) - 1;
+      if (left === 0) this.#ownClears.delete(session);
+      else this.#ownClears.set(session, left);
+    }
     this.#tables().deleteSettled(session);
     this.#events.emit(session, { type: "reset" });
     if (handoff) {
@@ -667,9 +676,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         role: "system",
         parts: [{ type: "text", text: handoff }]
       };
-      await this.#own(session, () =>
-        handle.appendMessage(asSessionMessage(note))
-      );
+      const release = this.#markOwn(session, [note.id]);
+      try {
+        await handle.appendMessage(asSessionMessage(note));
+      } finally {
+        release();
+      }
       this.#events.emit(session, { type: "message", message: note });
     }
   }
@@ -903,6 +915,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         await this.#abandon(op, "aborted");
         return {};
       }
+      if (op.abandonReason !== undefined) {
+        await this.#abandon(op, op.abandonReason);
+        return {};
+      }
       const message = await this.#message(op);
       const tools = await this.#tools(session);
       const action = nextAction(
@@ -1000,12 +1016,27 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
       case "answer": {
         const history = asUIMessages(await handle.getHistory());
-        const answered = answerToolCall(history, toolCallAnswer(input.answer));
+        const tools = await this.#tools(session);
+        const answer = input.answer;
+        if (answer.type === "tool-result" && op.source === "client") {
+          // A client answers only its own tools. A server tool's result
+          // comes from running it, under its approval policy.
+          const call = history
+            .flatMap((message) => message.parts)
+            .find(
+              (part): part is ToolCallPart =>
+                isToolCallPart(part) && part.toolCallId === answer.toolCallId
+            );
+          if (call && isServerTool(tools, toolNameOf(call))) {
+            unanswered = "not_client_tool";
+            break;
+          }
+        }
+        const answered = answerToolCall(history, toolCallAnswer(answer));
         if (!answered) {
           unanswered = "not_waiting";
           break;
         }
-        const tools = await this.#tools(session);
         const latest = history.at(-1);
         const continues =
           input.autoContinue &&
@@ -1688,35 +1719,60 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // go around the harness; pass them on as events, so listeners and chat
     // clients see them too. The harness's own writes already emitted theirs.
     this.#sessions.subscribe((change) => {
-      if ((this.#ownWrites.get(change.sessionId) ?? 0) > 0) return;
+      const session = change.sessionId;
       switch (change.type) {
         case "append":
         case "update":
         case "import":
-          this.#events.emit(change.sessionId, {
+          if (this.#takeOwn(session, change.message.id)) return;
+          this.#events.emit(session, {
             type: "message",
             message: asUIMessage(change.message)
           });
           return;
         case "clear":
-          this.#events.emit(change.sessionId, { type: "reset" });
+          if ((this.#ownClears.get(session) ?? 0) > 0) return;
+          this.#events.emit(session, { type: "reset" });
           return;
-        default:
+        case "delete":
+        case "compact":
+        case "compaction":
+          // No one message describes these: the active path changed.
+          this.#events.emit(session, { type: "transcript" });
           return;
       }
     });
   }
 
-  /** Run a write of the harness's own, which emits its own events. */
-  async #own<T>(session: ThinkSessionId, write: () => Promise<T>): Promise<T> {
-    this.#ownWrites.set(session, (this.#ownWrites.get(session) ?? 0) + 1);
-    try {
-      return await write();
-    } finally {
-      const left = (this.#ownWrites.get(session) ?? 1) - 1;
-      if (left === 0) this.#ownWrites.delete(session);
-      else this.#ownWrites.set(session, left);
+  /** Note messages the harness is about to write; returns the release. */
+  #markOwn(session: ThinkSessionId, ids: readonly string[]): () => void {
+    let own = this.#ownMessages.get(session);
+    if (!own) {
+      own = new Map();
+      this.#ownMessages.set(session, own);
     }
+    for (const id of ids) own.set(id, (own.get(id) ?? 0) + 1);
+    return () => {
+      const current = this.#ownMessages.get(session);
+      if (!current) return;
+      for (const id of ids) {
+        const left = (current.get(id) ?? 1) - 1;
+        if (left <= 0) current.delete(id);
+        else current.set(id, left);
+      }
+      if (current.size === 0) this.#ownMessages.delete(session);
+    };
+  }
+
+  /** Whether a change is one of the harness's own writes; consumes the mark. */
+  #takeOwn(session: ThinkSessionId, id: string): boolean {
+    const own = this.#ownMessages.get(session);
+    const count = own?.get(id);
+    if (!own || count === undefined) return false;
+    if (count <= 1) own.delete(id);
+    else own.set(id, count - 1);
+    if (own.size === 0) this.#ownMessages.delete(session);
+    return true;
   }
 
   /** @internal The answers to a message: its children in the tree. */
@@ -1741,12 +1797,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** @internal Compact a session with its compaction function. */
   async compact(session: ThinkSessionId): Promise<CompactResult | null> {
-    const result = await this.#own(session, () =>
-      this.#handle(session).compact()
-    );
-    // The model's view of the transcript changed; re-read it.
-    if (result) this.#events.emit(session, { type: "reset" });
-    return result;
+    // The change feed reports the compaction as a transcript event.
+    return this.#handle(session).compact();
   }
 
   #handle(session: ThinkSessionId): Session {
@@ -1794,9 +1846,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   ): Promise<void> {
     const sync = this.#handle(session).__DO_NOT_USE_WILL_BREAK__sync();
     const afters: (() => Promise<void>)[] = [];
+    const ids: string[] = [];
     const commit = () => {
       afters.length = 0;
+      ids.length = 0;
       writes((message, options = {}) => {
+        ids.push(message.id);
         afters.push(
           sync.upsert(asSessionMessage(message), {
             ...(options.parentId !== undefined && {
@@ -1819,9 +1874,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       sync.abandon();
       throw error;
     }
-    await this.#own(session, async () => {
+    const release = this.#markOwn(session, ids);
+    try {
       for (const after of afters) await after();
-    });
+    } finally {
+      release();
+    }
   }
 
   /** Every chunk a stream holds, without waiting for more. */
@@ -1977,6 +2035,10 @@ function toSessionEvents(event: ThinkSessionEvent): SessionEvent[] {
       return [{ type: "message", message: toTranscriptMessage(event.message) }];
     case "reset":
       return [{ type: "reset" }];
+    case "transcript":
+      // The shared interface has no "re-read" event; a watch sees the
+      // change in its next state.
+      return [];
   }
 }
 

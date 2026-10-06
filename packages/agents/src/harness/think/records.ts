@@ -54,6 +54,8 @@ export type OperationRecord = {
   readonly overflowRetries: number;
   readonly reason: string | undefined;
   readonly text: string | undefined;
+  /** Set when the operation must be settled unanswered rather than run on. */
+  readonly abandonReason: string | undefined;
   readonly createdAt: number;
 };
 
@@ -88,6 +90,7 @@ type OperationRow = {
   overflow_retries: number;
   reason: string | null;
   text: string | null;
+  abandon_reason: string | null;
   created_at: number;
 };
 
@@ -117,6 +120,7 @@ export type OperationUpdate = {
   readonly overflowRetries?: number;
   readonly reason?: string | null;
   readonly text?: string | null;
+  readonly abandonReason?: string | null;
 };
 
 const STATUSES: ReadonlySet<string> = new Set([
@@ -154,6 +158,7 @@ function parseOperation(row: OperationRow): OperationRecord {
     overflowRetries: row.overflow_retries,
     reason: row.reason ?? undefined,
     text: row.text ?? undefined,
+    abandonReason: row.abandon_reason ?? undefined,
     createdAt: row.created_at
   };
 }
@@ -196,6 +201,7 @@ export class OperationRecords {
       overflow_retries INTEGER NOT NULL DEFAULT 0,
       reason TEXT,
       text TEXT,
+      abandon_reason TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (session_id, operation_id)
@@ -344,6 +350,9 @@ export class OperationRecords {
     }
     if (change.reason !== undefined) set("reason", change.reason);
     if (change.text !== undefined) set("text", change.text);
+    if (change.abandonReason !== undefined) {
+      set("abandon_reason", change.abandonReason);
+    }
     set("updated_at", Date.now());
     this.#sql.exec(
       `UPDATE cf_think_harness_operations SET ${sets.join(", ")}

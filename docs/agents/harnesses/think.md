@@ -83,22 +83,22 @@ const { text, messages } = await session.prompt("Hello");
 
 `submit()` accepts a string, a `UIMessage` or an array of them, the shared harness input `{ parts }`, or a tool answer. A submission made while the session is busy waits its turn. Steering the running turn is not supported: `whenBusy: "steer"` throws `SteerNotSupportedError`.
 
-| Method                       | What it does                                                                                             |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `submit(input, options)`     | Durably queue input. Returns `{ operationId, session, accepted }`.                                       |
-| `prompt(input, options)`     | `submit`, then `wait`, then the transcript.                                                              |
-| `wait(operationId, signal?)` | Resolve when the operation settles: `done` with `text`, or `unanswered` with a `reason`.                 |
-| `inspect(operationId)`       | The operation's status, or `undefined`.                                                                  |
-| `chat(input, callback)`      | Stream the answer to `onStart`, `onEvent(json)`, then `onDone` or `onError`, like Think's `chat()`.      |
-| `abort(operationId?)`        | Withdraw a queued operation or abort a running one. With no id, everything open in the session.          |
-| `regenerate(messageId?)`     | Answer a user message again, as a new branch. `Session.getBranches()` still reads the earlier answers.   |
-| `continue()`                 | Call the model again to continue the latest message.                                                     |
-| `reset(handoff?)`            | Abort everything and clear the transcript, optionally leaving a system note.                             |
-| `messages()`                 | The active transcript.                                                                                   |
-| `pending()`                  | Operations not settled yet, oldest first.                                                                |
-| `subscribe(listener)`        | Live events in the AI SDK's vocabulary: chunks, persisted messages, operation status, run start and end. |
-| `inFlight()`                 | The running operation and its model call's chunks so far, including chunks an eviction left in storage.  |
-| `watch()`                    | The shared harness interface's watch, so a Channels host can serve the session.                          |
+| Method                       | What it does                                                                                                                                                                                 |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `submit(input, options)`     | Durably queue input. Returns `{ operationId, session, accepted }`.                                                                                                                           |
+| `prompt(input, options)`     | `submit`, then `wait`, then the transcript.                                                                                                                                                  |
+| `wait(operationId, signal?)` | Resolve when the operation settles: `done` with `text`, or `unanswered` with a `reason`.                                                                                                     |
+| `inspect(operationId)`       | The operation's status, or `undefined`.                                                                                                                                                      |
+| `chat(input, callback)`      | Stream the answer to `onStart`, `onEvent(json)`, then `onDone` or `onError`, like Think's `chat()`.                                                                                          |
+| `abort(operationId?)`        | Withdraw a queued operation or abort a running one. With no id, everything open in the session.                                                                                              |
+| `regenerate(messageId?)`     | Answer a user message again, as a new branch. `Session.getBranches()` still reads the earlier answers.                                                                                       |
+| `continue()`                 | Call the model again to continue the latest message.                                                                                                                                         |
+| `reset(handoff?)`            | Abort everything and clear the transcript, optionally leaving a system note.                                                                                                                 |
+| `messages()`                 | The active transcript.                                                                                                                                                                       |
+| `pending()`                  | Operations not settled yet, oldest first.                                                                                                                                                    |
+| `subscribe(listener)`        | Live events in the AI SDK's vocabulary: chunks, persisted messages, operation status, run start and end, reset, and `transcript` (deleted messages or a compaction; re-read the transcript). |
+| `inFlight()`                 | The running operation and its model call's chunks so far, including chunks an eviction left in storage.                                                                                      |
+| `watch()`                    | The shared harness interface's watch, so a Channels host can serve the session.                                                                                                              |
 
 `harness.sessions` has `create()`, `fork(from)` and `list()`. A fork copies the source session's active path.
 
@@ -110,7 +110,7 @@ A session also reads and shapes its transcript:
 | `search(query, { limit })` | Full-text search over the session's messages.                                                           |
 | `compact()`                | Summarize older messages with the compaction function set in `configureSession`.                        |
 
-`configureSession` receives each session's `Session` handle from `agents/sessions`, for compaction settings and for writing messages without starting a turn. Those writes still reach `subscribe()` listeners and `ThinkChat` clients.
+`configureSession` receives each session's `Session` handle from `agents/sessions`, for compaction settings and for writing messages without starting a turn. Those writes still reach `subscribe()` listeners and `ThinkChat` clients: an append or update as a `message` event, a deletion or compaction as a `transcript` event.
 
 ## Tools, approvals and client tools
 
@@ -129,6 +129,13 @@ await session.submit({
 
 A client tool call works the same way: the operation settles with the call `input-available`, and the client's result continues the turn. Pass `autoContinue: false` with an answer to record it without continuing. Tool schemas a browser sends are kept with the session through `submit(..., { clientTools })`.
 
+Input submitted with `source: "client"` is untrusted:
+
+- It may only add `user` messages. Any other role ends the operation `unanswered` with reason `client_role`.
+- A message whose id is already stored, on any branch, is dropped rather than rewritten.
+- A client tool never replaces a server tool of the same name.
+- A tool result answers only a client tool. A result for a server tool call ends `unanswered` with reason `not_client_tool`, so a server tool's result always comes from running it under its approval policy.
+
 ## Recovery
 
 Every step of a turn reads only durable state, so a restarted object continues where the last write left off.
@@ -137,7 +144,7 @@ Every step of a turn reads only durable state, so a restarted object continues w
 - **During a tool call.** The harness records each call before it runs. After an eviction, a call with a record and no result was cut short. A tool that carries `recovery: "rerun"` runs again. Any other tool (`"report"`, the default) has the call recorded as failed with an "interrupted" error and the model decides what to do. Use `rerun` only for tools that are safe to repeat.
 - **Budget.** `recovery.maxAttempts` (default 10) counts interruptions without progress. A finished model call or tool call resets the count. Past the budget the operation settles `unanswered` with reason `interrupted`. Retries after the first back off from `recovery.backoffMs` (default 1000), doubling up to a minute.
 - **Stalls.** A model stream that sends nothing for `recovery.stallTimeoutMs` (default 120000) is treated as interrupted.
-- **Memory limits.** The wake jobs are flagged for the Lifecycle's alarm memory-limit breaker, so a turn that keeps running out of memory is backed off and then stopped.
+- **Memory limits.** The wake jobs are flagged for the Lifecycle's alarm memory-limit breaker, so a turn that keeps running out of memory is backed off. When the breaker seals, the running operation is settled `unanswered` with reason `out_of_memory` on the next start, keeping any partial answer, rather than run again. A restart keeps a wake already set for later, so backoff survives a deploy.
 
 ## Hooks
 

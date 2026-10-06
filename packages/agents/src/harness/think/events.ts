@@ -41,7 +41,12 @@ export type ThinkSessionEvent =
       readonly operationId?: string;
     }
   /** The session was reset. Messages that follow belong to the new context. */
-  | { readonly type: "reset" };
+  | { readonly type: "reset" }
+  /**
+   * The transcript changed in a way no single message describes: messages
+   * were deleted, or a compaction changed what the model sees. Re-read it.
+   */
+  | { readonly type: "transcript" };
 
 /** A listener for a session's events. @experimental */
 export type ThinkSessionListener = (event: ThinkSessionEvent) => void;
