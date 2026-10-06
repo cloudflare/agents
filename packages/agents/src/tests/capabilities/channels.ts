@@ -12,6 +12,7 @@ import {
   type SessionState,
   type SubmitOptions
 } from "../../experimental/channels";
+import { AcpChannel } from "../../experimental/channels/acp";
 import { WebChannel } from "../../experimental/channels/web";
 import { Lifecycle } from "../../lifecycle";
 import { Streams } from "../../streams";
@@ -128,7 +129,7 @@ class ScriptedHarness implements AgentHarness {
 }
 
 /**
- * Channels with the Web Channel over a scripted harness. Tests play the
+ * Channels with the Web and ACP channels over a scripted harness. Tests play the
  * harness through RPC and the participants through WebSockets, connecting
  * with the identity header the gateway would set.
  */
@@ -137,7 +138,8 @@ export class ChannelsHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly channels = Channels.forHarness(this.harness, {
     streams: new Streams({ maxChunkBytes: 1024 }),
     channels: {
-      web: new WebChannel()
+      web: new WebChannel(),
+      acp: new AcpChannel({ agentInfo: { name: "test-agent", version: "1" } })
     }
   });
 

@@ -392,6 +392,11 @@
       "import": "./dist/experimental/channels/index.js",
       "require": "./dist/experimental/channels/index.js"
     },
+    "./experimental/channels/acp": {
+      "types": "./dist/experimental/channels/acp/index.d.ts",
+      "import": "./dist/experimental/channels/acp/index.js",
+      "require": "./dist/experimental/channels/acp/index.js"
+    },
     "./experimental/channels/email": {
       "types": "./dist/experimental/channels/email/index.d.ts",
       "import": "./dist/experimental/channels/email/index.js",

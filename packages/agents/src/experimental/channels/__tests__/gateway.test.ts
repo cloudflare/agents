@@ -13,6 +13,7 @@ import {
   type ChannelIngressEvent,
   type ChannelRouteEvent
 } from "..";
+import { acp } from "../acp/ingress";
 import { web } from "../web/ingress";
 import { WEB_IDENTITY_HEADER } from "../web/protocol";
 
@@ -794,7 +795,8 @@ describe("ChannelGateway Web upgrades", () => {
     expect(agent).toHaveBeenCalledWith("participant:user-1");
     expect(forwarded()).toEqual({
       route: "participant:user-1",
-      participant: { id: "user-1", name: "Ada" }
+      participant: { id: "user-1", name: "Ada" },
+      channel: "web"
     });
   });
 
@@ -808,7 +810,8 @@ describe("ChannelGateway Web upgrades", () => {
     expect(forwarded()).toEqual({
       route: "participant:anonymous",
       conversationId: "conversation 1",
-      participant: { id: "anonymous" }
+      participant: { id: "anonymous" },
+      channel: "web"
     });
   });
 
@@ -858,6 +861,26 @@ describe("ChannelGateway Web upgrades", () => {
     expect(agent).toHaveBeenCalledWith("team");
     expect(outsider?.status).toBe(403);
     expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("names the Channel that took the upgrade, so the agent's channel under that key serves it", async () => {
+    const fetch = vi.fn<GatewayAgent["fetch"]>(async () => new Response());
+    const gateway = new ChannelGateway({
+      channels: {
+        web: web({ participant: () => "user-1" }),
+        acp: acp({ participant: () => "user-1" })
+      },
+      agent: () => ({ receive: vi.fn(), fetch })
+    });
+
+    await gateway.fetch(upgrade("/acp"));
+    await gateway.fetch(upgrade("/channels"));
+
+    const channels = fetch.mock.calls.map(
+      ([request]) =>
+        JSON.parse(request.headers.get(WEB_IDENTITY_HEADER) ?? "{}").channel
+    );
+    expect(channels).toEqual(["acp", "web"]);
   });
 
   it("leaves an upgrade no Channel matches to the Worker", async () => {

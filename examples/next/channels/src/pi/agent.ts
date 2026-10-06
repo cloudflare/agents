@@ -10,6 +10,7 @@ import {
   type GatewayEvent,
   type GatewayOrigin
 } from "agents/experimental/channels";
+import { AcpChannel } from "agents/experimental/channels/acp";
 import { WebChannel } from "agents/experimental/channels/web";
 import { Lifecycle } from "agents/lifecycle";
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -65,7 +66,14 @@ export class PiAgent extends DurableObject<Env> {
   });
   readonly channels = Channels.forHarness(
     piChannelsHarness(this.harness, { kv: this.ctx.storage.kv }),
-    { channels: { web: new WebChannel() } }
+    {
+      channels: {
+        web: new WebChannel(),
+        acp: new AcpChannel({
+          agentInfo: { name: "pi-agent", title: "pi agent", version: "0.0.0" }
+        })
+      }
+    }
   );
   readonly lifecycle = Lifecycle.install(this)
     .use(this.harness)
