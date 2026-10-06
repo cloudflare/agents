@@ -8298,3 +8298,375 @@ describe("useAgentChat socket close mid-stream (#2013)", () => {
     await expect.element(screen.getByTestId("error")).toBeEmptyDOMElement();
   });
 });
+
+describe("useAgentChat stale reply after a mid-stream close (#2464)", () => {
+  type Sent = {
+    type: string;
+    id?: string;
+    probeId?: string;
+    init?: { body?: string };
+  };
+
+  function setup(name: string) {
+    const target = new EventTarget();
+    const sentMessages: string[] = [];
+    const agent = createAgent({
+      name,
+      url: `ws://localhost:3000/agents/chat/${name}?_pk=abc`,
+      send: (data: string) => sentMessages.push(data)
+    });
+    (agent as unknown as Record<string, unknown>).addEventListener =
+      target.addEventListener.bind(target);
+    (agent as unknown as Record<string, unknown>).removeEventListener =
+      target.removeEventListener.bind(target);
+    const dispatch = (data: Record<string, unknown>) =>
+      target.dispatchEvent(
+        new MessageEvent("message", { data: JSON.stringify(data) })
+      );
+    const sentOfType = (type: string) =>
+      sentMessages
+        .map((message) => JSON.parse(message) as Sent)
+        .filter((message) => message.type === type);
+    return { agent, target, dispatch, sentOfType };
+  }
+
+  function textOf(message: UIMessage | undefined) {
+    return (message?.parts ?? [])
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("");
+  }
+
+  function assistantTextOfRequest(request: Sent | undefined, id: string) {
+    const body = JSON.parse(request?.init?.body ?? "{}") as {
+      messages?: UIMessage[];
+    };
+    return textOf(body.messages?.find((message) => message.id === id));
+  }
+
+  type ChatRef = { chat: ReturnType<typeof useAgentChat> | null };
+
+  async function mountChat(
+    agent: ReturnType<typeof useAgent>,
+    resume: boolean
+  ) {
+    const ref: ChatRef = { chat: null };
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume
+      });
+      ref.chat = chat;
+      const assistants = chat.messages.filter((m) => m.role === "assistant");
+      return (
+        <div>
+          <div data-testid="text">{assistants.map(textOf).join("|")}</div>
+          <div data-testid="assistants">{assistants.length}</div>
+          <div data-testid="roles">
+            {chat.messages.map((m) => m.role).join(",")}
+          </div>
+        </div>
+      );
+    };
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+    return { screen, ref };
+  }
+
+  /** Sends "hi", streams "Hel" into assistant a1, then drops the socket. */
+  async function streamPartialThenClose(
+    harness: ReturnType<typeof setup>,
+    ref: ChatRef
+  ) {
+    const { target, dispatch, sentOfType } = harness;
+    await act(async () => {
+      dispatch({ type: "cf_agent_stream_resume_none", reason: "idle" });
+      await sleep(10);
+    });
+    await act(async () => {
+      void ref.chat!.sendMessage({ text: "hi" });
+      await sleep(20);
+    });
+    const requestId = sentOfType("cf_agent_use_chat_request")[0]?.id;
+    expect(requestId).toBeDefined();
+    const chunk = (seq: number, body: string, replay = false) => ({
+      type: "cf_agent_use_chat_response",
+      id: requestId,
+      body,
+      done: false,
+      seq,
+      ...(replay && { replay: true })
+    });
+    await act(async () => {
+      dispatch(chunk(0, '{"type":"start","messageId":"a1"}'));
+      dispatch(chunk(1, '{"type":"text-start","id":"t1"}'));
+      dispatch(chunk(2, '{"type":"text-delta","id":"t1","delta":"Hel"}'));
+      await sleep(10);
+    });
+    const userMessage = ref.chat!.messages.find((m) => m.role === "user");
+    expect(userMessage).toBeDefined();
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      await sleep(20);
+    });
+    return { requestId: requestId!, chunk, userMessage: userMessage! };
+  }
+
+  const storedReply = (text: string): UIMessage => ({
+    id: "a1",
+    role: "assistant",
+    parts: [{ type: "text", text, state: "done" }]
+  });
+
+  it("lets the idle-connect snapshot replace the cut-off reply once the turn ended while disconnected", async () => {
+    const harness = setup("stale-reply-idle-snapshot");
+    const { target, dispatch, sentOfType } = harness;
+    const { screen, ref } = await mountChat(harness.agent, true);
+    const { userMessage } = await streamPartialThenClose(harness, ref);
+    await expect.element(screen.getByTestId("text")).toHaveTextContent("Hel");
+
+    // The server finished the reply while we were away. Think sends the stored
+    // transcript on an idle connect, then answers the resume probe with idle.
+    await act(async () => {
+      target.dispatchEvent(new Event("open"));
+      await sleep(20);
+    });
+    const probe = sentOfType("cf_agent_stream_resume_request").at(-1);
+    expect(probe?.probeId).toEqual(expect.any(String));
+    await act(async () => {
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: [userMessage, storedReply("Hello world")],
+        connect: true
+      });
+      dispatch({
+        type: "cf_agent_stream_resume_none",
+        reason: "idle",
+        probeId: probe?.probeId
+      });
+      await sleep(20);
+    });
+
+    await expect
+      .element(screen.getByTestId("text"))
+      .toHaveTextContent(/^Hello world$/);
+    await expect
+      .element(screen.getByTestId("assistants"))
+      .toHaveTextContent("1");
+
+    // The next send must carry the stored reply, not the cut-off copy.
+    await act(async () => {
+      void ref.chat!.sendMessage({ text: "next" });
+      await sleep(20);
+    });
+    const nextRequest = sentOfType("cf_agent_use_chat_request").at(-1);
+    expect(assistantTextOfRequest(nextRequest, "a1")).toBe("Hello world");
+  });
+
+  it("lets a later snapshot replace the cut-off reply with resume disabled", async () => {
+    const harness = setup("stale-reply-no-resume");
+    const { target, dispatch, sentOfType } = harness;
+    const { screen, ref } = await mountChat(harness.agent, false);
+    const { userMessage } = await streamPartialThenClose(harness, ref);
+
+    await act(async () => {
+      target.dispatchEvent(new Event("open"));
+      await sleep(20);
+    });
+    // e.g. the end-of-turn broadcast, or another tab's later change.
+    await act(async () => {
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: [userMessage, storedReply("Hello world")]
+      });
+      await sleep(20);
+    });
+
+    await expect
+      .element(screen.getByTestId("text"))
+      .toHaveTextContent(/^Hello world$/);
+    await act(async () => {
+      void ref.chat!.sendMessage({ text: "next" });
+      await sleep(20);
+    });
+    const nextRequest = sentOfType("cf_agent_use_chat_request").at(-1);
+    expect(assistantTextOfRequest(nextRequest, "a1")).toBe("Hello world");
+  });
+
+  it("keeps protecting the reply a mid-stream reconnect resumes, without doubling or losing text", async () => {
+    const harness = setup("stale-reply-resume-replay");
+    const { target, dispatch, sentOfType } = harness;
+    const { screen, ref } = await mountChat(harness.agent, true);
+    const { requestId, chunk, userMessage } = await streamPartialThenClose(
+      harness,
+      ref
+    );
+
+    await act(async () => {
+      target.dispatchEvent(new Event("open"));
+      await sleep(20);
+    });
+    await act(async () => {
+      dispatch({ type: "cf_agent_stream_resuming", id: requestId });
+      await sleep(10);
+    });
+    await act(async () => {
+      dispatch(chunk(0, '{"type":"start","messageId":"a1"}', true));
+      dispatch(chunk(1, '{"type":"text-start","id":"t1"}', true));
+      dispatch(chunk(2, '{"type":"text-delta","id":"t1","delta":"Hel"}', true));
+      dispatch(chunk(3, '{"type":"text-delta","id":"t1","delta":"lo"}'));
+      await sleep(10);
+    });
+    // A behind snapshot mid-stream (e.g. after a tool result) must not
+    // clobber the resumed assistant.
+    await act(async () => {
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: [userMessage, storedReply("Hel")]
+      });
+      dispatch(chunk(4, '{"type":"text-delta","id":"t1","delta":" world"}'));
+      await sleep(10);
+    });
+    await expect
+      .element(screen.getByTestId("text"))
+      .toHaveTextContent(/^Hello world$/);
+    await act(async () => {
+      dispatch(chunk(5, '{"type":"text-end","id":"t1"}'));
+      dispatch({
+        type: "cf_agent_use_chat_response",
+        id: requestId,
+        body: "",
+        done: true
+      });
+      await sleep(20);
+    });
+
+    await expect
+      .element(screen.getByTestId("text"))
+      .toHaveTextContent(/^Hello world$/);
+    await expect
+      .element(screen.getByTestId("assistants"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("roles"))
+      .toHaveTextContent(/^user,assistant$/);
+    await act(async () => {
+      void ref.chat!.sendMessage({ text: "next" });
+      await sleep(20);
+    });
+    const nextRequest = sentOfType("cf_agent_use_chat_request").at(-1);
+    expect(assistantTextOfRequest(nextRequest, "a1")).toBe("Hello world");
+  });
+
+  it("lets the idle-connect snapshot replace a cut-off reply another tab was observing", async () => {
+    const harness = setup("stale-reply-observer");
+    const { target, dispatch, sentOfType } = harness;
+    const { screen } = await mountChat(harness.agent, true);
+    await act(async () => {
+      dispatch({ type: "cf_agent_stream_resume_none", reason: "idle" });
+      await sleep(10);
+    });
+    const userMessage: UIMessage = {
+      id: "u1",
+      role: "user",
+      parts: [{ type: "text", text: "hi" }]
+    };
+    const frame = (seq: number, body: string) => ({
+      type: "cf_agent_use_chat_response",
+      id: "other-tab-request",
+      body,
+      done: false,
+      seq
+    });
+    await act(async () => {
+      dispatch({ type: "cf_agent_chat_messages", messages: [userMessage] });
+      dispatch(frame(0, '{"type":"start","messageId":"a1"}'));
+      dispatch(frame(1, '{"type":"text-start","id":"t1"}'));
+      dispatch(frame(2, '{"type":"text-delta","id":"t1","delta":"Hel"}'));
+      await sleep(20);
+    });
+    await expect.element(screen.getByTestId("text")).toHaveTextContent("Hel");
+
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      target.dispatchEvent(new Event("open"));
+      await sleep(20);
+    });
+    const probe = sentOfType("cf_agent_stream_resume_request").at(-1);
+    await act(async () => {
+      dispatch({
+        type: "cf_agent_chat_messages",
+        messages: [userMessage, storedReply("Hello world")],
+        connect: true
+      });
+      dispatch({
+        type: "cf_agent_stream_resume_none",
+        reason: "idle",
+        probeId: probe?.probeId
+      });
+      await sleep(20);
+    });
+
+    await expect
+      .element(screen.getByTestId("text"))
+      .toHaveTextContent(/^Hello world$/);
+    await expect
+      .element(screen.getByTestId("assistants"))
+      .toHaveTextContent("1");
+  });
+
+  it("rebuilds the reply once when a snapshot without it lands before the resume replay", async () => {
+    const harness = setup("stale-reply-snapshot-then-replay");
+    const { target, dispatch } = harness;
+    const { screen, ref } = await mountChat(harness.agent, true);
+    const { requestId, chunk, userMessage } = await streamPartialThenClose(
+      harness,
+      ref
+    );
+
+    await act(async () => {
+      target.dispatchEvent(new Event("open"));
+      await sleep(20);
+    });
+    // A transcript from before the reply was persisted, then the resume.
+    await act(async () => {
+      dispatch({ type: "cf_agent_chat_messages", messages: [userMessage] });
+      dispatch({ type: "cf_agent_stream_resuming", id: requestId });
+      await sleep(10);
+    });
+    await act(async () => {
+      dispatch(chunk(0, '{"type":"start","messageId":"a1"}', true));
+      dispatch(chunk(1, '{"type":"text-start","id":"t1"}', true));
+      dispatch(chunk(2, '{"type":"text-delta","id":"t1","delta":"Hel"}', true));
+      dispatch(chunk(3, '{"type":"text-delta","id":"t1","delta":"lo"}'));
+      dispatch(chunk(4, '{"type":"text-end","id":"t1"}'));
+      dispatch({
+        type: "cf_agent_use_chat_response",
+        id: requestId,
+        body: "",
+        done: true
+      });
+      await sleep(20);
+    });
+
+    await expect
+      .element(screen.getByTestId("text"))
+      .toHaveTextContent(/^Hello$/);
+    await expect
+      .element(screen.getByTestId("assistants"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("roles"))
+      .toHaveTextContent(/^user,assistant$/);
+  });
+});
