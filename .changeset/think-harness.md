@@ -1,5 +1,5 @@
 ---
-"agents": minor
+"agents": patch
 ---
 
 Add `ThinkHarness` from the new experimental `agents/harness/think` entry point. It runs Think's agent loop as a Lifecycle capability with the same shape as `PiHarness` (`prompt`, `submit`, `wait`, `abort`, `sessions`, `session(id)`), and implements the shared harness interface Channels serves.
