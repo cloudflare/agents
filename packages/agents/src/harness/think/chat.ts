@@ -56,6 +56,12 @@ type Framing = {
   readonly requester: string | undefined;
   /** The last model call's finish chunk, sent just before the terminal frame. */
   finish: UIMessageChunk | undefined;
+  /**
+   * Whether the operation's `start` went out. An operation that calls the
+   * model several times extends one assistant message, so clients get one
+   * message stream: one `start`, the chunks of every call, one `finish`.
+   */
+  started: boolean;
 };
 
 function send(connection: Connection, frame: object): void {
@@ -137,6 +143,8 @@ export class ThinkChat extends LifecycleCapability {
   >();
   /** Connections that asked for an operation, by operation id. */
   readonly #requesters = new Map<string, string>();
+  /** Connections told STREAM_PENDING, with their probe ids. */
+  readonly #pendingProbes = new Map<string, string | undefined>();
   readonly #unobserve: () => void;
 
   /** @param options - The harness, its WebSockets, and the session to serve. */
@@ -188,6 +196,7 @@ export class ThinkChat extends LifecycleCapability {
 
   #forget(connection: Connection): void {
     this.#awaitingAck.delete(connection.id);
+    this.#pendingProbes.delete(connection.id);
     this.#replayed.delete(connection.id);
   }
 
@@ -321,6 +330,9 @@ export class ThinkChat extends LifecycleCapability {
         if (inFlight) {
           this.#offerResume(connection, inFlight.operationId, event.probeId);
         } else if ((await session.pending()).length > 0) {
+          // Answered later: with an offer when the work starts streaming,
+          // or "none" if it ends without streaming.
+          this.#pendingProbes.set(connection.id, event.probeId);
           send(connection, {
             type: CHAT_MESSAGE_TYPES.STREAM_PENDING,
             ...(event.probeId !== undefined && { probeId: event.probeId })
@@ -411,8 +423,16 @@ export class ThinkChat extends LifecycleCapability {
         this.#framing.set(event.operationId, {
           continuation: event.continuation,
           requester,
-          finish: undefined
+          finish: undefined,
+          started: false
         });
+        // Probes told to keep waiting learn which stream to resume.
+        for (const connection of this.#webSockets.getConnections()) {
+          if (!this.#pendingProbes.has(connection.id)) continue;
+          const probeId = this.#pendingProbes.get(connection.id);
+          this.#pendingProbes.delete(connection.id);
+          this.#offerResume(connection, event.operationId, probeId);
+        }
         // Someone who answered a tool call learns of the continuation from
         // an offer, as Think does; a chat request's sender already owns it.
         if (event.continuation && requester !== undefined) {
@@ -429,6 +449,10 @@ export class ThinkChat extends LifecycleCapability {
         if (event.chunk.type === "finish") {
           if (framing) framing.finish = event.chunk;
           return;
+        }
+        if (event.chunk.type === "start" && framing) {
+          if (framing.started) return;
+          framing.started = true;
         }
         this.#broadcastChunk(event.operationId, event.chunk, framing);
         return;
@@ -455,7 +479,7 @@ export class ThinkChat extends LifecycleCapability {
         const framing = this.#framing.get(status.operationId);
         this.#framing.delete(status.operationId);
         this.#requesters.delete(status.operationId);
-        void this.#finish(status, framing);
+        void this.#finish(status, framing).then(() => this.#resolveProbes());
         return;
       }
       case "reset":
@@ -496,6 +520,23 @@ export class ThinkChat extends LifecycleCapability {
     for (const connection of this.#webSockets.getConnections()) {
       if (connection.id === except) continue;
       send(connection, { type: CHAT_MESSAGE_TYPES.CHAT_MESSAGES, messages });
+    }
+  }
+
+  /** Tell probes still waiting that nothing will stream, once the session is idle. */
+  async #resolveProbes(): Promise<void> {
+    if (this.#pendingProbes.size === 0) return;
+    const session = this.#harness.session(this.#session);
+    if ((await session.pending()).length > 0) return;
+    for (const connection of this.#webSockets.getConnections()) {
+      if (!this.#pendingProbes.has(connection.id)) continue;
+      const probeId = this.#pendingProbes.get(connection.id);
+      this.#pendingProbes.delete(connection.id);
+      send(connection, {
+        type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE,
+        reason: STREAM_RESUME_NONE_REASONS.IDLE,
+        ...(probeId !== undefined && { probeId })
+      });
     }
   }
 

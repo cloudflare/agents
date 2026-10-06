@@ -25,6 +25,10 @@ type RunReport = {
 type Scoreboard = {
   total: number;
   passed: number;
+  /** Tests that fail when Think cannot be constructed: they need Think. */
+  needThink: number;
+  /** Of those, the ones that pass against the harness-backed Think. */
+  needThinkPassed: number;
   files: Record<string, { total: number; passed: number }>;
   passing: string[];
 };
@@ -35,11 +39,27 @@ const scoreboardMd = path.join(packageDir, "harness-compat.md");
 const check = process.argv.includes("--check");
 const work = mkdtempSync(path.join(tmpdir(), "think-harness-"));
 
-function vitest(args: string[]): void {
+function vitest(args: string[], env: Record<string, string> = {}): void {
   spawnSync("pnpm", ["exec", "vitest", ...args], {
     cwd: packageDir,
-    stdio: ["ignore", "inherit", "inherit"]
+    stdio: ["ignore", "inherit", "inherit"],
+    env: { ...process.env, ...env }
   });
+}
+
+/** Ids of the tests a JSON report records as passing. */
+function passedIn(reportFile: string): Set<string> {
+  const report = existsSync(reportFile)
+    ? (JSON.parse(readFileSync(reportFile, "utf8")) as RunReport)
+    : { testResults: [] };
+  const ids = new Set<string>();
+  for (const file of report.testResults) {
+    for (const test of file.assertionResults) {
+      if (test.status !== "passed") continue;
+      ids.add(id(file.name, [...test.ancestorTitles, test.title].join(" > ")));
+    }
+  }
+  return ids;
 }
 
 function relative(file: string): string {
@@ -71,37 +91,48 @@ vitest([
   "--reporter=json",
   `--outputFile.json=${reportFile}`
 ]);
-const report = existsSync(reportFile)
-  ? (JSON.parse(readFileSync(reportFile, "utf8")) as RunReport)
-  : { testResults: [] };
+const passedIds = passedIn(reportFile);
 
-const passedIds = new Set<string>();
-for (const file of report.testResults) {
-  for (const test of file.assertionResults) {
-    if (test.status !== "passed") continue;
-    passedIds.add(
-      id(file.name, [...test.ancestorTitles, test.title].join(" > "))
-    );
-  }
-}
+// 2b. And against a Think that cannot be constructed: whatever still passes
+// never constructs Think, so it is not evidence about the harness.
+const absentFile = path.join(work, "absent.json");
+vitest(
+  [
+    "--run",
+    "-c",
+    "src/tests/vitest.harness.config.ts",
+    "--reporter=dot",
+    "--reporter=json",
+    `--outputFile.json=${absentFile}`
+  ],
+  { THINK_COMPAT_TARGET: "absent" }
+);
+const withoutThink = passedIn(absentFile);
 
 // 3. Score against the inventory.
 const files: Scoreboard["files"] = {};
 const passing: string[] = [];
+let needThink = 0;
+let needThinkPassed = 0;
 for (const test of inventory) {
   const key = relative(test.file);
   const testId = id(test.file, test.name);
   files[key] ??= { total: 0, passed: 0 };
   files[key].total += 1;
+  const needsThink = !withoutThink.has(testId);
+  if (needsThink) needThink += 1;
   if (passedIds.has(testId)) {
     files[key].passed += 1;
     passing.push(testId);
+    if (needsThink) needThinkPassed += 1;
   }
 }
 passing.sort();
 const scoreboard: Scoreboard = {
   total: inventory.length,
   passed: passing.length,
+  needThink,
+  needThinkPassed,
   files: Object.fromEntries(
     Object.entries(files).sort(([a], [b]) => a.localeCompare(b))
   ),
@@ -111,7 +142,7 @@ const scoreboard: Scoreboard = {
 const percent = (passed: number, total: number) =>
   total === 0 ? "0%" : `${Math.floor((passed / total) * 100)}%`;
 console.log(
-  `\nThink on ThinkHarness: ${scoreboard.passed} of ${scoreboard.total} tests pass (${percent(scoreboard.passed, scoreboard.total)}).`
+  `\nThink on ThinkHarness: ${needThinkPassed} of the ${needThink} tests that construct Think pass (${percent(needThinkPassed, needThink)}); ${scoreboard.passed} of all ${scoreboard.total}.`
 );
 
 if (check) {
@@ -150,12 +181,14 @@ Think's workers suite, run against the harness-backed Think in
 \`src/harness/think.ts\` instead of \`src/think.ts\`. When every test passes,
 Think moves onto \`agents/harness/think\`.
 
-Some files test modules Think uses (extensions, fetch tools, messenger
-helpers) rather than the \`Think\` class, so they pass either way. A failing
-test that reaches a Think feature the harness-backed class does not have yet
-fails with "Think.<name> is not supported by the harness-backed Think yet".
+The headline counts only tests that construct Think: the run is repeated
+against a Think that throws when constructed, and a test that still passes
+there (one that tests a module Think uses, such as extensions or fetch
+tools) is left out of it. A failing test that reaches a Think feature the
+harness-backed class does not have yet fails with "Think.<name> is not
+supported by the harness-backed Think yet".
 
-**${scoreboard.passed} of ${scoreboard.total} tests pass (${percent(scoreboard.passed, scoreboard.total)}).**
+**${needThinkPassed} of the ${needThink} tests that construct Think pass (${percent(needThinkPassed, needThink)}).** Across the whole suite, ${scoreboard.passed} of ${scoreboard.total}.
 
 | File | Passing | |
 | --- | --- | --- |

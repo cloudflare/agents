@@ -13,6 +13,27 @@ agent loop as a Lifecycle capability on a plain Durable Object, served to
 - `ThinkChat` speaks Think's `cf_agent_chat_*` protocol over it, so the
   client is the stock `useAgentChat` from `agents/chat/react`.
 
+```ts
+export class ThinkAgent extends DurableObject<Env> {
+  readonly harness = new ThinkHarness({
+    model: createAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.7-code"),
+    tools: { getWeather, sendNotification, getUserTimezone }
+  });
+  readonly webSockets = new WebSockets();
+  readonly chat = new ThinkChat({
+    harness: this.harness,
+    webSockets: this.webSockets
+  });
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.harness)
+    .use(this.webSockets)
+    .use(this.chat);
+}
+```
+
+Each browser gets its own chat, named by a random id kept in
+`localStorage`, so visitors to a deployed copy do not share a transcript.
+
 The tools show the three ways a tool call runs:
 
 | Tool               | Runs                    | After an eviction cuts a call short                |

@@ -8,6 +8,7 @@ import type {
   ToolAnswer
 } from "../../../experimental/channels/harness";
 import { Lifecycle } from "../../../lifecycle";
+import { Streams } from "../../../streams/streams";
 import type { Session } from "../../../sessions/handle";
 import { WebSockets } from "../../../websockets/websockets";
 import { ThinkChat } from "../chat";
@@ -255,7 +256,9 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       } else if (text === "client") {
         parts = callReply([{ name: "ask", input: { question: "why?" } }]);
       } else if (text === "slow") {
-        return this.#slow();
+        return this.#slow(12);
+      } else if (text === "slow-short") {
+        return this.#slow(2);
       } else if (text === "fail") {
         parts = [
           { type: "stream-start", warnings: [] },
@@ -279,14 +282,14 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     });
   }
 
-  /** Streams twelve deltas, then holds until `releaseSlow()`. */
-  #slow(): ReadableStream<StreamPart> {
+  /** Streams `deltas` deltas, then holds until `releaseSlow()`. */
+  #slow(deltas: number): ReadableStream<StreamPart> {
     const held = this.#slowHeld;
     return new ReadableStream({
       async start(controller) {
         controller.enqueue({ type: "stream-start", warnings: [] });
         controller.enqueue({ type: "text-start", id: "t" });
-        for (let i = 0; i < 12; i++) {
+        for (let i = 0; i < deltas; i++) {
           controller.enqueue({ type: "text-delta", id: "t", delta: "x" });
         }
         await held;
@@ -329,6 +332,25 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       return error instanceof SteerNotSupportedError ? error._tag : "other";
     }
+  }
+
+  /** Submit untrusted input as a chat client would. */
+  submitAsClient(
+    messages: {
+      id: string;
+      role: "user" | "assistant" | "system";
+      text: string;
+    }[],
+    clientTools?: { name: string; description?: string }[]
+  ): Promise<ThinkReceipt> {
+    return this.harness.session().submit(
+      messages.map((m) => ({
+        id: m.id,
+        role: m.role,
+        parts: [{ type: "text" as const, text: m.text }]
+      })),
+      { source: "client", ...(clientTools && { clientTools }) }
+    );
   }
 
   answer(answer: ToolAnswer, session?: string): Promise<ThinkReceipt> {
@@ -546,6 +568,68 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   async alarmTime(): Promise<number | null> {
     return this.ctx.storage.getAlarm();
+  }
+}
+
+/**
+ * A host with its own Streams capability beside the harness's, on one
+ * object: the two share the stream tables, including a v1 legacy table.
+ */
+export class ThinkWithStreamsObject extends DurableObject<Cloudflare.Env> {
+  readonly streams = new Streams();
+  readonly harness = new ThinkHarness({
+    model: new MockLanguageModelV4({
+      doStream: async () => ({
+        stream: new ReadableStream<StreamPart>({
+          start(controller) {
+            for (const part of textReply("hi")) controller.enqueue(part);
+            controller.close();
+          }
+        })
+      })
+    })
+  });
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.streams)
+    .use(this.harness);
+
+  /** Seed a v1 stream whose rows are the last in the legacy table. */
+  async seedLegacy(): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    await this.ctx.storage.put("cf_agents:streams_schema_version", 1);
+    sql.exec(`CREATE TABLE IF NOT EXISTS cf_agents_streams (
+      stream_id TEXT PRIMARY KEY, state TEXT NOT NULL, tag TEXT, metadata TEXT,
+      error_message TEXT, chunk_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, closed_at INTEGER)`);
+    sql.exec(`CREATE TABLE IF NOT EXISTS cf_agents_stream_chunks (
+      stream_id TEXT NOT NULL, seq INTEGER NOT NULL, chunk TEXT NOT NULL,
+      created_at INTEGER NOT NULL, PRIMARY KEY (stream_id, seq)) WITHOUT ROWID`);
+    sql.exec(
+      `INSERT INTO cf_agents_streams (stream_id, state, chunk_count, created_at, updated_at, closed_at)
+       VALUES ('old', 'completed', 1, 1, 1, 2)`
+    );
+    sql.exec(
+      `INSERT INTO cf_agents_stream_chunks (stream_id, seq, chunk, created_at) VALUES ('old', 0, '"a"', 1)`
+    );
+  }
+
+  /** Read the v1 stream through the host's Streams, which folds it and drops the table. */
+  async foldThroughHost(): Promise<boolean> {
+    for await (const _chunk of this.streams.read("old")) {
+      // Reading is what folds.
+    }
+    return (
+      this.ctx.storage.sql
+        .exec(
+          "SELECT name FROM sqlite_master WHERE name = 'cf_agents_stream_chunks'"
+        )
+        .toArray().length === 0
+    );
+  }
+
+  async prompt(text: string) {
+    const result = await this.harness.prompt(text);
+    return result.status;
   }
 }
 

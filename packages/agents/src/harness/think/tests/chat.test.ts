@@ -124,6 +124,9 @@ describe("ThinkChat", () => {
     expect(done).toMatchObject({ id: "req-1", outcome: "completed" });
     const types = chunkTypes(client.seen, "req-1");
     expect(types[0]).toBe("start");
+    // Two model calls, one message stream: one start and one finish.
+    expect(types.filter((type) => type === "start")).toHaveLength(1);
+    expect(types.filter((type) => type === "finish")).toHaveLength(1);
     expect(types).toContain("tool-input-available");
     expect(types).toContain("tool-output-available");
     expect(types).toContain("text-delta");

@@ -1,6 +1,8 @@
 {
   "total": 1225,
   "passed": 427,
+  "needThink": 991,
+  "needThinkPassed": 193,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -454,8 +456,8 @@
     "media-eviction.test.ts > hasEvictableMedia — the in-memory gate for scheduling a pass > ignores text, markers, remote urls and small payloads",
     "media-eviction.test.ts > hasEvictableMedia — the in-memory gate for scheduling a pass > sees a payload nested inside a tool output",
     "media-eviction.test.ts > hasEvictableMedia — the in-memory gate for scheduling a pass > sees an inline file payload at or above the threshold",
+    "message-reconciliation.test.ts > Think — message reconciliation on incoming submits > collapses an optimistic copy of a provider-executed tool with a large input",
     "message-reconciliation.test.ts > Think — message reconciliation on incoming submits > does not re-repair an already-errored tool call or clobber its errorText",
-    "message-reconciliation.test.ts > Think — message reconciliation on incoming submits > keeps a later assistant when a toolCallId is reused across turns",
     "message-reconciliation.test.ts > Think — message reconciliation on incoming submits > merges server tool outputs into a stale client snapshot when IDs match",
     "message-reconciliation.test.ts > Think — message reconciliation on incoming submits > preserves a denied tool approval (output-denied) instead of flipping it to errored",
     "messengers.test.ts > telegram messenger provider > classifies Telegram no-op edit errors",

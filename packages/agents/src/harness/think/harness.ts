@@ -16,6 +16,7 @@ import {
 } from "../../lifecycle/capability";
 import { Sessions } from "../../sessions/sessions";
 import { Streams } from "../../streams/streams";
+import type { MemoryLimitContext } from "../../lifecycle/capability-runner";
 import type {
   LifecycleJobContext,
   LifecycleJobOutcome
@@ -131,6 +132,8 @@ const STREAM_MAX_CHUNK_BYTES = 1_900_000;
 const SEGMENT_CHUNKS = 10;
 /** Raw bytes packed into one stored segment before it is written. */
 const SEGMENT_MAX_BYTES = 256_000;
+/** Longest a streamed chunk waits in memory before it is written. */
+const FLUSH_AFTER_MS = 100;
 /** Segments read at a time when rebuilding an interrupted model call. */
 const READ_PAGE = 50;
 
@@ -431,7 +434,39 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const store = this.#tables();
     store.ensureSession(ROOT_SESSION);
     const sessions = new Set(store.open().map((op) => op.session));
-    for (const session of sessions) await this.#wake(session);
+    for (const session of sessions) {
+      // A wake already set for later is a recovery backoff or the alarm
+      // memory-limit breaker's delay; replacing it with one due now would
+      // skip that wait.
+      const wake = this.lifecycle.jobs.get(wakeJobId(session));
+      if (wake && wake.time > Date.now()) continue;
+      await this.#wake(session);
+    }
+  }
+
+  /**
+   * The alarm memory-limit breaker sealed: the work it stopped would only
+   * run out of memory again. Its wake jobs are already gone; settle the
+   * running operations, so the next startup does not wake them again.
+   * Queued operations behind them still run. Runs after the isolate's
+   * work unwound, so it keeps to small synchronous writes.
+   */
+  onMemoryLimit(context: MemoryLimitContext): void {
+    if (!context.sealed) return;
+    const store = this.#tables();
+    for (const op of store.open()) {
+      if (op.status !== "running") continue;
+      if (op.streamId !== undefined) {
+        this.#streams
+          .__DO_NOT_USE_WILL_BREAK__sync()
+          .deleteUnchecked(op.streamId);
+      }
+      store.update(op.session, op.operationId, {
+        status: "unanswered",
+        reason: "out_of_memory",
+        streamId: null
+      });
+    }
   }
 
   /** Run a session's wake job. */
@@ -932,14 +967,29 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
     switch (input.kind) {
       case "messages": {
-        const last = input.messages.at(-1);
+        let messages = input.messages;
+        if (op.source === "client") {
+          // Untrusted input may only add user messages. It may not rewrite
+          // a stored message, even one off the active path, by reusing its
+          // id: those are dropped.
+          if (messages.some((message) => message.role !== "user")) {
+            unanswered = "client_role";
+            break;
+          }
+          const fresh: UIMessage[] = [];
+          for (const message of messages) {
+            if (!(await handle.getMessage(message.id))) fresh.push(message);
+          }
+          messages = fresh;
+        }
+        const last = messages.at(-1);
         if (!last) {
           unanswered = "empty";
           break;
         }
         await this.#commit(session, undefined, (put) => {
           let parentId: string | undefined;
-          for (const message of input.messages) {
+          for (const message of messages) {
             put(message, { parentId, source: op.source });
             parentId = message.id;
             placed.push(message);
@@ -1092,7 +1142,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     live.continues = existing !== undefined;
     let segment: UIMessageChunk[] = [];
     let segmentBytes = 0;
+    // Chunks are written in segments, for fewer storage writes, but never
+    // held longer than FLUSH_AFTER_MS: what a client has seen should be
+    // what recovery finds after an eviction.
+    let flushTimer: ReturnType<typeof setTimeout> | undefined;
     const flush = () => {
+      if (flushTimer !== undefined) clearTimeout(flushTimer);
+      flushTimer = undefined;
       if (segment.length === 0) return;
       // SAFETY: UI message chunks are JSON by the AI SDK's contract.
       writer.append(segment as unknown as StreamJson);
@@ -1153,6 +1209,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           segmentBytes >= SEGMENT_MAX_BYTES
         ) {
           flush();
+        } else {
+          flushTimer ??= setTimeout(flush, FLUSH_AFTER_MS);
         }
         this.#events.emit(session, { type: "chunk", operationId, chunk });
         if (hooks?.onChunk) {
@@ -1712,7 +1770,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const client = createToolsFromClientSchemas(
       this.#tables().clientTools(session)
     );
-    return { ...tools, ...client };
+    // A client cannot replace a server tool: the server's definition, its
+    // execute and its approval policy win on a name clash.
+    for (const name of Object.keys(client)) {
+      if (Object.hasOwn(tools, name)) {
+        console.warn(
+          `ThinkHarness ignored a client tool named "${name}": a server tool has that name`
+        );
+      }
+    }
+    return { ...client, ...tools };
   }
 
   /**

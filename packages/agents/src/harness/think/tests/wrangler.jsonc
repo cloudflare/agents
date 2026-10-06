@@ -4,10 +4,14 @@
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
-      { "name": "THINK_HARNESS_TEST", "class_name": "ThinkHarnessTestObject" }
+      { "name": "THINK_HARNESS_TEST", "class_name": "ThinkHarnessTestObject" },
+      { "name": "THINK_WITH_STREAMS", "class_name": "ThinkWithStreamsObject" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["ThinkHarnessTestObject"] }
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ThinkHarnessTestObject", "ThinkWithStreamsObject"]
+    }
   ]
 }

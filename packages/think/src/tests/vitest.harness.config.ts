@@ -13,7 +13,16 @@ import base from "./vitest.config";
 
 const testsDir = import.meta.dirname;
 const realThink = path.join(testsDir, "..", "think");
-const compatThink = path.join(testsDir, "..", "harness", "compat.ts");
+// THINK_COMPAT_TARGET=absent runs against a Think that cannot be
+// constructed, to find the tests that never construct one.
+const compatThink = path.join(
+  testsDir,
+  "..",
+  "harness",
+  process.env.THINK_COMPAT_TARGET === "absent"
+    ? "compat-absent.ts"
+    : "compat.ts"
+);
 
 export default mergeConfig(base, {
   plugins: [

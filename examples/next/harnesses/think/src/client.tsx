@@ -95,6 +95,17 @@ function shouldShowStreamedTextPart(part: {
   return part.text.length > 0 || part.state === "streaming";
 }
 
+/** This browser's chat: a random name, kept in localStorage. */
+function chatName(): string {
+  const key = "think-harness-chat";
+  let name = localStorage.getItem(key);
+  if (!name) {
+    name = crypto.randomUUID();
+    localStorage.setItem(key, name);
+  }
+  return name;
+}
+
 function Chat() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
@@ -103,7 +114,9 @@ function Chat() {
 
   const agent = useAgent({
     agent: "ThinkAgent",
-    name: "demo",
+    // One chat per browser, so visitors to a deployed demo do not share a
+    // transcript or approve each other's tool calls.
+    name: chatName(),
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
     onClose: useCallback(() => setConnectionStatus("disconnected"), []),
     onError: useCallback(
@@ -118,6 +131,7 @@ function Chat() {
     clearHistory,
     addToolApprovalResponse,
     stop,
+    status,
     isStreaming
   } = useAgentChat({
     agent,
@@ -136,6 +150,8 @@ function Chat() {
   });
 
   const isConnected = connectionStatus === "connected";
+  // Busy from the moment a message is sent, not only once it streams.
+  const isBusy = isStreaming || status === "submitted";
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -143,14 +159,14 @@ function Chat() {
 
   const send = useCallback(async () => {
     const text = input.trim();
-    if (!text || isStreaming) return;
+    if (!text || isBusy) return;
     setInput("");
     try {
       await sendMessage({ role: "user", parts: [{ type: "text", text }] });
     } catch (error) {
       console.error("Failed to send message:", error);
     }
-  }, [input, isStreaming, sendMessage]);
+  }, [input, isBusy, sendMessage]);
 
   return (
     <div className="flex flex-col h-screen bg-kumo-elevated">
@@ -402,10 +418,10 @@ function Chat() {
                         )}
                         {errorText && (
                           <div className="mt-2">
-                            <span className="text-[10px] uppercase tracking-wider text-red-400 font-semibold">
+                            <span className="text-[10px] uppercase tracking-wider text-kumo-danger font-semibold">
                               Error
                             </span>
-                            <pre className="mt-1 p-2 rounded-lg bg-red-50 dark:bg-red-950/20 text-xs font-mono text-red-600 dark:text-red-400 overflow-x-auto max-h-40 overflow-y-auto whitespace-pre-wrap break-all">
+                            <pre className="mt-1 p-2 rounded-lg bg-kumo-elevated ring ring-kumo-danger text-xs font-mono text-kumo-danger overflow-x-auto max-h-40 overflow-y-auto whitespace-pre-wrap break-all">
                               {errorText}
                             </pre>
                           </div>
@@ -454,11 +470,11 @@ function Chat() {
                 }
               }}
               placeholder="Try: What is the weather in Lisbon?"
-              disabled={!isConnected || isStreaming}
+              disabled={!isConnected || isBusy}
               rows={2}
               className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
             />
-            {isStreaming ? (
+            {isBusy ? (
               <Button
                 type="button"
                 variant="secondary"

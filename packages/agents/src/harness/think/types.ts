@@ -67,8 +67,11 @@ export type ThinkSubmitOptions = {
   readonly operationId?: string;
   readonly whenBusy?: ThinkWhenBusy;
   /**
-   * Who wrote the input. `"client"` input is untrusted: the Sessions
-   * capability strips its reserved metadata keys. Default `"server"`.
+   * Who wrote the input. `"client"` input is untrusted: it may only add
+   * `user` messages (an operation with any other role ends `unanswered`
+   * with reason `"client_role"`), a message whose id is already stored is
+   * dropped rather than rewritten, and reserved metadata keys are
+   * stripped. Default `"server"`.
    */
   readonly source?: "client" | "server";
   /**
@@ -383,7 +386,11 @@ export type ThinkHarnessOptions<TOOLS extends ToolSet = ToolSet> = {
    * may carry `recovery: "rerun"` (see `ToolRecovery`).
    */
   readonly tools?: PerSession<TOOLS>;
-  /** Most model calls one operation makes. Default 10. */
+  /**
+   * Most model calls one operation makes. Default 10. As with the AI SDK's
+   * `stepCountIs`, when the last allowed call asks for tools, the tools run
+   * and the operation ends without another model reply.
+   */
   readonly maxSteps?: number;
   /**
    * Whether a tool call needs approval before it runs. A tool's own

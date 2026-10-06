@@ -6,12 +6,14 @@ Think's workers suite, run against the harness-backed Think in
 `src/harness/think.ts` instead of `src/think.ts`. When every test passes,
 Think moves onto `agents/harness/think`.
 
-Some files test modules Think uses (extensions, fetch tools, messenger
-helpers) rather than the `Think` class, so they pass either way. A failing
-test that reaches a Think feature the harness-backed class does not have yet
-fails with "Think.<name> is not supported by the harness-backed Think yet".
+The headline counts only tests that construct Think: the run is repeated
+against a Think that throws when constructed, and a test that still passes
+there (one that tests a module Think uses, such as extensions or fetch
+tools) is left out of it. A failing test that reaches a Think feature the
+harness-backed class does not have yet fails with "Think.<name> is not
+supported by the harness-backed Think yet".
 
-**427 of 1225 tests pass (34%).**
+**193 of the 991 tests that construct Think pass (19%).** Across the whole suite, 427 of 1225.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
