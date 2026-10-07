@@ -1,0 +1,31 @@
+.changeset/claude-code-container-harness.md
+  s_32b3cea1fa63fa::t_4a4ffbb4132b31 7
+examples/next/harnesses/claude-code/README.md
+  s_32b3cea1fa63fa::t_a78b45ea8bcda7 22-26
+examples/next/harnesses/claude-code/src/client.tsx
+  s_32b3cea1fa63fa::t_7daf37c742f1a7 270-278
+packages/agents/src/harness/claude-code/harness.ts
+  s_32b3cea1fa63fa::t_f83aea5cb0de5c 97-100,232-239,272-274,849,857-872,880,887,1217-1246,1373-1374,1525-1532,1587
+packages/agents/src/harness/claude-code/tests/harness.test.ts
+  s_32b3cea1fa63fa::t_129c5d808ce691 93,118,160,183-226,480-483
+packages/agents/src/harness/claude-code/tests/worker.ts
+  s_32b3cea1fa63fa::t_61f406799c4b9e 51-52,138,217-220,341-347,477,485,776-777
+packages/agents/src/harness/claude-code/types.ts
+  s_32b3cea1fa63fa::t_27127af060be0e 93-97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a99f4a3c846c7302f7bad4a5f1f5f7c5a314785f",
+  "prompts": {},
+  "sessions": {
+    "s_32b3cea1fa63fa": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a11172-4c22-7033-85c7-af55dfd76757",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}
