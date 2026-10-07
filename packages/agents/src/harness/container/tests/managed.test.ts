@@ -127,6 +127,26 @@ describe("ContainerHarness with a managed image", () => {
     });
   });
 
+  it("keeps the workspace snapshot when a brief outage outlasts two starts", async () => {
+    const stub = fresh();
+    await stub.prompt("one");
+    await stub.stopContainer(); // workspace snapshot-2
+    // Two failed starts skip the workspace snapshot; the setup snapshot then
+    // starts, which proves the platform is back, so the workspace snapshot
+    // is tried again rather than dropped.
+    await stub.failNextStarts(2);
+    const receipt = await stub.submit("two");
+    await until(async () => {
+      await runDurableObjectAlarm(stub);
+      return (await stub.pending()).length === 0;
+    }, "the start");
+    expect((await stub.wait(receipt.operationId)).status).toBe("done");
+    expect((await stub.setup()).lastStart).toMatchObject({
+      containerSnapshot: { id: "snapshot-2" }
+    });
+    expect(await stub.workspaceSnapshot()).toBe("snapshot-2");
+  });
+
   it("falls back past a broken workspace snapshot within one prompt, and drops it", async () => {
     const stub = fresh();
     await stub.prompt("one");

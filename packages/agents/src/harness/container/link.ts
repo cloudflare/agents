@@ -22,7 +22,9 @@ export type Hello = Extract<DaemonMessage, { type: "hello" }>;
 /** Why a link could not be opened. */
 export type LinkError =
   | { readonly _tag: "unreachable"; readonly message: string }
-  | { readonly _tag: "protocol"; readonly message: string };
+  | { readonly _tag: "protocol"; readonly message: string }
+  /** Not a failure: the harness stopped a container to try a better start. */
+  | { readonly _tag: "retry"; readonly message: string };
 
 /** A link result. */
 export type LinkResult<T> =

@@ -114,6 +114,12 @@ type SnapshotRecord = {
   readonly usedAt?: number;
   /** Consecutive starts from it that failed, and since when. */
   readonly failures?: { readonly count: number; readonly since: number };
+  /**
+   * Skipped after failing, while a fallback then started: try it once more
+   * now the platform has shown it can start containers. Failing again
+   * means the snapshot itself is broken.
+   */
+  readonly probe?: true;
 };
 
 /**
@@ -1003,6 +1009,11 @@ export class ContainerHarness extends LifecycleCapability {
     const failures = wake.failures + 1;
     await this.#wake(session, Date.now() + this.#heartbeatMs, failures);
     const attached = await this.#attach(session);
+    if (attached._tag === "err" && attached.error._tag === "retry") {
+      // Not a failure: try again at once, with the count as it was.
+      await this.#wake(session, Date.now() + this.#heartbeatMs, wake.failures);
+      return { at: Date.now(), failures: wake.failures };
+    }
     if (attached._tag === "err") {
       const detail = { session, failures, error: attached.error.message };
       console.warn("[container-harness] attach failed", detail);
@@ -1265,6 +1276,7 @@ export class ContainerHarness extends LifecycleCapability {
       await this.lifecycle.storage.delete(storageKey);
       return undefined;
     }
+    if (record.probe) return record;
     if ((record.failures?.count ?? 0) >= SKIP_AFTER_FAILURES) return undefined;
     return record;
   }
@@ -1288,7 +1300,13 @@ export class ContainerHarness extends LifecycleCapability {
         source.storageKey
       );
       if (!record) continue;
-      if (index === rank) {
+      if (index === rank && record.probe) {
+        // It failed right after another source started: it is broken.
+        console.warn(
+          `[container-harness] dropping the ${source.from} snapshot: it no longer starts`
+        );
+        await this.lifecycle.storage.delete(source.storageKey);
+      } else if (index === rank) {
         const now = Date.now();
         const failed: SnapshotRecord = {
           ...record,
@@ -1306,11 +1324,14 @@ export class ContainerHarness extends LifecycleCapability {
 
   /**
    * A start came up. Its snapshot's lifetime restarts and its failures
-   * clear. A preferred snapshot that was being skipped fails where this one
-   * works: it is broken, and is dropped.
+   * clear. A preferred snapshot that was being skipped is not proven
+   * broken by this (the failures may have been an outage that has just
+   * ended): it is marked to be tried once more, and the caller stops this
+   * container to do so. Returns whether it should.
    */
-  async #snapshotWorked(from: StartedFrom): Promise<void> {
+  async #snapshotWorked(from: StartedFrom): Promise<boolean> {
     const rank = this.#rank(from);
+    let retry = false;
     for (const [index, source] of SNAPSHOT_SOURCES.entries()) {
       const record = await this.lifecycle.storage.get<SnapshotRecord>(
         source.storageKey
@@ -1325,14 +1346,20 @@ export class ContainerHarness extends LifecycleCapability {
         await this.lifecycle.storage.put(source.storageKey, worked);
       } else if (
         index < rank &&
+        !record.probe &&
         (record.failures?.count ?? 0) >= SKIP_AFTER_FAILURES
       ) {
-        console.warn(
-          `[container-harness] dropping the ${source.from} snapshot: it no longer starts`
-        );
-        await this.lifecycle.storage.delete(source.storageKey);
+        const probe: SnapshotRecord = {
+          key: record.key,
+          snapshot: record.snapshot,
+          ...(record.usedAt === undefined ? {} : { usedAt: record.usedAt }),
+          probe: true
+        };
+        await this.lifecycle.storage.put(source.storageKey, probe);
+        retry = true;
       }
     }
+    return retry;
   }
 
   /** Forget every snapshot's failures: nothing could be concluded from them. */
@@ -1341,8 +1368,9 @@ export class ContainerHarness extends LifecycleCapability {
       const record = await this.lifecycle.storage.get<SnapshotRecord>(
         source.storageKey
       );
-      if (record?.failures)
+      if (record?.failures || record?.probe) {
         await this.#clearFailures(source.storageKey, record);
+      }
     }
   }
 
@@ -1419,7 +1447,18 @@ export class ContainerHarness extends LifecycleCapability {
       await container.destroy().catch(() => undefined);
       return healthy;
     }
-    await this.#snapshotWorked(started.value);
+    if (await this.#snapshotWorked(started.value)) {
+      // A preferred snapshot was skipped after failing; the platform has
+      // just started a container, so try that snapshot once more.
+      await container.destroy().catch(() => undefined);
+      return {
+        _tag: "err",
+        error: {
+          _tag: "retry",
+          message: "retrying a snapshot skipped after failed starts"
+        }
+      };
+    }
     this.#broadcast({ type: "container", status: "ready" });
     return { _tag: "ok", value: runtime };
   }

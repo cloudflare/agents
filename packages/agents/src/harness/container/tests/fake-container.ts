@@ -42,6 +42,8 @@ export class FakeContainer {
   failSnapshotRestore = false;
   /** When set, `start()` refuses a snapshot outright. */
   failSnapshotStart = false;
+  /** `start()` fails this many more times, whatever it starts from. */
+  failNextStarts = 0;
   /** When set, `start()` refuses this one snapshot, as a broken one. */
   refuseSnapshot: string | undefined;
   /** When set, `snapshotContainer()` fails. */
@@ -62,6 +64,10 @@ export class FakeContainer {
   start(options?: StartRecord & { env?: Record<string, string> }): void {
     this.startAttempts += 1;
     if (this.failStarts) throw new Error("no capacity");
+    if (this.failNextStarts > 0) {
+      this.failNextStarts -= 1;
+      throw new Error("no capacity, briefly");
+    }
     if (options?.containerSnapshot && this.failSnapshotStart) {
       throw new Error("snapshot expired");
     }

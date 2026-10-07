@@ -347,6 +347,10 @@ export class ContainerManagedTestObject extends ContainerHarnessTestObject {
     this.fake.failSnapshotStart = fail;
   }
 
+  failNextStarts(count: number): void {
+    this.fake.failNextStarts = count;
+  }
+
   refuseSnapshot(id: string | null): void {
     this.fake.refuseSnapshot = id ?? undefined;
   }
