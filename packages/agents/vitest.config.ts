@@ -10,6 +10,8 @@ export default defineConfig({
       "src/harness/opencode/tests/vitest.config.ts",
       "src/harness/pi/tests/vitest.config.ts",
       "src/harness/think/tests/vitest.config.ts",
+      "src/harness/container/tests/vitest.config.ts",
+      "src/harness/container/runtime/tests/vitest.config.ts",
       "src/experimental/channels/vitest.config.ts",
       "src/node-tests/vitest.config.ts",
       "src/x402-tests/vitest.config.ts",

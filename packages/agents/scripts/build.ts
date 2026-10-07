@@ -3,6 +3,7 @@ import { globSync } from "glob";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { copyPackageDocs } from "../../../scripts/copy-package-docs";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
+import { buildDaemon } from "./build-daemon";
 
 const entries = [
   "src/*.ts",
@@ -14,6 +15,10 @@ const entries = [
   "src/harness/opencode/index.ts",
   "src/harness/pi/index.ts",
   "src/harness/think/index.ts",
+  "src/harness/container/index.ts",
+  "src/harness/container/daemon/index.ts",
+  "src/harness/container/runtime/index.ts",
+  "src/harness/store/index.ts",
   "src/routing/index.ts",
   "src/chat/index.ts",
   "src/chat/transport.ts",
@@ -91,6 +96,9 @@ function injectSkillsTypeReference(): void {
 }
 
 async function main() {
+  // Embedded in agents/harness/container, so it must exist first.
+  await buildDaemon();
+
   await build({
     clean: true,
     dts: true,

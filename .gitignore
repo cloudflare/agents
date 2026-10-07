@@ -167,3 +167,6 @@ test-results/
 # npm artifacts (repo uses pnpm)
 package-lock.json
 !examples/next/harnesses/pi/vendor/pi-dev/*.tgz
+
+# Built by packages/agents/scripts/build-daemon.ts
+packages/agents/src/harness/container/daemon-source.generated.ts
