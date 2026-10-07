@@ -1,5 +1,11 @@
 # @cloudflare/worker-bundler
 
+## 0.2.6
+
+### Patch Changes
+
+- [#2471](https://github.com/cloudflare/agents/pull/2471) [`26798f1`](https://github.com/cloudflare/agents/commit/26798f1b57c45521c55a4f6fcd260467654bab15) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Resolve package subpath imports such as `ajv/dist/compile/codegen` to the requested file when the package has a `main` field but no `exports` map. They previously resolved to the package's root entrypoint.
+
 ## 0.2.5
 
 ### Patch Changes
