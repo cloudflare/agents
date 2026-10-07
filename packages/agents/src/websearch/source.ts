@@ -113,6 +113,8 @@ export function createAIWebSearch(
         }
       );
     }
+    // Do not start a billed search for a call that is already cancelled.
+    call.signal?.throwIfAborted();
     // The binding takes no signal, so an abort stops waiting for it.
     const response = await abortable(
       binding.websearch({
@@ -279,7 +281,10 @@ function validateRequest(
 }
 
 /** Settle with `promise`, or reject with the signal's reason once it aborts. */
-function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+export function abortable<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal
+): Promise<T> {
   if (!signal) return promise;
   signal.throwIfAborted();
   return new Promise<T>((resolve, reject) => {
@@ -302,8 +307,20 @@ async function readResponse(
   } catch {
     body = undefined;
   }
-  const result = response.ok ? toWebSearchResponse(body, query) : undefined;
-  if (!result) throw toWebSearchError(response.status, body, text);
+  if (!response.ok) throw toWebSearchError(response.status, body, text);
+  const result = toWebSearchResponse(body, query);
+  if (!result) {
+    // A success status with a body that is not a search response is an
+    // upstream fault, likely transient, not a reason to stop searching.
+    throw new WebSearchError(
+      `Web search returned HTTP ${response.status} without search results${text ? `: ${text.slice(0, 200)}` : ""}.`,
+      {
+        status: response.status,
+        code: "web_search_unavailable",
+        retryable: true
+      }
+    );
+  }
   return result;
 }
 

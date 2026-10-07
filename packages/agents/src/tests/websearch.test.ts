@@ -372,22 +372,36 @@ describe("createAIWebSearch", () => {
   });
 
   it("stops waiting for the binding when the signal aborts", async () => {
-    const ai = fakeAI(() => json(RESPONSE));
     const never = { websearch: () => new Promise<Response>(() => {}) };
     const source = createAIWebSearch({ binding: never as unknown as Ai });
     const controller = new AbortController();
     const search = source.search({ query: "q" }, { signal: controller.signal });
     controller.abort(new Error("stop"));
     await expect(search).rejects.toThrow("stop");
+  });
+
+  it("does not call the binding when the signal is already aborted", async () => {
+    const ai = fakeAI(() => json(RESPONSE));
+    const source = createAIWebSearch({ binding: ai.binding });
+    await expect(
+      source.search(
+        { query: "q" },
+        { signal: AbortSignal.abort(new Error("stop")) }
+      )
+    ).rejects.toThrow("stop");
     expect(ai.calls).toHaveLength(0);
   });
 
   it("rejects a 200 that isn't a search response", async () => {
     const ai = fakeAI(() => json({ hello: "world" }));
     const source = createAIWebSearch({ binding: ai.binding });
-    await expect(
-      source.search({ query: "q", limit: 1 })
-    ).rejects.toBeInstanceOf(WebSearchError);
+    const error = await source.search({ query: "q", limit: 1 }).catch((e) => e);
+    expect(error).toBeInstanceOf(WebSearchError);
+    expect(error).toMatchObject({
+      status: 200,
+      code: "web_search_unavailable",
+      retryable: true
+    });
   });
 });
 
@@ -635,6 +649,14 @@ describe("createWebSearchToolCore", () => {
       code: "web_search_timeout",
       retryable: true
     });
+  });
+
+  it("times out a source that ignores the signal", async () => {
+    const source: WebSearchSource = { search: () => new Promise(() => {}) };
+    const run = await createWebSearchToolCore({ source, timeoutMs: 10 }).run({
+      query: "a"
+    });
+    expect(!run.ok && run.error.code).toBe("web_search_timeout");
   });
 
   it("rethrows when the caller aborts instead of returning a failure", async () => {

@@ -78,7 +78,7 @@ Today we are launching the Web Search API in open beta…
 2. …
 ```
 
-The host gets the API response untouched — `items` with every field the provider returned, `metadata` with `requestId` and `latencyMs`, plus `provider` — as `WebSearchToolOutput`:
+The host gets the full API response, without trimming, as `WebSearchToolOutput`: `items` with their whole descriptions and every documented field, `metadata` with `requestId` and `latencyMs`, plus `provider`. Items without a URL are dropped, a missing title falls back to the URL, and fields the API does not document are left out:
 
 - **Pi**: in the tool result's `details`, as `{ ok: true, output }`. The tool is `replay: "safe"`: if a search is interrupted mid-call, for example by an eviction, pi runs it again when the session recovers, and that is a second billed search. Completed results are stored and not searched again.
 - **AI SDK**: as the return value of `execute`, so `onFinish`, UI message parts, and logs see the full response. `toModelOutput` renders the text for the model.

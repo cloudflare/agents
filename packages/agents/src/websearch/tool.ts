@@ -15,6 +15,7 @@ import {
 } from "./contract";
 import {
   WebSearchError,
+  abortable,
   createAIWebSearch,
   type AIWebSearchOptions,
   type WebSearchSource
@@ -141,9 +142,12 @@ export function createWebSearchToolCore(
         ? AbortSignal.any([signal, timeout])
         : timeout;
       try {
-        const response = await source.search(request, {
-          signal: searchSignal
-        });
+        // Race the source too: a custom source may ignore the signal, and
+        // the deadline must still end the call.
+        const response = await abortable(
+          source.search(request, { signal: searchSignal }),
+          searchSignal
+        );
         const output: WebSearchToolOutput = provider
           ? { ...response, provider }
           : response;
