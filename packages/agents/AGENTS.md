@@ -42,6 +42,10 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/browser/ai`                       | `src/browser/ai.ts`                           | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools`                                                                  |
 | `agents/browser/ai-sdk`                   | `src/browser/ai-sdk.ts`                       | AI SDK `browserTool` for a persistent `Browser` (+ `createQuickActionTools` re-export)                                                        |
 | `agents/browser/tanstack-ai`              | `src/browser/tanstack-ai.ts`                  | TanStack AI `browserTool` for a persistent `Browser` (+ legacy `createBrowserTools`)                                                          |
+| `agents/websearch`                        | `src/websearch/index.ts`                      | Web Search API sources (`createAIWebSearch`, `createHTTPWebSearch`), `WebSearchError`, renderer                                               |
+| `agents/websearch/pi`                     | `src/websearch/tools/pi.ts`                   | pi harness `webSearchTool`                                                                                                                    |
+| `agents/websearch/ai-sdk`                 | `src/websearch/tools/ai-sdk.ts`               | AI SDK `webSearchTool`                                                                                                                        |
+| `agents/websearch/tanstack-ai`            | `src/websearch/tools/tanstack-ai.ts`          | TanStack AI `webSearchTool`                                                                                                                   |
 | `agents/voice`                            | `src/voice/index.ts`                          | Voice server mixins, contracts, Workers AI providers, text, and SFU helpers                                                                   |
 | `agents/voice/types`                      | `src/voice/types.ts`                          | Dependency-light Voice protocol and provider contracts                                                                                        |
 | `agents/voice/client`                     | `src/voice/client.ts`                         | Framework-neutral browser Voice client                                                                                                        |
@@ -186,6 +190,13 @@ src/
     browser-tool.ts     # harness-neutral browserTool core shared by ai-sdk.ts and tanstack-ai.ts
     tool-helpers.ts     # model-output + ctx helpers shared by ai.ts and ai-sdk.ts
     tanstack-ai.ts      # browserTool and createBrowserTools for TanStack AI
+
+  websearch/            # web_search tool over Cloudflare's Web Search API (beta)
+    index.ts            # Barrel for agents/websearch
+    contract.ts         # Tool name, description, input/output types, renderer
+    source.ts           # WebSearchSource: AI binding + HTTP sources, WebSearchError
+    tool.ts             # harness-neutral core shared by the adapters
+    tools/              # pi.ts, ai-sdk.ts, tanstack-ai.ts adapters; input-schema.ts (zod, shared)
 
   voice/                # Voice server, client, React, provider, SFU, and text entries
   channels/             # Messaging core and Channels: slack/, telegram/, email/, web/

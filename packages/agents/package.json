@@ -392,6 +392,26 @@
       "import": "./dist/browser/tanstack-ai.js",
       "require": "./dist/browser/tanstack-ai.js"
     },
+    "./websearch": {
+      "types": "./dist/websearch/index.d.ts",
+      "import": "./dist/websearch/index.js",
+      "require": "./dist/websearch/index.js"
+    },
+    "./websearch/pi": {
+      "types": "./dist/websearch/tools/pi.d.ts",
+      "import": "./dist/websearch/tools/pi.js",
+      "require": "./dist/websearch/tools/pi.js"
+    },
+    "./websearch/ai-sdk": {
+      "types": "./dist/websearch/tools/ai-sdk.d.ts",
+      "import": "./dist/websearch/tools/ai-sdk.js",
+      "require": "./dist/websearch/tools/ai-sdk.js"
+    },
+    "./websearch/tanstack-ai": {
+      "types": "./dist/websearch/tools/tanstack-ai.d.ts",
+      "import": "./dist/websearch/tools/tanstack-ai.js",
+      "require": "./dist/websearch/tools/tanstack-ai.js"
+    },
     "./voice": {
       "types": "./dist/voice/index.d.ts",
       "import": "./dist/voice/index.js",
