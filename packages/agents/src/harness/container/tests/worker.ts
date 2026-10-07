@@ -347,6 +347,18 @@ export class ContainerManagedTestObject extends ContainerHarnessTestObject {
     this.fake.failSnapshotStart = fail;
   }
 
+  refuseSnapshot(id: string | null): void {
+    this.fake.refuseSnapshot = id ?? undefined;
+  }
+
+  /** The stored workspace snapshot, if any. */
+  async workspaceSnapshot(): Promise<string | null> {
+    const record = await this.ctx.storage.get<{ snapshot: { id: string } }>(
+      "container-harness:workspace"
+    );
+    return record?.snapshot.id ?? null;
+  }
+
   failSnapshot(fail: boolean): void {
     this.fake.failSnapshot = fail;
   }

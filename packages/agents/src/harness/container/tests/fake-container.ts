@@ -42,6 +42,8 @@ export class FakeContainer {
   failSnapshotRestore = false;
   /** When set, `start()` refuses a snapshot outright. */
   failSnapshotStart = false;
+  /** When set, `start()` refuses this one snapshot, as a broken one. */
+  refuseSnapshot: string | undefined;
   /** When set, `snapshotContainer()` fails. */
   failSnapshot = false;
   #daemon: ContainerDaemon | undefined;
@@ -62,6 +64,12 @@ export class FakeContainer {
     if (this.failStarts) throw new Error("no capacity");
     if (options?.containerSnapshot && this.failSnapshotStart) {
       throw new Error("snapshot expired");
+    }
+    if (
+      this.refuseSnapshot !== undefined &&
+      options?.containerSnapshot?.id === this.refuseSnapshot
+    ) {
+      throw new Error("snapshot broken");
     }
     const env = options?.env ?? {};
     this.starts += 1;

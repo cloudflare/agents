@@ -123,12 +123,18 @@ type SnapshotRecord = {
 const SNAPSHOT_STALE_MS = 29 * 24 * 60 * 60_000;
 
 /**
- * The platform does not say why a start failed, and a snapshot is too
- * valuable to drop on a transient failure (no capacity, say): it is
- * forgotten only after failing this many times, over at least this long.
+ * The platform does not say why a start failed. A snapshot that fails this
+ * many starts in a row is skipped (not deleted) in favour of the next
+ * source: whether that one works decides whether the snapshot was at fault.
  */
-const FORGET_AFTER_FAILURES = 3;
-const FORGET_AFTER_MS = 10 * 60_000;
+const SKIP_AFTER_FAILURES = 2;
+
+/** Snapshot sources, most preferred first. */
+const SNAPSHOT_SOURCES = [
+  { from: "workspace", storageKey: WORKSPACE_KEY },
+  { from: "snapshot", storageKey: SNAPSHOT_KEY }
+] as const;
+
 const MESSAGES = "messages";
 const ENGINE = "engine";
 const OPEN: readonly ("queued" | "running")[] = ["queued", "running"];
@@ -1008,7 +1014,10 @@ export class ContainerHarness extends LifecycleCapability {
         );
         return { at: Date.now() + backoff, failures };
       }
-      // Give the work up rather than retry forever; the next submit tries again.
+      // Give the work up rather than retry forever; the next submit tries
+      // again, from the preferred snapshot: every source failed, so no
+      // snapshot is to blame.
+      await this.#clearAllFailures();
       for (const operation of store.operations({ session, status: OPEN })) {
         this.#settle(store, session, operation.id, {
           status: "unanswered",
@@ -1242,7 +1251,10 @@ export class ContainerHarness extends LifecycleCapability {
     return { _tag: "ok", value: from };
   }
 
-  /** The stored snapshot for `key`, unless it is for another setup or too old to restore. */
+  /**
+   * The stored snapshot for `key`, unless it is for another setup, too old
+   * to restore (deleted), or failing (skipped for now, kept).
+   */
   async #usableSnapshot(
     storageKey: string,
     key: string
@@ -1253,53 +1265,97 @@ export class ContainerHarness extends LifecycleCapability {
       await this.lifecycle.storage.delete(storageKey);
       return undefined;
     }
+    if ((record.failures?.count ?? 0) >= SKIP_AFTER_FAILURES) return undefined;
     return record;
   }
 
-  #snapshotKeyOf(from: StartedFrom): string | undefined {
-    if (from === "workspace") return WORKSPACE_KEY;
-    if (from === "snapshot") return SNAPSHOT_KEY;
-    return undefined;
+  /** Index of a start source in `SNAPSHOT_SOURCES`; the image or setup is last. */
+  #rank(from: StartedFrom): number {
+    const index = SNAPSHOT_SOURCES.findIndex((source) => source.from === from);
+    return index === -1 ? SNAPSHOT_SOURCES.length : index;
   }
 
   /**
-   * A start from a snapshot failed. Count it; forget the snapshot only once
-   * it has failed `FORGET_AFTER_FAILURES` times over `FORGET_AFTER_MS`, so
-   * a transient failure never costs the workspace.
+   * A start failed. Count it against the snapshot it came from. A
+   * preferred snapshot being skipped is not to blame when its fallback
+   * fails too (no capacity, say): its count is cleared, so it is tried
+   * again.
    */
   async #snapshotFailed(from: StartedFrom): Promise<void> {
-    const storageKey = this.#snapshotKeyOf(from);
-    if (storageKey === undefined) return;
-    const record = await this.lifecycle.storage.get<SnapshotRecord>(storageKey);
-    if (!record) return;
-    const now = Date.now();
-    const failures = {
-      count: (record.failures?.count ?? 0) + 1,
-      since: record.failures?.since ?? now
-    };
-    if (
-      failures.count >= FORGET_AFTER_FAILURES &&
-      now - failures.since >= FORGET_AFTER_MS
-    ) {
-      await this.lifecycle.storage.delete(storageKey);
-      return;
+    const rank = this.#rank(from);
+    for (const [index, source] of SNAPSHOT_SOURCES.entries()) {
+      const record = await this.lifecycle.storage.get<SnapshotRecord>(
+        source.storageKey
+      );
+      if (!record) continue;
+      if (index === rank) {
+        const now = Date.now();
+        const failed: SnapshotRecord = {
+          ...record,
+          failures: {
+            count: (record.failures?.count ?? 0) + 1,
+            since: record.failures?.since ?? now
+          }
+        };
+        await this.lifecycle.storage.put(source.storageKey, failed);
+      } else if (index < rank && record.failures) {
+        await this.#clearFailures(source.storageKey, record);
+      }
     }
-    const updated: SnapshotRecord = { ...record, failures };
-    await this.lifecycle.storage.put(storageKey, updated);
   }
 
-  /** A start from a snapshot came up: its lifetime restarts, its failures clear. */
+  /**
+   * A start came up. Its snapshot's lifetime restarts and its failures
+   * clear. A preferred snapshot that was being skipped fails where this one
+   * works: it is broken, and is dropped.
+   */
   async #snapshotWorked(from: StartedFrom): Promise<void> {
-    const storageKey = this.#snapshotKeyOf(from);
-    if (storageKey === undefined) return;
-    const record = await this.lifecycle.storage.get<SnapshotRecord>(storageKey);
-    if (!record) return;
-    const updated: SnapshotRecord = {
+    const rank = this.#rank(from);
+    for (const [index, source] of SNAPSHOT_SOURCES.entries()) {
+      const record = await this.lifecycle.storage.get<SnapshotRecord>(
+        source.storageKey
+      );
+      if (!record) continue;
+      if (index === rank) {
+        const worked: SnapshotRecord = {
+          key: record.key,
+          snapshot: record.snapshot,
+          usedAt: Date.now()
+        };
+        await this.lifecycle.storage.put(source.storageKey, worked);
+      } else if (
+        index < rank &&
+        (record.failures?.count ?? 0) >= SKIP_AFTER_FAILURES
+      ) {
+        console.warn(
+          `[container-harness] dropping the ${source.from} snapshot: it no longer starts`
+        );
+        await this.lifecycle.storage.delete(source.storageKey);
+      }
+    }
+  }
+
+  /** Forget every snapshot's failures: nothing could be concluded from them. */
+  async #clearAllFailures(): Promise<void> {
+    for (const source of SNAPSHOT_SOURCES) {
+      const record = await this.lifecycle.storage.get<SnapshotRecord>(
+        source.storageKey
+      );
+      if (record?.failures)
+        await this.#clearFailures(source.storageKey, record);
+    }
+  }
+
+  async #clearFailures(
+    storageKey: string,
+    record: SnapshotRecord
+  ): Promise<void> {
+    const cleared: SnapshotRecord = {
       key: record.key,
       snapshot: record.snapshot,
-      usedAt: Date.now()
+      ...(record.usedAt === undefined ? {} : { usedAt: record.usedAt })
     };
-    await this.lifecycle.storage.put(storageKey, updated);
+    await this.lifecycle.storage.put(storageKey, cleared);
   }
 
   /** What a container's filesystem is built from: the setup, or the image. */

@@ -114,44 +114,57 @@ describe("ContainerHarness with a managed image", () => {
     await stub.stopContainer(); // workspace snapshot-2
     await stub.failSnapshotStart(true);
     const receipt = await stub.submit("two");
+    // One failed start, then the platform recovers.
     await until(async () => {
       await runDurableObjectAlarm(stub);
-      return (await stub.container()).startAttempts >= 3;
+      return (await stub.container()).startAttempts >= 2;
     }, "a failed start");
     await stub.failSnapshotStart(false);
     expect((await stub.wait(receipt.operationId)).status).toBe("done");
-    // Retried from the same workspace, not set up afresh.
+    // Retried from the same workspace, which is still kept.
     expect((await stub.setup()).lastStart).toMatchObject({
       containerSnapshot: { id: "snapshot-2" }
     });
   });
 
-  it("forgets snapshots that keep failing, and sets up afresh", async () => {
+  it("falls back past a broken workspace snapshot within one prompt, and drops it", async () => {
     const stub = fresh();
     await stub.prompt("one");
-    await stub.stopContainer();
-    await stub.failSnapshotStart(true);
-    // Each failure looks older than the last, so persistent failures pass
-    // the forgetting threshold (three, over ten minutes) one by one.
+    await stub.stopContainer(); // workspace snapshot-2
+    await stub.refuseSnapshot("snapshot-2");
+    // Two refused starts, then the setup snapshot works: the prompt is
+    // answered, and the broken workspace snapshot is dropped.
+    const receipt = await stub.submit("two");
+    await until(async () => {
+      await runDurableObjectAlarm(stub);
+      return (await stub.pending()).length === 0;
+    }, "the fallback start");
+    expect((await stub.wait(receipt.operationId)).status).toBe("done");
+    expect((await stub.setup()).lastStart).toMatchObject({
+      containerSnapshot: { id: "snapshot-1" }
+    });
+    expect(await stub.workspaceSnapshot()).toBeNull();
+  });
+
+  it("does not blame the snapshots when every start fails", async () => {
+    const stub = fresh();
+    await stub.prompt("one");
+    await stub.stopContainer(); // workspace snapshot-2
+    await stub.failStarts(true);
     const first = await stub.submit("two");
     await until(async () => {
-      await stub.backdateSnapshots(11 * 60_000);
       await runDurableObjectAlarm(stub);
       return (await stub.pending()).length === 0;
     }, "the start failures to give up");
     expect((await stub.wait(first.operationId)).reason).toBe(
       "container_unavailable"
     );
-    // The workspace snapshot is gone; the setup snapshot goes on its next
-    // failure, and the attempt after that sets up afresh.
-    const second = await stub.submit("three");
-    await until(async () => {
-      await stub.backdateSnapshots(11 * 60_000);
-      await runDurableObjectAlarm(stub);
-      return (await stub.setup()).lastStart.image !== undefined;
-    }, "a fresh setup");
-    await stub.failSnapshotStart(false);
-    expect((await stub.wait(second.operationId)).status).toBe("done");
+    // The outage ends: the next prompt starts from the workspace again.
+    await stub.failStarts(false);
+    expect((await stub.prompt("three")).status).toBe("done");
+    expect((await stub.setup()).lastStart).toMatchObject({
+      containerSnapshot: { id: "snapshot-2" }
+    });
   });
 
   it("skips snapshots too old to restore", async () => {
