@@ -96,6 +96,15 @@ const CLAUSE_KEYWORDS = new Set([
   "WINDOW"
 ]);
 const MASTER_TABLES = new Set(["sqlite_master", "sqlite_schema"]);
+/** PRAGMAs whose argument is a table or index name. */
+const SCHEMA_PRAGMAS = new Set([
+  "table_info",
+  "table_xinfo",
+  "index_list",
+  "index_info",
+  "index_xinfo",
+  "foreign_key_list"
+]);
 /**
  * Bare words that follow a table keyword without naming a table:
  * `TABLE IF NOT EXISTS`, `INSERT OR REPLACE INTO`, `FROM (SELECT …)`.
@@ -234,8 +243,14 @@ class TablePrefixRewriter {
         out[index] = this.#prefixed(token);
       }
     }
-    // `PRAGMA table_info('name')`: the statement form with a string argument.
-    if (firstWord === "PRAGMA") {
+    // `PRAGMA table_info('name')`: the statement form with a string
+    // argument, for the PRAGMAs whose argument names a table or index.
+    const pragma = significant[1]?.token;
+    if (
+      firstWord === "PRAGMA" &&
+      pragma?.kind === "word" &&
+      SCHEMA_PRAGMAS.has(pragma.text.toLowerCase())
+    ) {
       for (let i = 1; i < significant.length; i++) {
         const { token, index } = significant[i];
         if (token.kind !== "string" || significant[i - 1]?.token.text !== "(") {

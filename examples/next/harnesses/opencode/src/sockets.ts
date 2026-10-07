@@ -10,6 +10,8 @@ import type { ClientMessage, ServerMessage, SessionSnapshot } from "./protocol";
 
 const SESSION_TAG_PREFIX = "opencode-session:";
 const SESSION_QUERY = "session";
+/** A bound on one prompt; this example has no other quotas. */
+const MAX_PROMPT_LENGTH = 100_000;
 /** `WebSocket.OPEN`; the constant is not defined on every runtime's global. */
 const OPEN = 1;
 
@@ -200,6 +202,11 @@ export class OpenCodeSessionSockets {
       case "submit": {
         if (typeof message.text !== "string" || message.text.trim() === "") {
           throw new Error("Nothing to send");
+        }
+        if (message.text.length > MAX_PROMPT_LENGTH) {
+          throw new Error(
+            `Prompts are limited to ${MAX_PROMPT_LENGTH.toLocaleString()} characters`
+          );
         }
         this.#watch(session);
         const receipt = await handle.submit(message.text, {
