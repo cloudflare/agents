@@ -351,6 +351,32 @@ export class ContainerManagedTestObject extends ContainerHarnessTestObject {
     this.fake.failSnapshot = fail;
   }
 
+  /** Move the stored snapshots' timestamps `ms` into the past. */
+  async backdateSnapshots(ms: number): Promise<void> {
+    for (const key of [
+      "container-harness:workspace",
+      "container-harness:snapshot"
+    ]) {
+      const record = await this.ctx.storage.get<{
+        usedAt?: number;
+        failures?: { count: number; since: number };
+      }>(key);
+      if (!record) continue;
+      await this.ctx.storage.put(key, {
+        ...record,
+        usedAt: (record.usedAt ?? Date.now()) - ms,
+        ...(record.failures
+          ? {
+              failures: {
+                ...record.failures,
+                since: record.failures.since - ms
+              }
+            }
+          : {})
+      });
+    }
+  }
+
   /** `events()` on a session that does not exist, as an error message. */
   async eventsOfMissing(): Promise<string> {
     try {

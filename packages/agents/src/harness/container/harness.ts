@@ -18,8 +18,7 @@ import {
   MANAGED_ENTRYPOINT,
   MANAGED_IMAGE,
   setUp,
-  setupKey,
-  type SetupSnapshot
+  setupKey
 } from "./managed-image";
 import {
   chunkEntries,
@@ -103,12 +102,33 @@ const IDLE_GRACE_MS = 2 * 60_000;
 /** The longest inactivity timeout the platform accepts. */
 const MAX_INACTIVITY_MS = 6 * 60 * 60_000;
 
-/** A snapshot of a container's whole filesystem, and what it was built from. */
-type WorkspaceSnapshot = {
-  /** The setup key (managed) or image (custom) the container ran. */
+/**
+ * A stored snapshot to start containers from: the workspace one (the
+ * whole filesystem as the harness last stopped it) or the setup one.
+ */
+type SnapshotRecord = {
+  /** The setup key (managed) or image (custom) the snapshot was taken on. */
   readonly key: string;
   readonly snapshot: { readonly id: string };
+  /** When it was taken or last restored: its 30-day lifetime runs from here. */
+  readonly usedAt?: number;
+  /** Consecutive starts from it that failed, and since when. */
+  readonly failures?: { readonly count: number; readonly since: number };
 };
+
+/**
+ * Snapshots live 30 days from their last restore. One unused for nearly
+ * that long is treated as gone rather than tried.
+ */
+const SNAPSHOT_STALE_MS = 29 * 24 * 60 * 60_000;
+
+/**
+ * The platform does not say why a start failed, and a snapshot is too
+ * valuable to drop on a transient failure (no capacity, say): it is
+ * forgotten only after failing this many times, over at least this long.
+ */
+const FORGET_AFTER_FAILURES = 3;
+const FORGET_AFTER_MS = 10 * 60_000;
 const MESSAGES = "messages";
 const ENGINE = "engine";
 const OPEN: readonly ("queued" | "running")[] = ["queued", "running"];
@@ -1141,11 +1161,10 @@ export class ContainerHarness extends LifecycleCapability {
     let from: StartedFrom = "image";
     let key: string | undefined;
     let options: Record<string, unknown>;
-    const workspace =
-      await this.lifecycle.storage.get<WorkspaceSnapshot>(WORKSPACE_KEY);
     const baseKey = await this.#baseKey();
+    const workspace = await this.#usableSnapshot(WORKSPACE_KEY, baseKey);
     if (image.kind === "custom") {
-      if (workspace?.key === baseKey) {
+      if (workspace) {
         from = "workspace";
         options = { ...base, env, containerSnapshot: workspace.snapshot };
       } else {
@@ -1153,19 +1172,18 @@ export class ContainerHarness extends LifecycleCapability {
       }
     } else {
       key = baseKey;
-      const stored =
-        await this.lifecycle.storage.get<SetupSnapshot>(SNAPSHOT_KEY);
+      const stored = await this.#usableSnapshot(SNAPSHOT_KEY, key);
       const managed = {
         ...base,
         env: { ...env, CF_HARNESS_USER: AGENT_USER },
         entrypoint: [...MANAGED_ENTRYPOINT]
       };
-      if (workspace?.key === key) {
+      if (workspace) {
         // The filesystem as the last container left it: the workspace,
         // the CLI and its setup, all in one.
         from = "workspace";
         options = { ...managed, containerSnapshot: workspace.snapshot };
-      } else if (stored?.key === key) {
+      } else if (stored) {
         from = "snapshot";
         options = { ...managed, containerSnapshot: stored.snapshot };
       } else {
@@ -1179,6 +1197,14 @@ export class ContainerHarness extends LifecycleCapability {
       // workers-types version does not declare yet; the rest is
       // `ContainerStartupOptions` as is.
       container.start(options as unknown as ContainerStartupOptions);
+    } catch (error) {
+      await this.#snapshotFailed(from);
+      return {
+        _tag: "err",
+        error: { _tag: "unreachable", message: errorText(error) }
+      };
+    }
+    try {
       await container.setInactivityTimeout(this.#inactivityTimeoutMs());
       this.#timeoutSet = true;
       // Intercepts last for one container: route them on every start,
@@ -1191,9 +1217,7 @@ export class ContainerHarness extends LifecycleCapability {
         }
       }
     } catch (error) {
-      // A snapshot the platform refuses (expired, say) must not be tried
-      // again: the next attempt falls back to the next source.
-      await this.#forget(from);
+      // The container started; what failed says nothing about the snapshot.
       return {
         _tag: "err",
         error: { _tag: "unreachable", message: errorText(error) }
@@ -1208,19 +1232,74 @@ export class ContainerHarness extends LifecycleCapability {
         };
       }
       if (setup.snapshot) {
-        await this.lifecycle.storage.put(SNAPSHOT_KEY, setup.snapshot);
+        const record: SnapshotRecord = {
+          ...setup.snapshot,
+          usedAt: Date.now()
+        };
+        await this.lifecycle.storage.put(SNAPSHOT_KEY, record);
       }
     }
     return { _tag: "ok", value: from };
   }
 
-  /** Drop the snapshot a failed start came from, so the next start falls back. */
-  async #forget(from: StartedFrom): Promise<void> {
-    if (from === "workspace")
-      await this.lifecycle.storage.delete(WORKSPACE_KEY);
-    else if (from === "snapshot") {
-      await this.lifecycle.storage.delete(SNAPSHOT_KEY);
+  /** The stored snapshot for `key`, unless it is for another setup or too old to restore. */
+  async #usableSnapshot(
+    storageKey: string,
+    key: string
+  ): Promise<SnapshotRecord | undefined> {
+    const record = await this.lifecycle.storage.get<SnapshotRecord>(storageKey);
+    if (!record || record.key !== key) return undefined;
+    if (Date.now() - (record.usedAt ?? Date.now()) > SNAPSHOT_STALE_MS) {
+      await this.lifecycle.storage.delete(storageKey);
+      return undefined;
     }
+    return record;
+  }
+
+  #snapshotKeyOf(from: StartedFrom): string | undefined {
+    if (from === "workspace") return WORKSPACE_KEY;
+    if (from === "snapshot") return SNAPSHOT_KEY;
+    return undefined;
+  }
+
+  /**
+   * A start from a snapshot failed. Count it; forget the snapshot only once
+   * it has failed `FORGET_AFTER_FAILURES` times over `FORGET_AFTER_MS`, so
+   * a transient failure never costs the workspace.
+   */
+  async #snapshotFailed(from: StartedFrom): Promise<void> {
+    const storageKey = this.#snapshotKeyOf(from);
+    if (storageKey === undefined) return;
+    const record = await this.lifecycle.storage.get<SnapshotRecord>(storageKey);
+    if (!record) return;
+    const now = Date.now();
+    const failures = {
+      count: (record.failures?.count ?? 0) + 1,
+      since: record.failures?.since ?? now
+    };
+    if (
+      failures.count >= FORGET_AFTER_FAILURES &&
+      now - failures.since >= FORGET_AFTER_MS
+    ) {
+      await this.lifecycle.storage.delete(storageKey);
+      return;
+    }
+    const updated: SnapshotRecord = { ...record, failures };
+    await this.lifecycle.storage.put(storageKey, updated);
+  }
+
+  /** A start from a snapshot came up: its lifetime restarts, its failures clear. */
+  async #snapshotWorked(from: StartedFrom): Promise<void> {
+    const storageKey = this.#snapshotKeyOf(from);
+    if (storageKey === undefined) return;
+    const record = await this.lifecycle.storage.get<SnapshotRecord>(storageKey);
+    if (!record) return;
+    const updated: SnapshotRecord = {
+      key: record.key,
+      snapshot: record.snapshot,
+      usedAt: Date.now()
+    };
+    await this.lifecycle.storage.put(storageKey, updated);
   }
 
   /** What a container's filesystem is built from: the setup, or the image. */
@@ -1241,9 +1320,10 @@ export class ContainerHarness extends LifecycleCapability {
       const snapshot = await container.snapshotContainer({
         name: `workspace-${Date.now()}`
       });
-      const saved: WorkspaceSnapshot = {
+      const saved: SnapshotRecord = {
         key: await this.#baseKey(),
-        snapshot: { id: snapshot.id }
+        snapshot: { id: snapshot.id },
+        usedAt: Date.now()
       };
       await this.lifecycle.storage.put(WORKSPACE_KEY, saved);
     } catch (error) {
@@ -1279,12 +1359,11 @@ export class ContainerHarness extends LifecycleCapability {
       () => container.running
     );
     if (healthy._tag === "err") {
-      // The snapshot may have expired: start from the next best thing
-      // next time (the setup snapshot, then a fresh setup).
-      await this.#forget(started.value);
+      await this.#snapshotFailed(started.value);
       await container.destroy().catch(() => undefined);
       return healthy;
     }
+    await this.#snapshotWorked(started.value);
     this.#broadcast({ type: "container", status: "ready" });
     return { _tag: "ok", value: runtime };
   }

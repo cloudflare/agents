@@ -72,20 +72,6 @@ describe("ContainerHarness with a managed image", () => {
     expect(next.execs).toEqual([]);
   });
 
-  it("falls back to the setup snapshot when the workspace snapshot does not restore", async () => {
-    const stub = fresh();
-    await stub.prompt("one");
-    await stub.stopContainer();
-    await stub.failSnapshotRestore(true);
-    const receipt = await stub.submit("two");
-    await until(async () => {
-      await runDurableObjectAlarm(stub);
-      return (await stub.setup()).lastStart.image !== undefined;
-    }, "a fresh setup after both snapshots failed");
-    await stub.failSnapshotRestore(false);
-    expect((await stub.wait(receipt.operationId)).status).toBe("done");
-  });
-
   it("keeps credentials out of the container and adds them at the egress", async () => {
     const stub = fresh();
     await stub.prompt("hello");
@@ -122,36 +108,58 @@ describe("ContainerHarness with a managed image", () => {
     ]);
   });
 
-  it("sets up afresh when the snapshot no longer restores", async () => {
+  it("keeps the workspace snapshot through a transient start failure", async () => {
     const stub = fresh();
     await stub.prompt("one");
-    await stub.stopContainer();
-    await stub.failSnapshotRestore(true);
+    await stub.stopContainer(); // workspace snapshot-2
+    await stub.failSnapshotStart(true);
     const receipt = await stub.submit("two");
     await until(async () => {
       await runDurableObjectAlarm(stub);
-      return (await stub.setup()).execs.length > 0;
-    }, "a fresh setup");
-    await stub.failSnapshotRestore(false);
+      return (await stub.container()).startAttempts >= 3;
+    }, "a failed start");
+    await stub.failSnapshotStart(false);
     expect((await stub.wait(receipt.operationId)).status).toBe("done");
+    // Retried from the same workspace, not set up afresh.
     expect((await stub.setup()).lastStart).toMatchObject({
-      image: "cloudflare/debian-trixie"
+      containerSnapshot: { id: "snapshot-2" }
     });
   });
 
-  it("falls back past snapshots that start() refuses", async () => {
+  it("forgets snapshots that keep failing, and sets up afresh", async () => {
     const stub = fresh();
     await stub.prompt("one");
     await stub.stopContainer();
     await stub.failSnapshotStart(true);
-    const receipt = await stub.submit("two");
-    // The workspace snapshot, then the setup snapshot, are refused and
-    // forgotten; the next attempt sets up afresh.
+    // Each failure looks older than the last, so persistent failures pass
+    // the forgetting threshold (three, over ten minutes) one by one.
+    const first = await stub.submit("two");
     await until(async () => {
+      await stub.backdateSnapshots(11 * 60_000);
       await runDurableObjectAlarm(stub);
       return (await stub.pending()).length === 0;
+    }, "the start failures to give up");
+    expect((await stub.wait(first.operationId)).reason).toBe(
+      "container_unavailable"
+    );
+    // The workspace snapshot is gone; the setup snapshot goes on its next
+    // failure, and the attempt after that sets up afresh.
+    const second = await stub.submit("three");
+    await until(async () => {
+      await stub.backdateSnapshots(11 * 60_000);
+      await runDurableObjectAlarm(stub);
+      return (await stub.setup()).lastStart.image !== undefined;
     }, "a fresh setup");
-    expect((await stub.wait(receipt.operationId)).status).toBe("done");
+    await stub.failSnapshotStart(false);
+    expect((await stub.wait(second.operationId)).status).toBe("done");
+  });
+
+  it("skips snapshots too old to restore", async () => {
+    const stub = fresh();
+    await stub.prompt("one");
+    await stub.stopContainer();
+    await stub.backdateSnapshots(30 * 24 * 60 * 60_000);
+    await stub.prompt("two");
     expect((await stub.setup()).lastStart).toMatchObject({
       image: "cloudflare/debian-trixie"
     });
