@@ -169,6 +169,31 @@ function getMessageText(message: UIMessage): string {
     .join("");
 }
 
+/** Parts that render something: non-empty text or reasoning, and tool calls. */
+function visibleParts(message: UIMessage) {
+  return message.parts.filter(
+    (part) =>
+      ((part.type === "text" || part.type === "reasoning") &&
+        part.text.trim()) ||
+      isToolUIPart(part)
+  );
+}
+
+/**
+ * True while a turn is running but nothing new is on screen: right after
+ * sending, or after a tool finishes and the model is deciding what's next.
+ */
+function isWaitingForModel(messages: UIMessage[]): boolean {
+  const last = messages[messages.length - 1];
+  if (!last || last.role === "user") return true;
+  const visible = visibleParts(last);
+  const lastPart = visible[visible.length - 1];
+  return (
+    !lastPart ||
+    (isToolUIPart(lastPart) && lastPart.state === "output-available")
+  );
+}
+
 function MessageParts({
   message,
   streaming,
@@ -579,8 +604,7 @@ function Chat() {
 
   const isConnected = connectionStatus === "connected";
   const userMessageCount = messages.filter((m) => m.role === "user").length;
-  const lastMessage = messages[messages.length - 1];
-  const waitingForReply = isStreaming && lastMessage?.role === "user";
+  const waitingForReply = isStreaming && isWaitingForModel(messages);
 
   const send = useCallback(
     (text: string) => {
@@ -675,7 +699,7 @@ function Chat() {
                   <UserMessage key={message.id}>
                     {getMessageText(message)}
                   </UserMessage>
-                ) : (
+                ) : visibleParts(message).length === 0 ? null : (
                   <MessageParts
                     key={message.id}
                     message={message}

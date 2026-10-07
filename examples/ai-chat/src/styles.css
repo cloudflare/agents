@@ -38,6 +38,13 @@ body {
 .sd-theme {
   overflow-wrap: anywhere;
 }
+/* Chat replies read better with headings closer to body size. */
+.sd-theme :is(h1, h2) {
+  font-size: 1.125rem;
+}
+.sd-theme :is(h3, h4, h5, h6) {
+  font-size: 1rem;
+}
 .sd-theme pre {
   font-size: 0.8125rem;
   line-height: 1.55;

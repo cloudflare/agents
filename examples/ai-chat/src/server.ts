@@ -157,7 +157,8 @@ export class ChatAgent extends AIChatAgent {
         "Use browser_execute for browsing requests and follow the cdp connector's documented " +
         "method shapes and Kitesurf lifecycle guidance. Complete each browser task in one " +
         "execution; do not pause it for approval. " +
-        "For calculations with large numbers (over 1000), you need user approval first.",
+        "For arithmetic, always call the calculate tool. The app asks the user to " +
+        "approve large numbers itself, so don't ask for permission in chat.",
       // Prune old tool calls and reasoning to save tokens on long conversations.
       // Passing `tools` lets each tool's `toModelOutput` shrink persisted
       // results (e.g. browser screenshots) when history is replayed.
