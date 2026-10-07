@@ -1,0 +1,27 @@
+.changeset/claude-code-container-harness.md
+  s_32b3cea1fa63fa::t_aef9e92c714f8e 7
+packages/agents/src/harness/claude-code/harness.ts
+  s_32b3cea1fa63fa::t_b8529679afdc01 54-71,85-94,117-188,374-380,836-838,840-841,1047-1081,1237-1246,1367-1375,1399-1406,1420,1423,1427-1430,1590,1595,1597-1602,1610-1611,1613,1621
+packages/agents/src/harness/claude-code/tests/harness.test.ts
+  s_32b3cea1fa63fa::t_4966cd815c7b24 134-182
+packages/agents/src/harness/claude-code/tests/worker.ts
+  s_32b3cea1fa63fa::t_c35ad88f408169 13,68-72,90,136-141,156-159,174-185,446-462,576-580,630-634,735-742
+packages/agents/src/harness/claude-code/types.ts
+  s_32b3cea1fa63fa::t_97d05a7a9833d7 94-97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7a505a7d6cad5f72f257b2a35ca0fae47edba8f4",
+  "prompts": {},
+  "sessions": {
+    "s_32b3cea1fa63fa": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a11172-4c22-7033-85c7-af55dfd76757",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}
