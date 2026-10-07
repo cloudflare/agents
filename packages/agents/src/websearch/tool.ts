@@ -4,10 +4,10 @@
  * AI (`agents/websearch/tanstack-ai`) adapters. Internal — not an entry point.
  */
 import {
-  DEFAULT_WEBSEARCH_LIMIT,
-  MAX_WEBSEARCH_LIMIT,
-  WEBSEARCH_TOOL_DESCRIPTION,
-  WEBSEARCH_TOOL_NAME,
+  DEFAULT_WEB_SEARCH_LIMIT,
+  MAX_WEB_SEARCH_LIMIT,
+  WEB_SEARCH_TOOL_DESCRIPTION,
+  WEB_SEARCH_TOOL_NAME,
   renderWebSearchResults,
   type WebSearchResponse,
   type WebSearchToolInput,
@@ -66,7 +66,7 @@ export type WebSearchToolOptions = (
 };
 
 /** The default for {@link WebSearchToolOptions.timeoutMs}. */
-export const DEFAULT_WEBSEARCH_TIMEOUT_MS = 30_000;
+export const DEFAULT_WEB_SEARCH_TIMEOUT_MS = 30_000;
 
 /**
  * What one run returns to the adapter: the host output, and the model's
@@ -78,7 +78,7 @@ export type WebSearchToolRun =
   | { ok: false; error: WebSearchError; text: string };
 
 export interface WebSearchToolCore {
-  name: typeof WEBSEARCH_TOOL_NAME;
+  name: typeof WEB_SEARCH_TOOL_NAME;
   description: string;
   /** The host's `limit`: the default and the cap for the model's `limit`. */
   limit: number;
@@ -97,12 +97,12 @@ export interface WebSearchToolCore {
 export function createWebSearchToolCore(
   options: WebSearchToolOptions
 ): WebSearchToolCore {
-  const limit = options.limit ?? DEFAULT_WEBSEARCH_LIMIT;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_WEBSEARCH_TIMEOUT_MS;
+  const limit = options.limit ?? DEFAULT_WEB_SEARCH_LIMIT;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_WEB_SEARCH_TIMEOUT_MS;
   const { maxDescriptionChars } = options;
-  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_WEBSEARCH_LIMIT) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_WEB_SEARCH_LIMIT) {
     throw new RangeError(
-      `limit must be an integer from 1 to ${MAX_WEBSEARCH_LIMIT}; got ${limit}.`
+      `limit must be an integer from 1 to ${MAX_WEB_SEARCH_LIMIT}; got ${limit}.`
     );
   }
   if (
@@ -126,8 +126,8 @@ export function createWebSearchToolCore(
     renderWebSearchResults(output, { maxDescriptionChars });
 
   return {
-    name: WEBSEARCH_TOOL_NAME,
-    description: options.description ?? WEBSEARCH_TOOL_DESCRIPTION,
+    name: WEB_SEARCH_TOOL_NAME,
+    description: options.description ?? WEB_SEARCH_TOOL_DESCRIPTION,
     limit,
     render,
     async run(input, { signal } = {}) {
@@ -217,6 +217,6 @@ function describeFailureForModel(error: WebSearchError): string {
 
 /** The model's `limit`, made an integer from 1 to 10. */
 function clampLimit(value: number): number {
-  if (!Number.isFinite(value)) return DEFAULT_WEBSEARCH_LIMIT;
-  return Math.min(MAX_WEBSEARCH_LIMIT, Math.max(1, Math.trunc(value)));
+  if (!Number.isFinite(value)) return DEFAULT_WEB_SEARCH_LIMIT;
+  return Math.min(MAX_WEB_SEARCH_LIMIT, Math.max(1, Math.trunc(value)));
 }

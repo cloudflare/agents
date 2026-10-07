@@ -6,9 +6,9 @@
  */
 import { DEFAULT_GATEWAY_ID } from "../models/core/settings";
 import {
-  DEFAULT_WEBSEARCH_LIMIT,
-  MAX_WEBSEARCH_LIMIT,
-  MAX_WEBSEARCH_QUERY_LENGTH,
+  DEFAULT_WEB_SEARCH_LIMIT,
+  MAX_WEB_SEARCH_LIMIT,
+  MAX_WEB_SEARCH_QUERY_LENGTH,
   type WebSearchResponse,
   type WebSearchResult
 } from "./contract";
@@ -105,8 +105,12 @@ export function createAIWebSearch(
     const request = validateRequest(input);
     if (typeof binding.websearch !== "function") {
       throw new WebSearchError(
-        "This Workers runtime has no env.AI.websearch(). Web search needs workerd 1.20260924.1 or later (wrangler 4.141.0 or later, @cloudflare/vite-plugin 1.60.2 or later).",
-        { status: 501, code: "websearch_unsupported_runtime", retryable: false }
+        "This Workers runtime has no env.AI.websearch(). Web search needs workerd 1.20260924.1 or later; see https://github.com/cloudflare/agents/blob/main/docs/agents/search-the-web.md.",
+        {
+          status: 501,
+          code: "web_search_unsupported_runtime",
+          retryable: false
+        }
       );
     }
     // The binding takes no signal, so an abort stops waiting for it.
@@ -146,7 +150,11 @@ export function createHTTPWebSearch(
 ): WebSearchSource {
   validateGatewayOptions(options);
   const doFetch = options.fetch ?? fetch;
-  const url = `${options.baseUrl ?? "https://api.cloudflare.com"}/client/v4/accounts/${options.accountId}/ai/websearch/`;
+  const baseUrl = (options.baseUrl ?? "https://api.cloudflare.com").replace(
+    /\/+$/,
+    ""
+  );
+  const url = `${baseUrl}/client/v4/accounts/${encodeURIComponent(options.accountId)}/ai/websearch/`;
   const search: WebSearchSource["search"] = async (input, call = {}) => {
     const request = validateRequest(input);
     const response = await doFetch(url, {
@@ -207,7 +215,7 @@ export type WebSearchErrorCode =
   /** The API or the provider failed. */
   | "web_search_unavailable"
   /** The Workers runtime has no `env.AI.websearch()`. */
-  | "websearch_unsupported_runtime"
+  | "web_search_unsupported_runtime"
   /** A code the API added after this release. */
   | (string & {});
 
@@ -248,26 +256,26 @@ function validateRequest(
   request: WebSearchRequest
 ): Required<WebSearchRequest> {
   const query = request.query.trim();
-  const limit = request.limit ?? DEFAULT_WEBSEARCH_LIMIT;
+  const limit = request.limit ?? DEFAULT_WEB_SEARCH_LIMIT;
   if (query.length === 0) {
     throw new WebSearchError("Query must not be empty.", {
       status: 400,
       code: "invalid_web_search_input"
     });
   }
-  if (query.length > MAX_WEBSEARCH_QUERY_LENGTH) {
+  if (query.length > MAX_WEB_SEARCH_QUERY_LENGTH) {
     throw new WebSearchError(
-      `Query must be at most ${MAX_WEBSEARCH_QUERY_LENGTH} characters.`,
+      `Query must be at most ${MAX_WEB_SEARCH_QUERY_LENGTH} characters.`,
       { status: 400, code: "invalid_web_search_input" }
     );
   }
-  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_WEBSEARCH_LIMIT) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_WEB_SEARCH_LIMIT) {
     throw new WebSearchError(
-      `Limit must be an integer from 1 to ${MAX_WEBSEARCH_LIMIT}.`,
+      `Limit must be an integer from 1 to ${MAX_WEB_SEARCH_LIMIT}.`,
       { status: 400, code: "invalid_web_search_input" }
     );
   }
-  return { query: request.query, limit };
+  return { query, limit };
 }
 
 /** Settle with `promise`, or reject with the signal's reason once it aborts. */

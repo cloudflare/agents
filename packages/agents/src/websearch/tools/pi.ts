@@ -6,7 +6,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import {
-  MAX_WEBSEARCH_QUERY_LENGTH,
+  MAX_WEB_SEARCH_QUERY_LENGTH,
   type WebSearchToolOutput
 } from "../contract";
 import type { WebSearchErrorCode } from "../source";
@@ -35,7 +35,7 @@ function webSearchParameters(maxLimit: number) {
   return Type.Object({
     query: Type.String({
       minLength: 1,
-      maxLength: MAX_WEBSEARCH_QUERY_LENGTH,
+      maxLength: MAX_WEB_SEARCH_QUERY_LENGTH,
       description: "What to search for."
     }),
     limit: Type.Optional(

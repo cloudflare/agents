@@ -12,16 +12,16 @@
  * `web_search` is the name models know from Anthropic's and OpenAI's built-in
  * search tools.
  */
-export const WEBSEARCH_TOOL_NAME = "web_search";
+export const WEB_SEARCH_TOOL_NAME = "web_search";
 
 /** The default number of results when the model doesn't ask for a count. */
-export const DEFAULT_WEBSEARCH_LIMIT = 5;
+export const DEFAULT_WEB_SEARCH_LIMIT = 5;
 
 /** The most results one search can return; the API rejects more. */
-export const MAX_WEBSEARCH_LIMIT = 10;
+export const MAX_WEB_SEARCH_LIMIT = 10;
 
 /** The longest query the API accepts, in characters. */
-export const MAX_WEBSEARCH_QUERY_LENGTH = 1024;
+export const MAX_WEB_SEARCH_QUERY_LENGTH = 1024;
 
 /**
  * Per-result description length in the model's view, in characters. Provider
@@ -29,7 +29,7 @@ export const MAX_WEBSEARCH_QUERY_LENGTH = 1024;
  * ten results is 80 KB of context per search. The full text stays in the
  * host-side output.
  */
-export const DEFAULT_WEBSEARCH_DESCRIPTION_CHARS = 600;
+export const DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS = 600;
 
 /*
  * These are type aliases, not interfaces: pi stores tool details as strict
@@ -83,7 +83,7 @@ export type WebSearchToolOutput = WebSearchResponse & {
   provider?: string;
 };
 
-export const WEBSEARCH_TOOL_DESCRIPTION = [
+export const WEB_SEARCH_TOOL_DESCRIPTION = [
   "Search the public web. Returns up to `limit` results, each with a URL, a title, and a short description of the page.",
   "Use it for current events, facts you're unsure of, documentation, and anything that may have changed since your training.",
   "There is no next page: for more or different results, search again with a rephrased query.",
@@ -93,7 +93,7 @@ export const WEBSEARCH_TOOL_DESCRIPTION = [
 export interface RenderWebSearchResultsOptions {
   /**
    * Trim each description to this many characters in the model's view.
-   * Defaults to {@link DEFAULT_WEBSEARCH_DESCRIPTION_CHARS}; `Infinity`
+   * Defaults to {@link DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS}; `Infinity`
    * disables trimming.
    */
   maxDescriptionChars?: number;
@@ -108,7 +108,7 @@ export function renderWebSearchResults(
   options: RenderWebSearchResultsOptions = {}
 ): string {
   const maxChars =
-    options.maxDescriptionChars ?? DEFAULT_WEBSEARCH_DESCRIPTION_CHARS;
+    options.maxDescriptionChars ?? DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS;
   if (response.items.length === 0) {
     return `No results for "${response.metadata.query}". Try a broader or rephrased query.`;
   }
@@ -134,5 +134,12 @@ function compactDescription(
   const compact = description.replace(/\s+/g, " ").trim();
   if (!compact) return undefined;
   if (compact.length <= maxChars) return compact;
-  return `${compact.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+  const cut = compact.slice(0, Math.max(0, maxChars - 1));
+  // Back off to the last word boundary, unless that loses too much.
+  const space = cut.lastIndexOf(" ");
+  const end = space >= cut.length - WORD_BOUNDARY_BACKOFF ? space : cut.length;
+  return `${cut.slice(0, end).trimEnd()}…`;
 }
+
+/** How far truncation backs off to end on a whole word. */
+const WORD_BOUNDARY_BACKOFF = 20;

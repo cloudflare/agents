@@ -90,7 +90,7 @@ The API has no pagination. The tool description tells the model to search again 
 
 ## Failures
 
-A failed search becomes a `WebSearchError` with `status`, `code`, `retryable`, and `requestId` (AI Gateway's id for the request, for the gateway log). Every error has a `code`: the API's own when it sends one, for example `web_search_payment_required`, otherwise one derived from the HTTP status, such as `web_search_rate_limited` or `web_search_unavailable`. On a runtime older than the one above, the binding has no `websearch()` and the search fails with code `websearch_unsupported_runtime`.
+A failed search becomes a `WebSearchError` with `status`, `code`, `retryable`, and `requestId` (AI Gateway's id for the request, for the gateway log). Every error has a `code`: the API's own when it sends one, for example `web_search_payment_required`, otherwise one derived from the HTTP status, such as `web_search_rate_limited` or `web_search_unavailable`. On a runtime older than the one above, the binding has no `websearch()` and the search fails with code `web_search_unsupported_runtime`.
 
 The error's `message` is written for you, and can say to top up credits or configure a key. The model gets different text that tells it what to do next: fix the query, retry once, or carry on without search.
 

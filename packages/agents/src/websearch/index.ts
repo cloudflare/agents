@@ -10,12 +10,12 @@
  * @beta
  */
 export {
-  DEFAULT_WEBSEARCH_DESCRIPTION_CHARS,
-  DEFAULT_WEBSEARCH_LIMIT,
-  MAX_WEBSEARCH_LIMIT,
-  MAX_WEBSEARCH_QUERY_LENGTH,
-  WEBSEARCH_TOOL_DESCRIPTION,
-  WEBSEARCH_TOOL_NAME,
+  DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS,
+  DEFAULT_WEB_SEARCH_LIMIT,
+  MAX_WEB_SEARCH_LIMIT,
+  MAX_WEB_SEARCH_QUERY_LENGTH,
+  WEB_SEARCH_TOOL_DESCRIPTION,
+  WEB_SEARCH_TOOL_NAME,
   renderWebSearchResults,
   type RenderWebSearchResultsOptions,
   type WebSearchResponse,
@@ -37,7 +37,7 @@ export {
   type WebSearchSource
 } from "./source";
 export {
-  DEFAULT_WEBSEARCH_TIMEOUT_MS,
+  DEFAULT_WEB_SEARCH_TIMEOUT_MS,
   type WebSearchToolBindingOptions,
   type WebSearchToolOptions,
   type WebSearchToolSourceOptions

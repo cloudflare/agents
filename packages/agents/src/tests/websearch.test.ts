@@ -134,13 +134,30 @@ describe("renderWebSearchResults", () => {
         "",
         "1. Introducing Web Search API via AI Gateway | Cloudflare Blog",
         "https://blog.cloudflare.com/introducing-web-search-api/",
-        "# Introducing Web Search API Today, we'…",
+        "# Introducing Web Search API Today,…",
         "Modified: 2026-10-02T14:16:00.000Z",
         "",
         "2. Web Search · Cloudflare AI Gateway docs",
         "https://developers.cloudflare.com/ai-gateway/usage/web-search/"
       ].join("\n")
     );
+  });
+
+  it("cuts mid-word only when no space is near the limit", () => {
+    const response = (description: string): WebSearchResponse => ({
+      items: [{ url: "https://a.example", title: "A", description }],
+      metadata: { query: "q", requestId: "r", latencyMs: 1 }
+    });
+    expect(
+      renderWebSearchResults(response("alpha beta gamma delta"), {
+        maxDescriptionChars: 14
+      })
+    ).toContain("\nalpha beta…");
+    expect(
+      renderWebSearchResults(response(`a ${"x".repeat(60)}`), {
+        maxDescriptionChars: 40
+      })
+    ).toContain(`\na ${"x".repeat(37)}…`);
   });
 
   it("passes descriptions through whole when untrimmed", () => {
@@ -199,7 +216,7 @@ describe("createAIWebSearch", () => {
     await expect(failure).rejects.toMatchObject({
       name: "WebSearchError",
       status: 501,
-      code: "websearch_unsupported_runtime",
+      code: "web_search_unsupported_runtime",
       retryable: false
     });
     await expect(failure).rejects.toThrow(/workerd 1\.20260924\.1/);
@@ -405,25 +422,26 @@ describe("createHTTPWebSearch", () => {
     });
   });
 
-  it("sends the BYOK alias, honours baseUrl, and forwards the signal", async () => {
+  it("sends the trimmed query and BYOK alias to a safe URL, with the signal", async () => {
     const requests: { url: string; init: RequestInit }[] = [];
     const source = createHTTPWebSearch({
-      accountId: "acct",
+      accountId: "acct/../x",
       apiToken: "tok",
       byokAlias: "team-key",
-      baseUrl: "https://api.example.com",
+      baseUrl: "https://api.example.com/",
       fetch: async (input, init) => {
         requests.push({ url: String(input), init: init ?? {} });
         return json(RESPONSE);
       }
     });
     const controller = new AbortController();
-    await source.search({ query: "q" }, { signal: controller.signal });
+    await source.search({ query: "  q  " }, { signal: controller.signal });
     expect(requests[0].url).toBe(
-      "https://api.example.com/client/v4/accounts/acct/ai/websearch/"
+      "https://api.example.com/client/v4/accounts/acct%2F..%2Fx/ai/websearch/"
     );
     expect(requests[0].init.signal).toBe(controller.signal);
     expect(JSON.parse(String(requests[0].init.body))).toMatchObject({
+      query: "q",
       limit: 5,
       byokAlias: "team-key",
       options: { gateway: { id: "default" } }
@@ -541,7 +559,7 @@ describe("createWebSearchToolCore", () => {
       source: recording().source,
       maxDescriptionChars: 20
     });
-    expect(core.render(RESPONSE)).toContain("# Introducing Web S…");
+    expect(core.render(RESPONSE)).toContain("# Introducing Web…");
   });
 
   it("returns the full response to the host and rendered text for the model", async () => {
@@ -694,7 +712,7 @@ describe("adapters", () => {
     expect(output).toEqual(RESPONSE);
     const model = tool.toModelOutput({ output });
     expect(model.type).toBe("text");
-    expect(model.value).toContain("# Introducing Web S…");
+    expect(model.value).toContain("# Introducing Web…");
     const error = await aiSdkWebSearchTool({ source: failingSource })
       .execute({ query: "a" }, {})
       .catch((e: unknown) => e);
@@ -712,13 +730,13 @@ describe("adapters", () => {
       maxDescriptionChars: 20
     }).execute({ query: "a" }, toolApi, context);
     expect(pi.content).toEqual([
-      { type: "text", text: expect.stringContaining("# Introducing Web S…") }
+      { type: "text", text: expect.stringContaining("# Introducing Web…") }
     ]);
     const tanstack = await tanstackWebSearchTool({
       source: okSource,
       maxDescriptionChars: 20
     }).execute?.({ query: "a" });
-    expect(tanstack).toContain("# Introducing Web S…");
+    expect(tanstack).toContain("# Introducing Web…");
   });
 
   it("forwards each framework's abort signal to the source", async () => {

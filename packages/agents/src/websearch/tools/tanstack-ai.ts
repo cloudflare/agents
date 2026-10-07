@@ -4,7 +4,7 @@
  * @beta
  */
 import { toolDefinition } from "@tanstack/ai";
-import type { WEBSEARCH_TOOL_NAME } from "../contract";
+import type { WEB_SEARCH_TOOL_NAME } from "../contract";
 import {
   createWebSearchToolCore,
   toolFailure,
@@ -27,7 +27,7 @@ export {
 export type { WebSearchToolOptions } from "../tool";
 
 export type TanStackWebSearchToolOptions<
-  TName extends string = typeof WEBSEARCH_TOOL_NAME
+  TName extends string = typeof WEB_SEARCH_TOOL_NAME
 > = WebSearchToolOptions & {
   /** The tool's name. TanStack AI tools carry it in the definition. */
   name?: TName;
@@ -55,7 +55,7 @@ export type TanStackWebSearchToolOptions<
  * ```
  */
 export function webSearchTool<
-  TName extends string = typeof WEBSEARCH_TOOL_NAME
+  TName extends string = typeof WEB_SEARCH_TOOL_NAME
 >(options: TanStackWebSearchToolOptions<TName>) {
   const core = createWebSearchToolCore(options);
   return toolDefinition({

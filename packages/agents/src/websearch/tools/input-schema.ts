@@ -5,7 +5,7 @@
  */
 import { z } from "zod";
 import {
-  MAX_WEBSEARCH_QUERY_LENGTH,
+  MAX_WEB_SEARCH_QUERY_LENGTH,
   type WebSearchToolInput
 } from "../contract";
 
@@ -19,7 +19,7 @@ export function webSearchInputSchema(maxLimit: number) {
     query: z
       .string()
       .min(1)
-      .max(MAX_WEBSEARCH_QUERY_LENGTH)
+      .max(MAX_WEB_SEARCH_QUERY_LENGTH)
       .describe("What to search for."),
     limit: z
       .number()
