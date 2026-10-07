@@ -177,7 +177,9 @@ describe("PiHarness on pi-durable", () => {
 
     await abortAllDurableObjects();
     stub = fresh(name);
-    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    // Run the wake alarm, unless its 1s heartbeat already fired on its own
+    // while the three gates started. The gate runs below prove the recovery.
+    await runDurableObjectAlarm(stub);
     // Each session's safe tool runs again.
     await stub.gateStarted(6);
     await stub.release();
