@@ -1,5 +1,11 @@
 # @cloudflare/think
 
+## 0.20.1
+
+### Patch Changes
+
+- [#2495](https://github.com/cloudflare/agents/pull/2495) [`88d6745`](https://github.com/cloudflare/agents/commit/88d6745c53cf69a343fcbe8f3bd17ea58590d27e) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Fix a chat that could stall when the model chains fast client tool calls across steps.
+
 ## 0.20.0
 
 ### Minor Changes

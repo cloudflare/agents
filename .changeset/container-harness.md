@@ -1,7 +1,0 @@
----
-"agents": patch
----
-
-Add experimental `agents/harness/container`, `agents/harness/container/daemon`, `agents/harness/container/runtime` and `agents/harness/store`. Everything in them may change before it stabilizes.
-
-`ContainerHarness` runs an agent CLI such as Claude Code or Codex in a Cloudflare Container (`ctx.container`) and drives it from a Durable Object, with the same interface as `PiHarness` (`prompt`, `submit`, `wait`, `abort`, `messages`, `pending`, `session(id)`, `sessions`). Typed presets (`claudeCode()`, `codex()`, `containerAgent()`) say what runs: the harness builds the container from `cloudflare/debian-trixie` at runtime and snapshots it, so there is no image to build, and `ContainerEgress` adds credentials (`apiKey`, `baseUrl`, `headers`) outside the container, which only ever sees a placeholder key. The container stops after an idle timeout (five minutes by default) and the next prompt starts a new one in which the CLI resumes its own session; a container lost mid-run settles that run as `container_lost` (or reruns it with `onContainerLost: "retry"`), and an object evicted mid-run reattaches and replays what it missed. `agents/harness/container/runtime` is the daemon's Node runtime with `cliAdapter`, for images that bring their own CLI; `agents/harness/container/daemon` is its runtime-agnostic core; and `agents/harness/store` is a session store on the object's SQLite that any harness can use.
