@@ -430,7 +430,7 @@ function SearchOutput({ output }: { output: WebSearchToolOutput }) {
           </ol>
         ))}
       {view !== "results" && (
-        <pre className="max-h-96 overflow-auto rounded-lg bg-kumo-recessed p-3 font-mono text-xs break-all whitespace-pre-wrap text-kumo-subtle">
+        <pre className="max-h-96 overflow-auto rounded-lg bg-kumo-recessed p-3 font-mono text-xs break-words whitespace-pre-wrap text-kumo-subtle">
           {view === "model" ? modelText : rawText}
         </pre>
       )}
