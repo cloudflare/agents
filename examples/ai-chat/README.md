@@ -21,7 +21,8 @@ A complete chat application built with `@cloudflare/ai-chat` showcasing the reco
 - `addToolApprovalResponse` for approve/reject UI
 - `body` option for sending custom data with every request
 - Tool part rendering, including inline browser screenshots
-- Kumo design system components
+- A feed that follows the stream only while you're at the bottom, so you can scroll up and read mid-reply
+- Reusable chat pieces (feed, composer, markdown, tool rows) in `src/chat-ui.tsx`, built on Kumo
 
 ## Running
 
