@@ -103,7 +103,10 @@ const SCHEMA_PRAGMAS = new Set([
   "index_list",
   "index_info",
   "index_xinfo",
-  "foreign_key_list"
+  "foreign_key_list",
+  "foreign_key_check",
+  "integrity_check",
+  "quick_check"
 ]);
 /**
  * Bare words that follow a table keyword without naming a table:
@@ -245,11 +248,20 @@ class TablePrefixRewriter {
     }
     // `PRAGMA table_info('name')`: the statement form with a string
     // argument, for the PRAGMAs whose argument names a table or index.
-    const pragma = significant[1]?.token;
+    // The name may be schema-qualified (`main.table_info`) or quoted.
+    const pragma =
+      significant[2]?.token.text === "."
+        ? significant[3]?.token
+        : significant[1]?.token;
+    const pragmaName =
+      pragma?.kind === "word"
+        ? pragma.text
+        : pragma?.kind === "quoted"
+          ? pragma.name
+          : "";
     if (
       firstWord === "PRAGMA" &&
-      pragma?.kind === "word" &&
-      SCHEMA_PRAGMAS.has(pragma.text.toLowerCase())
+      SCHEMA_PRAGMAS.has(pragmaName.toLowerCase())
     ) {
       for (let i = 1; i < significant.length; i++) {
         const { token, index } = significant[i];

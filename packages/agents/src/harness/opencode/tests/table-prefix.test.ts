@@ -93,6 +93,8 @@ describe("prefixTables", () => {
     for (const pragma of [
       "PRAGMA table_info(session)",
       "PRAGMA table_info('session')",
+      `PRAGMA "table_info"('session')`,
+      "PRAGMA main.table_info('session')",
       "SELECT name FROM pragma_table_info('session')"
     ]) {
       const rows = await stub.prefixed([
@@ -101,6 +103,21 @@ describe("prefixTables", () => {
       ]);
       expect(rows.map((row) => row.name)).toEqual(["engine_column"]);
     }
+  });
+
+  it("checks the engine's table in foreign key and integrity PRAGMAs", async () => {
+    const stub = fresh();
+    // No host table named `child`: an unprefixed PRAGMA would fail with
+    // "no such table".
+    const rows = await stub.prefixed([
+      "CREATE TABLE parent (id TEXT PRIMARY KEY)",
+      "CREATE TABLE child (id TEXT, parent_id TEXT REFERENCES parent(id))",
+      "PRAGMA foreign_key_check('child')"
+    ]);
+    expect(rows).toEqual([]);
+    expect(await stub.prefixed(["PRAGMA quick_check('child')"])).toEqual([
+      { quick_check: "ok" }
+    ]);
   });
 
   it("renames and drops through the prefix", async () => {
