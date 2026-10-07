@@ -73,7 +73,8 @@ export async function* toResponseChunks(
   if (error) throw error;
 }
 
-function toResponseChunk(
+/** Convert one AI SDK UI message chunk into a response chunk, if it has one. */
+export function toResponseChunk(
   chunk: UIMessageChunk,
   options: AiSdkConversionOptions
 ): ResponseChunk | undefined {

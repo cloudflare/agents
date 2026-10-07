@@ -197,6 +197,11 @@
       "import": "./dist/harness/pi/index.js",
       "require": "./dist/harness/pi/index.js"
     },
+    "./harness/think": {
+      "types": "./dist/harness/think/index.d.ts",
+      "import": "./dist/harness/think/index.js",
+      "require": "./dist/harness/think/index.js"
+    },
     "./agent-tools": {
       "types": "./dist/agent-tools.d.ts",
       "import": "./dist/agent-tools.js",
@@ -515,6 +520,7 @@
     "test:conformance:server:mcp-agent": "bash conformance/run.sh server-mcp-agent",
     "test:conformance:server:handler": "bash conformance/run.sh server-handler",
     "test:conformance:server:handler:legacy-compat": "bash conformance/run.sh server-handler-legacy-compat",
-    "test:conformance:server:handler:legacy": "bash conformance/run.sh server-handler-legacy"
+    "test:conformance:server:handler:legacy": "bash conformance/run.sh server-handler-legacy",
+    "test:harness:think": "vitest --project harness-think"
   }
 }

@@ -124,7 +124,9 @@
     "test": "npm run test:workers && npm run test:react",
     "test:react": "vitest --run -c src/react-tests/vitest.config.ts",
     "test:workers": "vitest --run -c src/tests/vitest.config.ts",
-    "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts"
+    "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts",
+    "test:harness": "tsx scripts/harness-compat.ts",
+    "test:harness:check": "tsx scripts/harness-compat.ts --check"
   },
   "nx": {
     "targets": {
