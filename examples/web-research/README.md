@@ -29,8 +29,8 @@ Every search also shows up in the panel next to the chat, so you can see three v
 ## Running
 
 ```bash
-npm install
-npm start
+pnpm install
+pnpm start
 ```
 
 You need:
@@ -38,7 +38,7 @@ You need:
 - **Wrangler 4.141.0 or later** (the example uses 4.145). Older runtimes don't have `env.AI.websearch()`.
 - **A Cloudflare account that can pay for searches.** Searches are billed to the default AI Gateway on the account the Worker runs on, from AI Gateway credits or a provider key stored on the gateway (BYOK). Without either, every search fails with `web_search_payment_required` and the agent tells you so.
 
-The `AI` binding has no local implementation, so `npm start` runs it remotely against the account you're logged in to with `wrangler login`. If you belong to more than one account, set `CLOUDFLARE_ACCOUNT_ID`. If your `workers.dev` subdomain is behind Cloudflare Access, sign in through the browser when Wrangler asks.
+The `AI` binding has no local implementation, so `pnpm start` runs it remotely against the account you're logged in to with `wrangler login`. If you belong to more than one account, set `CLOUDFLARE_ACCOUNT_ID`. If your `workers.dev` subdomain is behind Cloudflare Access, sign in through the browser when Wrangler asks.
 
 The model is `@cf/moonshotai/kimi-k2.7-code` on Workers AI (`MODEL` in `src/shared.ts`).
 
