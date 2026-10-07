@@ -7,6 +7,7 @@ export default defineConfig({
       "src/react-tests/vitest.config.ts",
       "src/voice/tests/vitest.config.ts",
       "src/voice/react-tests/vitest.config.ts",
+      "src/harness/opencode/tests/vitest.config.ts",
       "src/harness/pi/tests/vitest.config.ts",
       "src/harness/think/tests/vitest.config.ts",
       "src/harness/container/tests/vitest.config.ts",

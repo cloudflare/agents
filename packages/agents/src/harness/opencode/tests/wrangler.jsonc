@@ -1,0 +1,23 @@
+{
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "OPENCODE_HARNESS_TEST",
+        "class_name": "OpenCodeHarnessTestObject"
+      },
+      { "name": "TABLE_PREFIX_TEST", "class_name": "TablePrefixTestObject" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "OpenCodeHarnessTestObject",
+        "TablePrefixTestObject"
+      ]
+    }
+  ]
+}

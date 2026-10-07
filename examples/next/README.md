@@ -18,6 +18,7 @@ lands.
 | [`routing`](./routing)                                   | This PR   | `RoutedAgents` on a plain `DurableObject` hub: one Agent per chat, a per-user catalog with push-based metadata, forwarded requests and sockets      |
 | [`dynamic-agents`](./dynamic-agents)                     | This PR   | A supervisor runs user-submitted code as facets: isolated storage, supervised abort, code upgrades over stable state                                |
 | [`harnesses/codex`](./harnesses/codex)                   | This PR   | A static Codex Rust/Wasm loop composed as a Lifecycle capability, using LanguageModelV4 and Shell Workspace                                         |
+| [`harnesses/opencode`](./harnesses/opencode)             | This PR   | Experimental: OpenCode v2 sessions on `agents/harness/opencode`, with Workers AI over the binding from `agents/models/opencode`                     |
 | [`harnesses/pi`](./harnesses/pi)                         | This PR   | Experimental: pi-durable sessions on `agents/harness/pi`, with Workspace tools and a JavaScript `exec` from `@cloudflare/computer`                  |
 | [`harnesses/think`](./harnesses/think)                   | This PR   | Experimental: Think's agent loop on a plain `DurableObject` with `agents/harness/think`, served to `useAgentChat` by `ThinkChat`                    |
 | [`harnesses/container`](./harnesses/container)           | This PR   | Experimental: Claude Code or Codex in a Cloudflare Container, driven from a Durable Object by `agents/harness/container`, resumed across containers |

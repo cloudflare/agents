@@ -7,6 +7,7 @@
     "src/voice/tests/**/*.ts",
     "src/voice/react-tests/**/*.ts",
     "src/voice/react-tests/**/*.tsx",
+    "src/harness/opencode/tests/**/*.ts",
     "src/harness/pi/tests/**/*.ts",
     "src/harness/think/tests/**/*.ts",
     "src/harness/container/tests/**/*.ts",
