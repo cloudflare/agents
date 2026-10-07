@@ -290,13 +290,22 @@ class EventTranslator {
         return [{ type: "run-start", operations }];
       }
       case "message_start":
-        if (event.message.role === "assistant") this.#run?.nextMessage();
-        return [];
+        if (event.message.role !== "assistant") return [];
+        this.#run?.nextMessage();
+        // The partial may already hold text that no update will repeat.
+        return this.#chunks(this.#run?.seed(event.message) ?? []);
       case "message_update":
         return this.#chunks(this.#run?.apply(event.changes) ?? []);
       case "message_end": {
-        const chunks = this.#run?.closeParts() ?? [];
         const message = event.entry.model?.[0];
+        // pi coalesces live updates; a message can finish with text that no
+        // update carried. Complete it from the saved entry before closing.
+        const chunks = [
+          ...(message?.role === "assistant"
+            ? (this.#run?.complete(message) ?? [])
+            : []),
+          ...(this.#run?.closeParts() ?? [])
+        ];
         if (message?.role === "assistant") {
           for (const part of message.content) {
             if (part.type === "toolCall") {
@@ -408,12 +417,15 @@ class EventTranslator {
 /** Part ids for one run: unique across the run's assistant messages. */
 class RunChunks {
   #open = new Map<number, { kind: "text" | "reasoning"; id: string }>();
+  /** Characters emitted per content index of the current message. */
+  #emitted = new Map<number, number>();
   #message = 0;
   readonly #calls = new Set<string>();
 
   nextMessage(): void {
     this.#message += 1;
     this.#open.clear();
+    this.#emitted.clear();
   }
 
   apply(changes: readonly MessageChange[]): ResponseChunk[] {
@@ -424,23 +436,33 @@ class RunChunks {
         case "thinking_start": {
           const kind = change.block.type === "thinking" ? "reasoning" : "text";
           const part = this.#start(change.contentIndex, kind, out);
-          const text = blockText(change.block);
-          if (text)
-            out.push({ type: `${kind}-delta`, id: part.id, delta: text });
+          this.#delta(
+            change.contentIndex,
+            part.id,
+            kind,
+            blockText(change.block),
+            out
+          );
           break;
         }
         case "text_delta":
         case "thinking_delta": {
           const kind = change.type === "text_delta" ? "text" : "reasoning";
           const part = this.#start(change.contentIndex, kind, out);
-          out.push({ type: `${kind}-delta`, id: part.id, delta: change.delta });
+          this.#delta(change.contentIndex, part.id, kind, change.delta, out);
           break;
         }
         case "block":
           if (change.block.type === "toolCall") {
             const { id, name, arguments: input } = change.block;
             out.push(...this.toolCall(id, name, input as Json));
-          } else this.#close(change.contentIndex, out);
+          } else {
+            this.#rest(change.contentIndex, change.block, out);
+            this.#close(change.contentIndex, out);
+          }
+          break;
+        case "message":
+          out.push(...this.complete(change.message));
           break;
         default:
           // Tool call deltas: the call is shown once its block completes.
@@ -461,8 +483,7 @@ class RunChunks {
       if (block.type === "toolCall") return;
       const kind = block.type === "thinking" ? "reasoning" : "text";
       const part = this.#start(index, kind, out);
-      const text = blockText(block);
-      if (text) out.push({ type: `${kind}-delta`, id: part.id, delta: text });
+      this.#delta(index, part.id, kind, blockText(block), out);
     });
     return out;
   }
@@ -475,6 +496,39 @@ class RunChunks {
       { type: "tool-input-start", toolCallId, toolName },
       { type: "tool-input-available", toolCallId, toolName, input }
     ];
+  }
+
+  /** Emit whatever text of `message` has not been streamed yet. */
+  complete(message: AssistantMessage): ResponseChunk[] {
+    const out: ResponseChunk[] = [];
+    message.content.forEach((block, index) => this.#rest(index, block, out));
+    return out;
+  }
+
+  #rest(
+    index: number,
+    block: AssistantMessage["content"][number],
+    out: ResponseChunk[]
+  ): void {
+    if (block.type !== "text" && block.type !== "thinking") return;
+    const text = blockText(block);
+    const done = this.#emitted.get(index) ?? 0;
+    if (text.length <= done) return;
+    const kind = block.type === "thinking" ? "reasoning" : "text";
+    const part = this.#start(index, kind, out);
+    this.#delta(index, part.id, kind, text.slice(done), out);
+  }
+
+  #delta(
+    index: number,
+    id: string,
+    kind: "text" | "reasoning",
+    delta: string,
+    out: ResponseChunk[]
+  ): void {
+    if (!delta) return;
+    this.#emitted.set(index, (this.#emitted.get(index) ?? 0) + delta.length);
+    out.push({ type: `${kind}-delta`, id, delta });
   }
 
   closeParts(): ResponseChunk[] {
