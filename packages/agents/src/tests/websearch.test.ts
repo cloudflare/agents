@@ -1,17 +1,27 @@
 import { describe, expect, it } from "vitest";
-import type { z } from "zod";
+import { z } from "zod";
 import {
   WebSearchError,
   renderWebSearchResults,
   createAIWebSearch,
   createHTTPWebSearch,
+  type WebSearchCallOptions,
   type WebSearchRequest,
   type WebSearchResponse,
   type WebSearchSource
 } from "../websearch";
-import { webSearchTool as aiSdkWebSearchTool } from "../websearch/tools/ai-sdk";
-import { webSearchTool as piWebSearchTool } from "../websearch/tools/pi";
-import { webSearchTool as tanstackWebSearchTool } from "../websearch/tools/tanstack-ai";
+import {
+  WebSearchError as AiSdkWebSearchError,
+  webSearchTool as aiSdkWebSearchTool
+} from "../websearch/tools/ai-sdk";
+import {
+  WebSearchError as PiWebSearchError,
+  webSearchTool as piWebSearchTool
+} from "../websearch/tools/pi";
+import {
+  WebSearchError as TanStackWebSearchError,
+  webSearchTool as tanstackWebSearchTool
+} from "../websearch/tools/tanstack-ai";
 import { createWebSearchToolCore } from "../websearch/tool";
 
 const RESPONSE: WebSearchResponse = {
@@ -144,7 +154,9 @@ describe("renderWebSearchResults", () => {
   it("says so when there are no results", () => {
     expect(
       renderWebSearchResults({ items: [], metadata: RESPONSE.metadata })
-    ).toBe('No results for "web search api".');
+    ).toBe(
+      'No results for "web search api". Try a broader or rephrased query.'
+    );
   });
 });
 
@@ -158,7 +170,7 @@ describe("createAIWebSearch", () => {
       byokAlias: "team-key"
     });
     await expect(
-      source({ query: "web search api", limit: 3 })
+      source.search({ query: "web search api", limit: 3 })
     ).resolves.toEqual(READ_RESPONSE);
     expect(ai.calls).toEqual([
       {
@@ -175,7 +187,7 @@ describe("createAIWebSearch", () => {
   it("defaults the gateway to 'default', the limit to 5, and leaves provider to the platform", async () => {
     const ai = fakeAI(() => json(RESPONSE));
     const source = createAIWebSearch({ binding: ai.binding });
-    await source({ query: "q" });
+    await source.search({ query: "q" });
     expect(ai.calls[0]).toMatchObject({ gatewayId: "default", limit: 5 });
     expect(ai.calls[0].provider).toBeUndefined();
     expect(source.provider).toBeUndefined();
@@ -183,7 +195,7 @@ describe("createAIWebSearch", () => {
 
   it("explains which runtime is needed when the binding has no websearch()", async () => {
     const source = createAIWebSearch({ binding: {} as Ai });
-    const failure = source({ query: "q", limit: 5 });
+    const failure = source.search({ query: "q", limit: 5 });
     await expect(failure).rejects.toMatchObject({
       name: "WebSearchError",
       status: 501,
@@ -196,15 +208,17 @@ describe("createAIWebSearch", () => {
   it("rejects bad requests before calling the API", async () => {
     const ai = fakeAI(() => json(RESPONSE));
     const source = createAIWebSearch({ binding: ai.binding });
-    await expect(source({ query: "   ", limit: 5 })).rejects.toMatchObject({
+    await expect(
+      source.search({ query: "   ", limit: 5 })
+    ).rejects.toMatchObject({
       name: "WebSearchError",
       code: "invalid_web_search_input"
     });
-    await expect(source({ query: "q", limit: 11 })).rejects.toBeInstanceOf(
-      WebSearchError
-    );
     await expect(
-      source({ query: "a".repeat(1025), limit: 1 })
+      source.search({ query: "q", limit: 11 })
+    ).rejects.toBeInstanceOf(WebSearchError);
+    await expect(
+      source.search({ query: "a".repeat(1025), limit: 1 })
     ).rejects.toBeInstanceOf(WebSearchError);
     expect(ai.calls).toHaveLength(0);
   });
@@ -256,7 +270,7 @@ describe("createAIWebSearch", () => {
   ])("maps %s errors", async (_label, body, status, expected, message) => {
     const ai = fakeAI(() => json(body, status));
     const source = createAIWebSearch({ binding: ai.binding });
-    const error = await source({ query: "q", limit: 1 }).catch((e) => e);
+    const error = await source.search({ query: "q", limit: 1 }).catch((e) => e);
     expect(error).toBeInstanceOf(WebSearchError);
     expect(error).toMatchObject(expected);
     expect(error.message).toMatch(message);
@@ -265,12 +279,14 @@ describe("createAIWebSearch", () => {
   it("treats a non-JSON failure as retryable when it's a server error", async () => {
     const ai = fakeAI(() => new Response("upstream down", { status: 502 }));
     const source = createAIWebSearch({ binding: ai.binding });
-    await expect(source({ query: "q", limit: 1 })).rejects.toMatchObject({
-      status: 502,
-      code: "web_search_unavailable",
-      retryable: true,
-      message: expect.stringContaining("upstream down")
-    });
+    await expect(source.search({ query: "q", limit: 1 })).rejects.toMatchObject(
+      {
+        status: 502,
+        code: "web_search_unavailable",
+        retryable: true,
+        message: expect.stringContaining("upstream down")
+      }
+    );
   });
 
   it("treats rate limits and server errors with a JSON body as retryable", async () => {
@@ -282,7 +298,7 @@ describe("createAIWebSearch", () => {
         )
       ).binding
     });
-    await expect(rateLimited({ query: "q" })).rejects.toMatchObject({
+    await expect(rateLimited.search({ query: "q" })).rejects.toMatchObject({
       status: 429,
       code: "web_search_rate_limited",
       apiCode: 971,
@@ -299,7 +315,7 @@ describe("createAIWebSearch", () => {
         )
       ).binding
     });
-    await expect(providerDown({ query: "q" })).rejects.toMatchObject({
+    await expect(providerDown.search({ query: "q" })).rejects.toMatchObject({
       status: 503,
       code: "web_search_provider_error",
       retryable: true
@@ -324,7 +340,7 @@ describe("createAIWebSearch", () => {
       })
     );
     const source = createAIWebSearch({ binding: ai.binding });
-    await expect(source({ query: "q" })).resolves.toEqual({
+    await expect(source.search({ query: "q" })).resolves.toEqual({
       items: [
         { url: "https://a.example", title: "A" },
         { url: "https://b.example", title: "https://b.example" },
@@ -343,7 +359,7 @@ describe("createAIWebSearch", () => {
     const never = { websearch: () => new Promise<Response>(() => {}) };
     const source = createAIWebSearch({ binding: never as unknown as Ai });
     const controller = new AbortController();
-    const search = source({ query: "q" }, { signal: controller.signal });
+    const search = source.search({ query: "q" }, { signal: controller.signal });
     controller.abort(new Error("stop"));
     await expect(search).rejects.toThrow("stop");
     expect(ai.calls).toHaveLength(0);
@@ -352,9 +368,9 @@ describe("createAIWebSearch", () => {
   it("rejects a 200 that isn't a search response", async () => {
     const ai = fakeAI(() => json({ hello: "world" }));
     const source = createAIWebSearch({ binding: ai.binding });
-    await expect(source({ query: "q", limit: 1 })).rejects.toBeInstanceOf(
-      WebSearchError
-    );
+    await expect(
+      source.search({ query: "q", limit: 1 })
+    ).rejects.toBeInstanceOf(WebSearchError);
   });
 });
 
@@ -371,7 +387,7 @@ describe("createHTTPWebSearch", () => {
         return json(RESPONSE);
       }
     });
-    await expect(source({ query: "q", limit: 2 })).resolves.toEqual(
+    await expect(source.search({ query: "q", limit: 2 })).resolves.toEqual(
       READ_RESPONSE
     );
     expect(requests[0].url).toBe(
@@ -402,7 +418,7 @@ describe("createHTTPWebSearch", () => {
       }
     });
     const controller = new AbortController();
-    await source({ query: "q" }, { signal: controller.signal });
+    await source.search({ query: "q" }, { signal: controller.signal });
     expect(requests[0].url).toBe(
       "https://api.example.com/client/v4/accounts/acct/ai/websearch/"
     );
@@ -422,17 +438,19 @@ describe("createHTTPWebSearch", () => {
         fetch: async () => response()
       });
     await expect(
-      failing(() => json(PAYMENT_REQUIRED, 402))({ query: "q" })
+      failing(() => json(PAYMENT_REQUIRED, 402)).search({ query: "q" })
     ).rejects.toMatchObject({
       status: 402,
       code: "web_search_payment_required",
       retryable: false
     });
     await expect(
-      failing(() => json(VALIDATION_ENVELOPE, 400))({ query: "q" })
+      failing(() => json(VALIDATION_ENVELOPE, 400)).search({ query: "q" })
     ).rejects.toMatchObject({ code: "invalid_web_search_input" });
     await expect(
-      failing(() => new Response("<html>bad gateway</html>", { status: 502 }))({
+      failing(
+        () => new Response("<html>bad gateway</html>", { status: 502 })
+      ).search({
         query: "q"
       })
     ).rejects.toMatchObject({
@@ -443,12 +461,24 @@ describe("createHTTPWebSearch", () => {
   });
 });
 
+/** A source that never settles until its signal aborts. */
+function hangUntilAborted(
+  _request: WebSearchRequest,
+  { signal }: WebSearchCallOptions = {}
+): Promise<WebSearchResponse> {
+  return new Promise((_resolve, reject) => {
+    signal?.addEventListener("abort", () => reject(signal.reason));
+  });
+}
+
 describe("createWebSearchToolCore", () => {
   const recording = () => {
     const requests: WebSearchRequest[] = [];
-    const source: WebSearchSource = async (request) => {
-      requests.push(request);
-      return RESPONSE;
+    const source: WebSearchSource = {
+      search: async (request) => {
+        requests.push(request);
+        return RESPONSE;
+      }
     };
     return { requests, source };
   };
@@ -462,16 +492,56 @@ describe("createWebSearchToolCore", () => {
     expect(requests.map((r) => r.limit)).toEqual([3, 2, 3]);
   });
 
-  it("clamps a host limit outside 1–10", () => {
-    expect(
-      createWebSearchToolCore({ source: recording().source, limit: 50 }).limit
-    ).toBe(10);
-    expect(
-      createWebSearchToolCore({ source: recording().source, limit: 0 }).limit
-    ).toBe(1);
-    expect(createWebSearchToolCore({ source: recording().source }).limit).toBe(
-      5
+  it("rejects invalid host configuration when the tool is created", () => {
+    const source = recording().source;
+    for (const limit of [0, 11, 2.5, Number.NaN]) {
+      expect(() => createWebSearchToolCore({ source, limit })).toThrow(
+        RangeError
+      );
+    }
+    for (const maxDescriptionChars of [0, -1, 1.5]) {
+      expect(() =>
+        createWebSearchToolCore({ source, maxDescriptionChars })
+      ).toThrow(RangeError);
+    }
+    expect(() => createWebSearchToolCore({ source, timeoutMs: 0 })).toThrow(
+      RangeError
     );
+    expect(() =>
+      createWebSearchToolCore({ source, maxDescriptionChars: Infinity })
+    ).not.toThrow();
+    const ai = fakeAI(() => json(RESPONSE));
+    expect(() =>
+      createAIWebSearch({ binding: ai.binding, byokAlias: "has space" })
+    ).toThrow(RangeError);
+    expect(() =>
+      createHTTPWebSearch({
+        accountId: "a",
+        apiToken: "t",
+        byokAlias: "x".repeat(65)
+      })
+    ).toThrow(RangeError);
+  });
+
+  it("keeps provider when a wrapper spreads the source", async () => {
+    const ai = fakeAI(() => json(RESPONSE));
+    const inner = createAIWebSearch({ binding: ai.binding, provider: "exa" });
+    const logged: WebSearchSource = {
+      ...inner,
+      search: (request, options) => inner.search(request, options)
+    };
+    const run = await createWebSearchToolCore({ source: logged }).run({
+      query: "a"
+    });
+    expect(run.ok && run.output.provider).toBe("exa");
+  });
+
+  it("renders output with the host's maxDescriptionChars", () => {
+    const core = createWebSearchToolCore({
+      source: recording().source,
+      maxDescriptionChars: 20
+    });
+    expect(core.render(RESPONSE)).toContain("# Introducing Web S…");
   });
 
   it("returns the full response to the host and rendered text for the model", async () => {
@@ -492,11 +562,13 @@ describe("createWebSearchToolCore", () => {
   });
 
   it("turns a failed search into an error result instead of throwing", async () => {
-    const source: WebSearchSource = async () => {
-      throw new WebSearchError("No credits.", {
-        status: 402,
-        code: "web_search_payment_required"
-      });
+    const source: WebSearchSource = {
+      search: async () => {
+        throw new WebSearchError("No credits.", {
+          status: 402,
+          code: "web_search_payment_required"
+        });
+      }
     };
     const run = await createWebSearchToolCore({ source }).run({ query: "a" });
     expect(run.ok).toBe(false);
@@ -508,8 +580,10 @@ describe("createWebSearchToolCore", () => {
   });
 
   it("tells the model to retry once for retryable failures", async () => {
-    const source: WebSearchSource = async () => {
-      throw new TypeError("socket hang up");
+    const source: WebSearchSource = {
+      search: async () => {
+        throw new TypeError("socket hang up");
+      }
     };
     const run = await createWebSearchToolCore({ source }).run({ query: "a" });
     expect(!run.ok && run.error).toMatchObject({
@@ -534,10 +608,7 @@ describe("createWebSearchToolCore", () => {
   });
 
   it("fails a search that outlives timeoutMs as retryable", async () => {
-    const source: WebSearchSource = (_request, { signal } = {}) =>
-      new Promise((_resolve, reject) => {
-        signal?.addEventListener("abort", () => reject(signal.reason));
-      });
+    const source: WebSearchSource = { search: hangUntilAborted };
     const run = await createWebSearchToolCore({ source, timeoutMs: 10 }).run({
       query: "a"
     });
@@ -549,10 +620,7 @@ describe("createWebSearchToolCore", () => {
   });
 
   it("rethrows when the caller aborts instead of returning a failure", async () => {
-    const source: WebSearchSource = (_request, { signal } = {}) =>
-      new Promise((_resolve, reject) => {
-        signal?.addEventListener("abort", () => reject(signal.reason));
-      });
+    const source: WebSearchSource = { search: hangUntilAborted };
     const controller = new AbortController();
     const run = createWebSearchToolCore({ source }).run(
       { query: "a" },
@@ -572,20 +640,22 @@ describe("createWebSearchToolCore", () => {
 });
 
 describe("adapters", () => {
-  const okSource: WebSearchSource = async () => RESPONSE;
-  const failingSource: WebSearchSource = async () => {
-    throw new WebSearchError("no credits", {
-      status: 402,
-      code: "web_search_payment_required",
-      requestId: "r"
-    });
+  const okSource: WebSearchSource = { search: async () => RESPONSE };
+  const failingSource: WebSearchSource = {
+    search: async () => {
+      throw new WebSearchError("no credits", {
+        status: 402,
+        code: "web_search_payment_required",
+        requestId: "r"
+      });
+    }
   };
   const toolApi = {} as never;
   const context = { abortSignal: undefined } as never;
 
   it("pi: text for the model, full output in details, replay-safe", async () => {
     const tool = piWebSearchTool({ source: okSource });
-    expect(tool.name).toBe("websearch");
+    expect(tool.name).toBe("web_search");
     expect(tool.replay).toBe("safe");
     const result = await tool.execute({ query: "a" }, toolApi, context);
     expect(result.isError).toBeUndefined();
@@ -653,9 +723,11 @@ describe("adapters", () => {
 
   it("forwards each framework's abort signal to the source", async () => {
     const signals: (AbortSignal | undefined)[] = [];
-    const source: WebSearchSource = async (_request, options) => {
-      signals.push(options?.signal);
-      return RESPONSE;
+    const source: WebSearchSource = {
+      search: async (_request, options) => {
+        signals.push(options?.signal);
+        return RESPONSE;
+      }
     };
     const controller = new AbortController();
     controller.abort(new Error("cancelled"));
@@ -678,28 +750,35 @@ describe("adapters", () => {
     expect(signals.every((signal) => signal?.aborted)).toBe(true);
   });
 
-  it("tells the model the host's limit as the schema maximum", () => {
-    const maximum = (limit?: number) =>
-      (
-        piWebSearchTool({ source: okSource, limit }).parameters.properties
-          .limit as { maximum?: number }
-      ).maximum;
-    expect(maximum(3)).toBe(3);
-    expect(maximum()).toBe(5);
+  it("tells the model the host's limit without rejecting more", async () => {
+    const pi = piWebSearchTool({ source: okSource, limit: 3 });
+    const piLimit = pi.parameters.properties.limit as {
+      maximum?: number;
+      description?: string;
+    };
+    expect(piLimit.maximum).toBeUndefined();
+    expect(piLimit.description).toContain("at most 3");
 
     for (const schema of [
       aiSdkWebSearchTool({ source: okSource, limit: 3 }).inputSchema,
       tanstackWebSearchTool({ source: okSource, limit: 3 }).inputSchema
     ]) {
       const zod = schema as z.ZodType;
-      expect(zod.safeParse({ query: "a", limit: 3 }).success).toBe(true);
-      expect(zod.safeParse({ query: "a", limit: 4 }).success).toBe(false);
+      expect(zod.safeParse({ query: "a", limit: 4 }).success).toBe(true);
+      expect(zod.safeParse({ query: "a", limit: 0 }).success).toBe(false);
+      expect(JSON.stringify(z.toJSONSchema(zod))).toContain("at most 3");
     }
   });
 
-  it("tanstack: named websearch by default, returns the rendered text", async () => {
+  it("re-exports WebSearchError from every adapter", () => {
+    expect(PiWebSearchError).toBe(WebSearchError);
+    expect(AiSdkWebSearchError).toBe(WebSearchError);
+    expect(TanStackWebSearchError).toBe(WebSearchError);
+  });
+
+  it("tanstack: named web_search by default, returns the rendered text", async () => {
     const tool = tanstackWebSearchTool({ source: okSource });
-    expect(tool.name).toBe("websearch");
+    expect(tool.name).toBe("web_search");
     expect(
       tanstackWebSearchTool({ source: okSource, name: "search" }).name
     ).toBe("search");

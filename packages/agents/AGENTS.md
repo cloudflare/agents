@@ -191,12 +191,12 @@ src/
     tool-helpers.ts     # model-output + ctx helpers shared by ai.ts and ai-sdk.ts
     tanstack-ai.ts      # browserTool and createBrowserTools for TanStack AI
 
-  websearch/            # websearch tool over Cloudflare's Web Search API (beta)
+  websearch/            # web_search tool over Cloudflare's Web Search API (beta)
     index.ts            # Barrel for agents/websearch
     contract.ts         # Tool name, description, input/output types, renderer
     source.ts           # WebSearchSource: AI binding + HTTP sources, WebSearchError
     tool.ts             # harness-neutral core shared by the adapters
-    tools/              # pi.ts, ai-sdk.ts, tanstack-ai.ts adapters
+    tools/              # pi.ts, ai-sdk.ts, tanstack-ai.ts adapters; input-schema.ts (zod, shared)
 
   voice/                # Voice server, client, React, provider, SFU, and text entries
   channels/             # Messaging core and Channels: slack/, telegram/, email/, web/

@@ -1,5 +1,5 @@
 /**
- * The harness-neutral core of the `websearch` tool, shared by the pi
+ * The harness-neutral core of the `web_search` tool, shared by the pi
  * (`agents/websearch/pi`), AI SDK (`agents/websearch/ai-sdk`), and TanStack
  * AI (`agents/websearch/tanstack-ai`) adapters. Internal — not an entry point.
  */
@@ -9,6 +9,7 @@ import {
   WEBSEARCH_TOOL_DESCRIPTION,
   WEBSEARCH_TOOL_NAME,
   renderWebSearchResults,
+  type WebSearchResponse,
   type WebSearchToolInput,
   type WebSearchToolOutput
 } from "./contract";
@@ -37,26 +38,29 @@ export type WebSearchToolSourceOptions = {
   byokAlias?: never;
 };
 
-/** Options every `websearch` tool adapter accepts. */
+/**
+ * Options every `web_search` tool adapter accepts. Invalid values throw a
+ * `RangeError` when the tool is created.
+ */
 export type WebSearchToolOptions = (
   | WebSearchToolBindingOptions
   | WebSearchToolSourceOptions
 ) & {
   /**
    * Results per search when the model doesn't ask for a count, and the most
-   * it may ask for. 1–10; defaults to 5.
+   * it gets when it asks for more. An integer from 1 to 10; defaults to 5.
    */
   limit?: number;
   /** Replaces the default tool description. */
   description?: string;
   /**
-   * Per-result description length in the model's view. Defaults to 600
-   * characters; `Infinity` passes descriptions through whole.
+   * Per-result description length in the model's view. A positive integer;
+   * defaults to 600 characters. `Infinity` passes descriptions through whole.
    */
   maxDescriptionChars?: number;
   /**
    * Give up on a search after this many milliseconds, as a retryable
-   * `web_search_timeout` failure. Defaults to 30 seconds.
+   * `web_search_timeout` failure. A positive integer; defaults to 30 seconds.
    */
   timeoutMs?: number;
 };
@@ -78,6 +82,8 @@ export interface WebSearchToolCore {
   description: string;
   /** The host's `limit`: the default and the cap for the model's `limit`. */
   limit: number;
+  /** Render a search's output as the text the model reads. */
+  render(output: WebSearchResponse): string;
   /**
    * Run one search. Aborting `signal` rejects with its reason rather than
    * producing a failed run, so the harness sees a cancelled call.
@@ -91,17 +97,39 @@ export interface WebSearchToolCore {
 export function createWebSearchToolCore(
   options: WebSearchToolOptions
 ): WebSearchToolCore {
-  const limit = clampLimit(options.limit ?? DEFAULT_WEBSEARCH_LIMIT);
+  const limit = options.limit ?? DEFAULT_WEBSEARCH_LIMIT;
   const timeoutMs = options.timeoutMs ?? DEFAULT_WEBSEARCH_TIMEOUT_MS;
+  const { maxDescriptionChars } = options;
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_WEBSEARCH_LIMIT) {
+    throw new RangeError(
+      `limit must be an integer from 1 to ${MAX_WEBSEARCH_LIMIT}; got ${limit}.`
+    );
+  }
+  if (
+    maxDescriptionChars !== undefined &&
+    maxDescriptionChars !== Infinity &&
+    !(Number.isInteger(maxDescriptionChars) && maxDescriptionChars > 0)
+  ) {
+    throw new RangeError(
+      `maxDescriptionChars must be a positive integer or Infinity; got ${maxDescriptionChars}.`
+    );
+  }
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError(
+      `timeoutMs must be a positive integer; got ${timeoutMs}.`
+    );
+  }
   const source =
     options.source === undefined ? createAIWebSearch(options) : options.source;
   const provider = source.provider;
-  const render = { maxDescriptionChars: options.maxDescriptionChars };
+  const render = (output: WebSearchResponse) =>
+    renderWebSearchResults(output, { maxDescriptionChars });
 
   return {
     name: WEBSEARCH_TOOL_NAME,
     description: options.description ?? WEBSEARCH_TOOL_DESCRIPTION,
     limit,
+    render,
     async run(input, { signal } = {}) {
       signal?.throwIfAborted();
       const request = {
@@ -113,14 +141,16 @@ export function createWebSearchToolCore(
         ? AbortSignal.any([signal, timeout])
         : timeout;
       try {
-        const response = await source(request, { signal: searchSignal });
+        const response = await source.search(request, {
+          signal: searchSignal
+        });
         const output: WebSearchToolOutput = provider
           ? { ...response, provider }
           : response;
         return {
           ok: true,
           output,
-          text: renderWebSearchResults(response, render)
+          text: render(response)
         };
       } catch (cause) {
         if (signal?.aborted) throw signal.reason;
@@ -185,6 +215,7 @@ function describeFailureForModel(error: WebSearchError): string {
   return `Web search is unavailable here (${error.code}). Do not retry; answer without it and say that web search was unavailable.`;
 }
 
+/** The model's `limit`, made an integer from 1 to 10. */
 function clampLimit(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_WEBSEARCH_LIMIT;
   return Math.min(MAX_WEBSEARCH_LIMIT, Math.max(1, Math.trunc(value)));

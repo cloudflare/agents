@@ -1,5 +1,5 @@
 /**
- * `agents/websearch/pi` — the `websearch` tool for the pi harness.
+ * `agents/websearch/pi` — the `web_search` tool for the pi harness.
  *
  * @beta
  */
@@ -9,6 +9,7 @@ import {
   MAX_WEBSEARCH_QUERY_LENGTH,
   type WebSearchToolOutput
 } from "../contract";
+import type { WebSearchErrorCode } from "../source";
 import { createWebSearchToolCore, type WebSearchToolOptions } from "../tool";
 
 export type {
@@ -17,10 +18,19 @@ export type {
   WebSearchToolInput,
   WebSearchToolOutput
 } from "../contract";
-export type { WebSearchProvider, WebSearchSource } from "../source";
+export {
+  WebSearchError,
+  type WebSearchErrorCode,
+  type WebSearchProvider,
+  type WebSearchSource
+} from "../source";
 export type { WebSearchToolOptions } from "../tool";
 
-/** The model's input schema; `limit` tops out at the host's cap. */
+/**
+ * The model's input schema. The description tells the model the host's
+ * `limit`; a larger value is not rejected (which would cost a validation
+ * round trip) but capped by the core. pi already coerces `"5"` to `5`.
+ */
 function webSearchParameters(maxLimit: number) {
   return Type.Object({
     query: Type.String({
@@ -31,7 +41,6 @@ function webSearchParameters(maxLimit: number) {
     limit: Type.Optional(
       Type.Integer({
         minimum: 1,
-        maximum: maxLimit,
         description: `How many results to return (at most ${maxLimit}).`
       })
     )
@@ -41,7 +50,7 @@ function webSearchParameters(maxLimit: number) {
 type WebSearchParameters = ReturnType<typeof webSearchParameters>;
 
 /**
- * Host-side details pi stores with each `websearch` result: the full API
+ * Host-side details pi stores with each `web_search` result: the full API
  * response (untrimmed descriptions, provider metadata) or the failure.
  */
 export type WebSearchToolDetails =
@@ -51,7 +60,7 @@ export type WebSearchToolDetails =
       /** The source's error message, with the API's detail. */
       message: string;
       status: number;
-      code?: string;
+      code: WebSearchErrorCode;
       retryable: boolean;
       requestId?: string;
     };

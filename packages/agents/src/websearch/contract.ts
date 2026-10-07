@@ -1,14 +1,18 @@
 /**
- * The `websearch` tool contract: its name, what it tells the model, what the
+ * The `web_search` tool contract: its name, what it tells the model, what the
  * model passes in, what comes back, and how results are rendered for the
  * model. Shared by every executor of the tool — the harness-executed
  * adapters in `agents/websearch/*` today, and a gateway-executed variant in
- * `agents/models/*` once AI Gateway server tools ship — so a `websearch` call
+ * `agents/models/*` once AI Gateway server tools ship — so a `web_search` call
  * looks the same in a transcript whoever ran it.
  */
 
-/** The tool's name, as the model calls it and as it appears in transcripts. */
-export const WEBSEARCH_TOOL_NAME = "websearch";
+/**
+ * The tool's name, as the model calls it and as it appears in transcripts.
+ * `web_search` is the name models know from Anthropic's and OpenAI's built-in
+ * search tools.
+ */
+export const WEBSEARCH_TOOL_NAME = "web_search";
 
 /** The default number of results when the model doesn't ask for a count. */
 export const DEFAULT_WEBSEARCH_LIMIT = 5;
@@ -70,7 +74,7 @@ export type WebSearchResponse = {
 };
 
 /**
- * What one `websearch` run produces for the host: the full API response and
+ * What one `web_search` run produces for the host: the full API response and
  * which provider served it. The model sees {@link renderWebSearchResults}
  * of this.
  */
@@ -82,7 +86,8 @@ export type WebSearchToolOutput = WebSearchResponse & {
 export const WEBSEARCH_TOOL_DESCRIPTION = [
   "Search the public web. Returns up to `limit` results, each with a URL, a title, and a short description of the page.",
   "Use it for current events, facts you're unsure of, documentation, and anything that may have changed since your training.",
-  "Results are discovery only: to read a page, fetch its URL with another tool."
+  "There is no next page: for more or different results, search again with a rephrased query.",
+  "Results are discovery only: to read a page, fetch its URL if you have a tool that reads pages."
 ].join(" ");
 
 export interface RenderWebSearchResultsOptions {
@@ -105,7 +110,7 @@ export function renderWebSearchResults(
   const maxChars =
     options.maxDescriptionChars ?? DEFAULT_WEBSEARCH_DESCRIPTION_CHARS;
   if (response.items.length === 0) {
-    return `No results for "${response.metadata.query}".`;
+    return `No results for "${response.metadata.query}". Try a broader or rephrased query.`;
   }
   const blocks = response.items.map((item, index) => {
     const lines = [`${index + 1}. ${item.title.trim() || item.url}`, item.url];

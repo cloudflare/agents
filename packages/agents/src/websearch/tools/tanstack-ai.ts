@@ -1,16 +1,16 @@
 /**
- * `agents/websearch/tanstack-ai` — the `websearch` tool for TanStack AI.
+ * `agents/websearch/tanstack-ai` — the `web_search` tool for TanStack AI.
  *
  * @beta
  */
 import { toolDefinition } from "@tanstack/ai";
-import { z } from "zod";
-import { MAX_WEBSEARCH_QUERY_LENGTH } from "../contract";
+import type { WEBSEARCH_TOOL_NAME } from "../contract";
 import {
   createWebSearchToolCore,
   toolFailure,
   type WebSearchToolOptions
 } from "../tool";
+import { webSearchInputSchema } from "./input-schema";
 
 export type {
   WebSearchResponse,
@@ -18,32 +18,20 @@ export type {
   WebSearchToolInput,
   WebSearchToolOutput
 } from "../contract";
-export type { WebSearchProvider, WebSearchSource } from "../source";
+export {
+  WebSearchError,
+  type WebSearchErrorCode,
+  type WebSearchProvider,
+  type WebSearchSource
+} from "../source";
 export type { WebSearchToolOptions } from "../tool";
 
-export type TanStackWebSearchToolOptions<TName extends string = "websearch"> =
-  WebSearchToolOptions & {
-    /** The tool's name. TanStack AI tools carry it in the definition. */
-    name?: TName;
-  };
-
-/** The model's input schema; `limit` tops out at the host's cap. */
-function webSearchInputSchema(maxLimit: number) {
-  return z.object({
-    query: z
-      .string()
-      .min(1)
-      .max(MAX_WEBSEARCH_QUERY_LENGTH)
-      .describe("What to search for."),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(maxLimit)
-      .optional()
-      .describe(`How many results to return (at most ${maxLimit}).`)
-  });
-}
+export type TanStackWebSearchToolOptions<
+  TName extends string = typeof WEBSEARCH_TOOL_NAME
+> = WebSearchToolOptions & {
+  /** The tool's name. TanStack AI tools carry it in the definition. */
+  name?: TName;
+};
 
 /**
  * Create a TanStack AI tool that searches the web through Cloudflare's Web
@@ -51,7 +39,7 @@ function webSearchInputSchema(maxLimit: number) {
  * both get the trimmed text rendering. A failed search throws a
  * `WebSearchError`, which TanStack AI reports as an error result: its
  * `message` is written for the model, and its `cause` is the source's error
- * with the API's detail. The tool is named `websearch` unless you pass
+ * with the API's detail. The tool is named `web_search` unless you pass
  * `name`.
  *
  * @example
@@ -66,9 +54,9 @@ function webSearchInputSchema(maxLimit: number) {
  * });
  * ```
  */
-export function webSearchTool<TName extends string = "websearch">(
-  options: TanStackWebSearchToolOptions<TName>
-) {
+export function webSearchTool<
+  TName extends string = typeof WEBSEARCH_TOOL_NAME
+>(options: TanStackWebSearchToolOptions<TName>) {
   const core = createWebSearchToolCore(options);
   return toolDefinition({
     name: options.name ?? (core.name as TName),

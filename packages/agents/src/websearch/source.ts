@@ -36,16 +36,21 @@ export interface WebSearchCallOptions {
 }
 
 /**
- * Runs a search. The tool core calls this and renders what comes back.
- * `provider` is informational — recorded on the tool's host output when the
- * source knows which provider it searches with.
+ * Runs searches. The tool core calls `search` and renders what comes back.
+ * An object rather than a bare function so a wrapper (caching, logging)
+ * keeps `provider` by spreading the source it wraps.
  */
-export type WebSearchSource = ((
-  request: WebSearchRequest,
-  options?: WebSearchCallOptions
-) => Promise<WebSearchResponse>) & {
+export interface WebSearchSource {
+  search(
+    request: WebSearchRequest,
+    options?: WebSearchCallOptions
+  ): Promise<WebSearchResponse>;
+  /**
+   * The provider this source searches with, when known. Informational:
+   * recorded on the tool's host output.
+   */
   readonly provider?: WebSearchProvider;
-};
+}
 
 /** Options shared by the AI-binding and HTTP sources. */
 export interface WebSearchGatewayOptions {
@@ -94,8 +99,9 @@ interface AiWebSearchBinding {
 export function createAIWebSearch(
   options: AIWebSearchOptions
 ): WebSearchSource {
+  validateGatewayOptions(options);
   const binding = options.binding as unknown as AiWebSearchBinding;
-  const source: WebSearchSource = async (input, call = {}) => {
+  const search: WebSearchSource["search"] = async (input, call = {}) => {
     const request = validateRequest(input);
     if (typeof binding.websearch !== "function") {
       throw new WebSearchError(
@@ -116,7 +122,7 @@ export function createAIWebSearch(
     );
     return readResponse(response, request.query);
   };
-  return withProvider(source, options.provider);
+  return { search, provider: options.provider };
 }
 
 /** A search over the HTTP API, from any runtime with `fetch`. */
@@ -138,9 +144,10 @@ export interface HTTPWebSearchOptions extends WebSearchGatewayOptions {
 export function createHTTPWebSearch(
   options: HTTPWebSearchOptions
 ): WebSearchSource {
+  validateGatewayOptions(options);
   const doFetch = options.fetch ?? fetch;
   const url = `${options.baseUrl ?? "https://api.cloudflare.com"}/client/v4/accounts/${options.accountId}/ai/websearch/`;
-  const source: WebSearchSource = async (input, call = {}) => {
+  const search: WebSearchSource["search"] = async (input, call = {}) => {
     const request = validateRequest(input);
     const response = await doFetch(url, {
       method: "POST",
@@ -159,14 +166,22 @@ export function createHTTPWebSearch(
     });
     return readResponse(response, request.query);
   };
-  return withProvider(source, options.provider);
+  return { search, provider: options.provider };
 }
 
-function withProvider(
-  source: WebSearchSource,
-  provider: WebSearchProvider | undefined
-): WebSearchSource {
-  return provider === undefined ? source : Object.assign(source, { provider });
+/** The API's pattern for `byokAlias`. */
+const BYOK_ALIAS_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** Host configuration errors are programming errors: throw when building. */
+function validateGatewayOptions(options: WebSearchGatewayOptions): void {
+  if (
+    options.byokAlias !== undefined &&
+    !BYOK_ALIAS_PATTERN.test(options.byokAlias)
+  ) {
+    throw new RangeError(
+      `byokAlias must be 1–64 letters, digits, "_" or "-"; got ${JSON.stringify(options.byokAlias)}.`
+    );
+  }
 }
 
 /**
