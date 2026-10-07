@@ -7,7 +7,7 @@ import {
 } from "agents/websearch";
 
 /** The Workers AI model the agent runs on. */
-export const MODEL = "@cf/deepseek-ai/deepseek-v4-pro-0813";
+export const MODEL = "@cf/moonshotai/kimi-k2.7-code";
 
 /**
  * How much of each result's description the model reads. The server passes

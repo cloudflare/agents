@@ -40,7 +40,7 @@ You need:
 
 The `AI` binding has no local implementation, so `npm start` runs it remotely against the account you're logged in to with `wrangler login`. If you belong to more than one account, set `CLOUDFLARE_ACCOUNT_ID`. If your `workers.dev` subdomain is behind Cloudflare Access, sign in through the browser when Wrangler asks.
 
-The model is `@cf/deepseek-ai/deepseek-v4-pro-0813` on Workers AI (`MODEL` in `src/shared.ts`).
+The model is `@cf/moonshotai/kimi-k2.7-code` on Workers AI (`MODEL` in `src/shared.ts`).
 
 ## Try it
 
