@@ -55,7 +55,10 @@ The example uses the remote Workers AI binding, which may incur Workers AI
 usage. It needs no API key. If your Wrangler login can see more than one
 account, set `CLOUDFLARE_ACCOUNT_ID` when starting.
 
-Each browser gets its own Durable Object, kept across reloads. OpenCode adds
+Each browser gets its own Durable Object, named by a random id kept in
+`localStorage`. That id is the only thing standing between one browser's
+chats and another's: anyone who has it can read and use them. A real app
+routes to an object the user is authorized for. OpenCode adds
 about 3.7 MB (gzip) to the Worker, so deploying needs the Workers Paid plan.
 
 ## What to try

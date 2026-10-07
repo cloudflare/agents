@@ -23,9 +23,24 @@ export class OpenCodeAgent extends DurableObject<Env> {
         // OpenCode refreshes its model catalog from models.dev; this app
         // only uses the Workers AI models it names.
         models: { fetch: false },
+        // OpenCode is silent unless given a log writer.
+        log: {
+          level: "warn",
+          emit: (entry) =>
+            console.warn(
+              `opencode ${entry.level}: ${entry.message}`,
+              entry.attributes,
+              entry.cause
+            )
+        },
         plugins: [this.ai.plugin, playgroundPlugin(this.ctx.storage.kv)]
       }),
-    defaults: { model: this.ai(MODEL_ID), agent: "build" }
+    // Low effort: with more, the model sometimes writes its whole answer
+    // into its reasoning.
+    defaults: {
+      model: this.ai(MODEL_ID, { reasoningEffort: "low" }),
+      agent: "build"
+    }
   });
 
   // App glue, not the harness: how this app puts sessions on a socket.

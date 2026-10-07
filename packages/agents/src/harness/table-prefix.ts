@@ -234,6 +234,19 @@ class TablePrefixRewriter {
         out[index] = this.#prefixed(token);
       }
     }
+    // `PRAGMA table_info('name')`: the statement form with a string argument.
+    if (firstWord === "PRAGMA") {
+      for (let i = 1; i < significant.length; i++) {
+        const { token, index } = significant[i];
+        if (token.kind !== "string" || significant[i - 1]?.token.text !== "(") {
+          continue;
+        }
+        const inner = token.text.slice(1, -1);
+        if (names.has(inner.toLowerCase())) {
+          out[index] = `'${this.#prefix}${inner}'`;
+        }
+      }
+    }
     return out.join("");
   }
 

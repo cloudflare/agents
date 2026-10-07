@@ -154,10 +154,14 @@ export function createAI(settings: AISettings): AI {
     modelId: WorkersAIModelId,
     options?: OpenCodeModelOptions
   ): OpenCodeModel => {
-    const known = models.has(modelId);
+    const changed =
+      !models.has(modelId) ||
+      JSON.stringify(models.get(modelId)?.limit) !==
+        JSON.stringify(options?.limit);
     models.set(modelId, options);
-    // A model named after OpenCode started: rebuild the provider's list.
-    if (!known) {
+    // A model named, or its limit changed, after OpenCode started: rebuild
+    // the provider's model list.
+    if (changed) {
       for (const reload of reloads) {
         reload().catch((error: unknown) => {
           console.warn("agents/models/opencode: provider reload failed", error);

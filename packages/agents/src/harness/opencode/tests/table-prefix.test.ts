@@ -87,6 +87,22 @@ describe("prefixTables", () => {
     expect(rows).toEqual([{ id: "e1", type: "event" }]);
   });
 
+  it("inspects the engine's table in PRAGMA calls, not the host's of the same name", async () => {
+    const stub = fresh();
+    await stub.raw("CREATE TABLE session (host_column TEXT)");
+    for (const pragma of [
+      "PRAGMA table_info(session)",
+      "PRAGMA table_info('session')",
+      "SELECT name FROM pragma_table_info('session')"
+    ]) {
+      const rows = await stub.prefixed([
+        "CREATE TABLE IF NOT EXISTS session (engine_column TEXT)",
+        pragma
+      ]);
+      expect(rows.map((row) => row.name)).toEqual(["engine_column"]);
+    }
+  });
+
   it("renames and drops through the prefix", async () => {
     const stub = fresh();
     await stub.prefixed([

@@ -4,13 +4,15 @@ import {
   Empty,
   InputArea,
   PoweredByCloudflare,
-  Surface
+  Surface,
+  Text
 } from "@cloudflare/kumo";
 import {
   BrainIcon,
   CheckCircleIcon,
   GearIcon,
   GlobeIcon,
+  InfoIcon,
   ListIcon,
   MoonIcon,
   NotePencilIcon,
@@ -27,7 +29,11 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Streamdown } from "streamdown";
-import { useOpenCodeSession, type LiveText } from "./use-opencode-session";
+import {
+  partTexts,
+  useOpenCodeSession,
+  type LiveText
+} from "./use-opencode-session";
 import "./styles.css";
 
 const OBJECT_KEY = "opencode-harness-object";
@@ -168,9 +174,12 @@ function Markdown({ text }: { text: string }) {
   );
 }
 
-function Reasoning({ text }: { text: string }) {
+function Reasoning({ text, open = false }: { text: string; open?: boolean }) {
   return (
-    <details className="rounded-xl border border-kumo-line px-3 py-2">
+    <details
+      className="rounded-xl border border-kumo-line px-3 py-2"
+      open={open}
+    >
       <summary className="cursor-pointer list-none text-xs font-semibold text-kumo-subtle">
         Thinking
       </summary>
@@ -197,31 +206,50 @@ function AssistantMessage({
   live: LiveText | undefined;
 }) {
   const streaming = message.time.completed === undefined;
-  const hasText = message.content.some(
-    (part) => part.type === "text" && part.text !== ""
-  );
+  // A finished answer with nothing but reasoning: show it, or the turn
+  // looks empty.
+  const onlyReasoning =
+    !streaming &&
+    !message.content.some(
+      (part) => part.type === "tool" || (part.type === "text" && part.text)
+    );
+  const texts = partTexts(live, message, "text");
+  const reasonings = partTexts(live, message, "reasoning");
+  const ordinals = { text: 0, reasoning: 0 };
   return (
     <div className="flex items-start gap-3">
       <Avatar />
       <div className="min-w-0 flex-1 space-y-3">
-        {live?.reasoning &&
-        !message.content.some((part) => part.type === "reasoning") ? (
-          <Reasoning text={live.reasoning} />
-        ) : null}
         {message.content.map((part, index) => {
           const key = `${message.id}-${index}`;
           switch (part.type) {
-            case "text":
-              return part.text ? <Markdown key={key} text={part.text} /> : null;
-            case "reasoning":
-              return part.text ? (
-                <Reasoning key={key} text={part.text} />
+            case "text": {
+              const text = texts[ordinals.text++] ?? "";
+              return text ? <Markdown key={key} text={text} /> : null;
+            }
+            case "reasoning": {
+              const text = reasonings[ordinals.reasoning++] ?? "";
+              return text ? (
+                <Reasoning key={key} text={text} open={onlyReasoning} />
               ) : null;
+            }
             case "tool":
               return <ToolCard key={key} part={part} />;
           }
         })}
-        {live?.text && !hasText ? <Markdown text={live.text} /> : null}
+        {/* Parts still streaming that the snapshot does not have yet. */}
+        {reasonings
+          .slice(ordinals.reasoning)
+          .map((text, index) =>
+            text ? (
+              <Reasoning key={`live-reasoning-${index}`} text={text} />
+            ) : null
+          )}
+        {texts
+          .slice(ordinals.text)
+          .map((text, index) =>
+            text ? <Markdown key={`live-text-${index}`} text={text} /> : null
+          )}
         {streaming ? <span className="streaming-cursor" /> : null}
         {message.error ? (
           <div
@@ -301,7 +329,8 @@ function App() {
     error,
     submit: submitPrompt,
     abort,
-    create
+    create,
+    fail
   } = useOpenCodeSession(object, session, () => {
     // A session this object does not have, such as one from an old
     // deployment: fall back to the root session.
@@ -366,7 +395,7 @@ function App() {
               aria-label="New session"
               disabled={!connected}
               onClick={() => {
-                void create().then(choose);
+                create().then(choose, fail);
               }}
               icon={<PlusIcon size={16} />}
             />
@@ -440,6 +469,31 @@ function App() {
 
         <main className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto max-w-3xl space-y-5 px-5 py-6">
+            <Surface className="rounded-xl p-4 ring ring-kumo-line">
+              <div className="flex gap-3">
+                <InfoIcon
+                  size={20}
+                  weight="bold"
+                  className="mt-0.5 shrink-0 text-kumo-accent"
+                />
+                <div>
+                  <Text size="sm" bold>
+                    OpenCode in a Durable Object
+                  </Text>
+                  <span className="mt-1 block">
+                    <Text size="xs" variant="secondary">
+                      OpenCode v2 runs inside this Durable Object with
+                      OpenCodeHarness, on Workers AI through the AI binding.
+                      Sessions keep running when you close the tab, and a run
+                      cut off by an eviction resumes on its own. Queue a
+                      follow-up or steer while a run is going, and open more
+                      sessions from the sidebar.
+                    </Text>
+                  </span>
+                </div>
+              </div>
+            </Surface>
+
             {empty ? (
               <div className="py-10 sm:py-16">
                 <Empty
@@ -472,8 +526,12 @@ function App() {
               <div key={id} className="flex items-start gap-3">
                 <Avatar />
                 <div className="min-w-0 flex-1 space-y-3">
-                  {text.reasoning ? <Reasoning text={text.reasoning} /> : null}
-                  {text.text ? <Markdown text={text.text} /> : null}
+                  {partTexts(text, undefined, "reasoning").map((part, index) =>
+                    part ? <Reasoning key={`r-${index}`} text={part} /> : null
+                  )}
+                  {partTexts(text, undefined, "text").map((part, index) =>
+                    part ? <Markdown key={`t-${index}`} text={part} /> : null
+                  )}
                   <span className="streaming-cursor" />
                 </div>
               </div>

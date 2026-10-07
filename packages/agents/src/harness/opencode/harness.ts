@@ -656,7 +656,9 @@ export class OpenCodeHarness extends LifecycleCapability {
     const open = await unsettled(opencode, session);
     const running = (await opencode.sessions.active())[session] !== undefined;
     if (!running) {
-      const first = inbox[0];
+      // A move is applied by OpenCode between turns and cannot start one,
+      // so only an input, synthetic message or compaction rings.
+      const first = inbox.find((item) => item.type !== "move");
       if (first !== undefined) {
         // Admitted but not running: the object died between OpenCode's
         // admission and the turn's start. Ring OpenCode's doorbell again.
@@ -740,7 +742,7 @@ export class OpenCodeHarness extends LifecycleCapability {
         });
         return;
       case "move":
-        // A move is applied by OpenCode between turns; nothing to re-ring.
+        // Not rung: see #wakeStep.
         return;
     }
   }

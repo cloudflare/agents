@@ -9,11 +9,55 @@ import type { ClientMessage, ServerMessage } from "./protocol";
 
 export type ConnectionStatus = "connecting" | "open" | "closed";
 
-/** Text streamed into an assistant message that no snapshot has yet. */
+/**
+ * Text streamed into an assistant message, by OpenCode's ordinal. Text and
+ * reasoning parts are numbered separately. OpenCode saves a part to the
+ * transcript when it starts, empty, and fills it in when it ends, so until
+ * the message completes the live text for an ordinal can be ahead of the
+ * saved one.
+ */
 export type LiveText = {
-  readonly text: string;
-  readonly reasoning: string;
+  readonly text: Readonly<Record<number, string>>;
+  readonly reasoning: Readonly<Record<number, string>>;
 };
+
+const NO_LIVE_TEXT: LiveText = { text: {}, reasoning: {} };
+
+type Kind = "text" | "reasoning";
+
+/** The saved text of each part of a kind, in ordinal order. */
+function savedTexts(
+  message: OpenCodeMessage | undefined,
+  kind: Kind
+): string[] {
+  if (message?.type !== "assistant") return [];
+  return message.content.flatMap((part) =>
+    part.type === kind ? [part.text] : []
+  );
+}
+
+/**
+ * The text to show for each part of a kind, in ordinal order: the saved
+ * text, or the live text where it has got further, plus live parts the
+ * snapshot does not have yet.
+ */
+export function partTexts(
+  live: LiveText | undefined,
+  message: OpenCodeMessage | undefined,
+  kind: Kind
+): string[] {
+  const saved = savedTexts(message, kind);
+  const streamed = live?.[kind] ?? {};
+  const count = Math.max(
+    saved.length,
+    ...Object.keys(streamed).map((ordinal) => Number(ordinal) + 1)
+  );
+  return Array.from({ length: count }, (_, ordinal) => {
+    const fromSnapshot = saved[ordinal] ?? "";
+    const fromLive = streamed[ordinal] ?? "";
+    return fromLive.length > fromSnapshot.length ? fromLive : fromSnapshot;
+  });
+}
 
 type State = {
   readonly status: ConnectionStatus;
@@ -36,14 +80,6 @@ const INITIAL_STATE: State = {
   error: undefined
 };
 
-function textLength(message: OpenCodeMessage | undefined): number {
-  if (message?.type !== "assistant") return 0;
-  return message.content.reduce(
-    (total, part) => total + (part.type === "text" ? part.text.length : 0),
-    0
-  );
-}
-
 /** Drop live text a snapshot has caught up with. */
 function prune(
   live: State["live"],
@@ -52,11 +88,19 @@ function prune(
   const next: Record<string, LiveText> = {};
   for (const [id, text] of Object.entries(live)) {
     const message = messages.find((candidate) => candidate.id === id);
-    const done =
-      message?.type === "assistant" &&
-      (message.time.completed !== undefined ||
-        textLength(message) >= text.text.length);
-    if (!done) next[id] = text;
+    if (message?.type === "assistant" && message.time.completed !== undefined) {
+      continue;
+    }
+    const keep = (kind: Kind) => {
+      const saved = savedTexts(message, kind);
+      return Object.fromEntries(
+        Object.entries(text[kind]).filter(
+          ([ordinal, value]) =>
+            value.length > (saved[Number(ordinal)] ?? "").length
+        )
+      );
+    };
+    next[id] = { text: keep("text"), reasoning: keep("reasoning") };
   }
   return next;
 }
@@ -112,19 +156,23 @@ export function useOpenCodeSession(
           ) {
             return;
           }
-          const id = opencode.data.assistantMessageID;
-          const delta = opencode.data.delta;
+          const { assistantMessageID: id, ordinal, delta } = opencode.data;
+          const kind =
+            opencode.type === "session.text.delta" ? "text" : "reasoning";
           setState((current) => {
-            const previous = current.live[id] ?? { text: "", reasoning: "" };
+            const previous = current.live[id] ?? NO_LIVE_TEXT;
             return {
               ...current,
               busy: true,
               live: {
                 ...current.live,
-                [id]:
-                  opencode.type === "session.text.delta"
-                    ? { ...previous, text: previous.text + delta }
-                    : { ...previous, reasoning: previous.reasoning + delta }
+                [id]: {
+                  ...previous,
+                  [kind]: {
+                    ...previous[kind],
+                    [ordinal]: (previous[kind][ordinal] ?? "") + delta
+                  }
+                }
               }
             };
           });
@@ -170,11 +218,25 @@ export function useOpenCodeSession(
     [send]
   );
 
-  /** Create a session; resolves with its id once the server answers. */
+  /**
+   * Create a session; resolves with its id once the server answers, and
+   * rejects if the socket closes first or no answer comes in 30 seconds.
+   */
   const create = useCallback(
     () =>
       new Promise<string>((resolve, reject) => {
         const id = crypto.randomUUID();
+        const done = () => {
+          clearTimeout(timer);
+          agent.removeEventListener("message", onMessage);
+          agent.removeEventListener("close", onClose);
+        };
+        const onClose = () => {
+          done();
+          reject(
+            new Error("The connection closed before the session was created")
+          );
+        };
         const onMessage = (event: MessageEvent) => {
           let message: ServerMessage;
           try {
@@ -183,17 +245,30 @@ export function useOpenCodeSession(
             return;
           }
           if (!("id" in message) || message.id !== id) return;
-          agent.removeEventListener("message", onMessage);
+          done();
           if (message.type === "error") reject(new Error(message.message));
           else if (message.type === "result") {
             resolve((message.result as { session: string }).session);
           }
         };
+        const timer = setTimeout(() => {
+          done();
+          reject(new Error("Creating the session timed out"));
+        }, 30_000);
         agent.addEventListener("message", onMessage);
+        agent.addEventListener("close", onClose);
         send({ type: "create", id });
       }),
     [agent, send]
   );
 
-  return { ...state, submit, abort, create };
+  /** Show an error from an action the server never answered. */
+  const fail = useCallback((error: unknown) => {
+    setState((current) => ({
+      ...current,
+      error: error instanceof Error ? error.message : String(error)
+    }));
+  }, []);
+
+  return { ...state, submit, abort, create, fail };
 }
