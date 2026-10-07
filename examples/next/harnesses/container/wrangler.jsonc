@@ -1,0 +1,38 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "next-container-harness",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "ClaudeCodeAgent", "class_name": "ClaudeCodeAgent" },
+      { "name": "CodexAgent", "class_name": "CodexAgent" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ClaudeCodeAgent", "CodexAgent"]
+    }
+  ],
+  // One container per agent object, started and stopped by the object
+  // through `ctx.container`. No image: the harness builds the container
+  // from cloudflare/debian-trixie at runtime.
+  "containers": [
+    { "class_name": "ClaudeCodeAgent", "scheduling_policy": "durable_object" },
+    { "class_name": "CodexAgent", "scheduling_policy": "durable_object" }
+  ],
+  "vars": {
+    // Your AI Gateway: https://gateway.ai.cloudflare.com/v1/<account>/<gateway>
+    "AI_GATEWAY_URL": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>"
+  },
+  // An AI Gateway token, set with `wrangler secret put AI_GATEWAY_TOKEN`
+  // (or in .dev.vars). With Unified Billing it is the only credential.
+  "secrets": {
+    "required": ["AI_GATEWAY_TOKEN"]
+  },
+  "observability": {
+    "enabled": true
+  }
+}

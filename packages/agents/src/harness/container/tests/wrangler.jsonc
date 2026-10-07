@@ -1,0 +1,33 @@
+{
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CONTAINER_HARNESS_TEST",
+        "class_name": "ContainerHarnessTestObject"
+      },
+      {
+        "name": "CONTAINER_RETRY_TEST",
+        "class_name": "ContainerRetryTestObject"
+      },
+      {
+        "name": "CONTAINER_MANAGED_TEST",
+        "class_name": "ContainerManagedTestObject"
+      },
+      { "name": "HARNESS_STORE_TEST", "class_name": "HarnessStoreTestObject" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "ContainerHarnessTestObject",
+        "ContainerRetryTestObject",
+        "ContainerManagedTestObject",
+        "HarnessStoreTestObject"
+      ]
+    }
+  ]
+}
