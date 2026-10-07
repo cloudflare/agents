@@ -2,7 +2,7 @@
 
 A chat agent that answers questions from the live web. It searches with the `web_search` tool from `agents/websearch/ai-sdk`, which wraps [Cloudflare's Web Search API](https://developers.cloudflare.com/web-search/), and cites what it finds.
 
-Every search also shows up in a Research panel next to the chat, so you can see three views of the same call:
+Every search also shows up in the panel next to the chat, so you can see three views of the same call:
 
 - **Results**: the ranked pages the search returned.
 - **Model saw**: the trimmed text the model actually read (the tool's `toModelOutput`).
@@ -13,16 +13,18 @@ Every search also shows up in a Research panel next to the chat, so you can see 
 **Server (`src/server.ts`):**
 
 - `webSearchTool()` on the Worker's `AI` binding, with the host deciding the provider, the result cap, and how much of each result the model reads
+- Provider and result cap kept in the agent's state, changed from the UI with `setState` and checked in `validateStateChange`
 - `convertToModelMessages(messages, { tools })`, so earlier searches are replayed to the model as the trimmed text it first saw, not as the full JSON
-- A custom `onError` that shows why a search failed (for example, missing AI Gateway credits) instead of the AI SDK's generic "An error occurred."
+- A custom `onError` that shows why a search or model call failed (for example, missing AI Gateway credits) instead of the AI SDK's generic "An error occurred."
 - A system prompt with today's date and inline numbered citations
 
 **Client (`src/client.tsx`):**
 
 - Typed `tool-web_search` parts via `useAgentChat<unknown, ResearchMessage>()`
-- Search chips in the transcript that open the matching card in the Research panel
+- Search settings (provider, max results) in the panel, synced through `useAgent` state
 - `renderWebSearchResults()` from `agents/websearch` to show the exact text the model saw, using the same `maxDescriptionChars` as the server (`src/shared.ts`)
-- Kumo design system components
+- A feed that follows the stream only while you're at the bottom, so you can scroll up and read mid-reply
+- Reusable chat pieces (feed, composer, markdown, tool rows) in `src/chat-ui.tsx`, built on Kumo
 
 ## Running
 
@@ -38,7 +40,7 @@ You need:
 
 The `AI` binding has no local implementation, so `npm start` runs it remotely against the account you're logged in to with `wrangler login`. If you belong to more than one account, set `CLOUDFLARE_ACCOUNT_ID`. If your `workers.dev` subdomain is behind Cloudflare Access, sign in through the browser when Wrangler asks.
 
-The model is `@cf/moonshotai/kimi-k2.7-code` on Workers AI.
+The model is `@cf/deepseek-ai/deepseek-v4-pro-0813` on Workers AI (`MODEL` in `src/shared.ts`).
 
 ## Try it
 
@@ -48,4 +50,4 @@ The model is `@cf/moonshotai/kimi-k2.7-code` on Workers AI.
 
 ## Choosing a provider
 
-The tool uses `ceramic` here. `exa` and `linkup` are also available. They cost more per search but often return better results for specific factual questions. Change `provider` in `src/server.ts` to compare them.
+The default is `ceramic`. `exa` and `linkup` cost more per search but often return better results for specific factual questions. Switch between them under **Search settings** to compare; the change applies from your next message.

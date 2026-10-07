@@ -3,30 +3,46 @@ import { routeAgentRequest } from "agents";
 import { WebSearchError, webSearchTool } from "agents/websearch/ai-sdk";
 import { convertToModelMessages, isStepCount, streamText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
-import { MAX_DESCRIPTION_CHARS } from "./shared";
+import {
+  DEFAULT_SETTINGS,
+  isResearchSettings,
+  MAX_DESCRIPTION_CHARS,
+  MODEL,
+  type ResearchSettings
+} from "./shared";
 
-export class ResearchAgent extends AIChatAgent {
+export class ResearchAgent extends AIChatAgent<Env, ResearchSettings> {
   maxPersistedMessages = 200;
+  initialState = DEFAULT_SETTINGS;
+
+  // The client changes the settings with `setState`. Reject anything the
+  // tool would refuse, so a bad value never reaches a search.
+  validateStateChange(next: ResearchSettings) {
+    if (!isResearchSettings(next)) {
+      throw new Error("Invalid research settings");
+    }
+  }
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const workersai = createWorkersAI({ binding: this.env.AI });
+    const { provider, limit } = this.state;
 
     const tools = {
       // The model picks the query and, optionally, how many results it
-      // wants. Everything else is fixed here: the provider ("ceramic",
-      // "exa", or "linkup"), the AI Gateway that bills the search, the cap
-      // on results, and how much of each result the model reads.
+      // wants. Everything else is the host's call: the provider and the
+      // cap on results (both set from the UI here), the AI Gateway that
+      // bills the search, and how much of each result the model reads.
       web_search: webSearchTool({
         binding: this.env.AI,
-        provider: "ceramic",
-        limit: 5,
+        provider,
+        limit,
         maxDescriptionChars: MAX_DESCRIPTION_CHARS
       })
     };
 
     const result = streamText({
       abortSignal: options?.abortSignal,
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai(MODEL, {
         sessionAffinity: this.sessionAffinity
       }),
       instructions: researchInstructions(new Date()),
@@ -54,15 +70,20 @@ function researchInstructions(today: Date): string {
 }
 
 /**
- * The text a failed tool call shows in the UI. The AI SDK shows "An error
- * occurred." unless told otherwise. A failed search throws a
+ * The error text the UI shows. The AI SDK shows "An error occurred." unless
+ * told otherwise. A failed search throws a
  * `WebSearchError` whose `message` is written for the model and whose
  * `cause` carries the API's explanation, which is what a developer needs.
  */
 function describeError(error: unknown): string {
-  if (!(error instanceof WebSearchError)) return "Something went wrong.";
-  const detail = error.cause instanceof WebSearchError ? error.cause : error;
-  return `${detail.message} (${detail.code})`;
+  if (error instanceof WebSearchError) {
+    const detail = error.cause instanceof WebSearchError ? error.cause : error;
+    return `${detail.message} (${detail.code})`;
+  }
+  // Anything else is usually the model call failing, e.g. a Workers AI
+  // "8005: Internal server error". Fine to show in a demo; a production app
+  // would log it and show something vaguer.
+  return error instanceof Error ? error.message : "Something went wrong.";
 }
 
 export default {
