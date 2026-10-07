@@ -2,6 +2,13 @@
 
 ## 0.27.0
 
+This release rebuilds Channels as an experimental API, adds four new experimental harnesses, and adds a `web_search` tool.
+
+- **Breaking:** `agents/channels` has been removed. Channels now lives at `agents/experimental/channels` and is built around conversations and turns. It includes `ChannelGateway`, the Web Channel and its client, an AI SDK chat transport, and a new `npx agents tui` terminal client.
+- **New experimental harnesses:** `AiSdkHarness`, `ThinkHarness`, `ContainerHarness` (which runs Claude Code or Codex in a Container) and `OpenCodeHarness`, all with the same shape as `PiHarness`.
+- **New `agents/websearch`:** a `web_search` tool over Cloudflare's Web Search API for pi, the AI SDK and TanStack AI.
+- **Fixes:** Streams, Tasks, `useAgentChat` reconnects, `WebChannelClient`, MCP credential cleanup on `removeServer()`, and x402 with MCP SDK v2.
+
 ### Minor Changes
 
 - [#2434](https://github.com/cloudflare/agents/pull/2434) [`0ebeae5`](https://github.com/cloudflare/agents/commit/0ebeae52a7897cd04ae8921663a92dfd52f04c49) Thanks [@cjol](https://github.com/cjol)! - Add `AiSdkHarness` from the new `agents/harness/ai-sdk` entry point, which runs each message with `streamText` and keeps sessions and transcripts in the Durable Object, so `Channels.forHarness` can serve an AI SDK model. The same entry point exports the AI SDK message conversions it is built on and `createSendMessageTool`, an AI SDK tool that sends a message to a surface through the gateway.
