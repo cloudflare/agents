@@ -1,5 +1,6 @@
 import type { JSONValue, ToolSet } from "ai";
 import { tool } from "ai";
+import { isPrivateOrLocalHost } from "agents/webfetch";
 import { z } from "zod";
 
 // ── Public types ──────────────────────────────────────────────────
@@ -372,7 +373,7 @@ async function runFetchInner(args: RunFetchArgs): Promise<FetchResult> {
   }
   const url = normalized.url;
 
-  if (target.kind === "public" && isBlockedHost(url.hostname)) {
+  if (target.kind === "public" && isPrivateOrLocalHost(url.hostname)) {
     return {
       ok: false,
       code: "disallowed_url",
@@ -586,7 +587,7 @@ function resolveRedirect(
     return { error: "Cross-origin redirects are not allowed for bindings." };
   }
 
-  if (target.kind === "public" && isBlockedHost(next.hostname)) {
+  if (target.kind === "public" && isPrivateOrLocalHost(next.hostname)) {
     return {
       error: `Redirect to a private or local address: ${next.hostname}`
     };
@@ -904,64 +905,6 @@ function globToRegExp(glob: string): RegExp {
     }
   }
   return new RegExp(`^${re}$`);
-}
-
-function isBlockedHost(hostname: string): boolean {
-  const h = hostname.toLowerCase().replace(/\.$/, "");
-  if (h.length === 0) return true;
-  if (h === "localhost" || h.endsWith(".localhost")) return true;
-  if (h.endsWith(".internal")) return true;
-
-  if (h.startsWith("[") && h.endsWith("]")) {
-    return isBlockedIpv6(h.slice(1, -1));
-  }
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) {
-    return isBlockedIpv4(h);
-  }
-  // Defensive: pure-integer / hex hosts (WHATWG normally normalizes these to
-  // dotted IPv4, but reject them outright in case a runtime does not).
-  if (/^\d+$/.test(h) || /^0x[0-9a-f]+$/.test(h)) return true;
-  return false;
-}
-
-function isBlockedIpv4(ip: string): boolean {
-  const parts = ip.split(".").map((p) => Number.parseInt(p, 10));
-  if (
-    parts.length !== 4 ||
-    parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)
-  ) {
-    return true;
-  }
-  const [a, b] = parts;
-  if (a === 0) return true; // 0.0.0.0/8
-  if (a === 10) return true; // 10.0.0.0/8
-  if (a === 127) return true; // loopback
-  if (a === 169 && b === 254) return true; // link-local
-  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
-  if (a === 192 && b === 168) return true; // 192.168.0.0/16
-  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64.0.0/10
-  return false;
-}
-
-function isBlockedIpv6(ip: string): boolean {
-  const lower = ip.toLowerCase();
-  if (lower === "::1" || lower === "::") return true;
-  if (lower.startsWith("fc") || lower.startsWith("fd")) return true; // fc00::/7
-  if (/^fe[89ab]/.test(lower)) return true; // fe80::/10 link-local
-  // IPv4-mapped, dotted form (::ffff:127.0.0.1).
-  const dotted = lower.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
-  if (dotted) return isBlockedIpv4(dotted[1]);
-  // IPv4-mapped, hex form. The WHATWG URL parser serializes
-  // `::ffff:127.0.0.1` as `::ffff:7f00:1`, so decode the trailing two hextets
-  // back into dotted IPv4 and reuse the v4 rules.
-  const hex = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (hex) {
-    const high = Number.parseInt(hex[1], 16);
-    const low = Number.parseInt(hex[2], 16);
-    const v4 = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
-    return isBlockedIpv4(v4);
-  }
-  return false;
 }
 
 /**
