@@ -88,6 +88,8 @@ The host gets the full API response, without trimming, as `WebSearchToolOutput`:
 
 The API has no pagination. The tool description tells the model to search again with a rephrased query when it wants more or different results.
 
+Results are for discovery. To let the model read the pages it finds, add the [`web_fetch` tool](./fetch-the-web.md) beside `web_search`; the `web_search` description tells the model to fetch result URLs with `web_fetch` when it is available.
+
 ## Failures
 
 A failed search becomes a `WebSearchError` with `status`, `code`, `retryable`, and `requestId` (AI Gateway's id for the request, for the gateway log). Every error has a `code`: the API's own when it sends one, for example `web_search_payment_required`, otherwise one derived from the HTTP status, such as `web_search_rate_limited` or `web_search_unavailable`. On a runtime older than the one above, the binding has no `websearch()` and the search fails with code `web_search_unsupported_runtime`.
