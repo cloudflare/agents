@@ -261,6 +261,29 @@ const stream = chat({
 
 The TanStack AI tool doesn't support screenshots yet. TanStack AI gives the host and the model the same output, so if the model returns a screenshot, the tool replaces it with a note saying it was left out, and the tool's instructions tell the model to read the page with `Runtime.evaluate` instead.
 
+For [pi-durable](./harnesses/pi.md), import `browserTool` from `agents/browser/pi` and install it in an extension. It takes the same options plus an optional `name` (default `"browser"`). Outside an `Agent`, pass `ctx`:
+
+```ts
+import { browserTool } from "agents/browser/pi";
+
+this.registry.install({
+  name: "browser",
+  tools: [
+    browserTool({
+      ctx: this.ctx,
+      browser: this.browser,
+      loader: this.env.LOADER
+    })
+  ]
+});
+```
+
+- A returned screenshot comes back as an image in the tool result, so the model can see the page and a UI can show it from the transcript. pi-ai only sends the image to models that accept images; other models get the text alone.
+- Each pi conversation gets its own active tab: `scope` defaults to the calling conversation, so sessions, forks, and subagents on one object don't drive each other's page. Cookies and logins are shared. Pass `scope` as a string to share one tab, or as a function of the call (`(api) => string`) to choose.
+- A conversation's calls run one at a time, since they share its tab.
+- pi doesn't rerun a browser call cut off by an eviction, because the code may have clicked or submitted something. The model gets an interrupted result and can try again; the browser itself is still there.
+- Stopping a conversation doesn't stop a browser call already running. It finishes or times out (`timeoutMs`, default 60 seconds).
+
 ## Quick Actions (stateless browsing)
 
 `browser_execute` drives a full, stateful CDP session — the right tool for interactive, multi-step automation. But a lot of agent browsing is really one-shot: _read this page as Markdown_, _extract these fields_, _list the links_. For those, [Quick Actions](https://developers.cloudflare.com/browser-run/quick-actions/) are simpler, faster, and cheaper. They need only the `browser` binding — no Durable Object, Worker Loader, or sandbox — so they work from any Worker.

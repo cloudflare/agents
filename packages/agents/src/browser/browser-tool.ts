@@ -1,6 +1,7 @@
 /**
  * The harness-neutral core of `browserTool`, shared by the adapters in
- * `tools/` (`agents/browser/ai-sdk`, `agents/browser/tanstack-ai`).
+ * `tools/` (`agents/browser/ai-sdk`, `agents/browser/tanstack-ai`,
+ * `agents/browser/pi`).
  * Internal — not an entry point.
  */
 import {

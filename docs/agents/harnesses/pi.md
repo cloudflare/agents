@@ -125,6 +125,31 @@ harness: async ({ storage, context }) => {
 
 The existing `@cloudflare/think` skills work out-of-the-box.
 
+### Browser
+
+`browserTool` from `agents/browser/pi` gives the model a persistent browser it drives with the Chrome DevTools Protocol. Put a `Browser` on the object's Lifecycle and install the tool in an extension:
+
+```ts
+import { Browser, browserRun } from "agents/browser";
+import { browserTool } from "agents/browser/pi";
+
+readonly browser = new Browser({ provider: browserRun(this.env.BROWSER) });
+
+harness: async ({ storage, context }) => {
+  this.registry.install({
+    name: "browser",
+    tools: [
+      browserTool({ ctx: this.ctx, browser: this.browser, loader: this.env.LOADER })
+    ]
+  });
+  return Harness.open(storage, { models, registry: this.registry }, context);
+};
+
+readonly lifecycle = Lifecycle.install(this).use(this.browser).use(this.harness);
+```
+
+It needs a `browser` binding, a `LOADER` Worker Loader binding, and `export { CodemodeRuntime } from "@cloudflare/codemode"` from the Worker entry. Screenshots come back as images, and each conversation works in its own tab. Refer to [Persistent browser](../browse-the-web.md#persistent-browser) for how it behaves.
+
 ## Work with sessions
 
 A session is a Pi conversation. Each has its own transcript, inbox, model and run, and they can run at the same time.

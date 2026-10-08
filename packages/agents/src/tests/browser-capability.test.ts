@@ -534,3 +534,138 @@ describe("TanStack AI browserTool over a Browser", () => {
     });
   });
 });
+
+describe("pi browserTool over a Browser", () => {
+  const code = `async () => cdp.send({
+    method: "Runtime.evaluate",
+    params: { expression: "document.title" },
+    sessionId: "active"
+  })`;
+  const screenshotCode = (data: string) => `async () => {
+    await cdp.send({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" });
+    return { type: "browser_screenshot", mediaType: "image/png", data: ${JSON.stringify(data)} };
+  }`;
+
+  // pi hands every call its invocation API and context; the browser tool
+  // reads only the API's conversationId, so stand-ins are enough to call it.
+  type PiTool = ReturnType<TestBrowserAgent["piBrowserTool"]>;
+  const run = (tool: PiTool, source: string, conversationId = 1) =>
+    tool.execute(
+      { code: source },
+      { conversationId } as unknown as Parameters<PiTool["execute"]>[1],
+      {} as Parameters<PiTool["execute"]>[2]
+    );
+  const textOf = (result: Awaited<ReturnType<PiTool["execute"]>>) => {
+    const part = result.content?.[0];
+    return part?.type === "text" ? JSON.parse(part.text) : undefined;
+  };
+
+  it("is named browser, runs one call at a time, and is not replayed", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const tool = instance.piBrowserTool();
+      expect(tool.name).toBe("browser");
+      expect(instance.piBrowserTool("web").name).toBe("web");
+      expect(tool.executionMode).toBe("sequential");
+      expect(tool.replay).toBe("unsafe");
+      expect(tool.description).toContain("`cdp`");
+      expect(tool.description).toContain("attached to the result");
+    });
+  });
+
+  it("drives the same persistent browser and reports a restart", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const tool = instance.piBrowserTool();
+      const first = await run(tool, code);
+      expect(textOf(first)).toMatchObject({
+        status: "completed",
+        result: { result: { value: "evaluated in target-session-1-2" } }
+      });
+      // The durable call log stays out of the model's context.
+      expect(textOf(first)).not.toHaveProperty("calls");
+      expect(first.isError).toBeUndefined();
+      expect(first.details).toEqual({
+        executionId: expect.any(String),
+        status: "completed"
+      });
+
+      instance.killBrowserSession("session-1");
+      const second = await run(tool, code);
+      expect(textOf(second)).toMatchObject({
+        status: "completed",
+        result: { result: { value: "evaluated in target-session-2-2" } },
+        restarted: true,
+        notice: expect.stringMatching(/navigate again/)
+      });
+      expect(second.details).toMatchObject({ restarted: true });
+    });
+  });
+
+  it("gives each conversation its own tab", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(
+      stub,
+      async (instance: TestBrowserAgent, state) => {
+        const tool = instance.piBrowserTool();
+        const value = async (conversationId: number) =>
+          textOf(await run(tool, code, conversationId)).result.result.value;
+
+        expect(await value(1)).toBe("evaluated in target-session-1-2");
+        expect(await value(2)).toBe("evaluated in target-session-1-3");
+        expect(await value(1)).toBe("evaluated in target-session-1-2");
+        expect(
+          await state.storage.get(
+            `browser-session:browser:scope:7:default:conversation:2`
+          )
+        ).toMatchObject({ activeTargetId: "target-session-1-3" });
+      }
+    );
+  });
+
+  it("attaches a screenshot as an image after the result text", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const tool = instance.piBrowserTool();
+      await run(tool, code);
+      instance.killBrowserSession("session-1");
+
+      const result = await run(tool, screenshotCode("aGVsbG8="));
+      expect(result.content).toHaveLength(2);
+      expect(result.content?.[1]).toEqual({
+        type: "image",
+        data: "aGVsbG8=",
+        mimeType: "image/png"
+      });
+      // The text part keeps the browser report and doesn't repeat the base64.
+      expect(textOf(result)).toMatchObject({
+        status: "completed",
+        result: expect.stringMatching(/^Screenshot attached as an image/),
+        restarted: true
+      });
+      expect(result.content?.[0]).not.toMatchObject({
+        text: expect.stringContaining("aGVsbG8=")
+      });
+    });
+  });
+
+  it("marks a failed run as an error result", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const result = await run(
+        instance.piBrowserTool(),
+        `async () => { throw new Error("boom"); }`
+      );
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toMatchObject({
+        status: "error",
+        error: expect.stringContaining("boom")
+      });
+    });
+  });
+});
