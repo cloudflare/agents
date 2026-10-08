@@ -1,0 +1,21 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "web-fetch-lab-example",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  // One binding for the model, web search, and HTML/PDF/Office → Markdown
+  // conversion (`env.AI.toMarkdown`). It has no local implementation, so
+  // `vite dev` runs it against your Cloudflare account.
+  "ai": { "binding": "AI", "remote": true },
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "WebFetchLabAgent", "name": "WebFetchLabAgent" }
+    ]
+  },
+  "migrations": [{ "new_sqlite_classes": ["WebFetchLabAgent"], "tag": "v1" }]
+}
