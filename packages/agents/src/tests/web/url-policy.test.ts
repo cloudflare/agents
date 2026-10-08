@@ -171,6 +171,9 @@ describe("validateUrlPolicy", () => {
     { allowedHosts: ["a*.com"] },
     { allowedHosts: ["*."] },
     { allowedHosts: ["example.com:8080"] },
+    { allowedHosts: ["[::1]:8080"] },
+    { allowedHosts: ["*.[::1]"] },
+    { allowedHosts: ["*.10.0.0.1"] },
     { allowedHosts: ["example.com/path"] },
     { blockedHosts: ["https://example.com"] },
     { blockedHosts: ["1.2.3.256"] }

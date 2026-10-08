@@ -217,10 +217,19 @@ function canonicalHostPattern(pattern: unknown): string | undefined {
   const rest = wildcard ? trimmed.slice(2) : trimmed;
   // No scheme, port, path, userinfo, or inner wildcard.
   if (rest === "" || /[*/?#@\\\s]/.test(rest)) return undefined;
-  if (rest.includes(":") && !rest.startsWith("[")) return undefined;
+  // An IPv6 literal is bracketed and nothing follows the bracket, so
+  // `[::1]:8080` is as invalid as `example.com:8080`.
+  if (rest.includes(":") && !(rest.startsWith("[") && rest.endsWith("]"))) {
+    return undefined;
+  }
   try {
     const host = new URL(`http://${rest}/`).hostname.replace(/\.$/, "");
-    return host === "" ? undefined : wildcard ? `*.${host}` : host;
+    if (host === "") return undefined;
+    if (!wildcard) return host;
+    // Nothing is a subdomain of an IP literal.
+    return host.startsWith("[") || /^[\d.]+$/.test(host)
+      ? undefined
+      : `*.${host}`;
   } catch {
     return undefined;
   }
