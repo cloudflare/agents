@@ -12,8 +12,6 @@ export type SchedulerEventType =
 
 /**
  * Optional callbacks and policy for a Scheduler capability.
- *
- * @experimental The API surface may change before stabilizing.
  */
 export interface SchedulerOptions<
   Handlers extends SchedulerHandlers = SchedulerCallbacks

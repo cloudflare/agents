@@ -12,8 +12,6 @@ export type StateChangeSource = Connection | "server";
  * Options for a {@link State} capability. Validation and the post-change hook
  * stay on the host, which passes them in; the capability owns storage and
  * change ordering.
- *
- * @experimental The API surface may change before stabilizing.
  */
 export interface StateOptions<T = unknown> {
   /** Seeded on first access when nothing is stored. `undefined` seeds nothing. */
@@ -66,8 +64,6 @@ const DEFAULT_STATE = {} as unknown;
  * validated persistence. Install the instance with `Lifecycle.use()`. State
  * validation and the post-change notification hook stay on the host, which
  * injects both callbacks. This capability never touches connections.
- *
- * @experimental The API surface may change before stabilizing.
  */
 export class State<T = unknown> extends LifecycleCapability {
   #state = DEFAULT_STATE as T;

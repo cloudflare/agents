@@ -17,10 +17,6 @@ Under the hood, scheduling uses [Durable Object alarms](https://developers.cloud
 
 ## Scheduler Lifecycle primitive
 
-> **Experimental.** The `Scheduler` primitive and the `agents/lifecycle`
-> surface it builds on may change between releases. Agent's established
-> scheduling methods (`this.schedule()` and friends) are stable.
-
 `Scheduler` is a reusable Lifecycle capability. A plain Lifecycle Object can
 install it without extending `Agent`:
 
@@ -836,8 +832,8 @@ When using this schema with OpenAI models via the AI SDK, you must pass `provide
 
 ## API Reference
 
-Two surfaces share these semantics: the experimental `Scheduler` primitive
-(`agents/schedules`, methods on the scheduler instance) and the stable `Agent`
+Two surfaces share these semantics: the `Scheduler` capability
+(`agents/schedules`, methods on the scheduler instance) and the `Agent`
 methods (on the Agent class, delegating to `this.scheduler`).
 
 ### Scheduler primitive

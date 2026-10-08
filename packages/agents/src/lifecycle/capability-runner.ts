@@ -101,8 +101,6 @@ export type MemoryLimitContext = {
  * - `onRoute` is addressed to one capability by its id; `onJob` is
  *   addressed by the due job's owning capability, with Lifecycle owning
  *   the queue and the one physical alarm.
- *
- * @experimental The API surface may change before stabilizing.
  */
 export interface DurableObjectCapability<Props extends object = object> {
   /**

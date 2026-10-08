@@ -161,8 +161,6 @@ export type LifecycleOptions = {
  * Construct this as an instance field on a class that directly extends
  * `DurableObject`, then call {@link Lifecycle.installHandlers}
  * from that class's constructor.
- *
- * @experimental The API surface may change before stabilizing.
  */
 /** The dispatch hooks a catch-all can monopolize; uniqueness is per hook. */
 const CATCH_ALL_HOOKS = ["onRequest", "onWebSocketUpgrade"] as const;

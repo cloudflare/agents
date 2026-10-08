@@ -69,8 +69,6 @@ export type LifecycleSockets = {
 
 /**
  * Standard services granted to every installed Lifecycle capability.
- *
- * @experimental The API surface may change before stabilizing.
  */
 export type LifecycleServices = {
   /** The host's Durable Object name; see `Lifecycle.name`. */
@@ -130,8 +128,6 @@ const installedServices = new WeakMap<object, LifecycleServices>();
 
 /**
  * Base class for capabilities that consume standard Lifecycle services.
- *
- * @experimental The API surface may change before stabilizing.
  */
 export abstract class LifecycleCapability<Props extends object = object> {
   readonly capabilityId: string;

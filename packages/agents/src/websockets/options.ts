@@ -20,8 +20,6 @@ export type WebSocketMessage = WSMessage;
  * Connection handlers for the WebSockets capability. Handlers run inside
  * the host invocation boundary with the live connection in ambient
  * context (`getCurrentAgent().connection`).
- *
- * @experimental The API surface may change before stabilizing.
  */
 export type WebSocketHandlers = {
   /** Handle a newly accepted hibernating WebSocket connection. */
@@ -51,8 +49,6 @@ export type WebSocketHandlers = {
 
 /**
  * Configuration for the WebSockets capability.
- *
- * @experimental The API surface may change before stabilizing.
  */
 export interface WebSocketsOptions {
   /**
