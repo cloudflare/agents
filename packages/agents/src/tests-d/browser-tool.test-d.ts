@@ -5,9 +5,9 @@ import {
   browserTool,
   type BrowserTool,
   type BrowserToolOutput
-} from "../browser/ai-sdk";
+} from "../browser/tools/ai-sdk";
 import { Browser, browserRun } from "../browser";
-import { browserTool as tanStackBrowserTool } from "../browser/tanstack-ai";
+import { browserTool as tanStackBrowserTool } from "../browser/tools/tanstack-ai";
 
 declare const env: { BROWSER: Fetcher; LOADER: WorkerLoader };
 

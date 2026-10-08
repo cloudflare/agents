@@ -1,7 +1,6 @@
 /**
  * Helpers shared by the browser tools: `createBrowserTools` in `ai.ts`, and
- * `browserTool` in `ai-sdk.ts` and `tanstack-ai.ts`. Internal — not an entry
- * point.
+ * the `browserTool` adapters in `tools/`. Internal — not an entry point.
  */
 import type { JSONValue } from "ai";
 import { truncateResult } from "@cloudflare/codemode";
