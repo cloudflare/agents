@@ -127,18 +127,40 @@ export function isTextualKind(kind: WebFetchContentKind): boolean {
 
 /**
  * A media type for a response that didn't send one, from its first bytes:
- * HTML, PDF, binary when it has NUL bytes, otherwise plain text.
+ * HTML, PDF, binary when it has NUL or many control bytes, otherwise text.
  */
 export function sniffContentType(bytes: Uint8Array): string {
   if (bytes.byteLength === 0) return "text/plain";
   const head = bytes.subarray(0, 1024);
   if (startsWithAscii(head, "%PDF-")) return "application/pdf";
-  if (head.includes(0)) return "application/octet-stream";
+  if (head.includes(0) || looksBinary(head)) return "application/octet-stream";
   const text = new TextDecoder().decode(head).trimStart().toLowerCase();
   if (text.startsWith("<!doctype html") || text.startsWith("<html")) {
     return "text/html";
   }
   return "text/plain";
+}
+
+/**
+ * Binary that happens to have no NUL in its first kilobyte still has
+ * control bytes text doesn't (`file` and git use the same test). Tab,
+ * line and form feeds, carriage return, and escape are text.
+ */
+function looksBinary(head: Uint8Array): boolean {
+  let control = 0;
+  for (const byte of head) {
+    if (
+      byte < 0x20 &&
+      byte !== 9 &&
+      byte !== 10 &&
+      byte !== 12 &&
+      byte !== 13 &&
+      byte !== 27
+    ) {
+      control += 1;
+    }
+  }
+  return control > head.byteLength * 0.05;
 }
 
 /**
@@ -281,20 +303,44 @@ export async function convertBody(
 /**
  * Trim the padding `toMarkdown` adds: table cells padded to the widest
  * column, delimiter rows of hundreds of dashes, trailing spaces, and runs
- * of blank lines. Only table rows have their inner spaces collapsed, so
- * indented code and nested lists are left alone. Saves roughly a tenth of
- * the characters on table-heavy pages, which is a tenth more page per call.
+ * of blank lines. Fenced code is left byte-for-byte as it was, and only
+ * table rows have their inner spaces collapsed, so indented code and
+ * nested lists are untouched. Saves roughly a tenth of the characters on
+ * table-heavy pages, which is a tenth more page per call.
  */
 export function tidyMarkdown(markdown: string): string {
-  const lines = markdown.split("\n").map((line) => {
-    const trimmed = line.trimEnd();
-    if (!trimmed.startsWith("|")) return trimmed;
-    if (/^\|[\s\-:|]+\|?$/.test(trimmed)) {
-      return trimmed.replace(/-{4,}/g, "---").replace(/[ \t]+/g, " ");
+  const out: string[] = [];
+  let fence: string | undefined;
+  let blankRun = 0;
+  for (const line of markdown.split("\n")) {
+    const opener = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence !== undefined) {
+      out.push(line);
+      if (opener?.[0] === fence[0] && opener.length >= fence.length) {
+        fence = undefined;
+      }
+      continue;
     }
-    return trimmed.replace(/[ \t]{2,}/g, " ");
-  });
-  return lines.join("\n").replace(/\n{3,}/g, "\n\n");
+    if (opener) {
+      fence = opener;
+      blankRun = 0;
+      out.push(line);
+      continue;
+    }
+    const tidy = tidyLine(line);
+    blankRun = tidy === "" ? blankRun + 1 : 0;
+    if (blankRun <= 1) out.push(tidy);
+  }
+  return out.join("\n");
+}
+
+function tidyLine(line: string): string {
+  const trimmed = line.trimEnd();
+  if (!trimmed.startsWith("|")) return trimmed;
+  if (/^\|[\s\-:|]+\|?$/.test(trimmed)) {
+    return trimmed.replace(/-{4,}/g, "---").replace(/[ \t]+/g, " ");
+  }
+  return trimmed.replace(/[ \t]{2,}/g, " ");
 }
 
 /** Pretty-print JSON; text that doesn't parse passes through as text. */

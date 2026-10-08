@@ -171,11 +171,10 @@ export function windowWebFetchPage(
       end - (newline + 1) <= pageChars * LINE_BOUNDARY_BACKOFF
     ) {
       end = newline + 1;
-    } else if (
-      isHighSurrogate(content.charCodeAt(end - 1)) &&
-      end - 1 > start
-    ) {
-      end -= 1;
+    } else if (isHighSurrogate(content.charCodeAt(end - 1))) {
+      // Keep the pair together: back off, or widen by one when the window
+      // is a single code unit.
+      end += end - 1 > start ? -1 : 1;
     }
   }
   return {
@@ -262,11 +261,13 @@ const REASON_PHRASES: Record<number, string> = {
 
 /**
  * Keep fetched content from closing the wrapper early: a page can't end
- * the untrusted block by containing its closing tag.
+ * the untrusted block by containing its closing tag, in any case or with
+ * stray whitespace (`</ untrusted_web_content>`), since a model reads
+ * tags more loosely than a parser does.
  */
 function neutralizeTag(text: string): string {
   return text.replace(
-    new RegExp(`<(/?)(${UNTRUSTED_TAG})`, "gi"),
+    new RegExp(`<(\\s*/?\\s*)(${UNTRUSTED_TAG})`, "gi"),
     (_match, slash: string, name: string) => `&lt;${slash}${name}`
   );
 }

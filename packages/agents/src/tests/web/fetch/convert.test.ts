@@ -322,6 +322,15 @@ describe("sniffContentType", () => {
       "application/octet-stream"
     );
     expect(sniffContentType(encode("hello"))).toBe("text/plain");
+    expect(sniffContentType(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]))).toBe(
+      "text/plain"
+    );
+    expect(
+      sniffContentType(new Uint8Array([0x1f, 0x8b, 0x08, 0x08, 0x01, 0x02]))
+    ).toBe("application/octet-stream");
+    expect(sniffContentType(encode("\x1b[31mred\x1b[0m\ttab\r\n"))).toBe(
+      "text/plain"
+    );
     expect(sniffContentType(new Uint8Array(0))).toBe("text/plain");
   });
 });
@@ -372,6 +381,47 @@ describe("tidyMarkdown", () => {
         "",
         "    indented code   stays",
         "- item"
+      ].join("\n")
+    );
+  });
+
+  it("leaves fenced code byte-for-byte alone", () => {
+    const fenced = [
+      "Intro   ",
+      "```text",
+      "first  ",
+      "",
+      "",
+      "",
+      "| a    | b    |",
+      "```",
+      "after   ",
+      "",
+      "",
+      "",
+      "~~~~",
+      "```",
+      "still   inside  ",
+      "~~~~",
+      "end"
+    ].join("\n");
+    expect(tidyMarkdown(fenced)).toBe(
+      [
+        "Intro",
+        "```text",
+        "first  ",
+        "",
+        "",
+        "",
+        "| a    | b    |",
+        "```",
+        "after",
+        "",
+        "~~~~",
+        "```",
+        "still   inside  ",
+        "~~~~",
+        "end"
       ].join("\n")
     );
   });
