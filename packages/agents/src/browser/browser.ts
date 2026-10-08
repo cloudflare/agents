@@ -194,8 +194,8 @@ export interface BrowserConnection {
    * `true` when this scope worked in an earlier browser that has since been
    * replaced, whichever scope's connection replaced it. Its tabs and page
    * state are gone; surface this loudly to the model. `false` on a scope's
-   * first connection: it had nothing to lose. For whether the browser
-   * itself was replaced, whatever the scope, use {@link Browser.resolve}.
+   * first connection, even one that replaced a lost browser: the scope had
+   * nothing to lose. This is per scope, not a browser-wide signal.
    */
   restarted: boolean;
   /**
