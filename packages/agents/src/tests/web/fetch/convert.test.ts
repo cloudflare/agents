@@ -426,6 +426,29 @@ describe("tidyMarkdown", () => {
     );
   });
 
+  it("closes a fence only on a bare closing run", () => {
+    const fenced = [
+      "```js",
+      "```not-a-close",
+      "| a    | b    |",
+      "```  ",
+      "| a    | b    |",
+      "\t```",
+      "x  "
+    ].join("\n");
+    expect(tidyMarkdown(fenced)).toBe(
+      [
+        "```js",
+        "```not-a-close",
+        "| a    | b    |",
+        "```  ",
+        "| a | b |",
+        "\t```",
+        "x"
+      ].join("\n")
+    );
+  });
+
   it("leaves compact markdown alone", () => {
     const compact = "# T\n\nSome *text*.\n\n```js\nconst  x = 1;\n```\n";
     expect(tidyMarkdown(compact)).toBe(compact);

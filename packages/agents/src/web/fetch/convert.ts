@@ -313,16 +313,23 @@ export function tidyMarkdown(markdown: string): string {
   let fence: string | undefined;
   let blankRun = 0;
   for (const line of markdown.split("\n")) {
-    const opener = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    // CommonMark: a fence is 3+ backticks or tildes after 0–3 spaces; the
+    // closer has the same character, at least as many, and nothing after.
+    const run = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
     if (fence !== undefined) {
       out.push(line);
-      if (opener?.[0] === fence[0] && opener.length >= fence.length) {
+      if (
+        run &&
+        run[1][0] === fence[0] &&
+        run[1].length >= fence.length &&
+        run[2].trim() === ""
+      ) {
         fence = undefined;
       }
       continue;
     }
-    if (opener) {
-      fence = opener;
+    if (run && !(run[1][0] === "`" && run[2].includes("`"))) {
+      fence = run[1];
       blankRun = 0;
       out.push(line);
       continue;
