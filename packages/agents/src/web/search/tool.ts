@@ -13,9 +13,9 @@ import {
   type WebSearchToolInput,
   type WebSearchToolOutput
 } from "./contract";
+import { abortable } from "../abortable";
 import {
   WebSearchError,
-  abortable,
   createAIWebSearch,
   type AIWebSearchOptions,
   type WebSearchSource
