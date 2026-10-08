@@ -2,4 +2,4 @@
 "agents": minor
 ---
 
-Add `browserTool` to `agents/browser/pi`, the pi-durable version of the persistent browser tool. Screenshots come back as images the model can see, and each conversation keeps its own active tab. See [Persistent browser](https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser).
+Add `browserTool()` to `agents/browser/pi`. See [Persistent browser](https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser).
