@@ -146,6 +146,39 @@ describe("HarnessStore", () => {
       expect(store.read("from", "engine")).toHaveLength(2);
     }));
 
+  it("keeps a session's creation time when one is given, for imported records", () =>
+    withStore((store) => {
+      store.createSession({ id: "new" });
+      store.createSession({ id: "imported", createdAt: 1000 });
+      expect(store.session("imported")).toMatchObject({
+        createdAt: 1000,
+        updatedAt: 1000
+      });
+      expect(store.sessions().map((s) => s.id)).toEqual(["imported", "new"]);
+    }));
+
+  it("forgets a session's settled operations and keeps its open ones", () =>
+    withStore((store) => {
+      for (const id of ["done", "gone", "running", "queued"]) {
+        store.enqueue({ session: "s", id, input: null });
+      }
+      store.enqueue({ session: "other", id: "done", input: null });
+      store.settle("s", "done", { status: "done", result: null });
+      store.settle("s", "gone", { status: "unanswered", reason: "withdrawn" });
+      store.settle("other", "done", { status: "done", result: null });
+      store.start("s", "running");
+      expect(store.deleteSettled("s")).toBe(2);
+      expect(store.operations({ session: "s" }).map((o) => o.id)).toEqual([
+        "running",
+        "queued"
+      ]);
+      expect(store.operation("other", "done")?.status).toBe("done");
+      // The id is free again.
+      expect(
+        store.enqueue({ session: "s", id: "done", input: 1 }).accepted
+      ).toBe(true);
+    }));
+
   it("deletes a session with its operations and logs", () =>
     withStore((store) => {
       store.createSession({ id: "s" });

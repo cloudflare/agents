@@ -577,7 +577,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       if (live?.operationId === op.operationId) {
         live.abort.abort();
       } else if (op.status === "queued") {
-        store.update(session, op.operationId, {
+        store.settle(session, op.operationId, {
           status: "unanswered",
           reason: "withdrawn"
         });
@@ -945,7 +945,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         case "await-input":
         case "end":
           await this.#commit(session, undefined, () => {
-            this.#tables().update(session, operationId, {
+            this.#tables().settle(session, operationId, {
               status: "done",
               text: textOf(message)
             });
@@ -974,8 +974,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       readonly parentId?: string;
       readonly messageId: string;
     }) =>
-      store.update(session, operationId, {
-        status: "running",
+      store.start(session, operationId, {
         parentId: change.parentId ?? null,
         messageId: change.messageId,
         pendingModel: true
@@ -1052,7 +1051,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           placed.push(answered);
           if (continues) running({ messageId: answered.id });
           else {
-            store.update(session, operationId, {
+            store.settle(session, operationId, {
               status: "done",
               text: textOf(answered)
             });
@@ -1094,7 +1093,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       this.#events.emit(session, { type: "message", message, operationId });
     }
     if (unanswered !== undefined) {
-      store.update(session, operationId, {
+      store.settle(session, operationId, {
         status: "unanswered",
         reason: unanswered
       });
@@ -1267,11 +1266,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     if (live.abort.signal.aborted) {
       await this.#commit(session, streamId, (put) => {
         if (keep) put(keep, { parentId: op.parentId });
-        this.#tables().update(session, operationId, {
-          status: "unanswered",
-          reason: "aborted",
-          streamId: null
-        });
+        this.#tables().settle(
+          session,
+          operationId,
+          { status: "unanswered", reason: "aborted" },
+          { streamId: null }
+        );
       });
       await this.#settled(session, operationId, keep);
       return {};
@@ -1311,11 +1311,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
       await this.#commit(session, streamId, (put) => {
         if (keep) put(keep, { parentId: op.parentId });
-        this.#tables().update(session, operationId, {
-          status: "unanswered",
-          reason: errorText(failure),
-          streamId: null
-        });
+        this.#tables().settle(
+          session,
+          operationId,
+          { status: "unanswered", reason: errorText(failure) },
+          { streamId: null }
+        );
       });
       await this.#settled(session, operationId, keep);
       return {};
@@ -1389,14 +1390,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     }
     await this.#commit(session, streamId, (put) => {
       if (partial) put(partial, { parentId: op.parentId });
-      this.#tables().update(session, operationId, {
-        streamId: null,
-        interruptions: attempt,
-        ...(decision === "abandon" && {
-          status: "unanswered",
-          reason: "interrupted"
-        })
-      });
+      const progress = { streamId: null, interruptions: attempt };
+      if (decision === "abandon") {
+        this.#tables().settle(
+          session,
+          operationId,
+          { status: "unanswered", reason: "interrupted" },
+          progress
+        );
+      } else {
+        this.#tables().update(session, operationId, progress);
+      }
     });
     if (partial) {
       this.#events.emit(session, {
@@ -1624,11 +1628,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         : undefined;
     await this.#commit(session, op.streamId, (put) => {
       if (keep) put(keep, { parentId: op.parentId });
-      this.#tables().update(session, operationId, {
-        status: "unanswered",
-        reason,
-        streamId: null
-      });
+      this.#tables().settle(
+        session,
+        operationId,
+        { status: "unanswered", reason },
+        { streamId: null }
+      );
     });
     if (keep) {
       this.#events.emit(session, {
@@ -1698,8 +1703,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   // ── Storage ──────────────────────────────────────────────────────────────
 
   #tables(): OperationRecords {
-    this.#records ??= new OperationRecords(this.lifecycle.storage.sql);
-    this.#records.ensureTables();
+    this.#records ??= new OperationRecords(this.lifecycle.storage);
     return this.#records;
   }
 

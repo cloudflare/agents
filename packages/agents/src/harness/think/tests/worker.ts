@@ -8,6 +8,7 @@ import type {
   ToolAnswer
 } from "../../../experimental/channels/harness";
 import { Lifecycle } from "../../../lifecycle";
+import { openHarnessStore } from "../../store/store";
 import { Streams } from "../../../streams/streams";
 import type { Session } from "../../../sessions/handle";
 import { WebSockets } from "../../../websockets/websockets";
@@ -453,6 +454,140 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       PRIMARY KEY (session_id, operation_id))`);
   }
 
+  /**
+   * Write the harness's records as a version before the shared store kept
+   * them: its own three tables, holding three sessions, a settled operation
+   * and a queued one.
+   */
+  seedLegacyRecords(): void {
+    const sql = this.ctx.storage.sql;
+    createLegacyTables(sql);
+    sql.exec(
+      `INSERT INTO cf_think_harness_sessions (id, parent, client_tools, created_at)
+       VALUES ('', NULL, NULL, 1000),
+         ('zeta', '', '[{"name":"lookup"}]', 2000), ('alpha', NULL, NULL, 3000)`
+    );
+    const messages = (id: string, text: string) =>
+      JSON.stringify({
+        kind: "messages",
+        messages: [{ id, role: "user", parts: [{ type: "text", text }] }]
+      });
+    sql.exec(
+      `INSERT INTO cf_think_harness_operations
+         (session_id, operation_id, seq, input, status, source, message_id,
+          text, created_at, updated_at)
+       VALUES ('', 'op-done', 1, ?, 'done', 'server', 'answer-old',
+          'old answer', 1000, 1000)`,
+      messages("user-old", "before the upgrade")
+    );
+    sql.exec(
+      `INSERT INTO cf_think_harness_operations
+         (session_id, operation_id, seq, input, status, source, created_at,
+          updated_at)
+       VALUES ('', 'op-queued', 2, ?, 'queued', 'server', 1000, 1000)`,
+      messages("user-new", "after the upgrade")
+    );
+  }
+
+  /**
+   * Move the harness's records out of the shared store into the tables an
+   * earlier version kept, as if that version had written them. The
+   * transcript and streams are untouched: their format did not change.
+   */
+  downgradeRecords(): void {
+    const sql = this.ctx.storage.sql;
+    const store = openHarnessStore(this.ctx.storage, {
+      prefix: SHARED_STORE_PREFIX
+    });
+    createLegacyTables(sql);
+    for (const session of store.sessions()) {
+      // SAFETY: the harness writes its session state as this shape.
+      const state = session.state as unknown as LegacySessionState;
+      sql.exec(
+        `INSERT INTO cf_think_harness_sessions (id, parent, client_tools, created_at)
+         VALUES (?, ?, ?, ?)`,
+        session.id,
+        session.parent ?? null,
+        JSON.stringify(state.clientTools),
+        session.createdAt
+      );
+      for (const [toolCallId, call] of Object.entries(state.toolCalls)) {
+        sql.exec(
+          `INSERT INTO cf_think_harness_tool_calls
+             (session_id, tool_call_id, operation_id, attempts)
+           VALUES (?, ?, ?, ?)`,
+          session.id,
+          toolCallId,
+          call.operationId,
+          call.attempts
+        );
+      }
+    }
+    for (const op of store.operations()) {
+      // SAFETY: the harness writes its operation meta as this shape.
+      const meta = op.meta as unknown as LegacyOperationMeta;
+      const result =
+        op.result !== null && typeof op.result === "object"
+          ? // SAFETY: a done operation's result is `{ text }`.
+            (op.result as { text?: string })
+          : {};
+      sql.exec(
+        `INSERT INTO cf_think_harness_operations
+           (session_id, operation_id, seq, input, status, source, parent_id,
+            message_id, stream_id, pending_model, steps, interruptions,
+            overflow_retries, reason, text, abandon_reason, created_at,
+            updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        op.session,
+        op.id,
+        op.seq,
+        JSON.stringify(op.input),
+        op.status,
+        meta.source,
+        meta.parentId,
+        meta.messageId,
+        meta.streamId,
+        meta.pendingModel ? 1 : 0,
+        meta.steps,
+        meta.interruptions,
+        meta.overflowRetries,
+        op.reason ?? null,
+        result.text ?? null,
+        meta.abandonReason,
+        op.createdAt,
+        op.createdAt
+      );
+    }
+    for (const table of ["sessions", "operations", "log"]) {
+      sql.exec(`DROP TABLE ${SHARED_STORE_PREFIX}${table}`);
+    }
+  }
+
+  /** The harness's tables that are left, by name. */
+  harnessTables(): string[] {
+    return this.ctx.storage.sql
+      .exec<{ name: string }>(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name LIKE 'cf_think_harness%' ORDER BY name`
+      )
+      .toArray()
+      .map((row) => row.name);
+  }
+
+  /** An operation as the shared harness store holds it. */
+  storedOperation(session: string, operationId: string) {
+    const op = openHarnessStore(this.ctx.storage, {
+      prefix: SHARED_STORE_PREFIX
+    }).operation(session, operationId);
+    if (!op) return undefined;
+    // Flattened for RPC: a JSON value's type is too deep to serialize.
+    const result: { readonly status: string; readonly result: string } = {
+      status: op.status,
+      result: JSON.stringify(op.result)
+    };
+    return result;
+  }
+
   /** What the alarm memory-limit breaker does when it seals. */
   sealMemoryLimit(): void {
     this.harness.onMemoryLimit({ sealed: true });
@@ -670,6 +805,50 @@ export class ThinkWithStreamsObject extends DurableObject<Cloudflare.Env> {
     const result = await this.harness.prompt(text);
     return result.status;
   }
+}
+
+/** The table prefix ThinkHarness keeps its records under in the shared store. */
+const SHARED_STORE_PREFIX = "cf_think_harness_store_";
+
+type LegacySessionState = {
+  readonly clientTools: unknown[];
+  readonly toolCalls: Record<
+    string,
+    { readonly operationId: string; readonly attempts: number }
+  >;
+};
+
+type LegacyOperationMeta = {
+  readonly source: string;
+  readonly parentId: string | null;
+  readonly messageId: string | null;
+  readonly streamId: string | null;
+  readonly pendingModel: boolean;
+  readonly steps: number;
+  readonly interruptions: number;
+  readonly overflowRetries: number;
+  readonly abandonReason: string | null;
+};
+
+/** ThinkHarness's own tables, as the version before the shared store made them. */
+function createLegacyTables(sql: SqlStorage): void {
+  sql.exec(`CREATE TABLE cf_think_harness_sessions (
+    id TEXT PRIMARY KEY, parent TEXT, client_tools TEXT,
+    created_at INTEGER NOT NULL)`);
+  sql.exec(`CREATE TABLE cf_think_harness_operations (
+    session_id TEXT NOT NULL, operation_id TEXT NOT NULL, seq INTEGER NOT NULL,
+    input TEXT NOT NULL, status TEXT NOT NULL, source TEXT NOT NULL,
+    parent_id TEXT, message_id TEXT, stream_id TEXT,
+    pending_model INTEGER NOT NULL DEFAULT 0, steps INTEGER NOT NULL DEFAULT 0,
+    interruptions INTEGER NOT NULL DEFAULT 0,
+    overflow_retries INTEGER NOT NULL DEFAULT 0,
+    reason TEXT, text TEXT, abandon_reason TEXT,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, operation_id))`);
+  sql.exec(`CREATE TABLE cf_think_harness_tool_calls (
+    session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL, attempts INTEGER NOT NULL,
+    PRIMARY KEY (session_id, tool_call_id))`);
 }
 
 /** Each message as `role: text`, with its tool calls as `[name state]`. */

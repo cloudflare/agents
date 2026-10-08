@@ -267,14 +267,17 @@ export class HarnessStore {
    * Create a session, or return the existing one with this id unchanged.
    *
    * @param input - The id, an optional parent, and the initial state.
+   *   `createdAt` keeps the creation time of a session imported from
+   *   elsewhere, so the session list stays in creation order; default now.
    * @returns The stored session.
    */
   createSession(input: {
     readonly id: string;
     readonly parent?: string;
     readonly state?: JsonValue;
+    readonly createdAt?: number;
   }): SessionRecord {
-    const now = Date.now();
+    const now = input.createdAt ?? Date.now();
     this.#storage.sql.exec(
       `INSERT INTO ${this.#sessions} (id, parent, state, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
@@ -501,6 +504,22 @@ export class HarnessStore {
         id
       ).rowsWritten > 0
     );
+  }
+
+  /**
+   * Forget a session's settled operations, as when the session starts
+   * over. Open operations are kept. A forgotten operation's id may be
+   * enqueued again.
+   *
+   * @param session - The session id.
+   * @returns How many operations were deleted.
+   */
+  deleteSettled(session: string): number {
+    return this.#storage.sql.exec(
+      `DELETE FROM ${this.#operations}
+       WHERE session = ? AND status IN ('done', 'unanswered')`,
+      session
+    ).rowsWritten;
   }
 
   /**
