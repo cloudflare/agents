@@ -10,25 +10,25 @@ import {
   type BrowserToolInput,
   type BrowserToolOptions,
   type BrowserToolOutput
-} from "./browser-tool";
+} from "../browser-tool";
 import {
   browserExecuteModelOutput,
   type BrowserModelOutput
-} from "./tool-helpers";
+} from "../tool-helpers";
 
 export type {
   BrowserToolInput,
   BrowserToolOptions,
   BrowserToolOutput
-} from "./browser-tool";
-export type { BrowserNewTab, BrowserSource } from "./session-connector";
+} from "../browser-tool";
+export type { BrowserNewTab, BrowserSource } from "../session-connector";
 
 // Stateless Quick Action tools, so one import covers both.
 export {
   createQuickActionTools,
   type CreateQuickActionToolsOptions,
   type QuickActionToolName
-} from "./ai";
+} from "../ai";
 
 /**
  * The AI SDK tool {@link browserTool} returns. Assignable to the AI SDK's

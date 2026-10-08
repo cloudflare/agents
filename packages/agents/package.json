@@ -383,14 +383,14 @@
       "require": "./dist/browser/ai.js"
     },
     "./browser/ai-sdk": {
-      "types": "./dist/browser/ai-sdk.d.ts",
-      "import": "./dist/browser/ai-sdk.js",
-      "require": "./dist/browser/ai-sdk.js"
+      "types": "./dist/browser/tools/ai-sdk.d.ts",
+      "import": "./dist/browser/tools/ai-sdk.js",
+      "require": "./dist/browser/tools/ai-sdk.js"
     },
     "./browser/tanstack-ai": {
-      "types": "./dist/browser/tanstack-ai.d.ts",
-      "import": "./dist/browser/tanstack-ai.js",
-      "require": "./dist/browser/tanstack-ai.js"
+      "types": "./dist/browser/tools/tanstack-ai.d.ts",
+      "import": "./dist/browser/tools/tanstack-ai.js",
+      "require": "./dist/browser/tools/tanstack-ai.js"
     },
     "./websearch": {
       "types": "./dist/websearch/index.d.ts",
