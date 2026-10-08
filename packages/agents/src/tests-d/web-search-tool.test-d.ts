@@ -1,10 +1,10 @@
 import type { Tool, ToolSet } from "ai";
 import type { ServerTool } from "@tanstack/ai";
 import { expectTypeOf } from "vitest";
-import type { WebSearchSource, WebSearchToolOutput } from "../websearch";
-import { webSearchTool } from "../websearch/tools/ai-sdk";
-import { webSearchTool as piWebSearchTool } from "../websearch/tools/pi";
-import { webSearchTool as tanStackWebSearchTool } from "../websearch/tools/tanstack-ai";
+import type { WebSearchSource, WebSearchToolOutput } from "../web/search";
+import { webSearchTool } from "../web/search/tools/ai-sdk";
+import { webSearchTool as piWebSearchTool } from "../web/search/tools/pi";
+import { webSearchTool as tanStackWebSearchTool } from "../web/search/tools/tanstack-ai";
 
 declare const env: { AI: Ai };
 declare const source: WebSearchSource;

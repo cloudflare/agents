@@ -9,20 +9,20 @@ import {
   type WebSearchRequest,
   type WebSearchResponse,
   type WebSearchSource
-} from "../websearch";
+} from "../../web/search";
 import {
   WebSearchError as AiSdkWebSearchError,
   webSearchTool as aiSdkWebSearchTool
-} from "../websearch/tools/ai-sdk";
+} from "../../web/search/tools/ai-sdk";
 import {
   WebSearchError as PiWebSearchError,
   webSearchTool as piWebSearchTool
-} from "../websearch/tools/pi";
+} from "../../web/search/tools/pi";
 import {
   WebSearchError as TanStackWebSearchError,
   webSearchTool as tanstackWebSearchTool
-} from "../websearch/tools/tanstack-ai";
-import { createWebSearchToolCore } from "../websearch/tool";
+} from "../../web/search/tools/tanstack-ai";
+import { createWebSearchToolCore } from "../../web/search/tool";
 
 const RESPONSE: WebSearchResponse = {
   items: [
