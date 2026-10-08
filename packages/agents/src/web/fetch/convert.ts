@@ -315,7 +315,7 @@ export function tidyMarkdown(markdown: string): string {
   for (const line of markdown.split("\n")) {
     // CommonMark: a fence is 3+ backticks or tildes after 0–3 spaces; the
     // closer has the same character, at least as many, and nothing after.
-    const run = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    const run = /^ {0,3}(`{3,}|~{3,})([^]*)$/.exec(line);
     if (fence !== undefined) {
       out.push(line);
       if (

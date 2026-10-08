@@ -426,6 +426,11 @@ describe("tidyMarkdown", () => {
     );
   });
 
+  it("recognises a fence whose info string has a Unicode line separator", () => {
+    const fenced = "```js\u2028demo\nconst x = 1;  \n```";
+    expect(tidyMarkdown(fenced)).toBe(fenced);
+  });
+
   it("closes a fence only on a bare closing run", () => {
     const fenced = [
       "```js",
