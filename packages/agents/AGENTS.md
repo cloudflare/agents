@@ -47,6 +47,10 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/websearch/pi`                     | `src/web/search/tools/pi.ts`                  | pi harness `webSearchTool`                                                                                                                    |
 | `agents/websearch/ai-sdk`                 | `src/web/search/tools/ai-sdk.ts`              | AI SDK `webSearchTool`                                                                                                                        |
 | `agents/websearch/tanstack-ai`            | `src/web/search/tools/tanstack-ai.ts`         | TanStack AI `webSearchTool`                                                                                                                   |
+| `agents/webfetch`                         | `src/web/fetch/index.ts`                      | Direct fetch source (`createDirectWebFetch`), `fetchWeb()`, `WebFetchError`, renderer                                                         |
+| `agents/webfetch/pi`                      | `src/web/fetch/tools/pi.ts`                   | pi harness `webFetchTool`                                                                                                                     |
+| `agents/webfetch/ai-sdk`                  | `src/web/fetch/tools/ai-sdk.ts`               | AI SDK `webFetchTool`                                                                                                                         |
+| `agents/webfetch/tanstack-ai`             | `src/web/fetch/tools/tanstack-ai.ts`          | TanStack AI `webFetchTool`                                                                                                                    |
 | `agents/voice`                            | `src/voice/index.ts`                          | Voice server mixins, contracts, Workers AI providers, text, and SFU helpers                                                                   |
 | `agents/voice/types`                      | `src/voice/types.ts`                          | Dependency-light Voice protocol and provider contracts                                                                                        |
 | `agents/voice/client`                     | `src/voice/client.ts`                         | Framework-neutral browser Voice client                                                                                                        |
@@ -192,12 +196,22 @@ src/
     tanstack-ai.ts      # legacy createBrowserTools for TanStack AI (re-exported by tools/tanstack-ai.ts)
     tools/              # browserTool adapters for a persistent Browser: ai-sdk.ts, tanstack-ai.ts, pi.ts
 
-  web/search/           # web_search tool over Cloudflare's Web Search API (beta)
-    index.ts            # Barrel for agents/websearch
-    contract.ts         # Tool name, description, input/output types, renderer
-    source.ts           # WebSearchSource: AI binding + HTTP sources, WebSearchError
-    tool.ts             # harness-neutral core shared by the adapters
-    tools/              # pi.ts, ai-sdk.ts, tanstack-ai.ts adapters; input-schema.ts (zod, shared)
+  web/                  # Tools that reach the public web
+    url-policy.ts       # URL + host checks shared by web_fetch and Think's fetch tools
+    abortable.ts        # Race a promise against an AbortSignal
+    search/             # web_search tool over Cloudflare's Web Search API (beta)
+      index.ts          # Barrel for agents/websearch
+      contract.ts       # Tool name, description, input/output types, renderer
+      source.ts         # WebSearchSource: AI binding + HTTP sources, WebSearchError
+      tool.ts           # harness-neutral core shared by the adapters
+      tools/            # pi.ts, ai-sdk.ts, tanstack-ai.ts adapters; input-schema.ts (zod, shared)
+    fetch/              # web_fetch tool: read a URL as Markdown, JSON, or text (beta)
+      index.ts          # Barrel for agents/webfetch, plus fetchWeb()
+      contract.ts       # Tool name, description, input/output types, windowing, renderer
+      source.ts         # WebFetchSource, createDirectWebFetch, WebFetchError
+      convert.ts        # Content-type classification, charset decoding, toMarkdown, JSON
+      tool.ts           # harness-neutral core shared by the adapters
+      tools/            # pi.ts, ai-sdk.ts, tanstack-ai.ts adapters; input-schema.ts (zod, shared)
 
   voice/                # Voice server, client, React, provider, SFU, and text entries
   channels/             # Messaging core and Channels: slack/, telegram/, email/, web/

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   WebFetchError,
   createDirectWebFetch,
+  fetchWeb,
   type DirectWebFetchOptions
 } from "../../../web/fetch";
 import { countingStream, fakeAi, page, redirect, stubFetch } from "./helpers";
@@ -573,5 +574,49 @@ describe("createDirectWebFetch", () => {
         )
       ).rejects.toBe(reason);
     });
+  });
+});
+
+describe("fetchWeb", () => {
+  it("fetches the whole page", async () => {
+    const content = `${"a".repeat(30)}\n${"b".repeat(30)}`;
+    const stub = stubFetch({
+      "https://example.com/": page(content, "text/plain")
+    });
+    const output = await fetchWeb(
+      { url: "https://example.com/" },
+      { binding: fakeAi().binding, fetch: stub.fetch }
+    );
+    expect(output).toMatchObject({ content, totalChars: 61, via: "text" });
+    expect(output).not.toHaveProperty("offset");
+  });
+
+  it("turns its deadline into web_fetch_timeout", async () => {
+    const error = await failure(
+      fetchWeb(
+        { url: "https://example.com/" },
+        {
+          binding: fakeAi().binding,
+          fetch: () => new Promise<Response>(() => {}),
+          timeoutMs: 10
+        }
+      )
+    );
+    expect(error).toMatchObject({
+      code: "web_fetch_timeout",
+      status: 504,
+      retryable: true,
+      timeoutMs: 10,
+      url: "https://example.com/"
+    });
+  });
+
+  it("throws RangeError for an invalid deadline", async () => {
+    await expect(
+      fetchWeb(
+        { url: "https://example.com/" },
+        { binding: fakeAi().binding, timeoutMs: -1 }
+      )
+    ).rejects.toThrow(RangeError);
   });
 });

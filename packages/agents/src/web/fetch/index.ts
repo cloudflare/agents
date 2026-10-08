@@ -9,6 +9,14 @@
  *
  * @beta
  */
+import type { WebFetchPage } from "./contract";
+import {
+  createDirectWebFetch,
+  type DirectWebFetchOptions,
+  type WebFetchRequest
+} from "./source";
+import { fetchWithDeadline, validateTimeout } from "./tool";
+
 export {
   DEFAULT_WEB_FETCH_MAX_BYTES,
   DEFAULT_WEB_FETCH_MAX_REDIRECTS,
@@ -35,3 +43,36 @@ export {
   type WebFetchRequest,
   type WebFetchSource
 } from "./source";
+export { isPrivateOrLocalHost } from "../url-policy";
+export {
+  type WebFetchToolDirectOptions,
+  type WebFetchToolOptions,
+  type WebFetchToolSourceOptions
+} from "./tool";
+
+/** Options for {@link fetchWeb}: the direct source's, plus a deadline. */
+export interface FetchWebOptions extends DirectWebFetchOptions {
+  /**
+   * Give up after this many milliseconds with a `web_fetch_timeout` error.
+   * A positive integer; defaults to 30 seconds.
+   */
+  timeoutMs?: number;
+  /** Abort the fetch; rejects with the signal's reason. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Fetch one URL directly, without a tool: {@link createDirectWebFetch} plus
+ * a deadline. Returns the whole page; to show it to a model a window at a
+ * time, as the tool does, pass it to {@link windowWebFetchPage} and
+ * {@link renderWebFetchPage}.
+ */
+export async function fetchWeb(
+  request: WebFetchRequest,
+  options: FetchWebOptions
+): Promise<WebFetchPage> {
+  const { timeoutMs, signal, ...sourceOptions } = options;
+  const deadline = validateTimeout(timeoutMs);
+  const source = createDirectWebFetch(sourceOptions);
+  return fetchWithDeadline(source, request, { timeoutMs: deadline, signal });
+}
