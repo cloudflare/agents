@@ -393,24 +393,24 @@
       "require": "./dist/browser/tools/tanstack-ai.js"
     },
     "./websearch": {
-      "types": "./dist/websearch/index.d.ts",
-      "import": "./dist/websearch/index.js",
-      "require": "./dist/websearch/index.js"
+      "types": "./dist/web/search/index.d.ts",
+      "import": "./dist/web/search/index.js",
+      "require": "./dist/web/search/index.js"
     },
     "./websearch/pi": {
-      "types": "./dist/websearch/tools/pi.d.ts",
-      "import": "./dist/websearch/tools/pi.js",
-      "require": "./dist/websearch/tools/pi.js"
+      "types": "./dist/web/search/tools/pi.d.ts",
+      "import": "./dist/web/search/tools/pi.js",
+      "require": "./dist/web/search/tools/pi.js"
     },
     "./websearch/ai-sdk": {
-      "types": "./dist/websearch/tools/ai-sdk.d.ts",
-      "import": "./dist/websearch/tools/ai-sdk.js",
-      "require": "./dist/websearch/tools/ai-sdk.js"
+      "types": "./dist/web/search/tools/ai-sdk.d.ts",
+      "import": "./dist/web/search/tools/ai-sdk.js",
+      "require": "./dist/web/search/tools/ai-sdk.js"
     },
     "./websearch/tanstack-ai": {
-      "types": "./dist/websearch/tools/tanstack-ai.d.ts",
-      "import": "./dist/websearch/tools/tanstack-ai.js",
-      "require": "./dist/websearch/tools/tanstack-ai.js"
+      "types": "./dist/web/search/tools/tanstack-ai.d.ts",
+      "import": "./dist/web/search/tools/tanstack-ai.js",
+      "require": "./dist/web/search/tools/tanstack-ai.js"
     },
     "./browser/pi": {
       "types": "./dist/browser/tools/pi.d.ts",

@@ -4,7 +4,7 @@
  * same tool works over the Workers AI binding, the HTTP API, or a fake in
  * tests.
  */
-import { DEFAULT_GATEWAY_ID } from "../models/core/settings";
+import { DEFAULT_GATEWAY_ID } from "../../models/core/settings";
 import {
   DEFAULT_WEB_SEARCH_LIMIT,
   MAX_WEB_SEARCH_LIMIT,

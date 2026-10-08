@@ -43,10 +43,10 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/browser/ai-sdk`                   | `src/browser/tools/ai-sdk.ts`                 | AI SDK `browserTool` for a persistent `Browser` (+ `createQuickActionTools` re-export)                                                        |
 | `agents/browser/tanstack-ai`              | `src/browser/tools/tanstack-ai.ts`            | TanStack AI `browserTool` for a persistent `Browser` (+ legacy `createBrowserTools`)                                                          |
 | `agents/browser/pi`                       | `src/browser/tools/pi.ts`                     | pi-durable `browserTool` for a persistent `Browser`                                                                                           |
-| `agents/websearch`                        | `src/websearch/index.ts`                      | Web Search API sources (`createAIWebSearch`, `createHTTPWebSearch`), `WebSearchError`, renderer                                               |
-| `agents/websearch/pi`                     | `src/websearch/tools/pi.ts`                   | pi harness `webSearchTool`                                                                                                                    |
-| `agents/websearch/ai-sdk`                 | `src/websearch/tools/ai-sdk.ts`               | AI SDK `webSearchTool`                                                                                                                        |
-| `agents/websearch/tanstack-ai`            | `src/websearch/tools/tanstack-ai.ts`          | TanStack AI `webSearchTool`                                                                                                                   |
+| `agents/websearch`                        | `src/web/search/index.ts`                     | Web Search API sources (`createAIWebSearch`, `createHTTPWebSearch`), `WebSearchError`, renderer                                               |
+| `agents/websearch/pi`                     | `src/web/search/tools/pi.ts`                  | pi harness `webSearchTool`                                                                                                                    |
+| `agents/websearch/ai-sdk`                 | `src/web/search/tools/ai-sdk.ts`              | AI SDK `webSearchTool`                                                                                                                        |
+| `agents/websearch/tanstack-ai`            | `src/web/search/tools/tanstack-ai.ts`         | TanStack AI `webSearchTool`                                                                                                                   |
 | `agents/voice`                            | `src/voice/index.ts`                          | Voice server mixins, contracts, Workers AI providers, text, and SFU helpers                                                                   |
 | `agents/voice/types`                      | `src/voice/types.ts`                          | Dependency-light Voice protocol and provider contracts                                                                                        |
 | `agents/voice/client`                     | `src/voice/client.ts`                         | Framework-neutral browser Voice client                                                                                                        |
@@ -192,7 +192,7 @@ src/
     tanstack-ai.ts      # legacy createBrowserTools for TanStack AI (re-exported by tools/tanstack-ai.ts)
     tools/              # browserTool adapters for a persistent Browser: ai-sdk.ts, tanstack-ai.ts, pi.ts
 
-  websearch/            # web_search tool over Cloudflare's Web Search API (beta)
+  web/search/           # web_search tool over Cloudflare's Web Search API (beta)
     index.ts            # Barrel for agents/websearch
     contract.ts         # Tool name, description, input/output types, renderer
     source.ts           # WebSearchSource: AI binding + HTTP sources, WebSearchError
