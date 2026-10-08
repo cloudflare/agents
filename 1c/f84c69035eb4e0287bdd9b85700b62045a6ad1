@@ -1,0 +1,25 @@
+.changeset/claude-code-container-harness.md
+  s_32b3cea1fa63fa::t_92936e2f8e6d42 7
+examples/next/harnesses/claude-code/README.md
+  s_32b3cea1fa63fa::t_cb991782568c5f 98-104
+examples/next/harnesses/claude-code/src/agent.ts
+  s_32b3cea1fa63fa::t_3ce39647f8ea19 14-16
+examples/next/harnesses/claude-code/wrangler.jsonc
+  s_32b3cea1fa63fa::t_97224202ac717e 16-19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1cf84c69035eb4e0287bdd9b85700b62045a6ad1",
+  "prompts": {},
+  "sessions": {
+    "s_32b3cea1fa63fa": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a11172-4c22-7033-85c7-af55dfd76757",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}
