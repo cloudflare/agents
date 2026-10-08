@@ -149,6 +149,16 @@ pnpm exec changeset       # interactive prompt — pick packages, semver bump, d
 
 This creates a markdown file in `.changeset/` that gets consumed during release.
 
+Keep the changeset description to a single line that links to the relevant documentation for details. Don't write multi-paragraph explanations — the docs are the source of truth. For example:
+
+```md
+---
+"agents": minor
+---
+
+Add `scheduleEvery()` for recurring schedules. See [Schedule tasks](https://developers.cloudflare.com/agents/api-reference/schedule-tasks/).
+```
+
 Examples, guides, and sites don't need changesets.
 
 ### Pull request process
