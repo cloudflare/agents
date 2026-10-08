@@ -27,7 +27,7 @@ import {
 } from "./live-view";
 import {
   DurableBrowserSessionStore,
-  type BrowserSessionStore,
+  type ListableBrowserSessionStore,
   type StoredBrowserSession
 } from "./session-store";
 import { loadCdpSpec, type SearchableCdpSpec } from "./spec";
@@ -48,6 +48,18 @@ export const SESSION_TOUCH_INTERVAL_MS = 60_000;
 /** The browser name used when a host doesn't pick one. */
 export const DEFAULT_BROWSER_NAME = "default";
 
+/**
+ * The scope used when a caller doesn't pick one: every caller that leaves
+ * `scope` out shares this one active tab. See {@link BrowserConnectOptions}.
+ */
+export const DEFAULT_BROWSER_SCOPE = "shared";
+
+/**
+ * Scope records kept per browser. Writing a new one past the cap deletes the
+ * least recently used; a scope that comes back afterwards starts fresh.
+ */
+export const MAX_BROWSER_SCOPES = 100;
+
 const NAMED_SESSION_KEY_PREFIX = "browser:session:";
 
 /** The store key holding the named browser's current record. */
@@ -66,6 +78,15 @@ const RETIRED_SESSION_KEY_PREFIX = "browser:retired:";
 
 function retiredBrowserSessionKey(name: string): string {
   return `${RETIRED_SESSION_KEY_PREFIX}${name}`;
+}
+
+/**
+ * Where a browser's scope records live. The name's length is part of the
+ * prefix, so one browser's prefix never matches another name's (`a` with
+ * scope `b:c` vs. `a:b` with scope `c`).
+ */
+function browserScopeKeyPrefix(name: string): string {
+  return `browser:scope:${name.length}:${name}:`;
 }
 
 /**
@@ -123,9 +144,9 @@ export interface BrowserOptions {
    * Where the browser's record lives. Defaults to a
    * {@link DurableBrowserSessionStore} over the host object's storage, which
    * requires installing the `Browser` with `Lifecycle.use()`. Passing a store
-   * lets the `Browser` work without Lifecycle.
+   * lets the `Browser` work without Lifecycle. It must implement `list`.
    */
-  store?: BrowserSessionStore;
+  store?: ListableBrowserSessionStore;
   /** Default CDP command timeout for {@link Browser.connect}. */
   timeoutMs?: number;
   /**
@@ -151,33 +172,47 @@ export interface ResolvedBrowser {
   restarted: boolean;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface BrowserConnectOptions {
   /**
-   * The tab the agent last worked in, when one was recorded for this
-   * browser. Absent on a browser this resolution created; a replacement a
-   * concurrent caller already created and used may carry one.
+   * Who is driving. Connections with the same scope share an active tab, and
+   * each scope keeps its own, so two conversations on one browser don't
+   * drive each other's page. Cookies, logins, and the tabs themselves are
+   * shared by every scope: a scope splits "which tab is mine", not the
+   * browser. Defaults to {@link DEFAULT_BROWSER_SCOPE}.
    */
-  activeTargetId?: string;
+  scope?: string;
 }
 
 export interface BrowserConnection {
   name: string;
   sessionId: string;
+  /** The scope this connection works in; see {@link BrowserConnectOptions}. */
+  scope: string;
   /**
-   * `true` when the browser this caller resolved is gone, even if a
-   * concurrent caller already replaced it. See
-   * {@link ResolvedBrowser.restarted}.
+   * `true` when this scope worked in an earlier browser that has since been
+   * replaced, whichever scope's connection replaced it. Its tabs and page
+   * state are gone; surface this loudly to the model. `false` on a scope's
+   * first connection, even one that replaced a lost browser: the scope had
+   * nothing to lose. This is per scope, not a browser-wide signal.
    */
   restarted: boolean;
-  /** See {@link ResolvedBrowser.activeTargetId}. */
+  /**
+   * The tab this scope last worked in, when it recorded one in this
+   * browser.
+   */
   activeTargetId?: string;
   /** Closing this connection does NOT close the browser. */
   cdp: CdpConnection;
   /**
-   * Record the tab the agent is working in (or clear it with `undefined`).
+   * Record the tab this scope is working in (or clear it with `undefined`).
    * Never resurrects: returns `false` when the browser was closed or
    * replaced since this connection resolved it.
    */
   setActiveTarget(targetId: string | undefined): Promise<boolean>;
+  /** The tabs other scopes are working in, in this browser. */
+  targetsInOtherScopes(): Promise<Set<string>>;
   /**
    * The Chrome DevTools Protocol description this browser serves, read from
    * the browser itself (cached per binding).
@@ -208,7 +243,7 @@ export class Browser extends LifecycleCapability {
   readonly name: string;
   readonly #options: BrowserOptions;
   readonly #key: string;
-  #store?: BrowserSessionStore;
+  #store?: ListableBrowserSessionStore;
 
   constructor(options: BrowserOptions) {
     const name = options.name ?? DEFAULT_BROWSER_NAME;
@@ -237,7 +272,7 @@ export class Browser extends LifecycleCapability {
         // No browser on record: create one. The commit reports whether the
         // name was ever used before (see #createAndCommit).
         const { session, restarted } = await this.#createAndCommit();
-        return { name, restarted, ...session };
+        return { name, restarted, ...resolvedFields(session) };
       }
 
       // Live entry on record — probe it outside any lock.
@@ -251,7 +286,7 @@ export class Browser extends LifecycleCapability {
         if (alive) {
           const refreshed = { ...current, updatedAt: Date.now() };
           await this.#sessionStore.set(key, refreshed);
-          return { name, restarted: false, ...refreshed };
+          return { name, restarted: false, ...resolvedFields(refreshed) };
         }
         // The browser died upstream (expired or reclaimed). Retire the
         // record under this lock, so any resolver that reads it during the
@@ -268,75 +303,89 @@ export class Browser extends LifecycleCapability {
   }
 
   /**
-   * Resolve the browser and open a CDP connection to it. Commands sent over
-   * the connection refresh the record's `updatedAt` (throttled to
+   * Resolve the browser and open a CDP connection to it for one scope (see
+   * {@link BrowserConnectOptions.scope}). Commands sent over the connection
+   * refresh the record's `updatedAt` (throttled to
    * {@link SESSION_TOUCH_INTERVAL_MS}), so hosts can tell an actively used
    * browser from one the platform has likely reclaimed.
    *
    * If the browser expires between the liveness probe and the WebSocket
    * upgrade, the record is retired and the browser resolved once more, so
-   * the caller gets a fresh browser with `restarted: true` instead of an
-   * error.
+   * the caller gets a fresh browser instead of an error.
    */
-  async connect(): Promise<BrowserConnection> {
-    const resolved = await this.resolve();
+  async connect(
+    options: BrowserConnectOptions = {}
+  ): Promise<BrowserConnection> {
+    const scope = options.scope ?? DEFAULT_BROWSER_SCOPE;
+    if (scope.trim() === "") {
+      throw new Error("Browser scopes must be non-empty");
+    }
+    let resolved = await this.resolve();
+    let cdp: CdpConnection;
     try {
-      return await this.#attach(resolved);
+      cdp = await this.#open(resolved);
     } catch (error) {
       if (!isMissingBrowserSession(error)) throw error;
       await this.#retireIfCurrent(resolved.sessionId);
+      resolved = await this.resolve();
+      cdp = await this.#open(resolved);
     }
-    // The browser this caller resolved is gone, so report a restart even
-    // when a concurrent resolver already replaced it and this resolve
-    // reattaches to that replacement.
-    const replaced = await this.resolve();
-    return this.#attach({ ...replaced, restarted: true });
+    try {
+      const entered = await this.#enterScope(scope, resolved.sessionId);
+      return this.#connection(resolved, scope, cdp, entered);
+    } catch (error) {
+      cdp.disconnect();
+      throw error;
+    }
   }
 
-  async #attach(resolved: ResolvedBrowser): Promise<BrowserConnection> {
-    let lastTouchAt = Date.now();
-    let touchInFlight = false;
-    const cdp = await connectBrowserSession(
-      this.#provider.binding,
-      resolved.sessionId,
-      {
-        timeoutMs: this.#options.timeoutMs,
-        onActivity: () => {
-          const now = Date.now();
-          if (touchInFlight || now - lastTouchAt < this.#touchIntervalMs) {
-            return;
-          }
-          touchInFlight = true;
-          lastTouchAt = now;
-          void this.#touch(resolved.sessionId)
-            .catch((error: unknown) => {
-              console.warn(
-                `[agents/browser] Failed to refresh activity for browser "${this.name}"`,
-                error
-              );
-            })
-            .finally(() => {
-              touchInFlight = false;
-            });
-        }
-      }
-    );
+  #connection(
+    resolved: ResolvedBrowser,
+    scope: string,
+    cdp: CdpConnection,
+    entered: { restarted: boolean; activeTargetId?: string }
+  ): BrowserConnection {
+    const { sessionId } = resolved;
     const { binding } = this.#provider;
     return {
       name: resolved.name,
-      sessionId: resolved.sessionId,
-      restarted: resolved.restarted,
-      activeTargetId: resolved.activeTargetId,
+      sessionId,
+      scope,
+      restarted: entered.restarted,
+      activeTargetId: entered.activeTargetId,
       cdp,
       setActiveTarget: (targetId) =>
-        this.#update(resolved.sessionId, (current) => ({
-          ...current,
-          activeTargetId: targetId,
-          updatedAt: Date.now()
-        })),
-      spec: () =>
-        loadCdpSpec({ browser: binding, sessionId: resolved.sessionId })
+        this.#updateScope(scope, sessionId, targetId),
+      targetsInOtherScopes: async () =>
+        activeTargets(await this.#listScopes(), scope, sessionId),
+      spec: () => loadCdpSpec({ browser: binding, sessionId })
     };
+  }
+
+  async #open(resolved: ResolvedBrowser): Promise<CdpConnection> {
+    let lastTouchAt = Date.now();
+    let touchInFlight = false;
+    return connectBrowserSession(this.#provider.binding, resolved.sessionId, {
+      timeoutMs: this.#options.timeoutMs,
+      onActivity: () => {
+        const now = Date.now();
+        if (touchInFlight || now - lastTouchAt < this.#touchIntervalMs) {
+          return;
+        }
+        touchInFlight = true;
+        lastTouchAt = now;
+        void this.#touch(resolved.sessionId)
+          .catch((error: unknown) => {
+            console.warn(
+              `[agents/browser] Failed to refresh activity for browser "${this.name}"`,
+              error
+            );
+          })
+          .finally(() => {
+            touchInFlight = false;
+          });
+      }
+    });
   }
 
   /**
@@ -435,7 +484,7 @@ export class Browser extends LifecycleCapability {
   }
 
   /** Lazy: `lifecycle.storage` exists only once `Lifecycle.use()` ran. */
-  get #sessionStore(): BrowserSessionStore {
+  get #sessionStore(): ListableBrowserSessionStore {
     this.#store ??=
       this.#options.store ??
       new DurableBrowserSessionStore(this.lifecycle.storage);
@@ -468,6 +517,103 @@ export class Browser extends LifecycleCapability {
         return false; // replaced or gone — the caller's view is stale
       }
       await this.#sessionStore.set(this.#key, change(current));
+      return true;
+    } finally {
+      await lock.release();
+    }
+  }
+
+  // ── Scopes ───────────────────────────────────────────────────────────────
+  //
+  // Each scope has a small record next to the browser's: the browser it last
+  // worked in (`sessionId`) and its tab there. All of a browser's scope
+  // records share one lock, so claiming a tab can check the others.
+
+  #scopeKey(scope: string): string {
+    return `${browserScopeKeyPrefix(this.name)}${scope}`;
+  }
+
+  /** The lock every scope record of this browser is written under. */
+  get #scopesLockKey(): string {
+    return browserScopeKeyPrefix(this.name);
+  }
+
+  /** Every scope record of this browser, by scope. */
+  async #listScopes(): Promise<Map<string, StoredBrowserSession>> {
+    const prefix = browserScopeKeyPrefix(this.name);
+    const entries = await this.#sessionStore.list(prefix);
+    const scopes = new Map<string, StoredBrowserSession>();
+    for (const [key, entry] of entries) {
+      scopes.set(key.slice(prefix.length), entry);
+    }
+    return scopes;
+  }
+
+  /**
+   * Start a connection's scope: a scope whose record names an earlier
+   * browser was restarted, and its record moves to this one. A new record
+   * past {@link MAX_BROWSER_SCOPES} evicts the least recently used.
+   */
+  async #enterScope(
+    scope: string,
+    sessionId: string
+  ): Promise<{ restarted: boolean; activeTargetId?: string }> {
+    const key = this.#scopeKey(scope);
+    const lock = await this.#sessionStore.acquireLock(this.#scopesLockKey);
+    try {
+      const entry = await this.#sessionStore.get(key);
+      const now = Date.now();
+      if (entry?.sessionId === sessionId) {
+        await this.#sessionStore.set(key, { ...entry, updatedAt: now });
+        return { restarted: false, activeTargetId: entry.activeTargetId };
+      }
+      await this.#sessionStore.set(key, {
+        sessionId,
+        createdAt: now,
+        updatedAt: now
+      });
+      if (!entry) await this.#evictScopes();
+      return { restarted: entry !== undefined };
+    } finally {
+      await lock.release();
+    }
+  }
+
+  /** Delete the least recently used scope records past the cap. */
+  async #evictScopes(): Promise<void> {
+    const scopes = await this.#listScopes();
+    if (scopes.size <= MAX_BROWSER_SCOPES) return;
+    const oldest = [...scopes]
+      .sort(([, a], [, b]) => a.updatedAt - b.updatedAt)
+      .slice(0, scopes.size - MAX_BROWSER_SCOPES);
+    for (const [scope] of oldest) {
+      await this.#sessionStore.delete(this.#scopeKey(scope));
+    }
+  }
+
+  /**
+   * Set a scope's tab (or clear it with `undefined`). Never resurrects:
+   * does nothing (and returns `false`) once the browser this connection
+   * resolved was closed or replaced.
+   */
+  async #updateScope(
+    scope: string,
+    sessionId: string,
+    targetId: string | undefined
+  ): Promise<boolean> {
+    const key = this.#scopeKey(scope);
+    const lock = await this.#sessionStore.acquireLock(this.#scopesLockKey);
+    try {
+      const current = await this.#sessionStore.get(this.#key);
+      const entry = await this.#sessionStore.get(key);
+      if (current?.sessionId !== sessionId || entry?.sessionId !== sessionId) {
+        return false;
+      }
+      await this.#sessionStore.set(key, {
+        ...entry,
+        activeTargetId: targetId,
+        updatedAt: Date.now()
+      });
       return true;
     } finally {
       await lock.release();
@@ -575,4 +721,24 @@ export class Browser extends LifecycleCapability {
       await lock.release();
     }
   }
+}
+
+/** A store record without fields that belong to scope records. */
+function resolvedFields(session: StoredBrowserSession) {
+  const { sessionId, createdAt, updatedAt } = session;
+  return { sessionId, createdAt, updatedAt };
+}
+
+/** The tabs scopes other than `scope` are working in, in `sessionId`. */
+function activeTargets(
+  scopes: Map<string, StoredBrowserSession>,
+  scope: string,
+  sessionId: string
+): Set<string> {
+  const targets = new Set<string>();
+  for (const [other, entry] of scopes) {
+    if (other === scope || entry.sessionId !== sessionId) continue;
+    if (entry.activeTargetId) targets.add(entry.activeTargetId);
+  }
+  return targets;
 }

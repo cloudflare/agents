@@ -31,13 +31,17 @@ export {
   DurableBrowserSessionStore,
   type BrowserSessionLock,
   type BrowserSessionStore,
+  type ListableBrowserSessionStore,
   type StoredBrowserSession
 } from "./session-store";
 
 export {
   Browser,
   browserRun,
+  DEFAULT_BROWSER_SCOPE,
+  MAX_BROWSER_SCOPES,
   type BrowserConnection,
+  type BrowserConnectOptions,
   type BrowserOptions,
   type BrowserProvider,
   type BrowserRunOptions,

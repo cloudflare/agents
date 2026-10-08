@@ -87,7 +87,7 @@ export function browserTool(options: BrowserToolOptions): BrowserTool {
   return {
     description: core.description,
     inputSchema: core.inputSchema,
-    execute: core.execute,
+    execute: (input) => core.execute(input),
     toModelOutput: ({ output }) =>
       browserExecuteModelOutput(output, browserReportNotes(output))
   };

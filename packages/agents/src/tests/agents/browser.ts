@@ -18,6 +18,7 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
   readonly #binding = createFakeBrowserBinding();
   readonly browserRequests: RecordedBrowserRequest[] = this.#binding.requests;
   readonly killBrowserSession = this.#binding.kill;
+  readonly browserEvents = this.#binding.events;
   readonly browser = new Browser({
     provider: browserRun(this.#binding.browser)
   });
@@ -28,11 +29,12 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
   }
 
   /** The host wiring the docs show: one `Browser`, a tool built per turn. */
-  browserTool(): BrowserTool {
+  browserTool(scope?: string): BrowserTool {
     return browserTool({
       ctx: this.ctx,
       browser: this.browser,
-      loader: this.env.LOADER
+      loader: this.env.LOADER,
+      scope
     });
   }
 

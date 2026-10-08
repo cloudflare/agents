@@ -11,10 +11,11 @@ import {
   BROWSER_SESSION_KEEP_ALIVE_MAX_MS,
   Browser,
   browserRun,
+  DEFAULT_BROWSER_SCOPE,
   namedBrowserSessionKey
 } from "../browser/browser";
 import type {
-  BrowserSessionStore,
+  ListableBrowserSessionStore,
   StoredBrowserSession
 } from "../browser/session-store";
 
@@ -24,7 +25,7 @@ function durableKey(name: string): string {
 }
 
 /** A minimal custom store — enough to prove the capability honors one. */
-function createMemoryStore(): BrowserSessionStore & {
+function createMemoryStore(): ListableBrowserSessionStore & {
   sessions: Map<string, StoredBrowserSession>;
 } {
   const sessions = new Map<string, StoredBrowserSession>();
@@ -233,7 +234,7 @@ describe("Browser capability", () => {
       // After liveView's initial read, a concurrent close retires the entry
       // — exactly the interleaving a network-yielding target listing allows.
       let closeWinsAfterNextRead = false;
-      const store: BrowserSessionStore = {
+      const store: ListableBrowserSessionStore = {
         ...inner,
         get: async (k) => {
           const value = await inner.get(k);
@@ -313,15 +314,15 @@ describe("browserTool over a Browser", () => {
         const first = await instance.browserTool().execute({ code }, {});
         expect(first.status).toBe("completed");
         expect(first.status === "completed" && first.result).toEqual({
-          result: { value: "evaluated in target-session-1" }
+          result: { value: "evaluated in target-session-1-2" }
         });
         expect(first.restarted).toBeUndefined();
 
-        // The active tab is saved on the browser's record.
+        // The active tab is saved on the default scope's record.
         const stored = await state.storage.get<StoredBrowserSession>(
-          durableKey("default")
+          `browser-session:browser:scope:7:default:${DEFAULT_BROWSER_SCOPE}`
         );
-        expect(stored?.activeTargetId).toBe("target-session-1");
+        expect(stored?.activeTargetId).toBe("target-session-1-2");
 
         // A tool rebuilt next turn reuses the same browser.
         const second = await instance.browserTool().execute({ code }, {});
@@ -332,6 +333,61 @@ describe("browserTool over a Browser", () => {
         expect(creates).toHaveLength(1);
       }
     );
+  });
+
+  it("gives each scope its own tab in the shared browser", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const a = await instance.browserTool("a").execute({ code }, {});
+      const b = await instance.browserTool("b").execute({ code }, {});
+      const again = await instance.browserTool("a").execute({ code }, {});
+
+      expect(a.status === "completed" && a.result).toEqual({
+        result: { value: "evaluated in target-session-1-2" }
+      });
+      expect(b.status === "completed" && b.result).toEqual({
+        result: { value: "evaluated in target-session-1-3" }
+      });
+      expect(again.status === "completed" && again.result).toEqual({
+        result: { value: "evaluated in target-session-1-2" }
+      });
+    });
+  });
+
+  it("runs one scope's calls one at a time, and different scopes together", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+    const waitCode = (ms: number) => `async () => cdp.send({
+      method: "Runtime.evaluate",
+      params: { expression: "wait:${ms}" },
+      sessionId: "active"
+    })`;
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      // Create the browser first, so neither run below races to create it.
+      await instance.browserTool().execute({ code }, {});
+
+      // Tools built separately (a turn each, say) still share the queue.
+      await Promise.all([
+        instance.browserTool("a").execute({ code: waitCode(40) }, {}),
+        instance.browserTool("a").execute({ code: waitCode(41) }, {})
+      ]);
+      expect(instance.browserEvents.splice(0)).toEqual([
+        "start wait:40",
+        "end wait:40",
+        "start wait:41",
+        "end wait:41"
+      ]);
+
+      await Promise.all([
+        instance.browserTool("b").execute({ code: waitCode(40) }, {}),
+        instance.browserTool("c").execute({ code: waitCode(41) }, {})
+      ]);
+      expect(instance.browserEvents.slice(0, 2).sort()).toEqual([
+        "start wait:40",
+        "start wait:41"
+      ]);
+    });
   });
 
   it("still runs the code after a restart and tells the model", async () => {
@@ -345,7 +401,7 @@ describe("browserTool over a Browser", () => {
       const output = await tool.execute({ code }, {});
       expect(output.status).toBe("completed");
       expect(output.status === "completed" && output.result).toEqual({
-        result: { value: "evaluated in target-session-2" }
+        result: { value: "evaluated in target-session-2-2" }
       });
       expect(output.restarted).toBe(true);
       expect(output.notice).toMatch(/restarted/);
@@ -439,7 +495,7 @@ describe("TanStack AI browserTool over a Browser", () => {
       const first = await instance.tanStackBrowserTool().execute?.({ code });
       expect(first).toMatchObject({
         status: "completed",
-        result: { result: { value: "evaluated in target-session-1" } }
+        result: { result: { value: "evaluated in target-session-1-2" } }
       });
       // The durable call log stays out of the model's context.
       expect(first).not.toHaveProperty("calls");
@@ -448,7 +504,7 @@ describe("TanStack AI browserTool over a Browser", () => {
       const second = await instance.tanStackBrowserTool().execute?.({ code });
       expect(second).toMatchObject({
         status: "completed",
-        result: { result: { value: "evaluated in target-session-2" } },
+        result: { result: { value: "evaluated in target-session-2-2" } },
         restarted: true,
         notice: expect.stringMatching(/navigate again/)
       });

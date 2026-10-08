@@ -23,8 +23,9 @@ const browser = new Browser({
 
 - **One object, one browser.** The name tells browsers apart when a Durable Object has more than one. The model never sees the name.
 - **Provider.** `browserRun(binding, options)` runs the browser on Browser Run. Its options (`keepAliveMs`, `recording`, `guardrails`) apply every time a browser is created, including replacements. `keepAliveMs` defaults to the platform maximum of 10 minutes. Browser Run is the only provider today; bring-your-own-browser would be another one.
-- **`connect()`** reattaches to the browser if it's still running and starts a new one if not. It returns a `CdpConnection`; closing that connection leaves the browser running. `resolve()` does the same without opening a connection.
-- **`restarted: true`** means an earlier browser was lost (closed, idle too long, or crashed), and its tabs and logins are gone. The very first browser reports `false`.
+- **`connect({ scope })`** reattaches to the browser if it's still running and starts a new one if not. It returns a `CdpConnection`; closing that connection leaves the browser running. `resolve()` does the same without opening a connection.
+- **Scopes** say who is driving. Each scope remembers its own active tab (`activeTargetId`, `setActiveTarget`), so two conversations on one browser don't drive each other's page. Cookies, logins, and the tabs themselves are shared. Leaving `scope` out uses `"shared"`.
+- **`restarted: true`** means the browser this scope last worked in was lost (closed, idle too long, or crashed), and its tabs and logins are gone, whichever scope noticed first. A scope's first connection reports `false`.
 - **`close()`** shuts the browser down.
 - **`liveView()`** returns fresh Live View links to the browser's tabs, so a person can watch or take over. It returns `undefined` when there's no running browser.
 - **Lifecycle.** Install a `Browser` with `Lifecycle.use()` and it keeps its record in the Durable Object's storage. It never schedules alarms or jobs. Pass your own `store` to use it without Lifecycle.
@@ -59,12 +60,13 @@ On an `Agent`, call `this.lifecycle.use(this.browser)` in the constructor instea
 
 ### Details
 
-- The browser's record is stored at `browser:session:<name>`: the Browser Run session id, timestamps, and the tab the agent last used.
+- The browser's record is stored at `browser:session:<name>`: the Browser Run session id and timestamps.
+- Each scope has a record at `browser:scope:<length of name>:<name>:<scope>`: the Browser Run session it last worked in and its tab there. A scope whose record names an older session was restarted. All of a browser's scope records share one lock. The 100 most recently used are kept; a scope dropped past that starts fresh. Listing them is why `Browser` needs a store with `list`.
 - There's no cleanup job. Browser Run shuts down an idle browser on its own, and the next `connect()` notices and starts a new one.
 - When a browser is lost or closed, a `browser:retired:<name>` marker is left behind. That marker is how the next `connect()` knows to report `restarted: true`. Markers are never deleted.
 - CDP commands and Live View links count as activity and refresh the record at most once a minute. A refresh never brings back a browser that was closed or replaced.
 - If two callers start a browser at the same time, the first one wins and the other closes its extra browser. Storage locks never wait on Browser Run network calls.
-- If the browser dies between the liveness check and the WebSocket connection, `connect()` starts a new one and reports `restarted: true` instead of failing.
+- If the browser dies between the liveness check and the WebSocket connection, `connect()` starts a new one instead of failing, and reports `restarted: true` to a scope that worked in the old one.
 
 ## Key decisions
 
