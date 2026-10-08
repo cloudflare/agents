@@ -52,7 +52,8 @@ If Browser Rendering expires a session while a pause waits for a human, the resu
 
 The model gets the same `cdp` global (`send`, `attachToTarget`, `spec`, `getDebugLog`, `clearDebugLog`), minus anything for starting, closing, or resetting browsers.
 
-- **`sessionId: "active"`** points at the tab the agent is working in, and it stays the same across runs. Opening a tab with `Target.createTarget` or switching with `attachToTarget` changes it. If the tab was closed, the tool picks another open tab or opens a blank one.
+- **`sessionId: "active"`** points at the tab the agent is working in, and it stays the same across runs. Opening a tab with `Target.createTarget` or switching with `attachToTarget` changes it. If the tab was closed, the tool claims a blank tab no other scope has or opens a new one, never a page the model didn't open, and says the tab was closed when someone else closed it.
+- **One active tab per scope.** `browserTool({ scope })` keeps conversations sharing one `Browser` in their own tabs; cookies and logins stay shared. Each scope gets its own connector on the same codemode runtime. Runs in one scope are queued (per `Browser` object, so tools rebuilt each turn share the queue); different scopes run in parallel over their own CDP connections, which Browser Run allows. The result's `notice` says when another scope is working in the model's tab too.
 - **Popups don't take over.** Tabs the page opens itself come back as `newTabs` in the result, and the model decides whether to switch.
 - **A lost browser doesn't stop the run.** If the browser had to be replaced, the code still runs in the new one, and the result includes `restarted: true` and a `notice` that earlier tabs and logins are gone.
 - **The model can't close the browser.** `Browser.close` and `Browser.crash*` are refused; the host decides when the browser ends.
@@ -78,6 +79,6 @@ The connector (`browser/session-connector.ts`) opens a CDP connection on the fir
 
 ## Verification
 
-`browser-session-connector.test.ts` covers the persistent tool's tab handling, popups, restarts, and errors. `browser-capability.test.ts` runs `browserTool` end to end on an Agent. The real-Chrome suite (`src/browser-tests/`) covers the active tab across runs and approval pauses, popups, detach and reattach, the refused `Browser.close`, and restarts.
+`browser-session-connector.test.ts` covers the persistent tool's tab handling, scopes, popups, restarts, and errors. `browser-capability.test.ts` runs `browserTool` end to end on an Agent. The real-Chrome suite (`src/browser-tests/`) covers the active tab across runs and approval pauses, popups, detach and reattach, the refused `Browser.close`, and restarts.
 
 Unit tests (`browser-connector.test.ts`) cover executionId keying, `disposeExecution` idempotency, `onPassEnd` socket release, sweep over both keyspaces (including exec tombstones, touch-on-use, and the loud resume failure after a sweep), concurrent connect dedupe, and the expired-session error. End-to-end tests (`src/browser-tests/`, run via `pnpm run test:browser` — spawns real `wrangler dev` with `browser` + `LOADER` bindings and Chromium) cover one-shot dispose-on-terminal, dynamic promotion surviving terminal, reuse + sweep, survive-a-pause (session intact across approve), the sequential-calls divergence guard, and a concurrent-socket probe.

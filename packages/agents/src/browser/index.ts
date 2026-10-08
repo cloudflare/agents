@@ -37,7 +37,10 @@ export {
 export {
   Browser,
   browserRun,
+  DEFAULT_BROWSER_SCOPE,
+  MAX_BROWSER_SCOPES,
   type BrowserConnection,
+  type BrowserConnectOptions,
   type BrowserOptions,
   type BrowserProvider,
   type BrowserRunOptions,

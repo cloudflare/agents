@@ -11,6 +11,7 @@ import {
   BROWSER_SESSION_KEEP_ALIVE_MAX_MS,
   Browser,
   browserRun,
+  DEFAULT_BROWSER_SCOPE,
   namedBrowserSessionKey
 } from "../browser/browser";
 import type {
@@ -317,9 +318,9 @@ describe("browserTool over a Browser", () => {
         });
         expect(first.restarted).toBeUndefined();
 
-        // The active tab is saved on the browser's record.
+        // The active tab is saved on the default scope's record.
         const stored = await state.storage.get<StoredBrowserSession>(
-          durableKey("default")
+          `browser-session:browser:scope:7:default:${DEFAULT_BROWSER_SCOPE}`
         );
         expect(stored?.activeTargetId).toBe("target-session-1");
 
@@ -332,6 +333,61 @@ describe("browserTool over a Browser", () => {
         expect(creates).toHaveLength(1);
       }
     );
+  });
+
+  it("gives each scope its own tab in the shared browser", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const a = await instance.browserTool("a").execute({ code }, {});
+      const b = await instance.browserTool("b").execute({ code }, {});
+      const again = await instance.browserTool("a").execute({ code }, {});
+
+      expect(a.status === "completed" && a.result).toEqual({
+        result: { value: "evaluated in target-session-1" }
+      });
+      expect(b.status === "completed" && b.result).toEqual({
+        result: { value: "evaluated in target-session-1-2" }
+      });
+      expect(again.status === "completed" && again.result).toEqual({
+        result: { value: "evaluated in target-session-1" }
+      });
+    });
+  });
+
+  it("runs one scope's calls one at a time, and different scopes together", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+    const waitCode = (ms: number) => `async () => cdp.send({
+      method: "Runtime.evaluate",
+      params: { expression: "wait:${ms}" },
+      sessionId: "active"
+    })`;
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      // Create the browser first, so neither run below races to create it.
+      await instance.browserTool().execute({ code }, {});
+
+      // Tools built separately (a turn each, say) still share the queue.
+      await Promise.all([
+        instance.browserTool("a").execute({ code: waitCode(40) }, {}),
+        instance.browserTool("a").execute({ code: waitCode(41) }, {})
+      ]);
+      expect(instance.browserEvents.splice(0)).toEqual([
+        "start wait:40",
+        "end wait:40",
+        "start wait:41",
+        "end wait:41"
+      ]);
+
+      await Promise.all([
+        instance.browserTool("b").execute({ code: waitCode(40) }, {}),
+        instance.browserTool("c").execute({ code: waitCode(41) }, {})
+      ]);
+      expect(instance.browserEvents.slice(0, 2).sort()).toEqual([
+        "start wait:40",
+        "start wait:41"
+      ]);
+    });
   });
 
   it("still runs the code after a restart and tells the model", async () => {

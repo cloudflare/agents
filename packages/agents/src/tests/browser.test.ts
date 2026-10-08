@@ -6,6 +6,7 @@ import {
   type BrowserRunOptions,
   browserRun,
   DEFAULT_BROWSER_NAME,
+  DEFAULT_BROWSER_SCOPE,
   namedBrowserSessionKey
 } from "../browser/browser";
 import {
@@ -491,10 +492,13 @@ describe("Browser.connect", () => {
   });
 
   it("replaces a browser that expires between the probe and the upgrade", async () => {
-    // The first upgrade finds the just-resolved browser gone (410).
-    const { browser, requests } = createFakeBrowser({ upgradeStatuses: [410] });
+    // The second connection's upgrade finds the browser gone (410).
+    const { browser, requests } = createFakeBrowser({
+      upgradeStatuses: [0, 410]
+    });
     const store = new MemorySessionStore();
     const named = createBrowser(browser, store, { name: "checkout" });
+    (await named.connect()).cdp.close();
 
     const connected = await named.connect();
 
@@ -513,7 +517,16 @@ describe("Browser.connect", () => {
     await expect(named.connect()).rejects.toThrow(/\(502\)/);
   });
 
-  it("records the active tab on the browser's record", async () => {
+  it("doesn't report a restart to a scope's first connection", async () => {
+    const { browser } = createFakeBrowser({ upgradeStatuses: [410] });
+    const named = createBrowser(browser, new MemorySessionStore());
+
+    const connected = await named.connect();
+    expect(connected.sessionId).toBe("session-2");
+    expect(connected.restarted).toBe(false);
+  });
+
+  it("records the active tab per scope", async () => {
     const { browser } = createFakeBrowser();
     const store = new MemorySessionStore();
     const named = createBrowser(browser, store, { name: "work" });
@@ -524,10 +537,29 @@ describe("Browser.connect", () => {
 
     const second = await named.connect();
     expect(second.activeTargetId).toBe("target-7");
+    expect(second.scope).toBe(DEFAULT_BROWSER_SCOPE);
+
+    const other = await named.connect({ scope: "other" });
+    expect(other.activeTargetId).toBeUndefined();
+    expect(await other.targetsInOtherScopes()).toEqual(new Set(["target-7"]));
+    // Another scope's tab can't be claimed; a free one can.
+    expect(await other.claimTarget("target-7")).toBe(false);
+    expect(await other.claimTarget("target-8")).toBe(true);
+
     expect(await second.setActiveTarget(undefined)).toBe(true);
     expect(
-      store.sessions.get(namedBrowserSessionKey("work"))?.activeTargetId
+      store.sessions.get(`browser:scope:4:work:${DEFAULT_BROWSER_SCOPE}`)
+        ?.activeTargetId
     ).toBeUndefined();
+    expect(
+      store.sessions.get(`browser:scope:4:work:other`)?.activeTargetId
+    ).toBe("target-8");
+  });
+
+  it("rejects an empty scope", async () => {
+    const { browser } = createFakeBrowser();
+    const named = createBrowser(browser, new MemorySessionStore());
+    await expect(named.connect({ scope: " " })).rejects.toThrow(/non-empty/);
   });
 
   it("never resurrects a closed browser when recording the active tab", async () => {

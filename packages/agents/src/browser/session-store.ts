@@ -11,10 +11,10 @@ export interface StoredBrowserSession {
    */
   closedAt?: number;
   /**
-   * Named browsers only: the tab (CDP `targetId`) the agent last worked in,
-   * so `sessionId: "active"` in a later execution lands on the same page.
-   * CDP session ids die with each connection; target ids live as long as
-   * the tab.
+   * Browser scope records only: the tab (CDP `targetId`) the scope last
+   * worked in, so `sessionId: "active"` in a later execution lands on the
+   * same page. CDP session ids die with each connection; target ids live as
+   * long as the tab.
    */
   activeTargetId?: string;
 }

@@ -196,12 +196,14 @@ interface NamedRunOutput extends RunOutput {
   report: {
     restarted: boolean;
     newTabs: Array<{ targetId: string; url?: string }>;
+    tabClosed: boolean;
+    tabShared: boolean;
   } | null;
 }
 
-/** Run code against the persistent named browser. */
-async function runNamed(code: string): Promise<NamedRunOutput> {
-  return (await callAgent("runNamed", [code])) as NamedRunOutput;
+/** Run code against the persistent named browser, in a scope. */
+async function runNamed(code: string, scope?: string): Promise<NamedRunOutput> {
+  return (await callAgent("runNamed", [code, scope])) as NamedRunOutput;
 }
 
 async function run(
@@ -632,6 +634,34 @@ describe("browser connector e2e", () => {
       expect(second.status).toBe("completed");
       expect(second.result).toBe("kept");
       expect(second.report?.restarted).toBe(false);
+    });
+
+    it("keeps a separate tab per scope", async () => {
+      await runNamed(setTitle("scope-a"), "a");
+      await runNamed(setTitle("scope-b"), "b");
+
+      expect((await runNamed(readTitle, "a")).result).toBe("scope-a");
+      expect((await runNamed(readTitle, "b")).result).toBe("scope-b");
+    });
+
+    it("says when another scope closed this scope's tab", async () => {
+      await runNamed(setTitle("doomed"), "closed");
+      const closed = await runNamed(
+        `async () => {
+        const { targetInfos } = await cdp.send({ method: "Target.getTargets" });
+        for (const tab of targetInfos) {
+          if (tab.type === "page" && tab.title === "doomed") {
+            await cdp.send({ method: "Target.closeTarget", params: { targetId: tab.targetId } });
+          }
+        }
+      }`,
+        "closer"
+      );
+      expect(closed.status).toBe("completed");
+
+      const after = await runNamed(readTitle, "closed");
+      expect(after.report?.tabClosed).toBe(true);
+      expect(after.result).not.toBe("doomed");
     });
 
     it("reports a popup as a new tab without switching to it", async () => {

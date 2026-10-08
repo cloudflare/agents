@@ -112,9 +112,10 @@ export class BrowserTestAgent extends Agent<Env> {
     });
   }
 
-  #namedConnector(): BrowserSessionConnector {
+  #namedConnector(scope?: string): BrowserSessionConnector {
     return new BrowserSessionConnector(this.ctx, {
-      browser: this.#namedBrowser()
+      browser: this.#namedBrowser(),
+      scope
     });
   }
 
@@ -130,9 +131,10 @@ export class BrowserTestAgent extends Agent<Env> {
   /** Run code against the persistent browser; include the browser report. */
   @callable()
   async runNamed(
-    code: string
+    code: string,
+    scope?: string
   ): Promise<ProxyToolOutput & { report: BrowserExecutionReport | null }> {
-    const connector = this.#namedConnector();
+    const connector = this.#namedConnector(scope);
     const output = await this.#execute(this.#namedRuntime(connector), code);
     return {
       ...output,

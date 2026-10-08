@@ -3,6 +3,7 @@ import { BrowserSessionConnector } from "../browser/session-connector";
 import {
   Browser,
   browserRun,
+  MAX_BROWSER_SCOPES,
   namedBrowserSessionKey
 } from "../browser/browser";
 import type {
@@ -270,7 +271,22 @@ function setup() {
   }
 
   /** Run `calls` as one execution (one pass) and return its report. */
-  async function run(
+  function run(calls: Array<[tool: string, args: Record<string, unknown>]>) {
+    return runWith(connector, calls);
+  }
+
+  /** A connector for another scope of the same browser. */
+  function scoped(scope: string) {
+    const other = new BrowserSessionConnector(fakeCtx, { browser, scope });
+    return {
+      connector: other,
+      run: (calls: Array<[tool: string, args: Record<string, unknown>]>) =>
+        runWith(other, calls)
+    };
+  }
+
+  async function runWith(
+    connector: BrowserSessionConnector,
     calls: Array<[tool: string, args: Record<string, unknown>]>
   ) {
     const executionId = `exec-${++executions}`;
@@ -290,6 +306,10 @@ function setup() {
   function stored() {
     return store.sessions.get(namedBrowserSessionKey("work"));
   }
+  /** The tab a scope of the "work" browser last worked in. */
+  function activeTab(scope = "shared") {
+    return store.sessions.get(`browser:scope:4:work:${scope}`)?.activeTargetId;
+  }
   function instance() {
     return fake.instances.get(stored()!.sessionId)!;
   }
@@ -302,10 +322,13 @@ function setup() {
   return {
     ...fake,
     store,
+    browser,
     connector,
     pass,
     run,
+    scoped,
     stored,
+    activeTab,
     instance,
     start
   };
@@ -356,8 +379,13 @@ describe("BrowserSessionConnector", () => {
     const { results, report } = await t.run([evaluateActive]);
 
     expect(evaluatedIn(results[0])).toBe("target-1");
-    expect(report).toEqual({ restarted: false, newTabs: [] });
-    expect(t.stored()?.activeTargetId).toBe("target-1");
+    expect(report).toEqual({
+      restarted: false,
+      newTabs: [],
+      tabClosed: false,
+      tabShared: false
+    });
+    expect(t.activeTab()).toBe("target-1");
   });
 
   it("keeps the active tab across executions, even with other tabs open", async () => {
@@ -400,13 +428,14 @@ describe("BrowserSessionConnector", () => {
     expect(report?.newTabs).toEqual([]);
   });
 
-  it("falls back to the first tab when several are open and none is stored", async () => {
+  it("claims an unused blank tab, never a page it didn't open", async () => {
     const t = setup();
-    await t.run([["send", { method: "Browser.getVersion" }]]);
-    t.instance().addTab("https://second.example/");
+    const instance = await t.start();
+    instance.tabs[0].url = "https://someone-elses.example/";
+    instance.addTab();
 
     const { results } = await t.run([evaluateActive]);
-    expect(evaluatedIn(results[0])).toBe("target-1");
+    expect(evaluatedIn(results[0])).toBe("target-2");
   });
 
   it("makes a tab created with Target.createTarget active", async () => {
@@ -419,7 +448,7 @@ describe("BrowserSessionConnector", () => {
       evaluateActive
     ]);
     expect(evaluatedIn(results[1])).toBe("target-2");
-    expect(t.stored()?.activeTargetId).toBe("target-2");
+    expect(t.activeTab()).toBe("target-2");
   });
 
   it("makes an attached tab active and returns a stable handle", async () => {
@@ -441,7 +470,7 @@ describe("BrowserSessionConnector", () => {
     expect(results[0]).toEqual({ sessionId: "target:target-2" });
     expect(evaluatedIn(results[1])).toBe("target-2");
     expect(evaluatedIn(results[2])).toBe("target-2");
-    expect(t.stored()?.activeTargetId).toBe("target-2");
+    expect(t.activeTab()).toBe("target-2");
 
     // One attach per target per socket.
     const attaches = t.sockets[0].sent.filter(
@@ -482,7 +511,7 @@ describe("BrowserSessionConnector", () => {
     ]);
     const { sessionId } = first.results[0] as { sessionId: string };
     expect(sessionId).toMatch(/^cdp-/);
-    expect(t.stored()?.activeTargetId).toBe("target-2");
+    expect(t.activeTab()).toBe("target-2");
 
     // Chrome's id belongs to that run's socket; a later run gets a hint.
     const second = await t.run([
@@ -560,7 +589,7 @@ describe("BrowserSessionConnector", () => {
     expect(report?.newTabs).toEqual([
       { targetId: "target-2", url: "https://popup.example/" }
     ]);
-    expect(t.stored()?.activeTargetId).toBe("target-1");
+    expect(t.activeTab()).toBe("target-1");
   });
 
   it("keeps popups from earlier passes of a resumed execution", async () => {
@@ -601,7 +630,7 @@ describe("BrowserSessionConnector", () => {
       t.sockets[0].close();
       await t.connector.onPassEnd("exec-drop");
 
-      expect(t.stored()?.activeTargetId).toBe("target-2");
+      expect(t.activeTab()).toBe("target-2");
       expect(warn).toHaveBeenCalledOnce();
       const { results } = await t.run([evaluateActive]);
       expect(evaluatedIn(results[0])).toBe("target-2");
@@ -646,8 +675,9 @@ describe("BrowserSessionConnector", () => {
       evaluateActive
     ]);
     expect(evaluatedIn(results[0])).toBe("target-1");
-    expect(evaluatedIn(results[2])).toBe("target-2");
-    expect(t.stored()?.activeTargetId).toBe("target-2");
+    // A new blank tab, not the other open page.
+    expect(evaluatedIn(results[2])).toBe("target-3");
+    expect(t.activeTab()).toBe("target-3");
   });
 
   it("forgets a stored tab that was closed outside the agent", async () => {
@@ -655,7 +685,7 @@ describe("BrowserSessionConnector", () => {
     await t.run([evaluateActive]);
     t.instance().tabs = [];
     await t.run([["send", { method: "Browser.getVersion" }]]);
-    expect(t.stored()?.activeTargetId).toBeUndefined();
+    expect(t.activeTab()).toBeUndefined();
   });
 
   it("reports restarted when the browser was replaced, with no stale tab", async () => {
@@ -668,7 +698,7 @@ describe("BrowserSessionConnector", () => {
     expect(report?.restarted).toBe(true);
     expect(t.stored()?.sessionId).toBe("session-2");
     expect(evaluatedIn(results[0])).toBe("target-1");
-    expect(t.stored()?.activeTargetId).toBe("target-1");
+    expect(t.activeTab()).toBe("target-1");
   });
 
   it("reports nothing for an execution that never touched the browser", async () => {
@@ -711,5 +741,164 @@ describe("BrowserSessionConnector", () => {
     const { results } = await t.run([["spec", {}]]);
     const spec = results[0] as { domains: Array<{ name: string }> };
     expect(spec.domains.map((domain) => domain.name)).toEqual(["Page"]);
+  });
+});
+
+describe("BrowserSessionConnector scopes", () => {
+  const createTab: [string, Record<string, unknown>] = [
+    "send",
+    { method: "Target.createTarget", params: { url: "about:blank" } }
+  ];
+
+  it("keeps an active tab per scope", async () => {
+    const t = setup();
+    const a = t.scoped("a");
+    const b = t.scoped("b");
+
+    const first = await a.run([evaluateActive]);
+    const second = await b.run([evaluateActive]);
+    const again = await a.run([evaluateActive]);
+
+    expect(evaluatedIn(first.results[0])).toBe("target-1");
+    // B doesn't land in A's tab: it gets one of its own.
+    expect(evaluatedIn(second.results[0])).toBe("target-2");
+    expect(evaluatedIn(again.results[0])).toBe("target-1");
+    expect(t.activeTab("a")).toBe("target-1");
+    expect(t.activeTab("b")).toBe("target-2");
+  });
+
+  it("keeps a tab switch in its own scope", async () => {
+    const t = setup();
+    const a = t.scoped("a");
+    const b = t.scoped("b");
+    await a.run([evaluateActive]);
+    await b.run([createTab, evaluateActive]);
+
+    const { results } = await a.run([evaluateActive]);
+    expect(evaluatedIn(results[0])).toBe("target-1");
+  });
+
+  it("doesn't let a new scope claim a tab another scope just opened", async () => {
+    const t = setup();
+    const a = t.scoped("a");
+    const b = t.scoped("b");
+    (await t.start()).tabs[0].url = "https://elsewhere.example/";
+    // A opens a blank tab, and B starts before A's pass ends.
+    await a.connector.executeTool("send", createTab[1], {
+      executionId: "a-1"
+    });
+    const { results } = await b.run([evaluateActive]);
+    await a.connector.onPassEnd("a-1");
+
+    expect(evaluatedIn(results[0])).toBe("target-3");
+    expect(t.activeTab("a")).toBe("target-2");
+  });
+
+  it("tells every scope about a restart, once", async () => {
+    const t = setup();
+    const a = t.scoped("a");
+    const b = t.scoped("b");
+    await a.run([evaluateActive]);
+    await b.run([evaluateActive]);
+    t.instances.clear();
+
+    expect((await a.run([evaluateActive])).report?.restarted).toBe(true);
+    expect((await b.run([evaluateActive])).report?.restarted).toBe(true);
+    expect((await b.run([evaluateActive])).report?.restarted).toBe(false);
+  });
+
+  it("doesn't report a restart to a scope's first run", async () => {
+    const t = setup();
+    await t.scoped("a").run([evaluateActive]);
+    t.instances.clear();
+
+    const { report } = await t.scoped("b").run([evaluateActive]);
+    expect(report?.restarted).toBe(false);
+  });
+
+  it("reports a popup to the scope whose page opened it", async () => {
+    const t = setup();
+    const a = t.scoped("a");
+    const b = t.scoped("b");
+    await b.run([evaluateActive]);
+    // A's pass is open while B's page opens a popup.
+    await a.connector.executeTool("send", evaluateActive[1], {
+      executionId: "a-1"
+    });
+    const fromB = await b.run([openPopup]);
+    await a.connector.onPassEnd("a-1");
+
+    expect(a.connector.takeReport("a-1")?.newTabs).toEqual([]);
+    expect(fromB.report?.newTabs.map((tab) => tab.url)).toEqual([
+      "https://popup.example/"
+    ]);
+  });
+
+  it("says when another scope closed this scope's tab", async () => {
+    const t = setup();
+    const a = t.scoped("a");
+    const b = t.scoped("b");
+    await a.run([evaluateActive]);
+    await b.run([
+      [
+        "send",
+        { method: "Target.closeTarget", params: { targetId: "target-1" } }
+      ]
+    ]);
+
+    const { results, report } = await a.run([evaluateActive]);
+    expect(report?.tabClosed).toBe(true);
+    expect(evaluatedIn(results[0])).not.toBe("target-1");
+    expect((await a.run([evaluateActive])).report?.tabClosed).toBe(false);
+  });
+
+  it("doesn't say the tab was closed when this scope closed it", async () => {
+    const t = setup();
+    const { report } = await t.run([
+      evaluateActive,
+      [
+        "send",
+        { method: "Target.closeTarget", params: { targetId: "target-1" } }
+      ],
+      evaluateActive
+    ]);
+    expect(report?.tabClosed).toBe(false);
+  });
+
+  it("says when another scope works in this scope's tab", async () => {
+    const t = setup();
+    const a = t.scoped("a");
+    const b = t.scoped("b");
+    await a.run([evaluateActive]);
+
+    const { report } = await b.run([
+      ["attachToTarget", { targetId: "target-1" }],
+      evaluateActive
+    ]);
+    expect(report?.tabShared).toBe(true);
+    expect((await a.run([evaluateActive])).report?.tabShared).toBe(true);
+  });
+
+  it(`keeps at most ${MAX_BROWSER_SCOPES} scopes, dropping the least recently used`, async () => {
+    const t = setup();
+    await t.browser.resolve();
+    let now = 1_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => ++now);
+    try {
+      for (let i = 0; i <= MAX_BROWSER_SCOPES; i++) {
+        const connected = await t.browser.connect({ scope: `s${i}` });
+        connected.cdp.disconnect();
+        // Touch s0 again, so s1 is the least recently used.
+        if (i === 1) {
+          (await t.browser.connect({ scope: "s0" })).cdp.disconnect();
+        }
+      }
+    } finally {
+      clock.mockRestore();
+    }
+    const scopes = await t.store.list("browser:scope:4:work:");
+    expect(scopes.size).toBe(MAX_BROWSER_SCOPES);
+    expect(scopes.has("browser:scope:4:work:s0")).toBe(true);
+    expect(scopes.has("browser:scope:4:work:s1")).toBe(false);
   });
 });

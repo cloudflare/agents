@@ -8,6 +8,7 @@ import {
   DynamicWorkerExecutor,
   type ProxyToolOutput
 } from "@cloudflare/codemode";
+import { DEFAULT_BROWSER_SCOPE } from "./browser";
 import {
   BROWSER_INSTRUCTIONS,
   BrowserSessionConnector,
@@ -35,6 +36,14 @@ export interface BrowserToolOptions {
   timeoutMs?: number;
 
   /**
+   * Who is driving, when several chats or users share one `Browser`: runs
+   * with the same scope share an active tab, and each scope keeps its own.
+   * Cookies and logins are shared by every scope. Defaults to `"shared"`,
+   * one active tab for every tool that leaves it out.
+   */
+  scope?: string;
+
+  /**
    * Durable Object state for the codemode runtime facet. Optional inside an
    * Agent (resolved via `getCurrentAgent()`); pass it explicitly elsewhere.
    *
@@ -57,7 +66,11 @@ export interface BrowserToolInput {
 export type BrowserToolOutput = ProxyToolOutput & {
   /** The browser was replaced before this run; earlier tabs are gone. */
   restarted?: true;
-  /** A sentence telling the model what `restarted` means for it. */
+  /**
+   * Sentences telling the model what happened to its browser: it was
+   * restarted, its tab was closed by someone else, or another scope is
+   * working in its tab too.
+   */
   notice?: string;
   /** Tabs the page opened itself (popups, `target=_blank` links). */
   newTabs?: BrowserNewTab[];
@@ -67,6 +80,15 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 
 const RESTARTED_NOTICE =
   "The browser was restarted before this run (it expired or was closed): earlier tabs, logins, and page state are gone. Your code ran in a fresh browser — navigate again before relying on page state.";
+
+const TAB_CLOSED_NOTICE =
+  "The tab you were working in was closed since your last run (by another conversation using this browser, or a person), so this run used a blank tab — navigate again before relying on page state.";
+
+const TAB_SHARED_NOTICE =
+  "Another conversation using this browser is also working in your tab, so its page may change between your runs. Open a tab of your own with Target.createTarget if you need one.";
+
+/** Scopes whose runtime and connector stay built; older ones are rebuilt. */
+const MAX_CACHED_SCOPES = 32;
 
 /**
  * A codemode runtime name per browser. Browser names are host-chosen and
@@ -81,17 +103,45 @@ function browserRuntimeName(name: string): string {
   return `browser-tool_${escaped}`;
 }
 
+/**
+ * The latest run queued per browser and scope, so runs in one scope go one
+ * at a time, even from tools built separately (one per turn, say). Per
+ * isolate, which is per Durable Object.
+ */
+const runQueues = new WeakMap<BrowserSource, Map<string, Promise<unknown>>>();
+
+function queued<T>(
+  browser: BrowserSource,
+  scope: string,
+  run: () => Promise<T>
+): Promise<T> {
+  let queues = runQueues.get(browser);
+  if (!queues) runQueues.set(browser, (queues = new Map()));
+  const previous = queues.get(scope) ?? Promise.resolve();
+  const next = previous.then(run, run);
+  const settled = next.catch(() => undefined);
+  queues.set(scope, settled);
+  void settled.then(() => {
+    if (queues.get(scope) === settled) queues.delete(scope);
+  });
+  return next;
+}
+
 /** Add what happened to the browser to the codemode result. */
 function withBrowserReport(
   output: ProxyToolOutput,
   report: BrowserExecutionReport | undefined
 ): BrowserToolOutput {
   if (!report) return output;
+  const notices = [
+    report.restarted && RESTARTED_NOTICE,
+    report.tabClosed && !report.restarted && TAB_CLOSED_NOTICE,
+    report.tabShared && TAB_SHARED_NOTICE
+  ].filter((notice) => typeof notice === "string");
   return {
     ...output,
-    ...(report.restarted
-      ? { restarted: true as const, notice: RESTARTED_NOTICE }
-      : {}),
+    ...(report.restarted ? { restarted: true as const } : {}),
+    ...(notices.length > 0 ? { notice: notices.join(" ") } : {}),
     ...(report.newTabs.length > 0 ? { newTabs: report.newTabs } : {})
   };
 }
@@ -111,6 +161,10 @@ export function browserReportNotes(output: BrowserToolOutput): string[] {
 /**
  * Build the codemode runtime and connector for one `browserTool`, and wrap
  * `execute` so each result carries the browser report.
+ *
+ * Each scope gets its own connector (which knows its scope) on the same
+ * codemode runtime, built on first use. Runs in one scope wait for each
+ * other, since they drive one tab; runs in different scopes go in parallel.
  */
 export function createBrowserToolCore(
   options: BrowserToolOptions,
@@ -127,18 +181,9 @@ export function createBrowserToolCore(
   }
 
   const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const connector = new BrowserSessionConnector(ctx, {
-    browser: options.browser
-  });
-  const runtime = createCodemodeRuntime({
-    ctx,
-    executor: new DynamicWorkerExecutor({
-      loader: options.loader,
-      timeout
-    }),
-    connectors: [connector],
-    name: browserRuntimeName(options.browser.name),
-    transformResult: transformBrowserResult
+  const executor = new DynamicWorkerExecutor({
+    loader: options.loader,
+    timeout
   });
 
   // Our own description, not codemode's generic one: that one tells the
@@ -171,20 +216,61 @@ export function createBrowserToolCore(
     rules,
     '- A `SyntaxError` from "Failed to start Worker" means your code didn\'t parse; its line number points into wrapper code, not yours. Check regex literals and escapes.'
   ].join("\n");
-  const codemodeTool = runtime.tool({ description });
+  type CodemodeTool = ReturnType<
+    ReturnType<typeof createCodemodeRuntime>["tool"]
+  >;
+  interface ScopedTool {
+    connector: BrowserSessionConnector;
+    tool: CodemodeTool;
+  }
+  const durableCtx: DurableObjectState = ctx;
+  const scopes = new Map<string, ScopedTool>();
+  function scoped(scope: string): ScopedTool {
+    const cached = scopes.get(scope);
+    if (cached) {
+      // Most recently used last, so the first entry is the one to drop.
+      scopes.delete(scope);
+      scopes.set(scope, cached);
+      return cached;
+    }
+    const connector = new BrowserSessionConnector(durableCtx, {
+      browser: options.browser,
+      scope
+    });
+    const runtime = createCodemodeRuntime({
+      ctx: durableCtx,
+      executor,
+      connectors: [connector],
+      name: browserRuntimeName(options.browser.name),
+      transformResult: transformBrowserResult
+    });
+    const built = { connector, tool: runtime.tool({ description }) };
+    scopes.set(scope, built);
+    if (scopes.size > MAX_CACHED_SCOPES) {
+      const oldest = scopes.keys().next().value;
+      if (oldest !== undefined) scopes.delete(oldest);
+    }
+    return built;
+  }
+
+  const defaultScope = options.scope ?? DEFAULT_BROWSER_SCOPE;
+  const { inputSchema } = scoped(defaultScope).tool;
 
   return {
-    description: codemodeTool.description,
-    inputSchema: codemodeTool.inputSchema,
-    execute: async (
+    description,
+    inputSchema,
+    /** Run `input` in `scope`, which defaults to the tool's `scope`. */
+    execute: (
       input: BrowserToolInput,
-      executeOptions?: unknown
-    ): Promise<BrowserToolOutput> => {
-      const output = await codemodeTool.execute(input, executeOptions);
-      return withBrowserReport(
-        output,
-        connector.takeReport(output.executionId)
-      );
-    }
+      scope: string = defaultScope
+    ): Promise<BrowserToolOutput> =>
+      queued(options.browser, scope, async () => {
+        const { connector, tool } = scoped(scope);
+        const output = await tool.execute(input, undefined);
+        return withBrowserReport(
+          output,
+          connector.takeReport(output.executionId)
+        );
+      })
   };
 }
