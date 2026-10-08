@@ -18,7 +18,7 @@ Browser tools are useful when your agent needs to:
 - **Capture screenshots or PDFs** — visual snapshots of web content
 - **Profile performance** — Core Web Vitals, JavaScript profiling, memory analysis
 
-For simple page fetches where you do not need a full browser, `fetch()` is simpler.
+For simple page fetches where you do not need a full browser, `fetch()` is simpler. To let a model read pages as Markdown without a browser, use the [`web_fetch` tool](./fetch-the-web.md) from `agents/webfetch`.
 
 ## Installation
 
