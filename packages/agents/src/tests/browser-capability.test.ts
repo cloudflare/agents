@@ -547,12 +547,12 @@ describe("pi browserTool over a Browser", () => {
   }`;
 
   // pi hands every call its invocation API and context; the browser tool
-  // uses neither, so empty stand-ins are enough to call it directly.
+  // reads only the API's conversationId, so stand-ins are enough to call it.
   type PiTool = ReturnType<TestBrowserAgent["piBrowserTool"]>;
-  const run = (tool: PiTool, source: string) =>
+  const run = (tool: PiTool, source: string, conversationId = 1) =>
     tool.execute(
       { code: source },
-      {} as Parameters<PiTool["execute"]>[1],
+      { conversationId } as unknown as Parameters<PiTool["execute"]>[1],
       {} as Parameters<PiTool["execute"]>[2]
     );
   const textOf = (result: Awaited<ReturnType<PiTool["execute"]>>) => {
@@ -602,6 +602,28 @@ describe("pi browserTool over a Browser", () => {
       });
       expect(second.details).toMatchObject({ restarted: true });
     });
+  });
+
+  it("gives each conversation its own tab", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(
+      stub,
+      async (instance: TestBrowserAgent, state) => {
+        const tool = instance.piBrowserTool();
+        const value = async (conversationId: number) =>
+          textOf(await run(tool, code, conversationId)).result.result.value;
+
+        expect(await value(1)).toBe("evaluated in target-session-1");
+        expect(await value(2)).toBe("evaluated in target-session-1-2");
+        expect(await value(1)).toBe("evaluated in target-session-1");
+        expect(
+          await state.storage.get(
+            `browser-session:browser:scope:7:default:conversation:2`
+          )
+        ).toMatchObject({ activeTargetId: "target-session-1-2" });
+      }
+    );
   });
 
   it("attaches a screenshot as an image after the result text", async () => {

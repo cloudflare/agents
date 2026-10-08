@@ -279,7 +279,8 @@ this.registry.install({
 ```
 
 - A returned screenshot comes back as an image in the tool result, so the model can see the page and a UI can show it from the transcript. pi-ai only sends the image to models that accept images; other models get the text alone.
-- The tool's calls run one at a time, since they share the active tab.
+- Each pi conversation gets its own active tab: `scope` defaults to the calling conversation, so sessions, forks, and subagents on one object don't drive each other's page. Cookies and logins are shared. Pass `scope` as a string to share one tab, or as a function of the call (`(api) => string`) to choose.
+- A conversation's calls run one at a time, since they share its tab.
 - pi doesn't rerun a browser call cut off by an eviction, because the code may have clicked or submitted something. The model gets an interrupted result and can try again; the browser itself is still there.
 - Stopping a conversation doesn't stop a browser call already running. It finishes or times out (`timeoutMs`, default 60 seconds).
 

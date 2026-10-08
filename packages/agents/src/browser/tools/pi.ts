@@ -4,6 +4,7 @@ import {
   type TextContent
 } from "@earendil-works/pi-ai";
 import type {
+  ToolExecutionApi,
   ToolExecutionResult,
   ToolRegistration
 } from "@earendil-works/pi-durable";
@@ -27,9 +28,17 @@ export type { BrowserNewTab, BrowserSource } from "../session-connector";
 
 export interface PiBrowserToolOptions<
   TName extends string = "browser"
-> extends BrowserToolOptions {
+> extends Omit<BrowserToolOptions, "scope"> {
   /** The tool's name. Default `"browser"`. */
   name?: TName;
+  /**
+   * Which calls share an active tab: a string for every call, or a function
+   * of the call. Defaults to `conversation:<id>` for the calling
+   * conversation, so each
+   * conversation (and each fork or subagent) on the Durable Object keeps its
+   * own tab, while cookies and logins stay shared.
+   */
+  scope?: string | ((api: ToolExecutionApi) => string);
 }
 
 const browserToolParameters = Type.Object({
@@ -118,6 +127,10 @@ function browserToolResult(
   };
 }
 
+function conversationScope(api: ToolExecutionApi): string {
+  return `conversation:${api.conversationId}`;
+}
+
 /**
  * Create a pi-durable tool that lets the model drive a persistent browser
  * with JavaScript and the Chrome DevTools Protocol.
@@ -128,8 +141,10 @@ function browserToolResult(
  * `restarted: true`. A returned screenshot comes back as an image part that
  * the model sees, when its model accepts images.
  *
- * The tool runs its calls one at a time, since they share the active tab,
- * and doesn't rerun after an eviction (its code may have clicked or
+ * Each conversation gets its own active tab (see
+ * {@link PiBrowserToolOptions.scope}). A conversation's calls run one at a
+ * time, since they share its tab, and the tool doesn't rerun after an
+ * eviction (its code may have clicked or
  * submitted something): pi gives the model an interrupted result instead.
  * Pass `ctx` unless the tool is built inside an Agent.
  *
@@ -165,7 +180,8 @@ function browserToolResult(
 export function browserTool<TName extends string = "browser">(
   options: PiBrowserToolOptions<TName>
 ): PiBrowserTool<TName> {
-  const core = createBrowserToolCore(options, {
+  const { scope = conversationScope, ...coreOptions } = options;
+  const core = createBrowserToolCore(coreOptions, {
     screenshotHint:
       "To see a screenshot, return { type: 'browser_screenshot', mediaType, data } with data from Page.captureScreenshot and mediaType 'image/png', or 'image/jpeg' if you captured with format: 'jpeg'. The image is attached to the result."
   });
@@ -173,12 +189,15 @@ export function browserTool<TName extends string = "browser">(
     name: options.name ?? ("browser" as TName),
     description: core.description,
     parameters: browserToolParameters,
-    // Calls share the active tab, so one round's calls must not interleave.
+    // A conversation's calls share its tab, so they must not interleave.
     executionMode: "sequential",
     // The code may have clicked or submitted something; don't run it twice.
     replay: "unsafe",
-    async execute(args) {
-      return browserToolResult(await core.execute({ code: args.code }));
+    async execute(args, api) {
+      const callScope = typeof scope === "string" ? scope : scope(api);
+      return browserToolResult(
+        await core.execute({ code: args.code }, callScope)
+      );
     }
   };
 }
