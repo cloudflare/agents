@@ -2,11 +2,7 @@ import { env } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import { createFetchTools } from "../tools/fetch";
-import type {
-  FetchResult,
-  FetchWorkspace,
-  CreateFetchToolsOptions
-} from "../tools/fetch";
+import type { FetchResult, CreateFetchToolsOptions } from "../tools/fetch";
 import type { ThinkFetchToolsTestAgent } from "./agents/fetch-tools";
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -28,24 +24,6 @@ function makeBinding(handler: Handler): Fetcher {
       return Promise.resolve(handler(url, init));
     }
   } as unknown as Fetcher;
-}
-
-function makeWorkspace() {
-  const files = new Map<string, string>();
-  const bytes = new Map<string, Uint8Array>();
-  const dirs: string[] = [];
-  const ws: FetchWorkspace = {
-    mkdir: (p) => {
-      dirs.push(p);
-    },
-    writeFile: (p, c) => {
-      files.set(p, c);
-    },
-    writeFileBytes: (p, b) => {
-      bytes.set(p, b);
-    }
-  };
-  return { files, bytes, dirs, ws };
 }
 
 const toolCtx = () =>
@@ -344,30 +322,34 @@ describe("fetch — size limits", () => {
 // ── Workspace spill ───────────────────────────────────────────────
 
 describe("fetch — workspace spill", () => {
+  async function spillAgent() {
+    return getAgentByName(
+      env.ThinkFetchToolsTestAgent as unknown as DurableObjectNamespace<ThinkFetchToolsTestAgent>,
+      `spill-${crypto.randomUUID()}`
+    );
+  }
+
   it("writes text bodies to the workspace in workspace mode", async () => {
-    const { ws, files } = makeWorkspace();
-    const res = await runTool(docsTools({ workspace: ws }), "fetch_docs", {
-      path: "/v1/docs/ok",
+    const agent = await spillAgent();
+    const result = await agent.spillForTest("hello docs", "text/plain", {
       response: "workspace"
     });
-    expect(res).toMatchObject({ ok: true, response: "workspace" });
-    if (res.ok && res.path) {
-      expect(res.path.startsWith("/fetched/")).toBe(true);
-      expect(files.get(res.path)).toBe("hello docs");
-    }
+    expect(result).toMatchObject({ ok: true, response: "workspace" });
+    expect(result.path?.startsWith("/workspace/fetched/")).toBe(true);
+    expect(new TextDecoder().decode(new Uint8Array(result.stored ?? []))).toBe(
+      "hello docs"
+    );
   });
 
-  it("writes binary bodies via writeFileBytes when spill is enabled in auto", async () => {
-    const { ws, bytes } = makeWorkspace();
-    const res = await runTool(
-      docsTools({ workspace: ws, spillToWorkspace: true }),
-      "fetch_docs",
-      { path: "/v1/docs/bin" }
+  it("writes binary bodies when spill is enabled in auto", async () => {
+    const agent = await spillAgent();
+    const result = await agent.spillForTest(
+      [1, 2, 3, 4],
+      "application/octet-stream",
+      { spillToWorkspace: true }
     );
-    expect(res).toMatchObject({ ok: true, response: "workspace" });
-    if (res.ok && res.path) {
-      expect(Array.from(bytes.get(res.path) ?? [])).toEqual([1, 2, 3, 4]);
-    }
+    expect(result).toMatchObject({ ok: true, response: "workspace" });
+    expect(result.stored).toEqual([1, 2, 3, 4]);
   });
 });
 

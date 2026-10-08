@@ -1,11 +1,8 @@
 import { describe, expect, it } from "vitest";
 import * as skills from "../skills";
 import { SkillRegistry } from "../skills";
-import type {
-  LegacySkillWorkspace,
-  SkillManifest,
-  SkillSource
-} from "../skills";
+import type { SkillManifest, SkillSource } from "../skills";
+import { MemorySkillWorkspace } from "./memory-skill-workspace";
 
 type ExecutableTool = {
   execute(input: Record<string, unknown>): Promise<unknown> | unknown;
@@ -13,40 +10,6 @@ type ExecutableTool = {
 
 function executable(tool: unknown): ExecutableTool {
   return tool as ExecutableTool;
-}
-
-class MemorySkillWorkspace implements LegacySkillWorkspace {
-  readonly files = new Map<string, Uint8Array>();
-
-  async stat(path: string): Promise<{ type: string; size: number } | null> {
-    const bytes = this.files.get(path);
-    return bytes ? { type: "file", size: bytes.byteLength } : null;
-  }
-
-  async readFile(path: string): Promise<string | null> {
-    const bytes = this.files.get(path);
-    return bytes ? new TextDecoder().decode(bytes) : null;
-  }
-
-  async readFileBytes(path: string): Promise<Uint8Array | null> {
-    const bytes = this.files.get(path);
-    return bytes ? new Uint8Array(bytes) : null;
-  }
-
-  async writeFile(path: string, content: string): Promise<void> {
-    this.files.set(path, new TextEncoder().encode(content));
-  }
-
-  async writeFileBytes(
-    path: string,
-    content: Uint8Array | ArrayBuffer
-  ): Promise<void> {
-    const bytes =
-      content instanceof Uint8Array ? content : new Uint8Array(content);
-    this.files.set(path, new Uint8Array(bytes));
-  }
-
-  async mkdir(): Promise<void> {}
 }
 
 const manifest: SkillManifest = {
@@ -236,17 +199,19 @@ Review carefully.
     const workspace = new MemorySkillWorkspace();
 
     const seeded = await registry.seedWorkspace(workspace);
-    expect(seeded.root).toBe("/.agents/skills");
+    expect(seeded.root).toBe("/workspace/.agents/skills");
     expect(resourceReads).toBe(0);
     expect(
-      await workspace.readFile("/.agents/skills/code-review/SKILL.md")
+      await workspace.readText("/workspace/.agents/skills/code-review/SKILL.md")
     ).toContain("Review carefully.");
     expect(
-      await workspace.readFile("/.agents/skills/code-review/scripts/review.ts")
+      await workspace.readText(
+        "/workspace/.agents/skills/code-review/scripts/review.ts"
+      )
     ).toBeNull();
 
-    await workspace.writeFile(
-      "/.agents/skills/code-review/SKILL.md",
+    await workspace.writeText(
+      "/workspace/.agents/skills/code-review/SKILL.md",
       "---\nname: code-review\ndescription: Edited review skill.\n---\n\nUse the workspace edit.\n"
     );
     const activated = await executable(registry.tools().activate_skill).execute(
@@ -264,11 +229,13 @@ Review carefully.
     expect(first).toContain("export default function review");
     expect(resourceReads).toBe(1);
     expect(
-      await workspace.readFile("/.agents/skills/code-review/scripts/review.ts")
+      await workspace.readText(
+        "/workspace/.agents/skills/code-review/scripts/review.ts"
+      )
     ).toContain("export default function review");
 
-    await workspace.writeFile(
-      "/.agents/skills/code-review/scripts/review.ts",
+    await workspace.writeText(
+      "/workspace/.agents/skills/code-review/scripts/review.ts",
       "export default function edited() {}"
     );
     const edited = await resourceTool.execute({

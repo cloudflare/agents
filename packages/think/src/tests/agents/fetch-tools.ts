@@ -6,6 +6,8 @@
  */
 import type { LanguageModel } from "ai";
 import { Think } from "../../think";
+import { createFetchTools, type FetchResult } from "../../tools/fetch";
+import { WorkspaceFiles } from "../../workspace-files";
 import type { StreamCallback, TurnContext } from "../../think";
 
 const v3FinishReason = (unified: "stop" | "tool-calls") => ({
@@ -92,5 +94,52 @@ export class ThinkFetchToolsTestAgent extends Think {
     const cb = new CollectingCallback();
     await this.chat("hello", cb);
     return { toolNames: this._lastToolNames, system: this._lastSystem };
+  }
+
+  /**
+   * Fetch one body through a binding into this agent's Workspace, then read
+   * the stored file back as bytes.
+   */
+  async spillForTest(
+    body: string | number[],
+    contentType: string,
+    request: { response?: "workspace"; spillToWorkspace?: boolean }
+  ): Promise<{
+    ok: boolean;
+    response: string | null;
+    path: string | null;
+    stored: number[] | null;
+  }> {
+    await this.__unsafe_ensureInitialized();
+    const binding = {
+      fetch: async () =>
+        new Response(typeof body === "string" ? body : new Uint8Array(body), {
+          headers: { "content-type": contentType }
+        })
+    } as unknown as Fetcher;
+    const tools = createFetchTools({
+      bindings: { docs: { binding, allowlist: ["/v1/docs/**"] } },
+      workspace: this.workspace,
+      spillToWorkspace: request.spillToWorkspace ?? false
+    });
+    const execute = tools.fetch_docs?.execute;
+    if (!execute) throw new Error("fetch_docs has no execute");
+    const result = (await execute(
+      {
+        path: "/v1/docs/body",
+        ...(request.response ? { response: request.response } : {})
+      },
+      { toolCallId: "test", messages: [], context: {} } as never
+    )) as FetchResult;
+    const stored =
+      result.ok && result.path
+        ? await new WorkspaceFiles(this.workspace).readBytes(result.path)
+        : null;
+    return {
+      ok: result.ok,
+      response: result.ok ? (result.response ?? null) : null,
+      path: result.ok ? (result.path ?? null) : null,
+      stored: stored === null ? null : Array.from(stored)
+    };
   }
 }

@@ -6,8 +6,10 @@
 import { tool } from "ai";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
-import type { WorkspaceFsLike } from "@cloudflare/shell";
-import { createWorkspaceStateBackend } from "@cloudflare/shell";
+import {
+  Workspace as ShellWorkspace,
+  createWorkspaceStateBackend
+} from "@cloudflare/shell";
 import { Think } from "../../think";
 import {
   createExecuteRuntime,
@@ -57,7 +59,7 @@ export class ThinkExecuteToolAgent extends Think {
         })
       },
       state: createWorkspaceStateBackend(
-        this.workspace as unknown as WorkspaceFsLike
+        new ShellWorkspace({ sql: this.ctx.storage.sql, namespace: "state" })
       ),
       loader: this.env.LOADER
     });
@@ -70,7 +72,18 @@ export class ThinkExecuteToolAgent extends Think {
 
   /** Run code through the `createExecuteTool(this)` one-liner. */
   async runOneLiner(code: string): Promise<ExecuteOutput> {
-    return invoke(createExecuteTool(this), code);
+    return invoke(
+      createExecuteTool(this, {
+        tools: {
+          echo: tool({
+            description: "Echo a value",
+            inputSchema: z.object({ value: z.string() }),
+            execute: async ({ value }) => value
+          })
+        }
+      }),
+      code
+    );
   }
 
   /** The sandbox type surface advertised by the `tools` connector. */

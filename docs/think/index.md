@@ -970,7 +970,7 @@ Sessions stores MESSAGES; it is not a file store. A message rides in one SQLite 
 Media eviction is a different concern: a context-window technique, not a storage one. Sending a screenshot the model has already looked at back through the context on every subsequent turn is pure cost, so once a message has aged past `mediaEviction.keepRecentMessages` (8 by default) on the active path, Think takes the media out of the conversation and leaves a marker in its place:
 
 ```
-[evicted image/png, 812004 bytes; preserved at /attachments/evicted/msg_01H8-0.png]
+[evicted image/png, 812004 bytes; preserved at /workspace/attachments/evicted/msg_01H8-0.png]
 ```
 
 The bytes are written to the Workspace at that path, raw and with their real mime type — not as a `data:` URL string. The workspace `read` tool recognises `image/*`, so when the agent decides it needs to look at the picture again it reads the path out of the marker and the actual image goes back into context. Eviction is visible to the model and lossy on purpose; nothing reconstructs it behind the model's back.

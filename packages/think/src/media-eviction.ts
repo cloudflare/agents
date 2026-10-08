@@ -55,7 +55,7 @@ export interface MediaEvictionConfig {
   maxRowsPerPass?: number;
   /**
    * @deprecated Ignored. Evicted bytes are always preserved in the Workspace
-   * under `/attachments/evicted/`; there is no drop-the-bytes mode. Accepted
+   * under `/workspace/attachments/evicted/`; there is no drop-the-bytes mode. Accepted
    * so existing configurations keep compiling.
    */
   externalizeToWorkspace?: boolean;
@@ -336,5 +336,5 @@ export function evictedFilePath(
   index: number,
   mediaType: string | undefined
 ): string {
-  return `/attachments/evicted/${messageId}-${index}.${extensionFor(mediaType)}`;
+  return `/workspace/attachments/evicted/${messageId}-${index}.${extensionFor(mediaType)}`;
 }
