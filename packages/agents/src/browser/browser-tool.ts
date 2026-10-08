@@ -82,7 +82,7 @@ const RESTARTED_NOTICE =
   "The browser was restarted before this run (it expired or was closed): earlier tabs, logins, and page state are gone. Your code ran in a fresh browser — navigate again before relying on page state.";
 
 const TAB_CLOSED_NOTICE =
-  "The tab you were working in was closed since your last run (by another conversation using this browser, or a person), so this run used a blank tab — navigate again before relying on page state.";
+  'The tab you were working in was closed (by another conversation using this browser, or a person). `sessionId: "active"` now opens a blank tab — navigate again before relying on page state.';
 
 const TAB_SHARED_NOTICE =
   "Another conversation using this browser is also working in your tab, so its page may change between your runs. Open a tab of your own with Target.createTarget if you need one.";

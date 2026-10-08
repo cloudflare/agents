@@ -17,6 +17,7 @@ import {
 import type {
   BrowserSessionLock,
   BrowserSessionStore,
+  ListableBrowserSessionStore,
   StoredBrowserSession
 } from "../browser/session-store";
 
@@ -187,7 +188,7 @@ async function waitUntil(condition: () => boolean): Promise<void> {
 /** A standalone `Browser` over `binding` — a custom store needs no Lifecycle. */
 function createBrowser(
   binding: BrowserBinding,
-  store: BrowserSessionStore,
+  store: ListableBrowserSessionStore,
   options: Omit<BrowserOptions, "provider" | "store"> & {
     run?: BrowserRunOptions;
   } = {}
@@ -542,9 +543,7 @@ describe("Browser.connect", () => {
     const other = await named.connect({ scope: "other" });
     expect(other.activeTargetId).toBeUndefined();
     expect(await other.targetsInOtherScopes()).toEqual(new Set(["target-7"]));
-    // Another scope's tab can't be claimed; a free one can.
-    expect(await other.claimTarget("target-7")).toBe(false);
-    expect(await other.claimTarget("target-8")).toBe(true);
+    expect(await other.setActiveTarget("target-8")).toBe(true);
 
     expect(await second.setActiveTarget(undefined)).toBe(true);
     expect(

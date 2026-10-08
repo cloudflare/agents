@@ -15,7 +15,7 @@ import {
   namedBrowserSessionKey
 } from "../browser/browser";
 import type {
-  BrowserSessionStore,
+  ListableBrowserSessionStore,
   StoredBrowserSession
 } from "../browser/session-store";
 
@@ -25,7 +25,7 @@ function durableKey(name: string): string {
 }
 
 /** A minimal custom store — enough to prove the capability honors one. */
-function createMemoryStore(): BrowserSessionStore & {
+function createMemoryStore(): ListableBrowserSessionStore & {
   sessions: Map<string, StoredBrowserSession>;
 } {
   const sessions = new Map<string, StoredBrowserSession>();
@@ -234,7 +234,7 @@ describe("Browser capability", () => {
       // After liveView's initial read, a concurrent close retires the entry
       // — exactly the interleaving a network-yielding target listing allows.
       let closeWinsAfterNextRead = false;
-      const store: BrowserSessionStore = {
+      const store: ListableBrowserSessionStore = {
         ...inner,
         get: async (k) => {
           const value = await inner.get(k);
@@ -314,7 +314,7 @@ describe("browserTool over a Browser", () => {
         const first = await instance.browserTool().execute({ code }, {});
         expect(first.status).toBe("completed");
         expect(first.status === "completed" && first.result).toEqual({
-          result: { value: "evaluated in target-session-1" }
+          result: { value: "evaluated in target-session-1-2" }
         });
         expect(first.restarted).toBeUndefined();
 
@@ -322,7 +322,7 @@ describe("browserTool over a Browser", () => {
         const stored = await state.storage.get<StoredBrowserSession>(
           `browser-session:browser:scope:7:default:${DEFAULT_BROWSER_SCOPE}`
         );
-        expect(stored?.activeTargetId).toBe("target-session-1");
+        expect(stored?.activeTargetId).toBe("target-session-1-2");
 
         // A tool rebuilt next turn reuses the same browser.
         const second = await instance.browserTool().execute({ code }, {});
@@ -344,13 +344,13 @@ describe("browserTool over a Browser", () => {
       const again = await instance.browserTool("a").execute({ code }, {});
 
       expect(a.status === "completed" && a.result).toEqual({
-        result: { value: "evaluated in target-session-1" }
-      });
-      expect(b.status === "completed" && b.result).toEqual({
         result: { value: "evaluated in target-session-1-2" }
       });
+      expect(b.status === "completed" && b.result).toEqual({
+        result: { value: "evaluated in target-session-1-3" }
+      });
       expect(again.status === "completed" && again.result).toEqual({
-        result: { value: "evaluated in target-session-1" }
+        result: { value: "evaluated in target-session-1-2" }
       });
     });
   });
@@ -401,7 +401,7 @@ describe("browserTool over a Browser", () => {
       const output = await tool.execute({ code }, {});
       expect(output.status).toBe("completed");
       expect(output.status === "completed" && output.result).toEqual({
-        result: { value: "evaluated in target-session-2" }
+        result: { value: "evaluated in target-session-2-2" }
       });
       expect(output.restarted).toBe(true);
       expect(output.notice).toMatch(/restarted/);
@@ -495,7 +495,7 @@ describe("TanStack AI browserTool over a Browser", () => {
       const first = await instance.tanStackBrowserTool().execute?.({ code });
       expect(first).toMatchObject({
         status: "completed",
-        result: { result: { value: "evaluated in target-session-1" } }
+        result: { result: { value: "evaluated in target-session-1-2" } }
       });
       // The durable call log stays out of the model's context.
       expect(first).not.toHaveProperty("calls");
@@ -504,7 +504,7 @@ describe("TanStack AI browserTool over a Browser", () => {
       const second = await instance.tanStackBrowserTool().execute?.({ code });
       expect(second).toMatchObject({
         status: "completed",
-        result: { result: { value: "evaluated in target-session-2" } },
+        result: { result: { value: "evaluated in target-session-2-2" } },
         restarted: true,
         notice: expect.stringMatching(/navigate again/)
       });

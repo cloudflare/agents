@@ -61,7 +61,7 @@ On an `Agent`, call `this.lifecycle.use(this.browser)` in the constructor instea
 ### Details
 
 - The browser's record is stored at `browser:session:<name>`: the Browser Run session id and timestamps.
-- Each scope has a record at `browser:scope:<length of name>:<name>:<scope>`: the Browser Run session it last worked in and its tab there. A scope whose record names an older session was restarted. All of a browser's scope records share one lock, so a scope can claim a blank tab only if no other scope has it. The 100 most recently used are kept; a scope dropped past that starts fresh.
+- Each scope has a record at `browser:scope:<length of name>:<name>:<scope>`: the Browser Run session it last worked in and its tab there. A scope whose record names an older session was restarted. All of a browser's scope records share one lock. The 100 most recently used are kept; a scope dropped past that starts fresh. Listing them is why `Browser` needs a store with `list`.
 - There's no cleanup job. Browser Run shuts down an idle browser on its own, and the next `connect()` notices and starts a new one.
 - When a browser is lost or closed, a `browser:retired:<name>` marker is left behind. That marker is how the next `connect()` knows to report `restarted: true`. Markers are never deleted.
 - CDP commands and Live View links count as activity and refresh the record at most once a minute. A refresh never brings back a browser that was closed or replaced.

@@ -59,7 +59,7 @@ export interface BrowserExecutionReport {
   newTabs: BrowserNewTab[];
   /**
    * The tab this scope was working in was closed by someone else (another
-   * scope, or a person in Live View), so `"active"` moved to another tab.
+   * scope, or a person in Live View), so `"active"` will be a new blank tab.
    */
   tabClosed: boolean;
   /** Another scope is working in this scope's active tab too. */
@@ -139,6 +139,11 @@ interface ExecutionState {
   connected: BrowserConnection;
   /** Live CDP session per target, valid on this socket only. */
   attached: Map<TargetId, LiveSessionId>;
+  /**
+   * Tabs this pass attached to, through the connector or a raw
+   * `Target.attachToTarget`. Their popups are this pass's new tabs.
+   */
+  workedIn: Set<TargetId>;
   /** Page targets open when the pass connected. */
   initialPages: Set<TargetId>;
   /** The tab `"active"` resolves to — decided lazily on first use. */
@@ -276,7 +281,7 @@ export class BrowserSessionConnector extends CodemodeConnector {
           } catch (error) {
             throw await this.#teach(state, error, method, sessionId);
           }
-          await this.#observe(state, method, liveParams, result);
+          this.#observe(state, method, liveParams, result);
           if (method === "Page.captureScreenshot") {
             assertScreenshotFits(result);
           }
@@ -446,6 +451,7 @@ export class BrowserSessionConnector extends CodemodeConnector {
       executionId,
       connected,
       attached: new Map(),
+      workedIn: new Set(),
       initialPages: new Set(initialPages.map((page) => page.targetId)),
       activeResolved: false,
       closed: new Set()
@@ -506,7 +512,7 @@ export class BrowserSessionConnector extends CodemodeConnector {
         ) {
           continue;
         }
-        if (state.attached.has(opener) || opened.has(opener)) {
+        if (state.workedIn.has(opener) || opened.has(opener)) {
           opened.add(page.targetId);
           grew = true;
         }
@@ -529,6 +535,18 @@ export class BrowserSessionConnector extends CodemodeConnector {
     open: Set<TargetId> | undefined
   ): Promise<TargetId | undefined> {
     const stored = state.connected.activeTargetId as TargetId | undefined;
+    // A pass that never used "active" still sees the stored tab is gone;
+    // say so now, since the next pass won't know there was one.
+    if (
+      !state.activeResolved &&
+      stored &&
+      open &&
+      !open.has(stored) &&
+      !state.closed.has(stored)
+    ) {
+      this.#report(state.executionId, state.connected.restarted).tabClosed =
+        true;
+    }
     const candidate = state.activeResolved ? state.activeTargetId : stored;
     const active =
       candidate && (!open || open.has(candidate)) ? candidate : undefined;
@@ -587,9 +605,8 @@ export class BrowserSessionConnector extends CodemodeConnector {
 
   /**
    * Decide which tab `"active"` means, once per pass: the scope's stored tab
-   * if it is still open, else a blank tab no other scope is working in,
-   * else a new blank tab. Never another scope's tab, or a page nobody
-   * claimed: the model would act on a page it didn't open.
+   * if it is still open, else a new blank tab. Never a tab the scope didn't
+   * open, even a blank one: it may be another scope's, or a popup.
    */
   async #activeTarget(state: ExecutionState): Promise<TargetId> {
     if (state.activeTargetId) return state.activeTargetId;
@@ -600,37 +617,14 @@ export class BrowserSessionConnector extends CodemodeConnector {
     if (!targetId && stored && !state.closed.has(stored)) {
       this.#report(state.executionId, connected.restarted).tabClosed = true;
     }
-    for (const page of pages) {
-      if (targetId) break;
-      if (
-        page.url === "about:blank" &&
-        (await connected.claimTarget(page.targetId))
-      ) {
-        targetId = page.targetId;
-      }
-    }
     if (!targetId) {
       const created = (await connected.cdp.send("Target.createTarget", {
         url: "about:blank"
       })) as { targetId: TargetId };
       targetId = created.targetId;
-      await this.#claimNewTab(state, targetId);
     }
     this.#setActive(state, targetId);
     return targetId;
-  }
-
-  /**
-   * Save a tab this pass just created as the scope's right away, rather than
-   * at pass end, so a scope starting meanwhile doesn't claim it as an
-   * unused blank tab.
-   */
-  async #claimNewTab(state: ExecutionState, targetId: TargetId): Promise<void> {
-    try {
-      await state.connected.setActiveTarget(targetId);
-    } catch (error) {
-      this.#warn("save the new tab", error);
-    }
   }
 
   #setActive(state: ExecutionState, targetId: TargetId | undefined): void {
@@ -649,16 +643,17 @@ export class BrowserSessionConnector extends CodemodeConnector {
       timeoutMs
     })) as LiveSessionId;
     state.attached.set(targetId, live);
+    state.workedIn.add(targetId);
     return live;
   }
 
   /** Track tab changes the model makes through raw Target commands. */
-  async #observe(
+  #observe(
     state: ExecutionState,
     method: string,
     params: Record<string, unknown> | undefined,
     result: unknown
-  ): Promise<void> {
+  ): void {
     const targetId =
       typeof params?.targetId === "string"
         ? (params.targetId as TargetId)
@@ -667,10 +662,10 @@ export class BrowserSessionConnector extends CodemodeConnector {
       const created = (result as { targetId?: unknown } | undefined)?.targetId;
       if (typeof created === "string") {
         this.#setActive(state, created as TargetId);
-        await this.#claimNewTab(state, created as TargetId);
       }
     } else if (method === "Target.attachToTarget" && targetId) {
       this.#setActive(state, targetId);
+      state.workedIn.add(targetId);
     } else if (method === "Target.closeTarget" && targetId) {
       state.attached.delete(targetId);
       state.closed.add(targetId);

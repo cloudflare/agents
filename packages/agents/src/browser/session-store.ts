@@ -41,6 +41,14 @@ export interface BrowserSessionStore {
   list?(prefix: string): MaybePromise<Map<string, StoredBrowserSession>>;
 }
 
+/**
+ * A {@link BrowserSessionStore} that can list by prefix, as `Browser` needs:
+ * it lists a browser's scope records to cap them and to see which tabs
+ * other scopes are working in.
+ */
+export type ListableBrowserSessionStore = BrowserSessionStore &
+  Required<Pick<BrowserSessionStore, "list">>;
+
 export class DurableBrowserSessionStore implements BrowserSessionStore {
   static #queues = new WeakMap<
     DurableObjectStorage,

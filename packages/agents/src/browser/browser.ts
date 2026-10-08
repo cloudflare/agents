@@ -27,7 +27,7 @@ import {
 } from "./live-view";
 import {
   DurableBrowserSessionStore,
-  type BrowserSessionStore,
+  type ListableBrowserSessionStore,
   type StoredBrowserSession
 } from "./session-store";
 import { loadCdpSpec, type SearchableCdpSpec } from "./spec";
@@ -144,9 +144,9 @@ export interface BrowserOptions {
    * Where the browser's record lives. Defaults to a
    * {@link DurableBrowserSessionStore} over the host object's storage, which
    * requires installing the `Browser` with `Lifecycle.use()`. Passing a store
-   * lets the `Browser` work without Lifecycle.
+   * lets the `Browser` work without Lifecycle. It must implement `list`.
    */
-  store?: BrowserSessionStore;
+  store?: ListableBrowserSessionStore;
   /** Default CDP command timeout for {@link Browser.connect}. */
   timeoutMs?: number;
   /**
@@ -194,7 +194,8 @@ export interface BrowserConnection {
    * `true` when this scope worked in an earlier browser that has since been
    * replaced, whichever scope's connection replaced it. Its tabs and page
    * state are gone; surface this loudly to the model. `false` on a scope's
-   * first connection: it had nothing to lose.
+   * first connection: it had nothing to lose. For whether the browser
+   * itself was replaced, whatever the scope, use {@link Browser.resolve}.
    */
   restarted: boolean;
   /**
@@ -210,12 +211,6 @@ export interface BrowserConnection {
    * replaced since this connection resolved it.
    */
   setActiveTarget(targetId: string | undefined): Promise<boolean>;
-  /**
-   * Make `targetId` this scope's tab only if no other scope is working in
-   * it. Returns `false` when another scope has it, or the browser was closed
-   * or replaced.
-   */
-  claimTarget(targetId: string): Promise<boolean>;
   /** The tabs other scopes are working in, in this browser. */
   targetsInOtherScopes(): Promise<Set<string>>;
   /**
@@ -248,7 +243,7 @@ export class Browser extends LifecycleCapability {
   readonly name: string;
   readonly #options: BrowserOptions;
   readonly #key: string;
-  #store?: BrowserSessionStore;
+  #store?: ListableBrowserSessionStore;
 
   constructor(options: BrowserOptions) {
     const name = options.name ?? DEFAULT_BROWSER_NAME;
@@ -360,11 +355,7 @@ export class Browser extends LifecycleCapability {
       activeTargetId: entered.activeTargetId,
       cdp,
       setActiveTarget: (targetId) =>
-        this.#updateScope(scope, sessionId, () => targetId),
-      claimTarget: (targetId) =>
-        this.#updateScope(scope, sessionId, (others) =>
-          others.has(targetId) ? false : targetId
-        ),
+        this.#updateScope(scope, sessionId, targetId),
       targetsInOtherScopes: async () =>
         activeTargets(await this.#listScopes(), scope, sessionId),
       spec: () => loadCdpSpec({ browser: binding, sessionId })
@@ -493,7 +484,7 @@ export class Browser extends LifecycleCapability {
   }
 
   /** Lazy: `lifecycle.storage` exists only once `Lifecycle.use()` ran. */
-  get #sessionStore(): BrowserSessionStore {
+  get #sessionStore(): ListableBrowserSessionStore {
     this.#store ??=
       this.#options.store ??
       new DurableBrowserSessionStore(this.lifecycle.storage);
@@ -547,10 +538,10 @@ export class Browser extends LifecycleCapability {
     return browserScopeKeyPrefix(this.name);
   }
 
-  /** Every scope record of this browser, by scope. Empty without `list`. */
+  /** Every scope record of this browser, by scope. */
   async #listScopes(): Promise<Map<string, StoredBrowserSession>> {
     const prefix = browserScopeKeyPrefix(this.name);
-    const entries = (await this.#sessionStore.list?.(prefix)) ?? new Map();
+    const entries = await this.#sessionStore.list(prefix);
     const scopes = new Map<string, StoredBrowserSession>();
     for (const [key, entry] of entries) {
       scopes.set(key.slice(prefix.length), entry);
@@ -601,15 +592,14 @@ export class Browser extends LifecycleCapability {
   }
 
   /**
-   * Set a scope's tab to what `choose` returns, given the tabs other scopes
-   * are working in; `false` from `choose` leaves it as is. Never
-   * resurrects: does nothing (and returns `false`) once the browser this
-   * connection resolved was closed or replaced.
+   * Set a scope's tab (or clear it with `undefined`). Never resurrects:
+   * does nothing (and returns `false`) once the browser this connection
+   * resolved was closed or replaced.
    */
   async #updateScope(
     scope: string,
     sessionId: string,
-    choose: (others: Set<string>) => string | undefined | false
+    targetId: string | undefined
   ): Promise<boolean> {
     const key = this.#scopeKey(scope);
     const lock = await this.#sessionStore.acquireLock(this.#scopesLockKey);
@@ -619,9 +609,6 @@ export class Browser extends LifecycleCapability {
       if (current?.sessionId !== sessionId || entry?.sessionId !== sessionId) {
         return false;
       }
-      const others = activeTargets(await this.#listScopes(), scope, sessionId);
-      const targetId = choose(others);
-      if (targetId === false) return false;
       await this.#sessionStore.set(key, {
         ...entry,
         activeTargetId: targetId,

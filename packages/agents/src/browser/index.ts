@@ -31,6 +31,7 @@ export {
   DurableBrowserSessionStore,
   type BrowserSessionLock,
   type BrowserSessionStore,
+  type ListableBrowserSessionStore,
   type StoredBrowserSession
 } from "./session-store";
 
