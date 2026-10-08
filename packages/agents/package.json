@@ -417,6 +417,26 @@
       "import": "./dist/browser/tools/pi.js",
       "require": "./dist/browser/tools/pi.js"
     },
+    "./webfetch": {
+      "types": "./dist/web/fetch/index.d.ts",
+      "import": "./dist/web/fetch/index.js",
+      "require": "./dist/web/fetch/index.js"
+    },
+    "./webfetch/pi": {
+      "types": "./dist/web/fetch/tools/pi.d.ts",
+      "import": "./dist/web/fetch/tools/pi.js",
+      "require": "./dist/web/fetch/tools/pi.js"
+    },
+    "./webfetch/ai-sdk": {
+      "types": "./dist/web/fetch/tools/ai-sdk.d.ts",
+      "import": "./dist/web/fetch/tools/ai-sdk.js",
+      "require": "./dist/web/fetch/tools/ai-sdk.js"
+    },
+    "./webfetch/tanstack-ai": {
+      "types": "./dist/web/fetch/tools/tanstack-ai.d.ts",
+      "import": "./dist/web/fetch/tools/tanstack-ai.js",
+      "require": "./dist/web/fetch/tools/tanstack-ai.js"
+    },
     "./voice": {
       "types": "./dist/voice/index.d.ts",
       "import": "./dist/voice/index.js",

@@ -87,7 +87,7 @@ export const WEB_SEARCH_TOOL_DESCRIPTION = [
   "Search the public web. Returns up to `limit` results, each with a URL, a title, and a short description of the page.",
   "Use it for current events, facts you're unsure of, documentation, and anything that may have changed since your training.",
   "There is no next page: for more or different results, search again with a rephrased query.",
-  "Results are discovery only: to read a page, fetch its URL if you have a tool that reads pages."
+  "Results are discovery only: to read a page, fetch its URL with `web_fetch` if it is available."
 ].join(" ");
 
 export interface RenderWebSearchResultsOptions {
