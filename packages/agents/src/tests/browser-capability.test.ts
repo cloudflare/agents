@@ -582,7 +582,7 @@ describe("pi browserTool over a Browser", () => {
       const first = await run(tool, code);
       expect(textOf(first)).toMatchObject({
         status: "completed",
-        result: { result: { value: "evaluated in target-session-1" } }
+        result: { result: { value: "evaluated in target-session-1-2" } }
       });
       // The durable call log stays out of the model's context.
       expect(textOf(first)).not.toHaveProperty("calls");
@@ -596,7 +596,7 @@ describe("pi browserTool over a Browser", () => {
       const second = await run(tool, code);
       expect(textOf(second)).toMatchObject({
         status: "completed",
-        result: { result: { value: "evaluated in target-session-2" } },
+        result: { result: { value: "evaluated in target-session-2-2" } },
         restarted: true,
         notice: expect.stringMatching(/navigate again/)
       });
@@ -614,14 +614,14 @@ describe("pi browserTool over a Browser", () => {
         const value = async (conversationId: number) =>
           textOf(await run(tool, code, conversationId)).result.result.value;
 
-        expect(await value(1)).toBe("evaluated in target-session-1");
-        expect(await value(2)).toBe("evaluated in target-session-1-2");
-        expect(await value(1)).toBe("evaluated in target-session-1");
+        expect(await value(1)).toBe("evaluated in target-session-1-2");
+        expect(await value(2)).toBe("evaluated in target-session-1-3");
+        expect(await value(1)).toBe("evaluated in target-session-1-2");
         expect(
           await state.storage.get(
             `browser-session:browser:scope:7:default:conversation:2`
           )
-        ).toMatchObject({ activeTargetId: "target-session-1-2" });
+        ).toMatchObject({ activeTargetId: "target-session-1-3" });
       }
     );
   });
