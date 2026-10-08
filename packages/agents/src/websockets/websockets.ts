@@ -23,6 +23,7 @@ import {
   setConnectionReadonly
 } from "./connection-flags";
 import { exposableMethods, type CallableInvoker } from "./callables-target";
+import { connectHibernatingSocket } from "./connect-close";
 import type {
   SyncedState,
   WebSocketHandlers,
@@ -390,7 +391,7 @@ export class WebSockets extends LifecycleCapability {
     // validation and reject the upgrade.
     const connectionId = url.searchParams.get("_pk") || nanoid();
 
-    let connection: Connection = Object.assign(serverWebSocket, {
+    const connection: Connection = Object.assign(serverWebSocket, {
       id: connectionId,
       uri: request.url,
       tags: [] as string[],
@@ -413,10 +414,10 @@ export class WebSockets extends LifecycleCapability {
       : [];
 
     // Hibernating WebSockets remain connected while the object is evicted.
-    connection = this.#connectionManager.accept(connection, { tags });
-    await this.#connect(connection, ctx);
-
-    return new Response(null, { status: 101, webSocket: clientWebSocket });
+    const accepted = this.#connectionManager.accept(connection, { tags });
+    return connectHibernatingSocket(accepted, clientWebSocket, () =>
+      this.#connect(accepted, ctx)
+    );
   }
 
   // ── Cap'n Web wire ─────────────────────────────────────────────────────

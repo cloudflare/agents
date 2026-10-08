@@ -5,7 +5,16 @@
  * Uses a short keepAliveIntervalMs (2s) so alarm-based recovery
  * happens quickly in tests instead of waiting the default 30s.
  */
-import { Agent, callable, routeAgentRequest } from "agents";
+import { DurableObject } from "cloudflare:workers";
+import {
+  Agent,
+  callable,
+  routeAgentRequest,
+  type Connection,
+  type ConnectionContext
+} from "agents";
+import { Lifecycle } from "agents/lifecycle";
+import { WebSockets } from "agents/websockets";
 import type { TaskHandlers, TaskStep } from "agents/tasks";
 import { Streams } from "agents/streams";
 import { Sessions } from "agents/sessions";
@@ -31,6 +40,8 @@ type Env = {
   PoisonBackoffAgent: DurableObjectNamespace<PoisonBackoffAgent>;
   FacetRecoveryParent: DurableObjectNamespace<FacetRecoveryParent>;
   FacetRecoveryChild: DurableObjectNamespace<FacetRecoveryChild>;
+  OnConnectCloseObject: DurableObjectNamespace<OnConnectCloseObject>;
+  OnConnectCloseAgent: DurableObjectNamespace<OnConnectCloseAgent>;
 };
 
 function fiberSleep(ms: number): Promise<void> {
@@ -1164,5 +1175,37 @@ export class CutoverKillAgent extends Agent<Record<string, unknown>> {
       blocks,
       messageRows
     };
+  }
+}
+
+// ── onConnect close (real network close handshake) ─────────────────────────
+
+/** The frame and close the onConnect-close hosts send to every client. */
+const ON_CONNECT_CLOSE = {
+  frame: "unknown session",
+  code: 4404,
+  reason: "Unknown session"
+} as const;
+
+function closeOnConnect(connection: Connection): void {
+  connection.send(ON_CONNECT_CLOSE.frame);
+  connection.close(ON_CONNECT_CLOSE.code, ON_CONNECT_CLOSE.reason);
+}
+
+/**
+ * A plain Lifecycle host whose WebSockets `onConnect` sends a frame and
+ * closes the socket, before the upgrade response exists.
+ */
+export class OnConnectCloseObject extends DurableObject<Env> {
+  readonly #webSockets = new WebSockets({
+    handlers: { onConnect: closeOnConnect }
+  });
+  readonly lifecycle = Lifecycle.install(this).use(this.#webSockets);
+}
+
+/** The same, through `Agent.onConnect`. */
+export class OnConnectCloseAgent extends Agent<Env> {
+  onConnect(connection: Connection, _ctx: ConnectionContext): void {
+    closeOnConnect(connection);
   }
 }

@@ -12,6 +12,8 @@ const SESSION_TAG_PREFIX = "opencode-session:";
 const SESSION_QUERY = "session";
 /** A bound on one prompt; this example has no other quotas. */
 const MAX_PROMPT_LENGTH = 100_000;
+/** Application close code for a socket whose session does not exist. */
+const UNKNOWN_SESSION_CLOSE_CODE = 4404;
 /** `WebSocket.OPEN`; the constant is not defined on every runtime's global. */
 const OPEN = 1;
 
@@ -151,9 +153,7 @@ export class OpenCodeSessionSockets {
           new URL(ctx.request.url).searchParams.get(SESSION_QUERY)
         )}`
       });
-      // A close sent from onConnect, before the upgrade completes, does not
-      // reach the client, so the client closes on this error instead. The
-      // socket has no session tag, so it gets no session's events.
+      connection.close(UNKNOWN_SESSION_CLOSE_CODE, "Unknown session");
       return;
     }
     send(connection, { type: "hello", session });

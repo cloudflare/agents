@@ -294,9 +294,13 @@ export class PlainLifecycleObject extends DurableObject<Cloudflare.Env> {
   readonly #hostBoundary = new HostBoundaryProbe();
   readonly #webSockets = new WebSockets({
     handlers: {
-      onConnect: (connection) => {
+      onConnect: (connection, { request }) => {
         this.#webSocketContexts.push(currentWebSocketContext("connect"));
         connection.send(`connected:${this.lifecycle.name}`);
+        // `?closeOnConnect=<reason>` closes the socket from onConnect,
+        // before the upgrade response exists.
+        const reason = new URL(request.url).searchParams.get("closeOnConnect");
+        if (reason !== null) connection.close(4404, reason);
       },
       onMessage: (connection, message) => {
         this.#webSocketContexts.push(currentWebSocketContext("message"));

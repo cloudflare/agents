@@ -371,6 +371,98 @@ describe("plain host Agent protocol on the Cap'n Web wire", () => {
 });
 
 /**
+ * A handler may close a socket from `onConnect`, which runs before the
+ * upgrade response exists. The client must still see the close, with its
+ * code and reason, after every frame sent before it. The runtime bug this
+ * guards against only shows on a real network socket; see
+ * `e2e-tests/websocket-onconnect-close.test.ts`.
+ */
+describe("closing a connection from onConnect", () => {
+  type Received =
+    | { readonly kind: "message"; readonly data: string }
+    | {
+        readonly kind: "close";
+        readonly code: number;
+        readonly reason: string;
+      };
+
+  /** Upgrade, then record every frame and the close until the socket ends. */
+  async function receiveUntilClose(url: URL): Promise<Received[]> {
+    const response = await routeAgentRequest(
+      new Request(url, { headers: { Upgrade: "websocket" } }),
+      env
+    );
+    const socket = response?.webSocket;
+    if (!socket)
+      throw new Error(`expected an upgrade, got ${response?.status}`);
+    const received: Received[] = [];
+    const closed = new Promise<Received[]>((resolve) => {
+      socket.addEventListener("message", (event) => {
+        received.push({ kind: "message", data: String(event.data) });
+      });
+      socket.addEventListener(
+        "close",
+        (event) => {
+          received.push({
+            kind: "close",
+            code: event.code,
+            reason: event.reason
+          });
+          resolve(received);
+        },
+        { once: true }
+      );
+    });
+    socket.accept();
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              `socket never closed; received ${JSON.stringify(received)}`
+            )
+          ),
+        2000
+      )
+    );
+    return Promise.race([closed, timeout]);
+  }
+
+  it("delivers the close after earlier frames on the hibernating wire", async () => {
+    const name = crypto.randomUUID();
+    const url = new URL(
+      `/agents/plain-lifecycle-object/${name}`,
+      "https://example.com"
+    );
+    url.searchParams.set("closeOnConnect", "unknown session");
+
+    const received = await receiveUntilClose(url);
+
+    expect(received.at(-1)).toEqual({
+      kind: "close",
+      code: 4404,
+      reason: "unknown session"
+    });
+    expect(received.slice(0, -1).map((r) => r.kind)).toEqual([
+      "message",
+      "message"
+    ]);
+    expect(received[1]).toEqual({
+      kind: "message",
+      data: `connected:${name}`
+    });
+    const host = env.PlainLifecycleObject.getByName(name);
+    expect(await host.connectionCount()).toBe(0);
+    // The host still hears about the close it made.
+    await expect
+      .poll(async () =>
+        (await host.getWebSocketContextEvents()).map((event) => event.phase)
+      )
+      .toEqual(["connect", "close"]);
+  });
+});
+
+/**
  * A plain host that composes `State` with `WebSockets` gets the hook's
  * whole state surface: pushed on connect, updated from the client,
  * broadcast to everyone else, and validated by the host.

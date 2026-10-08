@@ -56,6 +56,14 @@
       {
         "name": "CutoverKillAgent",
         "class_name": "CutoverKillAgent"
+      },
+      {
+        "name": "OnConnectCloseObject",
+        "class_name": "OnConnectCloseObject"
+      },
+      {
+        "name": "OnConnectCloseAgent",
+        "class_name": "OnConnectCloseAgent"
       }
     ]
   },
@@ -87,6 +95,10 @@
     {
       "tag": "v6",
       "new_sqlite_classes": ["CutoverKillAgent"]
+    },
+    {
+      "tag": "v7",
+      "new_sqlite_classes": ["OnConnectCloseObject", "OnConnectCloseAgent"]
     }
   ]
 }
