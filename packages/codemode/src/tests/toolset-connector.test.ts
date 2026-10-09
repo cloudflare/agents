@@ -1,6 +1,7 @@
-import { tool } from "ai";
+import { jsonSchema, tool } from "ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { describeTarget } from "../connectors/describe";
 import { ToolSetConnector, toolSetConnector } from "../connectors/toolset";
 
 const ctx = {} as ExecutionContext;
@@ -55,6 +56,74 @@ describe("ToolSetConnector", () => {
     await expect(
       connector.executeTool("getWeather", { city: "Lisbon" })
     ).resolves.toBe("sunny in Lisbon");
+  });
+
+  it("forwards output schemas into connector descriptors", async () => {
+    const connector = new ToolSetConnector(ctx, {
+      tools: {
+        getDashboard: tool({
+          inputSchema: z.object({ token: z.string() }),
+          outputSchema: z.object({ token: z.string(), title: z.string() }),
+          execute: async ({ token }) => ({ token, title: "Example" })
+        }),
+        noOutput: tool({
+          inputSchema: z.object({}),
+          execute: async () => "ok"
+        })
+      }
+    });
+
+    const desc = await connector.describe();
+    expect(desc.descriptors.getDashboard.outputSchema).toMatchObject({
+      type: "object",
+      properties: {
+        token: { type: "string" },
+        title: { type: "string" }
+      },
+      required: ["token", "title"]
+    });
+    expect(desc.descriptors.noOutput.outputSchema).toBeUndefined();
+  });
+
+  it("omits an output schema that cannot be converted without failing other tools", async () => {
+    const connector = new ToolSetConnector(ctx, {
+      tools: {
+        getDate: tool({
+          inputSchema: z.object({}),
+          outputSchema: jsonSchema(() => {
+            throw new Error("cannot convert");
+          }),
+          execute: async () => "2026-01-01"
+        }),
+        getWeather: tool({
+          inputSchema: z.object({ city: z.string() }),
+          execute: async ({ city }) => `sunny in ${city}`
+        })
+      }
+    });
+
+    const desc = await connector.describe();
+    expect(desc.descriptors.getDate.outputSchema).toBeUndefined();
+    await expect(
+      connector.executeTool("getWeather", { city: "Lisbon" })
+    ).resolves.toBe("sunny in Lisbon");
+  });
+
+  it("shows the output type in durable describe", async () => {
+    const connector = new ToolSetConnector(ctx, {
+      name: "vantage",
+      tools: {
+        getDashboard: tool({
+          inputSchema: z.object({ token: z.string() }),
+          outputSchema: z.object({ title: z.string() }),
+          execute: async () => ({ title: "Example" })
+        })
+      }
+    });
+
+    const desc = await connector.describe();
+    const { types } = describeTarget("vantage.getDashboard", [desc]);
+    expect(types).toMatch(/GetDashboardOutput = \{\s*title: string;?\s*\}/);
   });
 
   it("validates args against the tool schema before executing", async () => {
