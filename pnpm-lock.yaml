@@ -4860,7 +4860,7 @@ importers:
   packages/hono-agents:
     devDependencies:
       agents:
-        specifier: ^0.27.0
+        specifier: ^0.28.0
         version: link:../agents
       hono:
         specifier: ^4.13.5
@@ -6109,6 +6109,7 @@ packages:
 
   '@cloudflare/vitest-pool-workers@0.19.1':
     resolution: {integrity: sha512-YzAJGOZNap12xefPgc7y74v2C1VcabPqn254wPjfgsleizy9Jj2nrvDjFnUAxoNzyiBi8p4ya8qDjA/fLOpqlQ==}
+    deprecated: '@cloudflare/vitest-pool-workers has been renamed to @cloudflare/vitest-plugin. This package will not receive future updates.'
     peerDependencies:
       '@vitest/runner': ^4.1.0
       '@vitest/snapshot': ^4.1.0

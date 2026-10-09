@@ -1,5 +1,19 @@
 # @cloudflare/agents
 
+## 0.28.0
+
+### Minor Changes
+
+- [#2484](https://github.com/cloudflare/agents/pull/2484) [`dedbee4`](https://github.com/cloudflare/agents/commit/dedbee41bad3986ffc45fe295502e9740bde31ca) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Add `browserTool()` to `agents/browser/pi`. See [Persistent browser](https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser).
+
+- [#2473](https://github.com/cloudflare/agents/pull/2473) [`6614955`](https://github.com/cloudflare/agents/commit/661495532b69e64affad5e7bcd6373b4ee6ad3c5) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Make `agents/lifecycle` stable along with the `Scheduler` (`agents/schedules`), `State` (`agents/state`), `WebSockets` (`agents/websockets`) and `MCPClientManager` (`agents/mcp/client`) capabilities. See [Lifecycle](https://github.com/cloudflare/agents/blob/main/docs/agents/lifecycle.md).
+
+### Patch Changes
+
+- [#2540](https://github.com/cloudflare/agents/pull/2540) [`b65956e`](https://github.com/cloudflare/agents/commit/b65956e8a40501fc241c223aba0d6177077268d1) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `ThinkHarness` now keeps its sessions and operations in the shared `agents/harness/store`. Migrations are performed on first run. See [ThinkHarness: Recovery](https://github.com/cloudflare/agents/blob/main/docs/agents/harnesses/think.md#recovery).
+
+- [#2522](https://github.com/cloudflare/agents/pull/2522) [`bcf5d20`](https://github.com/cloudflare/agents/commit/bcf5d2057aa477da9f464af8496a21811416a7c4) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Add `agents/webfetch`, a `web_fetch` tool that reads a URL as Markdown, JSON, or text (HTML, PDF, and Office documents via Worker AI). See [Fetch the Web](https://github.com/cloudflare/agents/blob/main/docs/agents/fetch-the-web.md).
+
 ## 0.27.0
 
 This release adds four new experimental harnesses and a `web_search` tool, and reorganizes the experimental Channels API.

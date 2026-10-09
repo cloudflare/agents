@@ -1,5 +1,11 @@
 # @cloudflare/think
 
+## 0.20.2
+
+### Patch Changes
+
+- [#2522](https://github.com/cloudflare/agents/pull/2522) [`bcf5d20`](https://github.com/cloudflare/agents/commit/bcf5d2057aa477da9f464af8496a21811416a7c4) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `fetch_url` now blocks private and local hosts using the shared policy from `agents/webfetch`. See [Fetch the Web: URL policy](https://github.com/cloudflare/agents/blob/main/docs/agents/fetch-the-web.md#url-policy).
+
 ## 0.20.1
 
 ### Patch Changes
