@@ -179,6 +179,21 @@ describe("HarnessStore", () => {
       ).toBe(true);
     }));
 
+  it("deletes one operation, so its id may be enqueued again", () =>
+    withStore((store) => {
+      store.enqueue({ session: "s", id: "op", input: "old" });
+      store.enqueue({ session: "other", id: "op", input: "kept" });
+      expect(store.deleteOperation("s", "op")).toBe(true);
+      expect(store.deleteOperation("s", "op")).toBe(false);
+      expect(store.operation("other", "op")?.input).toBe("kept");
+      expect(
+        store.enqueue({ session: "s", id: "op", input: "new" })
+      ).toMatchObject({
+        accepted: true,
+        record: { input: "new", status: "queued" }
+      });
+    }));
+
   it("deletes a session with its operations and logs", () =>
     withStore((store) => {
       store.createSession({ id: "s" });

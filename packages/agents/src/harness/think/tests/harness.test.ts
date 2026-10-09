@@ -62,6 +62,12 @@ describe("ThinkHarness turns", () => {
     expect(await stub.streamRows()).toBe(0);
   });
 
+  it("runs a tool call whose id names an Object.prototype property", async () => {
+    const stub = fresh();
+    const result = await stub.prompt("prototype id");
+    expect(result).toMatchObject({ status: "done", text: "tool said: 15" });
+  });
+
   it("runs parallel tool calls of one step", async () => {
     const stub = fresh();
     const result = await stub.prompt("two tools");
@@ -430,6 +436,34 @@ describe("ThinkHarness durability", () => {
     );
     expect(await stub.gateRuns()).toBe(1);
     expect(await stub.messages()).toHaveLength(2);
+  });
+
+  it("keeps work a rolled-back version queued under an id the store already holds", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    expect(
+      text(
+        await stub.wait(
+          (await stub.submit("before", { operationId: "op-1" })).operationId
+        )
+      )
+    ).toBe("echo: before");
+    // Rolled back: the earlier version cannot see the store, so it reuses the id.
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
+      instance.seedRollbackRecords("op-1")
+    );
+    await evictDurableObject(stub);
+    stub = fresh(name);
+
+    // Upgraded again: the newer, queued operation wins and runs.
+    await runDurableObjectAlarm(stub);
+    expect(text(await stub.wait("op-1"))).toBe("echo: after the rollback");
+    expect(await stub.harnessTables()).toEqual([
+      "cf_think_harness_store_log",
+      "cf_think_harness_store_operations",
+      "cf_think_harness_store_sessions"
+    ]);
   });
 
   it("finishes queued work after a restart, woken by the alarm", async () => {

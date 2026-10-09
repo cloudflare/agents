@@ -74,14 +74,14 @@ function textReply(text: string): StreamPart[] {
 }
 
 function callReply(
-  calls: readonly { name: string; input?: unknown }[]
+  calls: readonly { name: string; input?: unknown; id?: string }[]
 ): StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
     ...calls.map(
       (call): StreamPart => ({
         type: "tool-call",
-        toolCallId: `call-${crypto.randomUUID()}`,
+        toolCallId: call.id ?? `call-${crypto.randomUUID()}`,
         toolName: call.name,
         input: JSON.stringify(call.input ?? {})
       })
@@ -244,6 +244,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       if (multiply) {
         parts = callReply([
           { name: "multiply", input: { value: Number(multiply[1]) } }
+        ]);
+      } else if (text === "prototype id") {
+        // A tool-call id that names an Object.prototype property.
+        parts = callReply([
+          { name: "multiply", input: { value: 5 }, id: "constructor" }
         ]);
       } else if (text === "two tools") {
         parts = callReply([
@@ -486,6 +491,36 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           updated_at)
        VALUES ('', 'op-queued', 2, ?, 'queued', 'server', 1000, 1000)`,
       messages("user-new", "after the upgrade")
+    );
+  }
+
+  /**
+   * Write a queued operation the way a rolled-back earlier version would:
+   * into its own tables, reusing an id the shared store already holds.
+   */
+  seedRollbackRecords(operationId: string): void {
+    const sql = this.ctx.storage.sql;
+    createLegacyTables(sql);
+    sql.exec(
+      `INSERT INTO cf_think_harness_sessions (id, parent, client_tools, created_at)
+       VALUES ('', NULL, NULL, 1000)`
+    );
+    sql.exec(
+      `INSERT INTO cf_think_harness_operations
+         (session_id, operation_id, seq, input, status, source, created_at,
+          updated_at)
+       VALUES ('', ?, 1, ?, 'queued', 'server', 1000, 1000)`,
+      operationId,
+      JSON.stringify({
+        kind: "messages",
+        messages: [
+          {
+            id: "user-rollback",
+            role: "user",
+            parts: [{ type: "text", text: "after the rollback" }]
+          }
+        ]
+      })
     );
   }
 

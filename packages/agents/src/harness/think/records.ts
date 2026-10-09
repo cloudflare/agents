@@ -234,7 +234,8 @@ function parseText(result: JsonValue): string | undefined {
 
 function parseSessionState(value: JsonValue | undefined): SessionState {
   if (!isRecord(value)) return EMPTY_STATE;
-  const toolCalls: Record<string, StartedToolCall> = {};
+  // Keyed by model-chosen ids, so no prototype: `__proto__` stays a key.
+  const toolCalls: Record<string, StartedToolCall> = Object.create(null);
   const calls = value.toolCalls;
   if (isRecord(calls)) {
     for (const [toolCallId, call] of Object.entries(calls)) {
@@ -460,7 +461,10 @@ export class OperationRecords {
 
   /** The record of a started tool call, if it was started. */
   toolCall(session: string, toolCallId: string): ToolCallRecord | undefined {
-    const call = this.#state(session).toolCalls[toolCallId];
+    const { toolCalls } = this.#state(session);
+    // An id such as `constructor` must not read an inherited property.
+    if (!Object.hasOwn(toolCalls, toolCallId)) return undefined;
+    const call = toolCalls[toolCallId];
     return call && { session, toolCallId, ...call };
   }
 
@@ -646,6 +650,10 @@ function importLegacyOperation(
     overflowRetries: row.overflow_retries,
     abandonReason: row.abandon_reason ?? null
   };
+  // Legacy tables exist beside the store only after a rollback to a version
+  // that cannot see the store, so a legacy row is the newer record of its
+  // id: it replaces the store's.
+  store.deleteOperation(session, id);
   // Enqueued in the legacy order, so the store's order is the same.
   store.enqueue({
     session,

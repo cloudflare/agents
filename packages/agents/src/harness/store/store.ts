@@ -507,6 +507,25 @@ export class HarnessStore {
   }
 
   /**
+   * Delete one operation, whatever its status. Its id may be enqueued
+   * again. For replacing a record imported from elsewhere; a harness that
+   * deletes an open operation must stop running it itself.
+   *
+   * @param session - The session id.
+   * @param id - The operation id.
+   * @returns False when there was no such operation.
+   */
+  deleteOperation(session: string, id: string): boolean {
+    return (
+      this.#storage.sql.exec(
+        `DELETE FROM ${this.#operations} WHERE session = ? AND id = ?`,
+        session,
+        id
+      ).rowsWritten > 0
+    );
+  }
+
+  /**
    * Forget a session's settled operations, as when the session starts
    * over. Open operations are kept. A forgotten operation's id may be
    * enqueued again.
