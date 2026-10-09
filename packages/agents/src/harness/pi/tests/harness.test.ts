@@ -207,4 +207,50 @@ describe("PiHarness on pi-durable", () => {
       other
     ]);
   });
+
+  it("through piChannelsHarness, reports the entry an operation placed before its message", async () => {
+    const stub = fresh();
+    const { events, result } = await stub.channels("multiply 2", "op-1");
+    const placed = events.findIndex(
+      (e) => e.type === "operation" && e.status.status === "placed"
+    );
+    const status = events[placed];
+    if (status?.type !== "operation" || status.status.status !== "placed") {
+      throw new Error("no placed status");
+    }
+    const entry = status.status.messageId;
+    expect(entry).toBeDefined();
+    const message = events.findIndex(
+      (e) => e.type === "message" && e.message.id === entry
+    );
+    expect(message).toBeGreaterThan(placed);
+    expect(events[message]).toMatchObject({
+      type: "message",
+      message: { role: "user", parts: [{ type: "text", text: "multiply 2" }] }
+    });
+    // A caller that missed `placed` learns the entry from the result.
+    expect(result).toMatchObject({ status: "done", messageId: entry });
+    // The tool result folds into the assistant message holding its call.
+    expect(
+      events.some(
+        (e) =>
+          e.type === "message" &&
+          e.message.parts.some(
+            (p) => p.type === "tool" && p.state === "output-available"
+          )
+      )
+    ).toBe(true);
+  });
+
+  it("through piChannelsHarness, replaces the transcript on a reset", async () => {
+    const stub = fresh();
+    const { later } = await stub.channels("hello", "op-1", "reset");
+    const replaced = later.find((e) => e.type === "transcript");
+    expect(replaced).toMatchObject({
+      type: "transcript",
+      messages: [
+        { role: "system", parts: [{ type: "text", text: "Context reset" }] }
+      ]
+    });
+  });
 });

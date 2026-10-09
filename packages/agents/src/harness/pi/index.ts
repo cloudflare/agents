@@ -18,7 +18,7 @@ export {
   type PiModel,
   type PiSessionDefaults
 } from "./harness";
-export { piChannelsHarness, type PiChannelsHarnessOptions } from "./channels";
+export { piChannelsHarness } from "./channels";
 export {
   openPiSessionStore,
   type PiSessionStoreOptions

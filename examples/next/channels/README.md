@@ -73,7 +73,7 @@ conversation is also reachable directly at
 
 ## The pi agent
 
-`PiHarness` keeps pi's own shape. `piChannelsHarness(harness, { kv })`,
+`PiHarness` keeps pi's own shape. `piChannelsHarness(harness)`,
 also from `agents/harness/pi`, is the harness adapter that puts it behind
 the shared harness interface: pi events become session events, and pi
 submission ids become the caller's operation ids. pi's entries and live
@@ -83,7 +83,7 @@ projection (`agents/experimental/channels/projections/pi`).
 
 ```ts
 readonly channels = Channels.forHarness(
-  piChannelsHarness(this.harness, { kv: this.ctx.storage.kv }),
+  piChannelsHarness(this.harness),
   { channels: { web: new WebChannel() } }
 );
 ```

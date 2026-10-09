@@ -2037,10 +2037,12 @@ function toSessionEvents(event: ThinkSessionEvent): SessionEvent[] {
     case "message":
       return [{ type: "message", message: toTranscriptMessage(event.message) }];
     case "reset":
-      return [{ type: "reset" }];
+      // A reset starts the transcript over; the messages that follow (a
+      // handoff note, then the new context) arrive as message events.
+      return [{ type: "transcript", messages: [] }];
     case "transcript":
-      // The shared interface has no "re-read" event; a watch sees the
-      // change in its next state.
+      // Re-reading here would race the events that follow, so a watch sees
+      // the change in its next state.
       return [];
   }
 }

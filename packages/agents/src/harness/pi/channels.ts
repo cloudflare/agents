@@ -36,32 +36,21 @@ import type { PiOperationResult } from "./types";
 
 const BG = BACKGROUND_CONTEXT;
 
-export type PiChannelsHarnessOptions = {
-  /**
-   * Where the adapter keeps the caller's message id per operation. pi has
-   * no field for it.
-   */
-  kv: SyncKvStorage;
-};
-
 /**
  * `PiHarness` behind the shared harness interface (`AgentHarness`), so
  * `Channels.forHarness` can serve it. pi events become session events, and
  * pi's submission ids become the caller's operation ids (pi's `requestId`).
- * Message formats are the pi projection's. It knows nothing about how
+ * Messages keep pi's entry ids; `placed` and `done` report the entry an
+ * operation placed. Message formats are the pi projection's. It knows nothing about how
  * sessions reach clients.
  *
  * Opt-in: `PiHarness` keeps pi's own shape.
  *
  * @experimental The shared harness interface may change between releases.
  */
-export function piChannelsHarness(
-  pi: PiHarness,
-  options: PiChannelsHarnessOptions
-): AgentHarness {
-  const ids = new MessageIds(pi, options.kv);
+export function piChannelsHarness(pi: PiHarness): AgentHarness {
   const session = (id?: string): HarnessSession =>
-    new PiChannelsSession(pi, pi.session(id), ids);
+    new PiChannelsSession(pi, pi.session(id));
   const sessions: HarnessSessions = {
     create: async () => session((await pi.sessions.create()).id),
     fork: async (from) => session((await pi.sessions.fork(from)).id),
@@ -70,93 +59,53 @@ export function piChannelsHarness(
   return { sessions, session };
 }
 
-/**
- * The caller's id for each user message.
- *
- * At submit, before pi sees the input, the caller's message id is recorded
- * under the operation id. Recording first means there is no crash window
- * where pi has the input but not the id: a crash between the two leaves an
- * orphaned record, which is harmless. The record is written outside pi's
- * transaction, so a repeated submit keeps the first id.
- *
- * On the way out, a user entry is matched to the submission that placed it
- * (from pi's storage, by `entry`) and so to its operation. That match is
- * cached once known.
- */
-class MessageIds {
+/** Lookups in pi's own storage that its events leave out. */
+class Submissions {
   constructor(
     private readonly pi: PiHarness,
-    private readonly kv: SyncKvStorage
+    private readonly session: string
   ) {}
-
-  record(session: string, operationId: string, messageId: string): void {
-    const key = `pi-channels:op:${session}:${operationId}`;
-    if (this.kv.get(key) === undefined) this.kv.put(key, messageId);
-  }
-
-  /** The caller's message id for a placed submission. */
-  placed(session: string, record: SubmissionRecord): string | undefined {
-    if (record.type !== "input" || record.requestId === undefined) return;
-    if (record.entry === undefined) return;
-    const messageId =
-      this.kv.get<string>(`pi-channels:op:${session}:${record.requestId}`) ??
-      record.requestId;
-    this.kv.put(`pi-channels:entry:${session}:${record.entry}`, messageId);
-    return messageId;
-  }
-
-  /** Map user entry ids to caller ids, reading pi's submissions for misses. */
-  async resolve(
-    session: string,
-    entryIds: readonly string[]
-  ): Promise<Map<string, string>> {
-    const out = new Map<string, string>();
-    const missing = new Set<string>();
-    for (const id of entryIds) {
-      const known = this.kv.get<string>(`pi-channels:entry:${session}:${id}`);
-      if (known === undefined) missing.add(id);
-      else out.set(id, known);
-    }
-    if (missing.size === 0) return out;
-    const storage = await this.pi.storage();
-    let cursor: Parameters<typeof storage.scanSubmissions>[2];
-    for (;;) {
-      const page = await storage.scanSubmissions(
-        // SAFETY: pi session ids are pi conversation ids as strings.
-        {
-          conversationId: Number(session) as SubmissionRecord["conversationId"]
-        },
-        100,
-        cursor,
-        BG
-      );
-      for (const record of page.items) {
-        if (record.entry === undefined) continue;
-        if (!missing.has(String(record.entry))) continue;
-        const messageId = this.placed(session, record);
-        if (messageId !== undefined) out.set(String(record.entry), messageId);
-      }
-      if (page.next === undefined) return out;
-      cursor = page.next;
-    }
-  }
 
   /** pi's submission id as the caller's operation id. */
   async operation(id: SubmissionId): Promise<string | undefined> {
     const storage = await this.pi.storage();
     return (await storage.submission(id, BG))?.requestId;
   }
+
+  /** The entry the caller's operation placed, if pi placed it. */
+  async entry(operationId: string): Promise<string | undefined> {
+    const storage = await this.pi.storage();
+    let cursor: Parameters<typeof storage.scanSubmissions>[2];
+    for (;;) {
+      const page = await storage.scanSubmissions(
+        // SAFETY: pi session ids are pi conversation ids as strings.
+        {
+          conversationId: Number(
+            this.session
+          ) as SubmissionRecord["conversationId"]
+        },
+        100,
+        cursor,
+        BG
+      );
+      const record = page.items.find((r) => r.requestId === operationId);
+      if (record) return entryId(record);
+      if (page.next === undefined) return undefined;
+      cursor = page.next;
+    }
+  }
 }
 
 class PiChannelsSession implements HarnessSession {
   readonly id: string;
+  readonly #submissions: Submissions;
 
   constructor(
     private readonly pi: PiHarness,
-    private readonly session: PiSession,
-    private readonly ids: MessageIds
+    private readonly session: PiSession
   ) {
     this.id = session.id;
+    this.#submissions = new Submissions(pi, session.id);
   }
 
   async submit(
@@ -165,9 +114,9 @@ class PiChannelsSession implements HarnessSession {
   ) {
     // pi's tools run on the server, and it has no approvals.
     if (!("parts" in input)) throw new Error("pi takes no tool answers");
-    // pi has no participants, so `from` is dropped.
+    // pi has no participants, so `from` is dropped, and its entries have
+    // their own ids, so `messageId` is too: `placed` reports the entry.
     const operationId = options.operationId ?? crypto.randomUUID();
-    this.ids.record(this.id, operationId, input.messageId ?? operationId);
     return this.session.submit(toUserInput(input.parts), {
       operationId,
       ...(options.whenBusy && { whenBusy: options.whenBusy })
@@ -179,7 +128,11 @@ class PiChannelsSession implements HarnessSession {
   }
 
   async wait(operationId: string, signal?: AbortSignal) {
-    return toResult(await this.session.wait(operationId, signal));
+    const result = toResult(await this.session.wait(operationId, signal));
+    if (result.status !== "done") return result;
+    // For a caller that missed `placed`.
+    const messageId = await this.#submissions.entry(operationId);
+    return { ...result, ...(messageId !== undefined && { messageId }) };
   }
 
   reset(handoff?: string): Promise<void> {
@@ -220,33 +173,23 @@ class PiChannelsSession implements HarnessSession {
               console.warn("pi → session event", event.type, error);
             }
           }
-          if (out.length) await listener(out);
+          if (out.length) await listener(placedFirst(out));
         }),
       stop: async () => void (await stream.stop()),
       closed: stream.closed.then(() => undefined)
     };
   }
 
-  /** The active transcript, with user messages under the caller's ids. */
+  /** The active transcript, under pi's entry ids. */
   async transcript(): Promise<TranscriptMessage[]> {
-    const messages = toTranscriptMessages(await this.session.messages());
-    const users = messages.filter((m) => m.role === "user").map((m) => m.id);
-    const ids = await this.ids.resolve(this.id, users);
-    return messages.map((m) =>
-      m.role === "user" ? { ...m, id: ids.get(m.id) ?? m.id } : m
-    );
-  }
-
-  /** Cache the caller's message id once pi places the input. */
-  placed(record: SubmissionRecord): void {
-    this.ids.placed(this.id, record);
+    return toTranscriptMessages(await this.session.messages());
   }
 
   /** pi submission ids as operation ids, read from pi's storage. */
   async operations(inputs: readonly SubmissionId[]): Promise<string[]> {
     const out: string[] = [];
     for (const id of inputs) {
-      const operation = await this.ids.operation(id);
+      const operation = await this.#submissions.operation(id);
       if (operation !== undefined) out.push(operation);
     }
     return out;
@@ -334,12 +277,19 @@ class EventTranslator {
           { type: "operation", status: { operationId, status: "queued" } }
         ];
       case "placed":
-        this.session.placed(record);
+      case "done": {
+        const messageId = entryId(record);
         return [
-          { type: "operation", status: { operationId, status: "placed" } }
+          {
+            type: "operation",
+            status: {
+              operationId,
+              status: record.status,
+              ...(messageId !== undefined && { messageId })
+            }
+          }
         ];
-      case "done":
-        return [{ type: "operation", status: { operationId, status: "done" } }];
+      }
       case "unanswered":
         return [
           {
@@ -352,8 +302,9 @@ class EventTranslator {
 
   async #saved(entry: EntryRecord): Promise<SessionEvent[]> {
     if (entry.kind === "pi.reset") {
-      this.#messages = new Map();
-      return [{ type: "reset" }, ...(await this.#changed())];
+      const messages = await this.session.transcript();
+      this.#messages = digest(messages);
+      return [{ type: "transcript", messages }];
     }
     return this.#changed();
   }
@@ -395,4 +346,41 @@ function toResult(result: PiOperationResult): OperationResult {
 
 function digest(messages: readonly TranscriptMessage[]): Map<string, string> {
   return new Map(messages.map((m) => [m.id, JSON.stringify(m)]));
+}
+
+function entryId(record: SubmissionRecord): string | undefined {
+  return record.entry === undefined ? undefined : String(record.entry);
+}
+
+/**
+ * pi publishes a commit's submission records after its entries, so the user
+ * entry an input placed comes before the `placed` that names it. Callers
+ * map that id before the message arrives, so each `placed` moves to just
+ * before its message; everything else keeps pi's order.
+ */
+function placedFirst(events: readonly SessionEvent[]): SessionEvent[] {
+  const placed = new Map<string, SessionEvent>();
+  for (const event of events) {
+    if (
+      event.type === "operation" &&
+      event.status.status === "placed" &&
+      event.status.messageId !== undefined
+    ) {
+      placed.set(event.status.messageId, event);
+    }
+  }
+  const sent = new Set<SessionEvent>();
+  const out: SessionEvent[] = [];
+  const send = (event: SessionEvent) => {
+    if (sent.has(event)) return;
+    sent.add(event);
+    out.push(event);
+  };
+  for (const event of events) {
+    const early =
+      event.type === "message" ? placed.get(event.message.id) : undefined;
+    if (early) send(early);
+    send(event);
+  }
+  return out;
 }

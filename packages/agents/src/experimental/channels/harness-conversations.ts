@@ -60,6 +60,11 @@ const PREFIX = "channels:harness:";
  * The harness owns the transcript. Turn records live in storage; each
  * watched session's transcript is held in memory, from the watch's state
  * and the messages that follow it.
+ *
+ * A harness that gives a user message its own id, rather than the inbound
+ * message's, reports that id when it places the message. Channels keeps the
+ * mapping and shows the message under the inbound message's id, so a
+ * surface that sent it recognizes it.
  */
 export class HarnessConversations {
   readonly #harness: AgentHarness;
@@ -181,7 +186,7 @@ export class HarnessConversations {
     return session.id;
   }
 
-  /** Reset a session's context; the watch reports it as a `reset` event. */
+  /** Reset a session's context; the watch reports the new transcript. */
   async reset(conversationId: string, handoff?: string): Promise<void> {
     const link = await this.#link(conversationId);
     await link.session.reset(handoff);
@@ -217,7 +222,12 @@ export class HarnessConversations {
     const session = this.#harness.session(conversationId);
     const watch = await session.watch();
     this.#host.kv().put(`${PREFIX}session:${conversationId}`, true);
-    const link = new SessionLink(session, watch);
+    const ids = new Map<string, string>();
+    const prefix = messageKey(conversationId, "");
+    for (const [key, id] of this.#host.kv().list<string>({ prefix })) {
+      ids.set(key.slice(prefix.length), id);
+    }
+    const link = new SessionLink(session, watch, ids);
     await this.#resume(conversationId, link);
     watch.start((events) => this.#onEvents(conversationId, link, events));
     return link;
@@ -277,17 +287,23 @@ export class HarnessConversations {
       case "chunk":
         link.append(event.chunk);
         return;
-      case "message":
-        link.upsert(event.message);
-        await this.#host.publishMessages(conversationId, [event.message]);
+      case "message": {
+        const message = link.upsert(event.message);
+        await this.#host.publishMessages(conversationId, [message]);
         return;
+      }
       case "run-end":
         link.endResponse();
         return;
-      case "reset":
+      case "transcript":
+        // Surfaces start over from an empty snapshot, then see the new
+        // transcript.
         link.endResponse();
-        link.messages = [];
+        link.replace(event.messages);
         await this.#host.reset(conversationId);
+        if (link.messages.length) {
+          await this.#host.publishMessages(conversationId, [...link.messages]);
+        }
         return;
     }
   }
@@ -322,6 +338,13 @@ export class HarnessConversations {
   ): Promise<void> {
     const { operationId } = status;
     const turn = this.#turn(conversationId, operationId);
+    if (
+      (status.status === "placed" || status.status === "done") &&
+      status.messageId !== undefined &&
+      turn?.turnId === operationId
+    ) {
+      await this.#named(conversationId, link, status.messageId, turn.messageId);
+    }
     switch (status.status) {
       case "queued":
         // An operation a client of the harness itself submitted.
@@ -434,6 +457,28 @@ export class HarnessConversations {
     });
   }
 
+  /**
+   * Record that the harness's message `harnessId` is the inbound message
+   * `messageId`, and show it under that id if it is already held.
+   */
+  async #named(
+    conversationId: string,
+    link: SessionLink,
+    harnessId: string,
+    messageId: string
+  ): Promise<void> {
+    if (harnessId === messageId || link.ids.get(harnessId) === messageId) {
+      return;
+    }
+    this.#host.kv().put(messageKey(conversationId, harnessId), messageId);
+    link.ids.set(harnessId, messageId);
+    const held = link.messages.findIndex((m) => m.id === harnessId);
+    if (held === -1) return;
+    const message = { ...link.messages[held], id: messageId };
+    link.messages[held] = message;
+    await this.#host.publishMessages(conversationId, [message]);
+  }
+
   // ── Turn records ───────────────────────────────────────────────────────
 
   async #save(conversationId: string, turn: Turn): Promise<void> {
@@ -459,24 +504,41 @@ export class HarnessConversations {
   }
 }
 
-/** One watched session: its transcript and the response of its run. */
+/**
+ * One watched session: its transcript, under the inbound messages' ids, and
+ * the response of its run.
+ */
 class SessionLink {
-  messages: TranscriptMessage[];
+  messages: TranscriptMessage[] = [];
   response: ResponseWriter | undefined;
   /** The saved message the run's response continues, if any. */
   extends: string | undefined;
 
   constructor(
     readonly session: HarnessSession,
-    readonly watch: SessionWatch
+    readonly watch: SessionWatch,
+    /** Harness message ids to inbound message ids, where they differ. */
+    readonly ids: Map<string, string>
   ) {
-    this.messages = [...watch.state.messages];
+    this.replace(watch.state.messages);
   }
 
-  upsert(message: TranscriptMessage): void {
+  replace(messages: readonly TranscriptMessage[]): void {
+    this.messages = messages.map((message) => this.#named(message));
+  }
+
+  /** Add or replace a harness message; returns it as held. */
+  upsert(harnessMessage: TranscriptMessage): TranscriptMessage {
+    const message = this.#named(harnessMessage);
     const index = this.messages.findIndex((m) => m.id === message.id);
     if (index === -1) this.messages.push(message);
     else this.messages[index] = message;
+    return message;
+  }
+
+  #named(message: TranscriptMessage): TranscriptMessage {
+    const id = this.ids.get(message.id);
+    return id === undefined ? message : { ...message, id };
   }
 
   append(chunk: ResponseChunk): void {
@@ -497,6 +559,10 @@ class SessionLink {
 function turnKey(conversationId: string, turnId: string): string {
   // The quoted id keeps one conversation's prefix from matching another's.
   return `${PREFIX}turn:${JSON.stringify(conversationId)}:${turnId}`;
+}
+
+function messageKey(conversationId: string, harnessId: string): string {
+  return `${PREFIX}message:${JSON.stringify(conversationId)}:${harnessId}`;
 }
 
 function aliasKey(conversationId: string, operationId: string): string {
