@@ -62,6 +62,12 @@ describe("ThinkHarness turns", () => {
     expect(await stub.streamRows()).toBe(0);
   });
 
+  it("runs a tool call whose id names an Object.prototype property", async () => {
+    const stub = fresh();
+    const result = await stub.prompt("prototype id");
+    expect(result).toMatchObject({ status: "done", text: "tool said: 15" });
+  });
+
   it("runs parallel tool calls of one step", async () => {
     const stub = fresh();
     const result = await stub.prompt("two tools");
@@ -339,7 +345,7 @@ describe("ThinkHarness durability", () => {
     );
   });
 
-  it("adds columns to an operations table created by an earlier version", async () => {
+  it("moves an operations table from before abandon_reason into the shared store", async () => {
     const name = crypto.randomUUID();
     let stub = env.THINK_HARNESS_TEST.getByName(name);
     // Before the harness first starts, create the table as it once was.
@@ -357,6 +363,107 @@ describe("ThinkHarness durability", () => {
       status: "unanswered",
       reason: "out_of_memory"
     });
+  });
+
+  it("moves an earlier version's records into the shared store on first start", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    // Before the harness first starts, write its records as they once were.
+    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
+      instance.seedLegacyRecords()
+    );
+    await evictDurableObject(stub);
+    stub = fresh(name);
+
+    // The queued operation is woken and answered.
+    await runDurableObjectAlarm(stub);
+    expect(await stub.wait("op-queued")).toMatchObject({
+      status: "done",
+      text: "echo: after the upgrade"
+    });
+    // The settled one keeps its answer and its id.
+    expect(await stub.wait("op-done")).toEqual({
+      operationId: "op-done",
+      session: "",
+      status: "done",
+      text: "old answer",
+      messageId: "answer-old"
+    });
+    expect(
+      (await stub.submit("again", { operationId: "op-done" })).accepted
+    ).toBe(false);
+    expect(await stub.listSessions()).toEqual([
+      { id: "", busy: false },
+      // Oldest first, as they were created, not by id.
+      { id: "zeta", parent: "", busy: false },
+      { id: "alpha", busy: false }
+    ]);
+    // The records now live in the shared store, and the old tables are gone.
+    expect(await stub.storedOperation("", "op-done")).toMatchObject({
+      status: "done",
+      result: JSON.stringify({ text: "old answer" })
+    });
+    expect(await stub.harnessTables()).toEqual([
+      "cf_think_harness_store_log",
+      "cf_think_harness_store_operations",
+      "cf_think_harness_store_sessions"
+    ]);
+  });
+
+  it("recovers a tool call an earlier version's records left in flight", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("gate");
+    await stub.gateStarted(1);
+
+    // Evicted mid-call, then restarted on a version that reads the old
+    // tables: rewrite the records that way before the harness starts again.
+    stub = await crash(name);
+    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
+      instance.downgradeRecords()
+    );
+    await evictDurableObject(stub);
+    stub = fresh(name);
+    // Released, so a forgotten call would run again and finish, not hang.
+    await stub.release();
+
+    await runDurableObjectAlarm(stub);
+    const result = await stub.wait(receipt.operationId);
+    expect(result.status).toBe("done");
+    // The started tool call was remembered: reported, not run again.
+    expect(text(result)).toMatch(
+      /^tool said: error: The tool call was interrupted/
+    );
+    expect(await stub.gateRuns()).toBe(1);
+    expect(await stub.messages()).toHaveLength(2);
+  });
+
+  it("keeps work a rolled-back version queued under an id the store already holds", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    expect(
+      text(
+        await stub.wait(
+          (await stub.submit("before", { operationId: "op-1" })).operationId
+        )
+      )
+    ).toBe("echo: before");
+    // Rolled back: the earlier version cannot see the store, so it reuses the id.
+    await evictDurableObject(stub);
+    await runInDurableObject(stub, (instance: ThinkHarnessTestObject) =>
+      instance.seedRollbackRecords("op-1")
+    );
+    await evictDurableObject(stub);
+    stub = fresh(name);
+
+    // Upgraded again: the newer, queued operation wins and runs.
+    await runDurableObjectAlarm(stub);
+    expect(text(await stub.wait("op-1"))).toBe("echo: after the rollback");
+    expect(await stub.harnessTables()).toEqual([
+      "cf_think_harness_store_log",
+      "cf_think_harness_store_operations",
+      "cf_think_harness_store_sessions"
+    ]);
   });
 
   it("finishes queued work after a restart, woken by the alarm", async () => {
