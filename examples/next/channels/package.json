@@ -9,7 +9,9 @@
     "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false",
     "tui": "node src/ai-sdk-tui.ts",
-    "tui2": "sh -c 'tsx ../../../packages/agents/src/cli/index.ts tui \"${AGENT_ORIGIN:-http://localhost:5173}/channels/${1:-ai-sdk}/${2:-default}\" --as \"terminal-$$\"' tui2"
+    "tui2": "sh -c 'tsx ../../../packages/agents/src/cli/index.ts tui \"${AGENT_ORIGIN:-http://localhost:5173}/channels/${1:-ai-sdk}/${2:-default}\" --as \"terminal-$$\"' tui2",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config src/tests/vitest.config.ts"
   },
   "dependencies": {
     "@cloudflare/kumo": "^2.6.0",
@@ -28,6 +30,7 @@
   "devDependencies": {
     "@ai-sdk/tui": "1.0.119",
     "@cloudflare/vite-plugin": "1.62.3",
+    "@cloudflare/vitest-pool-workers": "^0.19.1",
     "@cloudflare/workers-types": "^5.20260729.1",
     "@tailwindcss/vite": "^4",
     "@types/node": "^26.0.1",
@@ -37,6 +40,7 @@
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
+    "vitest": "4.1.11",
     "wrangler": "^4.145.0"
   }
 }
