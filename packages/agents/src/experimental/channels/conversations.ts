@@ -21,6 +21,8 @@ import { HarnessConversations, isTurnEvent } from "./harness-conversations";
 import { responseWriter, type ResponseWriter } from "./response";
 
 const TAG_PREFIX = "channels:";
+/** Streaming Channels responses `onStart` interrupts per pass. */
+const STARTUP_PAGE = 500;
 const GENERIC_FAILURE = "The turn failed.";
 // How many recent event ids Channels remembers so a repeated event, such as
 // one a client resends after reconnecting, reaches the agent once. Past this
@@ -209,23 +211,30 @@ export class Channels extends LifecycleCapability {
 
   /** Mark responses left streaming by an earlier instance as interrupted. */
   async onStart(): Promise<void> {
-    const streaming = await this.streams.list({
-      state: "streaming",
-      // Streams lists 100 by default. A loop until none are left would drop
-      // the cap, but `list()` matches tags exactly, not by prefix, so streams
-      // other capabilities left streaming would come back on every pass.
-      limit: 1000
-    });
-    for (const status of streaming) {
-      const conversationId = conversationOf(status.tag);
-      if (conversationId === undefined) continue;
-      const writer = await this.streams.open(status.streamId);
-      writer.error("interrupted");
-      await this.#publish(conversationId, {
-        type: "response-end",
-        responseId: status.streamId,
-        ending: "interrupted"
-      });
+    // `list()` matches tags exactly, not by prefix, so it returns streams
+    // other capabilities left streaming too. Each pass interrupts the
+    // Channels responses it finds, which leaves the list, and widens the
+    // window past the others, until a pass comes back short.
+    let others = 0;
+    for (;;) {
+      const limit = others + STARTUP_PAGE;
+      const streaming = await this.streams.list({ state: "streaming", limit });
+      others = 0;
+      for (const status of streaming) {
+        const conversationId = conversationOf(status.tag);
+        if (conversationId === undefined) {
+          others += 1;
+          continue;
+        }
+        const writer = await this.streams.open(status.streamId);
+        writer.error("interrupted");
+        await this.#publish(conversationId, {
+          type: "response-end",
+          responseId: status.streamId,
+          ending: "interrupted"
+        });
+      }
+      if (streaming.length < limit) break;
     }
     // Follow harness sessions again; a run in progress opens a new response.
     await this.#harness.attachAll();
