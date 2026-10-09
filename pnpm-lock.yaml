@@ -1933,8 +1933,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       hono:
-        specifier: ^4.13.5
-        version: 4.13.8
+        specifier: ^4.13.9
+        version: 4.13.9
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -4120,13 +4120,13 @@ importers:
         version: 2.17.0
       '@x402/hono':
         specifier: ^2.17.0
-        version: 2.17.0(hono@4.13.8)(typescript@6.0.3)
+        version: 2.17.0(hono@4.13.9)(typescript@6.0.3)
       agents:
         specifier: '*'
         version: link:../../packages/agents
       hono:
-        specifier: ^4.13.5
-        version: 4.13.8
+        specifier: ^4.13.9
+        version: 4.13.9
       nanoid:
         specifier: ^5.1.16
         version: 5.1.16
@@ -4863,8 +4863,8 @@ importers:
         specifier: ^0.28.0
         version: link:../agents
       hono:
-        specifier: ^4.13.5
-        version: 4.13.8
+        specifier: ^4.13.9
+        version: 4.13.9
 
   packages/shell:
     dependencies:
@@ -11428,6 +11428,10 @@ packages:
     resolution: {integrity: sha512-/Gng7NfoykZl2pjukW5Z6+8Yxm3BPRf86GTbQnt0SbySkvax4fyL4H3HhY1cCpBGmiW9XDRFzRV+CXK2W8QudQ==}
     engines: {node: '>=16.9.0'}
 
+  hono@4.13.9:
+    resolution: {integrity: sha512-7dMkQmZoC4E6F7AtaQSPhlWAdnBti+j7rreMZl8QB4jFiEhP9TWbGWUMi8WYzBCgmgulxuvLQupKqo+Co6Omyg==}
+    engines: {node: '>=16.9.0'}
+
   hookable@6.1.1:
     resolution: {integrity: sha512-U9LYDy1CwhMCnprUfeAZWZGByVbhd54hwepegYTK7Pi5NvqEj63ifz5z+xukznehT7i6NIZRu89Ay1AZmRsLEQ==}
 
@@ -16015,7 +16019,7 @@ snapshots:
       '@cloudflare/containers': 0.3.7
       aws4fetch: 1.0.20
       capnweb: 0.8.0
-      hono: 4.12.27
+      hono: 4.13.8
     optionalDependencies:
       '@openai/agents': 0.12.0(@aws-sdk/credential-provider-node@3.972.84)(@cfworker/json-schema@4.1.1)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.21.3)(zod@4.5.4)
 
@@ -20795,11 +20799,11 @@ snapshots:
     dependencies:
       '@x402/core': 2.17.0
 
-  '@x402/hono@2.17.0(hono@4.13.8)(typescript@6.0.3)':
+  '@x402/hono@2.17.0(hono@4.13.9)(typescript@6.0.3)':
     dependencies:
       '@x402/core': 2.17.0
       '@x402/extensions': 2.17.0(typescript@6.0.3)
-      hono: 4.13.8
+      hono: 4.13.9
     transitivePeerDependencies:
       - bufferutil
       - ethers
@@ -22764,6 +22768,8 @@ snapshots:
   hono@4.12.27: {}
 
   hono@4.13.8: {}
+
+  hono@4.13.9: {}
 
   hookable@6.1.1: {}
 
