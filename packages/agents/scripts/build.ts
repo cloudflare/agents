@@ -11,7 +11,6 @@ const entries = [
   "src/skills/index.ts",
   "src/skills/compile.ts",
   "src/lifecycle/index.ts",
-  "src/harness/ai-sdk/index.ts",
   "src/harness/opencode/index.ts",
   "src/harness/pi/index.ts",
   "src/harness/think/index.ts",
@@ -72,7 +71,8 @@ const entries = [
   "src/experimental/channels/telegram/index.ts",
   "src/experimental/channels/web/index.ts",
   "src/experimental/channels/web/client.ts",
-  "src/experimental/channels/web/ai-sdk.ts"
+  "src/experimental/channels/web/ai-sdk.ts",
+  "src/experimental/channels/projections/ai-sdk.ts"
 ];
 
 for (const entry of entries) {

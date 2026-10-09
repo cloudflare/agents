@@ -12,10 +12,10 @@ Every agent has the same shape:
 3. The Worker's **`ChannelGateway`** routes each WebSocket upgrade to the
    agent object its route names, which holds the room's conversations.
 
-| Path                               | Agent        | Harness                                                          |
-| ---------------------------------- | ------------ | ---------------------------------------------------------------- |
-| `/channels/pi/<room>[/<conv>]`     | `PiAgent`    | `PiHarness` from `agents/harness/pi`, behind `piChannelsHarness` |
-| `/channels/ai-sdk/<room>[/<conv>]` | `AiSdkAgent` | `AiSdkHarness` from `agents/harness/ai-sdk`                      |
+| Path                              | Agent        | Harness                                                          |
+| --------------------------------- | ------------ | ---------------------------------------------------------------- |
+| `/channels/pi/<room>[/<conv>]`    | `PiAgent`    | `PiHarness` from `agents/harness/pi`, behind `piChannelsHarness` |
+| `/channels/think/<room>[/<conv>]` | `ThinkAgent` | `ThinkHarness` from `agents/harness/think`                       |
 
 ## Files
 
@@ -25,14 +25,14 @@ Every agent has the same shape:
   client name itself with `?as=` and join any room, which only a demo
   should allow: the agent object is the authorization boundary, so whoever
   reaches a room may use every conversation in it.
-- `src/ai-sdk-agent.ts` is `AiSdkAgent`: `AiSdkHarness` runs each message
-  with `streamText` on Workers AI. It has a client tool (`getLocation`, run
+- `src/think-agent.ts` is `ThinkAgent`: `ThinkHarness` runs each message
+  with Think's agent loop on Workers AI. It has a client tool (`getLocation`, run
   by the participant who asked) and a tool that needs approval (`flipCoin`).
 - `src/pi/agent.ts` is `PiAgent`: `PiHarness` runs pi-durable sessions with
   a `current_time` tool. See [The pi agent](#the-pi-agent).
 - `src/client.tsx` is a browser client built on `WebChannelClient` from
   `agents/experimental/channels/web/client`. The URL hash picks the agent and room
-  (`#ai-sdk/lobby`); the harness picker switches between agents.
+  (`#think/lobby`); the harness picker switches between agents.
 
 ## Run it
 
@@ -58,14 +58,14 @@ pnpm tui [room]
 ```
 
 `src/ai-sdk-tui.ts` runs `@ai-sdk/tui` over `WebChannelChatTransport` from
-`agents/experimental/channels/web/ai-sdk`, against the AI SDK agent. The TUI runs
+`agents/experimental/channels/web/ai-sdk`, against the Think agent. The TUI runs
 `getLocation` itself and asks for approvals with `y` / `n`. Set
 `AGENT_ORIGIN` if the dev server is not on `ws://localhost:5173`. The browser
 and the TUI can share a room; each is its own participant.
 
 `pnpm tui2 [harness] [room]` runs the Agents SDK terminal client built on Pi
 TUI (`npx agents tui <url>`) against either agent, for example
-`pnpm tui2 ai-sdk lobby`. It shows turns started from other surfaces, lets you
+`pnpm tui2 think lobby`. It shows turns started from other surfaces, lets you
 provide client-tool results, and can start, fork, list and switch
 conversations (`/new`, `/fork`, `/conversations`, `/switch <id>`). A
 conversation is also reachable directly at
@@ -99,6 +99,6 @@ readonly channels = Channels.forHarness(
 | `conversation-reset`               | `session.reset(handoff)`                              |
 | `approval-response`, `tool-result` | Rejected: pi-durable has neither yet                  |
 
-Client tools and approvals therefore work only on the AI SDK agent. Try
+Client tools and approvals therefore work only on the Think agent. Try
 `pnpm tui2 pi lobby`, ask `What time is it?`, then `/fork`, `/new`, or
 `/reset <handoff note>`.

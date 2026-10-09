@@ -11,12 +11,17 @@
   },
   "durable_objects": {
     "bindings": [
-      { "class_name": "AiSdkAgent", "name": "AiSdkAgent" },
+      { "class_name": "ThinkAgent", "name": "ThinkAgent" },
       { "class_name": "PiAgent", "name": "PiAgent" }
     ]
   },
   "migrations": [
     { "new_sqlite_classes": ["AiSdkAgent"], "tag": "v1" },
-    { "new_sqlite_classes": ["PiAgent"], "tag": "v2" }
+    { "new_sqlite_classes": ["PiAgent"], "tag": "v2" },
+    {
+      "deleted_classes": ["AiSdkAgent"],
+      "new_sqlite_classes": ["ThinkAgent"],
+      "tag": "v3"
+    }
   ]
 }

@@ -43,11 +43,10 @@ import type { Session } from "../../sessions/handle";
 import type { SearchResult, SessionMessage } from "../../sessions/types";
 import type { StreamJson } from "../../streams/types";
 import {
-  answerToolCall,
   toResponseChunk,
-  toTranscriptMessage,
-  type ToolCallAnswer
-} from "../ai-sdk/turns";
+  toTranscriptMessage
+} from "../../experimental/channels/projections/ai-sdk";
+import { answerToolCall, type ToolCallAnswer } from "./answers";
 import {
   SessionEvents,
   Watcher,

@@ -45,7 +45,7 @@ const result = streamText({
 });
 ```
 
-If you convert UI messages yourself, pass the same tools to `convertToModelMessages(messages, { tools })`. Without them, the AI SDK sends earlier fetches back to the model as the JSON output: the same window, but without the header line or the `<untrusted_web_content>` wrapper. `AiSdkHarness` does this for you.
+If you convert UI messages yourself, pass the same tools to `convertToModelMessages(messages, { tools })`. Without them, the AI SDK sends earlier fetches back to the model as the JSON output: the same window, but without the header line or the `<untrusted_web_content>` wrapper. `ThinkHarness` does this for you.
 
 TanStack AI:
 

@@ -1,8 +1,5 @@
 import type { ChatTransport, UIMessage, UIMessageChunk } from "ai";
-import {
-  toTranscriptMessage,
-  toUIMessageChunk
-} from "../../../harness/ai-sdk/turns";
+import { toTranscriptMessage, toUIMessageChunk } from "../projections/ai-sdk";
 import type { Json, ToolPart, TurnStatus } from "../protocol";
 import type { ClientEvent, WebChannelClient } from "./client";
 

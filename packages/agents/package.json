@@ -182,11 +182,6 @@
       "import": "./dist/lifecycle/index.js",
       "require": "./dist/lifecycle/index.js"
     },
-    "./harness/ai-sdk": {
-      "types": "./dist/harness/ai-sdk/index.d.ts",
-      "import": "./dist/harness/ai-sdk/index.js",
-      "require": "./dist/harness/ai-sdk/index.js"
-    },
     "./harness/opencode": {
       "types": "./dist/harness/opencode/index.d.ts",
       "import": "./dist/harness/opencode/index.js",
@@ -511,6 +506,11 @@
       "types": "./dist/experimental/channels/web/ai-sdk.d.ts",
       "import": "./dist/experimental/channels/web/ai-sdk.js",
       "require": "./dist/experimental/channels/web/ai-sdk.js"
+    },
+    "./experimental/channels/projections/ai-sdk": {
+      "types": "./dist/experimental/channels/projections/ai-sdk.d.ts",
+      "import": "./dist/experimental/channels/projections/ai-sdk.js",
+      "require": "./dist/experimental/channels/projections/ai-sdk.js"
     },
     "./tsconfig": "./agents.tsconfig.json",
     "./vite": {
