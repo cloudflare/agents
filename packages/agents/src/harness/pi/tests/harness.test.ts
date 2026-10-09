@@ -253,4 +253,21 @@ describe("PiHarness on pi-durable", () => {
       ]
     });
   });
+
+  it("through piChannelsHarness, joins a run in progress from pi's snapshot alone", async () => {
+    const stub = fresh();
+    const { state, applied, fresh: reread } = await stub.channelsJoin();
+    expect(state.run).toMatchObject({ operations: ["op-gate"] });
+    const user = state.messages.find((m) => m.role === "user");
+    expect(user).toMatchObject({ parts: [{ type: "text", text: "gate" }] });
+    expect(state.pending).toEqual([
+      { operationId: "op-gate", status: "placed", messageId: user?.id }
+    ]);
+    // The transcript kept from the events matches one read afresh.
+    expect(applied).toEqual(reread);
+    expect(applied.at(-1)).toMatchObject({
+      role: "assistant",
+      parts: [{ type: "text", text: "tool said: released after 1 runs" }]
+    });
+  });
 });
