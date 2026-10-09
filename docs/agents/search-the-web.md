@@ -39,7 +39,7 @@ const result = streamText({
 });
 ```
 
-If you convert UI messages yourself, pass the same tools to `convertToModelMessages(messages, { tools })`. Without them, the AI SDK sends earlier search results back to the model as the full JSON response instead of the trimmed text. `AiSdkHarness` does this for you.
+If you convert UI messages yourself, pass the same tools to `convertToModelMessages(messages, { tools })`. Without them, the AI SDK sends earlier search results back to the model as the full JSON response instead of the trimmed text. `ThinkHarness` does this for you.
 
 TanStack AI:
 

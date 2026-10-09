@@ -5,9 +5,9 @@ import {
   type GatewayOrigin
 } from "agents/experimental/channels";
 import { WebChannel } from "agents/experimental/channels/web";
-import { AiSdkHarness } from "agents/harness/ai-sdk";
+import { ThinkHarness } from "agents/harness/think";
 import { Lifecycle } from "agents/lifecycle";
-import { stepCountIs, tool } from "ai";
+import { tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 
@@ -27,17 +27,17 @@ const tools = {
 };
 
 /**
- * An AI SDK agent served to browsers and terminals through Channels. The
+ * A Think agent served to browsers and terminals through Channels. The
  * harness keeps the transcript and runs one message at a time, queueing the
  * rest; Channels carries events in and responses out.
  */
-export class AiSdkAgent extends DurableObject<Env> {
-  readonly harness = new AiSdkHarness({
+export class ThinkAgent extends DurableObject<Env> {
+  readonly harness = new ThinkHarness({
     model: createWorkersAI({ binding: this.env.AI })(
       "@cf/moonshotai/kimi-k2.7-code"
     ),
     tools,
-    stopWhen: stepCountIs(5)
+    maxSteps: 5
   });
   readonly channels = Channels.forHarness(this.harness, {
     channels: { web: new WebChannel() }

@@ -4,18 +4,18 @@ import {
 } from "agents/experimental/channels";
 import { web } from "agents/experimental/channels/web";
 
-export { AiSdkAgent } from "./ai-sdk-agent";
+export { ThinkAgent } from "./think-agent";
 export { PiAgent } from "./pi/agent";
 
 /** Each harness's agents, by the first segment of a route. */
 const harnesses: Record<string, (env: Env, name: string) => GatewayAgent> = {
-  "ai-sdk": (env, name) => env.AiSdkAgent.getByName(name),
+  think: (env, name) => env.ThinkAgent.getByName(name),
   pi: (env, name) => env.PiAgent.getByName(name)
 };
 
 /**
- * `/channels/<harness>/<room>[/<conversation>]`: `/channels/ai-sdk/lobby`
- * reaches the AiSdkAgent named `lobby`.
+ * `/channels/<harness>/<room>[/<conversation>]`: `/channels/think/lobby`
+ * reaches the ThinkAgent named `lobby`.
  */
 function parse(request: Request) {
   const match = /^\/channels\/([^/]+)\/([^/]+)(?:\/([^/]+))?$/.exec(

@@ -61,7 +61,7 @@ export interface WebSearchTool {
  *
  * `toModelOutput` only applies to earlier turns when the tools are passed to
  * `convertToModelMessages(messages, { tools })`; otherwise the AI SDK sends
- * the full response back to the model as JSON. `AiSdkHarness` passes them.
+ * the full response back to the model as JSON. `ThinkHarness` passes them.
  *
  * @example
  * ```ts
