@@ -39,26 +39,20 @@ const BG = BACKGROUND_CONTEXT;
 export const ROOT_SESSION: PiSessionId = String(ROOT_CONVERSATION_ID);
 
 /**
- * The three wake timings. They suit a real deployment; only tests change
- * them, with `setWakeTimingForTests`, so a suite does not sit on the real
+ * The wake timings. They suit a real deployment; only tests change them,
+ * with `setWakeTimingForTests`, so a suite does not sit on the real
  * heartbeat.
  *
- * A pi long wait further away than this is handed to the alarm, so the
- * alarm, not pi's in-memory timer, is what wakes the object.
+ * A pi wait further away than this is handed to the alarm. A pending timer
+ * keeps an object in memory for at most 15 minutes, so a far deadline is
+ * the alarm's to keep, not pi's in-memory timer.
  */
 const SLEEP_THRESHOLD_MS = 60_000;
 
 /**
- * Longest one wake waits on pi. It waits inside an alarm invocation, which
- * has a 15 minute wall-time limit, so a longer run is waited on across
- * several alarms.
- */
-const WAIT_BUDGET_MS = 10 * 60_000;
-
-/**
- * The wake job's heartbeat while it waits, and how often it re-checks work
- * it cannot wait on, such as background tasks. If the object is evicted, the
- * job is still due and its alarm restarts the object.
+ * The wake job's heartbeat while pi has live work. It does not keep the
+ * object alive; pi's own I/O and timers do. It is what brings the object
+ * back if it restarts mid-run, and how background-only work is re-checked.
  */
 const HEARTBEAT_MS = 30_000;
 
@@ -142,13 +136,11 @@ export type PiSessionDefaults = {
   readonly thinkingLevel?: ModelThinkingLevel;
 };
 
-/** How long the wake waits, and when it hands a wait to the alarm. */
+/** The wake's heartbeat, and when it hands a pi wait to the alarm. */
 type WakeTiming = {
   /** A pi wait further away than this goes to the alarm. Default 60_000. */
   readonly sleepThresholdMs?: number;
-  /** Longest one wake waits inside an alarm. Default 600_000. */
-  readonly waitBudgetMs?: number;
-  /** Heartbeat while waiting, and the re-check for background work. Default 30_000. */
+  /** Heartbeat while pi has live work. Default 30_000. */
   readonly heartbeatMs?: number;
 };
 
@@ -202,25 +194,25 @@ function signalContext(signal: AbortSignal | undefined): Context {
  * database (see `session-store.ts`).
  *
  * What pi cannot do on a Durable Object is wake itself: its scheduler runs
- * in memory, and an evicted object has no memory. The harness is that wake,
- * with one Lifecycle job per session. Input goes to pi once, in `submit()`,
- * after the session's job is scheduled. The job waits while pi has live
- * tasks in the session, rescheduling itself as a heartbeat, and completes
- * when there are none. An eviction mid-run leaves the job due, so its alarm
- * restarts the object, pi reopens and resumes its own tasks, and the job
- * waits again.
+ * in memory, and an object that restarts has no memory. The harness is that
+ * wake, with one Lifecycle job per session. Input goes to pi once, in
+ * `submit()`, after the session's job is scheduled. pi does the work; the
+ * job only checks on it. While pi has live tasks in the session, the job
+ * stays due on a heartbeat, so an object that restarts mid-run is brought
+ * back by its alarm, and pi reopens and resumes its own tasks. When pi goes
+ * idle, the job completes, so no alarm is left and the object can
+ * hibernate. The wake keeps no timer of its own.
  *
  * @beta The API may change between releases.
  */
 export class PiHarness extends LifecycleCapability {
   readonly sessions: PiSessions;
   readonly #options: PiHarnessOptions;
-  /** In-memory waits on pi, per session, each inside an alarm's work. */
-  readonly #waits = new Map<PiSessionId, Promise<void>>();
+  /** pi's idle promise per session the wake is watching, in memory only. */
+  readonly #watching = new Map<PiSessionId, Promise<void>>();
   /** Submissions between their wake and pi's admission, per session. */
   readonly #admitting = new Map<PiSessionId, number>();
   #sleepThresholdMs = SLEEP_THRESHOLD_MS;
-  #waitBudgetMs = WAIT_BUDGET_MS;
   #heartbeatMs = HEARTBEAT_MS;
   #opening: Promise<Opened> | undefined;
 
@@ -241,7 +233,6 @@ export class PiHarness extends LifecycleCapability {
       }
     }
     this.#sleepThresholdMs = timing.sleepThresholdMs ?? this.#sleepThresholdMs;
-    this.#waitBudgetMs = timing.waitBudgetMs ?? this.#waitBudgetMs;
     this.#heartbeatMs = timing.heartbeatMs ?? this.#heartbeatMs;
   }
 
@@ -456,13 +447,14 @@ export class PiHarness extends LifecycleCapability {
   }
 
   /**
-   * One run of a session's wake job. It never admits or replays anything:
-   * it waits while pi has live tasks in the session and completes when it
-   * has none. pi does all the work in between.
+   * One run of a session's wake job. It never admits, replays or waits for
+   * anything: it checks whether pi has live tasks in the session, stays due
+   * on a heartbeat while it does, and completes when it has none. pi does
+   * all the work in between.
    */
   async #wakeStep(session: PiSessionId): Promise<LifecycleJobOutcome> {
     const heartbeat = { rescheduleAt: Date.now() + this.#heartbeatMs };
-    if (this.#waits.has(session)) return heartbeat;
+    if (this.#watching.has(session)) return heartbeat;
     const { pi } = await this.#open();
     const conversation = await pi.conversation(conversationId(session), BG);
     if (!conversation) return undefined;
@@ -476,37 +468,40 @@ export class PiHarness extends LifecycleCapability {
     }
     const wakeAt = await this.#longWait(pi, conversation.id, BG);
     if (wakeAt !== undefined) return { rescheduleAt: wakeAt };
-    // Background tasks are outside the conversation's idle wait.
+    // Background tasks are outside the conversation's idle promise, so the
+    // heartbeat re-checks them.
     if (tasks.every((task) => task.record.background)) return heartbeat;
 
-    const wait = this.#waitForIdle(conversation).finally(() => {
-      this.#waits.delete(session);
-      // Re-check now: pi may have started more work, such as a follow-up.
-      void this.#wake(session);
-    });
-    this.#waits.set(session, wait);
-    // The wait runs past this dispatch, inside the alarm's work, so the
-    // object stays alive for it. The heartbeat covers an eviction.
-    this.lifecycle.trackAlarmWork(wait);
+    this.#watchIdle(session, conversation);
     return heartbeat;
   }
 
-  async #waitForIdle(conversation: Conversation): Promise<void> {
-    const budget = new AbortController();
-    const timer = setTimeout(() => budget.abort(), this.#waitBudgetMs);
-    try {
-      // Cancelling the wait never cancels pi's work.
-      await conversation.waitForIdle(withAbortSignal(budget.signal, BG));
-    } catch (error) {
-      if (!budget.signal.aborted) {
+  /**
+   * Step the wake again as soon as pi goes idle, so the job completes then
+   * rather than at the next heartbeat. pi's work mostly finishes outside
+   * any alarm, and nothing inbound marks its end. The idle promise has no
+   * timer and does no I/O, so it keeps nothing alive; if the object
+   * restarts it is gone, and the heartbeat covers that.
+   */
+  #watchIdle(session: PiSessionId, conversation: Conversation): void {
+    const idle = conversation
+      .waitForIdle(BG)
+      .catch((error: unknown) => {
         this.lifecycle.events.emit("pi:wake_error", {
-          session: String(conversation.id),
+          session,
           error: error instanceof Error ? error.message : String(error)
         });
-      }
-    } finally {
-      clearTimeout(timer);
-    }
+      })
+      .finally(() => {
+        this.#watching.delete(session);
+        // Re-check now: pi may have started more work, such as a follow-up.
+        void this.#wake(session);
+      });
+    this.#watching.set(session, idle);
+    // Not for keep-alive: this attributes a memory-limit reset during pi's
+    // work to the wake job, so a run that keeps crashing the object trips
+    // Lifecycle's breaker instead of looping.
+    this.lifecycle.trackAlarmWork(idle);
   }
 
   // ── pi ───────────────────────────────────────────────────────────────────

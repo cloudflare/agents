@@ -50,10 +50,11 @@ Responsibilities are split by authority:
   suite runs against it on a real Durable Object.
 - **The wake** is one Lifecycle job per session, owned by `PiHarness`. Input
   goes to pi once, in `submit()`, after the session's job is scheduled. The
-  job waits while pi has live tasks in the session, rescheduling itself as a
-  heartbeat, and completes when there are none. An eviction leaves it due,
-  so its alarm restarts the object and pi resumes its own tasks. The wake
-  never admits input or replays model or tool work.
+  job only checks on pi: while pi has live tasks in the session it stays due
+  on a heartbeat, and it completes when there are none, or as soon as pi's
+  idle promise resolves. A restart mid-run leaves it due, so its alarm
+  restarts the object and pi resumes its own tasks. The wake never admits
+  input, replays model or tool work, or holds a timer of its own.
 - **Transport is app glue**, not part of the harness. The harness exposes
   `session.events()`, which is pi's own agent events: a snapshot, then one
   batch per commit. The example's `sockets.ts` puts one session per socket on
@@ -67,9 +68,10 @@ over Tasks, the driver, and the state machine, and records everything that was h
 
 - Background pi tasks are polled every 30 s, because the conversation's idle
   wait ignores them.
-- pi sleeps with `setTimeout`, which does not keep an object alive. Long
-  waits of the generation task become wake-job reschedules by reading pi's
-  `LiveDoc`; custom task sleeps are invisible. This needs a pi change.
+- pi sleeps with `setTimeout`. A pending timer keeps an object in memory
+  for at most 15 minutes and is lost on a restart, so long waits of the
+  generation task become wake-job reschedules by reading pi's `LiveDoc`;
+  custom task sleeps are invisible. This needs a pi change.
 - Two reads (`submissionByRequest`, `scanConversations`) go to pi's storage
   directly, because the Harness does not offer them.
 - The table prefix is a SQL rewrite, because pi has no prefix option.

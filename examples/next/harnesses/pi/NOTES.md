@@ -28,8 +28,8 @@ pi-durable already is a durable execution engine. It has checkpointed tasks,
 ownership trees, abort, replay-safe and unsafe tools, retries, and an inbox,
 and its `submit()` is durable before it resolves. Around it, the SDK only has
 to do one thing: wake the object when pi has work but no memory. That is one
-Lifecycle job per session, owned by `PiHarness` (`#wake`, `#wakeStep`,
-`#waitForIdle` in `pi-harness.ts`, about 90 lines).
+Lifecycle job per session, owned by `PiHarness` (`#wake`, `#wakeStep` and
+`#watchIdle` in `agents/harness/pi`, about 80 lines).
 
 - **Tasks.** This was the old design. Tasks journals steps for replay, and pi
   is already the replay authority, so every Tasks step was a no-op wrapper
@@ -66,9 +66,16 @@ A run of the job (`#wakeStep`) never admits or replays anything:
   instead.
 - **A pi wait more than 60 s away:** reschedule to that deadline.
 - **Only background tasks:** reschedule in 30 s.
-- **Otherwise:** start `conversation.waitForIdle()` in the background,
-  inside the alarm's work (`trackAlarmWork`), and reschedule the job 30 s out
-  as a heartbeat. When the wait ends, push the job due now to re-check.
+- **Otherwise:** reschedule the job 30 s out as a heartbeat, and watch
+  `conversation.waitForIdle()`. When pi goes idle, push the job due now, so
+  it completes then instead of at the next heartbeat. The watch has no timer
+  and does no I/O, so it keeps nothing alive. It is passed to
+  `trackAlarmWork` only so a memory-limit reset during pi's work counts
+  against the wake job's breaker.
+
+The wake keeps no timer of its own. pi's model requests, tool I/O and retry
+timers keep the object in memory while there is work. The heartbeat is
+there for when the object restarts mid-run anyway.
 
 The whole thing relies on one Lifecycle rule: a same-id `push()` made while
 the job is dispatching supersedes that dispatch's outcome. So a submit
@@ -111,11 +118,11 @@ against it:
 
 ### Background work is polled
 
-The wake waits with `conversation.waitForIdle()`, which ignores background
+The wake watches `conversation.waitForIdle()`, which ignores background
 tasks, such as a background subagent's anchor (pi-durable example 23). When
-only background tasks are left, the wake sleeps 30 s and checks again. The
-alarm keeps the object alive, but a background task that finishes is only
-noticed at the next check. A background task in another conversation shows
+only background tasks are left, the wake checks again on each 30 s
+heartbeat, so a background task that finishes is only noticed at the next
+check. A background task in another conversation shows
 up under that conversation's wake, which `onStart` creates.
 
 ### pi's timers are in memory
@@ -124,17 +131,16 @@ pi sleeps with `setTimeout`: `runtime.sleep(until)` in the scheduler, which
 the generation task uses for retry backoff (`{ phase: "retry", until }`) and
 deferred polling (`{ phase: "poll", pollAt }`), and which custom tasks can
 call too. The deadline is in the checkpoint, so a restart resumes the sleep
-correctly. But a pending timer does not keep a Durable Object alive. If
-nothing else is in flight, the object is evicted, the timer is gone, and
-nothing wakes it until the next request.
+correctly. A pending timer keeps a Durable Object in memory, but for at most
+15 minutes, and a restart loses it.
 
-While a wake step is waiting, it keeps the object alive through its alarm
-invocation, so pi's timer fires. `#longWait` turns a wait more than 60 s
-away into a reschedule of the wake job at the deadline. It finds the deadline by
-reading pi's `LiveDoc` (`generation.retry.at`, `generation.deferred.pollAt`).
-That is a presentation document used as a control signal, and it only
-covers the generation task. A custom task's `runtime.sleep` is invisible,
-and a wait under 60 s holds the alarm invocation open (billed wall time).
+So `#longWait` turns a wait more than 60 s away into a reschedule of the
+wake job at the deadline. A shorter wait is left to pi's timer, with the
+heartbeat as the fallback if the object restarts. `#longWait` finds the
+deadline by reading pi's `LiveDoc` (`generation.retry.at`,
+`generation.deferred.pollAt`). That is a presentation document used as a
+control signal, and it only covers the generation task. A custom task's
+`runtime.sleep` is invisible.
 
 **Ask Mario** (either would do):
 
@@ -150,23 +156,22 @@ and a wait under 60 s holds the alarm invocation open (billed wall time).
 Either removes `#longWait` and makes custom task sleeps safe on Durable
 Objects.
 
-### Alarm wall time
+### Long model requests
 
-The wake's wait runs inside an alarm invocation (`trackAlarmWork`), and
-alarm handlers have a 15 minute wall-time limit. Outbound model streams keep
-an object alive for at most 15 minutes too. A wait therefore lasts at most 10
-minutes and then pushes the job due now, which starts a new alarm
-invocation. A single model request that streams for more than 15 minutes
-is still at the platform's mercy.
+The wake's dispatch returns at once; nothing of the wake runs inside the
+alarm invocation, so its 15 minute wall-time limit does not apply. An
+outbound model stream keeps the object in memory for at most 15 minutes,
+though, so a single model request that streams for longer is still at the
+platform's mercy. If the object goes, the heartbeat brings it back and pi
+retries the request.
 
-### Graceful eviction waits for the wake
+### Graceful eviction waits for pi
 
-`evictDurableObject` waits for in-flight work to drain. The wake's purpose
-is to keep a wait in flight, so the tests crash the object with
-`abortAllDurableObjects()` instead. A deploy behaves the same way: the
-runtime gives in-flight work 30 s and then kills it. The recovery path is the
-same either way, but it is worth knowing that a running pi turn never lets
-the object drain.
+`evictDurableObject` waits for in-flight work to drain, and a running pi
+turn is in-flight work: model requests, tool I/O and timers. So the tests
+crash the object with `abortAllDurableObjects()` instead. A deploy behaves
+the same way: the runtime gives in-flight work 30 s and then kills it. The
+recovery path is the same either way.
 
 ### Reads the Harness does not offer
 
