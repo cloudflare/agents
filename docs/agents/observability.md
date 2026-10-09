@@ -272,6 +272,50 @@ yet readable during construction), and `cloudflare.agents.operation.name`
 (`agent_initialization`). Like the rest of the tracing in this package, it is a
 no-op when the runtime has no native tracing capability.
 
+## Job queue spans
+
+When Worker traces are enabled, every job the Lifecycle alarm loop runs gets
+its own span, named `process {owner}`, under the alarm invocation's root span.
+The owner is the capability that queued the job (`scheduler`, `queue`,
+`tasks`, ...) or `host` for the Durable Object's own jobs. Spans the job
+creates while it runs, such as Durable Object storage calls and model calls
+from a scheduled callback, appear as children of its span.
+
+The span follows the
+[OpenTelemetry messaging conventions for a process span](https://opentelemetry.io/docs/specs/semconv/messaging/messaging-spans/#process-span):
+
+| Attribute                    | Value                                |
+| ---------------------------- | ------------------------------------ |
+| `messaging.system`           | `cloudflare.agents`                  |
+| `messaging.operation.name`   | `process`                            |
+| `messaging.operation.type`   | `process`                            |
+| `messaging.destination.name` | The job owner                        |
+| `messaging.message.id`       | The job id                           |
+| `error.type`                 | The error class, when the job failed |
+
+Details the conventions do not cover use the `cloudflare.agents.job` prefix:
+
+| Attribute                                                            | Value                                                                     |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `cloudflare.agents.job.fn`                                           | The function name the owner dispatches on                                 |
+| `cloudflare.agents.job.outcome`                                      | `completed`, `rescheduled`, `yielded`, `deferred`, `dropped`, `abandoned` |
+| `cloudflare.agents.job.attempt.count`                                | How many times the owner's `onJob` ran                                    |
+| `cloudflare.agents.job.retry.max_attempts`                           | The retry budget                                                          |
+| `cloudflare.agents.job.reschedule_at`                                | The new due time, in epoch milliseconds, when the job was rescheduled     |
+| `cloudflare.agents.job.lag_ms`                                       | How long after its due time the job started                               |
+| `cloudflare.agents.job.singleflight`, `.exclusive`, `.recovery_loop` | The job's push options                                                    |
+| `cloudflare.agents.job.hung_reset`                                   | `true` when a hung single-flight run was forcibly reset to run this one   |
+| `cloudflare.agents.job.slow_dispatch`                                | `true` when the dispatch outlived its hung timeout                        |
+
+`outcome` says what happened to the job and is separate from failure. A job
+whose retries ran out and whose owner then completed it reports `completed`
+with `error.type` set and an error span status. Each failed attempt adds an
+exception event that records only the error class name, never its message.
+A `deferred` job hit a platform failure and stays queued for a fresh
+invocation. A `dropped` job had no installed owner and was deleted without
+running. A single-flight job skipped because its previous run is still going
+gets no span.
+
 ## AI SDK tracing
 
 `agents/observability/ai` instruments the Vercel AI SDK with Workers' native

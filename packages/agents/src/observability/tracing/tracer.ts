@@ -9,10 +9,21 @@ export type TraceAttributes = Readonly<Record<string, TraceAttributeValue>>;
 /** A value that may complete synchronously or through a promise-like result. */
 export type MaybePromise<T> = T | PromiseLike<T>;
 
-/** Minimal runtime span surface used by tracers. */
+/** Span status codes understood by the Workers `Span.setStatus()` API. */
+export type SpanStatusCode = "unset" | "ok" | "error";
+
+/**
+ * Minimal runtime span surface used by tracers.
+ *
+ * `recordException` and `setStatus` arrived in later Workers runtimes than
+ * the rest of this surface, so they are optional: a runtime without them
+ * still records attributes and span timing.
+ */
 export type SpanWriter = {
   readonly isTraced: boolean;
   setAttribute(key: string, value: TraceAttributeValue): void;
+  recordException?(exception: { readonly name: string }): void;
+  setStatus?(status: { readonly code: SpanStatusCode }): void;
   end(): void;
 };
 
@@ -79,6 +90,20 @@ export type AgentSpan = {
    * are not counted as errors. The cause message is never recorded. Idempotent.
    */
   fail(cause: unknown): void;
+  /**
+   * Marks the span failed without ending it, for work that keeps running to
+   * report what it did about the failure. Records `error.type` and an error
+   * status where the runtime supports one; cancellations record `canceled`
+   * instead, like {@link AgentSpan.fail}. The cause message is never recorded.
+   */
+  markFailed(cause: unknown): void;
+  /**
+   * Records an exception event on the open span without ending it or changing
+   * its status — for a failure the work recovered from, such as an attempt
+   * that was retried. Only the error class name is recorded, never its
+   * message or stack. Cancellations are not exceptions and are ignored.
+   */
+  recordException(cause: unknown): void;
 };
 
 type InvocationScope = {
@@ -294,16 +319,37 @@ class ManagedSpan implements AgentSpan {
       // operations do not inflate error rates. The vendor marker is additive.
       setAttributes(this.span, { "cloudflare.agents.canceled": true });
     } else {
-      // Workers' custom Span API does not currently expose setStatus(). Do not
-      // invent an `otel.status_code` attribute: status is span state in OTel,
-      // not an attribute. error.type remains the standard queryable marker.
-      setAttributes(this.span, {
-        "error.type":
-          cause instanceof Error ? cause.name || "Error" : typeof cause
-      });
+      // Status is span state in OTel, not an attribute, so do not invent an
+      // `otel.status_code` attribute. error.type is the queryable marker;
+      // these spans do not set an error status yet (see markFailed).
+      setAttributes(this.span, { "error.type": errorType(cause) });
     }
 
     this.close();
+  }
+
+  markFailed(cause: unknown): void {
+    if (this.#closed) {
+      return;
+    }
+
+    if (isCancellation(cause)) {
+      setAttributes(this.span, { "cloudflare.agents.canceled": true });
+      return;
+    }
+
+    setAttributes(this.span, { "error.type": errorType(cause) });
+    writeSafely(this.span, (span) => span.setStatus?.({ code: "error" }));
+  }
+
+  recordException(cause: unknown): void {
+    if (this.#closed || isCancellation(cause)) {
+      return;
+    }
+
+    writeSafely(this.span, (span) =>
+      span.recordException?.({ name: errorType(cause) })
+    );
   }
 
   close(): void {
@@ -371,21 +417,38 @@ export function writeSpanAttributes(
 }
 
 function setAttributes(span: SpanWriter, attributes: TraceAttributes): void {
+  writeSafely(span, (writer) => {
+    for (const [key, value] of Object.entries(attributes)) {
+      if (value !== undefined) {
+        writer.setAttribute(key, value);
+      }
+    }
+  });
+}
+
+/**
+ * Runs one write against a traced span. Fail-safe: a throwing writer must not
+ * leak the span or replace the application's original error with a telemetry
+ * one, so the write is dropped and the span still closes.
+ */
+function writeSafely(
+  span: SpanWriter,
+  write: (writer: SpanWriter) => void
+): void {
   if (!span.isTraced) {
     return;
   }
 
-  // Fail-safe: a throwing writer must not leak the span or replace the
-  // application's original error with a telemetry one.
   try {
-    for (const [key, value] of Object.entries(attributes)) {
-      if (value !== undefined) {
-        span.setAttribute(key, value);
-      }
-    }
+    write(span);
   } catch {
-    // Drop the attributes; the span still closes.
+    // Drop the write.
   }
+}
+
+/** The low-cardinality class of a failure, recorded as `error.type`. */
+function errorType(cause: unknown): string {
+  return cause instanceof Error ? cause.name || "Error" : typeof cause;
 }
 
 function isPromiseLike<T>(value: MaybePromise<T>): value is PromiseLike<T> {
