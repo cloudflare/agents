@@ -73,12 +73,13 @@ conversation is also reachable directly at
 
 ## The pi agent
 
-`PiHarness` keeps pi's own shape. `src/pi/channels-harness.ts`,
-`piChannelsHarness(harness, { kv })`, is the harness adapter that puts it
-behind the shared harness interface. It only translates shapes: pi entries
-become transcript messages, pi events become session events, and pi
-submission ids become the caller's operation ids. `Channels.forHarness`
-knows nothing about pi:
+`PiHarness` keeps pi's own shape. `piChannelsHarness(harness, { kv })`,
+also from `agents/harness/pi`, is the harness adapter that puts it behind
+the shared harness interface: pi events become session events, and pi
+submission ids become the caller's operation ids. pi's entries and live
+messages become transcript messages and response chunks through the pi
+projection (`agents/experimental/channels/projections/pi`).
+`Channels.forHarness` knows nothing about pi:
 
 ```ts
 readonly channels = Channels.forHarness(

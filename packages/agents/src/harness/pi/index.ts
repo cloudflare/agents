@@ -2,6 +2,8 @@
  * pi-durable hosted in a Durable Object. `PiHarness` is a Lifecycle
  * capability that opens pi over the object's SQLite database and wakes it
  * after eviction; pi owns the transcript, the inbox, and every run.
+ * `piChannelsHarness` puts it behind the shared harness interface so
+ * `Channels.forHarness` can serve it.
  *
  * @beta The API may change between releases.
  */
@@ -16,6 +18,7 @@ export {
   type PiModel,
   type PiSessionDefaults
 } from "./harness";
+export { piChannelsHarness, type PiChannelsHarnessOptions } from "./channels";
 export {
   openPiSessionStore,
   type PiSessionStoreOptions
