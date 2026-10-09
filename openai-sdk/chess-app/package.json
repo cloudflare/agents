@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@cloudflare/vite-plugin": "1.62.3",
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@modelcontextprotocol/server": "2.0.0",
     "@vitejs/plugin-react": "^6.0.3",
     "agents": "*",
