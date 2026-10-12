@@ -69,6 +69,37 @@ export class MyAgent extends Think<Env> {
 
 Computer ships a JavaScript backend and a just-bash shell backend that run in Dynamic Workers, and a container backend with a full Linux userland. See the [Computer README](https://github.com/cloudflare/computer/tree/main/packages/computer#choosing-a-backend) for each backend's bindings.
 
+### Calling the agent's tools from code
+
+Give a JavaScript backend a `ws:tools` module, and code the model runs with `exec` can import the agent's tools. Files come from `node:fs/promises`, so serve `getTools()` rather than the workspace tools:
+
+```typescript
+import { createToolBindings } from "@cloudflare/computer/modules/tools";
+import { forAISDKTools } from "@cloudflare/computer/tools/ai-sdk";
+
+new WorkerJavaScriptBackend({
+  id: "js",
+  loader: this.env.LOADER,
+  modules: {
+    "ws:tools": createToolBindings(forAISDKTools(() => this.getTools()))
+  }
+});
+```
+
+```ts
+import { readFile } from "node:fs/promises";
+import { getWeather } from "ws:tools";
+
+export default async function () {
+  const cities = JSON.parse(await readFile("/workspace/cities.json", "utf8"));
+  const reports = [];
+  for (const city of cities) reports.push((await getWeather({ city })).text);
+  return reports;
+}
+```
+
+Tools that need approval, and tools that run in the browser, are not exported: nothing can approve or run them from code. Calls from code do not go through `beforeToolCall`. See [`ws:tools`](https://github.com/cloudflare/computer/blob/main/docs/17_isolate_javascript.md#wstools) for how calls and results work.
+
 ### Changing the tools
 
 `exec` offers every backend the Workspace has, and each backend describes itself to the model. To change a built-in tool, return a tool with the same name from `getTools()`; it replaces the built-in. To hide tools for a turn, return `activeTools` from `beforeTurn`.
@@ -242,6 +273,8 @@ export class MyAgent extends Think<Env> {
 See [Connecting to MCP Servers](https://github.com/cloudflare/agents/blob/main/docs/agents/mcp-client.md) for full MCP client documentation.
 
 ## Code Execution Tool
+
+> **Deprecated.** Use `exec` on a JavaScript backend with `ws:tools` instead; see [Calling the agent's tools from code](#calling-the-agents-tools-from-code). `createExecuteTool` will be removed along with `@cloudflare/codemode`.
 
 Let the LLM write and run TypeScript in a sandboxed Worker, recorded on a durable codemode runtime (abort-and-replay, human approvals, audit trail, reusable snippets). Requires `@cloudflare/codemode` and a `worker_loaders` binding.
 
