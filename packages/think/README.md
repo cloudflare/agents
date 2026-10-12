@@ -214,6 +214,27 @@ export class MyAgent extends Think<Env> {
 `workspaceTools` takes the options of `createAITools` from
 `@cloudflare/computer/tools/ai-sdk`. Set it to `false` to omit the tools.
 
+Give a backend a `ws:tools` module, and code the model runs with `exec` can
+import the agent's tools; files come from `node:fs`:
+
+```ts
+import { createToolBindings } from "@cloudflare/computer/modules/tools";
+import { forAISDKTools } from "@cloudflare/computer/tools/ai-sdk";
+
+new WorkerJavaScriptBackend({
+  id: "js",
+  loader: this.env.LOADER,
+  modules: {
+    "ws:tools": createToolBindings(forAISDKTools(() => this.getTools()))
+  }
+});
+```
+
+```js
+import { getWeather } from "ws:tools";
+export default async () => (await getWeather({ city: "Lisbon" })).text;
+```
+
 To work in a Workspace another Durable Object owns, use `lazyWorkspace`:
 
 ```ts
@@ -1044,6 +1065,8 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 - **Row size enforcement** — compacts tool outputs exceeding 1.8MB
 
 ## Code execution tool
+
+> **Deprecated.** Use `exec` with `ws:tools` (see [Built-in workspace](#built-in-workspace)).
 
 Let the LLM write and run JavaScript in a sandboxed Worker:
 

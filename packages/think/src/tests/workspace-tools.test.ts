@@ -65,6 +65,45 @@ describe("Think workspace tools", () => {
     expect(output).toContain("42");
   });
 
+  it("lets code run with exec import the agent's tools from ws:tools", async () => {
+    const agent = await freshAgent();
+    await agent.addJavaScriptBackend();
+    await agent.captureTurn();
+    const output = await agent.callTool("exec", {
+      command: [
+        'import { shout } from "ws:tools";',
+        "export default async function () {",
+        '  return (await shout({ text: "hello" })).text;',
+        "}"
+      ].join("\n")
+    });
+    expect(output).toContain("HELLO");
+  });
+
+  it("reads files through node:fs, not ws:tools", async () => {
+    const agent = await freshAgent();
+    await agent.addJavaScriptBackend();
+    await agent.captureTurn();
+    const withRead = await agent.callTool("exec", {
+      command: [
+        'import { read } from "ws:tools";',
+        "export default async () => read;"
+      ].join("\n")
+    });
+    expect(withRead).toContain("does not provide an export named 'read'");
+
+    const withFs = await agent.callTool("exec", {
+      command: [
+        'import { writeFile, readFile } from "node:fs/promises";',
+        "export default async function () {",
+        '  await writeFile("/workspace/fs.txt", "via node:fs");',
+        '  return readFile("/workspace/fs.txt", "utf8");',
+        "}"
+      ].join("\n")
+    });
+    expect(withFs).toContain("via node:fs");
+  });
+
   it("hands its Workspace to getWorkspace(stub)", async () => {
     const agent = await freshAgent();
     // SAFETY: Think implements `__getWorkspaceStub()`. The DO stub types its

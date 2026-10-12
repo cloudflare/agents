@@ -168,6 +168,12 @@ function optionsFromAgent(agent: ExecuteToolAgent): CreateExecuteToolOptions {
  * When called with an agent, the runtime handle is also assigned to
  * `agent.codemode` so callables (and Think's built-in approval flow) can
  * reach it.
+ *
+ * @deprecated Code execution is moving to the Workspace: give it a
+ * JavaScript backend with a `ws:tools` module
+ * (`createToolBindings(forAISDKTools(() => this.getTools()))` from
+ * `@cloudflare/computer`), so code the model runs with `exec` imports the
+ * agent's tools and reads files through `node:fs`.
  */
 export function createExecuteRuntime(
   source: CreateExecuteToolOptions | ExecuteToolAgent,
@@ -373,6 +379,12 @@ export function truncatePausedExecutionOutput(output: unknown): unknown {
  *
  * Use {@link createExecuteRuntime} to also get the runtime handle
  * (approvals, audit, snippets) and the connector set.
+ *
+ * @deprecated Code execution is moving to the Workspace: give it a
+ * JavaScript backend with a `ws:tools` module
+ * (`createToolBindings(forAISDKTools(() => this.getTools()))` from
+ * `@cloudflare/computer`), so code the model runs with `exec` imports the
+ * agent's tools and reads files through `node:fs`.
  */
 export function createExecuteTool(
   source: CreateExecuteToolOptions | ExecuteToolAgent,

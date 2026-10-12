@@ -6,7 +6,10 @@
  */
 import { Workspace } from "@cloudflare/computer";
 import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
-import type { LanguageModel, ToolSet } from "ai";
+import { createToolBindings } from "@cloudflare/computer/modules/tools";
+import { forAISDKTools } from "@cloudflare/computer/tools/ai-sdk";
+import { tool, type LanguageModel, type ToolSet } from "ai";
+import { z } from "zod";
 import { Think } from "../../think";
 import type { StreamCallback, TurnContext } from "../../think";
 
@@ -67,6 +70,16 @@ export class ThinkWorkspaceToolsAgent extends Think {
     return "You are a test assistant.";
   }
 
+  override getTools(): ToolSet {
+    return {
+      shout: tool({
+        description: "Upper-case some text.",
+        inputSchema: z.object({ text: z.string() }),
+        execute: async ({ text }) => text.toUpperCase()
+      })
+    };
+  }
+
   override beforeTurn(ctx: TurnContext): void {
     this.#tools = ctx.tools;
     this.#system = ctx.system;
@@ -82,7 +95,13 @@ export class ThinkWorkspaceToolsAgent extends Think {
     this.workspace = new Workspace({
       storage: this.ctx.storage,
       backends: [
-        new WorkerJavaScriptBackend({ id: "js", loader: this.env.LOADER })
+        new WorkerJavaScriptBackend({
+          id: "js",
+          loader: this.env.LOADER,
+          modules: {
+            "ws:tools": createToolBindings(forAISDKTools(() => this.getTools()))
+          }
+        })
       ]
     });
     if (description) this.workspaceTools = { exec: { js: { description } } };

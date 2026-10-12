@@ -4952,8 +4952,8 @@ importers:
         specifier: workspace:*
         version: link:../ai-chat
       '@cloudflare/computer':
-        specifier: ^0.5.0
-        version: 0.5.0(@cloudflare/workers-types@5.20260729.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(supports-color@10.2.2)(zod@4.5.4)
+        specifier: https://pkg.pr.new/@cloudflare/computer@229
+        version: https://pkg.pr.new/@cloudflare/computer@229(@cloudflare/workers-types@5.20260729.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(supports-color@10.2.2)(zod@4.5.4)
       '@testing-library/react':
         specifier: ^16.3.2
         version: 16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -6059,6 +6059,24 @@ packages:
 
   '@cloudflare/computer@0.5.0':
     resolution: {integrity: sha512-4iBift6AzUWeeV7trnWHfXBfjtJZTJ9nWOBa5QA/M3qRYceO/3n0Xk6qZ6WSv5YyWxeYmNIDCpJCJ7OnR3Uplw==}
+    peerDependencies:
+      '@cloudflare/workers-types': ^4.20260616.1 || ^5.20260921.1
+      '@platformatic/vfs': '*'
+      ai: ^6.0.196 || ^7.0.0
+      zod: ^4.4.3
+    peerDependenciesMeta:
+      '@cloudflare/workers-types':
+        optional: true
+      '@platformatic/vfs':
+        optional: true
+      ai:
+        optional: true
+      zod:
+        optional: true
+
+  '@cloudflare/computer@https://pkg.pr.new/@cloudflare/computer@229':
+    resolution: {integrity: sha512-VzixPSdC0wW4cEAFstFvhRy5m/1BC20y+qYDLz54ZpFw35IZ8p0mhCnM+6KsJtiqIdp0cSNl92uM72QEZIhW9Q==, tarball: https://pkg.pr.new/@cloudflare/computer@229}
+    version: 0.4.1
     peerDependencies:
       '@cloudflare/workers-types': ^4.20260616.1 || ^5.20260921.1
       '@platformatic/vfs': '*'
@@ -15960,6 +15978,19 @@ snapshots:
       just-bash: 3.0.2(supports-color@10.2.2)
     optionalDependencies:
       '@cloudflare/workers-types': 5.20260812.1
+      '@platformatic/vfs': 0.4.0
+      ai: 7.0.18(zod@4.5.4)
+      zod: 4.5.4
+    transitivePeerDependencies:
+      - supports-color
+
+  '@cloudflare/computer@https://pkg.pr.new/@cloudflare/computer@229(@cloudflare/workers-types@5.20260729.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(supports-color@10.2.2)(zod@4.5.4)':
+    dependencies:
+      acorn: 8.17.0
+      capnweb: 0.10.0
+      just-bash: 3.0.2(supports-color@10.2.2)
+    optionalDependencies:
+      '@cloudflare/workers-types': 5.20260729.1
       '@platformatic/vfs': 0.4.0
       ai: 7.0.18(zod@4.5.4)
       zod: 4.5.4
