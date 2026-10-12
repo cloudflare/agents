@@ -249,10 +249,11 @@ Let the LLM write and run TypeScript in a sandboxed Worker, recorded on a durabl
 npm install @cloudflare/codemode
 ```
 
-The one-liner infers the executor from `env.LOADER` and a live browser (`cdp.*`) from `env.BROWSER` if bound:
+The one-liner infers the executor from `env.LOADER` and a live browser (`cdp.*`) from `env.BROWSER` if bound. Pass tools for `tools.*`, including the workspace tools if the sandbox should reach the workspace:
 
 ```typescript
 import { Think } from "@cloudflare/think";
+import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 
 export class MyAgent extends Think<Env> {
@@ -262,7 +263,9 @@ export class MyAgent extends Think<Env> {
 
   getTools() {
     return {
-      execute: createExecuteTool(this)
+      execute: createExecuteTool(this, {
+        tools: createAITools({ workspace: this.workspace })
+      })
     };
   }
 }
@@ -290,30 +293,15 @@ Each missing piece fails with an error naming the step.
 Inside the sandbox the model sees typed namespaces plus the platform SDK:
 
 - `tools.*` — your AI SDK tools (object args, validated against their schemas). Only tools with an `execute` function are exposed — client-side tools can't run in the sandbox.
-- `state.*` — a filesystem, when you pass `state` (`state.readFile({ path })`, `state.glob({ pattern })`, …)
 - `cdp.*` — the browser, when a Browser Rendering binding is configured. The execute tool defaults to `session: { mode: "dynamic" }`: sessions are per-execution unless the model promotes one with `cdp.startSession()`.
 - `codemode.search` / `codemode.describe` / `codemode.step` / `codemode.run` — discovery, side-effect boundaries, and saved snippets
 
-Pass overrides for anything beyond the defaults — e.g. custom `tools.*`:
+Or pass fully explicit options (no agent inference):
 
 ```typescript
-execute: createExecuteTool(this, { tools: myDomainTools });
-```
-
-Or fully explicit options (no agent inference):
-
-```typescript
-import {
-  Workspace as ShellWorkspace,
-  createWorkspaceStateBackend
-} from "@cloudflare/shell";
-
 createExecuteTool({
   ctx: this.ctx,
   tools: myDomainTools,
-  state: createWorkspaceStateBackend(
-    new ShellWorkspace({ sql: this.ctx.storage.sql, namespace: "state" })
-  ),
   browser: this.env.BROWSER,
   loader: this.env.LOADER
 });

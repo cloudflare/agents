@@ -1030,7 +1030,7 @@ Think's workspace is a `Workspace` from [`@cloudflare/computer`](https://github.
 - The default Workspace lives on the agent's own storage and has no execution backends. Override `workspace` with `new Workspace({ storage: this.ctx.storage, ... })` to add backends, mounts, or git.
 - For a Workspace another Durable Object owns, use `lazyWorkspace(async () => getWorkspace(stub))`. It resolves on first use and keeps the client.
 - Think writes its own files under `/workspace`: evicted media under `/workspace/attachments/evicted/`, fetched responses under `/workspace/fetched/`, and skills under `/workspace/.agents/skills`.
-- `createExecuteTool(this)` no longer builds `state.*` from the workspace; pass `state` yourself.
+- The execute tool's `state` option and `state.*` namespace are removed. Pass `createAITools({ workspace: this.workspace })` as `tools` to give sandboxed code the workspace.
 - The workspace tools are `@cloudflare/computer`'s `createAITools`: `read`, `ls`, `find`, `grep`, `write`, `edit`, and `delete`, plus `exec` when the Workspace has backends. `list` is now `ls`. `exec` offers every backend the Workspace has.
 - `workspaceBash`, `createWorkspaceTools`, and `@cloudflare/think/tools/workspace` are removed, with no replacement. There is no in-process `bash` tool: add a backend to the Workspace to get `exec`. To change a built-in tool, return a same-name tool from `getTools()`; to hide tools for a turn, return `activeTools` from `beforeTurn`.
 - Every Think agent has `__getWorkspaceStub()`, so `getWorkspace(stub)` and the Worker shell backend can reach a Workspace it owns.
