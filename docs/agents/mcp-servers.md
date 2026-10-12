@@ -25,7 +25,7 @@ that needs Standard Schema support, use `@modelcontextprotocol/server` v2 with
 The simplest way to create an MCP server. Install the exact SDK v2 server peer, then use the isolated server entry point so legacy Agents transports and MCP clients stay out of your Worker bundle:
 
 ```sh
-pnpm add agents @modelcontextprotocol/server@2.0.0 zod
+pnpm add agents @modelcontextprotocol/server@2.2.0 zod
 ```
 
 ```typescript

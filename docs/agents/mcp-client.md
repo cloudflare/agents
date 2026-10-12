@@ -73,7 +73,7 @@ available.
 Install the exact MCP client peer used by this Agents release:
 
 ```sh
-pnpm add agents @modelcontextprotocol/client@2.0.0
+pnpm add agents @modelcontextprotocol/client@2.2.0
 ```
 
 ```typescript
