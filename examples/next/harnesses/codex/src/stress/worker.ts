@@ -1,4 +1,4 @@
-import { Workspace } from "@cloudflare/shell";
+import { Workspace } from "@cloudflare/computer";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
 import { Sessions } from "agents/sessions";
@@ -9,7 +9,6 @@ import { StressModel, type StressScenario } from "./model";
 
 type StressEnv = {
   STRESS: DurableObjectNamespace<StressCoder>;
-  WORKSPACE: R2Bucket;
 };
 
 /** Result of one synthetic operation. */
@@ -45,14 +44,7 @@ export class StressCoder extends DurableObject<StressEnv> {
   private readonly tasks = new Tasks();
   private readonly streams = new Streams();
   private readonly sessions = new Sessions();
-  private readonly workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    namespace: "codex",
-    // Files past the inline threshold spill to R2; SQLite rows cannot hold
-    // them.
-    r2: this.env.WORKSPACE,
-    r2Prefix: this.ctx.id.toString()
-  });
+  private readonly workspace = new Workspace({ storage: this.ctx.storage });
   private readonly codex = new CodexHarness({
     tasks: this.tasks,
     streams: this.streams,

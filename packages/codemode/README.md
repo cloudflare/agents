@@ -135,28 +135,34 @@ Tool providers let you compose capabilities from different packages into a singl
 ```ts
 import { createCodeTool } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
-import { stateTools } from "@cloudflare/shell/workers";
+import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
 const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
 const codemode = createCodeTool({
   tools: [
     { tools: myTools }, // codemode.myTool({ query: "test" })
-    stateTools(workspace) // state.readFile("/path")
+    { name: "workspace", tools: createAITools({ workspace }) } // workspace.read({ path })
   ],
   executor
 });
 ```
 
-The sandbox has both `codemode.*` and `state.*`:
+The sandbox has both `codemode.*` and `workspace.*`:
 
 ```js
 async () => {
-  const files = await state.glob("/src/**/*.ts");
+  const { entries } = await workspace.find({
+    path: "/workspace/src",
+    pattern: "**/*.ts"
+  });
   const results = await Promise.all(
-    files.map((f) => codemode.analyzeFile({ path: f }))
+    entries.map((entry) => codemode.analyzeFile({ path: entry.path }))
   );
-  await state.writeJson("/report.json", results);
+  await workspace.write({
+    path: "/workspace/report.json",
+    content: JSON.stringify(results)
+  });
   return results.length;
 };
 ```
@@ -165,7 +171,7 @@ async () => {
 
 Any package can provide tools to the sandbox. A `ToolProvider` describes:
 
-- an optional **name** (the namespace in the sandbox, e.g. `"state"`, `"db"` — defaults to `"codemode"`)
+- an optional **name** (the namespace in the sandbox, e.g. `"workspace"`, `"db"` — defaults to `"codemode"`)
 - **tools** — AI SDK tools, tool descriptors, or simple `{ execute }` records
 - optional **types** for LLM context (auto-generated from tools if omitted)
 - optional **positionalArgs** flag (e.g. `state.readFile("/path")` vs `codemode.search({ query })`)
@@ -466,7 +472,7 @@ Connector calls go via **Workers RPC** directly to the host-side connector bindi
 ```
 
 1. `createCodeTool` generates TypeScript type definitions from your tool providers and builds a description the LLM can read
-2. The LLM writes an async arrow function that calls `codemode.toolName(args)` and any provider namespaces (`state.*`, `db.*`, etc.)
+2. The LLM writes an async arrow function that calls `codemode.toolName(args)` and any provider namespaces (`workspace.*`, `db.*`, etc.)
 3. Code is normalized via AST parsing (acorn) and sent to the executor
 4. `DynamicWorkerExecutor` spins up an isolated Worker via `WorkerLoader`, with one `ToolDispatcher` per namespace
 5. Inside the sandbox, a `Proxy` per namespace intercepts calls and routes them back via Workers RPC
@@ -598,23 +604,29 @@ export class MyAgent extends Agent<Env, State> {
 }
 ```
 
-### With filesystem access (via `@cloudflare/shell`)
+### With filesystem access (via `@cloudflare/computer`)
 
-Combine `codemode.*` tools with `state.*` filesystem operations:
+Combine `codemode.*` tools with the `@cloudflare/computer` workspace tools:
 
 ```ts
 import { createCodeTool } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
-import { Workspace } from "@cloudflare/shell";
-import { stateTools } from "@cloudflare/shell/workers";
+import { Workspace } from "@cloudflare/computer";
+import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
 export class MyAgent extends Agent<Env> {
-  workspace = new Workspace({ sql: this.ctx.storage.sql });
+  workspace = new Workspace({ storage: this.ctx.storage });
 
   getCodemodeTool() {
     const executor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
     return createCodeTool({
-      tools: [{ tools: myDomainTools }, stateTools(this.workspace)],
+      tools: [
+        { tools: myDomainTools },
+        {
+          name: "workspace",
+          tools: createAITools({ workspace: this.workspace })
+        }
+      ],
       executor
     });
   }

@@ -272,12 +272,16 @@ function createR2Storage(bucket: R2Bucket, prefix = "assets"): AssetStorage {
 ### Custom: Workspace Storage
 
 ```ts
-import type { Workspace } from "@cloudflare/shell";
+import type { Workspace } from "@cloudflare/computer";
 
 function createWorkspaceStorage(workspace: Workspace): AssetStorage {
   return {
     async get(pathname) {
-      return workspace.readFile(pathname);
+      try {
+        return await workspace.fs.readFile(`/workspace/assets${pathname}`);
+      } catch {
+        return null;
+      }
     }
   };
 }
@@ -711,16 +715,16 @@ const fs = new DurableObjectRawFileSystem(this.ctx.storage);
 
 ### Snapshotting from async sources
 
-The `FileSystem` interface is synchronous because esbuild and TypeScript require synchronous file access. To bridge from an async storage backend (like `Workspace` from `@cloudflare/shell`), use `createFileSystemSnapshot`:
+The `FileSystem` interface is synchronous because esbuild and TypeScript require synchronous file access. To bridge from an async storage backend (like a `Workspace` from `@cloudflare/computer`), use `createFileSystemSnapshot`:
 
 ```ts
 import { createFileSystemSnapshot } from "@cloudflare/worker-bundler";
 
 // Accepts any sync or async iterable of [path, content] pairs
 async function* workspaceFiles(workspace) {
-  for (const entry of workspace.glob("**/*.{ts,tsx,json}")) {
-    const content = await workspace.readFile(entry.path);
-    if (content !== null) yield [entry.path, content];
+  for (const entry of await workspace.fs.find("/workspace", "**")) {
+    if (entry.type !== "file" || !/\.(tsx?|json)$/.test(entry.path)) continue;
+    yield [entry.path, await workspace.fs.readFile(entry.path, "utf8")];
   }
 }
 
@@ -837,7 +841,7 @@ const diagnostics = languageService.getSemanticDiagnostics("src/index.ts");
 
 ### Integrating with Workspace
 
-When using `Workspace` from `@cloudflare/shell` as durable storage, snapshot source files into an `InMemoryFileSystem` for type checking:
+When using a `Workspace` from `@cloudflare/computer` as durable storage, snapshot source files into an `InMemoryFileSystem` for type checking:
 
 ```ts
 import { createFileSystemSnapshot } from "@cloudflare/worker-bundler";
@@ -845,9 +849,9 @@ import { createTypescriptLanguageService } from "@cloudflare/worker-bundler/type
 
 // 1. Snapshot source files from Workspace (async reads)
 async function* sourceFiles(workspace) {
-  for (const entry of workspace.glob("**/*.{ts,tsx,json}")) {
-    const content = await workspace.readFile(entry.path);
-    if (content !== null) yield [entry.path, content];
+  for (const entry of await workspace.fs.find("/workspace", "**")) {
+    if (entry.type !== "file" || !/\.(tsx?|json)$/.test(entry.path)) continue;
+    yield [entry.path, await workspace.fs.readFile(entry.path, "utf8")];
   }
 }
 

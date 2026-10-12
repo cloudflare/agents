@@ -12,7 +12,7 @@ Think builds on packages that are installed alongside it:
 
 - `agents/docs/index.md` — Durable Objects, state, routing, sessions, scheduling, MCP, and shared agent primitives
 - `@cloudflare/codemode/docs/index.md` — sandboxed execution, tool providers, connectors, approvals, and snippets
-- `@cloudflare/shell/docs/index.md` — Workspace, filesystem operations, and the `state.*` and `git.*` providers used by Think's tools
+- [`@cloudflare/computer`](https://github.com/cloudflare/computer/tree/main/packages/computer) — the Workspace, its execution backends, and the workspace tools Think adds to every turn
 
 ## Why Think
 
@@ -31,7 +31,7 @@ If you only need a chat-protocol adapter where you own the loop and the `Respons
 ### Install
 
 ```sh
-npm install @cloudflare/think agents ai @cloudflare/shell zod
+npm install @cloudflare/think @cloudflare/computer agents ai zod
 ```
 
 `workers-ai-provider` is bundled with Think, so the common case needs no extra provider package — `getModel()` can return a model id string.
@@ -416,7 +416,7 @@ path.
 | `getSkills()`              | `[]`                             | Return Agent Skills sources for on-demand skill activation                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `skillWorkspace`           | `false`                          | Project skills into the Workspace as files; `{}` enables with defaults                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `getSkillScriptRunner()`   | `null`                           | Enable the optional `run_skill_script` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `workspaceBash`            | `true`                           | Include or configure the default workspace `bash` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `workspaceTools`           | `{}`                             | Options for the `@cloudflare/computer` workspace tools (`exec` backends and descriptions, read limits, `readonly`); `false` omits them. See [Tools](./tools.md#built-in-workspace-tools)                                                                                                                                                                                                                                                                                                                                    |
 | `fetchTools`               | `false`                          | Opt-in allowlisted, read-only HTTP fetch tools (`fetch_url` + per-binding `fetch_<name>`). Set to a config object; see [Fetch tool](#fetch-tool)                                                                                                                                                                                                                                                                                                                                                                            |
 | `messageConcurrency`       | `"queue"`                        | How overlapping submits behave — see [Client Tools](./client-tools.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `includeMcpTools`          | `true`                           | Automatically convert connected MCP tools to AI SDK tools and merge them into model turns                                                                                                                                                                                                                                                                                                                                                                                                                                   |
@@ -530,14 +530,14 @@ agent (including a plain `@cloudflare/ai-chat` `onChatMessage`) can build a
 Think can also project each resolved `SKILL.md` into the active workspace so
 the agent can read and edit skills as files. This is off by default: skills
 load from their sources and nothing is written to the Workspace. Set
-`skillWorkspace = {}` to enable it. Computer uses `/workspace/.agents/skills`;
-legacy Shell uses `/.agents/skills`. Existing workspace edits are preserved and
+`skillWorkspace = {}` to enable it. Skills land under `/workspace/.agents/skills`.
+Existing workspace edits are preserved and
 affect later activation. Resources copy into the workspace when first requested
 rather than at startup. A durable source fingerprint lets unchanged cold wakes
 attach to the existing projection without statting or rewriting every file.
 
-Set `skillWorkspace = { root: "/workspace/.agents/skills" }` when a custom
-Computer proxy presents Think's legacy direct-method shape.
+Set `skillWorkspace = { root: "/some/other/dir" }` to project skills somewhere
+else.
 
 Sources are applied in order; the first source to register a skill name wins,
 and later duplicates (or a source that fails to load) are skipped with a logged
@@ -957,13 +957,13 @@ Two things do change on upgrade:
 
 Annotate a `configureSession` override with `Session` imported from `@cloudflare/think`. The `Session` class exported by `agents/sessions` is the raw storage handle and is not assignable to Think's.
 
-`sessionAttachments` is gone (Sessions stores media out of the row on its own), `MediaEvictionConfig.externalizeToWorkspace` is ignored (bytes are always preserved), and `WorkspaceLike.writeFileBytes` is optional (a workspace without it disables media eviction and skills projection with a one-time warning).
+`sessionAttachments` is gone (Sessions stores media out of the row on its own), `MediaEvictionConfig.externalizeToWorkspace` is ignored (bytes are always preserved), and the workspace is now a `@cloudflare/computer` Workspace (`ThinkWorkspace`).
 
 Think's `this.messages` getter reads directly from the Session tree. Compaction overlays and search are handled by Sessions.
 
 ### Message storage
 
-Sessions stores MESSAGES; it is not a file store. A message rides in one SQLite row until its serialized JSON exceeds the 1.5 MiB row budget; a message larger than that is split across continuation rows and reassembled on read, byte for byte. Nothing is truncated and no message is too large to store, so there is no size error to handle and nothing to configure. Splitting never reclaims database space — the continuation rows live in the same Durable Object as the message — and Sessions imposes no upper bound on a single message, so a Durable Object's 10 GB ceiling is the real bound on how much one conversation can hold and bounding untrusted input is the application's job. Files belong in the Workspace, which spills to R2; put a reference to one in the message. This is a storage detail: it is invisible to the model, and it is unrelated to media eviction.
+Sessions stores MESSAGES; it is not a file store. A message rides in one SQLite row until its serialized JSON exceeds the 1.5 MiB row budget; a message larger than that is split across continuation rows and reassembled on read, byte for byte. Nothing is truncated and no message is too large to store, so there is no size error to handle and nothing to configure. Splitting never reclaims database space — the continuation rows live in the same Durable Object as the message — and Sessions imposes no upper bound on a single message, so a Durable Object's 10 GB ceiling is the real bound on how much one conversation can hold and bounding untrusted input is the application's job. Files belong in the Workspace; put a reference to one in the message. This is a storage detail: it is invisible to the model, and it is unrelated to media eviction.
 
 ### Media eviction
 
@@ -1017,7 +1017,6 @@ A compaction threshold that the compacted history still exceeds compacts on ever
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
 | `@cloudflare/think/workflows`           | `ThinkWorkflow`, `step.prompt()` — Workflow prompts           |
-| `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
 | `@cloudflare/think/tools/fetch`         | `createFetchTools()` — opt-in allowlisted HTTP reads          |
 | `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
 | `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
@@ -1032,15 +1031,14 @@ Peer dependencies you provide:
 | `agents`                 | yes      | Cloudflare Agents SDK            |
 | `ai`                     | yes      | Vercel AI SDK v6                 |
 | `zod`                    | yes      | Schema validation (v4)           |
+| `@cloudflare/computer`   | yes      | Workspace and workspace tools    |
 | `@chat-adapter/telegram` | optional | Required for Telegram messengers |
 
 Bundled with `@cloudflare/think`:
 
-| Package                | Notes                                                 |
-| ---------------------- | ----------------------------------------------------- |
-| `@cloudflare/shell`    | `Workspace` filesystem                                |
-| `@cloudflare/codemode` | Code execution for `createExecuteTool()`              |
-| `just-bash`            | Sandboxed shell for the default workspace `bash` tool |
+| Package                | Notes                                    |
+| ---------------------- | ---------------------------------------- |
+| `@cloudflare/codemode` | Code execution for `createExecuteTool()` |
 
 The Agent Skills engine and its script runner live in
 [`agents/skills`](https://github.com/cloudflare/agents/blob/main/packages/agents/AGENTS.md) (so skill scripts pull

@@ -131,7 +131,7 @@ The agent is a Durable Object, so it needs a binding and a SQLite migration in `
 | [`@cloudflare/ai-chat`](packages/ai-chat)               | Higher-level AI chat — persistent messages, resumable streaming, tool execution               |
 | [`@cloudflare/think`](packages/think)                   | Opinionated chat agent base — agentic loop, stream resumption, client tools, workspace tools  |
 | [`@cloudflare/codemode`](packages/codemode)             | LLMs write executable code that calls your tools, instead of one tool call at a time          |
-| [`@cloudflare/shell`](packages/shell)                   | Sandboxed JS execution + virtual filesystem (`Workspace`) for agents                          |
+| [`@cloudflare/shell`](packages/shell)                   | Deprecated: use [`@cloudflare/computer`](https://github.com/cloudflare/computer) workspaces   |
 | [`@cloudflare/voice`](packages/voice)                   | Deprecated compatibility wrapper for the `agents/voice` exports                               |
 | [`@cloudflare/worker-bundler`](packages/worker-bundler) | Build and bundle Workers at runtime, for use with the Worker Loader binding                   |
 | [`hono-agents`](packages/hono-agents)                   | Hono middleware for adding agents to Hono apps                                                |
@@ -176,7 +176,7 @@ npm start
 | [`packages/ai-chat/`](packages/ai-chat)               | AI chat layer                                            |
 | [`packages/think/`](packages/think)                   | Opinionated chat agent base                              |
 | [`packages/codemode/`](packages/codemode)             | Code Mode                                                |
-| [`packages/shell/`](packages/shell)                   | Sandboxed execution + filesystem                         |
+| [`packages/shell/`](packages/shell)                   | Deprecated sandboxed execution + filesystem              |
 | [`packages/voice/`](packages/voice)                   | Deprecated Voice compatibility wrapper                   |
 | [`packages/worker-bundler/`](packages/worker-bundler) | Runtime Workers bundler                                  |
 | [`packages/hono-agents/`](packages/hono-agents)       | Hono integration                                         |

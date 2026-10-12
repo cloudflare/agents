@@ -1,4 +1,4 @@
-import { Workspace } from "@cloudflare/shell";
+import { Workspace } from "@cloudflare/computer";
 import { DurableObject } from "cloudflare:workers";
 import { routeAgentRequest } from "agents";
 import { Lifecycle } from "agents/lifecycle";
@@ -16,14 +16,7 @@ export class Coder extends DurableObject<Env> {
   readonly tasks = new Tasks();
   readonly streams = new Streams();
   readonly sessions = new Sessions();
-  readonly workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    namespace: "codex",
-    // Files past the inline threshold spill to R2; SQLite rows cannot hold
-    // them.
-    r2: this.env.WORKSPACE,
-    r2Prefix: this.ctx.id.toString()
-  });
+  readonly workspace = new Workspace({ storage: this.ctx.storage });
   readonly codex = new CodexHarness({
     tasks: this.tasks,
     streams: this.streams,

@@ -6,7 +6,7 @@ By the end of this tutorial you will have a Think agent that:
 
 - Streams responses to a React chat UI
 - Has persistent memory the model can read and write
-- Includes workspace file tools (read, write, edit, find, grep, delete)
+- Includes workspace file tools (read, ls, find, grep, write, edit, delete)
 - Supports custom server-side tools
 
 ## Prerequisites
@@ -25,7 +25,7 @@ npm init -y
 Install dependencies:
 
 ```sh
-npm install @cloudflare/think agents ai @cloudflare/shell zod react react-dom
+npm install @cloudflare/think @cloudflare/computer agents ai zod react react-dom
 npm install -D wrangler @cloudflare/vite-plugin @cloudflare/workers-types @vitejs/plugin-react @tailwindcss/vite tailwindcss typescript vite
 ```
 
@@ -110,7 +110,7 @@ This is a working agent. Think automatically provides:
 - WebSocket chat protocol (compatible with `useAgentChat`)
 - Message persistence in SQLite
 - Resumable streaming (page refresh replays buffered chunks)
-- Workspace file tools (read, write, edit, list, find, grep, delete)
+- Workspace file tools (read, ls, find, grep, write, edit, delete)
 - Abort/cancel support
 - Error handling with partial message persistence
 
@@ -272,7 +272,7 @@ export class MyAgent extends Think<Env> {
 
 Think merges tools from multiple sources automatically. On every turn, the model has access to:
 
-1. **Workspace tools** — read, write, edit, list, find, grep, delete (built-in)
+1. **Workspace tools** — read, ls, find, grep, write, edit, delete (built-in)
 2. **Context tools** — set_context, search_context (from `configureContext`)
 3. **Your tools** — from `getTools()`
 4. **Skill tools** — activate_skill, read_skill_resource, and optional run_skill_script (from `getSkills()`)

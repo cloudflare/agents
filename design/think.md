@@ -53,7 +53,7 @@ Every way to start a turn converges on one private inference loop:
 For each model run Think:
 
 1. Optionally waits for MCP connections (`waitForMcpConnections`).
-2. Merges tools, later sources overriding earlier ones on name collisions: workspace tools (plus `bash` unless `workspaceBash = false`), `fetchTools`, `getTools()`, compiled `getActions()`, extension tools, context tools, skill tools, MCP tools (when `includeMcpTools`), and client tool schemas.
+2. Merges tools, later sources overriding earlier ones on name collisions: workspace tools (`createAITools` from `@cloudflare/computer`, configured by `workspaceTools`), `fetchTools`, `getTools()`, compiled `getActions()`, extension tools, context tools, skill tools, MCP tools (when `includeMcpTools`), and client tool schemas.
 3. Applies the active channel's tool filter and instructions from `configureChannels()`.
 4. Builds the system prompt from the frozen context-block prompt, falling back to `getSystemPrompt()` when no context blocks are configured.
 5. Assembles model messages from the Session path, with compaction overlays applied.
@@ -124,11 +124,11 @@ A Think instance holds one conversation on the default Sessions handle. Multi-ch
 
 ### Workspace
 
-`this.workspace` is typed `WorkspaceLike`. By default it is a `Workspace` from `@cloudflare/shell` over the object's SQLite; a subclass can assign its own, for example one with R2 spillover or a proxy to a parent-owned workspace. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, and `bash`) are merged into every turn. The factories are exported from `@cloudflare/think/tools/workspace` for custom backends.
+`this.workspace` is typed `ThinkWorkspace`, which needs only `workspace.fs` (plus `runtime` and `assets` when present). By default it is a `Workspace` from `@cloudflare/computer` over the object's SQLite, with no execution backends; a subclass can assign its own, for example one with backends, or `lazyWorkspace(() => getWorkspace(parentStub))` for a parent-owned workspace. Think's internals (media eviction, skills projection, fetch spill, extension host functions) go through one adapter over `workspace.fs`, and Think writes its own files under `/workspace`. Computer's workspace tools (`read`, `ls`, `find`, `grep`, `write`, `edit`, `delete`, plus `exec` when the Workspace has backends and `publish` when it has assets) are merged into every turn; `workspaceTools` passes options through to `createAITools`, or `false` omits them. Every Think agent implements `__getWorkspaceStub()`, so `getWorkspace(stub)` and the Worker shell backend can reach a Workspace it owns.
 
 ### Code execution (`@cloudflare/think/tools/execute`)
 
-`createExecuteTool(this, overrides?)` builds a codemode runtime from the agent (`ctx`, `env.LOADER`, optional `env.BROWSER`) and returns the `execute` tool. The model writes JavaScript that runs in a Dynamic Worker with `tools.*`, `state.*` (the workspace), and `cdp.*` connectors. The runtime is assigned to `this.codemode`, which backs the `approveExecution` / `rejectExecution` / `pendingExecutions` callables for approval-gated sandbox tools. See [think-execute-hitl.md](./think-execute-hitl.md).
+`createExecuteTool(this, overrides?)` builds a codemode runtime from the agent (`ctx`, `env.LOADER`, optional `env.BROWSER`) and returns the `execute` tool. The model writes JavaScript that runs in a Dynamic Worker with `tools.*` and `cdp.*` connectors; pass `createAITools({ workspace: this.workspace })` as `tools` to reach the workspace. The runtime is assigned to `this.codemode`, which backs the `approveExecution` / `rejectExecution` / `pendingExecutions` callables for approval-gated sandbox tools. See [think-execute-hitl.md](./think-execute-hitl.md).
 
 ### Fetch tools (`@cloudflare/think/tools/fetch`)
 
@@ -252,7 +252,6 @@ Tests live in `packages/think/src/`:
 | `@cloudflare/think/workflows`           | `ThinkWorkflow`                                            |
 | `@cloudflare/think/messengers`          | Messenger helpers and `ThinkMessengerStateAgent`           |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger                                         |
-| `@cloudflare/think/tools/workspace`     | Workspace tool factories                                   |
 | `@cloudflare/think/tools/execute`       | `createExecuteTool`, `createExecuteRuntime`                |
 | `@cloudflare/think/tools/fetch`         | `createFetchTools`                                         |
 | `@cloudflare/think/tools/browser`       | `createBrowserTools`, `createQuickActionTools`             |

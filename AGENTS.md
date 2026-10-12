@@ -172,12 +172,12 @@ CI runs on every PR (`pnpm install --frozen-lockfile && pnpm run build && pnpm r
 
 ## Learned Workspace Facts
 
-- `packages/shell/` is published as `@cloudflare/shell` — an experimental sandboxed JS execution and filesystem runtime for agents, built on the same dynamic Worker loader machinery as `@cloudflare/codemode`.
-- To run code against a `Workspace`: import `stateTools` from `@cloudflare/shell/workers` and `DynamicWorkerExecutor`/`resolveProvider` from `@cloudflare/codemode`; use `executor.execute(code, [resolveProvider(stateTools(workspace))])`.
+- `packages/shell/` (`@cloudflare/shell`) is deprecated. Agent workspaces are a `Workspace` from `@cloudflare/computer` (github.com/cloudflare/computer); do not add new uses of Shell.
+- Think's `workspace` is a Computer `Workspace`. Its workspace tools are Computer's `createAITools`, configured through `workspaceTools`; execution backends and their modules are configured on the `Workspace`.
 
 ## Learned User Preferences
 
-- Keep `Workspace` as a pure durable filesystem — do not embed execution or session logic inside it. Execution is a caller concern wired via `@cloudflare/codemode` + `stateTools`.
+- One way to give an agent a workspace: a `@cloudflare/computer` `Workspace`. Execution goes through its backends, not a separate sandbox wired beside it.
 - When a package boundary feels wrong (e.g., a helper package depending on a larger package just for an adapter), prefer moving the adapter out rather than carrying the dependency.
 
 ## Boundaries

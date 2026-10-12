@@ -4,7 +4,7 @@ import { DemoWrapper } from "../../layout";
 import { CodeExplanation, LogPanel, type CodeSection } from "../../components";
 import { useLogs } from "../../hooks";
 
-type LayerId = "think" | "workspace" | "codemode" | "git" | "extensions";
+type LayerId = "think" | "workspace" | "exec" | "git" | "extensions";
 
 const layers: Array<{
   id: LayerId;
@@ -24,32 +24,32 @@ const layers: Array<{
   },
   {
     id: "workspace",
-    name: "Workspace",
+    name: "Computer Workspace",
     role: "Durable virtual filesystem",
     details: [
-      "Stores files in SQLite with optional R2 spillover",
-      "Gives the model read/write/list/search tools",
+      "Stores files in the agent's own SQLite",
+      "Gives the model read, ls, find, grep, write, edit, and delete tools",
       "Survives refreshes and follow-up turns"
     ]
   },
   {
-    id: "codemode",
-    name: "Codemode + Shell",
-    role: "Sandboxed state programs",
+    id: "exec",
+    name: "Execution backends",
+    role: "Run code against the same files",
     details: [
-      "Runs JavaScript in an isolated Worker",
-      "Exposes state.* instead of shell commands",
-      "Lets agents perform multi-file edits transactionally"
+      "JavaScript modules or just-bash in a Dynamic Worker, or a full Linux container",
+      "The exec tool appears once the Workspace has a backend",
+      "Modules you supply, such as ws:git, are importable from executed code"
     ]
   },
   {
     id: "git",
-    name: "Git Tools",
+    name: "Git",
     role: "Version control over virtual files",
     details: [
       "Uses isomorphic-git against the Workspace filesystem",
-      "Can inject hidden auth for clone/fetch/push",
-      "Keeps secrets out of model-visible tool inputs"
+      "Runs in the host, so executed code needs no network of its own",
+      "Available as workspace.git and as the ws:git module"
     ]
   },
   {
@@ -67,12 +67,12 @@ const layers: Array<{
 const flow = [
   [
     "user_message",
-    { text: "Rename foo to bar across /src and summarize changes" }
+    { text: "Rename foo to bar across /workspace/src and summarize changes" }
   ],
   ["think_before_turn", { contextBlocks: ["workspace tree", "recent files"] }],
-  ["workspace_search", { query: "foo", matches: 3 }],
-  ["codemode_execute", { code: "state.replaceInFiles(...)", sandboxed: true }],
-  ["workspace_diff", { filesChanged: 2 }],
+  ["tool_grep", { pattern: "foo", path: "/workspace/src", matches: 3 }],
+  ["tool_exec", { backend: "js", source: "export default async () => ..." }],
+  ["tool_exec_result", { exitCode: 0, filesChanged: 2 }],
   ["assistant_response", { summary: "Renamed foo to bar in two files." }]
 ];
 
@@ -94,41 +94,43 @@ export class Assistant extends Think<Env> {
 }`
   },
   {
-    title: "Back the assistant with a Workspace",
+    title: "Give the assistant a Workspace that can run code",
     description:
-      "Workspace is a durable virtual filesystem. Think exposes workspace tools automatically, and lower-level agents can wire it into their own tools.",
-    code: `import { Workspace } from "@cloudflare/shell";
+      "Every Think agent has a Computer Workspace with file tools. Add an execution backend, and the modules it offers, to give the model an exec tool.",
+    code: `import { Workspace } from "@cloudflare/computer";
+import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { createGitClient } from "@cloudflare/computer/git";
+import { createGitModule } from "@cloudflare/computer/modules/git";
 
 export class Assistant extends Think<Env> {
   override workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    r2: this.env.R2,
-    name: () => this.name
+    storage: this.ctx.storage,
+    git: createGitClient(),
+    backends: [
+      new WorkerJavaScriptBackend({
+        id: "js",
+        loader: this.env.LOADER,
+        access: "read-write",
+        modules: { "ws:git": createGitModule() }
+      })
+    ]
   });
 }`
   },
   {
-    title: "Run structured state programs instead of shell",
+    title: "Choose and describe the backends exec offers",
     description:
-      "Shell is not bash. It runs JavaScript in an isolated Worker and gives code a typed state object for filesystem operations.",
-    code: `import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
-import { stateTools } from "@cloudflare/shell/workers";
-
-const executor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
-
-await executor.execute(
-  \`async () => {
-    const preview = await state.replaceInFiles("src/**/*.ts", "foo", "bar", {
-      dryRun: true
-    });
-    return preview;
-  }\`,
-  [resolveProvider(stateTools(this.workspace))]
-);`
+      "workspaceTools takes the createAITools options from @cloudflare/computer. The text you give comes before each backend's own description.",
+    code: `export class Assistant extends Think<Env> {
+  override workspaceTools = {
+    exec: { js: { description: "Use for multi-file edits and git." } },
+    read: { maxBytes: 32 * 1024 }
+  };
+}`
   }
 ];
 
-export function ThinkShellDemo() {
+export function ThinkComputerDemo() {
   const [selectedId, setSelectedId] = useState<LayerId>("think");
   const { logs, addLog, clearLogs } = useLogs();
   const selected = layers.find((layer) => layer.id === selectedId) ?? layers[0];
@@ -145,13 +147,13 @@ export function ThinkShellDemo() {
 
   return (
     <DemoWrapper
-      title="Think + Shell"
+      title="Think + Computer"
       description={
         <>
-          Think is the higher-level assistant runtime; Shell and Workspace give
-          that assistant durable files and safe structured execution. Together
-          they are the SDK path for coding assistants, workspace agents, and
-          multi-step tool-using products.
+          Think is the higher-level assistant runtime; a Computer Workspace
+          gives that assistant durable files and code execution against them.
+          Together they are the SDK path for coding assistants, workspace
+          agents, and multi-step tool-using products.
         </>
       }
     >
@@ -209,8 +211,8 @@ export function ThinkShellDemo() {
               </Text>
             </div>
             <p className="text-sm text-kumo-subtle mb-4">
-              This is the kind of turn Think + Shell is designed for: gather
-              context, operate on durable files, run sandboxed state code, then
+              This is the kind of turn Think + Computer is designed for: gather
+              context, operate on durable files, run code against them, then
               return a diff-aware answer.
             </p>
             <Button variant="primary" onClick={simulate}>
@@ -230,7 +232,7 @@ export function ThinkShellDemo() {
               {[
                 ["Assistant product shell", "examples/assistant"],
                 ["Workspace chat", "examples/workspace-chat"],
-                ["Shell package", "packages/shell"],
+                ["Computer package", "github.com/cloudflare/computer"],
                 ["Think package", "packages/think"]
               ].map(([label, path]) => (
                 <div
