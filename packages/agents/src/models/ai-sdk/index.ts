@@ -4,7 +4,8 @@
  * One rule decides everything here: **Workers AI is the one catalog this
  * package keeps up with; every other vendor brings its own provider.**
  *
- * 1. **`ai("@cf/…")`** is a Workers AI model — ours, wire format and all.
+ * 1. **`ai("@cf/…")`** is a Workers AI model — ours, wire format and all —
+ *    and **`ai("dynamic/<route>")`** is a dynamic route on your gateway.
  * 2. **`ai(anthropic("claude-opus-4-8"))`** is the vendor's model, routed
  *    through AI Gateway. Their code builds and parses the request; we only
  *    carry it. No vendor ids, wire formats or model metadata live here, and

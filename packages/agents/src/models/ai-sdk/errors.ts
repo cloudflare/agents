@@ -1,5 +1,5 @@
 import { APICallError } from "@ai-sdk/provider";
-import { isDynamicRouteId } from "../core/catalog";
+import { isDynamicRouteId, isRunPathLanguageModelId } from "../core/catalog";
 import {
   type CloudflareAIAttempt,
   type CloudflareAIErrorCode,
@@ -31,14 +31,21 @@ const VENDOR_PACKAGES: Record<string, { package: string; call: string }> = {
  * this provider knows; a third-party model is a model object built by that
  * vendor's own provider package.
  */
-export function notAWorkersAIId(modelId: string): TypeError {
+export function notAWorkersAIId(
+  modelId: string,
+  accepts: "workers-ai" | "workers-ai-or-route" = "workers-ai"
+): TypeError {
   const vendor = VENDOR_PACKAGES[modelId.split("/")[0] ?? ""];
   const advice =
     vendor === undefined
       ? 'install its AI SDK provider package and pass the model object, e.g. ai(anthropic("claude-opus-4-8"))'
       : `install ${vendor.package} and pass the model object: ai(${vendor.call})`;
   return new TypeError(
-    `"${modelId}" is not a Workers AI model id. Workers AI ids start with "@cf/" (and AI Gateway dynamic routes with "dynamic/"), and they are the only ids this provider takes: a third-party model goes through its own provider and is only routed by AI Gateway — ${advice}.`
+    `"${modelId}" is not a Workers AI model id. Workers AI ids start with "@cf/"${
+      accepts === "workers-ai-or-route"
+        ? ' (and AI Gateway dynamic routes with "dynamic/")'
+        : ""
+    }, and they are the only ids this provider takes: a third-party model goes through its own provider and is only routed by AI Gateway — ${advice}.`
   );
 }
 
@@ -64,8 +71,9 @@ export function requireWorkersAIId<Id extends string>(modelId: Id): Id {
  * vendor id, which is never a string here.
  */
 export function requireLanguageModelId<Id extends string>(modelId: Id): Id {
-  if (isDynamicRouteId(modelId)) return modelId;
-  if (!modelId.startsWith("@cf/")) throw notAWorkersAIId(modelId);
+  if (!isRunPathLanguageModelId(modelId)) {
+    throw notAWorkersAIId(modelId, "workers-ai-or-route");
+  }
   return modelId;
 }
 

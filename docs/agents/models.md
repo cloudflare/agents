@@ -20,9 +20,11 @@ we hand its request to AI Gateway and hand the answer straight back to it.
 
 ## The canon, in five lines
 
-1. **`ai(string)` is a Workers AI id.** `@cf/<author>/<model>`, autocompleted
-   from `@cloudflare/workers-types`. Any other string is a `TypeError` that
-   tells you which provider package to install.
+1. **`ai(string)` is Cloudflare's.** A Workers AI id, `@cf/<author>/<model>`,
+   autocompleted from `@cloudflare/workers-types`, or a
+   [dynamic route](#dynamic-routes) on your gateway, `dynamic/<route>`. Any
+   other string is a `TypeError` that tells you which provider package to
+   install.
 2. **`ai(model)` is any AI SDK v4 model**, routed through AI Gateway. Its
    provider builds the request, parses the response, and handles its own
    errors; only the transport is ours.

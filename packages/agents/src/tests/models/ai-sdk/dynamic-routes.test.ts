@@ -152,7 +152,9 @@ describe("AI Gateway dynamic routes", () => {
 
   it("needs a route name", () => {
     const ai = createAI({ binding: asAi(fakeBinding(() => jsonResponse({}))) });
-    expect(() => ai("dynamic/" as never)).toThrow(/not a Workers AI model id/);
+    expect(() => ai("dynamic/" as never)).toThrow(
+      /not a Workers AI model id.*dynamic routes with "dynamic\/"/
+    );
   });
 
   it("is not a fallback leg for the modality models", async () => {
@@ -170,5 +172,19 @@ describe("AI Gateway dynamic routes", () => {
       })
     ).rejects.toThrow(/dynamic route/);
     expect(binding.calls).toHaveLength(0);
+  });
+
+  it("is not offered as an id where it would be refused", () => {
+    const ai = createAI({ binding: asAi(fakeBinding(() => jsonResponse({}))) });
+    let message = "";
+    try {
+      ai.embedding("@cf/baai/bge-base-en-v1.5", {
+        fallback: ["openai/text-embedding-3-small" as never]
+      });
+    } catch (error) {
+      message = (error as TypeError).message;
+    }
+    expect(message).toMatch(/not a Workers AI model id/);
+    expect(message).not.toMatch(/dynamic/);
   });
 });

@@ -72,6 +72,7 @@ import { createStreams } from "./models/language";
 
 export type {
   CloudflareEmbeddingModelId,
+  DynamicRouteId,
   WorkersAIModelId
 } from "../core/catalog";
 export {
