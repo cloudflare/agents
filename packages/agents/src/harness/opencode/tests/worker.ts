@@ -173,17 +173,29 @@ export class OpenCodeHarnessTestObject extends DurableObject<Cloudflare.Env> {
     { stream: OpenCodeEventStream; events: OpenCodeSessionEvent[] }
   >();
 
-  /** Open the root session's event stream; returns its id and snapshot. */
+  /**
+   * Open the root session's event stream; returns its id and its snapshot,
+   * with the transcript as texts. OpenCode's message type is too deep for
+   * the stub's RPC types.
+   */
   async openStream(): Promise<{
     id: string;
-    snapshot: OpenCodeSessionSnapshot;
+    snapshot: Omit<OpenCodeSessionSnapshot, "messages"> & {
+      readonly messages: string[];
+    };
   }> {
     const stream = await this.harness.session().events();
     const id = crypto.randomUUID();
     const events: OpenCodeSessionEvent[] = [];
     stream.start((batch) => events.push(...batch));
     this.#streams.set(id, { stream, events });
-    return { id, snapshot: stream.snapshot };
+    return {
+      id,
+      snapshot: {
+        ...stream.snapshot,
+        messages: texts(stream.snapshot.messages)
+      }
+    };
   }
 
   /**
