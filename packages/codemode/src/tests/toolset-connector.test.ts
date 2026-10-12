@@ -109,6 +109,35 @@ describe("ToolSetConnector", () => {
     ).resolves.toBe("sunny in Lisbon");
   });
 
+  it("describes the value an output schema produces, not its input", async () => {
+    const connector = new ToolSetConnector(ctx, {
+      name: "stats",
+      tools: {
+        getStats: tool({
+          inputSchema: z.object({}),
+          outputSchema: z.object({
+            count: z.number().default(0),
+            total: z.string().pipe(z.coerce.number())
+          }),
+          execute: async () => ({ count: 1, total: 2 })
+        }),
+        getLength: tool({
+          inputSchema: z.object({}),
+          outputSchema: z.string().transform((s) => s.length),
+          execute: async () => 3
+        })
+      }
+    });
+
+    const desc = await connector.describe();
+    expect(desc.descriptors.getStats.outputSchema).toMatchObject({
+      properties: { count: { type: "number" }, total: { type: "number" } },
+      required: ["count", "total"]
+    });
+    // `.transform()` has no JSON Schema; omit it rather than show the input.
+    expect(desc.descriptors.getLength.outputSchema).toBeUndefined();
+  });
+
   it("awaits schemas that convert asynchronously", async () => {
     const connector = new ToolSetConnector(ctx, {
       tools: {

@@ -15,7 +15,7 @@
 import { asSchema } from "ai";
 import type { ToolSet } from "ai";
 import type { JSONSchema7 } from "json-schema";
-import { generateTypes } from "../tool-types";
+import { generateTypes, standardOutputJsonSchema } from "../tool-types";
 import { sanitizeToolName } from "../utils";
 import { CodemodeConnector, type ConnectorTools } from "./base";
 
@@ -147,18 +147,23 @@ export class ToolSetConnector extends CodemodeConnector {
 }
 
 /**
- * Convert a tool's output schema to JSON Schema for its descriptor. The
- * output type is advisory, so a schema that cannot be converted (it throws
- * or its promise rejects) is left out and shows as `unknown`, matching
- * `generateTypes`, instead of failing the whole toolset.
+ * Convert a tool's output schema to JSON Schema for its descriptor, using
+ * the output side of the schema where the library exposes it (see
+ * `standardOutputJsonSchema`). The output type is advisory, so a schema that
+ * cannot be converted (it throws or its promise rejects) is left out and
+ * shows as `unknown`, matching `generateTypes`, instead of failing the whole
+ * toolset.
  */
 async function outputJsonSchema(
   raw: unknown
 ): Promise<JSONSchema7 | undefined> {
   if (raw == null) return undefined;
   try {
-    return (await asSchema(raw as Parameters<typeof asSchema>[0])
-      .jsonSchema) as JSONSchema7;
+    return (
+      standardOutputJsonSchema(raw) ??
+      ((await asSchema(raw as Parameters<typeof asSchema>[0])
+        .jsonSchema) as JSONSchema7)
+    );
   } catch {
     return undefined;
   }
