@@ -20,16 +20,21 @@ export {
 export type {
   OpenCode,
   OpenCodeEvent,
+  OpenCodeEventStream,
+  OpenCodeFinish,
   OpenCodeInput,
   OpenCodeLogEvent,
   OpenCodeMessage,
   OpenCodeOperationResult,
   OpenCodePendingOperation,
+  OpenCodePermission,
   OpenCodePromptResponse,
   OpenCodeReceipt,
+  OpenCodeSessionEvent,
   OpenCodeSessionId,
   OpenCodeSessionInfo,
   OpenCodeSessionOptions,
+  OpenCodeSessionSnapshot,
   OpenCodeSubmitOptions,
   OpenCodeWhenBusy
 } from "./types";

@@ -168,20 +168,139 @@ describe("OpenCodeHarness on OpenCode v2", () => {
     expect(await stub.pending()).toEqual([]);
   });
 
-  it("streams OpenCode's events for the session, live deltas included", async () => {
+  it("streams a run as session events, live deltas included", async () => {
     const stub = fresh();
-    const types = await stub.watch("hello");
+    const { id, snapshot } = await stub.openStream();
+    expect(snapshot).toMatchObject({
+      session: "ses_root",
+      messages: [],
+      pending: [],
+      busy: false,
+      permissions: []
+    });
+    const receipt = await stub.submit("hello");
+    const events = await stub.drain(id, "run_end");
+    const types = events.map((event) => event.type);
     for (const type of [
-      "session.inbox.delivered",
-      "session.execution.started",
-      "session.text.delta",
-      "session.execution.succeeded"
+      "operation_start",
+      "run_start",
+      "message_start",
+      "text_delta",
+      "text_end",
+      "message_end",
+      "operation_end",
+      "run_end"
     ]) {
       expect(types).toContain(type);
     }
+    expect(types.indexOf("operation_end")).toBeLessThan(
+      types.indexOf("run_end")
+    );
+    expect(events).toContainEqual({
+      type: "operation_start",
+      operationId: receipt.operationId
+    });
+    const end = events.find((event) => event.type === "operation_end");
+    expect(end).toEqual({
+      type: "operation_end",
+      result: await stub.wait(receipt.operationId)
+    });
+    expect(events.at(-1)).toEqual({ type: "run_end", outcome: "succeeded" });
+    const text = events
+      .flatMap((event) => (event.type === "text_delta" ? [event.delta] : []))
+      .join("");
+    expect(text).toBe("echo: hello");
+
+    // OpenCode's own events are in the durable log; deltas are not.
     const log = await stub.logTypes();
     expect(log).toContain("session.execution.succeeded");
     expect(log).not.toContain("session.text.delta");
+  });
+
+  it("names the tool on tool_start and tool_end", async () => {
+    const stub = fresh();
+    const { id } = await stub.openStream();
+    const receipt = await stub.submit("tool");
+    const events = await stub.drain(id, "run_end");
+    const start = events.find((event) => event.type === "tool_start");
+    const end = events.find((event) => event.type === "tool_end");
+    expect(start).toMatchObject({ name: "shout", input: { text: "hi" } });
+    expect(end).toMatchObject({ name: "shout", error: false, output: "HI" });
+    expect(start?.type === "tool_start" && start.toolCallId).toBe(
+      end?.type === "tool_end" && end.toolCallId
+    );
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done",
+      text: "tool said: HI"
+    });
+  });
+
+  it("ends each queued follow-up with its own answer", async () => {
+    const stub = fresh();
+    const held = await stub.submit("hold");
+    await stub.holdStarted(1);
+    // Opened mid-run: the snapshot has the running input.
+    const { id, snapshot } = await stub.openStream();
+    expect(snapshot.busy).toBe(true);
+    expect(snapshot.pending).toEqual([
+      { operationId: held.operationId, session: "ses_root", status: "running" }
+    ]);
+    const one = await stub.submit("one");
+    const two = await stub.submit("two");
+    await stub.release();
+    const events = await stub.drain(id, "operation_end", 3);
+    expect(
+      events.flatMap((event) =>
+        event.type === "operation_queued" ? [event.operationId] : []
+      )
+    ).toEqual([one.operationId, two.operationId]);
+    expect(
+      events.flatMap((event) =>
+        event.type === "operation_end"
+          ? [[event.result.operationId, event.result.text]]
+          : []
+      )
+    ).toEqual([
+      [held.operationId, "echo: hold"],
+      [one.operationId, "echo: one"],
+      [two.operationId, "echo: two"]
+    ]);
+  });
+
+  it("reports a withdrawn input and an interrupted run", async () => {
+    const stub = fresh();
+    const held = await stub.submit("hold");
+    await stub.holdStarted(1);
+    const { id } = await stub.openStream();
+    const queued = await stub.submit("queued");
+    await stub.abort(queued.operationId);
+    await stub.abort();
+    const events = await stub.drain(id, "run_end");
+    expect(events).toContainEqual({
+      type: "operation_withdrawn",
+      operationId: queued.operationId
+    });
+    expect(events).toContainEqual({
+      type: "operation_end",
+      result: {
+        operationId: held.operationId,
+        session: "ses_root",
+        status: "unanswered",
+        reason: "interrupted"
+      }
+    });
+    expect(events.at(-1)).toEqual({ type: "run_end", outcome: "interrupted" });
+  });
+
+  it("reports a failed model call on message_end, operation_end and run_end", async () => {
+    const stub = fresh();
+    const { id } = await stub.openStream();
+    const receipt = await stub.submit("fail");
+    const events = await stub.drain(id, "run_end");
+    const result = await stub.wait(receipt.operationId);
+    expect(result.status).toBe("unanswered");
+    expect(events).toContainEqual({ type: "operation_end", result });
+    expect(events.at(-1)).toMatchObject({ type: "run_end" });
   });
 
   it("parks the session's wake and closes OpenCode once idle, leaving no alarm", async () => {

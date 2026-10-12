@@ -1,12 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
+import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
+import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { createGitClient } from "@cloudflare/computer/git";
 import { OpenCodeWorkerd } from "@opencode/sdk/workerd";
 import { routeAgentRequest } from "agents";
 import { OpenCodeHarness } from "agents/harness/opencode";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/opencode";
 import { WebSockets } from "agents/websockets";
-import { playgroundPlugin } from "./plugin";
 import { OpenCodeSessionSockets } from "./sockets";
+import { JAVASCRIPT_BACKEND, workspacePlugin } from "./workspace";
 
 export const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 
@@ -14,6 +17,25 @@ export const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 export class OpenCodeAgent extends DurableObject<Env> {
   // Workers AI over the AI binding, as an OpenCode provider plugin.
   readonly ai = createAI({ binding: this.env.AI });
+  // Files in the object's own storage. `exec` runs JavaScript in a Worker
+  // Loader isolate with no network of its own. `git` turns on
+  // `workspace.git`, which `ws:git` uses to clone over HTTPS from the host.
+  readonly workspace = new Workspace({
+    // SAFETY: DurableObjectStorage has every member DurableObjectStorageLike
+    // names; computer declares its own narrower type to avoid depending on
+    // workers-types.
+    storage: this.ctx.storage as unknown as DurableObjectStorageLike,
+    git: createGitClient(),
+    backends: [
+      new WorkerJavaScriptBackend({
+        id: JAVASCRIPT_BACKEND,
+        loader: this.env.LOADER,
+        root: "/workspace",
+        access: "read-write",
+        allowGitNetwork: true
+      })
+    ]
+  });
   readonly harness = new OpenCodeHarness({
     opencode: ({ storage }) =>
       OpenCodeWorkerd.create({
@@ -33,7 +55,7 @@ export class OpenCodeAgent extends DurableObject<Env> {
               entry.cause
             )
         },
-        plugins: [this.ai.plugin, playgroundPlugin(this.ctx.storage.kv)]
+        plugins: [this.ai.plugin, workspacePlugin(this.workspace)]
       }),
     // Low effort: with more, the model sometimes writes its whole answer
     // into its reasoning.

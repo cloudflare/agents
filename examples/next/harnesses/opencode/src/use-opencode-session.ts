@@ -107,8 +107,8 @@ function prune(
 
 /**
  * One OpenCode session over this app's WebSocket protocol, connected with
- * `useAgent`. Snapshots replace the transcript; OpenCode's text and
- * reasoning deltas stream into the assistant message they belong to until
+ * `useAgent`. Snapshots replace the transcript; text and reasoning deltas
+ * stream into the assistant message they belong to until
  * the next snapshot has them.
  */
 export function useOpenCodeSession(
@@ -149,16 +149,15 @@ export function useOpenCodeSession(
           }));
           return;
         case "event": {
-          const { event: opencode } = message;
+          const { event: update } = message;
           if (
-            opencode.type !== "session.text.delta" &&
-            opencode.type !== "session.reasoning.delta"
+            update.type !== "text_delta" &&
+            update.type !== "reasoning_delta"
           ) {
             return;
           }
-          const { assistantMessageID: id, ordinal, delta } = opencode.data;
-          const kind =
-            opencode.type === "session.text.delta" ? "text" : "reasoning";
+          const { messageId: id, ordinal, delta } = update;
+          const kind = update.type === "text_delta" ? "text" : "reasoning";
           setState((current) => {
             const previous = current.live[id] ?? NO_LIVE_TEXT;
             return {

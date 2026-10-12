@@ -2,8 +2,9 @@ import type { Connection, ConnectionContext } from "agents/lifecycle";
 import type { WebSocketMessage, WebSocketsOptions } from "agents/websockets";
 import {
   ROOT_SESSION,
-  type OpenCodeEvent,
+  type OpenCodeEventStream,
   type OpenCodeHarness,
+  type OpenCodeSessionEvent,
   type OpenCodeSessionId
 } from "agents/harness/opencode";
 import type { ClientMessage, ServerMessage, SessionSnapshot } from "./protocol";
@@ -16,30 +17,20 @@ const MAX_PROMPT_LENGTH = 100_000;
 const OPEN = 1;
 
 /**
- * Durable events after which the transcript has changed in a way the
- * client should see in full: a new input, a finished step or tool, the run
- * starting or ending.
+ * Events after which the transcript has changed in a way the client should
+ * see in full: a new input, a finished step or tool, the run starting, a
+ * compaction. Deltas are forwarded as they are.
  */
-const RESNAPSHOT = new Set<string>([
-  "session.inbox.delivered",
-  "session.inbox.cancelled",
-  "session.execution.started",
-  "session.step.ended",
-  "session.step.failed",
-  "session.tool.called",
-  "session.tool.success",
-  "session.tool.failed",
-  "session.execution.succeeded",
-  "session.execution.failed",
-  "session.execution.interrupted",
-  "session.compaction.started",
-  "session.compaction.ended"
-]);
-
-const RUN_ENDED = new Set<string>([
-  "session.execution.succeeded",
-  "session.execution.failed",
-  "session.execution.interrupted"
+const RESNAPSHOT = new Set<OpenCodeSessionEvent["type"]>([
+  "operation_queued",
+  "operation_withdrawn",
+  "operation_start",
+  "run_start",
+  "message_end",
+  "tool_start",
+  "tool_end",
+  "compaction_start",
+  "transcript_reset"
 ]);
 
 function sessionTag(session: OpenCodeSessionId): string {
@@ -90,16 +81,19 @@ function parse(raw: WebSocketMessage): ClientMessage | undefined {
  *
  * Each socket follows one session, picked by `?session=`. On connect it gets
  * a snapshot of the transcript. While a session runs, one watch on
- * `session.events()` fans OpenCode's events out to every socket on that
- * session, with a fresh snapshot after each durable change. The watch stops
+ * `session.events()` fans the session's events out to every socket on it,
+ * with a fresh snapshot after each change to the transcript. The watch stops
  * when the session is idle, so the object can hibernate between runs with
  * its sockets still open.
  */
 export class OpenCodeSessionSockets {
   readonly #harness: OpenCodeHarness;
   readonly #getWebSockets: (tag?: string) => WebSocket[];
-  /** One watch per running session. */
-  readonly #watches = new Map<OpenCodeSessionId, AbortController>();
+  /** One event stream per running session, or its opening. */
+  readonly #watches = new Map<
+    OpenCodeSessionId,
+    Promise<OpenCodeEventStream | undefined>
+  >();
   /** Sessions with a snapshot being sent, and whether another is due. */
   readonly #snapshots = new Map<OpenCodeSessionId, boolean>();
 
@@ -288,43 +282,60 @@ export class OpenCodeSessionSockets {
       send(socket, { type: "sessions", sessions });
     }
     if (!(await this.#harness.session(session).busy())) {
-      this.#watches.get(session)?.abort();
-      this.#watches.delete(session);
+      await this.#unwatch(session);
     }
   }
 
   /** Watch the session's events until it is idle. Idempotent. */
   #watch(session: OpenCodeSessionId): void {
     if (this.#watches.has(session)) return;
-    const controller = new AbortController();
-    this.#watches.set(session, controller);
-    void (async () => {
-      try {
-        for await (const event of this.#harness
-          .session(session)
-          .events(controller.signal)) {
-          this.#forward(session, event);
-          if (RESNAPSHOT.has(event.type)) {
-            await this.#broadcastSnapshot(session);
-          }
-          if (RUN_ENDED.has(event.type)) await this.#settle(session);
-          if (this.#getWebSockets(sessionTag(session)).length === 0) break;
-        }
-      } catch (error) {
-        if (!controller.signal.aborted) {
-          console.warn("OpenCode event watch stopped", error);
-        }
-      } finally {
-        if (this.#watches.get(session) === controller) {
+    const opening = this.#harness
+      .session(session)
+      .events()
+      .then((stream) => {
+        stream.start((events) => void this.#onEvents(session, events));
+        return stream;
+      })
+      .catch((error: unknown) => {
+        console.warn("OpenCode event watch failed to open", error);
+        if (this.#watches.get(session) === opening) {
           this.#watches.delete(session);
         }
-      }
-    })();
+        return undefined;
+      });
+    this.#watches.set(session, opening);
   }
 
-  #forward(session: OpenCodeSessionId, event: OpenCodeEvent): void {
-    for (const socket of this.#getWebSockets(sessionTag(session))) {
-      send(socket, { type: "event", event });
+  async #unwatch(session: OpenCodeSessionId): Promise<void> {
+    const opening = this.#watches.get(session);
+    if (opening === undefined) return;
+    this.#watches.delete(session);
+    await (await opening)?.stop();
+  }
+
+  async #onEvents(
+    session: OpenCodeSessionId,
+    events: readonly OpenCodeSessionEvent[]
+  ): Promise<void> {
+    for (const event of events) {
+      for (const socket of this.#getWebSockets(sessionTag(session))) {
+        send(socket, { type: "event", event });
+      }
+    }
+    try {
+      if (this.#getWebSockets(sessionTag(session)).length === 0) {
+        await this.#unwatch(session);
+      } else if (events.some((event) => event.type === "run_end")) {
+        await this.#settle(session);
+      } else if (events.some((event) => RESNAPSHOT.has(event.type))) {
+        await this.#broadcastSnapshot(session);
+      } else if (events.some((event) => event.type === "fault")) {
+        // The stream may have ended: open a new one if the session runs.
+        await this.#unwatch(session);
+        if (await this.#harness.session(session).busy()) this.#watch(session);
+      }
+    } catch (error) {
+      console.warn("OpenCode event handling failed", error);
     }
   }
 }

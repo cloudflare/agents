@@ -1,7 +1,7 @@
 import type {
-  OpenCodeEvent,
   OpenCodeMessage,
   OpenCodePendingOperation,
+  OpenCodeSessionEvent,
   OpenCodeSessionId,
   OpenCodeSessionInfo,
   OpenCodeWhenBusy
@@ -43,8 +43,8 @@ export type ServerMessage =
     }
   /** Replaces the client's state for the session. */
   | ({ readonly type: "snapshot" } & SessionSnapshot)
-  /** OpenCode's own events for the session, live deltas included. */
-  | { readonly type: "event"; readonly event: OpenCodeEvent }
+  /** The session's events from `session.events()`, live deltas included. */
+  | { readonly type: "event"; readonly event: OpenCodeSessionEvent }
   | { readonly type: "result"; readonly id: string; readonly result: unknown }
   | {
       readonly type: "error";

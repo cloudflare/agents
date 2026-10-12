@@ -5,6 +5,8 @@
  *
  * - `fail` answers with a 400.
  * - `hold` calls the `hold` hook first, which a test uses to gate the run.
+ * - `tool` calls the `shout` tool with `{ text: "hi" }`, then answers
+ *   `tool said: <its output>`.
  * - anything else is echoed back as `echo: <prompt>`.
  *
  * OpenCode's restart notice is not a prompt: the script answers the user
@@ -25,16 +27,65 @@ function sse(text: string): Response {
 }
 
 function chunks(text: string): string {
-  const events = [
+  return stream([
     { choices: [{ index: 0, delta: { role: "assistant", content: text } }] },
     {
       choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
       usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
     }
-  ];
+  ]);
+}
+
+function stream(events: readonly unknown[]): string {
   return [...events.map((event) => JSON.stringify(event)), "[DONE]"]
     .map((data) => `data: ${data}\n\n`)
     .join("");
+}
+
+/** One call to the tool `name`, in OpenAI's streaming format. */
+function toolCall(name: string, args: unknown): Response {
+  const body = stream([
+    {
+      choices: [
+        {
+          index: 0,
+          delta: {
+            role: "assistant",
+            tool_calls: [
+              {
+                index: 0,
+                id: "call_1",
+                type: "function",
+                function: { name, arguments: JSON.stringify(args) }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+    }
+  ]);
+  return new Response(body, {
+    headers: { "content-type": "text/event-stream" }
+  });
+}
+
+/** The last message's text, if it is a tool result. */
+function toolResult(input: Record<string, unknown>): string | undefined {
+  const messages: unknown[] = Array.isArray(input.messages)
+    ? input.messages
+    : [];
+  const last = messages.at(-1);
+  return typeof last === "object" &&
+    last !== null &&
+    "role" in last &&
+    last.role === "tool" &&
+    "content" in last
+    ? textOf(last.content)
+    : undefined;
 }
 
 function textOf(content: unknown): string {
@@ -110,6 +161,12 @@ export function scriptedAI(
         );
       }
       if (prompt === "hold") await hold(options?.signal);
+      if (prompt === "tool") {
+        const result = toolResult(input);
+        return result === undefined
+          ? toolCall("shout", { text: "hi" })
+          : sse(`tool said: ${result}`);
+      }
       return sse(`echo: ${prompt}`);
     }
   };

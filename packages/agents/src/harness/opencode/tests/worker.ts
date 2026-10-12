@@ -1,3 +1,4 @@
+import type { Plugin } from "@opencode/plugin";
 import { OpenCodeWorkerd } from "@opencode/sdk/workerd";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
@@ -6,9 +7,12 @@ import { setWakeTimingForTests } from "../harness";
 import { prefixTables } from "../../table-prefix";
 import {
   OpenCodeHarness,
+  type OpenCodeEventStream,
   type OpenCodeMessage,
   type OpenCodeOperationResult,
   type OpenCodeReceipt,
+  type OpenCodeSessionEvent,
+  type OpenCodeSessionSnapshot,
   type OpenCodeWhenBusy
 } from "../index";
 import { scriptedAI } from "./scripted-ai";
@@ -17,6 +21,30 @@ import { TEST_TIMING } from "./timing";
 const MODEL = "@cf/moonshotai/kimi-k2.7-code";
 const RELEASE_KEY = "test:hold:release";
 const HOLD_RUNS_KEY = "test:hold:runs";
+
+/** A tool the scripted model calls: it upper-cases its input. */
+const shoutPlugin: Plugin.Plugin = {
+  id: "test.shout",
+  async setup(context) {
+    await context.tool.transform((editor) => {
+      editor.add({
+        name: "shout",
+        description: "Upper-case some text.",
+        input: {
+          type: "object",
+          properties: { text: { type: "string" } },
+          required: ["text"],
+          additionalProperties: false
+        },
+        // Offered to the model by name, not inside OpenCode's code mode.
+        options: { codemode: false },
+        execute: async (input) => ({
+          content: (input as { text: string }).text.toUpperCase()
+        })
+      });
+    });
+  }
+};
 
 /** User and assistant texts, so tests can compare transcripts as strings. */
 function texts(messages: readonly OpenCodeMessage[]): string[] {
@@ -43,7 +71,7 @@ export class OpenCodeHarnessTestObject extends DurableObject<Cloudflare.Env> {
       OpenCodeWorkerd.create({
         storage,
         models: { fetch: false },
-        plugins: [this.ai.plugin]
+        plugins: [this.ai.plugin, shoutPlugin]
       }),
     defaults: { model: this.ai(MODEL) }
   });
@@ -139,28 +167,49 @@ export class OpenCodeHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return (await this.ctx.storage.get<number>(HOLD_RUNS_KEY)) ?? 0;
   }
 
-  /** Watch the root session's events until its run is idle again. */
-  async watch(text: string): Promise<string[]> {
-    const controller = new AbortController();
-    const types: string[] = [];
-    const session = this.harness.session();
-    const watching = (async () => {
-      for await (const event of session.events(controller.signal)) {
-        types.push(event.type);
-        if (
-          event.type === "session.execution.succeeded" ||
-          event.type === "session.execution.failed"
-        ) {
-          return;
-        }
+  /** Open streams, by id, for tests that read events in steps. */
+  readonly #streams = new Map<
+    string,
+    { stream: OpenCodeEventStream; events: OpenCodeSessionEvent[] }
+  >();
+
+  /** Open the root session's event stream; returns its id and snapshot. */
+  async openStream(): Promise<{
+    id: string;
+    snapshot: OpenCodeSessionSnapshot;
+  }> {
+    const stream = await this.harness.session().events();
+    const id = crypto.randomUUID();
+    const events: OpenCodeSessionEvent[] = [];
+    stream.start((batch) => events.push(...batch));
+    this.#streams.set(id, { stream, events });
+    return { id, snapshot: stream.snapshot };
+  }
+
+  /**
+   * The stream's events once one of type `until` has arrived `count`
+   * times; then stop the stream.
+   */
+  async drain(
+    id: string,
+    until: OpenCodeSessionEvent["type"],
+    count = 1
+  ): Promise<OpenCodeSessionEvent[]> {
+    const open = this.#streams.get(id);
+    if (open === undefined) throw new Error(`No stream ${id}`);
+    for (let i = 0; i < 500; i++) {
+      if (open.events.filter((event) => event.type === until).length >= count) {
+        await open.stream.stop();
+        this.#streams.delete(id);
+        return open.events;
       }
-    })();
-    // Let the subscription attach before the run starts.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    await session.submit(text);
-    await watching;
-    controller.abort();
-    return types;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await open.stream.stop();
+    this.#streams.delete(id);
+    throw new Error(
+      `No ${until} event; got ${open.events.map((event) => event.type).join(", ")}`
+    );
   }
 
   /** The durable log's event types for the root session. */

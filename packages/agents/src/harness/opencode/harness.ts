@@ -5,19 +5,25 @@ import {
   type LifecycleJobOutcome
 } from "../../lifecycle";
 import { prefixTables } from "../table-prefix";
+import { SessionEventProjector, sessionIdOf } from "./events";
+import { messageIdOf, operationIdOf } from "./operation-id";
 import type {
   OpenCode,
   OpenCodeEvent,
+  OpenCodeEventStream,
   OpenCodeInput,
   OpenCodeLogEvent,
   OpenCodeMessage,
   OpenCodeOperationResult,
   OpenCodePendingOperation,
+  OpenCodePermission,
   OpenCodePromptResponse,
   OpenCodeReceipt,
+  OpenCodeSessionEvent,
   OpenCodeSessionId,
   OpenCodeSessionInfo,
   OpenCodeSessionOptions,
+  OpenCodeSessionSnapshot,
   OpenCodeSubmitOptions
 } from "./types";
 
@@ -156,23 +162,6 @@ type InboxItem = Awaited<
   ReturnType<OpenCode["sessions"]["inbox"]["list"]>
 >[number];
 
-const OPERATION_ID = /^[A-Za-z0-9._~-]+$/;
-
-/** OpenCode's id for the user message an operation submits. */
-function messageIdOf(operationId: string): string {
-  if (!OPERATION_ID.test(operationId)) {
-    throw new TypeError(
-      `Invalid operation id ${JSON.stringify(operationId)}: use letters, digits, ".", "_", "~" and "-"`
-    );
-  }
-  return `msg_${operationId}`;
-}
-
-/** The operation id of a message or inbox item, the inverse of `messageIdOf`. */
-function operationIdOf(messageId: string): string {
-  return messageId.startsWith("msg_") ? messageId.slice(4) : messageId;
-}
-
 /** Whether an OpenCode client error is the tagged error `tag`. */
 function isTagged(error: unknown, tag: string): boolean {
   return (
@@ -202,19 +191,6 @@ function textOf(message: OpenCodeMessage | undefined): string {
   return message.content
     .map((part) => (part.type === "text" ? part.text : ""))
     .join("");
-}
-
-function sessionIdOf(
-  event: OpenCodeEvent | OpenCodeLogEvent
-): string | undefined {
-  if (!("data" in event)) return undefined;
-  const data: unknown = event.data;
-  return typeof data === "object" &&
-    data !== null &&
-    "sessionID" in data &&
-    typeof data.sessionID === "string"
-    ? data.sessionID
-    : undefined;
 }
 
 /**
@@ -1138,23 +1114,111 @@ export class OpenCodeSession {
   }
 
   /**
-   * OpenCode's events for this session as they happen, durable and live
-   * (text deltas, tool input), until `signal` aborts. Read the transcript
-   * with `messages()` first for a snapshot; use `log()` to resume from a
-   * durable position instead.
+   * The session's state now, then everything that happens to it after, as
+   * `OpenCodeSessionEvent`s: the same kinds of event `PiHarness` reports,
+   * live text deltas included. The stream holds OpenCode open until
+   * `stop()`. For OpenCode's own events, durable and resumable by sequence
+   * number, use `log()`.
    */
-  async *events(signal?: AbortSignal): AsyncIterable<OpenCodeEvent> {
+  async events(): Promise<OpenCodeEventStream> {
     const release = this.#harness.lease();
+    const controller = new AbortController();
+    // Events wait here until the snapshot is read, then in `pending` until
+    // `start()`.
+    const early: OpenCodeEvent[] = [];
+    const pending: OpenCodeSessionEvent[] = [];
+    let projector: SessionEventProjector | undefined;
+    let listener:
+      | ((events: readonly OpenCodeSessionEvent[]) => void)
+      | undefined;
+    const deliver = (events: readonly OpenCodeSessionEvent[]) => {
+      if (events.length === 0) return;
+      if (listener === undefined) pending.push(...events);
+      else listener(events);
+    };
+    let attached!: () => void;
+    const subscribed = new Promise<void>((resolve) => {
+      attached = resolve;
+    });
+    let pump: Promise<void> = Promise.resolve();
     try {
       const opencode = await this.#harness.opencode();
-      for await (const event of opencode.events.subscribe(
-        signal ? { signal } : {}
-      )) {
-        if (sessionIdOf(event) === this.id) yield event;
-      }
-    } finally {
+      pump = (async () => {
+        try {
+          for await (const event of opencode.events.subscribe({
+            signal: controller.signal
+          })) {
+            // OpenCode's first event: the subscription is live from here.
+            if (event.type === "server.connected") attached();
+            if (sessionIdOf(event) !== this.id) continue;
+            if (projector === undefined) early.push(event);
+            else deliver(projector.project(event));
+          }
+        } catch (error) {
+          if (!controller.signal.aborted) {
+            deliver([
+              { type: "fault", code: "events_failed", message: describe(error) }
+            ]);
+          }
+        } finally {
+          attached();
+        }
+      })();
+      // Subscribe before reading the snapshot, so no event falls between.
+      await subscribed;
+      const snapshot = await this.#snapshot(opencode);
+      projector = new SessionEventProjector(snapshot);
+      for (const event of early.splice(0)) deliver(projector.project(event));
+
+      let stopped: Promise<void> | undefined;
+      return {
+        snapshot,
+        start: (next) => {
+          if (listener !== undefined) {
+            throw new Error("OpenCodeEventStream.start() was already called");
+          }
+          listener = next;
+          deliver(pending.splice(0));
+        },
+        stop: () => {
+          stopped ??= (async () => {
+            controller.abort();
+            await pump;
+            await release();
+          })();
+          return stopped;
+        }
+      };
+    } catch (error) {
+      controller.abort();
+      await pump;
       await release();
+      throw error;
     }
+  }
+
+  async #snapshot(opencode: OpenCode): Promise<OpenCodeSessionSnapshot> {
+    const [messages, busy, pending, permissions] = await Promise.all([
+      this.history(),
+      this.busy(),
+      this.#harness.pending({ session: this.id }),
+      opencode.permission.list({ sessionID: this.id })
+    ]);
+    return {
+      session: this.id,
+      messages,
+      busy,
+      pending,
+      permissions: permissions.map(
+        (request): OpenCodePermission => ({
+          id: request.id,
+          session: request.sessionID,
+          action: request.action,
+          resources: request.resources,
+          ...(request.message === undefined ? {} : { message: request.message })
+        })
+      )
+    };
   }
 
   /**
