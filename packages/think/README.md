@@ -1048,11 +1048,15 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 Let the LLM write and run JavaScript in a sandboxed Worker:
 
 ```ts
+import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 
 getTools() {
   return {
-    execute: createExecuteTool({ tools: wsTools, loader: this.env.LOADER })
+    // tools.* in the sandbox includes the workspace tools
+    execute: createExecuteTool(this, {
+      tools: createAITools({ workspace: this.workspace })
+    })
   };
 }
 ```

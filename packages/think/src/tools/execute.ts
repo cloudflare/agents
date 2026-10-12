@@ -8,8 +8,6 @@ import {
   type Executor
 } from "@cloudflare/codemode";
 import { ToolSetConnector } from "@cloudflare/codemode/ai";
-import type { StateBackend } from "@cloudflare/shell";
-import { StateConnector } from "@cloudflare/shell/workers";
 import {
   BrowserConnector,
   DurableBrowserSessionStore,
@@ -50,19 +48,6 @@ export interface CreateExecuteToolOptions {
   tools?: ToolSet;
 
   /**
-   * StateBackend exposed as `state.*` inside the sandbox — the full
-   * filesystem API (readFile, writeFile, glob, searchFiles, replaceInFiles,
-   * planEdits, …). Every method takes a single object argument.
-   *
-   * @example
-   * ```ts
-   * import { createWorkspaceStateBackend } from "@cloudflare/shell";
-   * state: createWorkspaceStateBackend(shellWorkspace)
-   * ```
-   */
-  state?: StateBackend;
-
-  /**
    * Browser Rendering binding. When provided, the sandbox gets the `cdp.*`
    * connector (cdp.send, cdp.attachToTarget, cdp.spec, …) — a live browser
    * over the Chrome DevTools Protocol.
@@ -78,7 +63,7 @@ export interface CreateExecuteToolOptions {
   session?: BrowserConnectorSessionOptions;
 
   /**
-   * Additional connectors for the sandbox beyond `tools`, `state`, and `cdp`.
+   * Additional connectors for the sandbox beyond `tools` and `cdp`.
    * Each adds its own named namespace.
    */
   connectors?: CodemodeConnector[];
@@ -115,7 +100,7 @@ export interface CreateExecuteToolOptions {
   /**
    * Custom tool description. Replaces the generated default entirely — the
    * default explains the codemode workflow and lists each configured
-   * namespace (`tools.*`, `state.*`, `cdp.*`) with a usage hint.
+   * namespace (`tools.*`, `cdp.*`) with a usage hint.
    */
   description?: string;
 
@@ -150,7 +135,7 @@ function isAgent(
   // An options bag has no `env`, but guard against a hand-built object that
   // happens to carry one (e.g. spread from a worker handler): an explicit
   // `executor`/`loader` key marks it as options — agents never have those.
-  // (Other option keys like `state`/`browser` can legitimately exist on agent
+  // (Other option keys like `tools`/`browser` can legitimately exist on agent
   // subclasses, so they can't discriminate.)
   return "env" in source && !("executor" in source) && !("loader" in source);
 }
@@ -224,9 +209,6 @@ export function createExecuteRuntime(
       new ToolSetConnector(options.ctx, { tools: options.tools })
     );
   }
-  if (options.state) {
-    connectors.push(new StateConnector(options.ctx, options.state));
-  }
   if (options.browser) {
     connectors.push(
       new BrowserConnector(options.ctx, {
@@ -242,7 +224,7 @@ export function createExecuteRuntime(
   if (connectors.length === 0) {
     throw new Error(
       "createExecuteTool has nothing to expose — provide at least one of " +
-        "`tools`, `state`, `browser`, or `connectors`."
+        "`tools`, `browser`, or `connectors`."
     );
   }
 
@@ -291,8 +273,8 @@ export function createExecuteRuntime(
 /**
  * One-line usage hints for the namespaces createExecuteTool itself wires up,
  * rendered into the default tool description. Models otherwise tend to guess
- * a filesystem API (`host.*`, `fs.*`) instead of discovering `state.*` /
- * `tools.*` via `codemode.search`.
+ * a filesystem API (`host.*`, `fs.*`) instead of discovering `tools.*` via
+ * `codemode.search`.
  */
 function connectorHints(
   options: CreateExecuteToolOptions
@@ -307,12 +289,6 @@ function connectorHints(
         `your host tools as async functions — e.g. \`await tools.${names[0]}({ ... })\`. ` +
         `Available: ${names.join(", ")}`;
     }
-  }
-  if (options.state) {
-    hints.state =
-      "the workspace filesystem. Every method takes ONE object argument: " +
-      "`state.readFile({ path })`, `state.writeFile({ path, content })`, " +
-      "`state.readdir({ path })`, `state.glob({ pattern })`, …";
   }
   if (options.browser) {
     hints.cdp =
@@ -354,13 +330,12 @@ export function truncatePausedExecutionOutput(output: unknown): unknown {
 
 /**
  * Create a code execution tool that lets the LLM write and run TypeScript
- * against your tools, the workspace filesystem, and (optionally) a live
- * browser — all inside a sandboxed Worker, recorded on a durable codemode
+ * against your tools and (optionally) a live browser — all inside a sandboxed Worker, recorded on a durable codemode
  * runtime (abort-and-replay, approvals, snippets).
  *
- * The model sees typed namespaces: `tools.*` for your AI SDK tools,
- * `state.*` for the filesystem (object args: `state.readFile({ path })`),
- * and `cdp.*` for the browser.
+ * The model sees typed namespaces: `tools.*` for your AI SDK tools and
+ * `cdp.*` for the browser. To give the sandbox the workspace, pass the
+ * workspace tools: `tools: createAITools({ workspace: this.workspace })`.
  *
  * Setup checklist:
  *
@@ -391,7 +366,6 @@ export function truncatePausedExecutionOutput(output: unknown): unknown {
  * execute: createExecuteTool({
  *   ctx: this.ctx,
  *   tools: myDomainTools,                                  // tools.*
- *   state: createWorkspaceStateBackend(shellWorkspace),    // state.*
  *   browser: this.env.BROWSER,                             // cdp.*
  *   loader: this.env.LOADER
  * })

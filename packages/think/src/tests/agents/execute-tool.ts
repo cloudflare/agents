@@ -6,10 +6,7 @@
 import { tool } from "ai";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
-import {
-  Workspace as ShellWorkspace,
-  createWorkspaceStateBackend
-} from "@cloudflare/shell";
+import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 import { Think } from "../../think";
 import {
   createExecuteRuntime,
@@ -51,6 +48,7 @@ export class ThinkExecuteToolAgent extends Think {
           inputSchema: z.object({ a: z.number(), b: z.number() }),
           execute: async ({ a, b }) => ({ sum: a + b })
         }),
+        ...createAITools({ workspace: this.workspace }),
         launchMissiles: tool({
           description: "Approval-gated — must be stripped from the sandbox",
           inputSchema: z.object({}),
@@ -58,14 +56,11 @@ export class ThinkExecuteToolAgent extends Think {
           execute: async () => "boom"
         })
       },
-      state: createWorkspaceStateBackend(
-        new ShellWorkspace({ sql: this.ctx.storage.sql, namespace: "state" })
-      ),
       loader: this.env.LOADER
     });
   }
 
-  /** Run code on the explicit-options runtime (tools.* + state.*). */
+  /** Run code on the explicit-options runtime (tools.*, including the workspace tools). */
   async runExecute(code: string): Promise<ExecuteOutput> {
     return invoke(this.#runtime().tool, code);
   }

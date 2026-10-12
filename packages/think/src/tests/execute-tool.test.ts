@@ -24,21 +24,20 @@ describe("execute tool on the codemode runtime", () => {
     expect(out.result).toBe(5);
   });
 
-  it("runs sandbox code against state.* with object args", async () => {
+  it("runs sandbox code against the workspace tools", async () => {
     const agent = await freshAgent();
     const out = await agent.runExecute(
       `async () => {
-        await state.writeFile({ path: "/notes.txt", content: "hello" });
-        await state.replaceInFile({
-          path: "/notes.txt",
-          search: "hello",
-          replacement: "bye"
+        await tools.write({ path: "/workspace/notes.txt", content: "hello" });
+        await tools.edit({
+          path: "/workspace/notes.txt",
+          edits: [{ oldText: "hello", newText: "bye" }]
         });
-        return await state.readFile({ path: "/notes.txt" });
+        return JSON.stringify(await tools.read({ path: "/workspace/notes.txt" }));
       }`
     );
     expect(out.status).toBe("completed");
-    expect(out.result).toBe("bye");
+    expect(String(out.result)).toContain("bye");
   });
 
   it("maps needsApproval AI SDK tools to requiresApproval — the call pauses durably", async () => {

@@ -6,18 +6,6 @@ import { defineConfig } from "vitest/config";
 const testsDir = import.meta.dirname;
 
 export default defineConfig({
-  resolve: {
-    alias: [
-      {
-        find: /^@cloudflare\/shell$/,
-        replacement: path.join(testsDir, "../../../shell/src/index.ts")
-      },
-      {
-        find: /^@cloudflare\/shell\/workers$/,
-        replacement: path.join(testsDir, "../../../shell/src/workers.ts")
-      }
-    ]
-  },
   plugins: [
     stripNodeModulesSourceMapReferences(),
     cloudflareTest({
