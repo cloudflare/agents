@@ -27,7 +27,6 @@ type MediaEvictionStub = {
   getContinuationRowCountForTest(): Promise<number>;
   readEvictedFileForTest(path: string): Promise<{
     byteLength: number;
-    mimeType: string | null;
     firstBytes: number[];
     allSame: boolean;
   } | null>;
@@ -88,7 +87,7 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     });
     expect(m0?.parts[1]).toEqual({
       type: "text",
-      text: `[evicted image/png, ${PAYLOAD_BYTES} bytes; preserved at /attachments/evicted/m0-0.png]`
+      text: `[evicted image/png, ${PAYLOAD_BYTES} bytes; preserved at /workspace/attachments/evicted/m0-0.png]`
     });
 
     // A reconstructing read sees the marker too — the media is gone from the
@@ -104,14 +103,12 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     await agent.runEvictionForTest();
 
     const file = await agent.readEvictedFileForTest(
-      "/attachments/evicted/m0-0.png"
+      "/workspace/attachments/evicted/m0-0.png"
     );
     expect(file).not.toBeNull();
-    // Raw bytes, not the `data:` URL string the old implementation stored:
-    // `read` sniffs image/* off the mime type and hands the model a real
-    // image when the agent deliberately reads it back.
+    // Raw bytes, not the `data:` URL string the old implementation stored,
+    // so `read` can hand the model a real image when the agent reads it back.
     expect(file?.byteLength).toBe(PAYLOAD_BYTES);
-    expect(file?.mimeType).toBe("image/png");
     expect(file?.allSame).toBe(true);
     expect(file?.firstBytes).toEqual([0, 0, 0, 0]);
   });
@@ -134,14 +131,13 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     expect(part.output.mediaType).toBe("image/png");
     expect(part.output.note).toBe("small structured field");
     expect(part.output.data).toBe(
-      `[evicted image/png, ${PAYLOAD_BYTES} bytes; preserved at /attachments/evicted/m1-0.png]`
+      `[evicted image/png, ${PAYLOAD_BYTES} bytes; preserved at /workspace/attachments/evicted/m1-0.png]`
     );
 
     const file = await agent.readEvictedFileForTest(
-      "/attachments/evicted/m1-0.png"
+      "/workspace/attachments/evicted/m1-0.png"
     );
     expect(file?.byteLength).toBe(PAYLOAD_BYTES);
-    expect(file?.mimeType).toBe("image/png");
   });
 
   it("evicts a payload larger than one row, leaving the bytes in one place", async () => {
@@ -168,14 +164,17 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
     const m0 = await agent.getStoredMessageForTest("m0");
     expect(m0?.parts[1]).toEqual({
       type: "text",
-      text: `[evicted image/png, ${SPLIT_PAYLOAD_BYTES} bytes; preserved at /attachments/evicted/m0-0.png]`
+      text: `[evicted image/png, ${SPLIT_PAYLOAD_BYTES} bytes; preserved at /workspace/attachments/evicted/m0-0.png]`
     });
     // The rewritten row is small again, so its continuations are gone: the
     // only copy of these bytes is now the Workspace file.
     expect(await agent.getContinuationRowCountForTest()).toBe(0);
     expect(
-      (await agent.readEvictedFileForTest("/attachments/evicted/m0-0.png"))
-        ?.byteLength
+      (
+        await agent.readEvictedFileForTest(
+          "/workspace/attachments/evicted/m0-0.png"
+        )
+      )?.byteLength
     ).toBe(SPLIT_PAYLOAD_BYTES);
   });
 
@@ -239,7 +238,9 @@ describe("mediaEviction — aged media leaves the conversation (#1710)", () => {
       `data:image/png;base64,${"A".repeat(16_000)}`
     );
     expect(
-      await agent.readEvictedFileForTest("/attachments/evicted/m0-0.png")
+      await agent.readEvictedFileForTest(
+        "/workspace/attachments/evicted/m0-0.png"
+      )
     ).toBeNull();
   });
 

@@ -14,7 +14,7 @@ import { parseSkillMarkdown } from "./frontmatter";
 import { validateSkillScriptPath } from "./runner";
 import {
   createSkillWorkspaceFiles,
-  type SkillProjectionWorkspace,
+  type SkillWorkspace,
   type SkillWorkspaceFiles,
   type SkillWorkspaceSeedOptions,
   type SkillWorkspaceSeedResult
@@ -187,12 +187,12 @@ export class SkillRegistry {
   }
 
   /**
-   * Seed resolved Agent Skills into Computer or legacy Shell storage.
+   * Seed resolved Agent Skills into a Workspace.
    * Existing files are preserved by default, and become authoritative for
    * activation, resource reads, and script execution.
    */
   async seedWorkspace(
-    workspace: SkillProjectionWorkspace,
+    workspace: SkillWorkspace,
     options: SkillWorkspaceSeedOptions = {}
   ): Promise<SkillWorkspaceSeedResult> {
     await this.load();
@@ -259,7 +259,7 @@ export class SkillRegistry {
    * matches the recorded projection fingerprint.
    */
   async useWorkspace(
-    workspace: SkillProjectionWorkspace,
+    workspace: SkillWorkspace,
     options: SkillWorkspaceSeedOptions = {}
   ): Promise<void> {
     await this.load();

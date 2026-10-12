@@ -8,8 +8,7 @@ import {
   type Executor
 } from "@cloudflare/codemode";
 import { ToolSetConnector } from "@cloudflare/codemode/ai";
-import type { StateBackend, WorkspaceFsLike } from "@cloudflare/shell";
-import { createWorkspaceStateBackend } from "@cloudflare/shell";
+import type { StateBackend } from "@cloudflare/shell";
 import { StateConnector } from "@cloudflare/shell/workers";
 import {
   BrowserConnector,
@@ -17,7 +16,6 @@ import {
   type BrowserBinding,
   type BrowserConnectorSessionOptions
 } from "agents/browser";
-import type { WorkspaceLike } from "./workspace";
 
 /**
  * The minimum agent surface for the `createExecuteTool(this)` one-liner.
@@ -28,7 +26,6 @@ import type { WorkspaceLike } from "./workspace";
  * which would break structural assignability of `this`.)
  */
 export interface ExecuteToolAgent {
-  workspace?: WorkspaceLike;
   /** Set by `createExecuteRuntime(agent)` so callables can reach the runtime. */
   codemode?: CodemodeRuntimeHandle;
 }
@@ -60,7 +57,7 @@ export interface CreateExecuteToolOptions {
    * @example
    * ```ts
    * import { createWorkspaceStateBackend } from "@cloudflare/shell";
-   * state: createWorkspaceStateBackend(this.workspace)
+   * state: createWorkspaceStateBackend(shellWorkspace)
    * ```
    */
   state?: StateBackend;
@@ -158,39 +155,6 @@ function isAgent(
   return "env" in source && !("executor" in source) && !("loader" in source);
 }
 
-// The agent one-liner derives state from the workspace, which requires the
-// full filesystem surface (`WorkspaceFsLike`) — a concrete `Workspace` has
-// it; a minimal custom `WorkspaceLike` may not.
-const WORKSPACE_FS_METHODS = [
-  "readFile",
-  "readFileBytes",
-  "writeFile",
-  "writeFileBytes",
-  "appendFile",
-  "exists",
-  "stat",
-  "lstat",
-  "mkdir",
-  "readDir",
-  "rm",
-  "cp",
-  "mv",
-  "symlink",
-  "readlink",
-  "glob"
-] as const;
-
-function workspaceFs(
-  workspace: WorkspaceLike | undefined
-): WorkspaceFsLike | undefined {
-  if (!workspace) return undefined;
-  const candidate = workspace as unknown as Record<string, unknown>;
-  for (const method of WORKSPACE_FS_METHODS) {
-    if (typeof candidate[method] !== "function") return undefined;
-  }
-  return workspace as unknown as WorkspaceFsLike;
-}
-
 function optionsFromAgent(agent: ExecuteToolAgent): CreateExecuteToolOptions {
   const env = ((agent as unknown as { env?: unknown }).env ?? {}) as {
     LOADER?: WorkerLoader;
@@ -203,11 +167,9 @@ function optionsFromAgent(agent: ExecuteToolAgent): CreateExecuteToolOptions {
         "call createExecuteTool({ ctx, loader, ... }) with explicit options."
     );
   }
-  const fs = workspaceFs(agent.workspace);
   return {
     ctx,
     loader: env.LOADER,
-    state: fs ? createWorkspaceStateBackend(fs) : undefined,
     browser: env.BROWSER
   };
 }
@@ -412,7 +374,7 @@ export function truncatePausedExecutionOutput(output: unknown): unknown {
  * ```ts
  * getTools() {
  *   return {
- *     // state.* from this.workspace, cdp.* if env.BROWSER is bound,
+ *     // cdp.* if env.BROWSER is bound,
  *     // executor from env.LOADER
  *     execute: createExecuteTool(this)
  *   };
@@ -429,7 +391,7 @@ export function truncatePausedExecutionOutput(output: unknown): unknown {
  * execute: createExecuteTool({
  *   ctx: this.ctx,
  *   tools: myDomainTools,                                  // tools.*
- *   state: createWorkspaceStateBackend(this.workspace),    // state.*
+ *   state: createWorkspaceStateBackend(shellWorkspace),    // state.*
  *   browser: this.env.BROWSER,                             // cdp.*
  *   loader: this.env.LOADER
  * })

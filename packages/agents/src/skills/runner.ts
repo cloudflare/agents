@@ -9,19 +9,11 @@ import type {
   SkillScriptContext
 } from "./types";
 import { validateSkillResourcePath } from "./types";
-
-/**
- * Minimal workspace surface the skill runner needs. A concrete `Workspace`
- * from `@cloudflare/shell` (or Think's `WorkspaceLike`) satisfies this
- * structurally, so the runner does not depend on a filesystem package.
- */
-export interface SkillWorkspace {
-  readFile(path: string): Promise<string | null>;
-  writeFile(path: string, content: string): Promise<void>;
-  readDir(path: string): Promise<unknown>;
-  glob(pattern: string): Promise<unknown>;
-  stat(path: string): Promise<{ type: string; size?: number } | null>;
-}
+import {
+  createSkillWorkspaceAccess,
+  type SkillWorkspace,
+  type SkillWorkspaceAccess
+} from "./workspace";
 
 /**
  * Options for {@link runner}.
@@ -415,7 +407,7 @@ interface OutputArtifact {
  */
 class SkillScriptHostBridge extends RpcTarget {
   readonly #tools: ToolSet | undefined;
-  readonly #workspace: SkillWorkspace | undefined;
+  readonly #workspace: SkillWorkspaceAccess | undefined;
   readonly #workspaceAccess: WorkspaceAccess;
   readonly #outputs = new Map<string, OutputArtifact>();
 
@@ -426,7 +418,10 @@ class SkillScriptHostBridge extends RpcTarget {
   ) {
     super();
     this.#tools = tools;
-    this.#workspace = workspace;
+    this.#workspace =
+      workspace === undefined
+        ? undefined
+        : createSkillWorkspaceAccess(workspace);
     this.#workspaceAccess = workspaceAccess;
   }
 
@@ -449,7 +444,7 @@ class SkillScriptHostBridge extends RpcTarget {
   }
 
   async listFiles(path = "."): Promise<unknown> {
-    return this.#requireWorkspace("read").readDir(path);
+    return this.#requireWorkspace("read").listFiles(path);
   }
 
   async glob(pattern: string): Promise<unknown> {
@@ -457,9 +452,7 @@ class SkillScriptHostBridge extends RpcTarget {
   }
 
   async stat(path: string): Promise<{ type: string; size: number } | null> {
-    const info = await this.#requireWorkspace("read").stat(path);
-    if (!info) return null;
-    return { type: info.type, size: info.size ?? 0 };
+    return this.#requireWorkspace("read").stat(path);
   }
 
   async writeFile(path: string, content: string): Promise<void> {
@@ -530,7 +523,7 @@ class SkillScriptHostBridge extends RpcTarget {
     }
   }
 
-  #requireWorkspace(access: "read" | "read-write"): SkillWorkspace {
+  #requireWorkspace(access: "read" | "read-write"): SkillWorkspaceAccess {
     if (!this.#workspace || this.#workspaceAccess === "none") {
       throw new Error("Workspace access is not available.");
     }

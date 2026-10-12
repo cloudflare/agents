@@ -19,6 +19,7 @@
     "@ai-sdk/anthropic": "^4.0.0",
     "@ai-sdk/openai": "^4.0.0",
     "@cloudflare/ai-chat": "workspace:*",
+    "@cloudflare/computer": "^0.5.1",
     "@cloudflare/think": "workspace:*",
     "@cloudflare/workspace": "https://pkg.pr.new/cloudflare/workspace/@cloudflare/workspace@98b74eb",
     "@platformatic/vfs": "^0.4.0",

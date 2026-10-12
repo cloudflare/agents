@@ -2,6 +2,7 @@ import type { JSONValue, ToolSet } from "ai";
 import { tool } from "ai";
 import { isPrivateOrLocalHost } from "agents/webfetch";
 import { z } from "zod";
+import { WorkspaceFiles, type ThinkWorkspace } from "../workspace-files";
 
 // ── Public types ──────────────────────────────────────────────────
 //
@@ -59,17 +60,6 @@ export interface FetchToolEvent {
   code?: FetchErrorCode;
 }
 
-/**
- * Minimal workspace surface the fetch tool needs to spill large/binary
- * responses to a file. A concrete `Workspace` from `@cloudflare/shell`
- * satisfies this.
- */
-export interface FetchWorkspace {
-  writeFile(path: string, content: string): Promise<void> | void;
-  writeFileBytes?(path: string, content: Uint8Array): Promise<void> | void;
-  mkdir(path: string, opts?: { recursive?: boolean }): Promise<void> | void;
-}
-
 export interface FetchBindingTarget {
   /** The service binding / Fetcher requests are routed through. */
   binding: Fetcher;
@@ -106,7 +96,7 @@ export interface CreateFetchToolsOptions {
   /** Allow large/binary bodies to spill to a workspace file. Default false. */
   spillToWorkspace?: boolean;
   /** Workspace used for `response: "workspace"` / spill. */
-  workspace?: FetchWorkspace;
+  workspace?: ThinkWorkspace;
   /** Per-request timeout in ms. Default 10_000. */
   timeoutMs?: number;
   /** Default response handling. Default `"auto"`. */
@@ -140,7 +130,7 @@ interface ResolvedConfig {
   maxBytes: number;
   maxModelChars: number;
   spillToWorkspace: boolean;
-  workspace?: FetchWorkspace;
+  workspace?: ThinkWorkspace;
   timeoutMs: number;
   response: FetchResponseMode;
   followRedirects: FetchRedirectPolicy;
@@ -729,23 +719,9 @@ async function spillToWorkspace(args: SpillArgs): Promise<FetchResult> {
     };
   }
 
-  const isTextual = isTextualContentType(contentType);
-  const path = `/fetched/${Date.now()}-${randomToken()}.${extensionFor(contentType)}`;
+  const path = `/workspace/fetched/${Date.now()}-${randomToken()}.${extensionFor(contentType)}`;
   try {
-    await ws.mkdir("/fetched", { recursive: true });
-    if (isTextual) {
-      await ws.writeFile(path, new TextDecoder().decode(bytes));
-    } else if (ws.writeFileBytes) {
-      await ws.writeFileBytes(path, bytes);
-    } else {
-      return {
-        ok: false,
-        code: "unsupported_content_type",
-        finalUrl,
-        message:
-          "Binary response cannot be stored: workspace does not support writeFileBytes."
-      };
-    }
+    await new WorkspaceFiles(ws).write(path, bytes);
   } catch (error) {
     return {
       ok: false,

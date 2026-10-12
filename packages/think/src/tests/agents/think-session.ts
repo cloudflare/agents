@@ -63,6 +63,7 @@ import type { Schedule } from "agents";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
 import { z } from "zod";
+import { WorkspaceFiles } from "../../workspace-files";
 
 // ── Test result type ────────────────────────────────────────────
 
@@ -2504,18 +2505,9 @@ export class ThinkTestAgent extends Think {
   async seedWorkspaceBytes(
     path: string,
     bytes: number[],
-    mimeType?: string
+    _mimeType?: string
   ): Promise<void> {
-    const parent = path.replace(/\/[^/]+$/, "");
-    const workspace = this.workspace;
-    const writeFileBytes = Reflect.get(workspace, "writeFileBytes");
-    if (typeof writeFileBytes !== "function") {
-      throw new Error("Test workspace does not support writeFileBytes");
-    }
-    if (parent && parent !== "/") {
-      await workspace.mkdir(parent, { recursive: true });
-    }
-    await writeFileBytes.call(workspace, path, new Uint8Array(bytes), mimeType);
+    await new WorkspaceFiles(this.workspace).write(path, new Uint8Array(bytes));
   }
 
   async testChatWithError(errorMessage?: string): Promise<TestChatResult> {
@@ -11928,17 +11920,14 @@ export class ThinkMediaEvictionAgent extends Think {
   /** The workspace file an eviction marker points at. */
   async readEvictedFileForTest(path: string): Promise<{
     byteLength: number;
-    mimeType: string | null;
     firstBytes: number[];
     allSame: boolean;
   } | null> {
-    const bytes = await this.workspace.readFileBytes(path);
+    const bytes = await new WorkspaceFiles(this.workspace).readBytes(path);
     if (bytes === null) return null;
-    const stat = await this.workspace.stat(path);
     const first = bytes[0] ?? 0;
     return {
       byteLength: bytes.byteLength,
-      mimeType: stat?.mimeType ?? null,
       firstBytes: Array.from(bytes.slice(0, 4)),
       allSame: bytes.every((b) => b === first)
     };

@@ -26,7 +26,7 @@ import type { McpToolDescriptor } from "./types";
 //     proxied.
 //
 // The parent stub is resolved lazily on first call and cached, same
-// pattern as `SharedWorkspace`.
+// pattern as the shared workspace (see `MyAssistant.workspace`).
 
 export class SharedMCPClient {
   #stubPromise?: Promise<DurableObjectStub<AssistantDirectory>>;

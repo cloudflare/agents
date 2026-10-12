@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.0",
+    "@cloudflare/computer": "^0.5.1",
     "@cloudflare/kumo": "^2.6.0",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",

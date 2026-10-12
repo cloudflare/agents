@@ -30,12 +30,8 @@ import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { z } from "zod";
 import type { Session } from "../think";
 import type { ObservabilityEvent } from "agents/observability";
-import {
-  action,
-  Think,
-  Workspace,
-  defaultContextOverflowClassifier
-} from "../think";
+import { Workspace } from "@cloudflare/computer";
+import { action, Think, defaultContextOverflowClassifier } from "../think";
 import type { Action } from "../think";
 import { ThinkWorkflow, type ThinkWorkflowStep } from "../workflows";
 import type {
@@ -381,11 +377,7 @@ const ON_ERROR_LOG_KEY = "test:on-error-log";
 const ON_CHAT_ERROR_LOG_KEY = "test:on-chat-error-log";
 
 export class TestAssistant extends Think<Env> {
-  override workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    r2: this.env.R2,
-    name: () => this.name
-  });
+  override workspace = new Workspace({ storage: this.ctx.storage });
 
   getModel(): LanguageModel {
     return createWorkersAI({ binding: this.env.AI })(

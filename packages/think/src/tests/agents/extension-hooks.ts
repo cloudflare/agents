@@ -10,6 +10,7 @@ import type { LanguageModel, UIMessage, ToolSet } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
 import { Think } from "../../think";
+import { WorkspaceFiles } from "../../workspace-files";
 import type { StreamCallback, ThinkModel, TurnConfig } from "../../think";
 
 // AI SDK v3 LanguageModel spec helpers — keep in sync with the helpers
@@ -182,7 +183,9 @@ export class ThinkExtensionHookAgent extends Think {
 
   async listExtLogFiles(): Promise<string[]> {
     try {
-      const entries = await this.workspace.readDir("ext-log");
+      const entries = await new WorkspaceFiles(this.workspace).list(
+        "/workspace/ext-log"
+      );
       return entries.map((e: { name: string }) => e.name);
     } catch {
       return [];
@@ -191,7 +194,9 @@ export class ThinkExtensionHookAgent extends Think {
 
   async readExtLogFile(name: string): Promise<unknown | null> {
     try {
-      const content = await this.workspace.readFile(`ext-log/${name}`);
+      const content = await new WorkspaceFiles(this.workspace).readText(
+        `/workspace/ext-log/${name}`
+      );
       if (content == null) return null;
       return JSON.parse(content);
     } catch {
@@ -252,7 +257,9 @@ export class ThinkExtensionBeforeTurnModelAgent extends Think {
   }
 
   async readBeforeTurnSnapshot(): Promise<{ modelId: string } | null> {
-    const content = await this.workspace.readFile("ext-log/before-turn.json");
+    const content = await new WorkspaceFiles(this.workspace).readText(
+      "/workspace/ext-log/before-turn.json"
+    );
     return content == null ? null : JSON.parse(content);
   }
 }

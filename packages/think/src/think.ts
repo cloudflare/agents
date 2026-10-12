@@ -387,13 +387,6 @@ function mediaEvictionCutoff(
 }
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 
-/** Whether a workspace can receive raw bytes, which skills projection needs. */
-function hasWriteFileBytes(
-  workspace: WorkspaceLike
-): workspace is WorkspaceLike &
-  Required<Pick<WorkspaceLike, "writeFileBytes">> {
-  return typeof workspace.writeFileBytes === "function";
-}
 const ACTION_OUTPUT_MAX_CHARS = 20_000;
 const MAX_REPLY_ATTACHMENTS_PER_TURN = 32;
 const ACTION_LEDGER_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
@@ -608,7 +601,12 @@ const ACTION_PENDING_LAST_SWEPT_KEY =
   "cf_think_action_pending_approvals:last_swept_at";
 /** Prefix for durable-pause action execution ids (vs codemode execution ids). */
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
-import { Workspace } from "@cloudflare/shell";
+import { Workspace } from "@cloudflare/computer";
+import {
+  WorkspaceFiles,
+  resolveWorkspacePath,
+  type ThinkWorkspace
+} from "./workspace-files";
 import {
   evictMediaFromMessage,
   evictedFilePath,
@@ -661,10 +659,13 @@ export type {
   SessionContextOptions
 } from "./session";
 export type { SessionMessage } from "agents/sessions";
-export { Workspace } from "@cloudflare/shell";
 export type { FiberContext, FiberRecoveryContext } from "agents";
-export type { WorkspaceLike } from "./tools/workspace";
-import type { WorkspaceLike } from "./tools/workspace";
+export { lazyWorkspace } from "./workspace-files";
+export type {
+  ThinkWorkspace,
+  ThinkWorkspaceFilesystem,
+  WorkspaceEntry
+} from "./workspace-files";
 
 export type {
   CreateFetchToolsOptions,
@@ -3538,8 +3539,7 @@ export class Think<
 
   /**
    * Project `getSkills()` into the active workspace so the agent can read
-   * and edit skills as files. Computer workspaces use
-   * `/workspace/.agents/skills`; legacy Shell uses `/.agents/skills`.
+   * and edit skills as files under `/workspace/.agents/skills`.
    * Existing edits are preserved. Off by default: skills load from their
    * sources and nothing is written to the Workspace, as before. Set `{}` to
    * project with the defaults.
@@ -3755,27 +3755,26 @@ export class Think<
   extensionManager?: import("./extensions/manager").ExtensionManager;
 
   /**
-   * Workspace filesystem available in `getTools()` and lifecycle hooks.
-   * Defaults to a full `Workspace` backed by the DO's SQLite storage.
+   * The agent's Workspace, available in `getTools()` and lifecycle hooks.
+   * Defaults to a `Workspace` from `@cloudflare/computer` on this Durable
+   * Object's storage, with no execution backends.
    *
-   * Typed as `WorkspaceLike` rather than `Workspace` so subclasses can
-   * replace it with anything that satisfies the interface — e.g. a proxy
-   * that forwards to a shared workspace owned by a parent DO. Override as
-   * a class field to skip the default init entirely:
+   * Override it as a class field to add backends, mounts, or git, or to
+   * work in a Workspace another Durable Object owns:
    *
    * ```typescript
-   * // Default init with R2 spillover for large files.
+   * import { Workspace } from "@cloudflare/computer";
+   *
    * override workspace = new Workspace({
-   *   sql: this.ctx.storage.sql,
-   *   r2: this.env.R2,
-   *   name: () => this.name
+   *   storage: this.ctx.storage,
+   *   backends: [...]
    * });
    *
-   * // Or a custom WorkspaceLike — e.g. a parent-owned shared workspace.
-   * override workspace: WorkspaceLike = new SharedWorkspace(this);
+   * // A Workspace owned by a parent Durable Object.
+   * override workspace = await getWorkspace(parentStub);
    * ```
    */
-  workspace!: WorkspaceLike;
+  workspace!: ThinkWorkspace;
 
   /**
    * The codemode runtime behind the execute tool, when one has been created
@@ -3836,10 +3835,7 @@ export class Think<
         async () => {
           // 1. Workspace initialization
           if (!this.workspace) {
-            this.workspace = new Workspace({
-              sql: this.ctx.storage.sql,
-              name: () => this.name
-            });
+            this.workspace = new Workspace({ storage: this.ctx.storage });
           }
 
           // 2. Session configuration (builder phase: compaction, and the
@@ -4308,7 +4304,6 @@ export class Think<
    * since — not zero — and the request they left pending can pass the gate.
    */
   private _mediaEvictionAppendsDuringPass = 0;
-  private _warnedEvictionUnsupported = false;
   /**
    * The last pass that found nothing to evict while aged rows were hidden
    * from the cache: the stored size it saw, and how many linear appends have
@@ -4447,23 +4442,7 @@ export class Think<
       backlogRemains: false
     };
     try {
-      // A custom `WorkspaceLike` may predate `writeFileBytes`. Eviction needs
-      // it to preserve the bytes, so without it the pass is a no-op rather
-      // than a lossy one.
-      const writeFileBytes = this.workspace.writeFileBytes?.bind(
-        this.workspace
-      );
-      if (!writeFileBytes) {
-        if (!this._warnedEvictionUnsupported) {
-          this._warnedEvictionUnsupported = true;
-          console.warn(
-            "[Think] mediaEviction is enabled but the configured workspace " +
-              "does not implement writeFileBytes; media eviction is a no-op " +
-              "for this agent."
-          );
-        }
-        return null;
-      }
+      const files = new WorkspaceFiles(this.workspace);
       const stats = await this.session.getHistoryRowStats();
       const aged = stats.slice(
         0,
@@ -4495,11 +4474,7 @@ export class Think<
           minPartBytes: config.minPartBytes,
           write: async (index, bytes, mediaType) => {
             const path = evictedFilePath(message.id, index, mediaType);
-            await writeFileBytes(
-              path,
-              bytes,
-              mediaType ?? "application/octet-stream"
-            );
+            await files.write(path, bytes);
             return path;
           }
         });
@@ -6498,15 +6473,6 @@ export class Think<
   ): Promise<void> {
     if (this.skillWorkspace === false) return;
     const workspace = this.workspace;
-    if (!hasWriteFileBytes(workspace)) {
-      const warning =
-        "skillWorkspace is enabled but the configured workspace does not implement writeFileBytes; skills stay source-backed.";
-      if (!this._loggedSkillWarnings.has(warning)) {
-        this._loggedSkillWarnings.add(warning);
-        console.warn(`[think] ${warning}`);
-      }
-      return;
-    }
     try {
       const key = "skillsWorkspaceFingerprint";
       if (this._configGet(key) === registry.fingerprint) {
@@ -8940,18 +8906,25 @@ export class Think<
 
   async _hostReadFile(path: string): Promise<string | null> {
     await this.__unsafe_ensureInitialized();
-    return (await this.workspace.readFile(path)) ?? null;
+    return new WorkspaceFiles(this.workspace).readText(
+      resolveWorkspacePath(path)
+    );
   }
 
   async _hostWriteFile(path: string, content: string): Promise<void> {
     await this.__unsafe_ensureInitialized();
-    await this.workspace.writeFile(path, content);
+    await new WorkspaceFiles(this.workspace).write(
+      resolveWorkspacePath(path),
+      content
+    );
   }
 
   async _hostDeleteFile(path: string): Promise<boolean> {
     await this.__unsafe_ensureInitialized();
     try {
-      await this.workspace.rm(path);
+      await new WorkspaceFiles(this.workspace).remove(
+        resolveWorkspacePath(path)
+      );
       return true;
     } catch {
       return false;
@@ -8964,12 +8937,14 @@ export class Think<
     Array<{ name: string; type: string; size: number; path: string }>
   > {
     await this.__unsafe_ensureInitialized();
-    const entries = await this.workspace.readDir(dir);
+    const entries = await new WorkspaceFiles(this.workspace).list(
+      resolveWorkspacePath(dir)
+    );
     return entries.map((e) => ({
       name: e.name,
       type: e.type,
-      size: e.size ?? 0,
-      path: e.path ?? `${dir}/${e.name}`
+      size: e.size,
+      path: e.path
     }));
   }
 

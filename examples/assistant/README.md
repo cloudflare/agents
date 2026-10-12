@@ -10,12 +10,11 @@ the sub-agent routing primitive from `agents`.
   chat is its own `MyAssistant` facet (full Think DO — own extensions, memory,
   messages). Addressed transparently via
   `useAgent({ sub: [{ agent: "MyAssistant", name: chatId }] })`
-- **Shared workspace across chats** — `AssistantDirectory` owns one `Workspace`
-  backed by its SQLite; every `MyAssistant` child gets a `SharedWorkspace`
-  proxy that forwards file I/O to the parent. A `hello.txt` written in chat A
-  is visible verbatim in chat B. The proxy swaps in via the `WorkspaceFsLike`
-  type exported by `@cloudflare/shell` — no casts; builtin workspace tools
-  AND codemode's `state.*` sandbox API both route through it
+- **Shared workspace across chats** — `AssistantDirectory` owns one
+  `@cloudflare/computer` `Workspace` backed by its SQLite; every `MyAssistant`
+  child reaches it with `getWorkspace()`, wrapped in Think's `lazyWorkspace`.
+  A `hello.txt` written in chat A is visible verbatim in chat B, and every
+  workspace-aware tool routes through it
 - **Shared MCP across chats** — server registry, OAuth credentials, live
   connections, and tool descriptors all live on `AssistantDirectory`. Auth
   to a server once (e.g. GitHub MCP) and every chat sees its tools. Each
@@ -23,10 +22,10 @@ the sub-agent routing primitive from `agents`.
   sets via one DO RPC hop to the parent. `useChats()` surfaces
   `mcpState` / `addMcpServer` / `removeMcpServer` so the MCP panel is
   the same across chats and open tabs
-- **Live cross-chat file updates** — the directory's `Workspace` is wired
-  with `onChange` → `broadcast`, so every open tab's file browser updates
-  live whenever any chat writes, edits, or deletes a file. `useChats()`
-  surfaces it as a `workspaceRevision` counter for `useEffect` deps
+- **Cross-chat file updates** — after every turn, a chat tells the directory
+  to `broadcast` a `workspace-change` frame, so every open tab's file browser
+  refreshes. `useChats()` surfaces it as a `workspaceRevision` counter for
+  `useEffect` deps
 - **Think base class** — `getModel()`, `configureSession()`, `getTools()`, `maxSteps` for a batteries-included agent
 - **Built-in workspace** — file tools (read, write, edit, find, grep, delete) auto-wired on every turn
 - **Sandboxed code execution** — `createExecuteTool` lets the LLM write and run JavaScript in a Dynamic Worker via `@cloudflare/codemode`
@@ -111,8 +110,8 @@ the shared workspace, the shared MCP registry (servers, OAuth creds, live
 connections), and cross-chat concerns like the daily-summary scheduled
 task it declares via `getScheduledTasks()` and fans out to one chat.
 `MyAssistant` is a Think DO per conversation, with its own
-SQLite storage, extensions, and message history — plus a
-`SharedWorkspace` proxy and a `SharedMCPClient` proxy that route file
+SQLite storage, extensions, and message history — plus a client for the
+directory's workspace and a `SharedMCPClient` proxy that route file
 operations and MCP tool invocations back to the directory.
 
 The browser never chooses a DO name. It connects to `/chat` (the
@@ -155,20 +154,40 @@ same pattern.
 
 ### Shared workspace
 
-Each `MyAssistant` overrides `this.workspace` with a `SharedWorkspace`
-proxy that forwards every call to `AssistantDirectory.workspace` over
-a DO RPC hop:
+The directory owns the `Workspace` and hands out RPC stubs to it:
 
 ```ts
+import { Workspace, type WorkspaceStub } from "@cloudflare/computer";
+
+class AssistantDirectory extends Think<Env, DirectoryState> {
+  override workspace = new Workspace({ storage: this.ctx.storage });
+
+  // getWorkspace() from @cloudflare/computer calls this over DO RPC.
+  async __getWorkspaceStub(): Promise<WorkspaceStub> {
+    await this.workspace.ready();
+    return this.workspace.stub();
+  }
+}
+```
+
+Each `MyAssistant` overrides `this.workspace` with a client for it.
+`lazyWorkspace` defers `getWorkspace()` until a turn first touches a file,
+then keeps the client:
+
+```ts
+import { getWorkspace } from "@cloudflare/computer";
+import { lazyWorkspace } from "@cloudflare/think";
+
 class MyAssistant extends Think<Env> {
-  override workspace: WorkspaceFsLike = new SharedWorkspace(this);
+  override workspace = lazyWorkspace(async () =>
+    getWorkspace(await this.parentAgent(AssistantDirectory))
+  );
 
   getTools() {
     return {
-      // The agent one-liner: ctx/loader from the agent, and state.* in the
-      // sandbox hits the shared workspace because SharedWorkspace satisfies
-      // WorkspaceFsLike. tools.* adds the workspace tools (and any
-      // needsApproval tools pause durably for the approval card).
+      // tools.* in the sandbox adds the workspace tools, backed by the
+      // shared workspace (and any needsApproval tools pause durably for
+      // the approval card).
       execute: createExecuteTool(this, {
         tools: createWorkspaceTools(this.workspace)
       })
@@ -176,31 +195,12 @@ class MyAssistant extends Think<Env> {
     };
   }
 }
-
-class SharedWorkspace implements WorkspaceFsLike {
-  readFile(p) {
-    return (await this.parent()).readFile(p);
-  }
-  writeFile(p, c) {
-    return (await this.parent()).writeFile(p, c);
-  }
-  // ...readFileBytes / writeFileBytes / appendFile / exists / stat /
-  //    lstat / mkdir / readDir / rm / cp / mv / symlink / readlink / glob
-}
 ```
 
-The proxy satisfies `@cloudflare/shell`'s `WorkspaceFsLike` interface,
-which is a strict superset of `@cloudflare/think`'s `WorkspaceLike`.
-That one type annotation unlocks two things at once:
-
-- **All of Think's workspace-aware machinery** (`createWorkspaceTools`,
-  lifecycle hooks, the builtin `listWorkspaceFiles` /
-  `readWorkspaceFile` RPCs) works unchanged against the proxy.
-- **Codemode's `state.*` sandbox API** works too, via
-  `createWorkspaceStateBackend(this.workspace)`. Multi-file operations
-  like `state.planEdits` and `state.applyEdits` run against the shared
-  workspace, so a plan composed in one chat can mutate files another
-  chat just created.
+All of Think's workspace-aware machinery (`createWorkspaceTools`, skill
+scripts, the fetch tool's saved responses, the `listWorkspaceFiles` /
+`readWorkspaceFile` callables) goes through `workspace.fs`, so it works
+unchanged against the shared workspace.
 
 The parent DO and the child facet live on the same machine, so each
 RPC hop is in-process and cheap (no network, no serialization across
@@ -211,8 +211,7 @@ external links).
 - _Every chat can see every chat's files._ That's the design — a
   multi-chat assistant should remember what it wrote in previous
   chats. If you fork this for a less-trusted surface (e.g. public
-  guests), gate access in `AssistantDirectory` instead of exposing the
-  workspace methods directly.
+  guests), gate access in `AssistantDirectory.__getWorkspaceStub()`.
 - _Extensions, messages, Think config, and branch history stay
   per-chat._ The workspace and the MCP registry are shared; everything
   else lives in each child DO's own storage. Extensions in particular
@@ -233,16 +232,15 @@ external links).
 - _Serialization is per-file, not per-turn._ Two chats writing to the
   same path queue behind each other in the parent DO's single-threaded
   isolate, which is the usual semantics you'd want.
-- _Change events fan out to every client, but not to sibling chats._
-  `AssistantDirectory.workspace` is constructed with `onChange: (ev)
-=> this.broadcast(...)`, so every file mutation reaches every client
-  connected to the directory — that's every browser tab the user has
-  open, across every chat. `useChats()` translates those broadcasts
-  into a `workspaceRevision` counter that chat panes pass into their
-  file-browser effects, so a write in chat A lights up chat B's files
-  list live. The parent does _not_ RPC events into sibling child
-  facets — no server-side tool in this example reacts to another
-  chat's writes. Add a parent → child RPC if that use case shows up.
+- _File browsers refresh per turn, not per write._ After each turn a chat
+  calls `AssistantDirectory.workspaceChanged()`, which broadcasts a
+  `workspace-change` frame to every client connected to the directory —
+  every browser tab the user has open, across every chat. `useChats()`
+  turns those frames into a `workspaceRevision` counter that chat panes
+  pass into their file-browser effects, so a write in chat A shows up in
+  chat B's files list when the turn ends. The parent does _not_ RPC into
+  sibling child facets — no server-side tool in this example reacts to
+  another chat's writes.
 
 ### Shared MCP
 

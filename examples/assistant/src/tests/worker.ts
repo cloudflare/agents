@@ -21,7 +21,7 @@
  * `MyAssistant.getModel()` is never called. That means we don't have
  * to mock Workers AI or worry about `kimi-k2.7-code` flakiness, and the
  * harness focuses on the plumbing the example owns: directory CRUD,
- * `SharedWorkspace` round-trips, change broadcasts, and the MCP
+ * shared-workspace round-trips, change broadcasts, and the MCP
  * empty-state path. See `shared-mcp.test.ts` for why the deep MCP
  * round-trip is out of scope here.
  */

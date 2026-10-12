@@ -12,8 +12,8 @@
   },
   "dependencies": {
     "@cloudflare/codemode": "*",
+    "@cloudflare/computer": "^0.5.1",
     "@cloudflare/kumo": "^2.6.0",
-    "@cloudflare/shell": "*",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.1.1",

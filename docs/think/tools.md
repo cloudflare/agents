@@ -153,7 +153,7 @@ getTools(): ToolSet {
       inputSchema: z.object({ path: z.string() }),
       needsApproval: async ({ path }) => path.startsWith("/important/"),
       execute: async ({ path }) => {
-        await this.workspace.rm(path);
+        await this.workspace.fs.rm(path);
         return { deleted: path };
       }
     })
@@ -246,7 +246,7 @@ Let the LLM write and run TypeScript in a sandboxed Worker, recorded on a durabl
 npm install @cloudflare/codemode
 ```
 
-The one-liner infers everything from the agent — `state.*` from `this.workspace`, the executor from `env.LOADER`, and a live browser (`cdp.*`) from `env.BROWSER` if bound:
+The one-liner infers the executor from `env.LOADER` and a live browser (`cdp.*`) from `env.BROWSER` if bound:
 
 ```typescript
 import { Think } from "@cloudflare/think";
@@ -287,11 +287,11 @@ Each missing piece fails with an error naming the step.
 Inside the sandbox the model sees typed namespaces plus the platform SDK:
 
 - `tools.*` — your AI SDK tools (object args, validated against their schemas). Only tools with an `execute` function are exposed — client-side tools can't run in the sandbox.
-- `state.*` — the workspace filesystem (`state.readFile({ path })`, `state.glob({ pattern })`, `state.planEdits(...)`, …)
+- `state.*` — a filesystem, when you pass `state` (`state.readFile({ path })`, `state.glob({ pattern })`, …)
 - `cdp.*` — the browser, when a Browser Rendering binding is configured. The execute tool defaults to `session: { mode: "dynamic" }`: sessions are per-execution unless the model promotes one with `cdp.startSession()`.
 - `codemode.search` / `codemode.describe` / `codemode.step` / `codemode.run` — discovery, side-effect boundaries, and saved snippets
 
-Pass overrides for anything beyond the defaults — e.g. custom `tools.*` alongside the agent-derived state:
+Pass overrides for anything beyond the defaults — e.g. custom `tools.*`:
 
 ```typescript
 execute: createExecuteTool(this, { tools: myDomainTools });
@@ -300,12 +300,17 @@ execute: createExecuteTool(this, { tools: myDomainTools });
 Or fully explicit options (no agent inference):
 
 ```typescript
-import { createWorkspaceStateBackend } from "@cloudflare/shell";
+import {
+  Workspace as ShellWorkspace,
+  createWorkspaceStateBackend
+} from "@cloudflare/shell";
 
 createExecuteTool({
   ctx: this.ctx,
   tools: myDomainTools,
-  state: createWorkspaceStateBackend(this.workspace),
+  state: createWorkspaceStateBackend(
+    new ShellWorkspace({ sql: this.ctx.storage.sql, namespace: "state" })
+  ),
   browser: this.env.BROWSER,
   loader: this.env.LOADER
 });
@@ -393,7 +398,7 @@ Pass `quickActions: false` to keep only `browser_execute`, or `quickActions: { a
 
 By default each execution gets a fresh browser session (`one-shot`), torn down when the run ends. Pass `session: { mode: "dynamic" }` to let the model promote a session with `cdp.startSession()` so later executions continue in the same browser, or `session: { mode: "reuse", key }` for a named long-lived session. Stale sessions are reclaimed by the connector's `sweep()` — call it from a scheduled task (see `createBrowserRuntime` in `agents/browser` for the connector handle).
 
-> The simplest setup is the unified execute tool above: `createExecuteTool(this)` already includes `cdp.*` alongside `state.*` and `tools.*` when `env.BROWSER` is bound — one tool, one durable history. Use `createBrowserTools` when you want a separate, browser-only tool.
+> The simplest setup is the unified execute tool above: `createExecuteTool(this)` already includes `cdp.*` alongside `tools.*` when `env.BROWSER` is bound — one tool, one durable history. Use `createBrowserTools` when you want a separate, browser-only tool.
 
 ### Combining with Other Tools
 
