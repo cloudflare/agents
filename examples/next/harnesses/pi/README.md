@@ -86,7 +86,7 @@ export class PiAgent extends DurableObject<Env> {
       new WorkerJavaScriptBackend({
         id: JAVASCRIPT_BACKEND,
         loader: this.env.LOADER,
-        allowGitNetwork: true
+        modules: { "ws:git": createGitModule({ allowNetwork: true }) }
       })
     ]
   });
@@ -176,8 +176,9 @@ JavaScript that includes the `ws:git` TypeScript interface (`clone`,
 
 Git needs two things besides the backend: `git: createGitClient()` from
 `@cloudflare/computer/git` on the `Workspace`, which needs the
-`@platformatic/vfs` peer, and `allowGitNetwork: true` on the backend for
-`clone`. Git runs in the host, through isomorphic-git on the workspace
+`@platformatic/vfs` peer, and the `ws:git` module from
+`createGitModule({ allowNetwork: true })` (`@cloudflare/computer/modules/git`)
+on the backend, which `clone` needs. Git runs in the host, through isomorphic-git on the workspace
 files, so cloning works while the module itself has no network.
 
 ## Package sources

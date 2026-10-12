@@ -6,6 +6,7 @@ Think's `workspace` is now a `Workspace` from `@cloudflare/computer`. By default
 
 Breaking changes:
 
+- `@cloudflare/computer` is a new peer dependency. Install it alongside `@cloudflare/think`.
 - `Workspace` is no longer re-exported. Import it from `@cloudflare/computer`.
 - `WorkspaceLike` is replaced by `ThinkWorkspace`, which needs only `workspace.fs`.
 - Think writes its own files under `/workspace`. Evicted media goes to `/workspace/attachments/evicted/`, and the fetch tool saves responses to `/workspace/fetched/`.
