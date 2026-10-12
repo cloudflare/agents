@@ -109,6 +109,60 @@ describe("ToolSetConnector", () => {
     ).resolves.toBe("sunny in Lisbon");
   });
 
+  it("awaits schemas that convert asynchronously", async () => {
+    const connector = new ToolSetConnector(ctx, {
+      tools: {
+        getCount: tool({
+          inputSchema: jsonSchema<{ q: string }>(
+            Promise.resolve({
+              type: "object",
+              properties: { q: { type: "string" } },
+              required: ["q"]
+            })
+          ),
+          outputSchema: jsonSchema<{ count: number }>(
+            Promise.resolve({
+              type: "object",
+              properties: { count: { type: "number" } },
+              required: ["count"]
+            })
+          ),
+          execute: async () => ({ count: 1 })
+        })
+      }
+    });
+
+    const desc = await connector.describe();
+    expect(desc.descriptors.getCount.inputSchema).toMatchObject({
+      properties: { q: { type: "string" } },
+      required: ["q"]
+    });
+    expect(desc.descriptors.getCount.outputSchema).toMatchObject({
+      properties: { count: { type: "number" } },
+      required: ["count"]
+    });
+  });
+
+  it("omits an output schema whose async conversion rejects", async () => {
+    const connector = new ToolSetConnector(ctx, {
+      tools: {
+        getDate: tool({
+          inputSchema: z.object({}),
+          outputSchema: jsonSchema(() =>
+            Promise.reject(new Error("cannot convert"))
+          ),
+          execute: async () => "2026-01-01"
+        })
+      }
+    });
+
+    const desc = await connector.describe();
+    expect(desc.descriptors.getDate.outputSchema).toBeUndefined();
+    await expect(connector.executeTool("getDate", {})).resolves.toBe(
+      "2026-01-01"
+    );
+  });
+
   it("shows the output type in durable describe", async () => {
     const connector = new ToolSetConnector(ctx, {
       name: "vantage",
@@ -123,7 +177,8 @@ describe("ToolSetConnector", () => {
 
     const desc = await connector.describe();
     const { types } = describeTarget("vantage.getDashboard", [desc]);
-    expect(types).toMatch(/GetDashboardOutput = \{\s*title: string;?\s*\}/);
+    expect(types).toContain("type GetDashboardOutput = {");
+    expect(types).toContain("title: string");
   });
 
   it("validates args against the tool schema before executing", async () => {

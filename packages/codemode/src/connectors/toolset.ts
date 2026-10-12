@@ -78,7 +78,7 @@ export class ToolSetConnector extends CodemodeConnector {
     return this.#options.instructions;
   }
 
-  protected override tools(): ConnectorTools {
+  protected override async tools(): Promise<ConnectorTools> {
     const out: ConnectorTools = {};
     const sources = new Map<string, string>();
     for (const [toolName, t] of Object.entries(this.#executableTools())) {
@@ -102,7 +102,10 @@ export class ToolSetConnector extends CodemodeConnector {
         rawSchema != null
           ? asSchema(rawSchema as Parameters<typeof asSchema>[0])
           : undefined;
-      const outputSchema = outputJsonSchema(
+      // `jsonSchema` may be a promise (`jsonSchema(promise)` or a lazy
+      // loader), so await it rather than passing a Promise through as a schema.
+      const inputSchema = schema ? await schema.jsonSchema : undefined;
+      const outputSchema = await outputJsonSchema(
         (t as { outputSchema?: unknown }).outputSchema
       );
 
@@ -116,7 +119,7 @@ export class ToolSetConnector extends CodemodeConnector {
       out[name] = {
         description:
           typeof t.description === "function" ? undefined : t.description,
-        inputSchema: schema?.jsonSchema as JSONSchema7 | undefined,
+        inputSchema: inputSchema as JSONSchema7 | undefined,
         ...(outputSchema ? { outputSchema } : {}),
         ...(requiresApproval ? { requiresApproval: true } : {}),
         execute: schema?.validate
@@ -145,18 +148,17 @@ export class ToolSetConnector extends CodemodeConnector {
 
 /**
  * Convert a tool's output schema to JSON Schema for its descriptor. The
- * output type is advisory, so a schema that cannot be converted (or only
- * converts asynchronously) is left out and shows as `unknown`, matching
+ * output type is advisory, so a schema that cannot be converted (it throws
+ * or its promise rejects) is left out and shows as `unknown`, matching
  * `generateTypes`, instead of failing the whole toolset.
  */
-function outputJsonSchema(raw: unknown): JSONSchema7 | undefined {
+async function outputJsonSchema(
+  raw: unknown
+): Promise<JSONSchema7 | undefined> {
   if (raw == null) return undefined;
   try {
-    const json = asSchema(raw as Parameters<typeof asSchema>[0]).jsonSchema;
-    if (typeof (json as PromiseLike<unknown>).then === "function") {
-      return undefined;
-    }
-    return json as JSONSchema7;
+    return (await asSchema(raw as Parameters<typeof asSchema>[0])
+      .jsonSchema) as JSONSchema7;
   } catch {
     return undefined;
   }
