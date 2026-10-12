@@ -64,6 +64,7 @@ import {
   optionsOf,
   type AISettings,
   type FallbackLeg,
+  type GatewayModelOptions,
   type ModalityOptions,
   type ModelOptions,
   type RoutedModelOptions
@@ -95,7 +96,8 @@ export type {
   ModalityOptions,
   ModelOptions,
   ProviderGatewaySettings,
-  RoutedModelOptions
+  RoutedModelOptions,
+  VendorKeyOptions
 } from "./settings";
 
 /** Whether a value is a model object rather than a model id. */
@@ -120,7 +122,7 @@ export interface AI {
   /** A Workers AI model. Third-party ids are not ids here — pass the model. */
   (modelId: WorkersAIModelId, options?: ModelOptions): LanguageModelV4;
   /** Any AI SDK v4 language model, routed through AI Gateway. */
-  (model: LanguageModelV4, options?: ModelOptions): LanguageModelV4;
+  (model: LanguageModelV4, options?: GatewayModelOptions): LanguageModelV4;
   /** The AI SDK provider specification this implements. */
   readonly specificationVersion: "v4";
   /** Same as calling the provider directly. */
@@ -130,7 +132,7 @@ export interface AI {
   ): LanguageModelV4;
   languageModel(
     model: LanguageModelV4,
-    options?: ModelOptions
+    options?: GatewayModelOptions
   ): LanguageModelV4;
   /** The `ProviderV4` shape: a registry resolves models by string alone. */
   languageModel(modelId: string, options?: ModelOptions): LanguageModelV4;
@@ -241,7 +243,9 @@ export function createAI(settings: AISettings): AI {
    * `sessionAffinity` — was written for the model it was written on, and a leg
    * that was configured with its own keeps every one of them.
    */
-  const normalize = (options?: ModelOptions): ModelOptions | undefined => {
+  const normalize = (
+    options?: GatewayModelOptions
+  ): GatewayModelOptions | undefined => {
     if (options?.fallback === undefined) return options;
     const inherited: ModelOptions = gatewayLayerOf(options);
     return {
@@ -258,7 +262,7 @@ export function createAI(settings: AISettings): AI {
 
   function languageModel(
     model: WorkersAIModelId | LanguageModelV4,
-    options?: ModelOptions
+    options?: GatewayModelOptions
   ): LanguageModelV4 {
     const resolved = normalize(options);
     if (isModel(model)) {
@@ -313,7 +317,7 @@ export function createAI(settings: AISettings): AI {
 
   const provider = (
     model: WorkersAIModelId | LanguageModelV4,
-    options?: ModelOptions
+    options?: GatewayModelOptions
   ): LanguageModelV4 => languageModel(model, options);
 
   return Object.assign(provider, {
