@@ -1,6 +1,6 @@
 # `@cloudflare/shell`
 
-> **Experimental.** API surface is still settling — expect breaking changes.
+> **Deprecated.** Use [`@cloudflare/computer`](https://github.com/cloudflare/computer) for new agent workspaces. To move existing files, see the migration guide at `docs/migrating-to-computer.md`.
 
 Sandboxed JavaScript execution and filesystem runtime for Cloudflare Workers agents.
 
