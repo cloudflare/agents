@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@cloudflare/kumo": "^2.6.0",
-    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/client": "2.2.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
     "react": "^19.2.7",
