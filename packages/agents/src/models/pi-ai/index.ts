@@ -42,7 +42,11 @@ import {
   createProvider,
   normalizeContext
 } from "@earendil-works/pi-ai";
-import type { WorkersAIModelId } from "../core/catalog";
+import {
+  isRunPathLanguageModelId,
+  type DynamicRouteId,
+  type WorkersAIModelId
+} from "../core/catalog";
 import type { AISettings } from "../core/settings";
 import { createTransport } from "../core/transport";
 import {
@@ -68,6 +72,7 @@ import { createStreams } from "./models/language";
 
 export type {
   CloudflareEmbeddingModelId,
+  DynamicRouteId,
   WorkersAIModelId
 } from "../core/catalog";
 export {
@@ -126,6 +131,8 @@ export type StreamFn = (
 export interface AI {
   /** A Workers AI model: Cloudflare's own catalog, on the run path. */
   (modelId: WorkersAIModelId, options?: PiModelOptions): CloudflareModel;
+  /** An AI Gateway dynamic route, `dynamic/<route>`, on the Workers AI wire. */
+  (route: DynamicRouteId, options?: PiModelOptions): CloudflareModel;
   /** Any pi-ai model, routed through AI Gateway with its metadata intact. */
   <TApi extends Api>(model: Model<TApi>, options?: PiModelOptions): Model<TApi>;
   /**
@@ -135,6 +142,7 @@ export interface AI {
   (target: string | Model<Api>, options?: PiModelOptions): RoutedModel;
   /** Same as calling the provider directly. */
   model(modelId: WorkersAIModelId, options?: PiModelOptions): CloudflareModel;
+  model(route: DynamicRouteId, options?: PiModelOptions): CloudflareModel;
   model<TApi extends Api>(
     model: Model<TApi>,
     options?: PiModelOptions
@@ -202,7 +210,7 @@ function unroutableString(specifier: string): TypeError {
   const prefix = specifier.split("/")[0] ?? "";
   const hint = VENDOR_HINTS[prefix];
   return new TypeError(
-    `ai("${specifier}") is not a model this provider knows. Workers AI ids start with "@cf/". A third-party model comes from its own pi-ai registry: ai(getBuiltinModel(${
+    `ai("${specifier}") is not a model this provider knows. Workers AI ids start with "@cf/", AI Gateway dynamic routes with "dynamic/". A third-party model comes from its own pi-ai registry: ai(getBuiltinModel(${
       hint === undefined ? '"<provider>"' : `"${hint}"`
     }, "<model id>")) from "@earendil-works/pi-ai/providers/all", or any Model object you built yourself.`
   );
@@ -215,12 +223,16 @@ function buildModel(
   // A string leg follows the same rule as a string target, checked here so
   // the mistake is reported at the line that wrote the chain.
   for (const leg of options?.fallback ?? []) {
-    if (typeof leg !== "string" || leg.startsWith("@cf/")) continue;
+    if (typeof leg !== "string" || isRunPathLanguageModelId(leg)) continue;
     if (!leg.includes("/")) throw unroutableString(leg);
     buildGatewayModel(leg, undefined);
   }
   if (typeof target !== "string") return withOptions(target, options);
-  if (target.startsWith("@cf/")) return buildWorkersAIModel(target, options);
+  // Workers AI ids and AI Gateway dynamic routes both run on `env.AI.run`
+  // and answer in the chat-completions shape.
+  if (isRunPathLanguageModelId(target)) {
+    return buildWorkersAIModel(target, options);
+  }
   if (!target.includes("/")) throw unroutableString(target);
   return buildGatewayModel(target, options);
 }

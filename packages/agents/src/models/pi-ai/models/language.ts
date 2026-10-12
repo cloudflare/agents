@@ -18,6 +18,7 @@ import {
   type SimpleStreamOptions,
   createAssistantMessageEventStream
 } from "@earendil-works/pi-ai";
+import { isRunPathLanguageModelId } from "../../core/catalog";
 import { gatewayLayerOf, mergeModelOptions } from "../../core/settings";
 import type { Transport } from "../../core/transport";
 import {
@@ -110,7 +111,7 @@ function legModel(
   // It resolves exactly as `ai(string)` does: a Workers AI id, or a
   // `<slug>/<id>` pi-ai's gateway registry knows — never a raw vendor id.
   if (typeof leg === "string") {
-    return leg.startsWith("@cf/")
+    return isRunPathLanguageModelId(leg)
       ? buildWorkersAIModel(leg, options)
       : buildGatewayModel(leg, options);
   }

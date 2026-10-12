@@ -12,7 +12,7 @@ import type {
 } from "@ai-sdk/provider";
 import { CloudflareAIError, requireWorkersAIId } from "../errors";
 import {
-  parseCallOptions,
+  parseModalityCallOptions,
   resolveOptions,
   type ModelOptions
 } from "../settings";
@@ -142,7 +142,7 @@ export abstract class CloudflareModalityModel {
     const resolved = resolveOptions(
       this.#config.providerGateway,
       this.#options,
-      parseCallOptions(call.providerOptions)
+      parseModalityCallOptions(call.providerOptions)
     );
     const transport = this.#config.transport;
     return withFallback(

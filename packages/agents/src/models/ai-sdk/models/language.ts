@@ -9,7 +9,7 @@ import type {
   SharedV4ProviderMetadata,
   SharedV4Warning
 } from "@ai-sdk/provider";
-import { CloudflareAIError, requireWorkersAIId } from "../errors";
+import { CloudflareAIError, requireLanguageModelId } from "../errors";
 import {
   fallbackLegs,
   rememberOptions,
@@ -473,7 +473,7 @@ export class CloudflareLanguageModel implements LanguageModelV4 {
             // legs, and a vendor id must never reach `env.AI.run`. Checked
             // as the chain is built, so the throw is not swallowed as one
             // more failed leg.
-            { model: requireWorkersAIId(leg), run: () => runSelf(leg) }
+            { model: requireLanguageModelId(leg), run: () => runSelf(leg) }
           : { model: leg.modelId, run: () => runLeg(leg) }
       )
     ]);

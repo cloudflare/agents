@@ -73,6 +73,41 @@ describe("pi-ai: Workers AI chat completions", () => {
     });
   });
 
+  it("runs an AI Gateway dynamic route on the binding", async () => {
+    const binding = fakeBinding(() =>
+      sseResponse([
+        JSON.stringify({
+          choices: [
+            { delta: { content: "Routed", role: "assistant" }, index: 0 }
+          ],
+          id: "chatcmpl-route",
+          model: "gpt-4o",
+          object: "chat.completion.chunk"
+        }),
+        JSON.stringify({
+          choices: [{ delta: {}, finish_reason: "stop", index: 0 }],
+          id: "chatcmpl-route",
+          model: "gpt-4o",
+          object: "chat.completion.chunk"
+        }),
+        "[DONE]"
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding), id: "prod" });
+    const { message } = await collectEvents(
+      ai.stream(ai("dynamic/support"), userContext("hi"))
+    );
+
+    expect(binding.universal).toHaveLength(0);
+    expect(binding.calls[0]?.model).toBe("dynamic/support");
+    expect(binding.calls[0]?.input).not.toHaveProperty("model");
+    expect(binding.calls[0]?.options).toMatchObject({
+      gateway: { id: "prod" }
+    });
+    expect(message.content).toEqual([{ text: "Routed", type: "text" }]);
+    expect(message.stopReason).toBe("stop");
+  });
+
   it("sends the chat-completions body through the binding with gateway options", async () => {
     const binding = fakeBinding(() => sseResponse(workersAITextStream()));
     const ai = createAI({

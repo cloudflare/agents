@@ -4,7 +4,8 @@
  * One rule decides everything here: **Workers AI is the one catalog this
  * package keeps up with; every other vendor brings its own provider.**
  *
- * 1. **`ai("@cf/…")`** is a Workers AI model — ours, wire format and all.
+ * 1. **`ai("@cf/…")`** is a Workers AI model — ours, wire format and all —
+ *    and **`ai("dynamic/<route>")`** is a dynamic route on your gateway.
  * 2. **`ai(anthropic("claude-opus-4-8"))`** is the vendor's model, routed
  *    through AI Gateway. Their code builds and parses the request; we only
  *    carry it. No vendor ids, wire formats or model metadata live here, and
@@ -45,9 +46,10 @@ import type {
   CloudflareRerankingModelId,
   CloudflareSpeechModelId,
   CloudflareTranscriptionModelId,
+  DynamicRouteId,
   WorkersAIModelId
 } from "../core/catalog";
-import { requireWorkersAIId } from "./errors";
+import { requireLanguageModelId } from "./errors";
 import { CloudflareEmbeddingModel } from "./models/embedding";
 import { GatewayLanguageModel, routed } from "./models/gateway";
 import { CloudflareImageModel } from "./models/image";
@@ -77,6 +79,7 @@ export type {
   CloudflareRerankingModelId,
   CloudflareSpeechModelId,
   CloudflareTranscriptionModelId,
+  DynamicRouteId,
   KnownImageModelId,
   KnownSpeechModelId,
   WorkersAIModelId
@@ -121,6 +124,11 @@ function isModel(value: unknown): value is LanguageModelV4 {
 export interface AI {
   /** A Workers AI model. Third-party ids are not ids here — pass the model. */
   (modelId: WorkersAIModelId, options?: ModelOptions): LanguageModelV4;
+  /**
+   * An AI Gateway dynamic route, `dynamic/<route>`: the route configured on
+   * the gateway picks the model, and it answers like a chat model.
+   */
+  (route: DynamicRouteId, options?: ModelOptions): LanguageModelV4;
   /** Any AI SDK v4 language model, routed through AI Gateway. */
   (model: LanguageModelV4, options?: GatewayModelOptions): LanguageModelV4;
   /** The AI SDK provider specification this implements. */
@@ -130,6 +138,7 @@ export interface AI {
     modelId: WorkersAIModelId,
     options?: ModelOptions
   ): LanguageModelV4;
+  languageModel(route: DynamicRouteId, options?: ModelOptions): LanguageModelV4;
   languageModel(
     model: LanguageModelV4,
     options?: GatewayModelOptions
@@ -254,14 +263,14 @@ export function createAI(settings: AISettings): AI {
         typeof leg === "string"
           ? // The same gate the primary passes, at the line that wrote the
             // leg: a vendor model is never a string here, in a chain either.
-            requireWorkersAIId(leg)
+            requireLanguageModelId(leg)
           : languageModel(leg, inherited)
       )
     };
   };
 
   function languageModel(
-    model: WorkersAIModelId | LanguageModelV4,
+    model: WorkersAIModelId | DynamicRouteId | LanguageModelV4,
     options?: GatewayModelOptions
   ): LanguageModelV4 {
     const resolved = normalize(options);
@@ -283,7 +292,7 @@ export function createAI(settings: AISettings): AI {
       return new GatewayLanguageModel(model, resolved, config);
     }
     return new CloudflareLanguageModel(
-      requireWorkersAIId(model),
+      requireLanguageModelId(model),
       resolved,
       config
     );
@@ -316,7 +325,7 @@ export function createAI(settings: AISettings): AI {
   ): RerankingModelV4 => new CloudflareRerankingModel(modelId, options, config);
 
   const provider = (
-    model: WorkersAIModelId | LanguageModelV4,
+    model: WorkersAIModelId | DynamicRouteId | LanguageModelV4,
     options?: GatewayModelOptions
   ): LanguageModelV4 => languageModel(model, options);
 

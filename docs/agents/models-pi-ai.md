@@ -86,6 +86,9 @@ ai("@cf/zai-org/glm-4.7-flash");
 // 2. pi-ai's Cloudflare AI Gateway catalog — a string, resolved by pi, not us.
 ai("anthropic/claude-opus-4.8");
 
+// 2b. An AI Gateway dynamic route — the route on the gateway picks the model.
+ai("dynamic/support");
+
 // 3. Any pi-ai model object, from any registry you imported.
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 const claude = anthropicProvider()
@@ -99,6 +102,10 @@ cost, context window, max tokens. That metadata is why Claude Opus gets
 `thinking: { type: "adaptive" }` and GPT-5 gets `reasoning.effort`: the model's author said
 so, and this package does not second-guess it. Form 3 never mutates the object you
 passed; the options ride on a copy.
+
+A `dynamic/<route>` id runs on `env.AI.run` with the Workers AI wire, under the gateway the
+route was created on. It answers in the chat-completions shape whichever model the route
+picked, and takes the same metadata defaults and overrides as a Workers AI id.
 
 ## Running a model
 

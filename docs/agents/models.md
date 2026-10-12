@@ -20,9 +20,11 @@ we hand its request to AI Gateway and hand the answer straight back to it.
 
 ## The canon, in five lines
 
-1. **`ai(string)` is a Workers AI id.** `@cf/<author>/<model>`, autocompleted
-   from `@cloudflare/workers-types`. Any other string is a `TypeError` that
-   tells you which provider package to install.
+1. **`ai(string)` is Cloudflare's.** A Workers AI id, `@cf/<author>/<model>`,
+   autocompleted from `@cloudflare/workers-types`, or a
+   [dynamic route](#dynamic-routes) on your gateway, `dynamic/<route>`. Any
+   other string is a `TypeError` that tells you which provider package to
+   install.
 2. **`ai(model)` is any AI SDK v4 model**, routed through AI Gateway. Its
    provider builds the request, parses the response, and handles its own
    errors; only the transport is ours.
@@ -234,6 +236,27 @@ a model on your key with one on unified billing.
 
 Only the gateway's _own_ failures — no such gateway, an unpaid account — become
 a `CloudflareAIError`. A vendor error stays the vendor's.
+
+## Dynamic routes
+
+An [AI Gateway dynamic route](https://developers.cloudflare.com/ai-gateway/features/dynamic-routing/)
+is called by name, as `dynamic/<route>`. The route configured on the gateway
+picks the model (conditions, percentages, rate and budget limits, its own
+fallbacks), and the call goes through `env.AI.run` like a Workers AI model:
+
+```ts
+const ai = createAI({ binding: env.AI, id: "prod" });
+
+await generateText({ model: ai("dynamic/support"), prompt: "Hi" });
+ai("@cf/zai-org/glm-4.7-flash", { fallback: ["dynamic/support"] });
+```
+
+The route belongs to a gateway, so set the gateway `id` it was created on. It
+answers in the OpenAI chat-completions shape whatever model served it, so the
+request is built as strict OpenAI: `chatTemplateKwargs` is dropped with a
+warning, because the route may not land on Workers AI. A dynamic route is a
+language model only, and the modality methods refuse it, including as a
+fallback leg.
 
 ## Other modalities
 
