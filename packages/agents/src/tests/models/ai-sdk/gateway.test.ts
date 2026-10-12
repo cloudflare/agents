@@ -391,6 +391,141 @@ describe("gateway options", () => {
   });
 });
 
+describe("BYOK and ZDR", () => {
+  it("sends byokAlias and zdr as cf-aig headers on the universal request", async () => {
+    const binding = fakeGatewayBinding({
+      universal: () => anthropicResponse()
+    });
+    const ai = createAI({ binding: asAi(binding), byokAlias: "team-a" });
+    await ai(anthropic("claude-opus-4-8"), { zdr: true }).doGenerate(
+      callOptions()
+    );
+
+    const call = binding.universal[0];
+    expect(call.headers["cf-aig-byok-alias"]).toBe("team-a");
+    expect(call.headers["cf-aig-zdr"]).toBe("true");
+    // The binding's own gateway options have no such fields.
+    expect(call.options.gateway).not.toHaveProperty("byokAlias");
+    expect(call.options.gateway).not.toHaveProperty("zdr");
+  });
+
+  it("reads them per call, where they win over the model's", async () => {
+    const binding = fakeGatewayBinding({
+      universal: () => anthropicResponse()
+    });
+    const ai = createAI({ binding: asAi(binding) });
+    await ai(anthropic("claude-opus-4-8"), {
+      byokAlias: "model",
+      zdr: true
+    }).doGenerate(
+      callOptions({
+        providerOptions: {
+          cloudflare: { gateway: { byokAlias: "call" }, zdr: false }
+        }
+      })
+    );
+
+    const call = binding.universal[0];
+    expect(call.headers["cf-aig-byok-alias"]).toBe("call");
+    expect(call.headers["cf-aig-zdr"]).toBe("false");
+    expect(call.query).not.toHaveProperty("cloudflare");
+  });
+
+  it("keeps them off the Workers AI run path", async () => {
+    const binding = fakeGatewayBinding({
+      run: () => jsonResponse(workersAIBody)
+    });
+    const ai = createAI({ binding: asAi(binding), byokAlias: "team-a" });
+    await ai(WORKERS_AI, { zdr: true }).doGenerate(callOptions());
+
+    const gateway = binding.calls[0].options.gateway;
+    expect(gateway).toMatchObject({ id: "default" });
+    expect(gateway).not.toHaveProperty("byokAlias");
+    expect(gateway).not.toHaveProperty("zdr");
+  });
+
+  it("strips the vendor key by default", async () => {
+    const binding = fakeGatewayBinding({
+      universal: () => anthropicResponse()
+    });
+    const ai = createAI({ binding: asAi(binding) });
+    const keyed = createAnthropic({ apiKey: "sk-ant-mine" });
+    await ai(keyed("claude-opus-4-8")).doGenerate(callOptions());
+
+    expect(binding.universal[0].headers).not.toHaveProperty("x-api-key");
+  });
+
+  it("forwards the vendor key with vendorKey: request", async () => {
+    const binding = fakeGatewayBinding({
+      universal: () => anthropicResponse()
+    });
+    const ai = createAI({ binding: asAi(binding) });
+    const keyed = createAnthropic({ apiKey: "sk-ant-mine" });
+    await ai(keyed("claude-opus-4-8"), { vendorKey: "request" }).doGenerate(
+      callOptions()
+    );
+
+    const headers = binding.universal[0].headers;
+    expect(headers["x-api-key"]).toBe("sk-ant-mine");
+    expect(headers).not.toHaveProperty("content-length");
+  });
+
+  it("forwards the vendor key on a routed non-language model", async () => {
+    const binding = fakeGatewayBinding({
+      universal: () =>
+        jsonResponse(
+          {
+            data: [{ embedding: [0.1, 0.2], index: 0 }],
+            usage: { prompt_tokens: 1, total_tokens: 1 }
+          },
+          { headers: gatewayHeaders() }
+        )
+    });
+    const ai = createAI({ binding: asAi(binding) });
+    const keyed = createOpenAI({ apiKey: "sk-mine" });
+    await ai
+      .routed(keyed.embedding("text-embedding-3-small"), {
+        vendorKey: "request"
+      })
+      .doEmbed({ providerOptions: {}, values: ["hi"] });
+
+    expect(binding.universal[0].headers.authorization).toBe("Bearer sk-mine");
+  });
+
+  it("keeps vendorKey with the model when it is re-wrapped", async () => {
+    const binding = fakeGatewayBinding({
+      universal: () => anthropicResponse()
+    });
+    const ai = createAI({ binding: asAi(binding) });
+    const keyed = createAnthropic({ apiKey: "sk-ant-mine" });
+    const model = ai(keyed("claude-opus-4-8"), { vendorKey: "request" });
+    await ai(model, { id: "prod" }).doGenerate(callOptions());
+
+    expect(binding.universal[0].gatewayId).toBe("prod");
+    expect(binding.universal[0].headers["x-api-key"]).toBe("sk-ant-mine");
+  });
+
+  it("does not hand the chain's vendorKey to a fallback leg", async () => {
+    let attempt = 0;
+    const binding = fakeGatewayBinding({
+      universal: () =>
+        attempt++ === 0
+          ? jsonResponse(gatewayError, { status: 402 })
+          : anthropicResponse()
+    });
+    const ai = createAI({ binding: asAi(binding) });
+    const keyed = createAnthropic({ apiKey: "sk-ant-mine" });
+    await ai(keyed("claude-opus-4-8"), {
+      fallback: [anthropic("claude-opus-4-8")],
+      vendorKey: "request"
+    }).doGenerate(callOptions());
+
+    expect(binding.universal).toHaveLength(2);
+    expect(binding.universal[0].headers["x-api-key"]).toBe("sk-ant-mine");
+    expect(binding.universal[1].headers).not.toHaveProperty("x-api-key");
+  });
+});
+
 describe("provider metadata", () => {
   it("adds cloudflare metadata to a generation without losing the vendor's", async () => {
     const binding = fakeGatewayBinding({

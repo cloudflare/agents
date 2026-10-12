@@ -238,6 +238,33 @@ function universalGatewayOptions(
 }
 
 /**
+ * The gateway options for the Workers AI run path, as the binding's own
+ * `GatewayOptions` type has them. `byokAlias` and `zdr` are left out: the
+ * binding does not define them, and a Workers AI model has no vendor key or
+ * vendor retention policy for them to change.
+ */
+function runGatewayOptions(gateway: ResolvedGateway): GatewayOptions {
+  const { byokAlias: _byokAlias, zdr: _zdr, ...options } = gateway;
+  return options;
+}
+
+/**
+ * The `cf-aig-*` headers for the gateway options the binding has no field
+ * for. They go on the universal request's own headers, where the gateway
+ * reads them for that provider call.
+ */
+function universalGatewayHeaders(
+  gateway: ResolvedGateway
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (gateway.byokAlias !== undefined) {
+    headers["cf-aig-byok-alias"] = gateway.byokAlias;
+  }
+  if (gateway.zdr !== undefined) headers["cf-aig-zdr"] = String(gateway.zdr);
+  return headers;
+}
+
+/**
  * Whether a parsed body is the gateway's own error envelope rather than a
  * vendor payload — `{ success: false, error: [{ code, message }] }`, named
  * `AiGatewayError`. The gateway answers this for its own failures (no such
@@ -352,7 +379,7 @@ function bindingTransport(binding: Ai): Transport {
           ...(Object.keys(request.headers).length > 0
             ? { extraHeaders: request.headers }
             : {}),
-          gateway: request.gateway,
+          gateway: runGatewayOptions(request.gateway),
           returnRawResponse: true,
           signal: request.signal
         });
@@ -379,7 +406,10 @@ function bindingTransport(binding: Ai): Transport {
         return await binding.gateway(request.gateway.id).run(
           {
             endpoint: request.endpoint,
-            headers: request.headers,
+            headers: {
+              ...request.headers,
+              ...universalGatewayHeaders(request.gateway)
+            },
             provider: request.provider,
             query: request.query
           },

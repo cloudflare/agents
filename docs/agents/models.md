@@ -215,6 +215,25 @@ this package's:
   and that error is surfaced to you exactly as Google wrote it, because Google's
   provider is the one that knows how to read it.
 
+When the gateway stores several keys for one provider, `byokAlias` picks one
+by alias. `zdr: true` sends a unified-billing request only to upstreams with
+Zero Data Retention, and `zdr: false` turns it off for a gateway that has it
+on. Both travel as `cf-aig-byok-alias` / `cf-aig-zdr` on the universal request
+and do nothing for a Workers AI model.
+
+To use a key you hold yourself rather than one stored on the gateway, give it
+to the vendor's provider and set `vendorKey: "request"`, which forwards the
+credential header instead of stripping it:
+
+```ts
+const anthropic = createAnthropic({ apiKey: env.ANTHROPIC_API_KEY });
+const model = ai(anthropic("claude-opus-4-8"), { vendorKey: "request" });
+```
+
+`vendorKey` belongs to the model it is set on (`ai(model, …)` or
+`ai.routed(model, …)`). A fallback leg does not inherit it, so a chain can mix
+a model on your key with one on unified billing.
+
 Only the gateway's _own_ failures — no such gateway, an unpaid account — become
 a `CloudflareAIError`. A vendor error stays the vendor's.
 
@@ -326,6 +345,9 @@ await generateText({
 | `eventId`            | `string`                                              | Correlates several requests into one gateway event.                     |
 | `requestTimeoutMs`   | `number`                                              | Upstream request timeout.                                               |
 | `retries`            | `{ maxAttempts, retryDelayMs, backoff }`              | Server-side retry policy for the upstream provider call.                |
+| `byokAlias`          | `string`                                              | Routed models only: which stored BYOK key to use, by alias.             |
+| `zdr`                | `boolean`                                             | Routed models only: Zero Data Retention on or off (unified billing).    |
+| `vendorKey`          | `"gateway" \| "request"`                              | Routed models only: forward the vendor key on the request. Per model.   |
 | `fallback`           | `(WorkersAIModelId \| LanguageModelV4)[]`             | Models to try, in order, if the primary fails before producing output.  |
 | `headers`            | `Record<string, string>`                              | Extra request headers, merged last.                                     |
 | `sessionAffinity`    | `string`                                              | Pin same-key requests to one replica for prefix-cache hits.             |

@@ -36,6 +36,19 @@ export interface GatewayOptions {
     retryDelayMs?: number;
     backoff?: "constant" | "linear" | "exponential";
   };
+  /**
+   * The stored BYOK key to use when the gateway holds more than one for the
+   * provider, by its alias. Sent as `cf-aig-byok-alias`. Applies to vendor
+   * models routed through the gateway; a Workers AI model has no vendor key.
+   */
+  byokAlias?: string;
+  /**
+   * Zero Data Retention for this request, sent as `cf-aig-zdr`. `true` sends
+   * it only to upstreams that support ZDR; `false` turns it off when the
+   * gateway has it on. Unified billing only, and like {@link byokAlias} it
+   * applies to vendor models routed through the gateway.
+   */
+  zdr?: boolean;
 }
 
 /**
@@ -166,6 +179,7 @@ function layerGateway(
   return {
     ...normalizeGateway(options.gateway),
     ...defined({
+      byokAlias: options.byokAlias,
       cacheKey: options.cacheKey,
       cacheTtl: options.cacheTtl,
       collectLog: options.collectLog,
@@ -174,13 +188,15 @@ function layerGateway(
       metadata: options.metadata,
       requestTimeoutMs: options.requestTimeoutMs,
       retries: options.retries,
-      skipCache: options.skipCache
+      skipCache: options.skipCache,
+      zdr: options.zdr
     })
   };
 }
 
 /** The flat gateway sugar {@link layerGateway} folds into `gateway`. */
 const FLAT_GATEWAY_KEYS = [
+  "byokAlias",
   "cacheKey",
   "cacheTtl",
   "collectLog",
@@ -190,7 +206,8 @@ const FLAT_GATEWAY_KEYS = [
   "metadata",
   "requestTimeoutMs",
   "retries",
-  "skipCache"
+  "skipCache",
+  "zdr"
 ] as const;
 
 /**
@@ -399,6 +416,7 @@ function asRetries(value: unknown): GatewayOptions["retries"] {
 /** Reads the shared gateway keys out of a loosely-typed record. */
 function parseGatewayFields(raw: Record<string, unknown>): GatewayOptions {
   return defined({
+    byokAlias: asString(raw.byokAlias),
     cacheKey: asString(raw.cacheKey),
     cacheTtl: asNumber(raw.cacheTtl),
     collectLog: asBoolean(raw.collectLog),
@@ -407,7 +425,8 @@ function parseGatewayFields(raw: Record<string, unknown>): GatewayOptions {
     metadata: asMetadata(raw.metadata),
     requestTimeoutMs: asNumber(raw.requestTimeoutMs),
     retries: asRetries(raw.retries),
-    skipCache: asBoolean(raw.skipCache)
+    skipCache: asBoolean(raw.skipCache),
+    zdr: asBoolean(raw.zdr)
   });
 }
 

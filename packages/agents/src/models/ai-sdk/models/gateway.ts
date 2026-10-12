@@ -35,9 +35,11 @@ import {
   resolveOptions,
   withoutCallFallback,
   type FallbackLeg,
+  type GatewayModelOptions,
   type ModelOptions,
   type ResolvedOptions,
-  type RoutedModelOptions
+  type RoutedModelOptions,
+  type VendorKeyOptions
 } from "../settings";
 import {
   errorFromGatewayEnvelope,
@@ -62,6 +64,9 @@ import {
  * @experimental This surface is experimental and may change.
  */
 export type { GatewayModelOptions } from "../settings";
+
+/** Which key a routed request authenticates with; see {@link VendorKeyOptions}. */
+type VendorKey = NonNullable<VendorKeyOptions["vendorKey"]>;
 
 /** A model whose provider exposes the standard `config.fetch` setting. */
 interface RoutableModel {
@@ -164,17 +169,22 @@ function universalQuery(body: BodyInit | null | undefined): unknown {
 }
 
 /**
- * The vendor's own request headers, minus the credential the gateway supplies
- * itself and the length of a body we are about to re-serialize.
+ * The vendor's own request headers, minus the length of a body we are about
+ * to re-serialize, and minus the vendor's credential unless the model asked
+ * for it to be forwarded.
  */
 function forwardedHeaders(
   init: RequestInit | undefined,
   input: RequestInfo | URL,
-  route: ResolvedGatewayProvider
+  route: ResolvedGatewayProvider,
+  vendorKey: VendorKey
 ): Record<string, string> {
   const source =
     init?.headers ?? (input instanceof Request ? input.headers : undefined);
-  const dropped = new Set([...route.authHeaders, "content-length"]);
+  const dropped = new Set([
+    ...(vendorKey === "request" ? [] : route.authHeaders),
+    "content-length"
+  ]);
   const headers: Record<string, string> = {};
   new Headers(source).forEach((value, key) => {
     if (!dropped.has(key.toLowerCase())) headers[key] = value;
@@ -205,6 +215,7 @@ function routedFetch(context: {
   resolved: ResolvedOptions;
   capture: RouteCapture;
   signal: AbortSignal | undefined;
+  vendorKey: VendorKey;
 }): typeof globalThis.fetch {
   const routed = async (
     input: RequestInfo | URL,
@@ -224,7 +235,7 @@ function routedFetch(context: {
       endpoint: route.endpoint,
       ...(Object.keys(extraHeaders).length > 0 ? { extraHeaders } : {}),
       gateway: resolved.gateway,
-      headers: forwardedHeaders(init, input, route),
+      headers: forwardedHeaders(init, input, route, context.vendorKey),
       provider: route.provider,
       query,
       // The vendor puts the call's abort signal on the request it builds; the
@@ -396,12 +407,12 @@ export class GatewayLanguageModel implements LanguageModelV4 {
   readonly specificationVersion = "v4" as const;
 
   readonly #model: LanguageModelV4;
-  readonly #options: ModelOptions | undefined;
+  readonly #options: GatewayModelOptions | undefined;
   readonly #config: LanguageModelConfig;
 
   constructor(
     model: LanguageModelV4,
-    options: ModelOptions | undefined,
+    options: GatewayModelOptions | undefined,
     config: LanguageModelConfig
   ) {
     // Fail where the mistake was made, not one call later.
@@ -498,7 +509,13 @@ export class GatewayLanguageModel implements LanguageModelV4 {
   ): LanguageModelV4 {
     return cloneWithFetch(
       this.#model,
-      routedFetch({ capture, config: this.#config, resolved, signal })
+      routedFetch({
+        capture,
+        config: this.#config,
+        resolved,
+        signal,
+        vendorKey: this.#options?.vendorKey ?? "gateway"
+      })
     );
   }
 
@@ -622,7 +639,13 @@ export function routed<T extends object>(
         const capture: RouteCapture = {};
         const clone = cloneWithFetch(
           target as LanguageModelV4,
-          routedFetch({ capture, config, resolved, signal: call?.abortSignal })
+          routedFetch({
+            capture,
+            config,
+            resolved,
+            signal: call?.abortSignal,
+            vendorKey: options?.vendorKey ?? "gateway"
+          })
         );
         const method = Reflect.get(clone, property) as (
           argument: RoutedCall

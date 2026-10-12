@@ -45,6 +45,19 @@ describe("pi-ai: Anthropic Messages over the universal gateway", () => {
     expect(field(call?.query, "messages.0.role")).toBe("user");
   });
 
+  it("sends byokAlias and zdr as cf-aig headers", async () => {
+    const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
+    const ai = createAI({ binding: asAi(binding), byokAlias: "team-a" });
+    await collectEvents(
+      ai.stream(ai(SONNET, { zdr: true }), userContext("hi"))
+    );
+
+    const call = binding.universal[0];
+    expect(call?.headers["cf-aig-byok-alias"]).toBe("team-a");
+    expect(call?.headers["cf-aig-zdr"]).toBe("true");
+    expect(call?.options.gateway).not.toHaveProperty("byokAlias");
+  });
+
   it("parses a text stream in the live event shape", async () => {
     const binding = fakeBinding(() =>
       sseEventResponse(anthropicTextEvents(), {
