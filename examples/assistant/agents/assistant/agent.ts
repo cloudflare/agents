@@ -1,8 +1,8 @@
 import { callable } from "agents";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { Think, Workspace } from "@cloudflare/think";
+import { Workspace, type WorkspaceStub } from "@cloudflare/computer";
+import { Think } from "@cloudflare/think";
 import type { ThinkScheduledTasks } from "@cloudflare/think";
-import type { FileInfo, WorkspaceChangeEvent } from "@cloudflare/shell";
 import { nanoid } from "nanoid";
 import { MyAssistant } from "./agents/my-assistant/agent";
 import type { ChatSummary, DirectoryState, McpToolDescriptor } from "./types";
@@ -41,15 +41,9 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
    * directory's own SQLite so all of a user's files live in one place —
    * a `hello.txt` written in chat A shows up verbatim in chat B.
    *
-   * Children (`MyAssistant` facets) see this workspace through the
-   * `SharedWorkspace` proxy below, which forwards each call to
-   * `readFile` / `writeFile` / etc. here. See `SharedWorkspace`.
-   *
-   * The `onChange` hook fires on every mutation (create/update/delete)
-   * regardless of which chat's tool caused it. We rebroadcast to every
-   * client connected to this directory — that's every browser tab the
-   * user has open — so live UI like the file browser refreshes across
-   * chats and tabs without polling. See `_broadcastWorkspaceChange`.
+   * Children (`MyAssistant` facets) reach it with `getWorkspace()` from
+   * `@cloudflare/computer`, which calls `__getWorkspaceStub()` below over
+   * DO RPC and returns a client whose `fs` forwards here.
    *
    * Security note: this means any tool running inside any chat has
    * read-write access to every file this user owns. That's the point —
@@ -58,27 +52,27 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
    * inherit the same reach. If you fork this example for a
    * less-trusted extension surface, add gating here.
    */
-  workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    name: () => this.name,
-    onChange: (event) => this._broadcastWorkspaceChange(event)
-    // r2: this.env.R2 — uncomment to spill large files to R2.
-  });
+  override workspace = new Workspace({ storage: this.ctx.storage });
 
   /**
-   * Fan-out: push workspace change events to every client connected to
-   * this directory. Each chat pane's `useAgent` connection to the
-   * directory (via `useChats()`) receives these; the client side
-   * treats them as signals to refresh workspace-backed UI.
-   *
-   * Deliberately a best-effort `broadcast` (not `setState`), so file
-   * churn doesn't trigger full `DirectoryState` re-broadcasts on every
-   * write. Does NOT notify sibling child facets — no tool in this
-   * example reacts server-side to another chat's writes. Add a
-   * parent → child RPC here if that use case shows up.
+   * Hand a child chat an RPC stub to the shared workspace. `getWorkspace()`
+   * from `@cloudflare/computer` calls this. Deliberately not `@callable()`:
+   * browsers have no business writing to the workspace over the sidebar
+   * websocket; only chats reach it, over DO RPC.
    */
-  private _broadcastWorkspaceChange(event: WorkspaceChangeEvent): void {
-    this.broadcast(JSON.stringify({ type: "workspace-change", event }));
+  async __getWorkspaceStub(): Promise<WorkspaceStub> {
+    await this.workspace.ready();
+    return this.workspace.stub();
+  }
+
+  /**
+   * Tell every client connected to this directory that the shared
+   * workspace may have changed, so file browsers in every tab refresh.
+   * Chats call this after each turn. It's a best-effort `broadcast` (not
+   * `setState`), so it never triggers a full `DirectoryState` re-broadcast.
+   */
+  async workspaceChanged(): Promise<void> {
+    this.broadcast(JSON.stringify({ type: "workspace-change" }));
   }
 
   onStart() {
@@ -280,110 +274,6 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
         }
       }
     };
-  }
-
-  // ── Shared workspace RPC surface (called by SharedWorkspace) ─────
-  //
-  // Children reach the directory via `parentAgent(AssistantDirectory)`,
-  // which exposes these as typed DO RPC methods. `@callable()` is
-  // deliberately NOT used — the client has no business writing to
-  // another chat's files via the sidebar websocket; workspace I/O is
-  // LLM-tool-only. DO-to-DO RPC doesn't need the decorator.
-  //
-  // The surface covers the full `WorkspaceFsLike` interface from
-  // `@cloudflare/shell`, which is what `createWorkspaceStateBackend`
-  // needs to drive codemode's `state.*` sandbox API. That means a
-  // plan from one chat can edit files the same way as a single-chat
-  // app — the shared workspace is the single source of truth.
-  //
-  // Each method is a one-line delegate. We use
-  // `Parameters<Workspace["method"]>[n]` to stay automatically in
-  // sync with `@cloudflare/shell` rather than re-stating the types.
-
-  async readFile(path: string): Promise<string | null> {
-    return this.workspace.readFile(path);
-  }
-
-  async readFileBytes(path: string): Promise<Uint8Array | null> {
-    return this.workspace.readFileBytes(path);
-  }
-
-  async writeFile(
-    path: string,
-    content: string,
-    mimeType?: Parameters<Workspace["writeFile"]>[2]
-  ): Promise<void> {
-    return this.workspace.writeFile(path, content, mimeType);
-  }
-
-  async writeFileBytes(
-    path: string,
-    content: Parameters<Workspace["writeFileBytes"]>[1],
-    mimeType?: Parameters<Workspace["writeFileBytes"]>[2]
-  ): Promise<void> {
-    return this.workspace.writeFileBytes(path, content, mimeType);
-  }
-
-  async appendFile(
-    path: string,
-    content: string,
-    mimeType?: Parameters<Workspace["appendFile"]>[2]
-  ): Promise<void> {
-    return this.workspace.appendFile(path, content, mimeType);
-  }
-
-  async exists(path: string): Promise<boolean> {
-    return this.workspace.exists(path);
-  }
-
-  async readDir(
-    path: string,
-    opts?: Parameters<Workspace["readDir"]>[1]
-  ): Promise<FileInfo[]> {
-    return this.workspace.readDir(path, opts);
-  }
-
-  async rm(path: string, opts?: Parameters<Workspace["rm"]>[1]): Promise<void> {
-    return this.workspace.rm(path, opts);
-  }
-
-  async glob(pattern: string): Promise<FileInfo[]> {
-    return this.workspace.glob(pattern);
-  }
-
-  async mkdir(
-    path: string,
-    opts?: Parameters<Workspace["mkdir"]>[1]
-  ): Promise<void> {
-    return this.workspace.mkdir(path, opts);
-  }
-
-  async stat(path: string): Promise<FileInfo | null> {
-    return this.workspace.stat(path);
-  }
-
-  async lstat(path: string): Promise<FileInfo | null> {
-    return this.workspace.lstat(path);
-  }
-
-  async cp(
-    src: string,
-    dest: string,
-    opts?: Parameters<Workspace["cp"]>[2]
-  ): Promise<void> {
-    return this.workspace.cp(src, dest, opts);
-  }
-
-  async mv(src: string, dest: string): Promise<void> {
-    return this.workspace.mv(src, dest);
-  }
-
-  async symlink(target: string, linkPath: string): Promise<void> {
-    return this.workspace.symlink(target, linkPath);
-  }
-
-  async readlink(path: string): Promise<string> {
-    return this.workspace.readlink(path);
   }
 
   // ── Shared MCP surface ───────────────────────────────────────────
