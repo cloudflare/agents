@@ -27,7 +27,7 @@ the sub-agent routing primitive from `agents`.
   refreshes. `useChats()` surfaces it as a `workspaceRevision` counter for
   `useEffect` deps
 - **Think base class** — `getModel()`, `configureSession()`, `getTools()`, `maxSteps` for a batteries-included agent
-- **Built-in workspace** — file tools (read, write, edit, find, grep, delete) auto-wired on every turn
+- **Built-in workspace** — `@cloudflare/computer` file tools (read, write, edit, ls, find, grep, delete) auto-wired on every turn
 - **Sandboxed code execution** — `createExecuteTool` lets the LLM write and run JavaScript in a Dynamic Worker via `@cloudflare/codemode`
 - **Browser automation** — the `BROWSER` binding gives the execute sandbox a `cdp.*` connector: a real browser driven over the Chrome DevTools Protocol, with durable sessions the model can promote and reuse across messages
 - **Stateless browsing (Quick Actions)** — `createQuickActionTools` adds `browser_markdown`, `browser_extract`, `browser_links`, and `browser_scrape` for one-shot page reads (no CDP session or sandbox); the model uses these for simple reads and `cdp.*` for interactive automation
@@ -154,19 +154,15 @@ same pattern.
 
 ### Shared workspace
 
-The directory owns the `Workspace` and hands out RPC stubs to it:
+The directory owns the `Workspace`. Think gives every agent a
+`__getWorkspaceStub()` method, which `getWorkspace()` from
+`@cloudflare/computer` calls over DO RPC:
 
 ```ts
-import { Workspace, type WorkspaceStub } from "@cloudflare/computer";
+import { Workspace } from "@cloudflare/computer";
 
 class AssistantDirectory extends Think<Env, DirectoryState> {
   override workspace = new Workspace({ storage: this.ctx.storage });
-
-  // getWorkspace() from @cloudflare/computer calls this over DO RPC.
-  async __getWorkspaceStub(): Promise<WorkspaceStub> {
-    await this.workspace.ready();
-    return this.workspace.stub();
-  }
 }
 ```
 
@@ -176,6 +172,7 @@ then keeps the client:
 
 ```ts
 import { getWorkspace } from "@cloudflare/computer";
+import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 import { lazyWorkspace } from "@cloudflare/think";
 
 class MyAssistant extends Think<Env> {
@@ -189,7 +186,7 @@ class MyAssistant extends Think<Env> {
       // shared workspace (and any needsApproval tools pause durably for
       // the approval card).
       execute: createExecuteTool(this, {
-        tools: createWorkspaceTools(this.workspace)
+        tools: createAITools({ workspace: this.workspace })
       })
       // ...
     };
@@ -197,7 +194,7 @@ class MyAssistant extends Think<Env> {
 }
 ```
 
-All of Think's workspace-aware machinery (`createWorkspaceTools`, skill
+All of Think's workspace-aware machinery (the workspace tools, skill
 scripts, the fetch tool's saved responses, the `listWorkspaceFiles` /
 `readWorkspaceFile` callables) goes through `workspace.fs`, so it works
 unchanged against the shared workspace.
@@ -211,7 +208,8 @@ external links).
 - _Every chat can see every chat's files._ That's the design — a
   multi-chat assistant should remember what it wrote in previous
   chats. If you fork this for a less-trusted surface (e.g. public
-  guests), gate access in `AssistantDirectory.__getWorkspaceStub()`.
+  guests), override `__getWorkspaceStub()` in `AssistantDirectory` to
+  gate access.
 - _Extensions, messages, Think config, and branch history stay
   per-chat._ The workspace and the MCP registry are shared; everything
   else lives in each child DO's own storage. Extensions in particular

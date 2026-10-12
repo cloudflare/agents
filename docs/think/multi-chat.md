@@ -340,21 +340,15 @@ SQLite, so a file written in one chat is visible in every other chat for that
 user:
 
 ```typescript
-import { Workspace, type WorkspaceStub } from "@cloudflare/computer";
+import { Workspace } from "@cloudflare/computer";
 
 export class AssistantDirectory extends Think<Env, DirectoryState> {
   override workspace = new Workspace({ storage: this.ctx.storage });
-
-  // getWorkspace() from @cloudflare/computer calls this over Durable Object RPC.
-  // Not @callable(): browsers must not reach the workspace through the sidebar socket.
-  async __getWorkspaceStub(): Promise<WorkspaceStub> {
-    await this.workspace.ready();
-    return this.workspace.stub();
-  }
 }
 ```
 
-Each chat replaces
+Every Think agent has a `__getWorkspaceStub()` method, which `getWorkspace()`
+from `@cloudflare/computer` calls over Durable Object RPC. Each chat replaces
 Think's default workspace with a client for the directory's. `lazyWorkspace`
 defers `getWorkspace()` until a turn first touches a file, and assigning it as a
 class field means Think never creates a per-chat `Workspace`:

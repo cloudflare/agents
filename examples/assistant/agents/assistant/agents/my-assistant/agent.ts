@@ -9,7 +9,7 @@ import {
 } from "@cloudflare/think";
 import bundledSkills from "agents:skills";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
-import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
+import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
 import { createQuickActionTools } from "@cloudflare/think/tools/browser";
 import { createCompactFunction } from "agents/sessions";
@@ -65,8 +65,8 @@ export class MyAssistant extends Think<Env> {
    * `lazyWorkspace` defers that until a turn first touches a file, so a
    * chat that never reads or writes files never reaches the directory.
    *
-   * Everything workspace-aware routes through this: the built-in tools from
-   * `createWorkspaceTools`, skill scripts, the fetch tool's saved responses,
+   * Everything workspace-aware routes through this: Think's workspace
+   * tools, skill scripts, the fetch tool's saved responses,
    * and the `listWorkspaceFiles` / `readWorkspaceFile` callables below.
    */
   override workspace = lazyWorkspace(async () => {
@@ -199,7 +199,7 @@ When you learn something about the user or their project, save it to memory.`
       // `pendingExecutions` callables behind the approval card.
       execute: createExecuteTool(this, {
         tools: {
-          ...createWorkspaceTools(this.workspace),
+          ...createAITools({ workspace: this.workspace }),
           // Approval-gated sandbox tool: calling it pauses the run durably
           // and renders the approval card in the client. Approving resumes
           // the run exactly where it stopped.

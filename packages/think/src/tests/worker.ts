@@ -14,7 +14,7 @@ export { CodemodeRuntime } from "@cloudflare/codemode";
 export { ThinkMessengerStateAgent } from "../messengers";
 
 export {
-  TestAssistantToolsAgent,
+  ThinkWorkspaceToolsAgent,
   TestAssistantAgentAgent,
   BareAssistantAgent,
   LoopTestAgent,
@@ -66,7 +66,7 @@ export {
 } from "./agents";
 
 import type {
-  TestAssistantToolsAgent,
+  ThinkWorkspaceToolsAgent,
   TestAssistantAgentAgent,
   BareAssistantAgent,
   LoopTestAgent,
@@ -222,7 +222,7 @@ export class BrowserToolsHost extends DurableObject<Env> {
 }
 
 export type Env = {
-  TestAssistantToolsAgent: DurableObjectNamespace<TestAssistantToolsAgent>;
+  ThinkWorkspaceToolsAgent: DurableObjectNamespace<ThinkWorkspaceToolsAgent>;
   TestAssistantAgentAgent: DurableObjectNamespace<TestAssistantAgentAgent>;
   BareAssistantAgent: DurableObjectNamespace<BareAssistantAgent>;
   LoopTestAgent: DurableObjectNamespace<LoopTestAgent>;

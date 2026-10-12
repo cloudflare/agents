@@ -1,4 +1,4 @@
-export { TestAssistantToolsAgent } from "./assistant-tools";
+export { ThinkWorkspaceToolsAgent } from "./workspace-tools";
 export { TestAssistantAgentAgent } from "./assistant-agent";
 export {
   BareAssistantAgent,

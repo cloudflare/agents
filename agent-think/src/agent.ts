@@ -162,14 +162,6 @@ export class ThinkAgent extends ThinkBase {
   override storeMessages = true;
   override storeTools = true;
 
-  /**
-   * We expose our own container-backed `bash` tool; skip Think's built-in
-   * just-bash. Note: even if this flag is ever flipped back,
-   * getTools() spreads after the workspace tools, so our `bash` would
-   * silently shadow Think's — desired, but worth knowing.
-   */
-  override workspaceBash = false;
-
   override skillWorkspace = { root: "/workspace/.agents/skills" };
 
   readonly #workspaceAgent: DurableObjectStub<WorkspaceAgent>;
@@ -561,7 +553,7 @@ export class ThinkAgent extends ThinkBase {
         : {}),
       // Only our four tools reach the model (read/write/edit/bash — pi's
       // codingTools shape, Claude Code's names). Think merges its workspace
-      // built-ins (list/find/grep/delete) unconditionally; this allowlist
+      // built-ins (ls/find/grep/delete) unconditionally; this allowlist
       // makes the AI SDK drop their definitions from the provider request
       // entirely (~600 prompt tokens reclaimed per call). ls/grep/rm/find
       // happen through `bash`. Keep Think's native skill activation tools when
