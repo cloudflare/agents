@@ -15,7 +15,7 @@
 import { asSchema } from "ai";
 import type { ToolSet } from "ai";
 import type { JSONSchema7 } from "json-schema";
-import { generateTypes } from "../tool-types";
+import { generateTypes, standardOutputJsonSchema } from "../tool-types";
 import { sanitizeToolName } from "../utils";
 import { CodemodeConnector, type ConnectorTools } from "./base";
 
@@ -78,7 +78,7 @@ export class ToolSetConnector extends CodemodeConnector {
     return this.#options.instructions;
   }
 
-  protected override tools(): ConnectorTools {
+  protected override async tools(): Promise<ConnectorTools> {
     const out: ConnectorTools = {};
     const sources = new Map<string, string>();
     for (const [toolName, t] of Object.entries(this.#executableTools())) {
@@ -102,6 +102,12 @@ export class ToolSetConnector extends CodemodeConnector {
         rawSchema != null
           ? asSchema(rawSchema as Parameters<typeof asSchema>[0])
           : undefined;
+      // `jsonSchema` may be a promise (`jsonSchema(promise)` or a lazy
+      // loader), so await it rather than passing a Promise through as a schema.
+      const inputSchema = schema ? await schema.jsonSchema : undefined;
+      const outputSchema = await outputJsonSchema(
+        (t as { outputSchema?: unknown }).outputSchema
+      );
 
       // boolean `false` means no approval; `true` or a function (which can't
       // be pre-evaluated against sandbox args) gates the call behind the
@@ -113,7 +119,8 @@ export class ToolSetConnector extends CodemodeConnector {
       out[name] = {
         description:
           typeof t.description === "function" ? undefined : t.description,
-        inputSchema: schema?.jsonSchema as JSONSchema7 | undefined,
+        inputSchema: inputSchema as JSONSchema7 | undefined,
+        ...(outputSchema ? { outputSchema } : {}),
         ...(requiresApproval ? { requiresApproval: true } : {}),
         execute: schema?.validate
           ? async (args: unknown) => {
@@ -136,6 +143,29 @@ export class ToolSetConnector extends CodemodeConnector {
    */
   override async getTypeScriptTypes(): Promise<string> {
     return generateTypes(this.#executableTools(), this.name());
+  }
+}
+
+/**
+ * Convert a tool's output schema to JSON Schema for its descriptor, using
+ * the output side of the schema where the library exposes it (see
+ * `standardOutputJsonSchema`). The output type is advisory, so a schema that
+ * cannot be converted (it throws or its promise rejects) is left out and
+ * shows as `unknown`, matching `generateTypes`, instead of failing the whole
+ * toolset.
+ */
+async function outputJsonSchema(
+  raw: unknown
+): Promise<JSONSchema7 | undefined> {
+  if (raw == null) return undefined;
+  try {
+    return (
+      standardOutputJsonSchema(raw) ??
+      ((await asSchema(raw as Parameters<typeof asSchema>[0])
+        .jsonSchema) as JSONSchema7)
+    );
+  } catch {
+    return undefined;
   }
 }
 

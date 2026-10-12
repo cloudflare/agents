@@ -9,7 +9,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { generateTypes } from "../tool-types";
-import { fromJSONSchema } from "zod";
+import { fromJSONSchema, z } from "zod";
 import { jsonSchema } from "ai";
 import type { ToolSet } from "ai";
 import type { ToolDescriptors } from "../tool-types";
@@ -91,7 +91,9 @@ describe("generateTypes edge cases", () => {
         "        day?: string;",
         "        high?: number;",
         "        low?: number;",
+        "        [key: string]: unknown;",
         "    }[];",
+        "    [key: string]: unknown;",
         "}",
         "",
         "declare const codemode: {",
@@ -225,6 +227,52 @@ describe("generateTypes edge cases", () => {
         "\t * Good second",
         "\t */",
         "\tgood2: (input: Good2Input) => Promise<Good2Output>;",
+        "}"
+      ].join("\n")
+    );
+  });
+
+  it("types outputs from the value the schema produces, not its input", () => {
+    const tools = {
+      getStats: {
+        description: "Get stats",
+        inputSchema: z.object({ limit: z.number().default(10) }),
+        outputSchema: z.object({
+          count: z.number().default(0),
+          total: z.string().pipe(z.coerce.number())
+        })
+      },
+      getLength: {
+        description: "Get length",
+        inputSchema: z.object({}),
+        outputSchema: z.string().transform((s) => s.length)
+      }
+    };
+
+    // `.default()` is required on the way out, `.pipe()` yields the piped
+    // type, and `.transform()` can't be represented so falls back to unknown.
+    expect(genTypes(tools)).toBe(
+      [
+        "type GetStatsInput = {",
+        "    limit?: number;",
+        "}",
+        "type GetStatsOutput = {",
+        "    count: number;",
+        "    total: number;",
+        "}",
+        "type GetLengthInput = {}",
+        "type GetLengthOutput = unknown",
+        "",
+        "declare const codemode: {",
+        "\t/**",
+        "\t * Get stats",
+        "\t */",
+        "\tgetStats: (input: GetStatsInput) => Promise<GetStatsOutput>;",
+        "",
+        "\t/**",
+        "\t * Get length",
+        "\t */",
+        "\tgetLength: (input: GetLengthInput) => Promise<GetLengthOutput>;",
         "}"
       ].join("\n")
     );

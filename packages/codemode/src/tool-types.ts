@@ -138,6 +138,16 @@ function extractParamDescriptions(schema: unknown): string[] {
   );
 }
 
+function jsonSchemaToTypeDecl(jsonSchema: JSONSchema7, typeName: string) {
+  const ctx: ConversionContext = {
+    root: jsonSchema,
+    depth: 0,
+    seen: new Set(),
+    maxDepth: 20
+  };
+  return `type ${typeName} = ${jsonSchemaToTypeString(jsonSchema, "", ctx)}`;
+}
+
 /**
  * Safely convert a schema to TypeScript type string.
  * Handles Zod schemas (v3/v4) and AI SDK jsonSchema wrappers.
@@ -147,36 +157,58 @@ function safeSchemaToTs(schema: unknown, typeName: string): string {
     if (isZodSchema(schema) || isStandardSchema(schema)) {
       const wrapped = asSchema(schema as ZodType);
       const jsonSchema = wrapped.jsonSchema as JSONSchema7;
-      if (jsonSchema) {
-        const ctx: ConversionContext = {
-          root: jsonSchema,
-          depth: 0,
-          seen: new Set(),
-          maxDepth: 20
-        };
-        const typeBody = jsonSchemaToTypeString(jsonSchema, "", ctx);
-        return `type ${typeName} = ${typeBody}`;
-      }
+      if (jsonSchema) return jsonSchemaToTypeDecl(jsonSchema, typeName);
     }
 
     if (isJsonSchemaWrapper(schema)) {
       const jsonSchema = extractJsonSchema(schema);
-      if (jsonSchema) {
-        const ctx: ConversionContext = {
-          root: jsonSchema,
-          depth: 0,
-          seen: new Set(),
-          maxDepth: 20
-        };
-        const typeBody = jsonSchemaToTypeString(jsonSchema, "", ctx);
-        return `type ${typeName} = ${typeBody}`;
-      }
+      if (jsonSchema) return jsonSchemaToTypeDecl(jsonSchema, typeName);
     }
 
     return `type ${typeName} = unknown`;
   } catch {
     return `type ${typeName} = unknown`;
   }
+}
+
+interface StandardJsonSchemaConverter {
+  output?: (options: { target: "draft-07" }) => unknown;
+}
+
+/**
+ * JSON Schema for the value a schema *produces*, from its Standard JSON
+ * Schema converter (Zod 4, Valibot, ArkType, ...). AI SDK's `asSchema`
+ * always converts the input side, which is wrong for a tool's output:
+ * `.default()` fields come out optional and `.pipe()` keeps the pre-pipe
+ * type.
+ *
+ * Returns `undefined` when the schema has no such converter (Zod 3,
+ * `jsonSchema()` wrappers, whose input and output are the same). Throws when
+ * the output can't be represented in JSON Schema (e.g. `.transform()`);
+ * callers treat that as `unknown` rather than falling back to the input type.
+ */
+export function standardOutputJsonSchema(
+  schema: unknown
+): JSONSchema7 | undefined {
+  if (!isStandardSchema(schema)) return undefined;
+  const converter = (
+    schema as { "~standard": { jsonSchema?: StandardJsonSchemaConverter } }
+  )["~standard"].jsonSchema;
+  if (typeof converter?.output !== "function") return undefined;
+  return converter.output({ target: "draft-07" }) as JSONSchema7;
+}
+
+/** Like `safeSchemaToTs`, but types the value the schema produces. */
+function safeOutputSchemaToTs(schema: unknown, typeName: string): string {
+  let jsonSchema: JSONSchema7 | undefined;
+  try {
+    jsonSchema = standardOutputJsonSchema(schema);
+  } catch {
+    return `type ${typeName} = unknown`;
+  }
+  return jsonSchema
+    ? jsonSchemaToTypeDecl(jsonSchema, typeName)
+    : safeSchemaToTs(schema, typeName);
 }
 
 /**
@@ -207,7 +239,7 @@ export function generateTypes(
       const inputType = safeSchemaToTs(inputSchema, `${typeName}Input`);
 
       const outputType = outputSchema
-        ? safeSchemaToTs(outputSchema, `${typeName}Output`)
+        ? safeOutputSchemaToTs(outputSchema, `${typeName}Output`)
         : `type ${typeName}Output = unknown`;
 
       availableTypes += `\n${inputType.trim()}`;
