@@ -103,6 +103,38 @@ export type WorkersAIModelId =
   | (`@cf/${string}` & {});
 
 /**
+ * An AI Gateway dynamic route, by name: `dynamic/<route>`.
+ *
+ * A dynamic route is configured on the gateway — which models it tries, in
+ * which order, with what rate limits or budgets — and called through the
+ * Workers AI run path like a model. It answers in the OpenAI chat-completions
+ * shape whatever model served it, so it is a language model only.
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export type DynamicRouteId = `dynamic/${string}`;
+
+/**
+ * Whether an id names an AI Gateway dynamic route: `dynamic/` and a route
+ * name after it.
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export function isDynamicRouteId(modelId: string): modelId is DynamicRouteId {
+  return modelId.startsWith("dynamic/") && modelId.length > "dynamic/".length;
+}
+
+/**
+ * Whether a string names a language model that runs on `env.AI.run`: a
+ * Workers AI id or an AI Gateway dynamic route.
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export function isRunPathLanguageModelId(modelId: string): boolean {
+  return modelId.startsWith("@cf/") || isDynamicRouteId(modelId);
+}
+
+/**
  * A text-embedding model id accepted by `ai.embedding()`.
  *
  * The modality methods are Workers AI only — there is no vendor route for them

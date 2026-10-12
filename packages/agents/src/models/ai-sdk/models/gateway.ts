@@ -26,7 +26,7 @@ import {
   type ResolvedGatewayProvider,
   requireGatewayProvider
 } from "../../core/gateway-providers";
-import { requireWorkersAIId } from "../errors";
+import { requireLanguageModelId } from "../errors";
 import {
   fallbackLegs,
   rememberOptions,
@@ -579,9 +579,9 @@ export class GatewayLanguageModel implements LanguageModelV4 {
   #workersAI(modelId: string): LanguageModelV4 {
     return new CloudflareLanguageModel(
       // Belt and braces: `ai()` and the per-call bag both gate their legs, so
-      // a non-`@cf/` id can only arrive from a caller that built the model
+      // any other id can only arrive from a caller that built the model
       // some other way — and it must not reach `env.AI.run` either.
-      requireWorkersAIId(modelId),
+      requireLanguageModelId(modelId),
       { ...this.#options, fallback: undefined },
       this.#config
     );

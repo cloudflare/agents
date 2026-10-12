@@ -3,13 +3,13 @@ import type {
   LanguageModelV4CallOptions,
   SharedV4ProviderOptions
 } from "@ai-sdk/provider";
-import type { WorkersAIModelId } from "../core/catalog";
+import type { DynamicRouteId, WorkersAIModelId } from "../core/catalog";
 import {
   type ModelOptions as CoreModelOptions,
   PROVIDER_OPTIONS_KEY,
   parseModelOptions
 } from "../core/settings";
-import { requireWorkersAIId } from "./errors";
+import { requireLanguageModelId, requireWorkersAIId } from "./errors";
 
 export {
   DEFAULT_GATEWAY_ID,
@@ -26,12 +26,13 @@ export {
 } from "../core/settings";
 
 /**
- * One leg of a fallback chain: a Workers AI id, or any AI SDK language model
- * — including one this provider has already wrapped for the gateway.
+ * One leg of a fallback chain: a Workers AI id, an AI Gateway dynamic route,
+ * or any AI SDK language model — including one this provider has already
+ * wrapped for the gateway.
  *
  * @experimental This surface is experimental and may change.
  */
-export type FallbackLeg = WorkersAIModelId | LanguageModelV4;
+export type FallbackLeg = WorkersAIModelId | DynamicRouteId | LanguageModelV4;
 
 /**
  * Per-model and per-call options.
@@ -129,6 +130,22 @@ export function fallbackLegs(
 export function parseCallOptions(
   providerOptions: SharedV4ProviderOptions | undefined
 ): ModelOptions | undefined {
+  const options = parseModelOptions(providerOptions?.[PROVIDER_OPTIONS_KEY]);
+  for (const leg of options?.fallback ?? []) requireLanguageModelId(leg);
+  return options;
+}
+
+/**
+ * Per-call options for the modality models — embedding, image, speech,
+ * transcription, reranking. The same bag as {@link parseCallOptions}, but a
+ * fallback leg must be a Workers AI id: a dynamic route answers in the
+ * chat-completions shape, which none of those models can read.
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export function parseModalityCallOptions(
+  providerOptions: SharedV4ProviderOptions | undefined
+): ModalityOptions | undefined {
   const options = parseModelOptions(providerOptions?.[PROVIDER_OPTIONS_KEY]);
   for (const leg of options?.fallback ?? []) requireWorkersAIId(leg);
   return options;

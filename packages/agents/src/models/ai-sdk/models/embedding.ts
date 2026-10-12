@@ -5,7 +5,7 @@ import {
   type EmbeddingModelV4Result
 } from "@ai-sdk/provider";
 import {
-  parseCallOptions,
+  parseModalityCallOptions,
   resolveOptions,
   type ModelOptions
 } from "../settings";
@@ -75,7 +75,7 @@ export class CloudflareEmbeddingModel implements EmbeddingModelV4 {
     const resolved = resolveOptions(
       this.#config.providerGateway,
       this.#options,
-      parseCallOptions(options.providerOptions)
+      parseModalityCallOptions(options.providerOptions)
     );
     const input = { text: options.values };
     const transport: Transport = this.#config.transport;
