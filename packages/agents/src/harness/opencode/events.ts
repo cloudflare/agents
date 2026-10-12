@@ -62,12 +62,18 @@ function answerOf(message: OpenCodeMessage): Answer | undefined {
  * `operation_end` follows the rule `wait()` uses on the transcript: an
  * input's answer ends at the next input that joins after an assistant
  * message, or at the end of the run.
+ *
+ * Events that arrive while the snapshot is read are projected after it, so
+ * some repeat what the snapshot shows. Projection is idempotent for those:
+ * an input the projector already knows is not started or ended again.
  */
 export class SessionEventProjector {
   readonly #session: OpenCodeSessionId;
   readonly #toolNames = new Map<string, string>();
   /** Inputs the next or current assistant message answers, oldest first. */
   #answering: string[] = [];
+  /** Inputs this stream has reported `operation_end` for. */
+  readonly #ended = new Set<string>();
   /** Whether an assistant message started after the newest input. */
   #answered = false;
   #answer: Answer | undefined;
@@ -111,11 +117,23 @@ export class SessionEventProjector {
         ];
       case "session.inbox.delivered": {
         const operationId = operationIdOf(event.data.inboxID);
+        // Already in the snapshot, or already answered: a repeat.
+        if (
+          this.#answering.includes(operationId) ||
+          this.#ended.has(operationId)
+        ) {
+          return [];
+        }
         const ended = this.#answered ? this.#settle("succeeded") : [];
         this.#answering.push(operationId);
         return [...ended, { type: "operation_start", operationId }];
       }
       case "session.execution.started":
+        // Nothing from an earlier run answers this one's inputs.
+        if (this.#answering.length === 0) {
+          this.#answer = undefined;
+          this.#answered = false;
+        }
         return [{ type: "run_start" }];
       case "session.execution.succeeded":
         return [...this.#settle("succeeded"), runEnd("succeeded")];
@@ -294,14 +312,16 @@ export class SessionEventProjector {
       .map(([, part]) => part)
       .join("");
     const error = answer?.error ?? runError;
-    const ended = this.#answering.map(
-      (operationId): OpenCodeSessionEvent => ({
+    const ended = this.#answering.map((operationId): OpenCodeSessionEvent => {
+      this.#ended.add(operationId);
+      return {
         type: "operation_end",
         result: resultOf(this.#session, operationId, outcome, text, error)
-      })
-    );
+      };
+    });
     this.#answering = [];
     this.#answered = false;
+    this.#answer = undefined;
     return ended;
   }
 }

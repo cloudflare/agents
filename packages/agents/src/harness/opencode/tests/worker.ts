@@ -224,6 +224,23 @@ export class OpenCodeHarnessTestObject extends DurableObject<Cloudflare.Env> {
     );
   }
 
+  /**
+   * Open a stream, let a run fill its buffer, stop it, then start it:
+   * returns how many events reached the listener.
+   */
+  async startAfterStop(): Promise<number> {
+    const stream = await this.harness.session().events();
+    const receipt = await this.harness.submit("hello");
+    await this.harness.wait(receipt.operationId);
+    await stream.stop();
+    let delivered = 0;
+    stream.start((events) => {
+      delivered += events.length;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return delivered;
+  }
+
   /** The durable log's event types for the root session. */
   async logTypes(): Promise<string[]> {
     const types: string[] = [];

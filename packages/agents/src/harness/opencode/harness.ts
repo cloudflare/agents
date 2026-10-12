@@ -1131,8 +1131,9 @@ export class OpenCodeSession {
     let listener:
       | ((events: readonly OpenCodeSessionEvent[]) => void)
       | undefined;
+    let stopped = false;
     const deliver = (events: readonly OpenCodeSessionEvent[]) => {
-      if (events.length === 0) return;
+      if (events.length === 0 || stopped) return;
       if (listener === undefined) pending.push(...events);
       else listener(events);
     };
@@ -1170,23 +1171,27 @@ export class OpenCodeSession {
       projector = new SessionEventProjector(snapshot);
       for (const event of early.splice(0)) deliver(projector.project(event));
 
-      let stopped: Promise<void> | undefined;
+      let stopping: Promise<void> | undefined;
       return {
         snapshot,
         start: (next) => {
           if (listener !== undefined) {
             throw new Error("OpenCodeEventStream.start() was already called");
           }
+          // A stopped stream delivers nothing.
+          if (stopping !== undefined) return;
           listener = next;
           deliver(pending.splice(0));
         },
         stop: () => {
-          stopped ??= (async () => {
+          stopping ??= (async () => {
+            stopped = true;
+            pending.length = 0;
             controller.abort();
             await pump;
             await release();
           })();
-          return stopped;
+          return stopping;
         }
       };
     } catch (error) {

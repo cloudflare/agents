@@ -217,6 +217,11 @@ describe("OpenCodeHarness on OpenCode v2", () => {
     expect(log).not.toContain("session.text.delta");
   });
 
+  it("delivers nothing from a stream started after it stopped", async () => {
+    const stub = fresh();
+    expect(await stub.startAfterStop()).toBe(0);
+  });
+
   it("names the tool on tool_start and tool_end", async () => {
     const stub = fresh();
     const { id } = await stub.openStream();
