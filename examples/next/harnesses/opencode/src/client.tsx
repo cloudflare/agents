@@ -10,17 +10,17 @@ import {
 import {
   BrainIcon,
   CheckCircleIcon,
+  CodeIcon,
+  FilePlusIcon,
   GearIcon,
-  GlobeIcon,
+  GitBranchIcon,
   InfoIcon,
   ListIcon,
   MoonIcon,
-  NotePencilIcon,
   PaperPlaneRightIcon,
   PlusIcon,
   StopIcon,
   SunIcon,
-  TerminalWindowIcon,
   XCircleIcon
 } from "@phosphor-icons/react";
 import { code } from "@streamdown/code";
@@ -43,21 +43,22 @@ const MODEL = "@cf/moonshotai/kimi-k2.7-code";
 
 const SUGGESTIONS = [
   {
-    icon: <NotePencilIcon size={15} />,
-    label: "Save a note",
+    icon: <FilePlusIcon size={15} />,
+    label: "Write a file",
     value:
-      "Save a note titled 'durable objects' with three facts about Durable Objects, then list my notes."
+      "Write a haiku about Durable Objects to /workspace/haiku.txt, then read it back."
   },
   {
-    icon: <GlobeIcon size={15} />,
-    label: "Fetch a page",
+    icon: <CodeIcon size={15} />,
+    label: "Run JavaScript",
     value:
-      "Fetch https://developers.cloudflare.com/durable-objects/ and summarize it in three bullets."
+      "Use exec to run JavaScript that lists /workspace and returns the size of each file."
   },
   {
-    icon: <TerminalWindowIcon size={15} />,
-    label: "What can you do?",
-    value: "Which tools do you have here, and what can't you do?"
+    icon: <GitBranchIcon size={15} />,
+    label: "Clone a repo",
+    value:
+      "Clone https://github.com/octocat/Hello-World into /workspace/hello, then show its git log."
   }
 ] satisfies Array<{ icon: ReactNode; label: string; value: string }>;
 

@@ -10,9 +10,8 @@ This example is the only documentation for them for now.
 
 - **`OpenCodeHarness`**, a Lifecycle capability with the same interface as
   `PiHarness`: `harness.prompt()`, `harness.submit()`, `harness.sessions`,
-  `harness.session(id)`. Each session also has `history()`, `events()` for
-  OpenCode's live events, and `log()` for its durable ones. A factory opens
-  OpenCode:
+  `harness.session(id)`. Each session also has `history()`, `events()` and
+  `log()`. A factory opens OpenCode:
 
   ```ts
   readonly harness = new OpenCodeHarness({
@@ -20,6 +19,22 @@ This example is the only documentation for them for now.
       OpenCodeWorkerd.create({ storage, plugins: [this.ai.plugin] }),
     defaults: { model: this.ai("@cf/moonshotai/kimi-k2.7-code") }
   });
+  ```
+
+- **Session events.** `session.events()` returns a snapshot of the session
+  and then its events, the same kinds `PiHarness` reports: `run_start` and
+  `run_end`, `operation_start` and `operation_end` (with the result `wait()`
+  returns), `message_start` and `message_end`, `text_delta`,
+  `reasoning_delta`, `tool_start` and `tool_end`, and a few more. OpenCode's
+  own events stay available from `session.log()`, durable and resumable by
+  sequence number.
+
+  ```ts
+  const stream = await harness.session(id).events();
+  render(stream.snapshot);
+  stream.start((events) => events.forEach(apply));
+  // later
+  await stream.stop();
   ```
 
 - **Storage.** The `storage` the factory gets keeps OpenCode's tables under
@@ -38,11 +53,14 @@ This example is the only documentation for them for now.
   plugin, over the `AI` binding: no account id or API token.
 - **App glue that isn't part of the harness.**
   - `sockets.ts` puts sessions on `WebSockets`. Each socket gets a snapshot
-    of the transcript. While a session runs, one watch on `session.events()`
-    fans OpenCode's events out to every socket on it, and the watch stops
-    when the session is idle.
-  - `plugin.ts` removes OpenCode's file and shell tools, which have nothing
-    to run on in Workers, and adds notes kept in the object's storage.
+    of the transcript. While a session runs, one stream from
+    `session.events()` fans its events out to every socket on it, and the
+    stream stops when the session is idle.
+  - `workspace.ts` replaces OpenCode's file and shell tools, which have
+    nothing to run on in Workers, with the Workspace tools from
+    `@cloudflare/computer`: `read`, `write`, `edit`, `delete`, `ls`, `find`
+    and `grep` over files in the object's storage, and `exec`, which runs
+    JavaScript in a Worker Loader isolate and can clone with git.
 
 ## Run locally
 
@@ -64,7 +82,8 @@ about 3.7 MB (gzip) to the Worker, so deploying needs the Workers Paid plan.
 
 ## What to try
 
-- `Save a note titled 'groceries' with milk, eggs and bread, then list my notes.`
+- `Write a haiku about Durable Objects to /workspace/haiku.txt, then read it back.`
+- `Clone https://github.com/octocat/Hello-World into /workspace/hello, then show its git log.`
 - `Fetch https://example.com and tell me the page's title.`
 - While a turn runs, press Enter to queue a follow-up, Steer to join the
   running turn, or Stop to interrupt it.
@@ -75,9 +94,16 @@ about 3.7 MB (gzip) to the Worker, so deploying needs the Workers Paid plan.
 ## What OpenCode can't do here
 
 OpenCode's Workers profile has no filesystem, shell or terminal, so those
-tools are removed. Add your own through OpenCode plugins, as `plugin.ts`
-does. OpenCode wraps plugin tools in its `execute` code-mode tool, so a
-tool call shows up as `execute`.
+tools are removed. `workspace.ts` adds its own through an OpenCode plugin.
+By default OpenCode wraps plugin tools in its `execute` code-mode tool;
+`options: { codemode: false }` offers each one to the model by name.
+
+There's no shell: `exec` runs JavaScript modules only, with no npm.
+
+The OpenCode CLI can't attach to a session here yet. OpenCode doesn't
+expose its in-process HTTP handler
+([anomalyco/opencode#54803](https://github.com/anomalyco/opencode/issues/54803),
+tracked in [#2567](https://github.com/cloudflare/agents/issues/2567)).
 
 On boot, OpenCode's local provider plugins (Ollama, LM Studio, vLLM) try to
 reach `127.0.0.1`. Those requests fail harmlessly.
