@@ -172,8 +172,7 @@ ai("anthropic/claude-opus-4.8", {
   eventId: "turn-17",
   requestTimeoutMs: 30_000,
   retries: { maxAttempts: 3, backoff: "exponential", retryDelayMs: 500 },
-  byokAlias: "team-a", // which stored BYOK key, routed models only
-  zdr: true, // Zero Data Retention, routed models only
+  zdr: true, // Zero Data Retention, routed models on unified billing
   fallback: ["@cf/zai-org/glm-4.7-flash"], // ids or models, in any mix
   headers: { "x-request-source": "docs" },
   sessionAffinity: "chat-42", // Workers AI prefix-cache routing
@@ -260,10 +259,8 @@ gateway, an unpaid account) become a `CloudflareAIError`, so fallback and retry 
 way they treat Workers AI failures. A model whose `api` is not one of the four routed markers
 never gets that far: the stream ends with an `error` event naming the `api`.
 
-`byokAlias` picks a stored key by alias when the gateway holds several for one provider, and
-`zdr` turns Zero Data Retention on or off for a unified-billing request. Both are sent as
-`cf-aig-byok-alias` / `cf-aig-zdr` on the universal request and do nothing for a Workers AI
-model.
+`zdr` turns Zero Data Retention on or off for one request, whatever the gateway's own setting.
+It applies to a routed model on unified billing and is sent as `cf-aig-zdr`.
 
 ## Observability
 

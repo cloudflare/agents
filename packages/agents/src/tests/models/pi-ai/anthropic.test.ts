@@ -45,17 +45,17 @@ describe("pi-ai: Anthropic Messages over the universal gateway", () => {
     expect(field(call?.query, "messages.0.role")).toBe("user");
   });
 
-  it("sends byokAlias and zdr as cf-aig headers", async () => {
+  it("sends zdr as cf-aig-zdr on the universal request itself", async () => {
     const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
-    const ai = createAI({ binding: asAi(binding), byokAlias: "team-a" });
+    const ai = createAI({ binding: asAi(binding) });
     await collectEvents(
       ai.stream(ai(SONNET, { zdr: true }), userContext("hi"))
     );
 
     const call = binding.universal[0];
-    expect(call?.headers["cf-aig-byok-alias"]).toBe("team-a");
-    expect(call?.headers["cf-aig-zdr"]).toBe("true");
-    expect(call?.options.gateway).not.toHaveProperty("byokAlias");
+    expect(call?.options.extraHeaders).toEqual({ "cf-aig-zdr": "true" });
+    expect(call?.headers).not.toHaveProperty("cf-aig-zdr");
+    expect(call?.options.gateway).not.toHaveProperty("zdr");
   });
 
   it("parses a text stream in the live event shape", async () => {

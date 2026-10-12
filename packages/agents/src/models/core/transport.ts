@@ -239,29 +239,29 @@ function universalGatewayOptions(
 
 /**
  * The gateway options for the Workers AI run path, as the binding's own
- * `GatewayOptions` type has them. `byokAlias` and `zdr` are left out: the
- * binding does not define them, and a Workers AI model has no vendor key or
- * vendor retention policy for them to change.
+ * `GatewayOptions` type has them. `zdr` is left out: the binding has no field
+ * for it, and it applies to vendor models routed through the gateway.
  */
 function runGatewayOptions(gateway: ResolvedGateway): GatewayOptions {
-  const { byokAlias: _byokAlias, zdr: _zdr, ...options } = gateway;
+  const { zdr: _zdr, ...options } = gateway;
   return options;
 }
 
 /**
- * The `cf-aig-*` headers for the gateway options the binding has no field
- * for. They go on the universal request's own headers, where the gateway
- * reads them for that provider call.
+ * The universal call's own request headers: the caller's extra headers, plus
+ * `cf-aig-zdr`. The gateway reads ZDR off the request itself, not off a
+ * provider entry, and the binding's options have no field for it.
  */
-function universalGatewayHeaders(
-  gateway: ResolvedGateway
-): Record<string, string> {
-  const headers: Record<string, string> = {};
-  if (gateway.byokAlias !== undefined) {
-    headers["cf-aig-byok-alias"] = gateway.byokAlias;
-  }
-  if (gateway.zdr !== undefined) headers["cf-aig-zdr"] = String(gateway.zdr);
-  return headers;
+function universalRequestHeaders(
+  request: UniversalRequest
+): Record<string, string> | undefined {
+  const headers = {
+    ...request.extraHeaders,
+    ...(request.gateway.zdr === undefined
+      ? {}
+      : { "cf-aig-zdr": String(request.gateway.zdr) })
+  };
+  return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
 /**
@@ -401,22 +401,18 @@ function bindingTransport(binding: Ai): Transport {
     },
     async universal(request) {
       try {
+        const extraHeaders = universalRequestHeaders(request);
         // Called as a method on the binding, and on the `AiGateway` it
         // returns: both read private fields.
         return await binding.gateway(request.gateway.id).run(
           {
             endpoint: request.endpoint,
-            headers: {
-              ...request.headers,
-              ...universalGatewayHeaders(request.gateway)
-            },
+            headers: request.headers,
             provider: request.provider,
             query: request.query
           },
           {
-            ...(request.extraHeaders === undefined
-              ? {}
-              : { extraHeaders: request.extraHeaders }),
+            ...(extraHeaders === undefined ? {} : { extraHeaders }),
             gateway: universalGatewayOptions(request.gateway),
             signal: request.signal
           }

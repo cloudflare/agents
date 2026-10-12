@@ -391,57 +391,54 @@ describe("gateway options", () => {
   });
 });
 
-describe("BYOK and ZDR", () => {
-  it("sends byokAlias and zdr as cf-aig headers on the universal request", async () => {
+describe("ZDR and vendor keys", () => {
+  it("sends zdr as cf-aig-zdr on the universal request itself", async () => {
     const binding = fakeGatewayBinding({
       universal: () => anthropicResponse()
     });
-    const ai = createAI({ binding: asAi(binding), byokAlias: "team-a" });
-    await ai(anthropic("claude-opus-4-8"), { zdr: true }).doGenerate(
-      callOptions()
-    );
+    const ai = createAI({ binding: asAi(binding), zdr: true });
+    await ai(anthropic("claude-opus-4-8"), {
+      headers: { "x-team": "agents" }
+    }).doGenerate(callOptions());
 
     const call = binding.universal[0];
-    expect(call.headers["cf-aig-byok-alias"]).toBe("team-a");
-    expect(call.headers["cf-aig-zdr"]).toBe("true");
-    // The binding's own gateway options have no such fields.
-    expect(call.options.gateway).not.toHaveProperty("byokAlias");
+    // The gateway reads it off the request, not off the provider entry.
+    expect(call.options.extraHeaders).toEqual({
+      "cf-aig-zdr": "true",
+      "x-team": "agents"
+    });
+    expect(call.headers).not.toHaveProperty("cf-aig-zdr");
+    // The binding's own gateway options have no such field.
     expect(call.options.gateway).not.toHaveProperty("zdr");
   });
 
-  it("reads them per call, where they win over the model's", async () => {
+  it("reads zdr per call, where it wins over the model's", async () => {
     const binding = fakeGatewayBinding({
       universal: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding) });
-    await ai(anthropic("claude-opus-4-8"), {
-      byokAlias: "model",
-      zdr: true
-    }).doGenerate(
+    await ai(anthropic("claude-opus-4-8"), { zdr: true }).doGenerate(
       callOptions({
-        providerOptions: {
-          cloudflare: { gateway: { byokAlias: "call" }, zdr: false }
-        }
+        providerOptions: { cloudflare: { gateway: { zdr: false } } }
       })
     );
 
     const call = binding.universal[0];
-    expect(call.headers["cf-aig-byok-alias"]).toBe("call");
-    expect(call.headers["cf-aig-zdr"]).toBe("false");
+    expect(call.options.extraHeaders).toEqual({ "cf-aig-zdr": "false" });
     expect(call.query).not.toHaveProperty("cloudflare");
   });
 
-  it("keeps them off the Workers AI run path", async () => {
+  it("keeps zdr off the Workers AI run path", async () => {
     const binding = fakeGatewayBinding({
       run: () => jsonResponse(workersAIBody)
     });
-    const ai = createAI({ binding: asAi(binding), byokAlias: "team-a" });
-    await ai(WORKERS_AI, { zdr: true }).doGenerate(callOptions());
+    const ai = createAI({ binding: asAi(binding), zdr: true });
+    await ai(WORKERS_AI).doGenerate(callOptions());
 
-    const gateway = binding.calls[0].options.gateway;
-    expect(gateway).toMatchObject({ id: "default" });
-    expect(gateway).not.toHaveProperty("byokAlias");
-    expect(gateway).not.toHaveProperty("zdr");
+    const options = binding.calls[0].options;
+    expect(options.gateway).toMatchObject({ id: "default" });
+    expect(options.gateway).not.toHaveProperty("zdr");
+    expect(options).not.toHaveProperty("extraHeaders");
   });
 
   it("strips the vendor key by default", async () => {
