@@ -3,11 +3,13 @@
  * Exact provenance and update instructions live in ./README.md.
  */
 import type {
+  AuthInfo,
   CallToolResult,
   ClientCapabilities,
   GetPromptResult,
   InputRequests,
   InputRequiredResult,
+  JSONRPCRequest,
   ReadResourceResult,
   ServerContext
 } from "@modelcontextprotocol/server";
@@ -27,6 +29,47 @@ import * as z from "zod/v4";
 // Server state
 const resourceSubscriptions = new Set<string>();
 const watchedResourceContent = "Watched resource content";
+
+// Scope-challenge registrations (upstream since @modelcontextprotocol/server
+// 2.2.0). Without verified auth info every check passes; the upstream Node
+// entrypoint stamps AuthInfo from fixed bearer tokens, which is outside this
+// adaptation's boundary.
+const SCOPE_CHALLENGE_SCOPES = {
+  tool: [
+    "mcp:conformance:tools:call",
+    "mcp:conformance:tools:test_simple_text"
+  ],
+  staticResource: [
+    "mcp:conformance:resources:read",
+    "mcp:conformance:resources:static"
+  ],
+  templateResource: [
+    "mcp:conformance:resources:read",
+    "mcp:conformance:resources:template:123"
+  ],
+  prompt: [
+    "mcp:conformance:prompts:get",
+    "mcp:conformance:prompts:test_simple_prompt"
+  ]
+} as const;
+
+type ConformanceScopeChallengeHandler = (context: {
+  request: JSONRPCRequest;
+  authInfo?: AuthInfo;
+}) => { scopes: readonly [string, ...string[]] } | undefined;
+
+function requireConformanceScopes(
+  ...scopes: readonly [string, ...string[]]
+): ConformanceScopeChallengeHandler {
+  return ({ authInfo }) => {
+    if (
+      authInfo === undefined ||
+      scopes.every((scope) => authInfo.scopes.includes(scope))
+    )
+      return;
+    return { scopes };
+  };
+}
 
 // Sample base64 encoded 1x1 red PNG pixel for testing
 const TEST_IMAGE_BASE64 =
@@ -252,7 +295,8 @@ export function createEverythingServerV2(options: EverythingServerV2Options) {
   mcpServer.registerTool(
     "test_simple_text",
     {
-      description: "Tests simple text content response"
+      description: "Tests simple text content response",
+      scopeChallenge: requireConformanceScopes(...SCOPE_CHALLENGE_SCOPES.tool)
     },
     async (): Promise<CallToolResult> => {
       return {
@@ -1238,7 +1282,10 @@ export function createEverythingServerV2(options: EverythingServerV2Options) {
     {
       title: "Static Text Resource",
       description: "A static text resource for testing",
-      mimeType: "text/plain"
+      mimeType: "text/plain",
+      scopeChallenge: requireConformanceScopes(
+        ...SCOPE_CHALLENGE_SCOPES.staticResource
+      )
     },
     async (): Promise<ReadResourceResult> => {
       return {
@@ -1282,7 +1329,10 @@ export function createEverythingServerV2(options: EverythingServerV2Options) {
     {
       title: "Resource Template",
       description: "A resource template with parameter substitution",
-      mimeType: "application/json"
+      mimeType: "application/json",
+      scopeChallenge: requireConformanceScopes(
+        ...SCOPE_CHALLENGE_SCOPES.templateResource
+      )
     },
     async (uri, variables): Promise<ReadResourceResult> => {
       const id = variables.id;
@@ -1350,7 +1400,8 @@ export function createEverythingServerV2(options: EverythingServerV2Options) {
     "test_simple_prompt",
     {
       title: "Simple Test Prompt",
-      description: "A simple prompt without arguments"
+      description: "A simple prompt without arguments",
+      scopeChallenge: requireConformanceScopes(...SCOPE_CHALLENGE_SCOPES.prompt)
     },
     async (): Promise<GetPromptResult> => {
       return {
