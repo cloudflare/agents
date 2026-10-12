@@ -596,12 +596,32 @@ function keepResolvedPauses(
     return { ...message, parts };
   });
 }
+/**
+ * Whether a workspace is a Computer `Workspace` this agent owns, as opposed
+ * to a client for one another Durable Object owns. Checked by shape so a
+ * second copy of `@cloudflare/computer` in the bundle still matches.
+ */
+function isLocalWorkspace(
+  workspace: ThinkWorkspace
+): workspace is ThinkWorkspace & Pick<Workspace, "ready" | "stub"> {
+  return (
+    "ready" in workspace &&
+    typeof workspace.ready === "function" &&
+    "stub" in workspace &&
+    typeof workspace.stub === "function"
+  );
+}
+
 const ACTION_PENDING_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_PENDING_LAST_SWEPT_KEY =
   "cf_think_action_pending_approvals:last_swept_at";
 /** Prefix for durable-pause action execution ids (vs codemode execution ids). */
 const ACTION_PAUSE_ID_PREFIX = "actpause_";
-import { Workspace } from "@cloudflare/computer";
+import { Workspace, type WorkspaceStub } from "@cloudflare/computer";
+import {
+  createAITools,
+  type CreateAIToolsOptions
+} from "@cloudflare/computer/tools/ai-sdk";
 import {
   WorkspaceFiles,
   resolveWorkspacePath,
@@ -614,7 +634,6 @@ import {
   type MediaEvictionConfig,
   hasEvictableMedia
 } from "./media-eviction";
-import { createWorkspaceTools } from "./tools/workspace";
 import { createFetchTools } from "./tools/fetch";
 import type { CreateFetchToolsOptions, FetchToolEvent } from "./tools/fetch";
 import { truncatePausedExecutionOutput } from "./tools/execute";
@@ -3763,7 +3782,11 @@ export class Think<
    * work in a Workspace another Durable Object owns:
    *
    * ```typescript
-   * import { Workspace } from "@cloudflare/computer";
+   * import { Workspace, type WorkspaceStub } from "@cloudflare/computer";
+import {
+  createAITools,
+  type CreateAIToolsOptions
+} from "@cloudflare/computer/tools/ai-sdk";
    *
    * override workspace = new Workspace({
    *   storage: this.ctx.storage,
@@ -3786,13 +3809,22 @@ export class Think<
   codemode?: import("@cloudflare/codemode").CodemodeRuntimeHandle;
 
   /**
-   * Include the default workspace Bash tool. Enabled by default so models can
-   * run shell-style multi-file workflows against the workspace. Set to `false`
-   * to omit it from the built-in workspace tools.
+   * The workspace tools from `@cloudflare/computer`: `read`, `ls`, `find`,
+   * `grep`, `write`, `edit`, and `delete`, plus `exec` when the Workspace
+   * has execution backends and `publish` when it has assets. Options pass
+   * through to `createAITools`; set `false` to omit the tools.
+   *
+   * `exec` runs on the backends configured on {@link workspace}. By default
+   * it offers every backend; list them here to choose and describe them:
+   *
+   * ```typescript
+   * override workspaceTools = {
+   *   exec: { js: { description: "Try this first." }, container: {} },
+   *   read: { maxBytes: 32 * 1024 }
+   * };
+   * ```
    */
-  workspaceBash:
-    | boolean
-    | NonNullable<Parameters<typeof createWorkspaceTools>[1]>["bash"] = true;
+  workspaceTools: false | Omit<CreateAIToolsOptions, "workspace"> = {};
 
   /**
    * Opt-in HTTP fetch tools. Disabled by default — set to a config object to
@@ -6097,7 +6129,7 @@ export class Think<
       "read",
       "write",
       "edit",
-      "list",
+      "ls",
       "find",
       "grep",
       "delete"
@@ -7420,9 +7452,10 @@ export class Think<
       await this.mcp.waitForConnections({ timeout });
     }
 
-    const workspaceTools = createWorkspaceTools(this.workspace, {
-      bash: this.workspaceBash
-    });
+    const workspaceTools: ToolSet =
+      this.workspaceTools === false
+        ? {}
+        : createAITools({ ...this.workspaceTools, workspace: this.workspace });
     const fetchToolSet: ToolSet = this.fetchTools
       ? createFetchTools({
           ...this.fetchTools,
@@ -8900,6 +8933,28 @@ export class Think<
       "onChunk",
       createChunkSnapshot(event as { chunk: { type: string } })
     );
+  }
+
+  /**
+   * Hand out an RPC stub to this agent's Workspace. `getWorkspace(stub)`
+   * from `@cloudflare/computer` calls it to reach the Workspace from
+   * another Worker or Durable Object, and the Worker shell backend calls it
+   * so its isolate can reach back into the Workspace.
+   *
+   * Only a Workspace this agent owns can hand out a stub; a client for
+   * another object's Workspace cannot.
+   */
+  async __getWorkspaceStub(): Promise<WorkspaceStub> {
+    await this.__unsafe_ensureInitialized();
+    const workspace = this.workspace;
+    if (!isLocalWorkspace(workspace)) {
+      throw new Error(
+        "[Think] This agent's workspace belongs to another Durable Object, " +
+          "so it cannot hand out a Workspace stub."
+      );
+    }
+    await workspace.ready();
+    return workspace.stub();
   }
 
   // ── Host bridge methods (called by HostBridgeLoopback via DO RPC) ──

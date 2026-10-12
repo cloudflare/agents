@@ -170,35 +170,63 @@ drill-in, and cleanup patterns.
 
 ## Built-in workspace
 
-Every Think agent gets `this.workspace` — a virtual filesystem backed by the DO's SQLite storage. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, `bash`) are automatically available to the model.
-
-The `read` tool returns line-numbered text for text files. For images and PDFs, it keeps the persisted tool result compact and passes file bytes to multimodal-capable models using AI SDK content parts.
-The `bash` tool runs sandboxed shell workflows through `just-bash`, with network
-access disabled by default, and syncs changed files and empty directories back
-into the workspace. It snapshots up to 1,000 files by default, skips files larger
-than 1 MB, and treats skipped paths as protected during write-back. Set
-`workspaceBash = false` on your Think subclass to opt out, or pass an options
-object to tune limits, timeout, and network access.
+Every Think agent gets `this.workspace`: a `Workspace` from
+[`@cloudflare/computer`](https://github.com/cloudflare/computer), stored in the
+agent's own SQLite. The `@cloudflare/computer` tools (`read`, `ls`, `find`,
+`grep`, `write`, `edit`, `delete`) are available to the model on every turn.
 
 ```ts
 export class MyAgent extends Think<Env> {
   getModel() { ... }
-  // this.workspace is ready to use — no setup needed
-  // workspace tools are auto-merged into every chat turn
+  // this.workspace is ready to use, and the workspace tools join every turn
 }
 ```
 
-Override to add R2 spillover for large files:
+The model gets an `exec` tool once the Workspace has execution backends.
+Configure the backends, and the modules they offer, on the `Workspace`; use
+`workspaceTools` to pick which backends `exec` offers and describe them to the
+model:
 
 ```ts
+import { Workspace } from "@cloudflare/computer";
+import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { createGitModule } from "@cloudflare/computer/modules/git";
+
 export class MyAgent extends Think<Env> {
   override workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    r2: this.env.R2,
-    name: () => this.name
+    storage: this.ctx.storage,
+    backends: [
+      new WorkerJavaScriptBackend({
+        id: "js",
+        loader: this.env.LOADER,
+        modules: { "ws:git": createGitModule() }
+      })
+    ]
   });
+
+  override workspaceTools = {
+    exec: { js: { description: "Run JavaScript against the workspace." } },
+    read: { maxBytes: 32 * 1024 }
+  };
 }
 ```
+
+`workspaceTools` takes the options of `createAITools` from
+`@cloudflare/computer/tools/ai-sdk`. Set it to `false` to omit the tools.
+
+To work in a Workspace another Durable Object owns, use `lazyWorkspace`:
+
+```ts
+import { getWorkspace } from "@cloudflare/computer";
+import { lazyWorkspace } from "@cloudflare/think";
+
+override workspace = lazyWorkspace(async () =>
+  getWorkspace(await this.parentAgent(Directory))
+);
+```
+
+Every Think agent can hand out its own Workspace the same way: `getWorkspace`
+calls the agent's `__getWorkspaceStub()` over RPC.
 
 ## Agent Skills
 
@@ -263,8 +291,8 @@ turn automatically.
 
 Think can also project each resolved `SKILL.md` into the active workspace so
 the agent can read and edit skills as files. This is off by default: skills
-load from their sources and nothing is written to the Workspace. Computer uses
-`/workspace/.agents/skills`; legacy Shell uses `/.agents/skills`. Existing
+load from their sources and nothing is written to the Workspace. Skills land
+under `/workspace/.agents/skills`. Existing
 workspace edits are preserved and affect later activation. Resources copy into
 the workspace on first use rather than at startup. Think records a durable
 source fingerprint, so unchanged cold wakes do not stat or rewrite every skill
@@ -342,12 +370,11 @@ Script execution requires a Worker Loader binding:
 
 | Export                                  | Description                                                   |
 | --------------------------------------- | ------------------------------------------------------------- |
-| `@cloudflare/think`                     | `Think`, `Session`, `Workspace` — main class + re-exports     |
+| `@cloudflare/think`                     | `Think`, `Session`, `lazyWorkspace` — main class + re-exports |
 | `agents/sessions`                       | `Sessions`, `Session`, `createCompactFunction`, attachments   |
 | `agents/context`                        | `ContextBlocks`, providers, `ContextConfig` — prompt assembly |
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
-| `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
 | `@cloudflare/think/tools/fetch`         | `createFetchTools()` — opt-in allowlisted HTTP reads          |
 | `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
 | `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
@@ -378,7 +405,7 @@ Script execution requires a Worker Loader binding:
 | `getSkillScriptRunner()`   | `null`                             | Optional runner for `run_skill_script`                                                                                                                                                                                       |
 | `getExtensions()`          | `[]`                               | Sandboxed extension declarations (load order)                                                                                                                                                                                |
 | `extensionLoader`          | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                                                                                                                  |
-| `workspaceBash`            | `true`                             | Include the default workspace `bash` tool                                                                                                                                                                                    |
+| `workspaceTools`           | `{}`                               | Options for the `@cloudflare/computer` workspace tools; `false` omits them                                                                                                                                                   |
 | `fetchTools`               | `false`                            | Opt-in allowlisted HTTP read tools (`fetch_url` + per-binding `fetch_<name>`). Set to a config object; see [Fetch tool](#fetch-tool)                                                                                         |
 | `includeMcpTools`          | `true`                             | Automatically convert connected MCP tools to AI SDK tools and merge them into model turns                                                                                                                                    |
 | `waitForMcpConnections`    | `false`                            | Wait for MCP connections to settle before inference                                                                                                                                                                          |
@@ -855,8 +882,7 @@ Splitting never reclaims database space — the continuation rows live in the
 same Durable Object as the message — and Sessions imposes no upper bound on a
 single message, so one very large write can consume a meaningful share of the
 10 GB an object has. Bounding untrusted input is the application's job. Files
-belong in the Workspace, which spills to R2; put a reference to one in the
-message. This is a storage detail: invisible to the model, and unrelated to
+belong in the Workspace; put a reference to one in the message. This is a storage detail: invisible to the model, and unrelated to
 media eviction.
 
 #### Media eviction
@@ -1017,20 +1043,6 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 - **Message sanitization** — strips ephemeral provider metadata before storage
 - **Row size enforcement** — compacts tool outputs exceeding 1.8MB
 
-## Workspace tools
-
-File operation tools are built into Think and available to the model on every turn. For custom storage backends, the individual tool factories are also exported:
-
-```ts
-import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
-
-// Use with a custom ReadOperations/WriteOperations implementation
-const tools = createWorkspaceTools(myCustomStorage);
-const toolsWithoutBash = createWorkspaceTools(myCustomStorage, { bash: false });
-```
-
-Each tool is an AI SDK `tool()` with Zod schemas. The underlying operations are abstracted behind interfaces (`ReadOperations`, `WriteOperations`, etc.) so you can create tools backed by any storage.
-
 ## Code execution tool
 
 Let the LLM write and run JavaScript in a sandboxed Worker:
@@ -1133,10 +1145,9 @@ getTools() {
 | `agents`                     | Cloudflare Agents SDK peer dependency                     |
 | `ai`                         | Vercel AI SDK v6 peer dependency                          |
 | `zod`                        | Schema validation peer dependency                         |
-| `@cloudflare/shell`          | Workspace filesystem                                      |
+| `@cloudflare/computer`       | Workspace and workspace tools peer dependency             |
 | `@cloudflare/codemode`       | Code execution, `createExecuteTool`, and JS skill scripts |
 | `@cloudflare/worker-bundler` | TypeScript skill script compilation                       |
-| `just-bash`                  | Bash skill script execution                               |
 | `@chat-adapter/telegram`     | Required for Telegram messengers                          |
 
 ## Acknowledgments

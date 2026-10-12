@@ -162,13 +162,8 @@ export class ThinkAgent extends ThinkBase {
   override storeMessages = true;
   override storeTools = true;
 
-  /**
-   * We expose our own container-backed `bash` tool; skip Think's built-in
-   * just-bash. Note: even if this flag is ever flipped back,
-   * getTools() spreads after the workspace tools, so our `bash` would
-   * silently shadow Think's — desired, but worth knowing.
-   */
-  override workspaceBash = false;
+  /** We expose our own workspace and container-backed `bash` tools. */
+  override workspaceTools = false as const;
 
   override skillWorkspace = { root: "/workspace/.agents/skills" };
 

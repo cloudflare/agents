@@ -1,4 +1,5 @@
 import type { Workspace } from "@cloudflare/computer";
+import type { CreateAIToolsOptions } from "@cloudflare/computer/tools/ai-sdk";
 
 /**
  * The filesystem methods Think uses, from `@cloudflare/computer`'s
@@ -16,19 +17,24 @@ export type ThinkWorkspaceFilesystem = Pick<
   | "grep"
 >;
 
+/** The parts of a Workspace the `@cloudflare/computer` tools use besides `fs`. */
+type ToolsWorkspace = CreateAIToolsOptions["workspace"];
+
 /**
  * The Workspace a Think agent works in.
  *
  * A `Workspace` from `@cloudflare/computer` satisfies this, and so does the
  * client `getWorkspace(stub)` returns for a Workspace owned by another
- * Durable Object. Think reads and writes through `workspace.fs` only.
+ * Durable Object. Think reads and writes through `workspace.fs`. The
+ * `@cloudflare/computer` tools also use `runtime` for `exec` and `assets`
+ * for `publish` when the Workspace has them.
  *
  * @experimental The API surface may change before stabilizing.
  */
 export type ThinkWorkspace = {
   /** The Workspace filesystem. */
   readonly fs: ThinkWorkspaceFilesystem;
-};
+} & Partial<Pick<ToolsWorkspace, "runtime" | "sessionId" | "assets">>;
 
 /** One file, directory, or symlink in a Workspace. */
 export type WorkspaceEntry = {
@@ -286,6 +292,10 @@ function joinPath(directory: string, name: string): string {
  *
  * The resolver runs once; later calls reuse its result. A rejected
  * resolution is not cached, so the next call retries.
+ *
+ * Only `fs` is forwarded, so the agent gets the file tools but no `exec`:
+ * the exec tool lists the Workspace's backends synchronously, before
+ * anything has been resolved.
  *
  * @param resolve - Produces the Workspace.
  * @returns A Workspace whose `fs` forwards to the resolved one.
