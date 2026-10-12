@@ -80,6 +80,21 @@ export abstract class McpAgent<
   }
 
   /**
+   * End a streamable HTTP session (`DELETE`). Teardown is deferred to the
+   * agent's alarm (#1625), so the stored initialize request is cleared too:
+   * every route treats a session without one as unknown, which makes requests
+   * carrying the terminated session ID get 404 as the spec requires. Teardown
+   * is scheduled first, so a failure part-way leaves a session the client can
+   * `DELETE` again rather than one that is never cleaned up.
+   *
+   * @internal
+   */
+  async _cf_terminateSession(): Promise<void> {
+    await this._cf_scheduleDestroy();
+    await this.ctx.storage.delete("initializeRequest");
+  }
+
+  /**
    * Storage key prefix for the `streamId -> requestIds` mapping used
    * to support POST stream resumption across WebSocket reconnects.
    *

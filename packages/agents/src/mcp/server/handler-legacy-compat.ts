@@ -3,7 +3,7 @@ import {
   isJSONRPCRequest,
   type CreateMcpHandlerOptions,
   type McpHandlerRequestOptions,
-  type McpServer,
+  McpServer,
   type McpServerFactory,
   type Server
 } from "@modelcontextprotocol/server";
@@ -19,6 +19,10 @@ import {
  *
  * - impossible stateless server-to-client requests fail immediately rather
  *   than leaving the tool handler waiting for a session response.
+ * - a factory that returns an instance still serving another request is
+ *   rejected before this request takes ownership of it, so the error path
+ *   never closes the other request's instance (mirrors upstream's
+ *   `assertNotServing` on the modern path).
  *
  * Streaming and keepalive behavior remain delegated to the SDK transport.
  * Remove this adapter once the SDK exposes the reverse-request policy directly.
@@ -63,13 +67,15 @@ export function createLegacyCompatibilityRequestHandler(
     const onAbort = () => void teardown();
 
     try {
-      product = await factory({
+      const candidate = await factory({
         era: "legacy",
         ...(requestOptions?.authInfo !== undefined && {
           authInfo: requestOptions.authInfo
         }),
         requestInfo: request
       });
+      assertNotServing(candidate);
+      product = candidate;
       transport = new WebStandardStreamableHTTPServerTransport({
         keepAliveMs,
         sessionIdGenerator: undefined
@@ -158,4 +164,14 @@ export function createLegacyCompatibilityRequestHandler(
   };
 
   return { fetch };
+}
+
+function assertNotServing(product: McpServer | Server): void {
+  const server = product instanceof McpServer ? product.server : product;
+  if (server.transport !== undefined) {
+    throw new Error(
+      "The factory returned an instance that is still serving another " +
+        "request. Return a new instance for each request."
+    );
+  }
 }

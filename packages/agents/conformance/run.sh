@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the exact-pinned MCP conformance referee (alpha.10) against Agents
+# Runs the exact-pinned MCP conformance referee (alpha.12) against Agents
 # implementations inside workerd. run-suite.mjs bounds client concurrency,
 # makes baseline coverage fail-closed, and treats client process failures and
 # server warning checks as failures even when the referee exits successfully.

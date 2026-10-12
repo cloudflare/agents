@@ -176,6 +176,42 @@ describe("createMcpHandler SDK v2", () => {
     expect(factoryCalls).toBe(0);
   });
 
+  it.each<KeepaliveLane>(["modern", "legacy"])(
+    "rejects a %s request when the factory returns an instance still serving another request",
+    async (lane) => {
+      const shared = createHangingServer();
+      const onerror = vi.fn();
+      const handler = createMcpHandler(() => shared.server, {
+        onerror,
+        responseMode: "sse"
+      });
+
+      const first = await handler(
+        keepaliveRequest(lane),
+        env,
+        createExecutionContext()
+      );
+      expect(first.status).toBe(200);
+
+      const second = await handler(
+        keepaliveRequest(lane),
+        env,
+        createExecutionContext()
+      );
+      expect(second.status).toBe(500);
+      expect(onerror).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining("still serving another request")
+        })
+      );
+
+      // The rejected request must not tear down the instance the first
+      // request is still using.
+      shared.release();
+      expect(await first.text()).toContain('"text":"done"');
+    }
+  );
+
   it("fails fast when Legacy compatibility code attempts a reverse request", async () => {
     const handler = createMcpHandler(() => {
       const server = createServer();

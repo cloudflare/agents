@@ -339,6 +339,20 @@ export class ConformanceHost extends Agent<Env> {
         }
         return;
       }
+      case "json-schema-2020-12-preservation": {
+        // Echo the schema exactly as MCPClientManager exposes it to
+        // applications, so the referee sees whatever our catalog kept.
+        const focal = this.mcp
+          .listTools({ serverId })
+          .find((tool) => tool.name === "json_schema_2020_12_tool");
+        if (!focal) {
+          throw new Error("json_schema_2020_12_tool was not discovered");
+        }
+        await this.callTool(serverId, "json_schema_echo", {
+          schema: focal.inputSchema
+        });
+        return;
+      }
       case "http-invalid-tool-headers":
         await this.callTool(serverId, "valid_tool", { region: "us-east1" });
         return;

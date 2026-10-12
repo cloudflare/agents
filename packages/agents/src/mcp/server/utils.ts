@@ -549,11 +549,12 @@ export const createStreamingHttpHandler = (
         // unreliable: the client is usually already gone by the time the
         // DELETE lands, the runtime gives a canceled request's trailing
         // work little to no grace, and the multi-step teardown got cut
-        // short — leaving half-deleted session DOs. Scheduling is two fast
+        // short — leaving half-deleted session DOs. Scheduling is a few fast
         // storage writes, so it is awaited before responding; the alarm
         // then runs the real teardown with a fresh execution budget and a
-        // durable marker that survives any further interruption.
-        await agent._cf_scheduleDestroy();
+        // durable marker that survives any further interruption. The
+        // session itself ends now: later requests with its ID get 404.
+        await agent._cf_terminateSession();
         return new Response(null, {
           status: 204,
           headers: corsHeaders(request, options.corsOptions)

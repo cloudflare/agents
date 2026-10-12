@@ -220,4 +220,90 @@ describe("deferred destroy (#1625)", () => {
       `streamable-http:${sessionId}`
     );
   });
+
+  it("MCP streamable-http session DELETE makes the session ID return 404 before teardown runs", async () => {
+    const handler = TestMcpJurisdiction.serve("/mcp", {
+      binding: "TEST_MCP_JURISDICTION",
+      transport: "streamable-http"
+    });
+    const ctx = createExecutionContext();
+
+    const initResponse = await handler.fetch(
+      new Request("http://example.com/mcp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-11-25"
+          }
+        })
+      }),
+      env,
+      ctx
+    );
+    expect(initResponse.status).toBe(200);
+    const sessionId = initResponse.headers.get("mcp-session-id")!;
+    const sessionHeaders = {
+      "mcp-session-id": sessionId,
+      "mcp-protocol-version": "2025-11-25"
+    };
+
+    const deleteResponse = await handler.fetch(
+      new Request("http://example.com/mcp", {
+        method: "DELETE",
+        headers: sessionHeaders
+      }),
+      env,
+      ctx
+    );
+    expect(deleteResponse.status).toBe(204);
+
+    // Streamable HTTP: after termination the server MUST answer requests
+    // carrying the session ID with 404, even though teardown is deferred.
+    const followUps = [
+      new Request("http://example.com/mcp", {
+        method: "POST",
+        headers: {
+          ...sessionHeaders,
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: "2", method: "tools/list" })
+      }),
+      new Request("http://example.com/mcp", {
+        method: "GET",
+        headers: { ...sessionHeaders, Accept: "text/event-stream" }
+      }),
+      new Request("http://example.com/mcp", {
+        method: "DELETE",
+        headers: sessionHeaders
+      })
+    ];
+    for (const request of followUps) {
+      const response = await handler.fetch(request, env, ctx);
+      expect(response.status, request.method).toBe(404);
+    }
+
+    // Those 404s came from the terminated session, not a torn-down one: the
+    // deferred-teardown marker is still pending.
+    const name = `streamable-http:${sessionId}`;
+    const namespace =
+      env.TEST_MCP_JURISDICTION as unknown as DurableObjectNamespace<
+        Agent<Cloudflare.Env>
+      >;
+    const stub = await getAgentByName(namespace, name);
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.get(DESTROY_PENDING_KEY)).toBeDefined();
+    });
+
+    await expectTeardownCompleted(namespace, name);
+  });
 });

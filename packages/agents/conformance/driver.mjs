@@ -55,7 +55,8 @@ const SUPPORTED_SCENARIOS = [
   "http-standard-headers",
   "http-custom-headers",
   "http-invalid-tool-headers",
-  "json-schema-ref-no-deref"
+  "json-schema-ref-no-deref",
+  "json-schema-2020-12-preservation"
 ];
 
 if (process.argv[2] === "--list-scenarios") {
