@@ -113,7 +113,7 @@ const SANDBOX_CODEC = String.raw`
 /**
  * A minimal tool record — just a description and an execute function.
  * Use this for providers that supply their own `types` and don't need
- * schema-based type generation (e.g. stateTools).
+ * schema-based type generation.
  */
 export type SimpleToolRecord = Record<
   string,

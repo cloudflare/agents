@@ -37,7 +37,7 @@ example has no authentication; put it behind your own before exposing it.
 The Workers AI model from `workers-ai-provider@4` is passed directly.
 
 The editable harness source lives under `/harness` in a durable
-`@cloudflare/shell` Workspace. Activation snapshots that source, bundles it
+`@cloudflare/computer` Workspace. Activation snapshots that source, bundles it
 with `@cloudflare/worker-bundler`, checks it in an isolated Dynamic Worker, and
 moves the active revision pointer only after the check succeeds. Every chat
 turn pins one revision and loads it with `WorkerLoader.load()`, so module globals

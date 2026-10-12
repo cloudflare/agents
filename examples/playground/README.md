@@ -49,13 +49,13 @@ The playground is organized into feature categories, each with interactive demos
 
 ### AI
 
-| Demo              | Description                                              |
-| ----------------- | -------------------------------------------------------- |
-| **Chat**          | `AIChatAgent` with message persistence and streaming     |
-| **Tools**         | Client-side tool execution with confirmation flows       |
-| **Codemode**      | AI code generation and editing                           |
-| **Agent Tools**   | Delegate chat work to child agents with inline timelines |
-| **Think + Shell** | Assistant runtime with durable workspace and state tools |
+| Demo                 | Description                                                            |
+| -------------------- | ---------------------------------------------------------------------- |
+| **Chat**             | `AIChatAgent` with message persistence and streaming                   |
+| **Tools**            | Client-side tool execution with confirmation flows                     |
+| **Codemode**         | AI code generation and editing                                         |
+| **Agent Tools**      | Delegate chat work to child agents with inline timelines               |
+| **Think + Computer** | Assistant runtime with a durable Computer workspace and code execution |
 
 ### MCP (Model Context Protocol)
 

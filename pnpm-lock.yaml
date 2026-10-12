@@ -2209,12 +2209,12 @@ importers:
       '@ai-sdk/provider':
         specifier: ^4.0.0
         version: 4.0.2
+      '@cloudflare/computer':
+        specifier: ^0.5.1
+        version: 0.5.1(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(supports-color@10.2.2)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.5.4)
-      '@cloudflare/shell':
-        specifier: '*'
-        version: link:../../../../packages/shell
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -2444,12 +2444,12 @@ importers:
       '@ai-sdk/provider':
         specifier: ^4.0.0
         version: 4.0.2
+      '@cloudflare/computer':
+        specifier: ^0.5.1
+        version: 0.5.1(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(supports-color@10.2.2)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.5.4)
-      '@cloudflare/shell':
-        specifier: '*'
-        version: link:../../../../packages/shell
       '@cloudflare/worker-bundler':
         specifier: '*'
         version: link:../../../../packages/worker-bundler
@@ -3935,12 +3935,12 @@ importers:
       '@cloudflare/ai-chat':
         specifier: '*'
         version: link:../../packages/ai-chat
+      '@cloudflare/computer':
+        specifier: ^0.5.1
+        version: 0.5.1(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(supports-color@10.2.2)(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)
-      '@cloudflare/shell':
-        specifier: '*'
-        version: link:../../packages/shell
       '@cloudflare/worker-bundler':
         specifier: '*'
         version: link:../../packages/worker-bundler
@@ -4060,18 +4060,18 @@ importers:
       '@cloudflare/ai-chat':
         specifier: '*'
         version: link:../../packages/ai-chat
-      '@cloudflare/codemode':
-        specifier: '*'
-        version: link:../../packages/codemode
+      '@cloudflare/computer':
+        specifier: ^0.5.1
+        version: 0.5.1(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(supports-color@10.2.2)(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)
-      '@cloudflare/shell':
-        specifier: '*'
-        version: link:../../packages/shell
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@platformatic/vfs':
+        specifier: ^0.4.0
+        version: 0.4.0
       '@streamdown/code':
         specifier: ^1.1.1
         version: 1.1.1(react@19.2.7)
@@ -15995,6 +15995,20 @@ snapshots:
       '@platformatic/vfs': 0.4.0
       ai: 7.0.18(zod@4.5.4)
       vite: 8.2.2(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
+      zod: 4.5.4
+    transitivePeerDependencies:
+      - supports-color
+
+  '@cloudflare/computer@0.5.1(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(supports-color@10.2.2)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)':
+    dependencies:
+      acorn: 8.17.0
+      capnweb: 0.10.0
+      just-bash: 3.0.2(supports-color@10.2.2)
+    optionalDependencies:
+      '@cloudflare/workers-types': 5.20261014.1
+      '@platformatic/vfs': 0.4.0
+      ai: 7.0.18(zod@4.5.4)
+      vite: 8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
       zod: 4.5.4
     transitivePeerDependencies:
       - supports-color

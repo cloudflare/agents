@@ -3,7 +3,7 @@ import type {
   LanguageModelV4CallOptions,
   LanguageModelV4GenerateResult
 } from "@ai-sdk/provider";
-import { Workspace } from "@cloudflare/shell";
+import { Workspace } from "@cloudflare/computer";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
 import { Streams } from "agents/streams";
@@ -244,10 +244,7 @@ class TestLanguageModel implements LanguageModelV4 {
 
 /** Test-only Durable Object with a deterministic LanguageModelV4. */
 export class TestSelfModifyingHarnessObject extends DurableObject<Env> {
-  private readonly workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    namespace: "self_modifying"
-  });
+  private readonly workspace = new Workspace({ storage: this.ctx.storage });
   private readonly tasks = new Tasks();
   private readonly streams = new Streams();
   private readonly harness = new SelfModifyingHarness({

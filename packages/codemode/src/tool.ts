@@ -66,7 +66,7 @@ function extractFns(
  * @example
  * ```ts
  * createCodeTool({
- *   tools: [stateTools(workspace), aiTools(myTools)],
+ *   tools: [aiTools(myTools), { name: "db", tools: dbTools }],
  *   executor,
  * });
  * ```
