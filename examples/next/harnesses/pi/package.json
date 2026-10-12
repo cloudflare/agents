@@ -13,7 +13,7 @@
     "test": "vitest run --config src/tests/vitest.config.ts"
   },
   "dependencies": {
-    "@cloudflare/computer": "^0.4.0",
+    "@cloudflare/computer": "^0.5.1",
     "@cloudflare/kumo": "^2.6.0",
     "@earendil-works/chord": "^1.0.0",
     "@earendil-works/pi-ai": "^1.0.0",

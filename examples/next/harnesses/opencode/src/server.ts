@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
 import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
 import { createGitClient } from "@cloudflare/computer/git";
+import { createGitModule } from "@cloudflare/computer/modules/git";
 import { OpenCodeWorkerd } from "@opencode/sdk/workerd";
 import { routeAgentRequest } from "agents";
 import { OpenCodeHarness } from "agents/harness/opencode";
@@ -32,7 +33,7 @@ export class OpenCodeAgent extends DurableObject<Env> {
         loader: this.env.LOADER,
         root: "/workspace",
         access: "read-write",
-        allowGitNetwork: true
+        modules: { "ws:git": createGitModule({ allowNetwork: true }) }
       })
     ]
   });

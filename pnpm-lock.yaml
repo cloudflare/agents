@@ -2272,8 +2272,8 @@ importers:
   examples/next/harnesses/opencode:
     dependencies:
       '@cloudflare/computer':
-        specifier: ^0.4.0
-        version: 0.4.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.1.8))(supports-color@10.2.2)(zod@4.1.8)
+        specifier: ^0.5.1
+        version: 0.5.1(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.1.8))(supports-color@10.2.2)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.1.8)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.1.8)
@@ -2336,8 +2336,8 @@ importers:
   examples/next/harnesses/pi:
     dependencies:
       '@cloudflare/computer':
-        specifier: ^0.4.0
-        version: 0.4.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.5.4))(supports-color@10.2.2)(zod@4.5.4)
+        specifier: ^0.5.1
+        version: 0.5.1(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.5.4))(supports-color@10.2.2)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.5.4)
@@ -6021,12 +6021,13 @@ packages:
     resolution: {integrity: sha512-qeRpKNXtvqhTtagx/5cLmDaFx/voBhWJ1S6SdFdBkE3OtgcPVz+Q8MtIG26zltW9Z0Icsu2FGBxV5RFmuHI/Bg==}
     hasBin: true
 
-  '@cloudflare/computer@0.4.0':
-    resolution: {integrity: sha512-9bYPrMktAUR/EUX/Z2Xdk1JoSK4LeM7owBsFEHCG+9Lb0IjxJRaMjAkqOzVvDTm6OLNvoKUoUt99Heg6y9MdlA==}
+  '@cloudflare/computer@0.5.1':
+    resolution: {integrity: sha512-tEA2uyZwOBnhbdBoVYLOnQFsQnAwXiUbzS8JF/2bjY4Mpcb7PXPRFAyWdfVYG0xu4eW6Ctd73v5O/Z07Fr5/Pg==}
     peerDependencies:
       '@cloudflare/workers-types': ^4.20260616.1 || ^5.20260921.1
       '@platformatic/vfs': '*'
       ai: ^6.0.196 || ^7.0.0
+      vite: ^6.0.0 || ^7.0.0 || ^8.0.0
       zod: ^4.4.3
     peerDependenciesMeta:
       '@cloudflare/workers-types':
@@ -6034,6 +6035,8 @@ packages:
       '@platformatic/vfs':
         optional: true
       ai:
+        optional: true
+      vite:
         optional: true
       zod:
         optional: true
@@ -15907,7 +15910,7 @@ snapshots:
 
   '@cloudflare/codemods@0.4.0': {}
 
-  '@cloudflare/computer@0.4.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.1.8))(supports-color@10.2.2)(zod@4.1.8)':
+  '@cloudflare/computer@0.5.1(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.1.8))(supports-color@10.2.2)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.1.8)':
     dependencies:
       acorn: 8.17.0
       capnweb: 0.10.0
@@ -15916,11 +15919,12 @@ snapshots:
       '@cloudflare/workers-types': 5.20261014.1
       '@platformatic/vfs': 0.4.0
       ai: 7.0.118(zod@4.1.8)
+      vite: 8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
       zod: 4.1.8
     transitivePeerDependencies:
       - supports-color
 
-  '@cloudflare/computer@0.4.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.5.4))(supports-color@10.2.2)(zod@4.5.4)':
+  '@cloudflare/computer@0.5.1(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.5.4))(supports-color@10.2.2)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)':
     dependencies:
       acorn: 8.17.0
       capnweb: 0.10.0
@@ -15929,6 +15933,7 @@ snapshots:
       '@cloudflare/workers-types': 5.20261014.1
       '@platformatic/vfs': 0.4.0
       ai: 7.0.118(zod@4.5.4)
+      vite: 8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
       zod: 4.5.4
     transitivePeerDependencies:
       - supports-color
