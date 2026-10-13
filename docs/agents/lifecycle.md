@@ -234,7 +234,9 @@ physical alarm automatically — there is no explicit rearm call. When the
 alarm fires, Lifecycle drives due jobs in due order as an event loop, then
 runs host `onAlarm()`, then re-arms from queue state. Before driving any job
 it arms a deadman pre-alarm so an isolate death mid-drive still wakes the
-object to resume.
+object to resume. While the queue holds jobs, it also arms one before
+startup runs, 30 seconds out, so an alarm whose startup fails still leaves a
+wake once the platform's own alarm retries run out.
 
 A job's drive result decides what happens next: returning nothing completes
 and deletes it, `{ rescheduleAt }` suspends it until a future time, and

@@ -29,6 +29,10 @@
         "name": "RetryableStartObject"
       },
       {
+        "class_name": "AlarmStartFailureObject",
+        "name": "AlarmStartFailureObject"
+      },
+      {
         "class_name": "ConcurrentStartObject",
         "name": "ConcurrentStartObject"
       },
@@ -449,6 +453,7 @@
         "PlainLifecycleObject",
         "StatefulPlainObject",
         "RetryableStartObject",
+        "AlarmStartFailureObject",
         "ConcurrentStartObject",
         "ScheduledLifecycleObject",
         "SchedulerHarnessObject",

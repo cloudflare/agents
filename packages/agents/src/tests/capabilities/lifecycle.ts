@@ -693,6 +693,41 @@ export class RetryableStartObject extends DurableObject<Cloudflare.Env> {
   }
 }
 
+/** Fails startup while its object's storage holds `fail-start`. */
+class StoredStartFailureProbe extends LifecycleCapability {
+  constructor() {
+    super("stored-start-failure-probe");
+  }
+
+  async onStart(): Promise<void> {
+    if (await this.lifecycle.storage.get<boolean>("fail-start")) {
+      throw new Error("intentional startup failure");
+    }
+  }
+
+  async onJob(): Promise<void> {}
+
+  push(options: LifecycleJobPushOptions) {
+    return this.lifecycle.jobs.push(options);
+  }
+}
+
+/**
+ * Holds a queued job whose alarm runs into a failing startup, so a test can
+ * check that the queue still has a wake once that alarm fails.
+ */
+export class AlarmStartFailureObject extends DurableObject<Cloudflare.Env> {
+  readonly #probe = new StoredStartFailureProbe();
+  readonly lifecycle = Lifecycle.install(this).use(this.#probe);
+
+  /** Queue a job due at `time`, then make every later startup fail. */
+  async queueJobThenFailStartup(time: number): Promise<void> {
+    await this.lifecycle.start();
+    await this.#probe.push({ id: "pending", fn: "tick", time });
+    await this.ctx.storage.put("fail-start", true);
+  }
+}
+
 export type ConcurrentStartOptions = {
   /** Make the capability's start throw after yielding. */
   readonly failCapability?: boolean;
