@@ -12,6 +12,7 @@ import {
   type Harness,
   type ModelRef,
   type SettledSubmissionRecord,
+  type TaskInspection,
   type UserInput
 } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
@@ -63,6 +64,46 @@ const WAIT_BUDGET_MS = 10 * 60_000;
  * job is still due and its alarm restarts the object.
  */
 const HEARTBEAT_MS = 30_000;
+
+/**
+ * The longest a backed-off wake waits. A session with only background work,
+ * or whose wake keeps failing, doubles its heartbeat up to this.
+ */
+const MAX_HEARTBEAT_MS = 10 * 60_000;
+
+/**
+ * A session's wake backoff, stored beside its job so it holds across
+ * restarts. It is not in the job's payload: a wake step that pushed its own
+ * job to save it could overwrite a submit's due-now push.
+ */
+type WakeState = {
+  /** Background-only beats in a row without progress. */
+  readonly idle?: number;
+  /** What the session's live work looked like at the last beat. */
+  readonly progress?: string;
+  /** Failed dispatches in a row. */
+  readonly errors?: number;
+};
+
+function wakeStateKey(session: PiSessionId): string {
+  return `pi-harness:wake:${session}`;
+}
+
+/**
+ * A fingerprint of a session's live work: which tasks are live, and their
+ * checkpoints. It ignores whether a task is pending or running, which a
+ * restart changes without any progress.
+ */
+function progressOf(tasks: readonly TaskInspection[]): string {
+  return JSON.stringify(
+    tasks
+      .map(({ record }) => {
+        const { status, ...state } = record.state;
+        return [record.id, status === "completing", state] as const;
+      })
+      .sort(([a], [b]) => a - b)
+  );
+}
 
 let setWakeTiming: (harness: PiHarness, timing: WakeTiming) => void;
 
@@ -158,6 +199,8 @@ type WakeTiming = {
   readonly waitBudgetMs?: number;
   /** Heartbeat while waiting, and the re-check for background work. Default 30_000. */
   readonly heartbeatMs?: number;
+  /** Longest a backed-off heartbeat gets. Default 600_000. */
+  readonly maxHeartbeatMs?: number;
 };
 
 /**
@@ -249,6 +292,7 @@ export class PiHarness extends LifecycleCapability {
   #sleepThresholdMs = SLEEP_THRESHOLD_MS;
   #waitBudgetMs = WAIT_BUDGET_MS;
   #heartbeatMs = HEARTBEAT_MS;
+  #maxHeartbeatMs = MAX_HEARTBEAT_MS;
   #opening: Promise<Opened> | undefined;
 
   static {
@@ -270,6 +314,27 @@ export class PiHarness extends LifecycleCapability {
     this.#sleepThresholdMs = timing.sleepThresholdMs ?? this.#sleepThresholdMs;
     this.#waitBudgetMs = timing.waitBudgetMs ?? this.#waitBudgetMs;
     this.#heartbeatMs = timing.heartbeatMs ?? this.#heartbeatMs;
+    this.#maxHeartbeatMs = timing.maxHeartbeatMs ?? this.#maxHeartbeatMs;
+  }
+
+  /** The heartbeat after `count` backed-off beats. */
+  #backoff(count: number): number {
+    return Math.min(this.#heartbeatMs * 2 ** count, this.#maxHeartbeatMs);
+  }
+
+  async #wakeState(session: PiSessionId): Promise<WakeState> {
+    return (
+      (await this.lifecycle.storage.get<WakeState>(wakeStateKey(session))) ?? {}
+    );
+  }
+
+  async #setWakeState(session: PiSessionId, state: WakeState): Promise<void> {
+    const key = wakeStateKey(session);
+    if (Object.keys(state).length === 0) {
+      await this.lifecycle.storage.delete(key);
+    } else {
+      await this.lifecycle.storage.put(key, state);
+    }
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -301,12 +366,19 @@ export class PiHarness extends LifecycleCapability {
   /**
    * A wake job whose dispatch failed through its retries. Lifecycle would
    * complete it, and the object would sleep with pi's work unfinished, so
-   * try again on the heartbeat. A later step completes the job once pi
-   * reports nothing left in the session.
+   * try again, backing off while the failures continue. A later step
+   * completes the job once pi reports nothing left in the session.
    */
-  onJobError(context: LifecycleJobContext): LifecycleJobOutcome | void {
+  async onJobError(
+    context: LifecycleJobContext
+  ): Promise<LifecycleJobOutcome | void> {
     if (context.job.fn !== WAKE_FN) return;
-    return { rescheduleAt: Date.now() + this.#heartbeatMs };
+    const session = sessionOfJob(context.job.payload);
+    if (session === undefined) return;
+    const state = await this.#wakeState(session);
+    const errors = (state.errors ?? 0) + 1;
+    await this.#setWakeState(session, { ...state, errors });
+    return { rescheduleAt: Date.now() + this.#backoff(errors - 1) };
   }
 
   /**
@@ -438,6 +510,8 @@ export class PiHarness extends LifecycleCapability {
       // 1. The wake first, so a job is scheduled before pi has the work.
       //    If the object dies after pi admits the input, that job restarts
       //    it. While this admission is in flight the step will not park.
+      //    New input is progress, so the wake drops any backoff.
+      await this.#setWakeState(session, {});
       await this.#wake(session);
       // 2. The one admission. pi deduplicates by request id.
       accepted =
@@ -535,9 +609,18 @@ export class PiHarness extends LifecycleCapability {
     if (this.#waits.has(session)) return heartbeat;
     const { pi } = await this.#open();
     const conversation = await pi.conversation(conversationId(session), BG);
-    if (!conversation) return undefined;
+    if (!conversation) {
+      await this.#setWakeState(session, {});
+      return undefined;
+    }
 
     const inspection = await pi.inspect(BG);
+    // This dispatch got through, so failures no longer count.
+    const state = await this.#wakeState(session);
+    if (state.errors !== undefined) {
+      const { errors: _errors, ...rest } = state;
+      await this.#setWakeState(session, rest);
+    }
     const tasks = inspection.tasks.filter(
       (task) => task.record.conversationId === conversation.id
     );
@@ -550,7 +633,10 @@ export class PiHarness extends LifecycleCapability {
           submission.status === "queued" &&
           submission.conversationId === conversation.id
       );
-      if (queued.length === 0) return undefined;
+      if (queued.length === 0) {
+        await this.#setWakeState(session, {});
+        return undefined;
+      }
       if ((this.#options.onFail ?? "resume") === "abort") {
         for (const submission of queued) {
           await pi.abortSubmission(submission.id, BG, conversation.id);
@@ -579,8 +665,15 @@ export class PiHarness extends LifecycleCapability {
       ? await this.#longWait(pi, conversation.id, BG)
       : undefined;
     if (wakeAt !== undefined) return { rescheduleAt: wakeAt };
-    // Background tasks are outside the conversation's idle wait.
-    if (tasks.every((task) => task.record.background)) return heartbeat;
+    // Background tasks are outside the conversation's idle wait, so the
+    // wake polls them, backing off while they show no progress.
+    if (tasks.every((task) => task.record.background)) {
+      const progress = progressOf(tasks);
+      const idle = state.progress === progress ? (state.idle ?? 0) + 1 : 0;
+      await this.#setWakeState(session, { idle, progress });
+      return { rescheduleAt: Date.now() + this.#backoff(idle) };
+    }
+    if (state.idle !== undefined) await this.#setWakeState(session, {});
 
     const wait = this.#waitForIdle(conversation).finally(() => {
       this.#waits.delete(session);

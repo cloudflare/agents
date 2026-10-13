@@ -23,6 +23,9 @@ import { TEST_TIMING } from "./timing";
 /** Long enough that a wake parked on it would miss everything else. */
 export const GENERATION_RETRY_DELAY_MS = 60_000;
 
+/** The longest a test's backed-off wake waits. */
+export const MAX_HEARTBEAT_MS = 8_000;
+
 /** Short enough that a test sees a wake's wait run out. */
 export const WAIT_BUDGET_MS = 300;
 
@@ -121,7 +124,8 @@ function defineWakeTestObject(lifecycleOptions?: LifecycleOptions) {
       super(ctx, env);
       setWakeTimingForTests(this.harness, {
         ...TEST_TIMING,
-        waitBudgetMs: WAIT_BUDGET_MS
+        waitBudgetMs: WAIT_BUDGET_MS,
+        maxHeartbeatMs: MAX_HEARTBEAT_MS
       });
       this.#faux.setResponses([
         fauxAssistantMessage([], {
@@ -211,6 +215,26 @@ function defineWakeTestObject(lifecycleOptions?: LifecycleOptions) {
         BACKGROUND_CONTEXT
       );
       return live?.generation?.retry?.at;
+    }
+
+    /** Bring a session's wake job due now, as if its time had come. */
+    async makeWakeDue(session = "1"): Promise<void> {
+      this.ctx.storage.sql.exec(
+        "UPDATE cf_agents_jobs SET time = ? WHERE id = ?",
+        Date.now() - 1,
+        `pi-wake:${session}`
+      );
+    }
+
+    /** The backoff a session's wake keeps between beats, if any. */
+    async wakeState(
+      session = "1"
+    ): Promise<{ idle?: number; errors?: number } | null> {
+      return (
+        (await this.ctx.storage.get<{ idle?: number; errors?: number }>(
+          `pi-harness:wake:${session}`
+        )) ?? null
+      );
     }
 
     /** The due time of a session's wake job, or null without one. */
