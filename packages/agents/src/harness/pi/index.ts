@@ -13,6 +13,7 @@ export {
   type PiHarnessContext,
   type PiHarnessFactory,
   type PiHarnessOptions,
+  type PiOnFail,
   type PiModel,
   type PiSessionDefaults
 } from "./harness";

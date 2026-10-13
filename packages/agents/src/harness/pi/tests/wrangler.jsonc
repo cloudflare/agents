@@ -18,6 +18,14 @@
         "name": "PI_QUARANTINE_TEST",
         "class_name": "PiQuarantineTestObject"
       },
+      {
+        "name": "PI_ON_FAIL_RESUME_TEST",
+        "class_name": "PiOnFailResumeTestObject"
+      },
+      {
+        "name": "PI_ON_FAIL_ABORT_TEST",
+        "class_name": "PiOnFailAbortTestObject"
+      },
       // The browser tool's codemode runtime facet. The test pool needs a
       // binding for ctx.exports to hand it out; it stays out of
       // new_sqlite_classes, since the host owns the SQLite store.
@@ -37,7 +45,9 @@
         "PiFlakyFactoryTestObject",
         "PiBrowserTestObject",
         "PiWakeTestObject",
-        "PiQuarantineTestObject"
+        "PiQuarantineTestObject",
+        "PiOnFailResumeTestObject",
+        "PiOnFailAbortTestObject"
       ]
     }
   ]
