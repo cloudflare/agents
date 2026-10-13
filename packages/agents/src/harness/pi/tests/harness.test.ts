@@ -63,6 +63,30 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.instance()).not.toBe(before);
   });
 
+  it("holds the object while a tool waits without I/O, so the tool runs once", async () => {
+    const stub = fresh();
+    const receipt = await stub.submit("hold");
+    await stub.holdStarted(1);
+    const instance = await stub.instance();
+
+    // Nothing but the wake keeps the object alive while the tool waits.
+    const eviction = await evictWhenIdle(stub);
+    expect(eviction.result).toBe("kept");
+    // Heartbeats find the same instance, so pi has nothing to resume.
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    expect(await stub.instance()).toBe(instance);
+
+    expect(await stub.releaseHold()).toBe(true);
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done",
+      text: "tool said: held after 1 runs"
+    });
+    expect(await stub.holdRuns()).toBe(1);
+    // With pi idle, the object drains and the eviction completes.
+    await eviction.evicted;
+  });
+
   it("dedupes a submission by operation id", async () => {
     const stub = fresh();
     const receipt = await stub.submit("hello", { operationId: "op-1" });
