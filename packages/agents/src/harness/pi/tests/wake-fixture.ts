@@ -16,7 +16,7 @@ import { DurableObject } from "cloudflare:workers";
 import { Lifecycle, type LifecycleOptions } from "../../../lifecycle";
 import { setWakeTimingForTests } from "../harness";
 import { BACKGROUND_CONTEXT } from "../context";
-import { PiHarness } from "../index";
+import { PiHarness, type PiHarnessOptions, type PiTask } from "../index";
 import { fauxModels } from "./faux";
 import { TEST_TIMING } from "./timing";
 
@@ -62,7 +62,10 @@ const SleepUntil = defineTask<{ runAt: number }, { phase: "wait" }, null>({
  * waits `GENERATION_RETRY_DELAY_MS` before retrying, so a generation can
  * sit in a long retry while other work in the session is due sooner.
  */
-function defineWakeTestObject(lifecycleOptions?: LifecycleOptions) {
+function defineWakeTestObject(
+  lifecycleOptions?: LifecycleOptions,
+  harnessOptions: Partial<PiHarnessOptions> = {}
+) {
   return class extends DurableObject<Cloudflare.Env> {
     readonly #faux = fauxProvider({
       tokensPerSecond: 200,
@@ -114,7 +117,8 @@ function defineWakeTestObject(lifecycleOptions?: LifecycleOptions) {
         };
         return pi;
       },
-      defaults: { model: this.#faux.getModel() }
+      defaults: { model: this.#faux.getModel() },
+      ...harnessOptions
     });
     readonly lifecycle = Lifecycle.install(this, lifecycleOptions).use(
       this.harness
@@ -259,3 +263,15 @@ export const PiQuarantineTestObject = defineWakeTestObject({
 export type PiQuarantineTestObject = InstanceType<
   typeof PiQuarantineTestObject
 >;
+
+/** When a `test.sleep-until` task is due; nothing for other tasks. */
+export function sleepUntilWakeAt(task: PiTask): Date | undefined {
+  if (task.kind !== "test.sleep-until") return undefined;
+  return new Date((task.input as { runAt: number }).runAt);
+}
+
+/** Reports `test.sleep-until` deadlines through `wakeAt`. */
+export const PiDeadlineTestObject = defineWakeTestObject(undefined, {
+  wakeAt: sleepUntilWakeAt
+});
+export type PiDeadlineTestObject = InstanceType<typeof PiDeadlineTestObject>;

@@ -15,7 +15,8 @@ export {
   type PiHarnessOptions,
   type PiOnFail,
   type PiModel,
-  type PiSessionDefaults
+  type PiSessionDefaults,
+  type PiTask
 } from "./harness";
 export {
   openPiSessionStore,
