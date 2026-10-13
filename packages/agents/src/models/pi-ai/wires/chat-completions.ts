@@ -409,10 +409,12 @@ class CompletionAssembler {
         this.output.stopReason = hasToolCalls ? "toolUse" : "stop";
       } else {
         this.output.stopReason = "error";
+        // "ended without" is wording pi-ai's retry classifier treats as a
+        // transient failure, so pi retries the request rather than failing.
         this.output.errorMessage =
           this.blocks.length > 0
-            ? "The stream ended before the model finished its answer."
-            : "The stream ended before the model produced any output.";
+            ? "The stream ended without the model finishing its answer."
+            : "The stream ended without any output from the model.";
       }
     } else if (this.output.stopReason === "stop" && hasToolCalls) {
       this.output.stopReason = "toolUse";
