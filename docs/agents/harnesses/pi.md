@@ -195,6 +195,8 @@ When a session's only live work is a generation waiting more than a minute to re
 
 If a wake job's dispatch keeps failing, for example because Pi's storage cannot be read, the job is not dropped. It tries again on the heartbeat until the session has no live work.
 
+Work that keeps exceeding the object's memory is stopped rather than retried forever. When the lifecycle's memory-limit breaker seals, the harness records the session whose wake job struck, or every purged session when the breaker cannot tell which one. On the next start, before Pi resumes, it aborts that session's tasks and withdraws its queued inputs. Those submissions end as `unanswered` with reason `aborted`, other sessions keep running, and the `pi:quarantined` lifecycle event names each session it stopped.
+
 Every operation waits for the object's startup, which runs the factory. A call over RPC that arrives first waits for it rather than opening Pi on its own.
 
 ## Run the example
