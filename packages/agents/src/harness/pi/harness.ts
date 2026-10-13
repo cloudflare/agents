@@ -20,6 +20,7 @@ import {
   type LifecycleJobContext,
   type LifecycleJobOutcome
 } from "../../lifecycle";
+import { isDurableObjectMemoryLimitReset } from "../../retries";
 import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "./context";
 import { openPiSessionStore } from "./session-store";
 import type {
@@ -479,15 +480,24 @@ export class PiHarness extends LifecycleCapability {
     // Background tasks are outside the conversation's idle wait.
     if (tasks.every((task) => task.record.background)) return heartbeat;
 
-    const wait = this.#waitForIdle(conversation).finally(() => {
-      this.#waits.delete(session);
-      // Re-check now: pi may have started more work, such as a follow-up.
-      void this.#wake(session);
-    });
+    const wait = this.#waitForIdle(conversation).then(
+      () => {
+        this.#waits.delete(session);
+        // Re-check now: pi may have started more work, such as a follow-up.
+        void this.#wake(session);
+      },
+      (error: unknown) => {
+        // A memory-limit reset: the breaker retimes the job, not us.
+        this.#waits.delete(session);
+        throw error;
+      }
+    );
     this.#waits.set(session, wait);
     // The wait runs past this dispatch, inside the alarm's work, so the
-    // object stays alive for it. The heartbeat covers an eviction.
-    this.lifecycle.trackAlarmWork(wait);
+    // object stays alive for it, and a memory-limit reset it reports
+    // counts against the wake job's breaker. The heartbeat covers an
+    // eviction.
+    if (!this.lifecycle.trackAlarmWork(wait)) wait.catch(() => {});
     return heartbeat;
   }
 
@@ -498,12 +508,13 @@ export class PiHarness extends LifecycleCapability {
       // Cancelling the wait never cancels pi's work.
       await conversation.waitForIdle(withAbortSignal(budget.signal, BG));
     } catch (error) {
-      if (!budget.signal.aborted) {
-        this.lifecycle.events.emit("pi:wake_error", {
-          session: String(conversation.id),
-          error: error instanceof Error ? error.message : String(error)
-        });
-      }
+      if (budget.signal.aborted) return;
+      this.lifecycle.events.emit("pi:wake_error", {
+        session: String(conversation.id),
+        error: error instanceof Error ? error.message : String(error)
+      });
+      // Only the breaker can act on a memory-limit reset.
+      if (isDurableObjectMemoryLimitReset(error)) throw error;
     } finally {
       clearTimeout(timer);
     }

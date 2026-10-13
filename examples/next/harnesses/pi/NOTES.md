@@ -68,7 +68,9 @@ A run of the job (`#wakeStep`) never admits or replays anything:
 - **Only background tasks:** reschedule in 30 s.
 - **Otherwise:** start `conversation.waitForIdle()` in the background,
   inside the alarm's work (`trackAlarmWork`), and reschedule the job 30 s out
-  as a heartbeat. When the wait ends, push the job due now to re-check.
+  as a heartbeat. When the wait ends, push the job due now to re-check. A
+  memory-limit reset during the wait is passed on, so it counts against the
+  job's alarm breaker, which then decides when the job runs again.
 
 The whole thing relies on one Lifecycle rule: a same-id `push()` made while
 the job is dispatching supersedes that dispatch's outcome. So a submit

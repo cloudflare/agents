@@ -31,6 +31,8 @@ import {
 
 const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
+/** Where the Lifecycle's alarm breaker counts memory-limit strikes. */
+const STRIKES_KEY = "cf_agents:oom_alarm_strikes";
 
 function textOf(content: Message["content"] | undefined): string {
   if (content === undefined) return "";
@@ -215,11 +217,21 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.#idleWaits;
   }
 
+  /** Make the wake's next idle wait reject with `message`. */
+  failNextIdleWait(message: string): void {
+    this.#idleFailure = message;
+  }
+
+  async memoryLimitStrikes(): Promise<number> {
+    return (await this.ctx.storage.get<number>(STRIKES_KEY)) ?? 0;
+  }
+
   setWaitBudget(waitBudgetMs: number): void {
     setWakeTimingForTests(this.harness, { waitBudgetMs });
   }
 
   #idleWaits = 0;
+  #idleFailure: string | undefined;
   readonly #observed = new WeakSet<Conversation>();
 
   /**
@@ -244,6 +256,9 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     const waitForIdle = conversation.waitForIdle.bind(conversation);
     conversation.waitForIdle = (...args) => {
       this.#idleWaits++;
+      const failure = this.#idleFailure;
+      this.#idleFailure = undefined;
+      if (failure !== undefined) return Promise.reject(new Error(failure));
       return waitForIdle(...args);
     };
   }

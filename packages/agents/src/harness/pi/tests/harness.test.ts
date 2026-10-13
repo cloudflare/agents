@@ -121,6 +121,24 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.gateRuns()).toBe(1);
   });
 
+  it("counts a memory-limit reset during the wake's wait against its breaker", async () => {
+    const name = crypto.randomUUID();
+    await fresh(name).failNextIdleWait(
+      "Durable Object's isolate exceeded its memory limit and was reset."
+    );
+    await fresh(name).submit("gate");
+
+    // The breaker resets the object once it records the strike.
+    let strikes = 0;
+    for (let i = 0; i < 100 && strikes === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      strikes = await fresh(name)
+        .memoryLimitStrikes()
+        .catch(() => 0);
+    }
+    expect(strikes).toBe(1);
+  });
+
   it("aborts the running work", async () => {
     const stub = fresh();
     const receipt = await stub.submit("gate");
