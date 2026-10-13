@@ -28,12 +28,21 @@ const INITIAL_STATE: State = {
  * `useAgent`. The server sends pi's own agent events; this folds them with
  * the same `reduceEvents` the server tests use. A reconnect gets a fresh
  * snapshot, and the client sends again every submit it has not seen
- * answered; the server deduplicates them by operation id.
+ * answered, including ones a reloaded tab saved; the server deduplicates
+ * them by operation id.
  */
+function openOutbox(object: string): PiCommandOutbox {
+  return new PiCommandOutbox(
+    typeof localStorage === "undefined" ? undefined : localStorage,
+    `pi-outbox:${object}`
+  );
+}
+
 export function usePiSession(object: string) {
   const [state, setState] = useState<State>(INITIAL_STATE);
-  // Submits not yet answered, sent again whenever the socket opens.
-  const outbox = useRef(new PiCommandOutbox());
+  // Submits not yet answered, sent again whenever the socket opens. Kept
+  // in `localStorage`, so a reloaded tab still sends them.
+  const outbox = useRef(openOutbox(object));
   const socket = useRef<{ send(data: string): void } | null>(null);
 
   const agent = useAgent({
@@ -77,7 +86,7 @@ export function usePiSession(object: string) {
 
   useEffect(() => {
     setState(INITIAL_STATE);
-    outbox.current = new PiCommandOutbox();
+    outbox.current = openOutbox(object);
   }, [object]);
 
   const send = useCallback(

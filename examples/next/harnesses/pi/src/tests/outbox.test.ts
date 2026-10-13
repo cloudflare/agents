@@ -31,7 +31,37 @@ function next(
   });
 }
 
+/** The part of `localStorage` the outbox uses, in memory. */
+function memoryStorage() {
+  const items = new Map<string, string>();
+  return {
+    getItem: (key: string) => items.get(key) ?? null,
+    setItem: (key: string, value: string) => void items.set(key, value),
+    removeItem: (key: string) => void items.delete(key)
+  };
+}
+
 describe("the client command outbox", () => {
+  it("keeps unacknowledged submits in storage across a reload", () => {
+    const storage = memoryStorage();
+    const before = new PiCommandOutbox(storage, "pi-outbox:a");
+    const submit = before.submit("hello");
+
+    // A reload builds a new outbox over the same storage.
+    const after = new PiCommandOutbox(storage, "pi-outbox:a");
+    expect(after.pending()).toEqual([submit]);
+    expect(new PiCommandOutbox(storage, "pi-outbox:b").pending()).toEqual([]);
+
+    after.receive({ type: "result", id: submit.id!, result: null });
+    expect(new PiCommandOutbox(storage, "pi-outbox:a").pending()).toEqual([]);
+  });
+
+  it("ignores stored submits it cannot read", () => {
+    const storage = memoryStorage();
+    storage.setItem("pi-outbox:a", "{not json");
+    expect(new PiCommandOutbox(storage, "pi-outbox:a").pending()).toEqual([]);
+  });
+
   it("names each submit with a durable operation id and keeps it until acknowledged", () => {
     const outbox = new PiCommandOutbox();
     const submit = outbox.submit("hello", "followUp");
@@ -53,7 +83,8 @@ describe("the client command outbox", () => {
 
   it("replays an unacknowledged submit after a reconnect without running it twice", async () => {
     const name = crypto.randomUUID();
-    const outbox = new PiCommandOutbox();
+    const storage = memoryStorage();
+    let outbox = new PiCommandOutbox(storage, `pi-outbox:${name}`);
     const submit = outbox.submit("echo once");
 
     // The server admits the prompt, but the connection drops before the
@@ -66,6 +97,8 @@ describe("the client command outbox", () => {
     for (const command of outbox.pending()) first.send(JSON.stringify(command));
     await admitted;
     first.close();
+    // The tab reloads before it reads the result.
+    outbox = new PiCommandOutbox(storage, `pi-outbox:${name}`);
     expect(outbox.pending()).toEqual([submit]);
 
     const second = await connect(name);
