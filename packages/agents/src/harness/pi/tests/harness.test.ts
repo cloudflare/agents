@@ -99,6 +99,28 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.gateRuns()).toBe(1);
   });
 
+  it("waits on a run longer than the wait budget across several wakes", async () => {
+    const stub = fresh();
+    // pi's work runs inside the alarm that started it, and alarms have a
+    // 15 minute wall-time limit, so one wake never waits longer than this.
+    await stub.setWaitBudget(100);
+    const receipt = await stub.submit("gate");
+    await stub.gateStarted(1);
+
+    let waits = await stub.idleWaits();
+    for (let i = 0; i < 100 && waits < 3; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      waits = await stub.idleWaits();
+    }
+    expect(waits).toBeGreaterThanOrEqual(3);
+
+    await stub.release();
+    expect((await stub.wait(receipt.operationId)).text).toBe(
+      "tool said: released after 1 runs"
+    );
+    expect(await stub.gateRuns()).toBe(1);
+  });
+
   it("aborts the running work", async () => {
     const stub = fresh();
     const receipt = await stub.submit("gate");

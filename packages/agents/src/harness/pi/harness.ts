@@ -49,9 +49,9 @@ export const ROOT_SESSION: PiSessionId = String(ROOT_CONVERSATION_ID);
 const SLEEP_THRESHOLD_MS = 60_000;
 
 /**
- * Longest one wake waits on pi. It waits inside an alarm invocation, which
- * has a 15 minute wall-time limit, so a longer run is waited on across
- * several alarms.
+ * Longest one wake waits on pi. The wait, and pi's work the alarm started,
+ * run inside an alarm invocation, which has a 15 minute wall-time limit, so
+ * a longer run is waited on across several alarms.
  */
 const WAIT_BUDGET_MS = 10 * 60_000;
 

@@ -12,6 +12,7 @@ import {
   createRegistry,
   Harness,
   type AgentEvent,
+  type Conversation,
   type EntryRecord,
   type Extension,
   type ToolRegistration
@@ -100,15 +101,17 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   readonly harness = new PiHarness({
     harness: async ({ storage, context }) => {
       this.registry.install(this.#testTools());
-      return Harness.open(
-        storage,
-        {
-          models: fauxModels(this.#faux.provider),
-          registry: this.registry,
-          settings: { retry: NO_RETRY },
-          onReport: (error) => console.warn("pi report", error)
-        },
-        context
+      return this.#observe(
+        await Harness.open(
+          storage,
+          {
+            models: fauxModels(this.#faux.provider),
+            registry: this.registry,
+            settings: { retry: NO_RETRY },
+            onReport: (error) => console.warn("pi report", error)
+          },
+          context
+        )
       );
     },
     defaults: { model: this.#faux.getModel() }
@@ -205,6 +208,44 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   async alarmTime(): Promise<number | null> {
     return this.ctx.storage.getAlarm();
+  }
+
+  /** How many times the wake has waited on a conversation going idle. */
+  idleWaits(): number {
+    return this.#idleWaits;
+  }
+
+  setWaitBudget(waitBudgetMs: number): void {
+    setWakeTimingForTests(this.harness, { waitBudgetMs });
+  }
+
+  #idleWaits = 0;
+  readonly #observed = new WeakSet<Conversation>();
+
+  /**
+   * pi, with each conversation's `waitForIdle` counted. The methods are
+   * replaced on the instances: pi checks its own objects' brands, so a
+   * proxy would not pass for them.
+   */
+  #observe(pi: Harness): Harness {
+    const conversation = pi.conversation.bind(pi);
+    pi.conversation = async (...args) => {
+      const found = await conversation(...args);
+      if (found) this.#observeConversation(found);
+      return found;
+    };
+    return pi;
+  }
+
+  #observeConversation(conversation: Conversation): void {
+    // pi may hand back the same conversation object again.
+    if (this.#observed.has(conversation)) return;
+    this.#observed.add(conversation);
+    const waitForIdle = conversation.waitForIdle.bind(conversation);
+    conversation.waitForIdle = (...args) => {
+      this.#idleWaits++;
+      return waitForIdle(...args);
+    };
   }
 
   /** The fixture's tools and preamble, as one pi extension. */

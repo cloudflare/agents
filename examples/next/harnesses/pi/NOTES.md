@@ -152,12 +152,15 @@ Objects.
 
 ### Alarm wall time
 
-The wake's wait runs inside an alarm invocation (`trackAlarmWork`), and
-alarm handlers have a 15 minute wall-time limit. Outbound model streams keep
-an object alive for at most 15 minutes too. A wait therefore lasts at most 10
-minutes and then pushes the job due now, which starts a new alarm
-invocation. A single model request that streams for more than 15 minutes
-is still at the platform's mercy.
+The wake's wait runs inside an alarm invocation (`trackAlarmWork`), and so
+does pi's own work that the alarm starts or resumes: a 12 s model run
+started from an alarm shows up as a 12 s alarm. Alarm handlers have a 15
+minute wall-time limit, and outbound model streams keep an object alive for
+at most 15 minutes too. A wait therefore lasts at most 10 minutes and then
+pushes the job due now, which starts a new alarm invocation. The budget is
+the only thing that keeps a long run under the limit, so it cannot be
+removed without another way to hold pi's work. A single model request that
+streams for more than 15 minutes is still at the platform's mercy.
 
 ### Graceful eviction waits for the wake
 
