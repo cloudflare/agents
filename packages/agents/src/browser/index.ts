@@ -37,17 +37,20 @@ export {
 
 export {
   Browser,
-  browserRun,
   DEFAULT_BROWSER_SCOPE,
   MAX_BROWSER_SCOPES,
   type BrowserConnection,
   type BrowserConnectOptions,
   type BrowserOptions,
   type BrowserProvider,
-  type BrowserRunOptions,
-  type BrowserRunProvider,
   type ResolvedBrowser
 } from "./browser";
+
+export {
+  browserRun,
+  type BrowserRunOptions,
+  type BrowserRunProvider
+} from "./providers/browser-run";
 
 export {
   browserContent,

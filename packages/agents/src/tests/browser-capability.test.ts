@@ -8,12 +8,14 @@ import {
 } from "./capabilities/browser";
 import { withCapabilityHarness } from "./shared/capability-harness";
 import {
-  BROWSER_SESSION_KEEP_ALIVE_MAX_MS,
   Browser,
-  browserRun,
   DEFAULT_BROWSER_SCOPE,
   namedBrowserSessionKey
 } from "../browser/browser";
+import {
+  BROWSER_SESSION_KEEP_ALIVE_MAX_MS,
+  browserRun
+} from "../browser/providers/browser-run";
 import type {
   ListableBrowserSessionStore,
   StoredBrowserSession

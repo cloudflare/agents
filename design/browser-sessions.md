@@ -74,7 +74,7 @@ On an `Agent`, call `this.lifecycle.use(this.browser)` in the constructor instea
 - **The host names the browser, not the model.** `BrowserConnector`, the connector behind `createBrowserTools`, lets the model decide when to keep a browser (its `dynamic` mode). Here the host decides, and a lost browser is always reported, never silently replaced.
 - **One object per browser.** An earlier version had one object that managed every browser by name, on top of a separate internal class. The two were hard to tell apart, and naming the browser once up front is simpler.
 - **Browser Run handles idle browsers.** An earlier version had a cleanup job. It duplicated `keepAliveMs`, woke idle objects, and could shut down a browser a person was using through Live View, because that traffic never reaches the host.
-- **No provider interface yet.** `browserRun()` returns a plain config object. A real interface waits until there's a second provider to shape it.
+- **Providers are data; adapters are internal.** `browserRun()` returns a plain config object. `Browser` turns it into an internal `BrowserProviderAdapter` (`providers/provider-adapter.ts`) with one explicit `switch` case per provider kind, and keeps everything else (the record, locks, restart detection, scopes, activity touches) itself. The adapter isn't exported: the set of providers stays closed until a third one is real. Adapters report a lost session as `false` from `isAlive` or a `BrowserSessionGoneError` from `connect`, and throw when they can't tell, so a flaky probe never replaces a live browser.
 
 ## Tradeoffs
 

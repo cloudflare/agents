@@ -1,6 +1,7 @@
 import type { AgentContext } from "../../index.ts";
 import { Agent } from "../../index.ts";
-import { Browser, browserRun } from "../../browser/browser";
+import { Browser } from "../../browser/browser";
+import { browserRun } from "../../browser/providers/browser-run";
 import { browserTool, type BrowserTool } from "../../browser/tools/ai-sdk";
 import { browserTool as piBrowserTool } from "../../browser/tools/pi";
 import { browserTool as tanStackBrowserTool } from "../../browser/tools/tanstack-ai";

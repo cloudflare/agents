@@ -2,10 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { BrowserSessionConnector } from "../browser/session-connector";
 import {
   Browser,
-  browserRun,
   MAX_BROWSER_SCOPES,
   namedBrowserSessionKey
 } from "../browser/browser";
+import { browserRun } from "../browser/providers/browser-run";
 import type {
   BrowserSessionLock,
   BrowserSessionStore,

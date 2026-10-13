@@ -6,38 +6,29 @@
  * one and reports `restarted: true` so the model knows its earlier state is
  * gone.
  *
- * Browser Run is the only provider today; see {@link browserRun}.
+ * Where the browser runs is its provider: Browser Run is the only one today
+ * (`browserRun` in ./providers/browser-run.ts). `Browser` holds everything
+ * that doesn't depend on the provider and calls the provider's adapter for
+ * the rest (see ./providers/provider-adapter.ts).
  */
 
 import { LifecycleCapability } from "../lifecycle/capability";
 import type { CdpConnection } from "./cdp-connection";
+import type { BrowserLiveView, LiveViewMode } from "./live-view";
 import {
-  type BrowserBinding,
-  type BrowserSessionGuardrails,
-  connectBrowserSession,
-  createBrowserSession,
-  deleteBrowserSession,
-  isMissingBrowserSession,
-  listBrowserTargets
-} from "./browser-run";
+  browserRunAdapter,
+  type BrowserRunProvider
+} from "./providers/browser-run";
 import {
-  createLiveView,
-  type BrowserLiveView,
-  type LiveViewMode
-} from "./live-view";
+  BrowserSessionGoneError,
+  type BrowserProviderAdapter
+} from "./providers/provider-adapter";
 import {
   DurableBrowserSessionStore,
   type ListableBrowserSessionStore,
   type StoredBrowserSession
 } from "./session-store";
-import { loadCdpSpec, type SearchableCdpSpec } from "./spec";
-
-/**
- * Browser Run's server-side `keep_alive` maximum (600 seconds). A `Browser`
- * pins keep-alive here by default so it survives quiet spells between agent
- * turns; the platform reclaims it only after this long idle.
- */
-export const BROWSER_SESSION_KEEP_ALIVE_MAX_MS = 600_000;
+import type { SearchableCdpSpec } from "./spec";
 
 /**
  * Minimum interval between store `updatedAt` refreshes driven by CDP traffic
@@ -89,51 +80,19 @@ function browserScopeKeyPrefix(name: string): string {
   return `browser:scope:${name.length}:${name}:`;
 }
 
-/**
- * Browser Run settings applied every time a browser is created — including
- * when a lost browser is replaced — so options like guardrails survive a
- * restart.
- */
-export interface BrowserRunOptions {
-  /**
-   * Platform `keep_alive` in milliseconds: how long an idle browser lives.
-   * Defaults to {@link BROWSER_SESSION_KEEP_ALIVE_MAX_MS} (the platform
-   * maximum).
-   */
-  keepAliveMs?: number;
-  /** Opt into Browser Run session recording (rrweb capture). */
-  recording?: boolean;
-  /** Hostname guardrails, fixed at launch for every connection. */
-  guardrails?: BrowserSessionGuardrails;
-}
-
-/** A {@link Browser} provider backed by Cloudflare Browser Run. */
-export interface BrowserRunProvider {
-  readonly kind: "browser-run";
-  readonly binding: BrowserBinding;
-  readonly options: BrowserRunOptions;
-}
-
 /** Where a {@link Browser} gets its browser from. */
 export type BrowserProvider = BrowserRunProvider;
 
-/**
- * Run the browser on Cloudflare Browser Run.
- *
- * @example
- * ```ts
- * new Browser({ provider: browserRun(env.BROWSER, { recording: true }) });
- * ```
- */
-export function browserRun(
-  binding: BrowserBinding,
-  options: BrowserRunOptions = {}
-): BrowserRunProvider {
-  return { kind: "browser-run", binding, options };
+/** The adapter behind a provider: one explicit case per provider kind. */
+function providerAdapterFor(provider: BrowserProvider): BrowserProviderAdapter {
+  switch (provider.kind) {
+    case "browser-run":
+      return browserRunAdapter(provider);
+  }
 }
 
 export interface BrowserOptions {
-  /** Where the browser runs. Create one with {@link browserRun}. */
+  /** Where the browser runs. Create one with `browserRun()`. */
   provider: BrowserProvider;
   /**
    * Which browser this is. Two `Browser` objects on the same Durable Object
@@ -161,7 +120,7 @@ export interface BrowserOptions {
 
 export interface ResolvedBrowser {
   name: string;
-  /** The Browser Run session id — host-side only, never model-visible. */
+  /** The provider's session id — host-side only, never model-visible. */
   sessionId: string;
   /**
    * `true` when this resolution had to create a fresh browser to replace one
@@ -215,7 +174,7 @@ export interface BrowserConnection {
   targetsInOtherScopes(): Promise<Set<string>>;
   /**
    * The Chrome DevTools Protocol description this browser serves, read from
-   * the browser itself (cached per binding).
+   * the browser itself (cached).
    */
   spec(): Promise<SearchableCdpSpec>;
 }
@@ -225,16 +184,16 @@ export interface BrowserConnection {
  *
  * Install it with `Lifecycle.use()` — on an Agent subclass or any Durable
  * Object that composes `Lifecycle` — and it stores its record in the
- * object's own storage. It schedules nothing: Browser Run reclaims idle
- * browsers itself once `keep_alive` elapses, and the next use replaces the
- * lost browser with `restarted: true`.
+ * object's own storage. It schedules nothing: the provider reclaims idle
+ * browsers itself (Browser Run once `keep_alive` elapses), and the next use
+ * replaces the lost browser with `restarted: true`.
  *
- * Everything here is host-side. Models never see browser names, Browser Run
- * ids, or Live View URLs through this surface.
+ * Everything here is host-side. Models never see browser names, provider
+ * session ids, or Live View URLs through this surface.
  *
  * Store discipline: locks wrap storage operations only — liveness probes and
- * Browser Run create/delete calls always happen outside any lock, with a
- * commit re-check to detect concurrent swaps.
+ * provider create/close calls always happen outside any lock, with a commit
+ * re-check to detect concurrent swaps.
  *
  * @experimental The API surface may change before stabilizing.
  */
@@ -243,6 +202,7 @@ export class Browser extends LifecycleCapability {
   readonly name: string;
   readonly #options: BrowserOptions;
   readonly #key: string;
+  readonly #adapter: BrowserProviderAdapter;
   #store?: ListableBrowserSessionStore;
 
   constructor(options: BrowserOptions) {
@@ -254,6 +214,7 @@ export class Browser extends LifecycleCapability {
     this.name = name;
     this.#options = options;
     this.#key = namedBrowserSessionKey(name);
+    this.#adapter = providerAdapterFor(options.provider);
   }
 
   /**
@@ -276,7 +237,7 @@ export class Browser extends LifecycleCapability {
       }
 
       // Live entry on record — probe it outside any lock.
-      const alive = await this.#isAlive(existing);
+      const alive = await this.#adapter.isAlive(existing.sessionId);
       const lock = await this.#sessionStore.acquireLock(key);
       try {
         const current = await this.#sessionStore.get(key);
@@ -325,7 +286,7 @@ export class Browser extends LifecycleCapability {
     try {
       cdp = await this.#open(resolved);
     } catch (error) {
-      if (!isMissingBrowserSession(error)) throw error;
+      if (!(error instanceof BrowserSessionGoneError)) throw error;
       await this.#retireIfCurrent(resolved.sessionId);
       resolved = await this.resolve();
       cdp = await this.#open(resolved);
@@ -346,7 +307,6 @@ export class Browser extends LifecycleCapability {
     entered: { restarted: boolean; activeTargetId?: string }
   ): BrowserConnection {
     const { sessionId } = resolved;
-    const { binding } = this.#provider;
     return {
       name: resolved.name,
       sessionId,
@@ -358,14 +318,14 @@ export class Browser extends LifecycleCapability {
         this.#updateScope(scope, sessionId, targetId),
       targetsInOtherScopes: async () =>
         activeTargets(await this.#listScopes(), scope, sessionId),
-      spec: () => loadCdpSpec({ browser: binding, sessionId })
+      spec: () => this.#adapter.spec(sessionId)
     };
   }
 
   async #open(resolved: ResolvedBrowser): Promise<CdpConnection> {
     let lastTouchAt = Date.now();
     let touchInFlight = false;
-    return connectBrowserSession(this.#provider.binding, resolved.sessionId, {
+    return this.#adapter.connect(resolved.sessionId, {
       timeoutMs: this.#options.timeoutMs,
       onActivity: () => {
         const now = Date.now();
@@ -390,12 +350,13 @@ export class Browser extends LifecycleCapability {
 
   /**
    * Close the browser: retire the record (so the next resolve reports
-   * `restarted: true`) and delete its Browser Run session. Returns `false`
-   * when there was nothing to close.
+   * `restarted: true`) and close its provider session. Returns `false` when
+   * there was nothing to close.
    *
-   * The platform delete is best-effort: the retired record is the durable
-   * outcome, and a browser whose delete failed is unreachable through this
-   * store, so the pinned `keep_alive` (≤600s) reclaims it.
+   * The provider close is best-effort: the retired record is the durable
+   * outcome, and a browser whose close failed is unreachable through this
+   * store, so the provider reclaims it once idle (Browser Run: the pinned
+   * `keep_alive`, ≤600s).
    */
   async close(): Promise<boolean> {
     let stored: StoredBrowserSession | undefined;
@@ -409,10 +370,10 @@ export class Browser extends LifecycleCapability {
       await lock.release();
     }
     try {
-      await deleteBrowserSession(this.#provider.binding, stored.sessionId);
+      await this.#adapter.close(stored.sessionId);
     } catch (error) {
       console.warn(
-        `[agents/browser] Failed to delete closed Browser Run session ${stored.sessionId}`,
+        `[agents/browser] Failed to close browser session ${stored.sessionId}`,
         error
       );
     }
@@ -431,56 +392,38 @@ export class Browser extends LifecycleCapability {
   }): Promise<BrowserLiveView | undefined> {
     const entry = await this.#sessionStore.get(this.#key);
     if (!entry) return undefined;
+    const view = await this.#adapter.liveView(entry.sessionId, options?.mode);
+    if (!view) return undefined;
+    // A human is about to look: minting counts as activity. Target listing
+    // yields to the network, so a concurrent close or replacement can retire
+    // the browser mid-mint — the touch and the retire serialize on the key
+    // lock, and a lost touch means the listed targets are already dead:
+    // report the browser gone rather than handing out doomed links. Touch
+    // *errors* stay best effort — a store blip must not break minting.
     try {
-      const targets = await listBrowserTargets(
-        this.#provider.binding,
-        entry.sessionId
-      );
-      // A human is about to look: minting counts as activity. Target
-      // listing yields to the network, so a concurrent close or replacement
-      // can retire the browser mid-mint — the touch and the retire
-      // serialize on the key lock, and a lost touch means the listed
-      // targets are already dead: report the browser gone rather than
-      // minting doomed links. Touch *errors* stay best effort — a store
-      // blip must not break minting.
-      try {
-        if (!(await this.#touch(entry.sessionId))) return undefined;
-      } catch (error) {
-        console.warn(
-          `[agents/browser] Failed to refresh activity for browser "${this.name}"`,
-          error
-        );
-      }
-      return createLiveView(entry.sessionId, targets, options?.mode);
+      if (!(await this.#touch(entry.sessionId))) return undefined;
     } catch (error) {
-      if (isMissingBrowserSession(error)) return undefined;
-      throw error;
+      console.warn(
+        `[agents/browser] Failed to refresh activity for browser "${this.name}"`,
+        error
+      );
     }
+    return view;
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
 
-  get #provider(): BrowserRunProvider {
-    return this.#options.provider;
-  }
-
-  /** The platform `keep_alive` every create applies. */
-  get #keepAliveMs(): number {
-    return (
-      this.#provider.options.keepAliveMs ?? BROWSER_SESSION_KEEP_ALIVE_MAX_MS
-    );
-  }
-
   /**
-   * Capped at half the keep-alive window: a browser with continuous CDP
-   * traffic must never look older than the window the platform uses to
-   * reclaim it.
+   * Capped at half the provider's keep-alive window: a browser with
+   * continuous CDP traffic must never look older than the window the
+   * provider uses to reclaim it.
    */
   get #touchIntervalMs(): number {
-    return Math.min(
-      this.#options.touchIntervalMs ?? SESSION_TOUCH_INTERVAL_MS,
-      Math.floor(this.#keepAliveMs / 2)
-    );
+    const interval = this.#options.touchIntervalMs ?? SESSION_TOUCH_INTERVAL_MS;
+    const { keepAliveMs } = this.#adapter;
+    return keepAliveMs === undefined
+      ? interval
+      : Math.min(interval, Math.floor(keepAliveMs / 2));
   }
 
   /** Lazy: `lifecycle.storage` exists only once `Lifecycle.use()` ran. */
@@ -644,10 +587,10 @@ export class Browser extends LifecycleCapability {
   }
 
   /**
-   * Create a Browser Run session (outside any lock) and commit it, applying
-   * the provider's creation options. If a concurrent caller committed an
-   * entry first, theirs wins and the redundant session is deleted
-   * best-effort.
+   * Create a provider session (outside any lock) and commit it. The adapter
+   * applies the provider's creation options. If a concurrent caller
+   * committed an entry first, theirs wins and the redundant session is
+   * closed best-effort.
    *
    * `restarted` is read under the commit lock: a retired marker — left by
    * close() or a dead-browser recovery — is evidence a prior browser
@@ -659,12 +602,7 @@ export class Browser extends LifecycleCapability {
     session: StoredBrowserSession;
     restarted: boolean;
   }> {
-    const { binding, options } = this.#provider;
-    const info = await createBrowserSession(binding, {
-      keepAliveMs: this.#keepAliveMs,
-      recording: options.recording,
-      guardrails: options.guardrails
-    });
+    const info = await this.#adapter.create();
     const now = Date.now();
     const stored: StoredBrowserSession = {
       sessionId: info.sessionId,
@@ -691,26 +629,16 @@ export class Browser extends LifecycleCapability {
 
     if (winner) {
       try {
-        await deleteBrowserSession(binding, stored.sessionId);
+        await this.#adapter.close(stored.sessionId);
       } catch (error) {
         console.warn(
-          `[agents/browser] Failed to delete redundant Browser Run session ${stored.sessionId}`,
+          `[agents/browser] Failed to close redundant browser session ${stored.sessionId}`,
           error
         );
       }
       return { session: winner, restarted };
     }
     return { session: stored, restarted };
-  }
-
-  async #isAlive(stored: StoredBrowserSession): Promise<boolean> {
-    try {
-      await listBrowserTargets(this.#provider.binding, stored.sessionId);
-      return true;
-    } catch (error) {
-      if (isMissingBrowserSession(error)) return false;
-      throw error;
-    }
   }
 
   async #readStored(): Promise<StoredBrowserSession | undefined> {

@@ -13,11 +13,8 @@ import {
   BrowserSessionConnector,
   type BrowserExecutionReport
 } from "../browser/session-connector";
-import {
-  Browser,
-  browserRun,
-  namedBrowserSessionKey
-} from "../browser/browser";
+import { Browser, namedBrowserSessionKey } from "../browser/browser";
+import { browserRun } from "../browser/providers/browser-run";
 import {
   DurableBrowserSessionStore,
   type StoredBrowserSession

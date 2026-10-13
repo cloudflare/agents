@@ -8,7 +8,8 @@ import {
 } from "@earendil-works/pi-ai";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
-import { Browser, browserRun } from "../../../browser/browser";
+import { Browser } from "../../../browser/browser";
+import { browserRun } from "../../../browser/providers/browser-run";
 import { browserTool } from "../../../browser/tools/pi";
 import { Lifecycle } from "../../../lifecycle";
 import { createFakeBrowserBinding } from "../../../tests/capabilities/browser";

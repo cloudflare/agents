@@ -1,14 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
-  BROWSER_SESSION_KEEP_ALIVE_MAX_MS,
   Browser,
   type BrowserOptions,
-  type BrowserRunOptions,
-  browserRun,
   DEFAULT_BROWSER_NAME,
   DEFAULT_BROWSER_SCOPE,
   namedBrowserSessionKey
 } from "../browser/browser";
+import {
+  BROWSER_SESSION_KEEP_ALIVE_MAX_MS,
+  type BrowserRunOptions,
+  browserRun
+} from "../browser/providers/browser-run";
 import {
   type BrowserBinding,
   openOneShotBrowserSession,
@@ -267,6 +269,22 @@ describe("Browser.resolve", () => {
     expect(creates(requests)).toHaveLength(2);
   });
 
+  it("keeps the browser when the liveness probe fails for another reason", async () => {
+    // A 500 says nothing about whether the browser is gone, so the record
+    // must survive and the error reach the caller.
+    const { browser, requests } = createFakeBrowser({ listStatuses: [500] });
+    const store = new MemorySessionStore();
+    const named = createBrowser(browser, store);
+
+    const first = await named.resolve();
+    await expect(named.resolve()).rejects.toThrow(/500/);
+
+    const again = await named.resolve();
+    expect(again.sessionId).toBe(first.sessionId);
+    expect(again.restarted).toBe(false);
+    expect(creates(requests)).toHaveLength(1);
+  });
+
   it("keeps sessions separate per name", async () => {
     const { browser, requests } = createFakeBrowser();
     const store = new MemorySessionStore();
@@ -446,6 +464,18 @@ describe("Browser.close", () => {
 
     // Closing again is a no-op — the closure already happened.
     expect(await named.close()).toBe(false);
+  });
+
+  it("closes quietly when the platform session already expired", async () => {
+    const { browser } = createFakeBrowser({ deleteStatuses: [410] });
+    const store = new MemorySessionStore();
+    const named = createBrowser(browser, store);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await named.resolve();
+    expect(await named.close()).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("returns false when there is nothing to close", async () => {
