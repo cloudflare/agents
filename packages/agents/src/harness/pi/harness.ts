@@ -702,6 +702,8 @@ export class PiHarness extends LifecycleCapability {
     if (wakeAt !== undefined && wakeAt - Date.now() > this.#sleepThresholdMs) {
       return { rescheduleAt: wakeAt };
     }
+    // Anything else needs pi running, including a deadline that has come.
+    pi.resume();
     // Background tasks are outside the conversation's idle wait, so the
     // wake polls them, backing off while they show no progress.
     if (tasks.every((task) => task.record.background)) {
@@ -770,8 +772,10 @@ export class PiHarness extends LifecycleCapability {
     await pi.root(BG, { agent: this.agentDefaults() });
     await this.#abortQuarantined(pi);
     // Continue whatever the last isolate left: pi reconciles tasks that were
-    // running to pending and schedules them again.
-    pi.resume();
+    // running to pending and schedules them again. Unless everything is
+    // asleep until a known time, in which case the wake resumes pi then.
+    if (await this.#allAsleep(pi)) this.#resumeOnNewWork(pi);
+    else pi.resume();
     return { pi, storage };
   }
 
@@ -834,6 +838,49 @@ export class PiHarness extends LifecycleCapability {
   }
 
   /** When pi's current wait is far enough away to hand to the alarm. */
+  /**
+   * Whether pi can stay paused: `wakeAt` is set, nothing is queued, and
+   * every live task sleeps until a known time beyond the sleep threshold.
+   * A paused pi runs no task, so it holds no timer, and the object can
+   * hibernate until a wake's alarm. pi cannot pause again once running, so
+   * this is decided only when it opens.
+   */
+  async #allAsleep(pi: Harness): Promise<boolean> {
+    if (this.#options.wakeAt === undefined) return false;
+    const { tasks, submissions } = await pi.inspect(BG);
+    if (tasks.length === 0) return false;
+    if (submissions.some((submission) => submission.status === "queued")) {
+      return false;
+    }
+    const sessions = new Map<PiSessionId, TaskInspection[]>();
+    for (const task of tasks) {
+      const session = String(task.record.conversationId);
+      sessions.set(session, [...(sessions.get(session) ?? []), task]);
+    }
+    for (const [session, live] of sessions) {
+      const at = this.#sessionWakeAt(session, live);
+      if (at === undefined || at - Date.now() <= this.#sleepThresholdMs) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * While pi is paused, resume it as soon as any task changes. A submit or
+   * wait resumes pi on its own, but a task committed directly would get
+   * neither a wake nor a run.
+   */
+  #resumeOnNewWork(pi: Harness): void {
+    const unsubscribe = pi.subscribeCommits((publication) => {
+      if (!publication.changes.some((change) => change.type === "task")) {
+        return;
+      }
+      unsubscribe();
+      pi.resume();
+    });
+  }
+
   /**
    * The earliest time any live task in the session next runs, when every
    * one of them is known; otherwise `undefined`. A task waiting on others

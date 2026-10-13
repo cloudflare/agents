@@ -140,6 +140,12 @@ function defineWakeTestObject(
       ]);
     }
 
+    /** Whether pi's scheduler is running, paused, or closing. */
+    async scheduling(): Promise<string> {
+      const pi = await this.harness.pi();
+      return (await pi.inspect(BACKGROUND_CONTEXT)).scheduling;
+    }
+
     /** Run startup, which gives every session with live work a wake job. */
     async start(): Promise<void> {
       await this.harness.pi();

@@ -207,6 +207,8 @@ new PiHarness({
 
 `wakeAt` receives each live task's kind, session, input and checkpoint, and returns when it next runs, or `undefined` if you do not know. One task without a known time keeps the session on its heartbeat, so a missing answer costs alarms, never lateness. A task waiting on other tasks is skipped. A past date means due now.
 
+With `wakeAt` set, the harness can also leave Pi paused. When the object starts and every live task is asleep until a known time more than a minute away, it does not resume Pi's scheduler, so no task holds a timer and the object can hibernate until a wake's alarm. Pi resumes when that alarm arrives, for any new input or wait, and as soon as a task is committed by other means. Once running, Pi cannot pause again, so this saves the most after a restart.
+
 If a wake job's dispatch keeps failing, for example because Pi's storage cannot be read, the job is not dropped. It tries again until the session has no live work.
 
 The heartbeat adapts to what the session is doing. While a foreground run is going, it beats every 30 seconds, so a crash costs at most about that much time. When the session's only live work is background tasks, and a beat finds them unchanged, the next beat waits twice as long, up to 10 minutes. The same doubling applies while dispatches keep failing. New input, a finished run, or any change in the background work returns the session to 30 seconds. The backoff is stored, so it holds across restarts.
