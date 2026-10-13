@@ -504,9 +504,10 @@ export class PiHarness extends LifecycleCapability {
       void this.#wake(session);
     });
     this.#waits.set(session, wait);
-    // The wait runs past this dispatch, inside the alarm's work, so the
-    // object stays alive for it. The heartbeat covers an eviction.
-    this.lifecycle.trackAlarmWork(wait);
+    // The wait runs past this dispatch. Tracking it lets the alarm's
+    // memory-limit breaker see a reset it reports. The heartbeat covers an
+    // eviction.
+    if (!this.lifecycle.trackAlarmWork(wait)) wait.catch(() => {});
     return heartbeat;
   }
 
@@ -517,12 +518,15 @@ export class PiHarness extends LifecycleCapability {
       // Cancelling the wait never cancels pi's work.
       await conversation.waitForIdle(withAbortSignal(budget.signal, BG));
     } catch (error) {
-      if (!budget.signal.aborted) {
-        this.lifecycle.events.emit("pi:wake_error", {
-          session: String(conversation.id),
-          error: error instanceof Error ? error.message : String(error)
-        });
-      }
+      // The budget running out is the wait's own end, not a failure.
+      if (budget.signal.aborted) return;
+      this.lifecycle.events.emit("pi:wake_error", {
+        session: String(conversation.id),
+        error: error instanceof Error ? error.message : String(error)
+      });
+      // Rethrown so the tracked wait settles with it, and a memory-limit
+      // reset reaches the alarm's breaker.
+      throw error;
     } finally {
       clearTimeout(timer);
     }

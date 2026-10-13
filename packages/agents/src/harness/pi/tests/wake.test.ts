@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { abortAllDurableObjects, runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { GENERATION_RETRY_DELAY_MS } from "./wake-fixture";
+import { GENERATION_RETRY_DELAY_MS, WAIT_BUDGET_MS } from "./wake-fixture";
 import { TEST_TIMING } from "./timing";
 
 function stub(name: string) {
@@ -83,6 +83,46 @@ describe("PiHarness wake deadlines", () => {
       },
       (time) => time !== null && time > Date.now()
     );
+  });
+
+  it("reports a memory-limit reset in a session's idle wait to the alarm breaker", async () => {
+    const name = crypto.randomUUID();
+    let object = stub(name);
+    // Foreground work that is not a generation: the wake waits on it.
+    await object.sleepUntil(Date.now() + 60_000, { background: false });
+    await object.failIdleWait(
+      "Durable Object's isolate exceeded its memory limit and was reset."
+    );
+    await abortAllDurableObjects();
+    object = stub(name);
+    await object.start();
+
+    // The breaker resets the isolate after recording the strike, which can
+    // surface from the alarm itself.
+    await runDurableObjectAlarm(object).catch(() => false);
+    expect(
+      await eventually(
+        () =>
+          stub(name)
+            .memoryLimitStrikes()
+            .catch(() => 0),
+        (strikes) => strikes > 0
+      )
+    ).toBe(1);
+  });
+
+  it("does not count a wake's own wait running out as a failure", async () => {
+    const name = crypto.randomUUID();
+    let object = stub(name);
+    await object.sleepUntil(Date.now() + 60_000, { background: false });
+    await abortAllDurableObjects();
+    object = stub(name);
+    await object.start();
+    await runDurableObjectAlarm(object);
+    await new Promise((resolve) => setTimeout(resolve, WAIT_BUDGET_MS * 3));
+
+    expect(await object.memoryLimitStrikes()).toBe(0);
+    expect(await object.wakeJobTime()).not.toBeNull();
   });
 
   it("parks the wake on a generation retry when the generation is the only live work", async () => {

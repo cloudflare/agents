@@ -22,6 +22,12 @@ import { TEST_TIMING } from "./timing";
 /** Long enough that a wake parked on it would miss everything else. */
 export const GENERATION_RETRY_DELAY_MS = 60_000;
 
+/** Short enough that a test sees a wake's wait run out. */
+export const WAIT_BUDGET_MS = 300;
+
+/** Storage key of an error a session's idle wait rejects with, if set. */
+const IDLE_ERROR_KEY = "test:idle-error";
+
 /** A background task that sleeps until `runAt`, then completes. */
 const SleepUntil = defineTask<{ runAt: number }, { phase: "wait" }, null>({
   name: "test.sleep-until",
@@ -79,7 +85,20 @@ export class PiWakeTestObject extends DurableObject<Cloudflare.Env> {
         },
         context
       );
-      // A switch the tests flip to make every wake dispatch fail.
+      // Switches the tests flip to make wake dispatches or idle waits fail.
+      // The idle error is stored, so it holds across a crash.
+      const conversation = pi.conversation.bind(pi);
+      pi.conversation = async (...args) => {
+        const found = await conversation(...args);
+        if (found === undefined) return found;
+        const waitForIdle = found.waitForIdle.bind(found);
+        found.waitForIdle = async (...waitArgs) => {
+          const error = await this.ctx.storage.get<string>(IDLE_ERROR_KEY);
+          if (error !== undefined) throw new Error(error);
+          return waitForIdle(...waitArgs);
+        };
+        return found;
+      };
       const inspect = pi.inspect.bind(pi);
       pi.inspect = async (...args) => {
         if (this.#failInspect) {
@@ -96,7 +115,10 @@ export class PiWakeTestObject extends DurableObject<Cloudflare.Env> {
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
-    setWakeTimingForTests(this.harness, TEST_TIMING);
+    setWakeTimingForTests(this.harness, {
+      ...TEST_TIMING,
+      waitBudgetMs: WAIT_BUDGET_MS
+    });
     this.#faux.setResponses([
       fauxAssistantMessage([], {
         stopReason: "error",
@@ -106,8 +128,29 @@ export class PiWakeTestObject extends DurableObject<Cloudflare.Env> {
     ]);
   }
 
-  /** Create a background task in the root session that is due at `runAt`. */
-  async sleepUntil(runAt: number): Promise<TaskId> {
+  /** Run startup, which gives every session with live work a wake job. */
+  async start(): Promise<void> {
+    await this.harness.pi();
+  }
+
+  /** Make every session's idle wait reject with `message`, or stop. */
+  async failIdleWait(message: string | undefined): Promise<void> {
+    if (message === undefined) await this.ctx.storage.delete(IDLE_ERROR_KEY);
+    else await this.ctx.storage.put(IDLE_ERROR_KEY, message);
+  }
+
+  /** The alarm memory-limit breaker's strike count. */
+  async memoryLimitStrikes(): Promise<number> {
+    return (
+      (await this.ctx.storage.get<number>("cf_agents:oom_alarm_strikes")) ?? 0
+    );
+  }
+
+  /** Create a task in the root session that is due at `runAt`. */
+  async sleepUntil(
+    runAt: number,
+    options: { background?: boolean } = {}
+  ): Promise<TaskId> {
     const pi = await this.harness.pi();
     const root = await pi.root(BACKGROUND_CONTEXT);
     return root.commit(
@@ -115,7 +158,10 @@ export class PiWakeTestObject extends DurableObject<Cloudflare.Env> {
         tx.createTask(
           SleepUntil,
           { runAt },
-          { ownership: { kind: "conversation" }, background: true }
+          {
+            ownership: { kind: "conversation" },
+            background: options.background ?? true
+          }
         ),
       BACKGROUND_CONTEXT
     );
