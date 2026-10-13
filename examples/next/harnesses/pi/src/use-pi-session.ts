@@ -1,5 +1,6 @@
 import { useAgent } from "agents/react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { PiCommandOutbox } from "./outbox";
 import { EMPTY_VIEW, reduceEvents } from "./view";
 import type {
   ClientMessage,
@@ -26,15 +27,24 @@ const INITIAL_STATE: State = {
  * One pi session over the harness's WebSocket protocol, connected with
  * `useAgent`. The server sends pi's own agent events; this folds them with
  * the same `reduceEvents` the server tests use. A reconnect gets a fresh
- * snapshot, so there is nothing to resume from.
+ * snapshot, and the client sends again every submit it has not seen
+ * answered; the server deduplicates them by operation id.
  */
 export function usePiSession(object: string) {
   const [state, setState] = useState<State>(INITIAL_STATE);
+  // Submits not yet answered, sent again whenever the socket opens.
+  const outbox = useRef(new PiCommandOutbox());
+  const socket = useRef<{ send(data: string): void } | null>(null);
 
   const agent = useAgent({
     agent: "pi-agent",
     name: object,
-    onOpen: () => setState((current) => ({ ...current, status: "open" })),
+    onOpen: () => {
+      setState((current) => ({ ...current, status: "open" }));
+      for (const command of outbox.current.pending()) {
+        socket.current?.send(JSON.stringify(command));
+      }
+    },
     onClose: () => setState((current) => ({ ...current, status: "closed" })),
     onMessage: (event) => {
       let message: ServerMessage;
@@ -43,6 +53,7 @@ export function usePiSession(object: string) {
       } catch {
         return;
       }
+      outbox.current.receive(message);
       switch (message.type) {
         case "hello":
           setState((current) => ({ ...current, catalog: message.tools }));
@@ -62,8 +73,11 @@ export function usePiSession(object: string) {
     }
   });
 
+  socket.current = agent;
+
   useEffect(() => {
     setState(INITIAL_STATE);
+    outbox.current = new PiCommandOutbox();
   }, [object]);
 
   const send = useCallback(
@@ -75,10 +89,14 @@ export function usePiSession(object: string) {
     [agent]
   );
 
-  /** Idle: starts a run. Busy: queued as a follow-up, or steers the run. */
+  /**
+   * Idle: starts a run. Busy: queued as a follow-up, or steers the run.
+   * While the socket is closed the submit waits in the outbox, and goes out
+   * when it opens.
+   */
   const submit = useCallback(
     (text: string, whenBusy: "followUp" | "steer" = "followUp") =>
-      send({ type: "submit", id: crypto.randomUUID(), input: text, whenBusy }),
+      send(outbox.current.submit(text, whenBusy)),
     [send]
   );
 
