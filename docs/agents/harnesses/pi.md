@@ -191,6 +191,8 @@ const result = await session.wait(receipt.operationId);
 
 The harness schedules one lifecycle job per session with work. The job waits on Pi's tasks, refreshes itself as a heartbeat while they run, and completes when they settle. If the object is evicted or crashes, the job is still due, so its alarm restarts the object. Pi reopens its stored state and resumes the session's work: a replay-safe tool call runs again, and an unsafe one is reported to the model as interrupted.
 
+When a session's only live work is a generation waiting more than a minute to retry or poll its model, the job sleeps until that deadline. If the session has any other live work, such as a background task, the job keeps its heartbeat instead, because that work may be due sooner.
+
 Every operation waits for the object's startup, which runs the factory. A call over RPC that arrives first waits for it rather than opening Pi on its own.
 
 ## Run the example

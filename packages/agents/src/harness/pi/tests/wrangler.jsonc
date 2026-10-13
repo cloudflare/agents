@@ -13,6 +13,7 @@
         "class_name": "PiFlakyFactoryTestObject"
       },
       { "name": "PI_BROWSER_TEST", "class_name": "PiBrowserTestObject" },
+      { "name": "PI_WAKE_TEST", "class_name": "PiWakeTestObject" },
       // The browser tool's codemode runtime facet. The test pool needs a
       // binding for ctx.exports to hand it out; it stays out of
       // new_sqlite_classes, since the host owns the SQLite store.
@@ -30,7 +31,8 @@
         "PiNoDefaultsTestObject",
         "PiFactoryTestObject",
         "PiFlakyFactoryTestObject",
-        "PiBrowserTestObject"
+        "PiBrowserTestObject",
+        "PiWakeTestObject"
       ]
     }
   ]

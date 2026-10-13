@@ -18,6 +18,7 @@ declare namespace Cloudflare {
     PI_BROWSER_TEST: DurableObjectNamespace<
       import("./worker").PiBrowserTestObject
     >;
+    PI_WAKE_TEST: DurableObjectNamespace<import("./worker").PiWakeTestObject>;
     LOADER: WorkerLoader;
   }
 }

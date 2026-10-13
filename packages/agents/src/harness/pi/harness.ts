@@ -1,5 +1,6 @@
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
+  GenerationTask,
   LiveDoc,
   ROOT_CONVERSATION_ID,
   watchEvents,
@@ -474,7 +475,14 @@ export class PiHarness extends LifecycleCapability {
       // A submit between its wake and pi's admission: check again later.
       return this.#admitting.has(session) ? heartbeat : undefined;
     }
-    const wakeAt = await this.#longWait(pi, conversation.id, BG);
+    // The long wait is the generation's own deadline. Other work in the
+    // session may be due sooner, and pi does not report its deadlines, so
+    // only a session whose live work is all generation can park on it.
+    const wakeAt = tasks.every(
+      (task) => task.record.kind === GenerationTask.definition.name
+    )
+      ? await this.#longWait(pi, conversation.id, BG)
+      : undefined;
     if (wakeAt !== undefined) return { rescheduleAt: wakeAt };
     // Background tasks are outside the conversation's idle wait.
     if (tasks.every((task) => task.record.background)) return heartbeat;
