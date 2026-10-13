@@ -1,5 +1,5 @@
 ---
-"agents": minor
+"agents": patch
 ---
 
-`createAI` from `agents/models/ai-sdk` runs every model on `env.AI.run`: Workers AI ids, AI Gateway catalog ids (`ai("anthropic/claude-opus-4.8")`) and dynamic routes. Vendor model objects are no longer routed through AI Gateway's deprecated universal endpoint, so `ai(model)`, `ai.routed()` and `GatewayLanguageModel` are removed; pass the catalog id instead. See [docs/agents/models.md](https://github.com/cloudflare/agents/blob/main/docs/agents/models.md#catalog-models).
+`createAI` from `agents/models/ai-sdk` takes AI Gateway catalog ids (`ai("anthropic/claude-opus-4.8")`) on `env.AI.run`, and sends a vendor's own model object (`ai(anthropic("claude-opus-4-8"))`) to AI Gateway's provider-native path instead of the deprecated Universal Endpoint. Adds the `byokAlias`, `zdr` and `vendorKey` options. See [docs/agents/models.md](https://github.com/cloudflare/agents/blob/main/docs/agents/models.md#model-objects).

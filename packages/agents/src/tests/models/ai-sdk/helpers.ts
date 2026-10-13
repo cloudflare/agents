@@ -120,3 +120,119 @@ export function field(body: unknown, path: string): unknown {
   }
   return current;
 }
+
+/** One recorded provider-native request: `env.AI.fetch` to the gateway. */
+export interface NativeCall {
+  gatewayId: string;
+  provider: string;
+  endpoint: string;
+  method: string;
+  /** Request headers, names lowercased. */
+  headers: Record<string, string>;
+  /** The raw body the vendor sent. */
+  body: BodyInit | null | undefined;
+  /** The body parsed as JSON, or `{}` when it is not JSON. */
+  query: Record<string, unknown>;
+}
+
+export interface FakeGatewayBinding extends FakeBinding {
+  native: NativeCall[];
+  fetch(input: string, init?: RequestInit): Promise<Response>;
+}
+
+/** The binding route aig-entry serves for the provider-native path. */
+const NATIVE_ROUTE =
+  /^https:\/\/workers-binding\.ai\/ai-gateway\/gateways\/([^/]+)\/([^/]+)\/(.*)$/;
+
+function parsedQuery(
+  body: BodyInit | null | undefined
+): Record<string, unknown> {
+  const text =
+    typeof body === "string"
+      ? body
+      : body instanceof ArrayBuffer
+        ? new TextDecoder().decode(body)
+        : undefined;
+  if (text === undefined) return {};
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return parsed !== null && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * An `Ai` binding that answers both halves: `run` for model ids and `fetch`
+ * for the provider-native requests a vendor's model object makes. Both are
+ * recorded, so one fake covers a mixed fallback chain.
+ */
+export function fakeGatewayBinding(options: {
+  run?: (call: RunCall, index: number) => Response | Promise<Response>;
+  native?: (call: NativeCall, index: number) => Response | Promise<Response>;
+}): FakeGatewayBinding {
+  const calls: RunCall[] = [];
+  const native: NativeCall[] = [];
+  return {
+    aiGatewayLogId: null,
+    calls,
+    async fetch(input, init) {
+      const match = NATIVE_ROUTE.exec(input);
+      if (match === null) throw new Error(`unexpected binding fetch: ${input}`);
+      const headers: Record<string, string> = {};
+      new Headers(init?.headers).forEach((value, key) => {
+        headers[key] = value;
+      });
+      const call: NativeCall = {
+        body: init?.body,
+        endpoint: match[3] ?? "",
+        gatewayId: decodeURIComponent(match[1] ?? ""),
+        headers,
+        method: init?.method ?? "GET",
+        provider: match[2] ?? "",
+        query: parsedQuery(init?.body)
+      };
+      native.push(call);
+      return (
+        (await options.native?.(call, native.length - 1)) ?? jsonResponse({})
+      );
+    },
+    native,
+    async run(model, input, runOptions) {
+      const call: RunCall = { input, model, options: runOptions };
+      calls.push(call);
+      return (await options.run?.(call, calls.length - 1)) ?? jsonResponse({});
+    }
+  };
+}
+
+/** The `cf-aig-*` headers a live gateway answer carries (43-demos captures). */
+export function gatewayHeaders(
+  overrides: Record<string, string> = {}
+): Record<string, string> {
+  return {
+    "cf-aig-cache-status": "MISS",
+    "cf-aig-event-id": "7bfd3660-9d0f-4bf7-bf9b-fa90b860456f",
+    "cf-aig-log-id": "01M1KZWN069WWNPC18V05NKHSS",
+    "cf-aig-request-id": "7bfd3660-9d0f-4bf7-bf9b-fa90b860456f",
+    "cf-aig-step": "0",
+    "cf-aig-trace-id": "2babd9bbb1984dfc90417e513c60a714",
+    ...overrides
+  };
+}
+
+/** A verbatim SSE `Response`, for replaying a captured vendor stream. */
+export function rawSseResponse(
+  body: string,
+  init: { headers?: Record<string, string> } = {}
+): Response {
+  return new Response(body, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      ...init.headers
+    },
+    status: 200
+  });
+}

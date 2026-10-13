@@ -1,13 +1,10 @@
-import type {
-  LanguageModelV4,
-  LanguageModelV4GenerateResult
-} from "@ai-sdk/provider";
 import { createProviderRegistry, generateText, streamText } from "ai";
 import { describe, expect, it } from "vitest";
 import { CloudflareAIError, createAI } from "../../../models/ai-sdk";
 import {
   asAi,
   callOptions,
+  collect,
   fakeBinding,
   jsonResponse,
   sseResponse
@@ -164,6 +161,185 @@ describe("catalog models", () => {
   });
 });
 
+/** An Anthropic Messages stream, as `/run` sends a streamed Claude model. */
+function anthropicSse(events: Record<string, unknown>[]): Response {
+  const body = events
+    .map(
+      (event) =>
+        `event: ${String(event.type)}\ndata: ${JSON.stringify({ p: "pad", ...event })}\n\n`
+    )
+    .join("");
+  return new Response(body, {
+    headers: { "cf-aig-run-id": "run-1", "content-type": "text/event-stream" },
+    status: 200
+  });
+}
+
+const MESSAGE_START = {
+  message: {
+    content: [],
+    id: "msg_1",
+    model: "claude-haiku-4-5-20251001",
+    role: "assistant",
+    type: "message",
+    usage: { cache_read_input_tokens: 2, input_tokens: 16, output_tokens: 1 }
+  },
+  type: "message_start"
+};
+
+describe("streamed catalog models that answer in Anthropic events", () => {
+  it("read as chat completions: text, finish reason and usage", async () => {
+    const binding = fakeBinding(() =>
+      anthropicSse([
+        MESSAGE_START,
+        {
+          content_block: { text: "", type: "text" },
+          index: 0,
+          type: "content_block_start"
+        },
+        { type: "ping" },
+        {
+          delta: { text: "one, two", type: "text_delta" },
+          index: 0,
+          type: "content_block_delta"
+        },
+        {
+          delta: { text: ", three", type: "text_delta" },
+          index: 0,
+          type: "content_block_delta"
+        },
+        { index: 0, type: "content_block_stop" },
+        {
+          delta: { stop_reason: "end_turn" },
+          type: "message_delta",
+          usage: { output_tokens: 7 }
+        },
+        { type: "message_stop" }
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const result = streamText({ model: ai(CLAUDE), prompt: "count" });
+
+    expect(await result.text).toBe("one, two, three");
+    expect(await result.finishReason).toBe("stop");
+    const usage = await result.usage;
+    expect(usage.inputTokens).toBe(18);
+    expect(usage.outputTokens).toBe(7);
+  });
+
+  it("read tool calls and thinking", async () => {
+    const binding = fakeBinding(() =>
+      anthropicSse([
+        MESSAGE_START,
+        {
+          content_block: { thinking: "", type: "thinking" },
+          index: 0,
+          type: "content_block_start"
+        },
+        {
+          delta: { thinking: "Need the weather.", type: "thinking_delta" },
+          index: 0,
+          type: "content_block_delta"
+        },
+        {
+          delta: { signature: "sig", type: "signature_delta" },
+          index: 0,
+          type: "content_block_delta"
+        },
+        { index: 0, type: "content_block_stop" },
+        {
+          content_block: {
+            id: "toolu_1",
+            input: {},
+            name: "getWeather",
+            type: "tool_use"
+          },
+          index: 1,
+          type: "content_block_start"
+        },
+        {
+          delta: { partial_json: '{"city":', type: "input_json_delta" },
+          index: 1,
+          type: "content_block_delta"
+        },
+        {
+          delta: { partial_json: ' "Lisbon"}', type: "input_json_delta" },
+          index: 1,
+          type: "content_block_delta"
+        },
+        { index: 1, type: "content_block_stop" },
+        {
+          delta: { stop_reason: "tool_use" },
+          type: "message_delta",
+          usage: { output_tokens: 20 }
+        },
+        { type: "message_stop" }
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const parts = await collect(
+      (await ai(CLAUDE).doStream(callOptions())).stream
+    );
+
+    const reasoning = parts
+      .filter((part) => part.type === "reasoning-delta")
+      .map((part) => (part as { delta: string }).delta)
+      .join("");
+    expect(reasoning).toBe("Need the weather.");
+    expect(parts).toContainEqual(
+      expect.objectContaining({
+        input: '{"city": "Lisbon"}',
+        toolCallId: "toolu_1",
+        toolName: "getWeather",
+        type: "tool-call"
+      })
+    );
+    expect(parts.at(-1)).toMatchObject({
+      finishReason: { unified: "tool-calls" },
+      type: "finish"
+    });
+  });
+
+  it("surface an error event as a stream error", async () => {
+    const binding = fakeBinding(() =>
+      anthropicSse([
+        MESSAGE_START,
+        {
+          error: { message: "Overloaded", type: "overloaded_error" },
+          type: "error"
+        }
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const parts = await collect(
+      (await ai(CLAUDE).doStream(callOptions())).stream
+    );
+    expect(parts).toContainEqual(expect.objectContaining({ type: "error" }));
+  });
+});
+
+describe("byokAlias", () => {
+  it("reaches /run as cf-aig-byok-alias for a catalog model", async () => {
+    const binding = fakeBinding(() => jsonResponse(chatBody("ok")));
+    const ai = createAI({ binding: asAi(binding), byokAlias: "team-a" });
+    await ai(CLAUDE).doGenerate(callOptions());
+
+    const options = binding.calls[0].options;
+    expect(options.extraHeaders).toMatchObject({
+      "cf-aig-byok-alias": "team-a"
+    });
+    // The binding's own gateway options have no such field.
+    expect(options.gateway).not.toHaveProperty("byokAlias");
+  });
+
+  it("stays off a Workers AI request, which has no vendor key", async () => {
+    const binding = fakeBinding(() => jsonResponse(chatBody("ok")));
+    const ai = createAI({ binding: asAi(binding), byokAlias: "team-a" });
+    await ai(WORKERS_AI).doGenerate(callOptions());
+    expect(binding.calls[0].options).not.toHaveProperty("extraHeaders");
+  });
+});
+
 describe("model ids", () => {
   const ai = createAI({ binding: asAi(fakeBinding(() => jsonResponse({}))) });
 
@@ -228,41 +404,6 @@ describe("fallback", () => {
     expect((caught as CloudflareAIError).attempts?.map((a) => a.model)).toEqual(
       [CLAUDE, GPT]
     );
-  });
-
-  it("calls another provider's model as it is", async () => {
-    const binding = fakeBinding(failing);
-    const ai = createAI({ binding: asAi(binding) });
-    const result: LanguageModelV4GenerateResult = {
-      content: [{ text: "from elsewhere", type: "text" }],
-      finishReason: { raw: "stop", unified: "stop" },
-      usage: {
-        inputTokens: {
-          cacheRead: undefined,
-          cacheWrite: undefined,
-          noCache: undefined,
-          total: 1
-        },
-        outputTokens: { reasoning: undefined, text: undefined, total: 1 }
-      },
-      warnings: []
-    };
-    const elsewhere: LanguageModelV4 = {
-      doGenerate: async () => result,
-      doStream: async () => {
-        throw new Error("not used");
-      },
-      modelId: "elsewhere",
-      provider: "other",
-      specificationVersion: "v4",
-      supportedUrls: {}
-    };
-
-    const answer = await ai(CLAUDE, { fallback: [elsewhere] }).doGenerate(
-      callOptions()
-    );
-    expect(answer.content).toEqual(result.content);
-    expect(binding.calls.map((call) => call.model)).toEqual([CLAUDE]);
   });
 
   it("keeps the rest of the per-call bag on a leg", async () => {

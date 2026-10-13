@@ -55,6 +55,11 @@ export interface CloudflareMetadata {
   model: string;
   /** The gateway id the request went through. */
   gateway: string;
+  /**
+   * The gateway provider slug, for a vendor's model object sent to the
+   * provider-native path. Absent for a model id.
+   */
+  provider?: string;
   /** `cf-aig-log-id`, or the binding's last log id. */
   logId?: string;
   /** `cf-aig-event-id` — correlates the requests of one gateway event. */
@@ -103,7 +108,8 @@ export function cloudflareMetadata(
   model: string,
   resolved: ResolvedOptions,
   response: Response,
-  transport: Transport
+  transport: Transport,
+  provider?: string
 ): SharedV4ProviderMetadata {
   const headers = response.headers;
   const rawStep = headers.get("cf-aig-step");
@@ -111,6 +117,7 @@ export function cloudflareMetadata(
   const metadata: CloudflareMetadata = {
     gateway: resolved.gateway.id,
     model,
+    ...(provider === undefined ? {} : { provider }),
     ...(Number.isNaN(step) ? {} : { step })
   };
   for (const [field, header] of [

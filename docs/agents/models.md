@@ -1,32 +1,38 @@
 # Models (Experimental)
 
-`agents/models/ai-sdk` is Cloudflare's AI SDK provider. Every model is a
-string, and every string runs on one method — `env.AI.run`:
+`agents/models/ai-sdk` is Cloudflare's AI SDK provider. It takes two call
+forms, both through the `AI` binding:
 
 ```ts
+// A string runs on env.AI.run.
 ai("@cf/zai-org/glm-4.7-flash"); // Workers AI
 ai("anthropic/claude-opus-4.8"); // the AI Gateway catalog
 ai("dynamic/support"); // a dynamic route on your gateway
+
+// A vendor's own model goes to AI Gateway's provider-native path.
+ai(anthropic("claude-opus-4-8"));
 ```
 
-There is no vendor package to install and no vendor key to hold. AI Gateway's
-catalog names the model, picks the provider, converts the request, and bills
-through Unified Billing or a key stored on the gateway. Every model speaks
-chat completions, so one request builder and one parser serve them all.
+A string needs no vendor package and no vendor key: AI Gateway's catalog names
+the model, picks the provider, converts the request, and bills through Unified
+Billing or a key stored on the gateway. A model object keeps the vendor's own
+request and parser, so every vendor feature its package supports works.
 
 ## The canon, in five lines
 
-1. **A model is a string.** `@cf/<author>/<model>` is Workers AI,
+1. **A string is Cloudflare's.** `@cf/<author>/<model>` is Workers AI,
    autocompleted from `@cloudflare/workers-types`; `<author>/<model>` is the
    AI Gateway catalog, in the gateway's spelling; `dynamic/<route>` is a
-   [dynamic route](#dynamic-routes). Any other string is a `TypeError` naming
-   the three forms.
-2. **One method.** Every string runs on `env.AI.run`. A Workers AI id goes to
-   Workers AI; a catalog id or a route goes to AI Gateway's `/run`.
+   [dynamic route](#dynamic-routes). All three run on `env.AI.run`, and any
+   other string is a `TypeError` naming the three forms.
+2. **`ai(model)` is any AI SDK v4 model**, sent to AI Gateway's
+   [provider-native path](#model-objects). Its provider builds the request,
+   parses the response, and handles its own errors; only the transport is
+   ours.
 3. **The gateway is an option, not a product.** Caching, logging, metadata,
    timeouts and retries are options on the call; the `default` gateway is
    created for you on first use.
-4. **Unified billing means no vendor key.** The gateway holds the credential —
+4. **Unified billing means no vendor key.** The gateway holds the credential:
    Cloudflare's, or a key you store on the gateway (BYOK).
 5. One factory: `createAI` — text, embeddings, images, speech, transcription
    and reranking all come off it, and it is a full `ProviderV4`.
@@ -34,10 +40,12 @@ chat completions, so one request builder and one parser serve them all.
 ## Quick start
 
 Requirements: `ai@^7` and `@ai-sdk/provider@^4` must both be resolvable — they
-are optional peers of `agents`, so install them alongside it:
+are optional peers of `agents`, so install them alongside it. Add a vendor
+provider only if you want to pass that vendor's model objects:
 
 ```sh
 pnpm add ai @ai-sdk/provider
+pnpm add @ai-sdk/anthropic   # only for ai(anthropic("…"))
 ```
 
 ```ts
@@ -141,8 +149,86 @@ the provider's format. The gateway owns the rest:
   failure.
 
 The request is built as strict OpenAI. `reasoningEffort` travels as
-`reasoning_effort`; `chatTemplateKwargs`, which only Workers AI takes, is
-dropped with a warning.
+`reasoning_effort`, the output cap as `max_completion_tokens`, and
+`chatTemplateKwargs`, which only Workers AI takes, is dropped with a warning.
+
+A streamed answer from a model whose native format is Anthropic Messages (the
+Claude models) comes back from `/run` in Anthropic events rather than chat
+completions. This provider reads those events as chat completions (text,
+reasoning, tool calls, finish reason and usage), so the stream looks the same
+whatever model served it. `byokAlias` picks a stored key by alias; it is sent
+as `cf-aig-byok-alias`, which `/run` reads.
+
+## Model objects
+
+A vendor's own AI SDK model goes to AI Gateway's **provider-native path**,
+unchanged. `ai(model)` clones the model per call and swaps the `fetch` its
+provider would have used for one that sends the same request (method,
+headers, body) through the binding:
+
+```ts
+env.AI.fetch(
+  `https://workers-binding.ai/ai-gateway/gateways/${gateway}/anthropic/v1/messages`,
+  { method, headers, body } // the vendor's own, plus cf-aig-* gateway headers
+);
+```
+
+The provider slug and path come from the request URL's host (`api.anthropic.com`
+is `anthropic`, `api.openai.com` is `openai`, and so on for every gateway
+provider). A host the gateway has no provider for is a `TypeError` naming it.
+What comes back is the vendor's own response, parsed by the vendor's own code,
+streams included. Your model object is never mutated.
+
+```ts
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { createOpenAI } from "@ai-sdk/openai";
+
+const anthropic = createAnthropic({ apiKey: "cloudflare" }); // placeholder
+const openai = createOpenAI({ apiKey: "cloudflare" });
+
+ai(anthropic("claude-opus-4-8")); // Anthropic Messages, the vendor's own id
+ai(openai("gpt-5-mini")); // OpenAI Responses
+ai.routed(openai.transcription("whisper-1")); // multipart bodies travel too
+```
+
+The vendor's id is the vendor's spelling (`claude-opus-4-8`), because its
+package picks capabilities from it. Gateway options travel as `cf-aig-*`
+headers. A model whose provider hides its settings (one already wrapped in
+middleware, or hand-written) is a `TypeError`; wrap first, then apply
+middleware:
+
+```ts
+wrapLanguageModel({ model: ai(anthropic("claude-opus-4-8")), middleware });
+```
+
+### Keys, ZDR and BYOK aliases
+
+The vendor's credential header (`authorization`, `x-api-key`,
+`x-goog-api-key`, `api-key`) is stripped by default, so the gateway supplies
+the key: Unified Billing, or a key stored on the gateway. Unified Billing needs
+authentication turned on for the gateway.
+
+To use a key you hold yourself, give it to the vendor's provider and set
+`vendorKey: "request"`, which forwards the credential instead of stripping it:
+
+```ts
+const anthropic = createAnthropic({ apiKey: env.ANTHROPIC_API_KEY });
+const model = ai(anthropic("claude-opus-4-8"), { vendorKey: "request" });
+```
+
+`vendorKey` belongs to the model it is set on. A fallback leg does not inherit
+it, so a chain can mix a model on your key with one on Unified Billing.
+
+`byokAlias` picks a stored key by alias when the gateway holds several for one
+provider, and `zdr` turns Zero Data Retention on (`true`) or off (`false`) for
+a Unified Billing request, whatever the gateway's own setting. On a model
+object both travel as headers (`cf-aig-byok-alias`, `cf-aig-zdr`). `zdr`
+applies to model objects only: `/run` does not read it.
+
+A vendor's own error, such as a bad model id or a rejected parameter, stays the
+vendor's, raised by its provider in its own error type. Only the gateway's own
+failures, such as no such gateway or an unpaid account, become a
+`CloudflareAIError`.
 
 ## Dynamic routes
 
@@ -261,6 +347,9 @@ await generateText({
 | `eventId`            | `string`                                              | Correlates several requests into one gateway event.                     |
 | `requestTimeoutMs`   | `number`                                              | Upstream request timeout.                                               |
 | `retries`            | `{ maxAttempts, retryDelayMs, backoff }`              | Server-side retry policy for the upstream provider call.                |
+| `byokAlias`          | `string`                                              | A stored BYOK key, by alias. Catalog models and model objects.          |
+| `zdr`                | `boolean`                                             | Zero Data Retention on or off (Unified Billing). Model objects only.    |
+| `vendorKey`          | `"gateway" \| "request"`                              | Model objects only: forward the vendor key on the request. Per model.   |
 | `fallback`           | `(CloudflareLanguageModelId \| LanguageModelV4)[]`    | Models to try, in order, if the primary fails before producing output.  |
 | `headers`            | `Record<string, string>`                              | Extra request headers, merged last.                                     |
 | `sessionAffinity`    | `string`                                              | Pin same-key requests to one replica for prefix-cache hits.             |
@@ -307,18 +396,19 @@ output it is the answer, failures and all: by then the caller already has part
 of it. A leg is any model id, or any AI SDK language model:
 
 ```ts
-const model = ai("anthropic/claude-opus-4.8", {
+const model = ai(anthropic("claude-opus-4-8"), {
   fallback: ["openai/gpt-5.5", "@cf/zai-org/glm-4.7-flash"]
 });
 ```
 
-A model object from another provider is called as it is — it reaches its own
-API, not AI Gateway — so a chain can end on a model you host elsewhere.
+A model object in a chain is routed like `ai(model)`, through the
+provider-native path, so a chain can mix catalog ids, Workers AI and a vendor's
+own models.
 
 A leg travels with the chain's gateway options: the chain's `id`, `cacheTtl`
 and the rest win over a leg's own, `metadata` merges field by field, and
 everything else a leg was built with — its `headers`, its Workers AI knobs —
-stays the leg's. A leg written as a string follows the same rule as `ai("…")`:
+stays the leg's, and so does its `vendorKey`. A leg written as a string follows the same rule as `ai("…")`:
 anything that is not one of the three id forms is the same `TypeError`,
 whether it was written on the model or per call under
 `providerOptions.cloudflare`.
@@ -375,17 +465,18 @@ providerMetadata?.cloudflare;
 // }
 ```
 
-| Field         | Source header         | Notes                                         |
-| ------------- | --------------------- | --------------------------------------------- |
-| `model`       | —                     | The leg that answered, after any fallback.    |
-| `gateway`     | —                     | The gateway id the request went through.      |
-| `logId`       | `cf-aig-log-id`       | Falls back to the binding's last log id.      |
-| `eventId`     | `cf-aig-event-id`     | Correlates the requests of one gateway event. |
-| `requestId`   | `cf-aig-request-id`   | The gateway's id for this request.            |
-| `traceId`     | `cf-aig-trace-id`     | The trace this request belongs to.            |
-| `runId`       | `cf-aig-run-id`       | Present only when the gateway sends one.      |
-| `cacheStatus` | `cf-aig-cache-status` | `HIT` / `MISS`.                               |
-| `step`        | `cf-aig-step`         | Which step of a gateway route answered.       |
+| Field         | Source header         | Notes                                          |
+| ------------- | --------------------- | ---------------------------------------------- |
+| `model`       | —                     | The leg that answered, after any fallback.     |
+| `gateway`     | —                     | The gateway id the request went through.       |
+| `provider`    | —                     | The gateway provider slug, for a model object. |
+| `logId`       | `cf-aig-log-id`       | Falls back to the binding's last log id.       |
+| `eventId`     | `cf-aig-event-id`     | Correlates the requests of one gateway event.  |
+| `requestId`   | `cf-aig-request-id`   | The gateway's id for this request.             |
+| `traceId`     | `cf-aig-trace-id`     | The trace this request belongs to.             |
+| `runId`       | `cf-aig-run-id`       | Present only when the gateway sends one.       |
+| `cacheStatus` | `cf-aig-cache-status` | `HIT` / `MISS`.                                |
+| `step`        | `cf-aig-step`         | Which step of a gateway route answered.        |
 
 Every field except `model` and `gateway` is optional, and which ones arrive
 depends on the path and the call. Read the fields you find rather than assuming
@@ -415,6 +506,9 @@ try {
 
 `code` is one of `"auth"`, `"rate-limit"`, `"not-found"`, `"bad-request"`,
 `"provider-error"`, `"gateway-error"`, `"unknown"`.
+
+On a model object this covers the gateway's own failures; a vendor's own error
+is raised by that vendor's provider in its own error type.
 
 ## Experimental
 

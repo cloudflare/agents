@@ -3,12 +3,27 @@ import {
   classifyStatus,
   normalizeThrownError
 } from "./errors";
-import { isWorkersAIId } from "./catalog";
+import { isCatalogModelId, isWorkersAIId } from "./catalog";
 import type { GatewayProviderName } from "./gateway-providers";
 import type { AISettings, ResolvedGateway } from "./settings";
 
 /** The reported `url` for a universal call made through the binding. */
 const UNIVERSAL_BINDING_URL = "ai-gateway-binding";
+
+/** The reported `url` for a provider-native call made through the binding. */
+const NATIVE_BINDING_URL = "ai-gateway-binding-native";
+
+/** The origin the binding's own `fetch` answers on. */
+const BINDING_ORIGIN = "https://workers-binding.ai";
+
+/**
+ * The `Ai` binding's `fetch`. The binding has one at runtime (workerd's
+ * `ai-api.ts`), and aig-entry routes it, but `@cloudflare/workers-types` does
+ * not declare it.
+ */
+interface FetchingBinding {
+  fetch(input: string, init?: RequestInit): Promise<Response>;
+}
 
 /**
  * The shape of a run-path request body, and of its answer. Only one today:
@@ -66,6 +81,31 @@ export interface UniversalRequest {
 }
 
 /**
+ * A vendor's own request, sent to AI Gateway's provider-native path:
+ * `{gateway}/{provider}/{endpoint}`. Nothing is converted on the way — the
+ * method, headers and body are the vendor's — so the answer is the vendor's
+ * own response, streams included.
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export interface NativeRequest {
+  /** The gateway provider slug, e.g. `anthropic`. */
+  provider: GatewayProviderName | string;
+  /** The vendor path after the provider slug, query string included. */
+  endpoint: string;
+  /** The HTTP method the vendor used. */
+  method: string;
+  /** The vendor's own request headers. */
+  headers: Record<string, string>;
+  /** The vendor's request body, untouched: JSON, multipart, or none. */
+  body: BodyInit | null | undefined;
+  /** Gateway options, sent as `cf-aig-*` headers. */
+  gateway: ResolvedGateway;
+  /** Abort signal, forwarded to the binding. */
+  signal?: AbortSignal;
+}
+
+/**
  * The single code path both backends implement. Always resolves to a raw
  * `Response`, so streaming and non-streaming calls share one path and nothing
  * is buffered on the caller's behalf.
@@ -84,6 +124,13 @@ export interface Transport {
    * knows how to read its own errors and we do not.
    */
   universal(request: UniversalRequest): Promise<Response>;
+  /**
+   * Sends a vendor's own request to AI Gateway's provider-native path. Like
+   * {@link Transport.universal} it resolves to the vendor's raw `Response`,
+   * error responses included; the caller lifts only the gateway's own
+   * failures.
+   */
+  native(request: NativeRequest): Promise<Response>;
   /**
    * A log id read off the backend itself when the response carried none. The
    * Workers AI binding exposes the last gateway log id as a mutable property,
@@ -256,6 +303,75 @@ function universalGatewayOptions(
 }
 
 /**
+ * The gateway options as the `cf-aig-*` request headers AI Gateway reads.
+ * The provider-native path has no options object, so every option travels
+ * this way; the names are the gateway's own.
+ */
+function gatewayHeaders(gateway: ResolvedGateway): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (gateway.cacheTtl !== undefined) {
+    headers["cf-aig-cache-ttl"] = String(gateway.cacheTtl);
+  }
+  if (gateway.skipCache !== undefined) {
+    headers["cf-aig-skip-cache"] = String(gateway.skipCache);
+  }
+  if (gateway.cacheKey !== undefined) {
+    headers["cf-aig-cache-key"] = gateway.cacheKey;
+  }
+  if (gateway.metadata !== undefined) {
+    headers["cf-aig-metadata"] = JSON.stringify(gateway.metadata);
+  }
+  if (gateway.collectLog !== undefined) {
+    headers["cf-aig-collect-log"] = String(gateway.collectLog);
+  }
+  if (gateway.eventId !== undefined) {
+    headers["cf-aig-event-id"] = gateway.eventId;
+  }
+  if (gateway.requestTimeoutMs !== undefined) {
+    headers["cf-aig-request-timeout"] = String(gateway.requestTimeoutMs);
+  }
+  const retries = gateway.retries;
+  if (retries?.maxAttempts !== undefined) {
+    headers["cf-aig-max-attempts"] = String(retries.maxAttempts);
+  }
+  if (retries?.retryDelayMs !== undefined) {
+    headers["cf-aig-retry-delay"] = String(retries.retryDelayMs);
+  }
+  if (retries?.backoff !== undefined) {
+    headers["cf-aig-backoff"] = retries.backoff;
+  }
+  if (gateway.byokAlias !== undefined) {
+    headers["cf-aig-byok-alias"] = gateway.byokAlias;
+  }
+  if (gateway.zdr !== undefined) headers["cf-aig-zdr"] = String(gateway.zdr);
+  return headers;
+}
+
+/**
+ * The binding's options for the Workers AI run path: the gateway options its
+ * `GatewayOptions` type defines, and the headers for the ones it does not.
+ *
+ * `byokAlias` reaches `/run` as `cf-aig-byok-alias`, which aig-entry forwards
+ * and `/run` reads for a catalog model's stored key. `zdr` is left off: `/run`
+ * does not read it, so it applies to provider-native requests only.
+ */
+function runOptions(request: TransportRequest): {
+  gateway: GatewayOptions;
+  headers: Record<string, string>;
+} {
+  const { byokAlias, zdr: _zdr, ...gateway } = request.gateway;
+  return {
+    gateway,
+    headers: {
+      ...request.headers,
+      ...(byokAlias !== undefined && isCatalogModelId(request.model)
+        ? { "cf-aig-byok-alias": byokAlias }
+        : {})
+    }
+  };
+}
+
+/**
  * What `/run` calls each request format in the binding's `openaiEndpoint`
  * option, which `aig-entry` turns into `/run`'s `requestFormat`.
  */
@@ -381,11 +497,12 @@ function bindingTransport(binding: Ai): Transport {
       try {
         // Called as a method, never detached: the binding reads private
         // fields and throws on a detached reference.
+        const run = runOptions(request);
         const response = await raw.run(request.model, request.input, {
-          ...(Object.keys(request.headers).length > 0
-            ? { extraHeaders: request.headers }
+          ...(Object.keys(run.headers).length > 0
+            ? { extraHeaders: run.headers }
             : {}),
-          gateway: request.gateway,
+          gateway: run.gateway,
           // A Workers AI id goes to Workers AI itself; any other id is served
           // by AI Gateway's `/run`, which reads the body and answers in the
           // format named here. Without it `/run` guesses the format from the
@@ -439,6 +556,30 @@ function bindingTransport(binding: Ai): Transport {
           model: universalModel(request),
           requestBodyValues: request.query,
           url: UNIVERSAL_BINDING_URL
+        });
+      }
+    },
+    async native(request) {
+      try {
+        // `fetch` is the binding's own and is called as a method: aig-entry
+        // serves `/ai-gateway/gateways/{gateway}/{provider}/*` for it and
+        // forwards the request to the provider-native path unchanged.
+        return await (binding as unknown as FetchingBinding).fetch(
+          `${BINDING_ORIGIN}/ai-gateway/gateways/${encodeURIComponent(
+            request.gateway.id
+          )}/${request.provider}/${request.endpoint}`,
+          {
+            body: request.body ?? null,
+            headers: { ...request.headers, ...gatewayHeaders(request.gateway) },
+            method: request.method,
+            signal: request.signal
+          }
+        );
+      } catch (error) {
+        throw normalizeThrownError(error, {
+          model: `${request.provider}/${request.endpoint}`,
+          requestBodyValues: undefined,
+          url: NATIVE_BINDING_URL
         });
       }
     },

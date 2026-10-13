@@ -30,7 +30,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/schedules`                        | `src/schedules/index.ts`                      | Dependency-light Lifecycle Scheduler primitive and runtime types                                                                              |
 | `agents/schedules/parser`                 | `src/schedules/parser.ts`                     | Zod-based natural-language scheduling prompt and schema helpers                                                                               |
 | `agents/observability`                    | `src/observability/index.ts`                  | Observability event types and emitters                                                                                                        |
-| `agents/models/ai-sdk`                    | `src/models/ai-sdk/index.ts`                  | Experimental `createAI` for the AI SDK — Workers AI, AI Gateway catalog and dynamic route ids, all on `env.AI.run`                            |
+| `agents/models/ai-sdk`                    | `src/models/ai-sdk/index.ts`                  | Experimental `createAI` for the AI SDK — model ids on `env.AI.run`, vendor model objects on AI Gateway's provider-native path                 |
 | `agents/models/pi-ai`                     | `src/models/pi-ai/index.ts`                   | Experimental `createAI` for pi-ai — Workers AI ids, vendor models routed through AI Gateway                                                   |
 | `agents/ai-chat-agent`                    | `src/ai-chat-agent.ts`                        | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                                                                                           |
 | `agents/ai-react`                         | `src/ai-react.tsx`                            | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                                                                                          |
@@ -156,9 +156,9 @@ src/
       settings.ts       #   ModelOptions, fallback legs, providerOptions.cloudflare parsing
       errors.ts         #   APICallError lift over core errors
       transport.ts      #   core transport with errors lifted
-      models/           #   language.ts (every model id, on env.AI.run), embedding/image/
+      models/           #   language.ts (model ids, env.AI.run), gateway.ts (model objects, provider-native), embedding/image/
                         #   transcription/speech/reranking/modality.ts, fallback.ts
-      wires/            #   chat-completions.ts, shared.ts (the one wire: chat completions)
+      wires/            #   chat-completions.ts, shared.ts (model ids speak chat completions; objects bring their own wire)
     pi-ai/              # agents/models/pi-ai — pi-ai models over core
       index.ts          #   createAI + public types
       settings.ts       #   pi call options -> resolved request

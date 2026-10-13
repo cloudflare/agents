@@ -43,8 +43,7 @@ export type CloudflareLanguageModelId =
 
 /**
  * One leg of a fallback chain: a language model id, or any AI SDK language
- * model, which is called as it is — another provider's model reaches its own
- * API, not AI Gateway.
+ * model — which is routed through AI Gateway like `ai(model)`.
  *
  * @experimental This surface is experimental and may change.
  */
@@ -57,6 +56,51 @@ export type FallbackLeg = CloudflareLanguageModelId | LanguageModelV4;
  * @experimental This surface is experimental and may change.
  */
 export type ModelOptions = CoreModelOptions<FallbackLeg>;
+
+/**
+ * Which key authenticates a vendor model object routed through AI Gateway.
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export interface VendorKeyOptions {
+  /**
+   * `"gateway"` (the default) strips the key the vendor's provider put on the
+   * request, so the gateway supplies one: Unified Billing, or a BYOK key
+   * stored on the gateway. `"request"` forwards that key to the vendor, for a
+   * key you hold yourself, e.g. `createAnthropic({ apiKey: env.ANTHROPIC_KEY })`.
+   *
+   * It belongs to the model it is set on, so a fallback leg keeps its own.
+   */
+  vendorKey?: "gateway" | "request";
+}
+
+/**
+ * The options accepted next to a model object — `ai(anthropic("…"), { … })`.
+ * {@link ModelOptions} plus {@link VendorKeyOptions.vendorKey}; the
+ * Workers-AI-only knobs (`reasoningEffort`, `chatTemplateKwargs`) are ignored
+ * with a warning.
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export type GatewayModelOptions = ModelOptions & VendorKeyOptions;
+
+/**
+ * The options `ai.routed()` takes: the gateway options, `headers`,
+ * `sessionAffinity` and `vendorKey`.
+ *
+ * A routed embedding, image, speech or transcription model is the vendor's
+ * own, and only its transport is ours — there is no chain to fall back through
+ * and no Workers AI reasoning knob to apply. They are absent from the type
+ * rather than dropped at runtime, so the mistake is a compile error naming the
+ * option.
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export type RoutedModelOptions = Omit<
+  ModelOptions,
+  "fallback" | "reasoningEffort" | "chatTemplateKwargs"
+> &
+  VendorKeyOptions;
 
 /**
  * The options the Workers-AI-only methods take — `ai.embedding`, `ai.image`,
@@ -124,18 +168,18 @@ export function parseModalityCallOptions(
  * back when it layers a fallback chain's gateway options over it, and that is
  * this module's business rather than part of any model's public shape.
  */
-const MODEL_OPTIONS = new WeakMap<object, ModelOptions>();
+const MODEL_OPTIONS = new WeakMap<object, GatewayModelOptions>();
 
 /** Records the options a model of this provider was built with. */
 export function rememberOptions(
   model: object,
-  options: ModelOptions | undefined
+  options: GatewayModelOptions | undefined
 ): void {
   if (options !== undefined) MODEL_OPTIONS.set(model, options);
 }
 
 /** The options a model of this provider was built with, if it is one. */
-export function optionsOf(model: unknown): ModelOptions | undefined {
+export function optionsOf(model: unknown): GatewayModelOptions | undefined {
   return model !== null && typeof model === "object"
     ? MODEL_OPTIONS.get(model)
     : undefined;
