@@ -566,6 +566,7 @@ export function streamCompletions(
 
       response = workersAI
         ? await transport.run({
+            format: "chat-completions",
             gateway: resolved.gateway,
             headers: request.headers,
             input: payload,

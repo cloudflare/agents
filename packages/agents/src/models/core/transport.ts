@@ -3,18 +3,36 @@ import {
   classifyStatus,
   normalizeThrownError
 } from "./errors";
+import { isWorkersAIId } from "./catalog";
 import type { GatewayProviderName } from "./gateway-providers";
 import type { AISettings, ResolvedGateway } from "./settings";
 
 /** The reported `url` for a universal call made through the binding. */
 const UNIVERSAL_BINDING_URL = "ai-gateway-binding";
 
+/**
+ * The shape of a run-path request body, and of its answer. Only one today:
+ * every language request this module sends is chat completions.
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export type RunRequestFormat = "chat-completions";
+
 /** One request on the Cloudflare run path. */
 export interface TransportRequest {
-  /** Model id — Workers AI slug or catalog `<author>/<model>`. */
+  /**
+   * Model id — a Workers AI id, an AI Gateway catalog id
+   * (`<author>/<model>`), or a dynamic route (`dynamic/<route>`).
+   */
   model: string;
   /** The provider-shaped request body (`input` on the run path). */
   input: Record<string, unknown>;
+  /**
+   * The format `input` is in, and that the answer comes back in, for a model
+   * AI Gateway's `/run` serves. Defaults to chat completions. A Workers AI
+   * model's input is its own, so this is ignored for one.
+   */
+  format?: RunRequestFormat;
   /** Gateway options for this request. */
   gateway: ResolvedGateway;
   /** Extra request headers, merged last. */
@@ -238,31 +256,12 @@ function universalGatewayOptions(
 }
 
 /**
- * The gateway options for the Workers AI run path, as the binding's own
- * `GatewayOptions` type has them. `zdr` is left out: the binding has no field
- * for it, and it applies to vendor models routed through the gateway.
+ * What `/run` calls each request format in the binding's `openaiEndpoint`
+ * option, which `aig-entry` turns into `/run`'s `requestFormat`.
  */
-function runGatewayOptions(gateway: ResolvedGateway): GatewayOptions {
-  const { zdr: _zdr, ...options } = gateway;
-  return options;
-}
-
-/**
- * The universal call's own request headers: the caller's extra headers, plus
- * `cf-aig-zdr`. The gateway reads ZDR off the request itself, not off a
- * provider entry, and the binding's options have no field for it.
- */
-function universalRequestHeaders(
-  request: UniversalRequest
-): Record<string, string> | undefined {
-  const headers = {
-    ...request.extraHeaders,
-    ...(request.gateway.zdr === undefined
-      ? {}
-      : { "cf-aig-zdr": String(request.gateway.zdr) })
-  };
-  return Object.keys(headers).length > 0 ? headers : undefined;
-}
+const OPENAI_ENDPOINTS: Record<RunRequestFormat, string> = {
+  "chat-completions": "/v1/chat/completions"
+};
 
 /**
  * Whether a parsed body is the gateway's own error envelope rather than a
@@ -354,7 +353,14 @@ interface RawResponseBinding {
   run(
     model: string,
     inputs: Record<string, unknown>,
-    options: AiOptions & { returnRawResponse: true }
+    options: AiOptions & {
+      returnRawResponse: true;
+      /**
+       * Not in `AiOptions`: the binding forwards every option, and
+       * `aig-entry` maps this one onto `/run`'s `requestFormat`.
+       */
+      openaiEndpoint?: string;
+    }
   ): Promise<Response>;
 }
 
@@ -379,7 +385,17 @@ function bindingTransport(binding: Ai): Transport {
           ...(Object.keys(request.headers).length > 0
             ? { extraHeaders: request.headers }
             : {}),
-          gateway: runGatewayOptions(request.gateway),
+          gateway: request.gateway,
+          // A Workers AI id goes to Workers AI itself; any other id is served
+          // by AI Gateway's `/run`, which reads the body and answers in the
+          // format named here. Without it `/run` guesses the format from the
+          // body and wraps an answer it cannot place in `{ state, result }`.
+          ...(isWorkersAIId(request.model)
+            ? {}
+            : {
+                openaiEndpoint:
+                  OPENAI_ENDPOINTS[request.format ?? "chat-completions"]
+              }),
           returnRawResponse: true,
           signal: request.signal
         });
@@ -401,7 +417,6 @@ function bindingTransport(binding: Ai): Transport {
     },
     async universal(request) {
       try {
-        const extraHeaders = universalRequestHeaders(request);
         // Called as a method on the binding, and on the `AiGateway` it
         // returns: both read private fields.
         return await binding.gateway(request.gateway.id).run(
@@ -412,7 +427,9 @@ function bindingTransport(binding: Ai): Transport {
             query: request.query
           },
           {
-            ...(extraHeaders === undefined ? {} : { extraHeaders }),
+            ...(request.extraHeaders === undefined
+              ? {}
+              : { extraHeaders: request.extraHeaders }),
             gateway: universalGatewayOptions(request.gateway),
             signal: request.signal
           }

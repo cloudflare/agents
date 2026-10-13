@@ -2625,12 +2625,6 @@ importers:
 
   examples/next/models:
     dependencies:
-      '@ai-sdk/anthropic':
-        specifier: ^4.0.0
-        version: 4.0.10(zod@4.5.4)
-      '@ai-sdk/openai':
-        specifier: ^4.0.0
-        version: 4.0.9(zod@4.5.4)
       '@ai-sdk/provider':
         specifier: ^4.0.0
         version: 4.0.2

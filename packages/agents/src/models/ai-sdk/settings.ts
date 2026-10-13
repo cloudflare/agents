@@ -3,7 +3,11 @@ import type {
   LanguageModelV4CallOptions,
   SharedV4ProviderOptions
 } from "@ai-sdk/provider";
-import type { DynamicRouteId, WorkersAIModelId } from "../core/catalog";
+import type {
+  CatalogModelId,
+  DynamicRouteId,
+  WorkersAIModelId
+} from "../core/catalog";
 import {
   type ModelOptions as CoreModelOptions,
   PROVIDER_OPTIONS_KEY,
@@ -26,71 +30,33 @@ export {
 } from "../core/settings";
 
 /**
- * One leg of a fallback chain: a Workers AI id, an AI Gateway dynamic route,
- * or any AI SDK language model — including one this provider has already
- * wrapped for the gateway.
+ * A language model id: a Workers AI id, an AI Gateway catalog id
+ * (`<author>/<model>`), or a dynamic route (`dynamic/<route>`). All three run
+ * on `env.AI.run`.
  *
  * @experimental This surface is experimental and may change.
  */
-export type FallbackLeg = WorkersAIModelId | DynamicRouteId | LanguageModelV4;
+export type CloudflareLanguageModelId =
+  | WorkersAIModelId
+  | DynamicRouteId
+  | (CatalogModelId & {});
 
 /**
- * Per-model and per-call options.
+ * One leg of a fallback chain: a language model id, or any AI SDK language
+ * model, which is called as it is — another provider's model reaches its own
+ * API, not AI Gateway.
  *
- * The framework-neutral options, with the fallback leg type this module
- * accepts: a leg may be a model object as well as a Workers AI id, because a
- * third-party model is never an id here — it is a model its own provider
- * package built.
+ * @experimental This surface is experimental and may change.
+ */
+export type FallbackLeg = CloudflareLanguageModelId | LanguageModelV4;
+
+/**
+ * Per-model and per-call options: the framework-neutral options, with the
+ * fallback leg type this module accepts.
  *
  * @experimental This surface is experimental and may change.
  */
 export type ModelOptions = CoreModelOptions<FallbackLeg>;
-
-/**
- * Which key authenticates a vendor model routed through AI Gateway.
- *
- * @experimental This surface is experimental and may change.
- */
-export interface VendorKeyOptions {
-  /**
-   * `"gateway"` (the default) strips the key the vendor's provider put on the
-   * request, so the gateway supplies one: unified billing, or a BYOK key
-   * stored on the gateway. `"request"` forwards that key to the vendor, for a
-   * key you hold yourself, e.g. `createAnthropic({ apiKey: env.ANTHROPIC_KEY })`.
-   *
-   * It belongs to the model it is set on, so a fallback leg keeps its own.
-   */
-  vendorKey?: "gateway" | "request";
-}
-
-/**
- * The options accepted next to a model object — `ai(anthropic("…"), { … })`.
- * {@link ModelOptions} plus {@link VendorKeyOptions.vendorKey}; the
- * Workers-AI-only knobs (`reasoningEffort`, `chatTemplateKwargs`) are ignored
- * with a warning.
- *
- * @experimental This surface is experimental and may change.
- */
-export type GatewayModelOptions = ModelOptions & VendorKeyOptions;
-
-/**
- * The options `ai.routed()` takes: the gateway options, `headers`,
- * `sessionAffinity` and `vendorKey`.
- *
- * A routed embedding, image, speech or transcription model is the vendor's
- * own, and only its transport is ours — there is no chain to fall back through
- * (a leg for one of those modalities would have to be another vendor's model,
- * which this module cannot build) and no Workers AI reasoning knob to apply.
- * They are absent from the type rather than dropped at runtime, so the mistake
- * is a compile error naming the option.
- *
- * @experimental This surface is experimental and may change.
- */
-export type RoutedModelOptions = Omit<
-  ModelOptions,
-  "fallback" | "reasoningEffort" | "chatTemplateKwargs"
-> &
-  VendorKeyOptions;
 
 /**
  * The options the Workers-AI-only methods take — `ai.embedding`, `ai.image`,
@@ -158,18 +124,18 @@ export function parseModalityCallOptions(
  * back when it layers a fallback chain's gateway options over it, and that is
  * this module's business rather than part of any model's public shape.
  */
-const MODEL_OPTIONS = new WeakMap<object, GatewayModelOptions>();
+const MODEL_OPTIONS = new WeakMap<object, ModelOptions>();
 
 /** Records the options a model of this provider was built with. */
 export function rememberOptions(
   model: object,
-  options: GatewayModelOptions | undefined
+  options: ModelOptions | undefined
 ): void {
   if (options !== undefined) MODEL_OPTIONS.set(model, options);
 }
 
 /** The options a model of this provider was built with, if it is one. */
-export function optionsOf(model: unknown): GatewayModelOptions | undefined {
+export function optionsOf(model: unknown): ModelOptions | undefined {
   return model !== null && typeof model === "object"
     ? MODEL_OPTIONS.get(model)
     : undefined;

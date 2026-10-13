@@ -4,29 +4,25 @@ The experimental `createAI` factories, `agents/models/ai-sdk` and
 `agents/models/pi-ai`, driven from a plain Worker. Same rule, same routes, one
 per framework.
 
-## The rule in five lines
+## How `agents/models/ai-sdk` names a model
 
-1. Workers AI is the one catalog this package keeps up with, so a string is a
-   `@cf/<author>/<model>` id and nothing else.
-2. Every other vendor brings its own code — an `@ai-sdk/*` provider you install,
-   or a pi-ai registry you import — and `ai(model)` only routes it.
-3. AI Gateway holds the vendor credential (unified billing, or a BYOK key you
-   store on the gateway), so no vendor key lives in the Worker.
-4. The gateway is an option, not a product: `{ id, cacheTtl, ... }` flat or
+1. A model is a string, and every string runs on one method, `env.AI.run`.
+2. `@cf/<author>/<model>` is a Workers AI model.
+3. `<author>/<model>` is a model from the AI Gateway catalog, in the gateway's
+   own spelling (`anthropic/claude-opus-4.8`, `openai/gpt-5.5`). Unified
+   billing means no vendor key lives in the Worker.
+4. `dynamic/<route>` is a dynamic route on your gateway.
+5. The gateway is an option, not a product: `{ id, cacheTtl, ... }` flat or
    nested under `gateway`, and `default` auto-creates on first use.
-5. `createAI({ binding: env.AI })` is the whole configuration: Workers AI goes
-   through `env.AI.run`, vendor models through `env.AI.gateway(id).run`.
 
 ```ts
-import { createAnthropic } from "@ai-sdk/anthropic";
 import { createAI } from "agents/models/ai-sdk";
 
 const ai = createAI({ binding: env.AI });
-const anthropic = createAnthropic({ apiKey: "cloudflare" }); // placeholder
 
 ai("@cf/zai-org/glm-4.7-flash");
-ai(anthropic("claude-opus-4-8"), {
-  fallback: [ai("@cf/zai-org/glm-4.7-flash")]
+ai("anthropic/claude-opus-4.8", {
+  fallback: ["@cf/zai-org/glm-4.7-flash"]
 });
 ai.embedding("@cf/baai/bge-base-en-v1.5");
 ai.image("@cf/black-forest-labs/flux-1-schnell");
@@ -37,22 +33,20 @@ ai.reranking("@cf/baai/bge-reranker-base");
 
 ## Routes
 
-Every text route takes a model two ways: `?model=@cf/<author>/<model>` for
-Workers AI, or `?vendor=anthropic:claude-opus-4-8` / `?vendor=openai:gpt-5-mini`,
-which the Worker builds with that vendor's own provider and hands to `ai()`.
+Every text route takes `?model=` in any of the three forms.
 
-| Route         | Query                         | Does                                                                   |
-| ------------- | ----------------------------- | ---------------------------------------------------------------------- |
-| `/`           | `model` or `vendor`, `prompt` | `generateText` — returns text, usage and `providerMetadata.cloudflare` |
-| `/stream`     | `model` or `vendor`, `prompt` | `streamText` as a plain text stream                                    |
-| `/tools`      | `model` or `vendor`, `prompt` | `generateText` with a `getWeather` tool and `stopWhen: isStepCount(3)` |
-| `/json`       | `model` or `vendor`, `prompt` | `generateText` with `Output.object` over a zod schema                  |
-| `/embed`      | `text` (repeatable)           | `embedMany` with `@cf/baai/bge-base-en-v1.5`                           |
-| `/image`      | `model`, `prompt`             | `generateImage` — answers with the image itself (JPEG or PNG)          |
-| `/speech`     | `model`, `text`, `voice`      | `generateSpeech` — answers with the MP3                                |
-| `/transcribe` | `model`, `text`               | `transcribe`; POST audio, or GET and the Worker speaks a line first    |
-| `/rerank`     | `query`, `doc` (repeatable)   | `rerank` with `@cf/baai/bge-reranker-base`                             |
-| `/fallback`   | `prompt`                      | `ai(anthropic(...), { fallback: [ai("@cf/...")] })`                    |
+| Route         | Query                       | Does                                                                   |
+| ------------- | --------------------------- | ---------------------------------------------------------------------- |
+| `/`           | `model`, `prompt`           | `generateText` — returns text, usage and `providerMetadata.cloudflare` |
+| `/stream`     | `model`, `prompt`           | `streamText` as a plain text stream                                    |
+| `/tools`      | `model`, `prompt`           | `generateText` with a `getWeather` tool and `stopWhen: isStepCount(3)` |
+| `/json`       | `model`, `prompt`           | `generateText` with `Output.object` over a zod schema                  |
+| `/embed`      | `text` (repeatable)         | `embedMany` with `@cf/baai/bge-base-en-v1.5`                           |
+| `/image`      | `model`, `prompt`           | `generateImage` — answers with the image itself (JPEG or PNG)          |
+| `/speech`     | `model`, `text`, `voice`    | `generateSpeech` — answers with the MP3                                |
+| `/transcribe` | `model`, `text`             | `transcribe`; POST audio, or GET and the Worker speaks a line first    |
+| `/rerank`     | `query`, `doc` (repeatable) | `rerank` with `@cf/baai/bge-reranker-base`                             |
+| `/fallback`   | `prompt`                    | `ai("anthropic/claude-opus-4.8", { fallback: ["@cf/..."] })`           |
 
 `model` defaults to `@cf/zai-org/glm-4.7-flash`. The modality routes are Workers
 AI only — that is where the catalog is.
@@ -116,12 +110,12 @@ curl 'http://localhost:8787/rerank?query=which+is+cooler&doc=a+lizard&doc=a+cat'
 that the JSON run path cannot carry, so `/transcribe` answers a clear error for
 them; use a whisper id.
 
-Anthropic and OpenAI, the same routes with `vendor` instead of `model`:
+Catalog models, the same routes with a catalog id:
 
 ```sh
-curl 'http://localhost:8787/?vendor=anthropic:claude-opus-4-8&prompt=hello'
-curl 'http://localhost:8787/tools?vendor=anthropic:claude-opus-4-8&prompt=weather+in+Lisbon'
-curl 'http://localhost:8787/?vendor=openai:gpt-5-mini&prompt=hello'
+curl 'http://localhost:8787/?model=anthropic/claude-opus-4.8&prompt=hello'
+curl 'http://localhost:8787/tools?model=anthropic/claude-opus-4.8&prompt=weather+in+Lisbon'
+curl 'http://localhost:8787/?model=openai/gpt-5.5&prompt=hello'
 curl 'http://localhost:8787/fallback'
 ```
 

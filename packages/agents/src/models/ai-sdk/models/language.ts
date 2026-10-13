@@ -55,11 +55,6 @@ export interface CloudflareMetadata {
   model: string;
   /** The gateway id the request went through. */
   gateway: string;
-  /**
-   * The gateway provider slug the request was routed to, for a model reached
-   * through the universal gateway path. Absent for Workers AI.
-   */
-  provider?: string;
   /** `cf-aig-log-id`, or the binding's last log id. */
   logId?: string;
   /** `cf-aig-event-id` — correlates the requests of one gateway event. */
@@ -108,8 +103,7 @@ export function cloudflareMetadata(
   model: string,
   resolved: ResolvedOptions,
   response: Response,
-  transport: Transport,
-  provider?: string
+  transport: Transport
 ): SharedV4ProviderMetadata {
   const headers = response.headers;
   const rawStep = headers.get("cf-aig-step");
@@ -117,7 +111,6 @@ export function cloudflareMetadata(
   const metadata: CloudflareMetadata = {
     gateway: resolved.gateway.id,
     model,
-    ...(provider === undefined ? {} : { provider }),
     ...(Number.isNaN(step) ? {} : { step })
   };
   for (const [field, header] of [
@@ -429,6 +422,7 @@ export class CloudflareLanguageModel implements LanguageModelV4 {
     resolved: ResolvedOptions
   ): Promise<Response> {
     const response = await this.#config.transport.run({
+      format: "chat-completions",
       gateway: resolved.gateway,
       headers: callHeaders(options, resolved),
       input: request.body,

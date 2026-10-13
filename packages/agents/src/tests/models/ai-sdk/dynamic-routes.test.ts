@@ -153,7 +153,7 @@ describe("AI Gateway dynamic routes", () => {
   it("needs a route name", () => {
     const ai = createAI({ binding: asAi(fakeBinding(() => jsonResponse({}))) });
     expect(() => ai("dynamic/" as never)).toThrow(
-      /not a Workers AI model id.*dynamic routes with "dynamic\/"/
+      /not a model id this provider knows.*"dynamic\/<route>"/
     );
   });
 

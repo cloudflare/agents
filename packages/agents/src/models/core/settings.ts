@@ -36,12 +36,6 @@ export interface GatewayOptions {
     retryDelayMs?: number;
     backoff?: "constant" | "linear" | "exponential";
   };
-  /**
-   * Zero Data Retention for this request, sent as `cf-aig-zdr`. `true` turns
-   * it on and `false` turns it off, whatever the gateway's own setting. It
-   * applies to vendor models routed through the gateway on unified billing.
-   */
-  zdr?: boolean;
 }
 
 /**
@@ -180,8 +174,7 @@ function layerGateway(
       metadata: options.metadata,
       requestTimeoutMs: options.requestTimeoutMs,
       retries: options.retries,
-      skipCache: options.skipCache,
-      zdr: options.zdr
+      skipCache: options.skipCache
     })
   };
 }
@@ -197,8 +190,7 @@ const FLAT_GATEWAY_KEYS = [
   "metadata",
   "requestTimeoutMs",
   "retries",
-  "skipCache",
-  "zdr"
+  "skipCache"
 ] as const;
 
 /**
@@ -415,8 +407,7 @@ function parseGatewayFields(raw: Record<string, unknown>): GatewayOptions {
     metadata: asMetadata(raw.metadata),
     requestTimeoutMs: asNumber(raw.requestTimeoutMs),
     retries: asRetries(raw.retries),
-    skipCache: asBoolean(raw.skipCache),
-    zdr: asBoolean(raw.zdr)
+    skipCache: asBoolean(raw.skipCache)
   });
 }
 

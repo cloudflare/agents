@@ -1,8 +1,7 @@
 import type { AISettings } from "../core/settings";
 import {
-  type Transport,
+  type Transport as CoreTransport,
   createTransport as createCoreTransport,
-  errorFromGatewayEnvelope as coreErrorFromGatewayEnvelope,
   errorFromResponse as coreErrorFromResponse,
   unwrapEnvelope as coreUnwrapEnvelope
 } from "../core/transport";
@@ -12,24 +11,17 @@ export {
   definedHeaders,
   errorMessageFrom,
   headersToObject,
-  isGatewayErrorEnvelope,
-  type Transport,
-  type TransportRequest,
-  type UniversalRequest
+  type TransportRequest
 } from "../core/transport";
 
 /**
- * The typed AI SDK error for the gateway's own error envelope — a missing
- * gateway, an unpaid account — on the universal path.
+ * The transport this module uses: `env.AI.run`, and nothing else. Every model
+ * this module builds — Workers AI, catalog, dynamic route — is a run-path
+ * request.
+ *
+ * @experimental This surface is experimental and may change.
  */
-export function errorFromGatewayEnvelope(
-  body: unknown,
-  context: Parameters<typeof coreErrorFromGatewayEnvelope>[1]
-): CloudflareAIError {
-  return CloudflareAIError.fromCore(
-    coreErrorFromGatewayEnvelope(body, context)
-  );
-}
+export type Transport = Omit<CoreTransport, "universal">;
 
 /**
  * Unwraps the Cloudflare `{ success, result }` envelope, throwing an AI SDK
@@ -69,13 +61,6 @@ export function createTransport(settings: AISettings): Transport {
     async run(request) {
       try {
         return await inner.run(request);
-      } catch (error) {
-        throw toAISDKError(error);
-      }
-    },
-    async universal(request) {
-      try {
-        return await inner.universal(request);
       } catch (error) {
         throw toAISDKError(error);
       }

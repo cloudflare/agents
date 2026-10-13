@@ -1,56 +1,47 @@
 # Models (Experimental)
 
-`agents/models/ai-sdk` is Cloudflare's AI SDK provider. One rule decides
-everything in it:
-
-> **Workers AI is the one catalog we keep up with. Every other vendor brings
-> its own provider, and we route it.**
-
-So there are two call forms, and no third:
+`agents/models/ai-sdk` is Cloudflare's AI SDK provider. Every model is a
+string, and every string runs on one method — `env.AI.run`:
 
 ```ts
-ai("@cf/zai-org/glm-4.7-flash"); // Workers AI — our model, our compat layer
-ai(anthropic("claude-opus-4-8")); // the vendor's model, our transport
+ai("@cf/zai-org/glm-4.7-flash"); // Workers AI
+ai("anthropic/claude-opus-4.8"); // the AI Gateway catalog
+ai("dynamic/support"); // a dynamic route on your gateway
 ```
 
-No vendor ids, wire formats, thinking rules or model metadata live in this
-package, and `agents` takes no vendor package as a dependency — not even an
-optional one. You build the model with the vendor's own `@ai-sdk/*` provider;
-we hand its request to AI Gateway and hand the answer straight back to it.
+There is no vendor package to install and no vendor key to hold. AI Gateway's
+catalog names the model, picks the provider, converts the request, and bills
+through Unified Billing or a key stored on the gateway. Every model speaks
+chat completions, so one request builder and one parser serve them all.
 
 ## The canon, in five lines
 
-1. **`ai(string)` is Cloudflare's.** A Workers AI id, `@cf/<author>/<model>`,
-   autocompleted from `@cloudflare/workers-types`, or a
-   [dynamic route](#dynamic-routes) on your gateway, `dynamic/<route>`. Any
-   other string is a `TypeError` that tells you which provider package to
-   install.
-2. **`ai(model)` is any AI SDK v4 model**, routed through AI Gateway. Its
-   provider builds the request, parses the response, and handles its own
-   errors; only the transport is ours.
+1. **A model is a string.** `@cf/<author>/<model>` is Workers AI,
+   autocompleted from `@cloudflare/workers-types`; `<author>/<model>` is the
+   AI Gateway catalog, in the gateway's spelling; `dynamic/<route>` is a
+   [dynamic route](#dynamic-routes). Any other string is a `TypeError` naming
+   the three forms.
+2. **One method.** Every string runs on `env.AI.run`. A Workers AI id goes to
+   Workers AI; a catalog id or a route goes to AI Gateway's `/run`.
 3. **The gateway is an option, not a product.** Caching, logging, metadata,
    timeouts and retries are options on the call; the `default` gateway is
    created for you on first use.
-4. **Unified billing means no vendor key.** Anthropic and OpenAI answer with a
-   placeholder key today; anything else needs a key stored on the gateway
-   (BYOK).
+4. **Unified billing means no vendor key.** The gateway holds the credential —
+   Cloudflare's, or a key you store on the gateway (BYOK).
 5. One factory: `createAI` — text, embeddings, images, speech, transcription
    and reranking all come off it, and it is a full `ProviderV4`.
 
 ## Quick start
 
 Requirements: `ai@^7` and `@ai-sdk/provider@^4` must both be resolvable — they
-are optional peers of `agents`, so install them alongside it. Add a vendor
-provider only if you want that vendor:
+are optional peers of `agents`, so install them alongside it:
 
 ```sh
 pnpm add ai @ai-sdk/provider
-pnpm add @ai-sdk/anthropic   # only if you call Anthropic
 ```
 
 ```ts
 import { createAI } from "agents/models/ai-sdk";
-import { createAnthropic } from "@ai-sdk/anthropic";
 import { generateText } from "ai";
 
 export default {
@@ -58,20 +49,17 @@ export default {
     // Inside a Worker: keyless, using the AI binding.
     const ai = createAI({ binding: env.AI, id: "default", cacheTtl: 60 });
 
-    // The gateway holds the real key, so this one is a placeholder.
-    const anthropic = createAnthropic({ apiKey: "cloudflare" });
-
     const workersAI = await generateText({
       model: ai("@cf/zai-org/glm-4.7-flash"),
       prompt: "Say hello in three words"
     });
 
-    const vendor = await generateText({
-      model: ai(anthropic("claude-opus-4-8")),
+    const claude = await generateText({
+      model: ai("anthropic/claude-opus-4.8"),
       prompt: "Say hello in three words"
     });
 
-    return Response.json({ workersAI: workersAI.text, vendor: vendor.text });
+    return Response.json({ workersAI: workersAI.text, claude: claude.text });
   }
 };
 ```
@@ -84,12 +72,12 @@ Your `wrangler.jsonc` needs the binding:
 }
 ```
 
-Streaming, tools, and structured output are ordinary AI SDK calls, on either
+Streaming, tools, and structured output are ordinary AI SDK calls, on every
 form:
 
 ```ts
 const result = streamText({
-  model: ai(anthropic("claude-opus-4-8")),
+  model: ai("openai/gpt-5.5"),
   prompt: "Write a haiku about durable objects"
 });
 return result.toTextStreamResponse();
@@ -117,7 +105,7 @@ import { createProviderRegistry, generateText } from "ai";
 // A registry: `cloudflare:` names this provider.
 const registry = createProviderRegistry({ cloudflare: ai });
 await generateText({
-  model: registry.languageModel("cloudflare:@cf/zai-org/glm-4.7-flash"),
+  model: registry.languageModel("cloudflare:anthropic/claude-opus-4.8"),
   prompt: "Hi"
 });
 
@@ -126,116 +114,35 @@ globalThis.AI_SDK_DEFAULT_PROVIDER = createAI({ binding: env.AI });
 await generateText({ model: "@cf/zai-org/glm-4.7-flash", prompt: "Hi" });
 ```
 
-The string rule does not change in either place: a specifier is a `@cf/` id, so
-a vendor model is still a model object (`ai(anthropic("claude-opus-4-8"))`) and
-cannot be reached by a bare string.
-
 Every modality is on the registry too (`registry.imageModel`,
 `registry.textEmbeddingModel`, and so on), because each `ProviderV4` method is
 implemented. The default provider is process-wide: set it once, where you build
 the Worker's `env`-dependent state.
 
-## Why a model object and not an id
+## Catalog models
 
-An id is only useful if someone keeps its catalog current. We keep exactly one:
-Workers AI. Every other vendor already ships a maintained catalog inside its
-own `@ai-sdk/*` package — ids, wire format, thinking levels, tool shapes, error
-types — and that package is updated the day the vendor ships something. Copying
-any of it here would mean a second, slower copy that is wrong every time a
-vendor moves.
+A catalog id is `<author>/<model>` in the
+[AI Gateway catalog](https://developers.cloudflare.com/ai/models/)'s own
+spelling — `anthropic/claude-opus-4.8`, `openai/gpt-5.5`, `cloudflare/auto`. The spelling is the gateway's, not the vendor's:
+`anthropic/claude-opus-4.8`, not `claude-opus-4-8`.
 
-So `ai(model)` takes what the vendor built, clones it per call, swaps the
-`fetch` its provider would have used, and sends the very same bytes to AI
-Gateway. What comes back is the vendor's own response, parsed by the vendor's
-own code. Your model object is never mutated — two concurrent calls never see
-each other's transport.
+The request goes through `env.AI.run(id, body, { gateway, openaiEndpoint })`
+to AI Gateway's `/run`. The body is chat completions and the answer comes back
+as chat completions, whichever provider served it: `/run` converts to and from
+the provider's format. The gateway owns the rest:
 
-```ts
-import { createOpenAI } from "@ai-sdk/openai";
+- **Credentials.** Unified Billing bills the model to your Cloudflare account,
+  so there is no vendor key. A provider key stored on the gateway (BYOK) is
+  used instead when one is configured.
+- **Providers.** A catalog model can have several providers behind it; `/run`
+  picks one and retries across them.
+- **Errors.** A failure — an unknown model, an unpaid account, an upstream
+  error — comes back as a `CloudflareAIError`, the same type as a Workers AI
+  failure.
 
-const openai = createOpenAI({ apiKey: "cloudflare" });
-
-ai(openai.responses("gpt-5-mini")); // OpenAI Responses API, routed
-ai(anthropic("claude-opus-4-8")); // Anthropic Messages API, routed
-```
-
-Passing a third-party id as a string is an error, on purpose:
-
-```ts
-ai("anthropic/claude-opus-4-8");
-// TypeError: "anthropic/claude-opus-4-8" is not a Workers AI model id.
-// Workers AI ids start with "@cf/" … install @ai-sdk/anthropic and pass the
-// model object: ai(anthropic("claude-opus-4-8")).
-```
-
-A model whose provider hides its settings — one already wrapped in middleware,
-or hand-written — is an error too. Wrap first, then apply middleware:
-
-```ts
-wrapLanguageModel({ model: ai(anthropic("claude-opus-4-8")), middleware });
-```
-
-## The universal gateway request
-
-A routed vendor model does not go down the Workers AI run path. It goes through
-AI Gateway's **universal request**, which carries the vendor's own body
-untouched:
-
-```ts
-env.AI.gateway(gatewayId).run(
-  { provider: "anthropic", endpoint: "v1/messages", headers, query },
-  { gateway: { cacheTtl, skipCache, metadata, … }, extraHeaders, signal }
-);
-```
-
-- `provider` comes from the request URL's host (`api.anthropic.com` →
-  `anthropic`, `api.openai.com` → `openai`, and so on for every gateway
-  provider). A host the gateway has no provider for is a `TypeError` naming it.
-- `endpoint` is the path after the host (`v1/messages`, `v1/responses`).
-- `query` is the vendor's JSON body, verbatim — including its own model id, in
-  the vendor's own spelling. `claude-opus-4.8` gets a 404 from Anthropic
-  ("Did you mean claude-opus-4-8?"), because we do not rewrite ids.
-- The vendor's credential header (`authorization`, `x-api-key`,
-  `x-goog-api-key`, `api-key`) is stripped; its protocol headers
-  (`anthropic-version`, `anthropic-beta`, …) travel.
-- `stream: true` comes back as the vendor's own SSE. The gateway adds a small
-  `"p"` padding field to each data event, which every vendor parser ignores.
-
-The universal request carries **JSON only**. A multipart body (a file upload,
-an audio transcription posted as `FormData`) cannot be expressed in it and
-raises a `TypeError` rather than being silently mangled.
-
-## Unified billing and BYOK
-
-Whether a vendor answers without a key of yours is the gateway's business, not
-this package's:
-
-- **Unified billing** covers Anthropic and OpenAI today: a placeholder
-  `apiKey` is enough, and Cloudflare bills you.
-- **Everything else needs BYOK** — a provider key stored on the gateway. Google
-  AI Studio without one answers `403 "Method doesn't allow unregistered callers"`,
-  and that error is surfaced to you exactly as Google wrote it, because Google's
-  provider is the one that knows how to read it.
-
-`zdr` turns Zero Data Retention on (`true`) or off (`false`) for one request,
-whatever the gateway's own setting. It applies to a routed model on unified
-billing and is sent as `cf-aig-zdr`.
-
-To use a key you hold yourself rather than one stored on the gateway, give it
-to the vendor's provider and set `vendorKey: "request"`, which forwards the
-credential header instead of stripping it:
-
-```ts
-const anthropic = createAnthropic({ apiKey: env.ANTHROPIC_API_KEY });
-const model = ai(anthropic("claude-opus-4-8"), { vendorKey: "request" });
-```
-
-`vendorKey` belongs to the model it is set on (`ai(model, …)` or
-`ai.routed(model, …)`). A fallback leg does not inherit it, so a chain can mix
-a model on your key with one on unified billing.
-
-Only the gateway's _own_ failures — no such gateway, an unpaid account — become
-a `CloudflareAIError`. A vendor error stays the vendor's.
+The request is built as strict OpenAI. `reasoningEffort` travels as
+`reasoning_effort`; `chatTemplateKwargs`, which only Workers AI takes, is
+dropped with a warning.
 
 ## Dynamic routes
 
@@ -289,18 +196,6 @@ const { rerankedDocuments } = await rerank({
 });
 ```
 
-A vendor's own embedding, image, speech or transcription model can be routed
-too, with `ai.routed(model)`: the same `fetch` swap, the same gateway options,
-and `providerMetadata.cloudflare` on the result.
-
-`ai.routed` takes the gateway options, `headers` and `sessionAffinity` — and
-those only. `fallback` is not among them (a leg for one of those modalities
-would have to be another vendor's model, which this provider cannot build), and
-neither are `reasoningEffort` and `chatTemplateKwargs`, which are Workers AI
-settings; passing one is a compile error rather than a silent drop. Sent per
-call under `providerOptions.cloudflare` instead, the two Workers AI knobs come
-back in the result's `warnings`.
-
 Bytes stay bytes and base64 stays base64: some models answer with a raw body
 (`image/png`, `audio/mpeg`, `audio/wav`) and some with JSON (`{ image }`,
 `{ audio }`), the content type decides, and nothing is converted on the way
@@ -334,15 +229,15 @@ throw a `CloudflareAIError` before any request is made, pointing at
 
 ## Options
 
-Options can be set in three places, on both call forms. Precedence is
-per-call > per-model > provider.
+Options can be set in three places. Precedence is per-call > per-model >
+provider.
 
 ```ts
 // Provider-wide
 const ai = createAI({ binding: env.AI, id: "prod", metadata: { app: "demo" } });
 
 // Per model
-const model = ai(anthropic("claude-opus-4-8"), { cacheTtl: 3600 });
+const model = ai("anthropic/claude-opus-4.8", { cacheTtl: 3600 });
 
 // Per call
 await generateText({
@@ -366,9 +261,7 @@ await generateText({
 | `eventId`            | `string`                                              | Correlates several requests into one gateway event.                     |
 | `requestTimeoutMs`   | `number`                                              | Upstream request timeout.                                               |
 | `retries`            | `{ maxAttempts, retryDelayMs, backoff }`              | Server-side retry policy for the upstream provider call.                |
-| `zdr`                | `boolean`                                             | Routed models only: Zero Data Retention on or off (unified billing).    |
-| `vendorKey`          | `"gateway" \| "request"`                              | Routed models only: forward the vendor key on the request. Per model.   |
-| `fallback`           | `(WorkersAIModelId \| LanguageModelV4)[]`             | Models to try, in order, if the primary fails before producing output.  |
+| `fallback`           | `(CloudflareLanguageModelId \| LanguageModelV4)[]`    | Models to try, in order, if the primary fails before producing output.  |
 | `headers`            | `Record<string, string>`                              | Extra request headers, merged last.                                     |
 | `sessionAffinity`    | `string`                                              | Pin same-key requests to one replica for prefix-cache hits.             |
 | `reasoningEffort`    | `"low" \| "medium" \| "high" \| null`                 | Workers AI only: explicit effort; `null` turns reasoning off.           |
@@ -379,28 +272,25 @@ The flat gateway keys are sugar: `{ cacheTtl: 60 }` and
 layers above and below them (`metadata`, `retries` and `headers` merge field by
 field).
 
-`fallback` takes model objects only on the language forms. On the modality
+`fallback` takes model objects only on language models. On the modality
 methods (`ai.embedding`, `ai.image`, `ai.speech`, `ai.transcription`,
 `ai.reranking`) a leg is a Workers AI id, because those run on the Workers AI
 run path, which resolves a leg by id and nothing else.
 
-`reasoningEffort` and `chatTemplateKwargs` are Workers AI settings. On a routed
-vendor model, reasoning is the vendor's own call option — use the AI SDK's
-unified `reasoning`, or that provider's `providerOptions`, and the vendor's
-rules apply because the vendor's code is what runs.
+`reasoningEffort` maps onto `reasoning_effort` for every model, and the AI
+SDK's unified `reasoning` call option maps onto it when it is not set.
+`chatTemplateKwargs` is a Workers AI setting: a catalog model or a dynamic
+route drops it with a warning.
 
 ### `providerOptions.cloudflare`
 
-Anything in the table above can be passed per call under the `cloudflare` key.
-It is read for gateway options and then **removed** before the call reaches a
-routed vendor model, so the vendor never sees a key it does not understand:
+Anything in the table above can be passed per call under the `cloudflare` key:
 
 ```ts
 await generateText({
-  model: ai(anthropic("claude-opus-4-8")),
+  model: ai("anthropic/claude-opus-4.8"),
   prompt: "hi",
   providerOptions: {
-    anthropic: { sendReasoning: true },
     cloudflare: { metadata: { userId: "u1" }, skipCache: true, cacheTtl: 300 }
   }
 });
@@ -414,28 +304,32 @@ then fails before its first output part — an `error` part, an error finish, or
 a broken body — in which case the failed leg's preamble is dropped and the
 answering leg's stream is delivered in its place. Once a leg has produced
 output it is the answer, failures and all: by then the caller already has part
-of it. Legs may be Workers AI ids or model objects, in any mix:
+of it. A leg is any model id, or any AI SDK language model:
 
 ```ts
-const model = ai(anthropic("claude-opus-4-8"), {
-  fallback: [ai("@cf/zai-org/glm-4.7-flash")]
+const model = ai("anthropic/claude-opus-4.8", {
+  fallback: ["openai/gpt-5.5", "@cf/zai-org/glm-4.7-flash"]
 });
 ```
+
+A model object from another provider is called as it is — it reaches its own
+API, not AI Gateway — so a chain can end on a model you host elsewhere.
 
 A leg travels with the chain's gateway options: the chain's `id`, `cacheTtl`
 and the rest win over a leg's own, `metadata` merges field by field, and
 everything else a leg was built with — its `headers`, its Workers AI knobs —
-stays the leg's. Legs written as strings are Workers AI ids, in a chain exactly
-as in `ai("…")`: a vendor id there is the same `TypeError`, whether it was
-written on the model or per call under `providerOptions.cloudflare`.
+stays the leg's. A leg written as a string follows the same rule as `ai("…")`:
+anything that is not one of the three id forms is the same `TypeError`,
+whether it was written on the model or per call under
+`providerOptions.cloudflare`.
 
 `providerMetadata.cloudflare.model` reports the model that actually answered.
 When every leg fails, the thrown `CloudflareAIError` carries an `attempts`
 array of `{ model, error }` and the last error as its `cause`.
 
-This is a client-side loop today. AI Gateway also accepts an **array** of
-universal requests as a server-side fallback chain; when we adopt it, the
-option shape will not change.
+This loop runs across models. Within one catalog model, `/run` already retries
+across that model's providers, and a [dynamic route](#dynamic-routes) runs its
+own fallback on the gateway.
 
 ## How Workers AI stays OpenAI-shaped
 
@@ -460,20 +354,17 @@ is conformant needs no entry at all.
 ## Observability: `providerMetadata.cloudflare`
 
 Every result and every stream `finish` part carries typed gateway metadata, so
-you never have to walk response objects looking for a log id. On a routed
-vendor model it is merged alongside the vendor's own metadata block rather than
-replacing it:
+you never have to walk response objects looking for a log id:
 
 ```ts
 const { providerMetadata } = await generateText({
-  model: ai(anthropic("claude-opus-4-8")),
+  model: ai("anthropic/claude-opus-4.8"),
   prompt: "hi"
 });
 
 providerMetadata?.cloudflare;
 // {
-//   model: "claude-opus-4-8",
-//   provider: "anthropic",
+//   model: "anthropic/claude-opus-4.8",
 //   gateway: "prod",
 //   logId: "01M1KZWN069WWNPC18V05NKHSS",
 //   eventId: "7bfd3660-9d0f-4bf7-bf9b-fa90b860456f",
@@ -482,21 +373,19 @@ providerMetadata?.cloudflare;
 //   cacheStatus: "MISS",
 //   step: 0
 // }
-providerMetadata?.anthropic; // still Anthropic's own
 ```
 
-| Field         | Source header         | Notes                                          |
-| ------------- | --------------------- | ---------------------------------------------- |
-| `model`       | —                     | The leg that answered, after any fallback.     |
-| `gateway`     | —                     | The gateway id the request went through.       |
-| `provider`    | —                     | The gateway provider slug, for a routed model. |
-| `logId`       | `cf-aig-log-id`       | Falls back to the binding's last log id.       |
-| `eventId`     | `cf-aig-event-id`     | Correlates the requests of one gateway event.  |
-| `requestId`   | `cf-aig-request-id`   | The gateway's id for this request.             |
-| `traceId`     | `cf-aig-trace-id`     | The trace this request belongs to.             |
-| `runId`       | `cf-aig-run-id`       | Present only when the gateway sends one.       |
-| `cacheStatus` | `cf-aig-cache-status` | `HIT` / `MISS`.                                |
-| `step`        | `cf-aig-step`         | Which step of a gateway route answered.        |
+| Field         | Source header         | Notes                                         |
+| ------------- | --------------------- | --------------------------------------------- |
+| `model`       | —                     | The leg that answered, after any fallback.    |
+| `gateway`     | —                     | The gateway id the request went through.      |
+| `logId`       | `cf-aig-log-id`       | Falls back to the binding's last log id.      |
+| `eventId`     | `cf-aig-event-id`     | Correlates the requests of one gateway event. |
+| `requestId`   | `cf-aig-request-id`   | The gateway's id for this request.            |
+| `traceId`     | `cf-aig-trace-id`     | The trace this request belongs to.            |
+| `runId`       | `cf-aig-run-id`       | Present only when the gateway sends one.      |
+| `cacheStatus` | `cf-aig-cache-status` | `HIT` / `MISS`.                               |
+| `step`        | `cf-aig-step`         | Which step of a gateway route answered.       |
 
 Every field except `model` and `gateway` is optional, and which ones arrive
 depends on the path and the call. Read the fields you find rather than assuming
@@ -526,11 +415,6 @@ try {
 
 `code` is one of `"auth"`, `"rate-limit"`, `"not-found"`, `"bad-request"`,
 `"provider-error"`, `"gateway-error"`, `"unknown"`.
-
-On a routed vendor model this covers the gateway's own failures. A vendor's own
-error — a bad model id, a rejected parameter, a rate limit — is raised by that
-vendor's provider in its own error type, because it is the code that knows how
-to read it.
 
 ## Experimental
 

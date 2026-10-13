@@ -11,8 +11,6 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^4.0.0",
-    "@ai-sdk/openai": "^4.0.0",
     "@ai-sdk/provider": "^4.0.0",
     "@earendil-works/pi-agent-core": "^1.0.0",
     "@earendil-works/pi-ai": "^1.0.0",
