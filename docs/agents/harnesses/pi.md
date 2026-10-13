@@ -193,6 +193,8 @@ The harness schedules one lifecycle job per session with work. The job waits on 
 
 When a session's only live work is a generation waiting more than a minute to retry or poll its model, the job sleeps until that deadline. If the session has any other live work, such as a background task, the job keeps its heartbeat instead, because that work may be due sooner.
 
+If a wake job's dispatch keeps failing, for example because Pi's storage cannot be read, the job is not dropped. It tries again on the heartbeat until the session has no live work.
+
 Every operation waits for the object's startup, which runs the factory. A call over RPC that arrives first waits for it rather than opening Pi on its own.
 
 ## Run the example

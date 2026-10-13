@@ -57,11 +57,13 @@ export class PiWakeTestObject extends DurableObject<Cloudflare.Env> {
     tokensPerSecond: 200,
     tokenSize: { min: 2, max: 4 }
   });
+  #failInspect = false;
+  #inspectFailures = 0;
   readonly harness = new PiHarness({
     harness: async ({ storage, context }) => {
       const registry = createRegistry();
       registry.install({ name: "test-tasks", tasks: [SleepUntil] });
-      return Harness.open(
+      const pi = await Harness.open(
         storage,
         {
           models: fauxModels(this.#faux.provider),
@@ -77,6 +79,16 @@ export class PiWakeTestObject extends DurableObject<Cloudflare.Env> {
         },
         context
       );
+      // A switch the tests flip to make every wake dispatch fail.
+      const inspect = pi.inspect.bind(pi);
+      pi.inspect = async (...args) => {
+        if (this.#failInspect) {
+          this.#inspectFailures++;
+          throw new Error("inspect is unavailable");
+        }
+        return inspect(...args);
+      };
+      return pi;
     },
     defaults: { model: this.#faux.getModel() }
   });
@@ -107,6 +119,16 @@ export class PiWakeTestObject extends DurableObject<Cloudflare.Env> {
         ),
       BACKGROUND_CONTEXT
     );
+  }
+
+  /** Fail or restore pi's `inspect()`, once pi is open. */
+  async failInspect(fail: boolean): Promise<void> {
+    await this.harness.pi();
+    this.#failInspect = fail;
+  }
+
+  inspectFailures(): number {
+    return this.#inspectFailures;
   }
 
   async submit(text: string) {

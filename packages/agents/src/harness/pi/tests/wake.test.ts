@@ -52,6 +52,39 @@ describe("PiHarness wake deadlines", () => {
     );
   });
 
+  it("keeps a session's wake job when its dispatch keeps failing while pi has work", async () => {
+    const name = crypto.randomUUID();
+    let object = stub(name);
+    await object.sleepUntil(Date.now() + 60_000);
+    // Startup gives every session with live work a wake job.
+    await abortAllDurableObjects();
+    object = stub(name);
+    await object.failInspect(true);
+
+    // Each alarm dispatch tries the job three times before giving up.
+    await eventually(
+      async () => {
+        await runDurableObjectAlarm(object);
+        return object.inspectFailures();
+      },
+      (failures) => failures >= 3
+    );
+
+    const wakeAt = await object.wakeJobTime();
+    expect(wakeAt).not.toBeNull();
+    expect(wakeAt!).toBeGreaterThan(Date.now());
+
+    // Once pi answers again, the wake carries on.
+    await object.failInspect(false);
+    await eventually(
+      async () => {
+        await runDurableObjectAlarm(object);
+        return object.wakeJobTime();
+      },
+      (time) => time !== null && time > Date.now()
+    );
+  });
+
   it("parks the wake on a generation retry when the generation is the only live work", async () => {
     const name = crypto.randomUUID();
     let object = stub(name);

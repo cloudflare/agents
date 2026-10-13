@@ -267,6 +267,17 @@ export class PiHarness extends LifecycleCapability {
     if (session !== undefined) return this.#wakeStep(session);
   }
 
+  /**
+   * A wake job whose dispatch failed through its retries. Lifecycle would
+   * complete it, and the object would sleep with pi's work unfinished, so
+   * try again on the heartbeat. A later step completes the job once pi
+   * reports nothing left in the session.
+   */
+  onJobError(context: LifecycleJobContext): LifecycleJobOutcome | void {
+    if (context.job.fn !== WAKE_FN) return;
+    return { rescheduleAt: Date.now() + this.#heartbeatMs };
+  }
+
   /** Close pi's in-memory resources. Durable state is untouched. */
   async dispose(): Promise<void> {
     const opening = this.#opening;
