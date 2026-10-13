@@ -1,5 +1,21 @@
 # @cloudflare/agents
 
+## 0.28.1
+
+### Patch Changes
+
+- [#2571](https://github.com/cloudflare/agents/pull/2571) [`1bd2bc5`](https://github.com/cloudflare/agents/commit/1bd2bc5d5e90e963c4d7db52cb9ef1a95153b99e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `createAI` (`agents/models/ai-sdk`, `agents/models/pi-ai`) adds the `zdr` gateway option, and `vendorKey: "request"` for AI SDK models routed with your own vendor key. See [docs/agents/models.md](https://github.com/cloudflare/agents/blob/main/docs/agents/models.md#unified-billing-and-byok).
+
+- [#2572](https://github.com/cloudflare/agents/pull/2572) [`b7c6ab9`](https://github.com/cloudflare/agents/commit/b7c6ab94dbe7b998ae9d85cb528eb1c39f02e00a) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `createAI` (`agents/models/ai-sdk`, `agents/models/pi-ai`) takes AI Gateway dynamic routes as `ai("dynamic/<route>")`. See [docs/agents/models.md](https://github.com/cloudflare/agents/blob/main/docs/agents/models.md#dynamic-routes).
+
+- [#2573](https://github.com/cloudflare/agents/pull/2573) [`80719a5`](https://github.com/cloudflare/agents/commit/80719a5943a4a5ee63e11acd719091a70d388119) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Update `@modelcontextprotocol/client` and `@modelcontextprotocol/server` to 2.2.0 and `@modelcontextprotocol/sdk` to 1.31.0. See [Model Context Protocol](https://developers.cloudflare.com/agents/model-context-protocol/).
+
+- [#2574](https://github.com/cloudflare/agents/pull/2574) [`131af4b`](https://github.com/cloudflare/agents/commit/131af4b0d9d54b465051f3209b9a41a1d6ddc1c1) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Update `@modelcontextprotocol/client` and `@modelcontextprotocol/server` to 2.3.1 and `@modelcontextprotocol/sdk` to 1.32.1. The MCP client transports now follow redirects only within the same origin. See [Model Context Protocol](https://developers.cloudflare.com/agents/model-context-protocol/).
+
+- [#2574](https://github.com/cloudflare/agents/pull/2574) [`131af4b`](https://github.com/cloudflare/agents/commit/131af4b0d9d54b465051f3209b9a41a1d6ddc1c1) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `McpAgent` now answers requests for a session ended with `DELETE` with 404 straight away, instead of serving it until deferred teardown runs, and `createMcpHandler` rejects a Legacy request whose factory returns an instance still serving another request without closing that instance. See [Transport](https://developers.cloudflare.com/agents/model-context-protocol/transport/).
+
+- [#2568](https://github.com/cloudflare/agents/pull/2568) [`46570f5`](https://github.com/cloudflare/agents/commit/46570f5309626d65f7111c9bda84c2de5412db16) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `OpenCodeHarness`: `session.events()` now returns a stream with a snapshot of the session and then its events, translated into the same kinds `PiHarness` reports: `run_start`/`run_end`, `operation_start`/`operation_end` (with the result `wait()` returns), `message_start`/`message_end`, `text_delta`, `reasoning_delta`, `tool_start`/`tool_end`, permissions and compaction. It replaces the async iterable of OpenCode's raw events; those are still available, durable and resumable, from `session.log()`. The OpenCode example now gives the model Workspace tools from `@cloudflare/computer` in place of OpenCode's local file and shell tools.
+
 ## 0.28.0
 
 ### Minor Changes
