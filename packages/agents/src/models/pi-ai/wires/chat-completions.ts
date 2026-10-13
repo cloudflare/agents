@@ -1,6 +1,6 @@
 /**
  * Chat-completions wire: Workers AI on the run path, and any pi-ai model whose
- * `api` is `openai-completions` on AI Gateway's universal endpoint.
+ * `api` is `openai-completions`, through AI Gateway.
  *
  * The request is shaped with pi-ai's own message converter so replay rules
  * (tool-call id normalization, reasoning replay, role bridging) match pi's
@@ -39,7 +39,7 @@ import {
   correlationDetails,
   openAIVendorHeaders,
   responseInfo,
-  sendUniversal,
+  sendGateway,
   startMessage,
   usageFromOpenAI,
   withIdleDeadline,
@@ -529,8 +529,8 @@ export function streamCompletions(
         stream: true,
         stream_options: { include_usage: true }
       };
-      // The run path names the model in the call; the universal request names
-      // it in the body, in the vendor's own spelling.
+      // The run path names the model in the call; a provider-native request
+      // names it in the body, in the vendor's own spelling.
       if (!workersAI) strict.model = wireModelId(model);
       const tools = getCurrentTools(context.messages);
       if (tools.length > 0) strict.tools = convertTools(tools);
@@ -573,11 +573,12 @@ export function streamCompletions(
             model: model.id,
             signal: options.signal
           })
-        : await sendUniversal(
+        : await sendGateway(
             request,
             transport,
             payload,
-            openAIVendorHeaders()
+            openAIVendorHeaders(),
+            "chat-completions"
           );
       await options.onResponse?.(responseInfo(response), model);
       attachCorrelation(

@@ -28,7 +28,7 @@ describe("pi-ai: Anthropic Messages over the universal gateway", () => {
       })
     );
 
-    const call = binding.universal[0];
+    const call = binding.native[0];
     expect(binding.calls).toHaveLength(0);
     expect(call?.gatewayId).toBe("gw");
     expect(call?.provider).toBe("anthropic");
@@ -94,7 +94,7 @@ describe("pi-ai: Anthropic Messages over the universal gateway", () => {
         ]
       })
     );
-    const call = binding.universal[0];
+    const call = binding.native[0];
     expect(field(call?.query, "tools.0.name")).toBe("getWeather");
     expect(field(call?.query, "tools.0.input_schema")).toBeDefined();
     // pi-ai defaults `supportsEagerToolInputStreaming` to true, so a model
@@ -129,17 +129,17 @@ describe("pi-ai: Anthropic Messages over the universal gateway", () => {
       })
     );
 
-    const adaptive = binding.universal[0]?.query;
+    const adaptive = binding.native[0]?.query;
     expect(field(adaptive, "thinking.type")).toBe("adaptive");
     expect(field(adaptive, "thinking.budget_tokens")).toBeUndefined();
     // An adaptive model has interleaved thinking built in, and this turn has
     // no tools, so pi asks for no beta at all.
-    expect(binding.universal[0]?.headers["anthropic-beta"]).toBeUndefined();
+    expect(binding.native[0]?.headers["anthropic-beta"]).toBeUndefined();
 
-    const budgeted = binding.universal[1]?.query;
+    const budgeted = binding.native[1]?.query;
     expect(field(budgeted, "thinking.type")).toBe("enabled");
     expect(field(budgeted, "thinking.budget_tokens")).toBeGreaterThan(0);
-    expect(binding.universal[1]?.headers["anthropic-beta"]).toContain(
+    expect(binding.native[1]?.headers["anthropic-beta"]).toContain(
       "interleaved-thinking-2025-05-14"
     );
   });
@@ -185,7 +185,7 @@ describe("pi-ai: Anthropic Messages over the universal gateway", () => {
         ]
       })
     );
-    const replayed = field(binding.universal[0]?.query, "messages.1.content.0");
+    const replayed = field(binding.native[0]?.query, "messages.1.content.0");
     expect(replayed).toMatchObject({
       signature: "sig-1",
       thinking: "Let me think.",
@@ -268,7 +268,7 @@ describe("pi-ai: Anthropic Messages over the universal gateway", () => {
         ]
       })
     );
-    expect(binding.universal[0]?.headers["anthropic-beta"]).toContain(
+    expect(binding.native[0]?.headers["anthropic-beta"]).toContain(
       "fine-grained-tool-streaming-2025-05-14"
     );
   });
@@ -281,6 +281,6 @@ describe("pi-ai: Anthropic Messages over the universal gateway", () => {
         interleavedThinking: false
       })
     );
-    expect(binding.universal[0]?.headers["anthropic-beta"]).toBeUndefined();
+    expect(binding.native[0]?.headers["anthropic-beta"]).toBeUndefined();
   });
 });

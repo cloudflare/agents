@@ -33,7 +33,7 @@ const WORKERS_AI = "@cf/zai-org/glm-4.7-flash";
 describe("pi-ai: fallback", () => {
   it("falls through from a vendor model to a Workers AI leg", async () => {
     const binding = fakeBinding((call) =>
-      call.kind === "universal"
+      call.kind === "native"
         ? jsonResponse(billingError(), { status: 402 })
         : sseResponse(workersAITextStream())
     );
@@ -46,7 +46,7 @@ describe("pi-ai: fallback", () => {
       ai.stream(model, userContext("hi"))
     );
 
-    expect(binding.universal.map((c) => c.provider)).toEqual(["openai"]);
+    expect(binding.native.map((c) => c.provider)).toEqual(["openai"]);
     expect(binding.calls.map((c) => c.model)).toEqual([WORKERS_AI]);
     // The fallback leg keeps the shared options.
     expect(binding.calls[0]?.options.gateway).toMatchObject({
@@ -80,11 +80,11 @@ describe("pi-ai: fallback", () => {
         userContext("hi")
       )
     );
-    expect(binding.universal.map((c) => c.provider)).toEqual([
+    expect(binding.native.map((c) => c.provider)).toEqual([
       "openai",
       "anthropic"
     ]);
-    expect(binding.universal[1]?.endpoint).toBe("v1/messages");
+    expect(binding.native[1]?.endpoint).toBe("v1/messages");
     expect(message.model).toBe("claude-sonnet-4-5");
     expect(message.content).toContainEqual({ text: "Hi there!", type: "text" });
   });
@@ -122,7 +122,7 @@ describe("pi-ai: fallback", () => {
 
   it("sends the chain's gateway to a leg that named its own", async () => {
     const binding = fakeBinding((call) =>
-      call.kind === "universal"
+      call.kind === "native"
         ? jsonResponse(billingError(), { status: 402 })
         : sseResponse(workersAITextStream())
     );
@@ -332,7 +332,7 @@ describe("pi-ai: fallback", () => {
         userContext("hi")
       )
     );
-    expect(binding.universal).toHaveLength(1);
+    expect(binding.native).toHaveLength(1);
     expect(binding.calls).toHaveLength(1);
     expect(events.map((e) => e.type)).toEqual(["error"]);
     expect(message.stopReason).toBe("error");

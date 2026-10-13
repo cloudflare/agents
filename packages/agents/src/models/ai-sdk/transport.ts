@@ -37,7 +37,7 @@ export function errorFromGatewayEnvelope(
  *
  * @experimental This surface is experimental and may change.
  */
-export type Transport = Omit<CoreTransport, "universal">;
+export type Transport = CoreTransport;
 
 /**
  * Unwraps the Cloudflare `{ success, result }` envelope, throwing an AI SDK

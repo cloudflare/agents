@@ -124,11 +124,10 @@ describe("pi-ai: ai.streamFn", () => {
       ai.streamFn(ai("anthropic/claude-opus-4.8"), userContext("hi"))
     );
 
-    expect(binding.calls).toHaveLength(0);
-    expect(binding.universal[0]).toMatchObject({
-      endpoint: "v1/messages",
-      gatewayId: "gw",
-      provider: "anthropic"
+    expect(binding.native).toHaveLength(0);
+    expect(binding.calls[0]).toMatchObject({
+      model: "anthropic/claude-opus-4.8",
+      options: { gateway: { id: "gw" }, openaiEndpoint: "/v1/messages" }
     });
     expect(message.stopReason).toBe("stop");
   });

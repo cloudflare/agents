@@ -15,9 +15,12 @@ import {
   calculateCost
 } from "@earendil-works/pi-ai";
 import { sseDataStream } from "../../core/sse";
-import type { Transport } from "../../core/transport";
+import { isCatalogModelId } from "../../core/catalog";
 import {
+  type RunRequestFormat,
+  type Transport,
   errorFromGatewayEnvelope,
+  errorFromResponse,
   headersToObject,
   isGatewayErrorEnvelope
 } from "../../core/transport";
@@ -351,33 +354,72 @@ export function openAIVendorHeaders(): Record<string, string> {
 }
 
 /**
- * Sends a vendor's own request body through AI Gateway's universal endpoint.
- *
- * The provider slug comes from the model's base URL and the endpoint from its
- * `api`; the body is what pi-ai's converter built, `model` included, because
- * that is what the universal request carries. The gateway's *own* failures
- * (no such gateway, unified billing unpaid) are lifted into a
- * `CloudflareAIError` so fallback and retry classification behave as they do on
- * the Workers AI run path; a vendor's own error response is left alone for the
- * wire's parser to read.
+ * The AI Gateway catalog id a model runs under on `/run`, when it has one: the
+ * `<author>/<model>` specifier it was resolved from, which pi's gateway
+ * catalog spells the gateway's way.
  */
-export async function sendUniversal(
+function catalogIdOf(model: Model<Api>): string | undefined {
+  const specifier = specifierOf(model);
+  return specifier !== undefined && isCatalogModelId(specifier)
+    ? specifier
+    : undefined;
+}
+
+/**
+ * Sends a vendor-format request body through AI Gateway, by the binding.
+ *
+ * A model from pi's Cloudflare AI Gateway catalog runs on `env.AI.run` under
+ * its catalog id, in its native `format`: `/run` converts nothing, so the
+ * answer — streams included — is the shape this wire parses. Any other model
+ * goes to the gateway's provider-native path with the request unchanged; the
+ * provider slug comes from the model's base URL and the endpoint from its
+ * `api`.
+ *
+ * The gateway's *own* failures (no such gateway, unified billing unpaid, an
+ * unknown catalog model) become a `CloudflareAIError`, so fallback and retry
+ * behave as they do on the Workers AI run path; a vendor's own error response
+ * on the provider-native path is left for the wire's parser to read.
+ */
+export async function sendGateway(
   request: WireRequest,
   transport: Transport,
   body: Record<string, unknown>,
   vendorHeaders: Record<string, string>,
+  format: RunRequestFormat,
   onResponse?: (response: Response) => void
 ): Promise<Response> {
   const { model, options, resolved } = request;
+  const catalogId = catalogIdOf(model);
+  if (catalogId !== undefined) {
+    // `/run` names the model at the top level; the vendor spelling the wire
+    // put in the body is not the catalog's.
+    const { model: _vendorId, ...input } = body;
+    const response = await transport.run({
+      format,
+      gateway: resolved.gateway,
+      headers: request.headers,
+      input,
+      model: catalogId,
+      signal: options.signal
+    });
+    onResponse?.(response);
+    if (!response.ok) {
+      throw await errorFromResponse(response, {
+        model: catalogId,
+        requestBodyValues: input,
+        url: transport.url
+      });
+    }
+    return response;
+  }
   const route = routeForModel(model);
-  const response = await transport.universal({
+  const response = await transport.native({
+    body: JSON.stringify(body),
     endpoint: route.endpoint,
-    extraHeaders:
-      Object.keys(request.headers).length > 0 ? request.headers : undefined,
     gateway: resolved.gateway,
-    headers: vendorHeaders,
+    headers: { ...vendorHeaders, ...request.headers },
+    method: "POST",
     provider: route.provider,
-    query: body,
     signal: options.signal
   });
   // The correlation ids are on the raw response, and a gateway envelope is

@@ -7,9 +7,6 @@ import { isCatalogModelId, isWorkersAIId } from "./catalog";
 import type { GatewayProviderName } from "./gateway-providers";
 import type { AISettings, ResolvedGateway } from "./settings";
 
-/** The reported `url` for a universal call made through the binding. */
-const UNIVERSAL_BINDING_URL = "ai-gateway-binding";
-
 /** The reported `url` for a provider-native call made through the binding. */
 const NATIVE_BINDING_URL = "ai-gateway-binding-native";
 
@@ -26,12 +23,13 @@ interface FetchingBinding {
 }
 
 /**
- * The shape of a run-path request body, and of its answer. Only one today:
- * every language request this module sends is chat completions.
+ * The shape of a run-path request body, and of its answer, for a model AI
+ * Gateway's `/run` serves. A request in a model's native format is not
+ * converted, streams included.
  *
  * @experimental This surface is experimental and may change.
  */
-export type RunRequestFormat = "chat-completions";
+export type RunRequestFormat = "chat-completions" | "messages" | "responses";
 
 /** One request on the Cloudflare run path. */
 export interface TransportRequest {
@@ -52,30 +50,6 @@ export interface TransportRequest {
   gateway: ResolvedGateway;
   /** Extra request headers, merged last. */
   headers: Record<string, string>;
-  /** Abort signal, forwarded to the binding or to `fetch`. */
-  signal?: AbortSignal;
-}
-
-/**
- * One request on the universal AI Gateway path: a vendor's own request, routed
- * by the gateway to that vendor. The body is the vendor's, untouched — nothing
- * here knows the vendor's wire format.
- *
- * @experimental This surface is experimental and may change.
- */
-export interface UniversalRequest {
-  /** The gateway provider slug the request is routed to. */
-  provider: GatewayProviderName | string;
-  /** The vendor path the gateway appends to that provider's base URL. */
-  endpoint: string;
-  /** The vendor's own request headers, minus its credential header. */
-  headers: Record<string, string>;
-  /** The vendor's request body, verbatim. */
-  query: unknown;
-  /** Gateway options for this request. */
-  gateway: ResolvedGateway;
-  /** Extra headers merged last, outside the vendor's own set. */
-  extraHeaders?: Record<string, string>;
   /** Abort signal, forwarded to the binding or to `fetch`. */
   signal?: AbortSignal;
 }
@@ -117,18 +91,11 @@ export interface Transport {
   readonly url: string;
   run(request: TransportRequest): Promise<Response>;
   /**
-   * Sends a vendor's own request through the gateway's universal endpoint.
-   * Always resolves to the vendor's raw `Response`, error responses included:
-   * only the gateway's own failures (a missing gateway, an unpaid account) are
-   * lifted into a {@link CloudflareAIError}, because the vendor's provider
-   * knows how to read its own errors and we do not.
-   */
-  universal(request: UniversalRequest): Promise<Response>;
-  /**
-   * Sends a vendor's own request to AI Gateway's provider-native path. Like
-   * {@link Transport.universal} it resolves to the vendor's raw `Response`,
-   * error responses included; the caller lifts only the gateway's own
-   * failures.
+   * Sends a vendor's own request to AI Gateway's provider-native path. It
+   * resolves to the vendor's raw `Response`, error responses included: only
+   * the gateway's own failures (a missing gateway, an unpaid account) are
+   * lifted, by the caller, because the vendor's own code knows how to read
+   * its errors and we do not.
    */
   native(request: NativeRequest): Promise<Response>;
   /**
@@ -279,30 +246,6 @@ export async function errorFromResponse(
 }
 
 /**
- * The gateway's own options for the universal call. The id is not among them:
- * it selects the gateway (`env.AI.gateway(id)`), and the binding's own `id`
- * field is deprecated.
- */
-function universalGatewayOptions(
-  gateway: ResolvedGateway
-): UniversalGatewayOptions {
-  // `id` is deprecated on this type but still required by it; the gateway is
-  // already selected by `env.AI.gateway(id)`, so it repeats that id.
-  const options: UniversalGatewayOptions = { id: gateway.id };
-  if (gateway.skipCache !== undefined) options.skipCache = gateway.skipCache;
-  if (gateway.cacheTtl !== undefined) options.cacheTtl = gateway.cacheTtl;
-  if (gateway.cacheKey !== undefined) options.cacheKey = gateway.cacheKey;
-  if (gateway.metadata !== undefined) options.metadata = gateway.metadata;
-  if (gateway.collectLog !== undefined) options.collectLog = gateway.collectLog;
-  if (gateway.eventId !== undefined) options.eventId = gateway.eventId;
-  if (gateway.requestTimeoutMs !== undefined) {
-    options.requestTimeoutMs = gateway.requestTimeoutMs;
-  }
-  if (gateway.retries !== undefined) options.retries = gateway.retries;
-  return options;
-}
-
-/**
  * The gateway options as the `cf-aig-*` request headers AI Gateway reads.
  * The provider-native path has no options object, so every option travels
  * this way; the names are the gateway's own.
@@ -376,7 +319,9 @@ function runOptions(request: TransportRequest): {
  * option, which `aig-entry` turns into `/run`'s `requestFormat`.
  */
 const OPENAI_ENDPOINTS: Record<RunRequestFormat, string> = {
-  "chat-completions": "/v1/chat/completions"
+  "chat-completions": "/v1/chat/completions",
+  messages: "/v1/messages",
+  responses: "/v1/responses"
 };
 
 /**
@@ -409,7 +354,7 @@ export function isGatewayErrorEnvelope(json: unknown): boolean {
 
 /**
  * Builds a {@link CloudflareAIError} from the gateway's own error envelope, so
- * a gateway failure on the universal path classifies and retries exactly as
+ * a gateway failure on the provider-native path classifies and retries exactly as
  * one on the Workers AI run path.
  *
  * @experimental This surface is experimental and may change.
@@ -444,19 +389,6 @@ export function errorFromGatewayEnvelope(
     status: context.status,
     url: context.url
   });
-}
-
-/**
- * The model id a universal request is about, for error reporting. Every vendor
- * body carries `model`; the endpoint is the fallback.
- */
-function universalModel(request: UniversalRequest): string {
-  const query = request.query;
-  if (query !== null && typeof query === "object" && !Array.isArray(query)) {
-    const model = (query as Record<string, unknown>).model;
-    if (typeof model === "string") return model;
-  }
-  return `${request.provider}/${request.endpoint}`;
 }
 
 /**
@@ -529,33 +461,6 @@ function bindingTransport(binding: Ai): Transport {
           model: request.model,
           requestBodyValues: request.input,
           url: "workers-ai-binding"
-        });
-      }
-    },
-    async universal(request) {
-      try {
-        // Called as a method on the binding, and on the `AiGateway` it
-        // returns: both read private fields.
-        return await binding.gateway(request.gateway.id).run(
-          {
-            endpoint: request.endpoint,
-            headers: request.headers,
-            provider: request.provider,
-            query: request.query
-          },
-          {
-            ...(request.extraHeaders === undefined
-              ? {}
-              : { extraHeaders: request.extraHeaders }),
-            gateway: universalGatewayOptions(request.gateway),
-            signal: request.signal
-          }
-        );
-      } catch (error) {
-        throw normalizeThrownError(error, {
-          model: universalModel(request),
-          requestBodyValues: request.query,
-          url: UNIVERSAL_BINDING_URL
         });
       }
     },

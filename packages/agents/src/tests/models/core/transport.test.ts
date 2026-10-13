@@ -1,7 +1,6 @@
 /**
- * The universal AI Gateway path over the AI binding — the only backend there
- * is. The fixtures are the shapes captured live against the Demos account
- * (`research/43-demos-*`).
+ * The core transport over the AI binding: `env.AI.run` for model ids, and the
+ * binding's own `fetch` for the provider-native path.
  */
 import { describe, expect, it } from "vitest";
 import { CloudflareAIError } from "../../../models/core/errors";
@@ -10,47 +9,49 @@ import {
   createTransport,
   errorFromGatewayEnvelope,
   isGatewayErrorEnvelope,
-  unwrapEnvelope,
-  type UniversalRequest
+  type NativeRequest,
+  unwrapEnvelope
 } from "../../../models/core/transport";
 
-interface GatewayCall {
-  id: string;
-  data: unknown;
-  options: unknown;
+interface FetchCall {
+  url: string;
+  init: RequestInit | undefined;
 }
 
-/** An `Ai`-shaped binding whose `gateway(id).run` records the universal call. */
-function fakeGatewayBinding(response: () => Response) {
-  const calls: GatewayCall[] = [];
+interface RunCall {
+  model: string;
+  input: unknown;
+  options: Record<string, unknown>;
+}
+
+/** An `Ai`-shaped binding that records `fetch` and `run`. */
+function fakeBinding(response: () => Response) {
+  const fetches: FetchCall[] = [];
+  const runs: RunCall[] = [];
   const binding = {
     aiGatewayLogId: null,
-    gateway(id: string) {
-      return {
-        async run(data: unknown, options: unknown) {
-          calls.push({ data, id, options });
-          return response();
-        }
-      };
+    async fetch(url: string, init?: RequestInit) {
+      fetches.push({ init, url });
+      return response();
     },
-    run() {
-      throw new Error("the run path is not used by universal requests");
+    async run(model: string, input: unknown, options: Record<string, unknown>) {
+      runs.push({ input, model, options });
+      return response();
     }
   };
-  return { binding: binding as unknown as Ai, calls };
+  return { binding: binding as unknown as Ai, fetches, runs };
 }
 
 const GATEWAY: ResolvedGateway = { id: "prod" };
 
-function universalRequest(
-  overrides: Partial<UniversalRequest> = {}
-): UniversalRequest {
+function nativeRequest(overrides: Partial<NativeRequest> = {}): NativeRequest {
   return {
+    body: JSON.stringify({ max_tokens: 8, model: "claude-opus-4-8" }),
     endpoint: "v1/messages",
     gateway: GATEWAY,
     headers: { "anthropic-version": "2023-06-01" },
+    method: "POST",
     provider: "anthropic",
-    query: { max_tokens: 8, model: "claude-opus-4-8" },
     ...overrides
   };
 }
@@ -63,16 +64,15 @@ const VENDOR_BODY = JSON.stringify({
   type: "message"
 });
 
-describe("core transport - universal request over the binding", () => {
-  it("selects the gateway and forwards provider, endpoint, headers and body", async () => {
-    const { binding, calls } = fakeGatewayBinding(
+describe("core transport - provider-native requests over the binding", () => {
+  it("sends the vendor's request to the gateway's provider route, options as headers", async () => {
+    const { binding, fetches } = fakeBinding(
       () => new Response(VENDOR_BODY, { status: 200 })
     );
-    const transport = createTransport({ binding });
-    const response = await transport.universal(
-      universalRequest({
-        extraHeaders: { "x-trace": "1" },
+    const response = await createTransport({ binding }).native(
+      nativeRequest({
         gateway: {
+          byokAlias: "team-a",
           cacheTtl: 60,
           collectLog: true,
           eventId: "evt-1",
@@ -80,45 +80,38 @@ describe("core transport - universal request over the binding", () => {
           metadata: { tenant: "acme" },
           requestTimeoutMs: 9000,
           retries: { backoff: "linear", maxAttempts: 2 },
-          skipCache: false
+          skipCache: false,
+          zdr: true
         }
       })
     );
-    expect(response.status).toBe(200);
-    expect(calls).toHaveLength(1);
-    expect(calls[0].id).toBe("prod");
-    expect(calls[0].data).toEqual({
-      endpoint: "v1/messages",
-      headers: { "anthropic-version": "2023-06-01" },
-      provider: "anthropic",
-      query: { max_tokens: 8, model: "claude-opus-4-8" }
-    });
-    expect(calls[0].options).toEqual({
-      extraHeaders: { "x-trace": "1" },
-      gateway: {
-        cacheTtl: 60,
-        collectLog: true,
-        eventId: "evt-1",
-        id: "prod",
-        metadata: { tenant: "acme" },
-        requestTimeoutMs: 9000,
-        retries: { backoff: "linear", maxAttempts: 2 },
-        skipCache: false
-      },
-      signal: undefined
-    });
-  });
 
-  it("omits extraHeaders when there are none", async () => {
-    const { binding, calls } = fakeGatewayBinding(
-      () => new Response(VENDOR_BODY)
+    expect(response.status).toBe(200);
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0]?.url).toBe(
+      "https://workers-binding.ai/ai-gateway/gateways/prod/anthropic/v1/messages"
     );
-    await createTransport({ binding }).universal(universalRequest());
-    expect(calls[0].options).not.toHaveProperty("extraHeaders");
+    expect(fetches[0]?.init?.method).toBe("POST");
+    expect(fetches[0]?.init?.body).toBe(
+      JSON.stringify({ max_tokens: 8, model: "claude-opus-4-8" })
+    );
+    expect(fetches[0]?.init?.headers).toEqual({
+      "anthropic-version": "2023-06-01",
+      "cf-aig-backoff": "linear",
+      "cf-aig-byok-alias": "team-a",
+      "cf-aig-cache-ttl": "60",
+      "cf-aig-collect-log": "true",
+      "cf-aig-event-id": "evt-1",
+      "cf-aig-max-attempts": "2",
+      "cf-aig-metadata": '{"tenant":"acme"}',
+      "cf-aig-request-timeout": "9000",
+      "cf-aig-skip-cache": "false",
+      "cf-aig-zdr": "true"
+    });
   });
 
   it("returns the vendor's own error response untouched", async () => {
-    const { binding } = fakeGatewayBinding(
+    const { binding } = fakeBinding(
       () =>
         new Response(
           JSON.stringify({
@@ -128,31 +121,75 @@ describe("core transport - universal request over the binding", () => {
           { status: 404 }
         )
     );
-    const response = await createTransport({ binding }).universal(
-      universalRequest()
-    );
+    const response = await createTransport({ binding }).native(nativeRequest());
     expect(response.status).toBe(404);
     expect(await response.json()).toMatchObject({ type: "error" });
   });
 
   it("normalizes a thrown binding failure into a CloudflareAIError", async () => {
     const binding = {
-      gateway() {
-        return {
-          run() {
-            throw new Error("3040: Capacity temporarily exceeded");
-          }
-        };
+      fetch() {
+        throw new Error("3040: Capacity temporarily exceeded");
       }
     } as unknown as Ai;
     await expect(
-      createTransport({ binding }).universal(universalRequest())
+      createTransport({ binding }).native(nativeRequest())
     ).rejects.toMatchObject({
       isRetryable: true,
-      model: "claude-opus-4-8",
       name: "CloudflareAIError",
       status: 429
     });
+  });
+});
+
+describe("core transport - the run path", () => {
+  it("names the answer format for a catalog model, in the format asked for", async () => {
+    const { binding, runs } = fakeBinding(() => new Response("{}"));
+    const transport = createTransport({ binding });
+    for (const format of [
+      "chat-completions",
+      "messages",
+      "responses"
+    ] as const) {
+      await transport.run({
+        format,
+        gateway: GATEWAY,
+        headers: {},
+        input: {},
+        model: "anthropic/claude-opus-4.8"
+      });
+    }
+    expect(runs.map((run) => run.options.openaiEndpoint)).toEqual([
+      "/v1/chat/completions",
+      "/v1/messages",
+      "/v1/responses"
+    ]);
+  });
+
+  it("sends byokAlias as a header for a catalog model, and zdr not at all", async () => {
+    const { binding, runs } = fakeBinding(() => new Response("{}"));
+    await createTransport({ binding }).run({
+      gateway: { byokAlias: "team-a", id: "prod", zdr: true },
+      headers: {},
+      input: {},
+      model: "anthropic/claude-opus-4.8"
+    });
+    expect(runs[0]?.options.extraHeaders).toEqual({
+      "cf-aig-byok-alias": "team-a"
+    });
+    expect(runs[0]?.options.gateway).toEqual({ id: "prod" });
+  });
+
+  it("leaves a Workers AI request to Workers AI", async () => {
+    const { binding, runs } = fakeBinding(() => new Response("{}"));
+    await createTransport({ binding }).run({
+      gateway: { byokAlias: "team-a", id: "prod" },
+      headers: {},
+      input: {},
+      model: "@cf/zai-org/glm-4.7-flash"
+    });
+    expect(runs[0]?.options).not.toHaveProperty("openaiEndpoint");
+    expect(runs[0]?.options).not.toHaveProperty("extraHeaders");
   });
 });
 

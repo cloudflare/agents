@@ -1,6 +1,6 @@
 /**
  * Anthropic Messages wire: pi-ai's own Anthropic implementation, over AI
- * Gateway's universal endpoint.
+ * Gateway — `/run` for a catalog model, the provider-native path otherwise.
  *
  * Everything about the wire — request shaping, thinking, tool use, stream
  * parsing, thinking-signature replay — is pi-ai's. It accepts a `client` whose
@@ -32,7 +32,7 @@ import {
   anthropicVendorHeaders,
   attachCorrelation,
   correlationDetails,
-  sendUniversal,
+  sendGateway,
   startMessage,
   withIdleDeadline,
   ignoredWorkersAIKnobs,
@@ -116,15 +116,16 @@ export function streamAnthropic(
   const create = (params: Record<string, unknown>) => ({
     async asResponse(): Promise<Response> {
       const { betas, ...vendorParams } = params;
-      // The universal request wants the vendor's own spelling of the id
-      // in the body, whatever this provider lists the model under.
+      // The body carries the vendor's own spelling of the id, whatever this
+      // provider lists the model under; `/run` takes the catalog id instead.
       const body = { ...vendorParams, model: wireModelId(model) };
       try {
-        const response = await sendUniversal(
+        const response = await sendGateway(
           request,
           transport,
           body,
           anthropicVendorHeaders(Array.isArray(betas) ? betas : []),
+          "messages",
           (raw) => {
             correlation = correlationDetails(request, raw, transport);
           }

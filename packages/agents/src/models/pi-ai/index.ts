@@ -18,8 +18,9 @@
  * ```
  *
  * Workers AI runs on `env.AI.run` with Cloudflare's own compat layer. Every
- * other model goes to AI Gateway's universal endpoint, which forwards the
- * vendor's own request to the vendor with the key the gateway holds — so no
+ * other model goes to AI Gateway in its own protocol — `/run` for a model
+ * from the gateway's catalog, the provider-native path otherwise — and the
+ * gateway calls the vendor with the key it holds, so no
  * provider key, and no vendor wire format, lives in your Worker. The model's
  * metadata (`api`, `compat`, `thinkingLevelMap`, cost, limits) is whatever its
  * own registry says, and pi-ai's converters and stream processors do the rest.

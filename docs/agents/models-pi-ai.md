@@ -43,8 +43,9 @@ design: a model this package cannot name exactly is yours to construct.
    created on first use.
 3. **No provider keys.** AI Gateway holds the credential — unified billing, or a key you
    store on the gateway (BYOK) — so nothing vendor-shaped needs a secret in your Worker.
-4. **The binding is the only way in.** Workers AI goes through `env.AI.run`, vendor models
-   through `env.AI.gateway(id).run`; there is no HTTP transport and no API token to hold.
+4. **The binding is the only way in.** Workers AI and catalog models go through
+   `env.AI.run`, other model objects through the binding's `fetch` to AI Gateway's
+   provider-native path; there is no HTTP transport and no API token to hold.
 5. Everything here is in beta and may change in a minor release.
 
 ## Quick start
@@ -179,6 +180,7 @@ ai("anthropic/claude-opus-4.8", {
   eventId: "turn-17",
   requestTimeoutMs: 30_000,
   retries: { maxAttempts: 3, backoff: "exponential", retryDelayMs: 500 },
+  byokAlias: "team-a", // which stored BYOK key, by alias
   fallback: ["@cf/zai-org/glm-4.7-flash"], // ids or models, in any mix
   headers: { "x-request-source": "docs" },
   sessionAffinity: "chat-42", // Workers AI prefix-cache routing
@@ -210,20 +212,28 @@ then model, then `createAI` settings.
 
 ## How a request travels
 
-| Model                    | `api`                | Transport                                 |
-| ------------------------ | -------------------- | ----------------------------------------- |
-| `@cf/…`                  | `cloudflare-ai`      | `env.AI.run` + Cloudflare's compat layer  |
-| Anthropic (any registry) | `anthropic-messages` | gateway universal → `v1/messages`         |
-| OpenAI (any registry)    | `openai-responses`   | gateway universal → `v1/responses`        |
-| Groq, DeepSeek, xAI, …   | `openai-completions` | gateway universal → `v1/chat/completions` |
+| Model                                   | `api`                | Transport                                                 |
+| --------------------------------------- | -------------------- | --------------------------------------------------------- |
+| `@cf/…`, `dynamic/…`                    | `cloudflare-ai`      | `env.AI.run` + Cloudflare's compat layer                  |
+| `anthropic/…` from pi's gateway catalog | `anthropic-messages` | `env.AI.run` → AI Gateway `/run`, Messages in and out     |
+| `openai/…` from pi's gateway catalog    | `openai-responses`   | `env.AI.run` → AI Gateway `/run`, Responses in and out    |
+| Any other model object                  | its own `api`        | the binding's `fetch` → AI Gateway's provider-native path |
 
-Everything that is not `@cf/` goes through **AI Gateway's universal request**: the vendor's
-own body, built by pi-ai's own converter, posted to the gateway with the provider slug taken
-from the model's `baseUrl` host. The gateway forwards it to the vendor with the credential it
-holds, and streams the vendor's own SSE back untouched — pi-ai's stream processors parse it,
-as they would if you had called the vendor directly, the thinking knobs aside (below). No
-credential header leaves your Worker, and the model's `api`, `provider` and `id` are never
-rewritten, so thinking signatures and encrypted reasoning items replay on the next turn.
+A model from pi's Cloudflare AI Gateway catalog runs on `env.AI.run` under its catalog id,
+which pi spells the gateway's way (`anthropic/claude-opus-4.8`). The body is pi-ai's own,
+built by pi-ai's converter for the model's `api`, and it is sent in that format: `/run`
+converts nothing, so the answer, streams included, is the shape pi-ai's stream processors
+read. `/run` picks the provider and bills through Unified Billing or a key stored on the
+gateway.
+
+Any other model object — one from pi's Anthropic, OpenAI or Groq registry, with the vendor's
+own id — goes to AI Gateway's **provider-native path** through the binding's `fetch`, with the
+provider slug taken from the model's `baseUrl` host. The gateway forwards it to the vendor with
+the credential it holds and streams the vendor's own SSE back untouched.
+
+Either way no credential header leaves your Worker, and the model's `api`, `provider` and
+`id` are never rewritten, so thinking signatures and encrypted reasoning items replay on the
+next turn.
 
 The `api` markers in that table are the only ones this package routes, and the table is the
 whole list: `cloudflare-ai`, `anthropic-messages`, `openai-responses`, `openai-completions`.
@@ -264,6 +274,11 @@ callers`. That error is the vendor's, surfaced as-is; the gateway's own failures
 gateway, an unpaid account) become a `CloudflareAIError`, so fallback and retry treat them the
 way they treat Workers AI failures. A model whose `api` is not one of the four routed markers
 never gets that far: the stream ends with an `error` event naming the `api`.
+
+`byokAlias` picks a stored key by alias when the gateway holds several for one provider. It is
+sent as `cf-aig-byok-alias` on a catalog model and on any other model object. `zdr` turns Zero
+Data Retention on or off for a Unified Billing request, and applies to model objects outside
+pi's gateway catalog only: `/run` does not read it.
 
 ## Observability
 

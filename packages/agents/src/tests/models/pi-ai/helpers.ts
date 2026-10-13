@@ -17,43 +17,43 @@ export interface RunCall {
   options: Record<string, unknown>;
 }
 
-/** One recorded `binding.gateway(id).run(request, options)` call. */
-export interface UniversalCall {
+/** One recorded provider-native request: `env.AI.fetch` to the gateway. */
+export interface NativeCall {
   gatewayId: string;
   provider: string;
   endpoint: string;
+  /** Request headers, names lowercased; gateway options arrive as `cf-aig-*`. */
   headers: Record<string, string>;
+  /** The body, parsed as JSON. */
   query: Record<string, unknown>;
-  options: Record<string, unknown>;
 }
 
 export interface FakeBinding {
-  /** Workers AI run-path calls, in order. */
+  /** Run-path calls (Workers AI, and catalog models on `/run`), in order. */
   calls: RunCall[];
-  /** Universal AI Gateway calls, in order. */
-  universal: UniversalCall[];
+  /** Provider-native calls, in order. */
+  native: NativeCall[];
   aiGatewayLogId: string | null;
   run(
     model: string,
     input: Record<string, unknown>,
     options: Record<string, unknown>
   ): Promise<Response>;
-  gateway(id: string): {
-    run(
-      request: Record<string, unknown>,
-      options: Record<string, unknown>
-    ): Promise<Response>;
-  };
+  fetch(input: string, init?: RequestInit): Promise<Response>;
 }
 
 /** What a fake binding answers with, whichever path the call took. */
 export type AnyCall =
   | ({ kind: "run" } & RunCall)
-  | ({ kind: "universal" } & UniversalCall);
+  | ({ kind: "native" } & NativeCall);
+
+/** The binding route aig-entry serves for the provider-native path. */
+const NATIVE_ROUTE =
+  /^https:\/\/workers-binding\.ai\/ai-gateway\/gateways\/([^/]+)\/([^/]+)\/(.*)$/;
 
 /**
- * An `Ai`-shaped binding that records every call — the Workers AI run path and
- * the universal gateway path — and answers with canned `Response` objects. The
+ * An `Ai`-shaped binding that records every call — the run path and the
+ * provider-native path — and answers with canned `Response` objects. The
  * responder sees the call so a test can vary the answer per model (fallback
  * legs) or per request body.
  */
@@ -61,33 +61,37 @@ export function fakeBinding(
   responder: (call: AnyCall, index: number) => Response | Promise<Response>
 ): FakeBinding {
   const calls: RunCall[] = [];
-  const universal: UniversalCall[] = [];
+  const native: NativeCall[] = [];
   let index = 0;
   return {
     aiGatewayLogId: null,
     calls,
-    gateway(id) {
-      return {
-        async run(request, options) {
-          const call: UniversalCall = {
-            endpoint: String(request.endpoint ?? ""),
-            gatewayId: id,
-            headers: (request.headers ?? {}) as Record<string, string>,
-            options,
-            provider: String(request.provider ?? ""),
-            query: (request.query ?? {}) as Record<string, unknown>
-          };
-          universal.push(call);
-          return await responder({ kind: "universal", ...call }, index++);
-        }
+    async fetch(input, init) {
+      const match = NATIVE_ROUTE.exec(input);
+      if (match === null) throw new Error(`unexpected binding fetch: ${input}`);
+      const headers: Record<string, string> = {};
+      new Headers(init?.headers).forEach((value, key) => {
+        headers[key] = value;
+      });
+      const call: NativeCall = {
+        endpoint: match[3] ?? "",
+        gatewayId: decodeURIComponent(match[1] ?? ""),
+        headers,
+        provider: match[2] ?? "",
+        query:
+          typeof init?.body === "string"
+            ? (JSON.parse(init.body) as Record<string, unknown>)
+            : {}
       };
+      native.push(call);
+      return await responder({ kind: "native", ...call }, index++);
     },
+    native,
     async run(model, input, options) {
       const call: RunCall = { input, model, options };
       calls.push(call);
       return await responder({ kind: "run", ...call }, index++);
-    },
-    universal
+    }
   };
 }
 

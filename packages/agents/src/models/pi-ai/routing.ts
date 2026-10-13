@@ -1,8 +1,8 @@
 /**
- * Where a pi-ai model's request goes on the AI Gateway universal endpoint.
+ * Where a pi-ai model's request goes on AI Gateway's provider-native path.
  *
  * A pi `Model` carries the vendor's own `baseUrl` and an `api` marker. Those
- * two are all the routing information the universal request needs, but neither
+ * two are all the routing information the provider-native request needs, but neither
  * alone is enough: the gateway's `endpoint` is the vendor's request URL minus
  * that provider's own base, and the base differs per provider (groq serves
  * chat completions at `/openai/v1/chat/completions`, deepseek at
@@ -32,7 +32,7 @@ const API_PATHS: Record<string, string> = {
 };
 
 /**
- * The universal request's `endpoint` for a gateway-shaped base URL, whose path
+ * The provider-native `endpoint` for a gateway-shaped base URL, whose path
  * already ends at the provider slug, so what follows is the vendor's own path.
  */
 const GATEWAY_ENDPOINTS: Record<string, string> = {
@@ -41,8 +41,8 @@ const GATEWAY_ENDPOINTS: Record<string, string> = {
   "openai-responses": "v1/responses"
 };
 
-/** Where one model's request goes on the universal gateway endpoint. */
-export interface UniversalRoute {
+/** Where one model's request goes on the provider-native path. */
+export interface GatewayRoute {
   provider: GatewayProviderName;
   endpoint: string;
 }
@@ -73,7 +73,7 @@ function asBase(baseUrl: string): string {
  * @throws TypeError when the model has no base URL, when AI Gateway has no
  * provider for it, or when this module knows no path for the model's api.
  */
-export function routeForModel(model: Model<Api>): UniversalRoute {
+export function routeForModel(model: Model<Api>): GatewayRoute {
   const provider = gatewaySlugForModel(model);
   if (isGatewayShapedUrl(model.baseUrl)) {
     const endpoint = GATEWAY_ENDPOINTS[model.api];
