@@ -13,6 +13,27 @@ function fresh(
   return env.PI_HARNESS_TEST.getByName(name);
 }
 
+/**
+ * Evict the object the way the runtime evicts an idle one: once nothing is
+ * in flight. The pool never evicts an idle object by itself, so without
+ * this a test cannot see work that only lives in memory being lost.
+ *
+ * `evictDurableObject` drains in-flight work first. Resolves "kept" if the
+ * object is still holding work after `ms`; `evicted` then settles once
+ * that work drains.
+ */
+async function evictWhenIdle(
+  stub: DurableObjectStub<PiHarnessTestObject>,
+  ms = 2_000
+): Promise<{ result: "evicted" | "kept"; evicted: Promise<void> }> {
+  const evicted = evictDurableObject(stub);
+  const result = await Promise.race([
+    evicted.then(() => "evicted" as const),
+    new Promise<"kept">((resolve) => setTimeout(() => resolve("kept"), ms))
+  ]);
+  return { result, evicted };
+}
+
 describe("PiHarness on pi-durable", () => {
   it("answers a prompt with a tool call and keeps the transcript across eviction", async () => {
     const stub = fresh();
@@ -26,6 +47,20 @@ describe("PiHarness on pi-durable", () => {
 
     const second = await stub.prompt("hello");
     expect(second).toMatchObject({ status: "done", text: "echo: hello" });
+  });
+
+  it("evicts an object with nothing in flight once its wake has parked", async () => {
+    const stub = fresh();
+    expect((await stub.prompt("hello")).text).toBe("echo: hello");
+    let alarm = await stub.alarmTime();
+    for (let i = 0; i < 50 && alarm !== null; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      alarm = await stub.alarmTime();
+    }
+    const before = await stub.instance();
+
+    expect((await evictWhenIdle(stub)).result).toBe("evicted");
+    expect(await stub.instance()).not.toBe(before);
   });
 
   it("dedupes a submission by operation id", async () => {

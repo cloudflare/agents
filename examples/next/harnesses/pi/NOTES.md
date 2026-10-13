@@ -168,10 +168,16 @@ streams for more than 15 minutes is still at the platform's mercy.
 
 `evictDurableObject` waits for in-flight work to drain. The wake's purpose
 is to keep a wait in flight, so the tests crash the object with
-`abortAllDurableObjects()` instead. A deploy behaves the same way: the
-runtime gives in-flight work 30 s and then kills it. The recovery path is the
-same either way, but it is worth knowing that a running pi turn never lets
-the object drain.
+`abortAllDurableObjects()` to test recovery. A deploy behaves the same way:
+the runtime gives in-flight work 30 s and then kills it. The recovery path is
+the same either way, but it is worth knowing that a running pi turn never
+lets the object drain.
+
+The pool never evicts an idle object by itself, so a test cannot see work
+that only lives in memory being lost when nothing holds the object. The
+tests' `evictWhenIdle` asks for a graceful eviction and reports whether the
+object was kept, which is how they check that the wake still holds the
+object while a pi task waits without I/O.
 
 ### Reads the Harness does not offer
 
