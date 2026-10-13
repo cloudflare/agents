@@ -16,7 +16,13 @@ import { DurableObject } from "cloudflare:workers";
 import { Lifecycle, type LifecycleOptions } from "../../../lifecycle";
 import { setWakeTimingForTests } from "../harness";
 import { BACKGROUND_CONTEXT } from "../context";
-import { PiHarness, type PiHarnessOptions, type PiTask } from "../index";
+import {
+  checkpointWakeAt,
+  PiHarness,
+  sleepUntil,
+  type PiHarnessOptions,
+  type PiTask
+} from "../index";
 import { fauxModels } from "./faux";
 import { TEST_TIMING } from "./timing";
 
@@ -57,6 +63,41 @@ const SleepUntil = defineTask<{ runAt: number }, { phase: "wait" }, null>({
   }
 });
 
+/** Sleeps with the harness's `sleepUntil`, so its deadline is in its checkpoint. */
+const HelperSleep = defineTask<
+  { runAt: number },
+  { phase: "wait"; wakeAt?: number } | { phase: "done" },
+  null
+>({
+  name: "test.helper-sleep",
+  version: 1,
+  initial: () => ({ phase: "wait" }),
+  phases: {
+    wait: async (task, runtime, context) => {
+      await sleepUntil(runtime, new Date(task.input.runAt), context);
+      await runtime.commit(
+        () => ({ status: "running", checkpoint: { phase: "done" } }),
+        context
+      );
+    },
+    done: async (_task, runtime, context) => {
+      await runtime.commit(
+        () => ({
+          status: "terminal",
+          outcome: { status: "completed", result: null }
+        }),
+        context
+      );
+    }
+  },
+  abort: async (_task, runtime, context) => {
+    await runtime.commit(
+      () => ({ status: "terminal", outcome: { status: "aborted" } }),
+      context
+    );
+  }
+});
+
 /**
  * A harness whose first model request fails with a retryable error and
  * waits `GENERATION_RETRY_DELAY_MS` before retrying, so a generation can
@@ -76,7 +117,10 @@ function defineWakeTestObject(
     readonly harness = new PiHarness({
       harness: async ({ storage, context }) => {
         const registry = createRegistry();
-        registry.install({ name: "test-tasks", tasks: [SleepUntil] });
+        registry.install({
+          name: "test-tasks",
+          tasks: [SleepUntil, HelperSleep]
+        });
         const pi = await Harness.open(
           storage,
           {
@@ -138,6 +182,36 @@ function defineWakeTestObject(
         }),
         fauxAssistantMessage([fauxText("recovered")])
       ]);
+    }
+
+    /** Create a background task that sleeps with `sleepUntil`. */
+    async helperSleep(runAt: number): Promise<TaskId> {
+      const pi = await this.harness.pi();
+      const root = await pi.root(BACKGROUND_CONTEXT);
+      return root.commit(
+        (tx) =>
+          tx.createTask(
+            HelperSleep,
+            { runAt },
+            { ownership: { kind: "conversation" }, background: true }
+          ),
+        BACKGROUND_CONTEXT
+      );
+    }
+
+    /** The stored checkpoints of a session's live tasks, as JSON. */
+    async checkpoints(session = "1"): Promise<string[]> {
+      const pi = await this.harness.pi();
+      const { tasks } = await pi.inspect(BACKGROUND_CONTEXT);
+      return tasks
+        .filter((task) => String(task.record.conversationId) === session)
+        .map((task) =>
+          JSON.stringify(
+            "checkpoint" in task.record.state
+              ? task.record.state.checkpoint
+              : null
+          )
+        );
     }
 
     /** Whether pi's scheduler is running, paused, or closing. */
@@ -278,6 +352,6 @@ export function sleepUntilWakeAt(task: PiTask): Date | undefined {
 
 /** Reports `test.sleep-until` deadlines through `wakeAt`. */
 export const PiDeadlineTestObject = defineWakeTestObject(undefined, {
-  wakeAt: sleepUntilWakeAt
+  wakeAt: (task) => sleepUntilWakeAt(task) ?? checkpointWakeAt(task)
 });
 export type PiDeadlineTestObject = InstanceType<typeof PiDeadlineTestObject>;

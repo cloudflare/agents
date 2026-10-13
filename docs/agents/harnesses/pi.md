@@ -209,6 +209,20 @@ new PiHarness({
 
 With `wakeAt` set, the harness can also leave Pi paused. When the object starts and every live task is asleep until a known time more than a minute away, it does not resume Pi's scheduler, so no task holds a timer and the object can hibernate until a wake's alarm. Pi resumes when that alarm arrives, for any new input or wait, and as soon as a task is committed by other means. Once running, Pi cannot pause again, so this saves the most after a restart.
 
+A task you write can report its own deadline. `sleepUntil(runtime, at, context)` commits `wakeAt` into the task's checkpoint and then sleeps, and `checkpointWakeAt(task)` reads it back:
+
+```ts
+import { checkpointWakeAt, sleepUntil } from "agents/harness/pi";
+
+// In a task phase. Commit the next phase after it returns.
+await sleepUntil(runtime, new Date(task.input.runAt), context);
+
+new PiHarness({
+  harness,
+  wakeAt: (task) => myDeadlines(task) ?? checkpointWakeAt(task)
+});
+```
+
 If a wake job's dispatch keeps failing, for example because Pi's storage cannot be read, the job is not dropped. It tries again until the session has no live work.
 
 The heartbeat adapts to what the session is doing. While a foreground run is going, it beats every 30 seconds, so a crash costs at most about that much time. When the session's only live work is background tasks, and a beat finds them unchanged, the next beat waits twice as long, up to 10 minutes. The same doubling applies while dispatches keep failing. New input, a finished run, or any change in the background work returns the session to 30 seconds. The backoff is stored, so it holds across restarts.
