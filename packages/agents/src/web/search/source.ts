@@ -78,22 +78,6 @@ export interface AIWebSearchOptions extends WebSearchGatewayOptions {
 }
 
 /**
- * `Ai.websearch` as `@cloudflare/workers-types` ≥ 5.20260812.1 declares it.
- * This repo can't take that version yet — it breaks `@types/node`'s
- * `Buffer` (cloudflare/workerd#7026) — so the method is spelled out here
- * and the binding is viewed through it. Drop once the repo bumps.
- */
-interface AiWebSearchBinding {
-  websearch(request: {
-    gatewayId: string;
-    query: string;
-    limit?: number;
-    provider?: string;
-    byokAlias?: string;
-  }): Promise<Response>;
-}
-
-/**
  * Search through the Workers AI binding. The Worker's own account and the
  * named gateway are billed.
  */
@@ -101,7 +85,7 @@ export function createAIWebSearch(
   options: AIWebSearchOptions
 ): WebSearchSource {
   validateGatewayOptions(options);
-  const binding = options.binding as unknown as AiWebSearchBinding;
+  const binding = options.binding;
   const search: WebSearchSource["search"] = async (input, call = {}) => {
     const request = validateRequest(input);
     if (typeof binding.websearch !== "function") {
