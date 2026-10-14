@@ -2,7 +2,7 @@
 
 Workspace provides a durable virtual filesystem backed by SQLite and optional R2 large-file storage. It works with any Durable Object that has SQLite storage, D1 databases, or custom SQL backends.
 
-> **Experimental** — this feature may have breaking changes in future releases.
+> **Deprecated.** Use [`@cloudflare/computer`](https://github.com/cloudflare/computer) for new agent workspaces. To move existing files, see [Migrating to `@cloudflare/computer`](./migrating-to-computer.md).
 
 ## Related package documentation
 

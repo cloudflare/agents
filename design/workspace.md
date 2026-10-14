@@ -2,7 +2,7 @@
 
 Durable file storage for Agents. A virtual filesystem backed by Durable Object SQLite with optional R2 spillover for large files. Includes symlinks, glob, diff, and streaming I/O.
 
-**Status:** experimental (`@cloudflare/shell`)
+**Status:** deprecated (`@cloudflare/shell`). Agent workspaces are now a `Workspace` from [`@cloudflare/computer`](https://github.com/cloudflare/computer); Think and Agent Skills accept only that. This record describes the Shell design for anyone migrating data out of it. See [Migrating to `@cloudflare/computer`](../docs/shell/migrating-to-computer.md).
 
 ## Problem
 
