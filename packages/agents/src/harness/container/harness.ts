@@ -1180,7 +1180,7 @@ export class ContainerHarness extends LifecycleCapability {
     };
     let from: StartedFrom = "image";
     let key: string | undefined;
-    let options: Record<string, unknown>;
+    let options: ContainerStartupOptions;
     const baseKey = await this.#baseKey();
     const workspace = await this.#usableSnapshot(WORKSPACE_KEY, baseKey);
     if (image.kind === "custom") {
@@ -1212,11 +1212,7 @@ export class ContainerHarness extends LifecycleCapability {
       }
     }
     try {
-      // SAFETY: `image`, `instance` and `containerSnapshot` are start
-      // options of the `durable_object` scheduling policy that this
-      // workers-types version does not declare yet; the rest is
-      // `ContainerStartupOptions` as is.
-      container.start(options as unknown as ContainerStartupOptions);
+      container.start(options);
     } catch (error) {
       await this.#snapshotFailed(from);
       return {
