@@ -168,9 +168,10 @@ class PiChannelsSession implements HarnessSession {
     // pi's tools run on the server, and it has no approvals.
     if (!("parts" in input)) throw new Error("pi takes no tool answers");
     // pi has no participants, so `from` is dropped.
+    const content = toUserInput(input);
     const operationId = options.operationId ?? crypto.randomUUID();
     this.ids.record(this.id, operationId, input.messageId ?? operationId);
-    return this.session.submit(toUserInput(input), {
+    return this.session.submit(content, {
       operationId,
       ...(options.whenBusy && { whenBusy: options.whenBusy })
     });
@@ -231,9 +232,28 @@ class PiChannelsSession implements HarnessSession {
 
   /** The active transcript, with user messages under the caller's ids. */
   async transcript(): Promise<TranscriptMessage[]> {
-    const messages = projectEntries(await this.session.messages());
-    const users = messages.filter((m) => m.role === "user").map((m) => m.id);
-    const ids = await this.ids.resolve(this.id, users);
+    const entries = await this.session.messages();
+    const messages = projectEntries(entries);
+    const users = new Set(
+      messages.filter((m) => m.role === "user").map((m) => m.id)
+    );
+    // A fork inherits its parent's entries, which keep the parent's
+    // conversation id: resolve each against the session that placed it.
+    const bySession = new Map<string, string[]>();
+    for (const entry of entries) {
+      if (!users.has(String(entry.id))) continue;
+      const session = String(entry.conversationId);
+      bySession.set(session, [
+        ...(bySession.get(session) ?? []),
+        String(entry.id)
+      ]);
+    }
+    const ids = new Map<string, string>();
+    for (const [session, entryIds] of bySession) {
+      for (const [entry, id] of await this.ids.resolve(session, entryIds)) {
+        ids.set(entry, id);
+      }
+    }
     return toTranscript(messages, (entryId) => ids.get(entryId));
   }
 
@@ -554,16 +574,27 @@ class RunChunks {
   }
 }
 
+/**
+ * The caller's parts as pi user content. pi takes text and base64 images;
+ * an inline text file becomes text. Anything else throws, so the submit
+ * fails rather than pi answering an incomplete prompt.
+ */
 function toUserInput(input: HarnessInput): UserInput {
-  const parts = input.parts.flatMap(
-    (part): Exclude<UserInput, string>[number][] => {
-      if (part.type === "text") return [{ type: "text", text: part.text }];
-      const data = /^data:([^;,]+);base64,(.*)$/.exec(part.url);
-      return data && part.mediaType.startsWith("image/")
-        ? [{ type: "image", mimeType: data[1], data: data[2] }]
-        : [];
+  const parts = input.parts.map((part): Exclude<UserInput, string>[number] => {
+    if (part.type === "text") return { type: "text", text: part.text };
+    const data = /^data:([^;,]+)(?:;[^;,]*)*;base64,(.*)$/.exec(part.url);
+    if (data && part.mediaType.startsWith("image/")) {
+      return { type: "image", mimeType: part.mediaType, data: data[2] };
     }
-  );
+    if (data && part.mediaType.startsWith("text/")) {
+      const bytes = Uint8Array.from(atob(data[2]), (c) => c.charCodeAt(0));
+      return { type: "text", text: new TextDecoder().decode(bytes) };
+    }
+    const name = part.filename ? ` (${part.filename})` : "";
+    throw new Error(
+      `pi cannot take a ${part.mediaType} attachment${name}${data ? "" : " by URL"}; it takes text, inline text files, and inline images`
+    );
+  });
   return parts.length === 1 && parts[0].type === "text" ? parts[0].text : parts;
 }
 
