@@ -17,6 +17,11 @@ import {
   isPlatformFailure,
   tryN
 } from "../retries";
+import {
+  writeSpanAttributes,
+  type AgentSpan,
+  type AgentTracer
+} from "../observability/tracing/tracer";
 import type { MemoryLimitContext } from "./capability-runner";
 import {
   hungTimeoutMs,
@@ -28,6 +33,14 @@ import {
   type LifecycleJobContext,
   type LifecycleJobOutcome
 } from "./job-queue";
+import {
+  jobSpanAttributes,
+  jobSpanDisposition,
+  jobSpanFinishAttributes,
+  jobSpanName,
+  SLOW_DISPATCH_ATTRIBUTES,
+  type JobSpanReport
+} from "./job-tracing";
 
 /** Default consecutive memory-limit strikes tolerated before sealing. */
 const DEFAULT_MAX_ALARM_MEMORY_LIMIT_STRIKES = 3;
@@ -76,6 +89,8 @@ export type JobDriverOptions = {
   readonly onMemoryLimit: (context: MemoryLimitContext) => void | Promise<void>;
   /** Best-effort lifecycle telemetry. */
   readonly emit: (type: string, payload: unknown) => void;
+  /** Tracer for the `process {owner}` span around each job dispatch. */
+  readonly tracer: () => AgentTracer;
   /** Recompute the physical alarm from queue state. */
   readonly rearm: () => Promise<void>;
   /**
@@ -307,7 +322,8 @@ export class JobDriver {
       const row = this.#options.queue.dueRow(stale.id, nowMs);
       if (!row) continue;
 
-      if (row.singleflight === 1 && row.running === 1) {
+      const hungReset = row.singleflight === 1 && row.running === 1;
+      if (hungReset) {
         if (!isHungRow(row, nowMs)) {
           console.warn(
             `Skipping job ${row.id}: previous execution still running`
@@ -325,12 +341,35 @@ export class JobDriver {
       // drive result (see JobQueue.applyOutcome).
       this.#options.queue.markRunning(row.id, nowMs);
 
-      await this.#driveJob(row);
+      await this.#driveJob(row, hungReset);
     }
   }
 
+  /**
+   * Dispatch one due row inside its `process {owner}` span. The dispatch is
+   * awaited by this alarm invocation, so the span closes within it, and the
+   * owner's own spans (storage, model calls) nest under the job that caused
+   * them.
+   */
+  async #driveJob(row: JobStorageRow, hungReset: boolean): Promise<void> {
+    await this.#options
+      .tracer()
+      .withSpan(
+        jobSpanName(row),
+        jobSpanAttributes({ row, nowMs: Date.now(), hungReset }),
+        async (span) => {
+          span.finish(
+            jobSpanFinishAttributes(await this.#dispatchJob(row, span))
+          );
+        }
+      );
+  }
+
   /** Dispatch one due row to its owner with retry and failure policy. */
-  async #driveJob(row: JobStorageRow): Promise<void> {
+  async #dispatchJob(
+    row: JobStorageRow,
+    span: AgentSpan
+  ): Promise<JobSpanReport> {
     const { queue, resolveDispatch, disabled } = this.#options;
     const job = jobFromRow(row);
     const dispatch = await resolveDispatch(row.capability);
@@ -340,10 +379,11 @@ export class JobDriver {
           `(owner ${JSON.stringify(row.capability)}); dropping it`
       );
       queue.delete(row.id);
-      return;
+      return { outcome: "dropped", attempts: 0 };
     }
 
     const maxAttempts = job.retry?.maxAttempts ?? DEFAULT_JOB_RETRY.maxAttempts;
+    let attempts = 0;
 
     // Dispatch must be bounded: the drive loop awaits each job inline, so
     // one long dispatch delays every other job on this object. The queue
@@ -357,6 +397,7 @@ export class JobDriver {
           `for over ${seconds}s. Long dispatches starve every other job on ` +
           `this object; onJob must detach unbounded work and return.`
       );
+      writeSpanAttributes(span, SLOW_DISPATCH_ATTRIBUTES);
       try {
         this.#options.emit("job:slow_dispatch", {
           capability: row.capability,
@@ -372,21 +413,37 @@ export class JobDriver {
     let outcome: LifecycleJobOutcome | void;
     try {
       outcome = await this.#alarmScope.run({ executing: row }, () =>
-        tryN(maxAttempts, (attempt) => dispatch.onJob({ job, attempt }), {
-          baseDelayMs: job.retry?.baseDelayMs ?? DEFAULT_JOB_RETRY.baseDelayMs,
-          maxDelayMs: job.retry?.maxDelayMs ?? DEFAULT_JOB_RETRY.maxDelayMs,
-          // In-process retries are futile on a superseded isolate (code
-          // never reloads mid-invocation) and on a memory-limit reset (the
-          // isolate is condemned, and a retry can read half-claimed state
-          // as "nothing to do", converting the reset into a silent success
-          // that the breaker never sees). Defer both to the alarm boundary.
-          shouldRetry: (error) =>
-            !isDurableObjectCodeUpdateReset(error) &&
-            !isDurableObjectMemoryLimitReset(error)
-        })
+        tryN(
+          maxAttempts,
+          async (attempt) => {
+            attempts = attempt;
+            try {
+              return await dispatch.onJob({ job, attempt });
+            } catch (error) {
+              // One event per failed attempt, so a retried-then-successful
+              // job still shows what it recovered from.
+              span.recordException(error);
+              throw error;
+            }
+          },
+          {
+            baseDelayMs:
+              job.retry?.baseDelayMs ?? DEFAULT_JOB_RETRY.baseDelayMs,
+            maxDelayMs: job.retry?.maxDelayMs ?? DEFAULT_JOB_RETRY.maxDelayMs,
+            // In-process retries are futile on a superseded isolate (code
+            // never reloads mid-invocation) and on a memory-limit reset (the
+            // isolate is condemned, and a retry can read half-claimed state
+            // as "nothing to do", converting the reset into a silent success
+            // that the breaker never sees). Defer both to the alarm boundary.
+            shouldRetry: (error) =>
+              !isDurableObjectCodeUpdateReset(error) &&
+              !isDurableObjectMemoryLimitReset(error)
+          }
+        )
       );
     } catch (error) {
-      if (disabled()) return;
+      if (disabled()) return { outcome: "abandoned", attempts, maxAttempts };
+      span.markFailed(error);
       if (isPlatformFailure(error)) {
         // Platform-class failure: preserve the job and re-throw so the
         // platform retries a fresh invocation (or the memory-limit breaker
@@ -405,7 +462,15 @@ export class JobDriver {
         // Carry the row out with the error rather than through a shared
         // field: an overlapping alarm's own #driveJob may already be
         // dispatching a different row by the time this unwinds to
-        // runAlarm's catch.
+        // runAlarm's catch. The span settles here: the rethrow is a
+        // deferral, not a failure of the span's own work.
+        span.finish(
+          jobSpanFinishAttributes({
+            outcome: "deferred",
+            attempts,
+            maxAttempts
+          })
+        );
         throw new AttributedPlatformFailure(row, error);
       }
       // Application failure after retry exhaustion: the owner observes it
@@ -422,8 +487,13 @@ export class JobDriver {
       clearTimeout(slowWatchdog);
     }
 
-    if (disabled()) return;
+    if (disabled()) return { outcome: "abandoned", attempts, maxAttempts };
     queue.applyOutcome(row.id, outcome ?? undefined);
+    return {
+      ...jobSpanDisposition(outcome ?? undefined),
+      attempts,
+      maxAttempts
+    };
   }
 
   #warnBacklog(due: ReadonlyArray<JobStorageRow>): void {
