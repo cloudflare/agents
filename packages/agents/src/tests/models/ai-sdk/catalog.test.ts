@@ -325,6 +325,68 @@ describe("streamed catalog models that answer in Anthropic events", () => {
   });
 });
 
+describe("a streamed catalog answer that drops", () => {
+  it("resumes through the binding and delivers the whole answer", async () => {
+    const chunk = (content: string) =>
+      `data: ${JSON.stringify({
+        choices: [{ delta: { content }, index: 0 }],
+        id: "chatcmpl-run",
+        model: GPT,
+        object: "chat.completion.chunk"
+      })}\n\n`;
+    const events = [
+      chunk("one"),
+      chunk(", two"),
+      chunk(", three"),
+      `data: ${JSON.stringify({
+        choices: [{ delta: {}, finish_reason: "stop", index: 0 }],
+        id: "chatcmpl-run",
+        object: "chat.completion.chunk"
+      })}\n\n`,
+      "data: [DONE]\n\n"
+    ];
+    const encoder = new TextEncoder();
+    const resumed: string[] = [];
+    const binding = {
+      aiGatewayLogId: null,
+      calls: [],
+      async fetch(url: string) {
+        resumed.push(url);
+        const from = Number(new URL(url).searchParams.get("from"));
+        return new Response(events.slice(from).join(""));
+      },
+      async run() {
+        // Two events, then the connection drops.
+        let pulled = false;
+        const body = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (!pulled) {
+              pulled = true;
+              controller.enqueue(encoder.encode(events[0] + events[1]));
+              return;
+            }
+            controller.error(new TypeError("Network connection lost."));
+          }
+        });
+        return new Response(body, {
+          headers: {
+            "cf-aig-run-id": "run-9",
+            "content-type": "text/event-stream"
+          }
+        });
+      }
+    };
+    const ai = createAI({ binding: binding as unknown as Ai, id: "prod" });
+    const result = streamText({ model: ai(GPT), prompt: "count" });
+
+    expect(await result.text).toBe("one, two, three");
+    expect(await result.finishReason).toBe("stop");
+    expect(resumed).toEqual([
+      "https://workers-binding.ai/ai-gateway/gateways/prod/run/run-9/resume?from=2"
+    ]);
+  });
+});
+
 describe("byokAlias", () => {
   it("reaches /run as cf-aig-byok-alias for a catalog model", async () => {
     const binding = fakeBinding(() => jsonResponse(chatBody("ok")));

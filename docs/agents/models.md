@@ -421,6 +421,28 @@ This loop runs across models. Within one catalog model, `/run` already retries
 across that model's providers, and a [dynamic route](#dynamic-routes) runs its
 own fallback on the gateway.
 
+## Stream resume
+
+A streamed answer from AI Gateway's `/run` (a catalog model or a dynamic
+route) carries `cf-aig-run-id`, and the gateway keeps every event of the run.
+If the connection drops mid-stream, the provider reconnects through the
+binding and replays the run from the last complete event, so the stream you
+read continues with nothing lost or repeated. There is nothing to configure:
+
+```ts
+const result = streamText({ model: ai("anthropic/claude-opus-4.8"), prompt });
+// A dropped connection is resumed; result.textStream just keeps going.
+```
+
+The run keeps going on the gateway after the connection is gone, so a resume
+continues the same answer rather than starting a new one. It gives up, with a
+`CloudflareAIError`, after five drops in one stream or once the gateway no
+longer holds the run (a few minutes after it ends). Aborting the call never
+resumes. The run id is in `providerMetadata.cloudflare.runId`.
+
+Workers AI `@cf/` streams and model objects on the provider-native path have
+no run id, so they are not resumed.
+
 ## How Workers AI stays OpenAI-shaped
 
 Every `@cf/...` model answers in the OpenAI chat-completions shape, but the run
