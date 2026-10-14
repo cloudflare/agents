@@ -116,6 +116,13 @@ describe("pi-ai: catalog models on /run", () => {
     expect(message.content).toEqual([{ text: "Hi there!", type: "text" }]);
   });
 
+  // TODO: AI Gateway drops `anthropic-beta` on the binding's `/run` path today:
+  // aig-entry forwards only `cf-aig-*` extra headers, and the Anthropic provider
+  // library sends fixed headers. Turn this on once the gateway forwards it.
+  it.todo(
+    "sends pi's anthropic-beta to /run for a catalog Claude model, and AI Gateway passes it to Anthropic"
+  );
+
   it("ends the stream with the gateway's error when /run refuses the model", async () => {
     const binding = fakeBinding(() =>
       jsonResponse(

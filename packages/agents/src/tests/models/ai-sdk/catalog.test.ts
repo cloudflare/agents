@@ -118,6 +118,13 @@ describe("catalog models", () => {
     );
   });
 
+  // TODO: a vendor header such as `anthropic-beta` set through `headers` on a
+  // catalog model does not reach the vendor: aig-entry forwards only `cf-aig-*`
+  // extra headers on `/run`. Turn this on once AI Gateway forwards it.
+  it.todo(
+    "pass a vendor header like anthropic-beta through /run to the vendor"
+  );
+
   it("send the extra headers and the session affinity key", async () => {
     const binding = fakeBinding(() => jsonResponse(chatBody("ok")));
     const ai = createAI({ binding: asAi(binding) });
