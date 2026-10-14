@@ -151,6 +151,9 @@ the provider's format. The gateway owns the rest:
 The request is built as strict OpenAI. `reasoningEffort` travels as
 `reasoning_effort`, the output cap as `max_completion_tokens`, and
 `chatTemplateKwargs`, which only Workers AI takes, is dropped with a warning.
+A catalog id speaks chat completions, so a vendor-only feature (an Anthropic
+beta header, cache control, a thinking budget) needs the vendor's own
+[model object](#model-objects), which keeps the vendor's request whole.
 
 A streamed answer from a model whose native format is Anthropic Messages (the
 Claude models) comes back from `/run` in Anthropic events rather than chat

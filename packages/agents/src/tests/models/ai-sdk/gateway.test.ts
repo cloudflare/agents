@@ -448,6 +448,22 @@ describe("ZDR and vendor keys", () => {
     expect(options).not.toHaveProperty("extraHeaders");
   });
 
+  it("forwards the vendor's beta headers on the provider-native request", async () => {
+    const binding = fakeGatewayBinding({
+      native: () => anthropicResponse()
+    });
+    const ai = createAI({ binding: asAi(binding) });
+    const beta = createAnthropic({
+      apiKey: "cloudflare",
+      headers: { "anthropic-beta": "interleaved-thinking-2025-05-14" }
+    });
+    await ai(beta("claude-opus-4-8")).doGenerate(callOptions());
+
+    expect(binding.native[0].headers["anthropic-beta"]).toContain(
+      "interleaved-thinking-2025-05-14"
+    );
+  });
+
   it("strips the vendor key by default", async () => {
     const binding = fakeGatewayBinding({
       native: () => anthropicResponse()
