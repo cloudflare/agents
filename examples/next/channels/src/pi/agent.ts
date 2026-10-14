@@ -13,9 +13,8 @@ import {
 import { WebChannel } from "agents/experimental/channels/web";
 import { Lifecycle } from "agents/lifecycle";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { PiHarness } from "agents/harness/pi";
+import { PiHarness, piChannelsHarness } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
-import { piChannelsHarness } from "./channels-harness";
 
 const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
 
@@ -63,10 +62,9 @@ export class PiAgent extends DurableObject<Env> {
     },
     defaults: { model: this.ai(MODEL_ID), thinkingLevel: "low" }
   });
-  readonly channels = Channels.forHarness(
-    piChannelsHarness(this.harness, { kv: this.ctx.storage.kv }),
-    { channels: { web: new WebChannel() } }
-  );
+  readonly channels = Channels.forHarness(piChannelsHarness(this.harness), {
+    channels: { web: new WebChannel() }
+  });
   readonly lifecycle = Lifecycle.install(this)
     .use(this.harness)
     .use(this.channels.streams)

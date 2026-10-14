@@ -63,7 +63,7 @@ export interface WebFetchTool {
  * `toModelOutput` only applies to earlier turns when the tools are passed to
  * `convertToModelMessages(messages, { tools })`; otherwise the AI SDK sends
  * the output back to the model as JSON, without the header or the
- * untrusted-content wrapper. `AiSdkHarness` passes them.
+ * untrusted-content wrapper. `ThinkHarness` passes them.
  *
  * @example
  * ```ts

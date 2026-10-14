@@ -16,13 +16,13 @@ import { createRoot } from "react-dom/client";
 
 /** The agents this Worker serves, by the route segment that reaches them. */
 const harnesses: Record<string, string> = {
-  "ai-sdk": "AI SDK",
+  think: "Think",
   pi: "pi"
 };
 
 // The URL hash picks the agent and room: #<harness>/<room>.
 const [hashHarness = "", hashRoom = ""] = location.hash.slice(1).split("/");
-const harness = Object.hasOwn(harnesses, hashHarness) ? hashHarness : "ai-sdk";
+const harness = Object.hasOwn(harnesses, hashHarness) ? hashHarness : "think";
 const room = hashRoom || "default";
 const protocol = location.protocol === "https:" ? "wss:" : "ws:";
 // Each browser is its own participant, so it runs only its own tool calls.

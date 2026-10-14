@@ -382,6 +382,55 @@ describe("Channels over the Web Channel", () => {
     });
   });
 
+  it("shows a harness-named user message under the inbound message's id", async () => {
+    const stub = harness();
+    const alice = await connect(stub, "alice");
+    alice.send(message("e1", "hi"));
+    await until(alice, (f) => f.type === "channels:ack");
+    await stub.emit([
+      {
+        type: "operation",
+        status: { operationId: "e1", status: "placed", messageId: "h1" }
+      },
+      {
+        type: "message",
+        message: {
+          id: "h1",
+          role: "user",
+          parts: [{ type: "text", text: "hi" }]
+        }
+      }
+    ]);
+    expect(
+      await until(alice, (f) => f.type === "channels:messages")
+    ).toMatchObject({
+      messages: [{ id: "e1", role: "user" }]
+    });
+
+    // A later surface's snapshot uses the inbound id too.
+    const bob = await connect(stub, "bob");
+    await stub.emit([
+      {
+        type: "transcript",
+        messages: [
+          { id: "h1", role: "user", parts: [{ type: "text", text: "hi" }] },
+          { id: "h2", role: "assistant", parts: [] }
+        ]
+      }
+    ]);
+    expect(
+      await until(bob, (f) => f.type === "channels:snapshot")
+    ).toMatchObject({ messages: [] });
+    expect(
+      await until(bob, (f) => f.type === "channels:messages")
+    ).toMatchObject({
+      messages: [
+        { id: "e1", role: "user" },
+        { id: "h2", role: "assistant" }
+      ]
+    });
+  });
+
   // T60
   it("deletes every response on reset and pushes an empty snapshot", async () => {
     const stub = harness();
@@ -400,7 +449,7 @@ describe("Channels over the Web Channel", () => {
       session: "default",
       handoff: "note"
     });
-    await stub.emit([{ type: "reset" }]);
+    await stub.emit([{ type: "transcript", messages: [] }]);
     expect(
       await until(alice, (f) => f.type === "channels:snapshot")
     ).toMatchObject({

@@ -1,15 +1,20 @@
+/**
+ * The AI SDK projection: AI SDK UI message chunks and UI messages to and
+ * from Channels response chunks and transcript messages.
+ *
+ * @experimental The API may change between releases.
+ */
 import type { ToolSet, UIMessage, UIMessageChunk } from "ai";
 import type {
-  InboundEvent,
   Json,
   JsonObject,
   MessagePart,
   ResponseChunk,
   ToolPart,
   TranscriptMessage
-} from "../../experimental/channels/protocol";
+} from "../protocol";
 
-export type AiSdkConversionOptions = {
+export type AiSdkProjectionOptions = {
   /** The agent's tools. Those without `execute` run on a client. */
   tools?: ToolSet;
   /** Id of the participant whose client runs this message's client tools. */
@@ -18,7 +23,7 @@ export type AiSdkConversionOptions = {
 
 function ownerOf(
   toolName: string,
-  { tools, owner }: AiSdkConversionOptions
+  { tools, owner }: AiSdkProjectionOptions
 ): string | undefined {
   const tool =
     tools && Object.hasOwn(tools, toolName) ? tools[toolName] : undefined;
@@ -60,7 +65,7 @@ function warnSkipped(type: string): void {
  */
 export async function* toResponseChunks(
   stream: AsyncIterable<UIMessageChunk>,
-  options: AiSdkConversionOptions = {}
+  options: AiSdkProjectionOptions = {}
 ): AsyncGenerator<ResponseChunk> {
   let error: Error | undefined;
   for await (const chunk of stream) {
@@ -76,7 +81,7 @@ export async function* toResponseChunks(
 /** Convert one AI SDK UI message chunk into a response chunk, if it has one. */
 export function toResponseChunk(
   chunk: UIMessageChunk,
-  options: AiSdkConversionOptions
+  options: AiSdkProjectionOptions
 ): ResponseChunk | undefined {
   switch (chunk.type) {
     case "text-start":
@@ -181,7 +186,7 @@ function tool<T extends object>(
     dynamic?: boolean;
     title?: string;
   },
-  options: AiSdkConversionOptions,
+  options: AiSdkProjectionOptions,
   rest: T
 ) {
   const owner = ownerOf(chunk.toolName, options);
@@ -235,7 +240,7 @@ export function toUIMessageChunk(chunk: ResponseChunk): UIMessageChunk {
 /** Convert a saved AI SDK UI message into a transcript message. */
 export function toTranscriptMessage(
   message: UIMessage,
-  options: AiSdkConversionOptions = {}
+  options: AiSdkProjectionOptions = {}
 ): TranscriptMessage {
   const metadata = object(message.metadata);
   return {
@@ -251,7 +256,7 @@ export function toTranscriptMessage(
 
 function toMessagePart(
   part: UIPart,
-  options: AiSdkConversionOptions
+  options: AiSdkProjectionOptions
 ): MessagePart | undefined {
   switch (part.type) {
     case "text":
@@ -300,7 +305,7 @@ function toToolPart(
   part: UIToolPart,
   toolName: string,
   dynamic: boolean,
-  options: AiSdkConversionOptions
+  options: AiSdkProjectionOptions
 ): ToolPart {
   const owner = ownerOf(toolName, options);
   return withMetadata(
@@ -376,83 +381,4 @@ function toUIPart(part: MessagePart): UIPart {
       // SAFETY: the remaining parts match their AI SDK shapes field for field.
       return part as UIPart;
   }
-}
-
-/** Whether the message has a tool call waiting for a result or an approval. */
-export function awaitsInput(message: UIMessage): boolean {
-  return message.parts.some(
-    (part) =>
-      "toolCallId" in part &&
-      (part.state === "input-available" || part.state === "approval-requested")
-  );
-}
-
-/** A tool result or approval response, as an inbound event carries it. */
-export type ToolCallAnswer =
-  | Pick<
-      Extract<InboundEvent, { type: "tool-result" }>,
-      "type" | "toolCallId" | "result"
-    >
-  | Pick<
-      Extract<InboundEvent, { type: "approval-response" }>,
-      "type" | "approvalId" | "approved" | "reason"
-    >;
-
-/**
- * Record a tool result or approval response on the tool call it answers.
- * Returns the updated message, or undefined when no call is waiting for it,
- * so the first answer wins.
- */
-export function answerToolCall(
-  messages: readonly UIMessage[],
-  event: ToolCallAnswer
-): UIMessage | undefined {
-  for (const message of messages) {
-    const index = message.parts.findIndex((part) => answers(part, event));
-    if (index === -1) continue;
-    const parts = [...message.parts];
-    const part = parts[index] as UIToolPart;
-    // SAFETY: the new state is set with exactly the fields it requires.
-    parts[index] = (
-      event.type === "approval-response"
-        ? {
-            ...part,
-            // As the AI SDK records them: a rejection ends the call.
-            state: event.approved ? "approval-responded" : "output-denied",
-            approval: {
-              id: event.approvalId,
-              approved: event.approved,
-              ...(event.reason !== undefined && { reason: event.reason })
-            }
-          }
-        : event.type === "tool-result" && event.result.ok
-          ? { ...part, state: "output-available", output: event.result.output }
-          : {
-              ...part,
-              state: "output-error",
-              errorText:
-                event.type === "tool-result" && !event.result.ok
-                  ? (event.result.errorText ?? "")
-                  : ""
-            }
-    ) as UIPart;
-    return { ...message, parts };
-  }
-  return undefined;
-}
-
-function answers(part: UIPart, event: ToolCallAnswer): boolean {
-  if (!("toolCallId" in part)) return false;
-  if (event.type === "tool-result") {
-    return (
-      part.toolCallId === event.toolCallId &&
-      // An approved client tool is answered after its approval.
-      (part.state === "input-available" || part.state === "approval-responded")
-    );
-  }
-  return (
-    event.type === "approval-response" &&
-    part.state === "approval-requested" &&
-    part.approval.id === event.approvalId
-  );
 }

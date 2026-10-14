@@ -1,12 +1,16 @@
 # Channels
 
-The shared language between agent harnesses (the AI SDK and pi harnesses today; AIChatAgent, Think, Codex or opencode later) and the interfaces people use to talk to them (browser, Slack, Telegram, email, voice). Every agent reaches Channels through the shared harness interface.
+The shared language between agent harnesses (the Think and pi harnesses today; AIChatAgent, Codex or opencode later) and the interfaces people use to talk to them (browser, Slack, Telegram, email, voice). Every agent reaches Channels through the shared harness interface.
 
 ## Conversations
 
 **Channel**:
-An interface that shows conversations to people, such as Slack, Telegram, Email or the Web Channel. Each Channel turns its platform's events into inbound events and shows responses on its surfaces. Clients of a Channel, such as the Pi TUI or the AI SDK chat transport over the Web Channel, are not Channels.
-_Avoid_: Adapter (a harness adapter is the vendor translation layer), provider, messenger
+The agent-side code for an interface that shows conversations to people, such as Slack, Telegram, Email or the Web Channel. Each Channel turns its platform's events into inbound events and shows responses on its surfaces.
+_Avoid_: Adapter (a harness adapter puts a vendor's harness behind the shared interface), provider, messenger
+
+**Client**:
+Code on the participant's side that speaks one Channel's protocol and shows its conversations to a person, such as the Pi TUI or the AI SDK chat transport over the Web Channel. A Client is not a Channel, and a Channel never depends on a Client. Platforms such as Slack supply their own.
+_Avoid_: Channel (for a client), frontend
 
 **Conversation**:
 The unit that owns exactly one transcript.
@@ -21,7 +25,7 @@ What a surface does with the one conversation it shows. A web surface can follow
 _Avoid_: Bind, switch, attach
 
 **Participant**:
-A person or client acting in a conversation. A participant may be connected through several tabs or devices at once; the shared vocabulary never names an individual connection. The application decides who a participant is, in each Channel's `participant` callback; Channels never picks an identity. Participants that share an id are the same participant. A participant's name is for display only.
+A person or program acting in a conversation. A participant may be connected through several tabs or devices at once; the shared vocabulary never names an individual connection. The application decides who a participant is, in each Channel's `participant` callback; Channels never picks an identity. Participants that share an id are the same participant. A participant's name is for display only.
 _Avoid_: User (when several people share a conversation), connection, tab
 
 ## Access
@@ -98,8 +102,12 @@ _Avoid_: Delivery stream, reply, operation
 ## Harnesses
 
 **Harness**:
-An agent loop that keeps its own transcripts behind the shared harness interface (`submit`, `abort`, `wait`, `reset`, `watch`, and session create, fork and list), such as `AiSdkHarness` or the pi harness's adapter. It is the only way an agent connects to Channels: `Channels.forHarness` serves each harness session as one conversation with the same id. The harness's words (session, operation, run) stay in harness-facing code.
+An agent loop that keeps its own transcripts behind the shared harness interface (`submit`, `abort`, `wait`, `reset`, `watch`, and session create, fork and list), such as `ThinkHarness` or the pi harness's adapter. It is the only way an agent connects to Channels: `Channels.forHarness` serves each harness session as one conversation with the same id. The harness's words (session, operation, run) stay in harness-facing code.
 _Avoid_: Session (outside harness-facing code)
 
 **Harness adapter**:
-Code that puts a vendor's own harness, such as `PiHarness`, behind the shared interface. It knows nothing about Channels setup; `Channels.forHarness` knows nothing about the vendor.
+Code that puts a vendor's own harness, such as `PiHarness`, behind the shared interface: its sessions, operations and events, and any lookup in the vendor's storage that its events leave out. It leaves message formats to the vendor's projection. It knows nothing about Channels setup; `Channels.forHarness` knows nothing about the vendor.
+
+**Projection**:
+Code that maps a vendor's message format to or from response chunks and transcript messages, such as the AI SDK's UI messages or pi's entries. It sees only the vendor's values, never its harness or storage, so it can be tested on recorded data. Each vendor's projection is its own entry point under `projections/`.
+_Avoid_: Adapter, converter, codec

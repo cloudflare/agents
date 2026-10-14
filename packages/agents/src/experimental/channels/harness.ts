@@ -8,9 +8,10 @@
  * one Channels conversation is one harness session, with the same id, and
  * one Channels turn is one operation.
  *
- * Everything outbound names operations by the caller's operation id. The
- * user message an operation places is keyed by the caller's `messageId`, or
- * by the operation id when none is given. Model selection is absent on
+ * Everything outbound names operations by the caller's operation id. A
+ * harness that cannot give the user message an operation places the
+ * caller's `messageId` reports the id it gave instead, on `placed` and
+ * `done`; the caller keeps its own mapping. Model selection is absent on
  * purpose: it is the application's decision, not a client protocol.
  */
 import type { Json, ResponseChunk, TranscriptMessage } from "./protocol";
@@ -65,8 +66,8 @@ export type InputPart =
 export type HarnessInput = {
   readonly parts: readonly InputPart[];
   /**
-   * The caller's id for the user message this places. Default: the
-   * operation id.
+   * The caller's id for the user message this places. A harness that gives
+   * the message another id reports it on `placed` and `done`.
    */
   readonly messageId?: string;
 };
@@ -115,11 +116,22 @@ export type Receipt = {
 
 export type OperationStatus =
   | { readonly operationId: string; readonly status: "queued" }
-  | { readonly operationId: string; readonly status: "placed" }
+  | {
+      readonly operationId: string;
+      readonly status: "placed";
+      /**
+       * The id of the user message this placed, when it is not the
+       * caller's `messageId`. Reported before that message's `message`
+       * event.
+       */
+      readonly messageId?: string;
+    }
   | {
       readonly operationId: string;
       readonly status: "done";
       readonly text?: string;
+      /** As on `placed`, for a caller that missed it. */
+      readonly messageId?: string;
     }
   | {
       readonly operationId: string;
@@ -168,8 +180,11 @@ export type SessionEvent =
   /** A message saved to the transcript; replaces any message with its id. */
   | { readonly type: "message"; readonly message: TranscriptMessage }
   /**
-   * The context was reset. Not in the first draft: without it a watcher
-   * could not tell the active transcript restarted. Messages that follow
-   * belong to the new context.
+   * The transcript changed in a way `message` events cannot describe, such
+   * as a reset, which starts it over, or messages removed. Replaces the
+   * whole active transcript; messages that follow belong to it.
    */
-  | { readonly type: "reset" };
+  | {
+      readonly type: "transcript";
+      readonly messages: readonly TranscriptMessage[];
+    };

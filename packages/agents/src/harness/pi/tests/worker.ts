@@ -21,8 +21,15 @@ import { Lifecycle } from "../../../lifecycle";
 import { setWakeTimingForTests } from "../harness";
 import { TEST_TIMING } from "./timing";
 import { fauxModels, NO_RETRY } from "./faux";
+import type {
+  OperationResult,
+  SessionEvent,
+  SessionState
+} from "../../../experimental/channels/harness";
+import type { TranscriptMessage } from "../../../experimental/channels/protocol";
 import {
   PiHarness,
+  piChannelsHarness,
   type PiOperationResult,
   type PiReceipt,
   type PiWhenBusy
@@ -205,6 +212,89 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   async alarmTime(): Promise<number | null> {
     return this.ctx.storage.getAlarm();
+  }
+
+  /**
+   * Through `piChannelsHarness`: watch the root session, submit `text` as
+   * operation `op` with the caller's message id `client-<op>`, and collect
+   * the session events until its run ends. Then `after` runs (a reset, say)
+   * and its events are collected for `settle` ms.
+   */
+  async channels(
+    text: string,
+    op: string,
+    after?: "reset"
+  ): Promise<{
+    state: SessionState;
+    events: SessionEvent[];
+    result: OperationResult;
+    later: SessionEvent[];
+  }> {
+    const session = piChannelsHarness(this.harness).session();
+    const watch = await session.watch();
+    const events: SessionEvent[] = [];
+    const later: SessionEvent[] = [];
+    let collecting = events;
+    let ended: () => void = () => {};
+    const runEnded = new Promise<void>((resolve) => {
+      ended = resolve;
+    });
+    watch.start(async (batch) => {
+      collecting.push(...batch);
+      if (batch.some((event) => event.type === "run-end")) ended();
+    });
+    await session.submit(
+      { parts: [{ type: "text", text }], messageId: `client-${op}` },
+      { operationId: op }
+    );
+    const result = await session.wait(op);
+    await runEnded;
+    collecting = later;
+    if (after === "reset") {
+      await session.reset("note");
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    await watch.stop();
+    return { state: watch.state, events, result, later };
+  }
+
+  /**
+   * Through `piChannelsHarness`: join a run already going (the gate tool
+   * holds it), release it, and apply the session events to the joined
+   * state's transcript as a watcher would. Returns the joined state, the
+   * transcript so applied, and the transcript read afresh.
+   */
+  async channelsJoin(): Promise<{
+    state: SessionState;
+    applied: TranscriptMessage[];
+    fresh: TranscriptMessage[];
+  }> {
+    await this.harness.submit("gate", { operationId: "op-gate" });
+    await this.gateStarted(1);
+    const harness = piChannelsHarness(this.harness);
+    const watch = await harness.session().watch();
+    let applied = [...watch.state.messages];
+    let ended: () => void = () => {};
+    const runEnded = new Promise<void>((resolve) => {
+      ended = resolve;
+    });
+    watch.start(async (batch) => {
+      for (const event of batch) {
+        if (event.type === "transcript") applied = [...event.messages];
+        if (event.type === "message") {
+          const index = applied.findIndex((m) => m.id === event.message.id);
+          if (index === -1) applied.push(event.message);
+          else applied[index] = event.message;
+        }
+        if (event.type === "run-end") ended();
+      }
+    });
+    await this.release();
+    await runEnded;
+    await watch.stop();
+    const fresh = await harness.session().watch();
+    await fresh.stop();
+    return { state: watch.state, applied, fresh: [...fresh.state.messages] };
   }
 
   /** The fixture's tools and preamble, as one pi extension. */
