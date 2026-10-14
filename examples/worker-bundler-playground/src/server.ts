@@ -1,5 +1,5 @@
 import { routeAgentRequest, callable } from "agents";
-import { Workspace } from "@cloudflare/shell";
+import { Workspace } from "@cloudflare/computer";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import {
   createApp,
@@ -55,11 +55,12 @@ function assertNamedAppExport(files: Record<string, string>): void {
   }
 }
 
+function isNotFound(error: unknown): boolean {
+  return (error as { code?: unknown }).code === "ENOENT";
+}
+
 export class WorkerPlayground extends AIChatAgent<Env> {
-  workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    name: () => this.name
-  });
+  workspace = new Workspace({ storage: this.ctx.storage });
   currentAppResult?: CreateAppResult;
   buildVersion = 0;
 
@@ -82,23 +83,59 @@ export class WorkerPlayground extends AIChatAgent<Env> {
     }
   }
 
+  /** Files (not directories) under a directory, or none if it is missing. */
+  private async listFiles(directory: string): Promise<string[]> {
+    try {
+      const entries = await this.workspace.fs.find(directory, "**");
+      return entries
+        .filter((entry) => entry.type === "file")
+        .map((entry) => entry.path);
+    } catch (error) {
+      if (isNotFound(error)) return [];
+      throw error;
+    }
+  }
+
+  /** A file's text, or `null` if it is missing. */
+  private async readText(path: string): Promise<string | null> {
+    try {
+      return await this.workspace.fs.readFile(path, "utf8");
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw error;
+    }
+  }
+
+  /** Write a file, creating its parent directories. */
+  private async writeText(path: string, content: string): Promise<void> {
+    const parent = path.slice(0, path.lastIndexOf("/"));
+    if (parent) await this.workspace.fs.mkdir(parent, { recursive: true });
+    await this.workspace.fs.writeFile(path, content);
+  }
+
+  /** Remove every saved file and directory. */
+  private async clearFiles(): Promise<void> {
+    for (const entry of await this.workspace.fs.readdir("/")) {
+      await this.workspace.fs.rm(`/${entry.name}`, {
+        recursive: true,
+        force: true
+      });
+    }
+  }
+
   private async readSourceFiles(): Promise<Record<string, string>> {
     const files: Record<string, string> = {};
-    const entries = await this.workspace.glob("/src/**");
-
-    for (const entry of entries) {
-      if (entry.type === "file") {
-        const content = await this.workspace.readFile(entry.path);
-        if (content !== null) {
-          // Strip leading slash to match createApp's expected format
-          files[entry.path.slice(1)] = content;
-        }
+    for (const path of await this.listFiles("/src")) {
+      const content = await this.readText(path);
+      if (content !== null) {
+        // Strip leading slash to match createApp's expected format
+        files[path.slice(1)] = content;
       }
     }
 
     // Also read root config files (package.json, wrangler.jsonc, etc.)
     for (const name of ["package.json", "wrangler.jsonc", "tsconfig.json"]) {
-      const content = await this.workspace.readFile("/" + name);
+      const content = await this.readText("/" + name);
       if (content !== null) {
         files[name] = content;
       }
@@ -109,16 +146,11 @@ export class WorkerPlayground extends AIChatAgent<Env> {
 
   private async readAssetFiles(): Promise<Record<string, string>> {
     const assets: Record<string, string> = {};
-    const entries = await this.workspace.glob("/assets/**");
-
-    for (const entry of entries) {
-      if (entry.type === "file") {
-        const content = await this.workspace.readFile(entry.path);
-        if (content !== null) {
-          // Convert /assets/index.html → /index.html
-          const pathname = entry.path.replace(/^\/assets/, "");
-          assets[pathname] = content;
-        }
+    for (const path of await this.listFiles("/assets")) {
+      const content = await this.readText(path);
+      if (content !== null) {
+        // Convert /assets/index.html → /index.html
+        assets[path.replace(/^\/assets/, "")] = content;
       }
     }
 
@@ -127,12 +159,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
 
   @callable({ description: "Clear all workspace files and reset state" })
   async clearWorkspace(): Promise<void> {
-    const existing = await this.workspace.glob("/**");
-    for (const entry of existing) {
-      if (entry.type === "file") {
-        await this.workspace.deleteFile(entry.path);
-      }
-    }
+    await this.clearFiles();
     this.currentAppResult = undefined;
     this.buildVersion = 0;
     await this.ctx.storage.put("buildVersion", 0);
@@ -175,20 +202,15 @@ export class WorkerPlayground extends AIChatAgent<Env> {
     this.currentAppResult = result;
 
     // Persist source files to workspace
-    const existing = await this.workspace.glob("/**");
-    for (const entry of existing) {
-      if (entry.type === "file") {
-        await this.workspace.deleteFile(entry.path);
-      }
-    }
+    await this.clearFiles();
     for (const [path, content] of Object.entries(files)) {
-      await this.workspace.writeFile("/" + path, content);
+      await this.writeText("/" + path, content);
     }
 
     // Persist assets under /assets/ prefix
     if (assets) {
       for (const [pathname, content] of Object.entries(assets)) {
-        await this.workspace.writeFile("/assets" + pathname, content);
+        await this.writeText("/assets" + pathname, content);
       }
     }
 

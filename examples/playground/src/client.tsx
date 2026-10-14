@@ -45,7 +45,7 @@ import {
   ToolsDemo,
   CodemodeDemo,
   AgentToolsDemo,
-  ThinkShellDemo
+  ThinkComputerDemo
 } from "./demos/ai";
 
 // MCP demos
@@ -103,7 +103,7 @@ function App() {
             <Route path="ai/tools" element={<ToolsDemo />} />
             <Route path="ai/codemode" element={<CodemodeDemo />} />
             <Route path="ai/agent-tools" element={<AgentToolsDemo />} />
-            <Route path="ai/think-shell" element={<ThinkShellDemo />} />
+            <Route path="ai/think-computer" element={<ThinkComputerDemo />} />
 
             {/* MCP */}
             <Route path="mcp/server" element={<McpServerDemo />} />

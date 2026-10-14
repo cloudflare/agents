@@ -1,5 +1,4 @@
 import type { LanguageModelV4 } from "@ai-sdk/provider";
-import type { Workspace } from "@cloudflare/shell";
 import { LifecycleCapability } from "agents/lifecycle";
 import type { Streams, StreamWriter } from "agents/streams";
 import type { Tasks, TaskStep } from "agents/tasks";
@@ -9,7 +8,7 @@ import {
   HarnessBuildError,
   runHarnessTurn
 } from "./harness-runtime";
-import { HarnessSource } from "./harness-source";
+import { HarnessSource, type HarnessWorkspace } from "./harness-source";
 import { SelfModifyingTurnHost } from "./host-bridge";
 import type {
   HarnessActivation,
@@ -47,7 +46,7 @@ export type SelfModifyingTurnReceipt = HarnessTurnReceipt;
 export type SelfModifyingHarnessOptions = {
   readonly tasks: Tasks;
   readonly streams: Streams;
-  readonly workspace: Workspace;
+  readonly workspace: HarnessWorkspace;
   readonly loader: WorkerLoader;
   readonly model: LanguageModelV4;
 };

@@ -120,8 +120,8 @@ const navigation: NavCategory[] = [
         icon: <TreeStructureIcon size={16} />
       },
       {
-        label: "Think + Shell",
-        path: "/ai/think-shell",
+        label: "Think + Computer",
+        path: "/ai/think-computer",
         icon: <CpuIcon size={16} />
       }
     ]

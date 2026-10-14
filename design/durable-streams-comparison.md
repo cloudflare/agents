@@ -120,8 +120,8 @@ streams produced _somewhere else_. That single fact cascades into most of this l
    provider-blind — it replays bytes without understanding the model stream.
 7. **Multimodal agent surfaces.** Browser/computer use (`packages/agents/src/browser`),
    email, voice.
-8. **Sandboxed code execution.** `@cloudflare/codemode` + `@cloudflare/shell`
-   (dynamic Worker loader, sandboxed JS/filesystem).
+8. **Sandboxed code execution.** `@cloudflare/codemode` and `@cloudflare/computer`
+   workspaces (dynamic Worker loader, sandboxed JS against a durable filesystem).
 9. **Client framework + routing.** `useAgent`/`useAgentChat` React hooks,
    `partysocket` reconnection, `routeAgentRequest` per-conversation DO addressing.
 

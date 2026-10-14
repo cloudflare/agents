@@ -72,8 +72,8 @@ const features = [
         description: "Delegate chat work to child agents"
       },
       {
-        name: "Think + Shell",
-        path: "/ai/think-shell",
+        name: "Think + Computer",
+        path: "/ai/think-computer",
         description: "Assistant runtime with durable workspace tools"
       }
     ]

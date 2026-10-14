@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { Workspace } from "@cloudflare/shell";
+import { Workspace } from "@cloudflare/computer";
 import { routeAgentRequest } from "agents";
 import { Lifecycle } from "agents/lifecycle";
 import { Streams } from "agents/streams";
@@ -11,10 +11,7 @@ import { SelfModifyingHarness } from "./self-modifying-harness";
 /** Plain Durable Object hosting the self-modifying Lifecycle capability. */
 export class SelfModifyingHarnessObject extends DurableObject<Env> {
   readonly workersAI = createWorkersAI({ binding: this.env.AI });
-  readonly workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    namespace: "self_modifying"
-  });
+  readonly workspace = new Workspace({ storage: this.ctx.storage });
   readonly tasks = new Tasks();
   readonly streams = new Streams();
   readonly harness = new SelfModifyingHarness({

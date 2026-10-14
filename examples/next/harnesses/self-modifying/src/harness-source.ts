@@ -1,4 +1,4 @@
-import type { Workspace } from "@cloudflare/shell";
+import type { Workspace } from "@cloudflare/computer";
 
 const HARNESS_ROOT = "/harness/";
 const MAX_SOURCE_FILES = 256;
@@ -41,35 +41,70 @@ function requireFileSize(path: string, content: string): number {
   return bytes;
 }
 
-/** Durable editable source tree stored in a Shell Workspace. */
+/** The part of a `@cloudflare/computer` Workspace the source tree uses. */
+export type HarnessWorkspace = Pick<Workspace, "fs">;
+
+function isNotFound(error: unknown): boolean {
+  return (error as { code?: unknown }).code === "ENOENT";
+}
+
+/** Durable editable source tree stored in a Computer Workspace. */
 export class HarnessSource {
-  readonly #workspace: Workspace;
+  readonly #workspace: HarnessWorkspace;
 
   /** Bind source operations to the host's durable Workspace. */
-  constructor(workspace: Workspace) {
+  constructor(workspace: HarnessWorkspace) {
     this.#workspace = workspace;
+  }
+
+  /** Absolute paths of every file under `/harness`. */
+  async #files(): Promise<string[]> {
+    try {
+      const entries = await this.#workspace.fs.find(
+        HARNESS_ROOT.slice(0, -1),
+        "**"
+      );
+      return entries
+        .filter((entry) => entry.type === "file")
+        .map((entry) => entry.path);
+    } catch (error) {
+      if (isNotFound(error)) return [];
+      throw error;
+    }
+  }
+
+  async #readFile(path: string): Promise<string | null> {
+    try {
+      return await this.#workspace.fs.readFile(path, "utf8");
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw error;
+    }
+  }
+
+  async #writeFile(path: string, content: string): Promise<void> {
+    await this.#workspace.fs.mkdir(path.slice(0, path.lastIndexOf("/")), {
+      recursive: true
+    });
+    await this.#workspace.fs.writeFile(path, content);
   }
 
   /** Seed a new object without overwriting an existing working tree. */
   async seed(files: Readonly<Record<string, string>>): Promise<boolean> {
-    const existing = await this.#workspace.glob(`${HARNESS_ROOT}**`);
-    if (existing.some((entry) => entry.type === "file")) return false;
+    if ((await this.#files()).length > 0) return false;
     this.#requireSnapshotSize(files);
     for (const [path, content] of Object.entries(files)) {
-      await this.#workspace.writeFile(absoluteHarnessPath(path), content);
+      await this.#writeFile(absoluteHarnessPath(path), content);
     }
     return true;
   }
 
   /** Snapshot every editable source file for bundling and revision history. */
   async snapshot(): Promise<Readonly<Record<string, string>>> {
-    const entries = await this.#workspace.glob(`${HARNESS_ROOT}**`);
     const source: Record<string, string> = {};
-    for (const entry of entries) {
-      if (entry.type !== "file") continue;
-      const content = await this.#workspace.readFile(entry.path);
-      if (content !== null)
-        source[entry.path.slice(HARNESS_ROOT.length)] = content;
+    for (const path of await this.#files()) {
+      const content = await this.#readFile(path);
+      if (content !== null) source[path.slice(HARNESS_ROOT.length)] = content;
     }
     this.#requireSnapshotSize(source);
     return source;
@@ -77,18 +112,24 @@ export class HarnessSource {
 
   /** Read one editable source file. */
   read(path: string): Promise<string | null> {
-    return this.#workspace.readFile(absoluteHarnessPath(path));
+    return this.#readFile(absoluteHarnessPath(path));
   }
 
   /** Write one editable source file. */
   write(path: string, content: string): Promise<void> {
     requireFileSize(path, content);
-    return this.#workspace.writeFile(absoluteHarnessPath(path), content);
+    return this.#writeFile(absoluteHarnessPath(path), content);
   }
 
   /** Delete one editable source file. */
-  delete(path: string): Promise<boolean> {
-    return this.#workspace.deleteFile(absoluteHarnessPath(path));
+  async delete(path: string): Promise<boolean> {
+    try {
+      await this.#workspace.fs.rm(absoluteHarnessPath(path));
+      return true;
+    } catch (error) {
+      if (isNotFound(error)) return false;
+      throw error;
+    }
   }
 
   /** List editable source files with paths relative to `/harness`. */
@@ -99,26 +140,27 @@ export class HarnessSource {
       readonly updatedAt: number;
     }>
   > {
-    const entries = await this.#workspace.glob(`${HARNESS_ROOT}**`);
-    return entries
-      .filter((entry) => entry.type === "file")
-      .map((entry) => ({
-        path: entry.path.slice(HARNESS_ROOT.length),
-        size: entry.size,
-        updatedAt: entry.updatedAt
-      }))
-      .sort((left, right) => left.path.localeCompare(right.path));
+    const entries = await Promise.all(
+      (await this.#files()).map(async (path) => {
+        const stat = await this.#workspace.fs.stat(path);
+        return {
+          path: path.slice(HARNESS_ROOT.length),
+          size: stat.size,
+          updatedAt: stat.mtime
+        };
+      })
+    );
+    return entries.sort((left, right) => left.path.localeCompare(right.path));
   }
 
   /** Replace the working tree with an activated source snapshot. */
   async replace(source: Readonly<Record<string, string>>): Promise<void> {
     this.#requireSnapshotSize(source);
-    const existing = await this.#workspace.glob(`${HARNESS_ROOT}**`);
-    for (const entry of existing) {
-      if (entry.type === "file") await this.#workspace.deleteFile(entry.path);
+    for (const path of await this.#files()) {
+      await this.#workspace.fs.rm(path);
     }
     for (const [path, content] of Object.entries(source)) {
-      await this.#workspace.writeFile(absoluteHarnessPath(path), content);
+      await this.#writeFile(absoluteHarnessPath(path), content);
     }
   }
 

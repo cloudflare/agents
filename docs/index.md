@@ -3,7 +3,7 @@
 Documentation is grouped by the package that owns it:
 
 - [`agents`](./agents/index.md) — Durable Object agents, state, routing, scheduling, sessions, MCP, Voice, Channels, and shared primitives
-- [`@cloudflare/think`](./think/index.md) — opinionated agent harness built on Agents, Codemode, and Shell
+- [`@cloudflare/think`](./think/index.md) — opinionated agent harness built on Agents, Codemode, and [`@cloudflare/computer`](https://github.com/cloudflare/computer)
 - [`@cloudflare/codemode`](./codemode/index.md) — sandboxed code execution, tool providers, connectors, approvals, and snippets
 - [`@cloudflare/shell`](./shell/index.md) — durable workspaces and filesystem tools
 - [`@cloudflare/voice`](./voice/index.md) — compatibility and migration guidance for the deprecated package

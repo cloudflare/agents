@@ -11,7 +11,7 @@ The example composes:
   output, with compaction;
 - `Streams` for ordered operation events;
 - `WebSockets` to serve those events to the browser;
-- `@cloudflare/shell` Workspace for durable files;
+- a `@cloudflare/computer` Workspace for durable files;
 - AI SDK `LanguageModelV4` for model calls;
 - `workers-ai-provider` for Kimi K2.7 Code through Workers AI and AI Gateway.
 
@@ -76,13 +76,13 @@ layers the harness protocol on that socket: a session snapshot on connect,
 
 ## Storage
 
-| Data                                      | Where                                 | Bound                                               |
-| ----------------------------------------- | ------------------------------------- | --------------------------------------------------- |
-| Prompts, assistant messages, tool outputs | Sessions                              | Durable Object storage; large messages are chunked  |
-| Operation events                          | Streams                               | one stream per operation                            |
-| Kernel checkpoint                         | one small row per operation           | a few hundred bytes, independent of transcript size |
-| Model and tool effects                    | Tasks step journal                    | message ids only                                    |
-| Files                                     | Workspace, spilling to R2 past 1.5 MB | read in ranges with `offset` and `max_bytes`        |
+| Data                                      | Where                             | Bound                                               |
+| ----------------------------------------- | --------------------------------- | --------------------------------------------------- |
+| Prompts, assistant messages, tool outputs | Sessions                          | Durable Object storage; large messages are chunked  |
+| Operation events                          | Streams                           | one stream per operation                            |
+| Kernel checkpoint                         | one small row per operation       | a few hundred bytes, independent of transcript size |
+| Model and tool effects                    | Tasks step journal                | message ids only                                    |
+| Files                                     | Workspace, in the object's SQLite | read in ranges with `offset` and `max_bytes`        |
 
 The model's context window is the one real limit, and it is handled in the
 prompt rather than in storage. Each round hydrates a byte-budgeted window of
@@ -91,13 +91,6 @@ by a marker the model can page back with a ranged read, and Sessions
 compacts the branch once its estimated tokens pass a threshold, using the
 same model to summarise. The budget and the compaction policy are
 `CodexHarness` options.
-
-The example binds an R2 bucket named `codex-harness-workspace` for the
-Workspace. Create it before deploying:
-
-```sh
-wrangler r2 bucket create codex-harness-workspace
-```
 
 ## Stress test
 

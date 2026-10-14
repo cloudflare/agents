@@ -1,5 +1,5 @@
 import type { LanguageModelV4 } from "@ai-sdk/provider";
-import { Workspace } from "@cloudflare/shell";
+import type { Workspace } from "@cloudflare/computer";
 import { generateText } from "ai";
 import { LifecycleCapability } from "agents/lifecycle";
 import {
@@ -112,7 +112,7 @@ export type CodexHarnessOptions = {
   /** Durable transcript: every prompt, assistant message, and tool output. */
   readonly sessions: Sessions;
   /** Durable filesystem the Codex tools operate on. */
-  readonly workspace: Workspace;
+  readonly workspace: CodexWorkspace;
   /** AI SDK LanguageModelV4 used for every Codex round and for compaction. */
   readonly model: LanguageModelV4;
   /** Model rounds one turn may take before it is failed. @default 128 */
@@ -137,7 +137,7 @@ export type CodexHarnessOptions = {
 export class CodexHarness extends LifecycleCapability {
   private readonly tasks: Tasks;
   private readonly streams: Streams;
-  private readonly workspace: Workspace;
+  private readonly workspace: CodexWorkspace;
   private readonly kernel: KernelRuntime;
   private readonly model: LanguageModelV4;
   private readonly session: Session;
@@ -281,7 +281,7 @@ export class CodexHarness extends LifecycleCapability {
 
   /** Read one Workspace file for the UI; the snapshot reads `DEMO_FILE`. */
   async readFile(path: string): Promise<CodexWorkspaceFile> {
-    const content = await this.workspace.readFile(path);
+    const content = await readText(this.workspace, path);
     return content === null
       ? { path, found: false }
       : { path, found: true, content };
@@ -722,8 +722,33 @@ function projectTaskResult(row: OperationRow): KernelJson {
 
 type ToolOutcome = { readonly success: boolean; readonly output: KernelJson };
 
+/** The part of a `@cloudflare/computer` Workspace the Codex tools use. */
+export type CodexWorkspace = Pick<Workspace, "fs">;
+
+async function readText(
+  workspace: CodexWorkspace,
+  path: string
+): Promise<string | null> {
+  try {
+    return await workspace.fs.readFile(path, "utf8");
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function writeText(
+  workspace: CodexWorkspace,
+  path: string,
+  content: string
+): Promise<void> {
+  const parent = path.slice(0, path.lastIndexOf("/"));
+  if (parent) await workspace.fs.mkdir(parent, { recursive: true });
+  await workspace.fs.writeFile(path, content);
+}
+
 async function performWorkspaceTool(
-  workspace: Workspace,
+  workspace: CodexWorkspace,
   action: Extract<KernelAction, { type: "tool" }>,
   input: unknown
 ): Promise<ToolOutcome> {
@@ -748,11 +773,11 @@ async function performWorkspaceTool(
         output: { path, error: "workspace_write requires content" }
       };
     }
-    await workspace.writeFile(path, content);
+    await writeText(workspace, path, content);
     return { success: true, output: { path, bytes: byteLength(content) } };
   }
   if (action.name === "workspace_read") {
-    const content = await workspace.readFile(path);
+    const content = await readText(workspace, path);
     if (content === null)
       return { success: false, output: { path, found: false } };
     // Files have no size limit; the model pages through big ones by range.

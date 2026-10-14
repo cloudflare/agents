@@ -17,7 +17,7 @@
 - [ ] **HTTP API** - Show `getAgentByName()` for HTTP-only access without WebSockets
 - [ ] **Queue Patterns** - Rate limiting, batching, deduplication using the queue
 - [x] **Agent Tools** - Show `agentTool()`, `runAgentTool()`, `useAgentToolEvents()`, and sub-agent drill-in
-- [x] **Think + Shell** - Explain the assistant runtime, durable workspace, state tools, and sandboxed execution
+- [x] **Think + Computer** - Explain the assistant runtime, durable Computer workspace, and code execution
 - [x] **Expanded MCP** - Explain transports, elicitation, OAuth server, codemode MCP, WebMCP, and x402 patterns
 - [x] **Product Integrations** - Explain email, webhooks, push, A2A, payments, and browser-tool product stories
 - [x] **Multi-Agent** - One agent calling another agent (agent-to-agent communication)
