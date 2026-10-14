@@ -184,7 +184,8 @@ src/
     index.ts            # Barrel for agents/browser
     browser-run.ts      # Low-level Browser Run REST/binding calls + errors
     cdp-connection.ts   # CdpConnection — one Chrome DevTools Protocol WebSocket
-    browser.ts          # Browser — one named persistent browser (Lifecycle capability) + browserRun()
+    browser.ts          # Browser — one named persistent browser (Lifecycle capability)
+    providers/          # browserRun() + its adapter; provider-adapter.ts is the internal seam Browser calls
     connector.ts        # BrowserConnector — codemode connector + session helpers
     session-store.ts    # Durable session-id store + sweep
     live-view.ts        # Live View URL minting shared by Browser and BrowserConnector

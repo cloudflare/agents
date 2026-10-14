@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { BrowserBinding } from "../../browser/browser-run";
-import { Browser, browserRun } from "../../browser/browser";
+import { Browser } from "../../browser/browser";
+import { browserRun } from "../../browser/providers/browser-run";
 import { Lifecycle } from "../../lifecycle";
 
 /** One request the fake Browser Run binding served, in arrival order. */
