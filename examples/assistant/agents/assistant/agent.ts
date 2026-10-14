@@ -1,6 +1,6 @@
 import { callable } from "agents";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { Workspace, type WorkspaceStub } from "@cloudflare/computer";
+import { Workspace } from "@cloudflare/computer";
 import { Think } from "@cloudflare/think";
 import type { ThinkScheduledTasks } from "@cloudflare/think";
 import { nanoid } from "nanoid";
@@ -42,7 +42,7 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
    * a `hello.txt` written in chat A shows up verbatim in chat B.
    *
    * Children (`MyAssistant` facets) reach it with `getWorkspace()` from
-   * `@cloudflare/computer`, which calls `__getWorkspaceStub()` below over
+   * `@cloudflare/computer`, which calls Think's `__getWorkspaceStub()` over
    * DO RPC and returns a client whose `fs` forwards here.
    *
    * Security note: this means any tool running inside any chat has
@@ -53,17 +53,6 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
    * less-trusted extension surface, add gating here.
    */
   override workspace = new Workspace({ storage: this.ctx.storage });
-
-  /**
-   * Hand a child chat an RPC stub to the shared workspace. `getWorkspace()`
-   * from `@cloudflare/computer` calls this. Deliberately not `@callable()`:
-   * browsers have no business writing to the workspace over the sidebar
-   * websocket; only chats reach it, over DO RPC.
-   */
-  async __getWorkspaceStub(): Promise<WorkspaceStub> {
-    await this.workspace.ready();
-    return this.workspace.stub();
-  }
 
   /**
    * Tell every client connected to this directory that the shared

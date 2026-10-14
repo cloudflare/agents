@@ -2344,7 +2344,11 @@ describe("Think — model message conversion", () => {
     expect(toolOutput?.value).toBe(legacyOutput);
   });
 
-  it("rehydrates compact workspace image read outputs during replay", async () => {
+  it("replays an image read stored by the old read tool without failing the turn", async () => {
+    // Think's own read tool stored images as `{ kind: "image", ... }` and
+    // re-read the bytes on replay. The @cloudflare/computer read tool
+    // captures bytes when it runs instead, so an old output replays as an
+    // error the model can act on (read the file again), not a crash.
     const agent = await freshAgent("model-conversion-image-read");
     const imageBytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
     await agent.seedWorkspaceBytes("/screenshot", imageBytes, "image/png");
@@ -2374,33 +2378,21 @@ describe("Think — model message conversion", () => {
       ]
     });
 
-    await agent.testChat("What is in the screenshot?");
+    const result = await agent.testChat("What is in the screenshot?");
+    expect(result.error).toBeUndefined();
 
     const messagesJson = await agent.getLastBeforeTurnMessagesJson();
     expect(messagesJson).not.toBeNull();
     const messages = JSON.parse(messagesJson!) as Array<{
       role: string;
-      content?: Array<{
-        output?: {
-          type: string;
-          value?: Array<{
-            type: string;
-            data?: unknown;
-            mediaType?: string;
-            filename?: string;
-          }>;
-        };
-      }>;
+      content?: Array<{ output?: { type: string; value?: unknown } }>;
     }>;
     const toolResult = messages
       .find((message) => message.role === "tool")
-      ?.content?.find((part) => part.output?.type === "content")?.output;
+      ?.content?.find((part) => part.output !== undefined)?.output;
 
-    expect(toolResult?.value).toContainEqual({
-      type: "image-data",
-      data: "iVBORw0KGgo=",
-      mediaType: "image/png"
-    });
+    expect(toolResult?.type).toBe("error-text");
+    expect(String(toolResult?.value)).toContain("/screenshot");
   });
 });
 

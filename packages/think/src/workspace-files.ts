@@ -1,4 +1,5 @@
 import type { Workspace } from "@cloudflare/computer";
+import type { CreateAIToolsOptions } from "@cloudflare/computer/tools/ai-sdk";
 
 /**
  * The filesystem methods Think uses, from `@cloudflare/computer`'s
@@ -16,19 +17,24 @@ export type ThinkWorkspaceFilesystem = Pick<
   | "grep"
 >;
 
+/** The parts of a Workspace the `@cloudflare/computer` tools use besides `fs`. */
+type ToolsWorkspace = CreateAIToolsOptions["workspace"];
+
 /**
  * The Workspace a Think agent works in.
  *
  * A `Workspace` from `@cloudflare/computer` satisfies this, and so does the
  * client `getWorkspace(stub)` returns for a Workspace owned by another
- * Durable Object. Think reads and writes through `workspace.fs` only.
+ * Durable Object. Think reads and writes through `workspace.fs`. The
+ * `@cloudflare/computer` tools also use `runtime` for `exec` and `assets`
+ * for `publish` when the Workspace has them.
  *
  * @experimental The API surface may change before stabilizing.
  */
 export type ThinkWorkspace = {
   /** The Workspace filesystem. */
   readonly fs: ThinkWorkspaceFilesystem;
-};
+} & Partial<Pick<ToolsWorkspace, "runtime" | "sessionId" | "assets">>;
 
 /** One file, directory, or symlink in a Workspace. */
 export type WorkspaceEntry = {
@@ -65,7 +71,6 @@ export function resolveWorkspacePath(path: string): string {
 
 const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder();
-const GLOB_CHARS = /[*?[\]{}]/;
 
 /**
  * Think's file operations over a {@link ThinkWorkspace}.
@@ -129,17 +134,6 @@ export class WorkspaceFiles {
   }
 
   /**
-   * Create a directory.
-   *
-   * @param path - Absolute directory path.
-   * @param options - `recursive` creates missing parents and accepts an
-   *   existing directory.
-   */
-  async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
-    await this.#fs.mkdir(path, options);
-  }
-
-  /**
    * Remove a file or directory.
    *
    * @param path - Absolute path.
@@ -151,32 +145,6 @@ export class WorkspaceFiles {
     options?: { recursive?: boolean; force?: boolean }
   ): Promise<void> {
     await this.#fs.rm(path, options);
-  }
-
-  /**
-   * Describe one path, following symlinks.
-   *
-   * @param path - Absolute path.
-   * @returns The entry, or `null` when the path does not exist.
-   */
-  async stat(path: string): Promise<WorkspaceEntry | null> {
-    try {
-      const stat = await this.#fs.stat(path);
-      return {
-        path,
-        name: basename(path),
-        type: stat.isDirectory
-          ? "directory"
-          : stat.isSymbolicLink
-            ? "symlink"
-            : "file",
-        size: stat.size,
-        updatedAt: stat.mtime
-      };
-    } catch (error) {
-      if (isNotFound(error)) return null;
-      throw error;
-    }
   }
 
   /**
@@ -202,36 +170,6 @@ export class WorkspaceFiles {
       size: entry.size,
       updatedAt: entry.mtime
     }));
-  }
-
-  /**
-   * Find paths matching a glob. Relative patterns match from
-   * {@link WORKSPACE_ROOT}.
-   *
-   * @param pattern - Glob with `*`, `**`, and `?`.
-   * @returns Matching files and directories.
-   */
-  async glob(pattern: string): Promise<WorkspaceEntry[]> {
-    const absolute = resolveWorkspacePath(pattern);
-    const segments = absolute.split("/").filter((segment) => segment !== "");
-    const firstGlob = segments.findIndex((segment) => GLOB_CHARS.test(segment));
-    if (firstGlob === -1) {
-      const entry = await this.stat(absolute);
-      return entry === null ? [] : [entry];
-    }
-    const directory = `/${segments.slice(0, firstGlob).join("/")}`;
-    const relative = segments.slice(firstGlob).join("/");
-    let matches: Awaited<ReturnType<ThinkWorkspaceFilesystem["find"]>>;
-    try {
-      matches = await this.#fs.find(directory, relative);
-    } catch (error) {
-      if (isNotFound(error)) return [];
-      throw error;
-    }
-    const entries = await Promise.all(
-      matches.map((match) => this.stat(match.path))
-    );
-    return entries.filter((entry) => entry !== null);
   }
 }
 
@@ -266,10 +204,6 @@ function parentDirectory(path: string): string {
   return index <= 0 ? "/" : path.slice(0, index);
 }
 
-function basename(path: string): string {
-  return path.slice(path.lastIndexOf("/") + 1);
-}
-
 function joinPath(directory: string, name: string): string {
   return directory.endsWith("/")
     ? `${directory}${name}`
@@ -293,6 +227,10 @@ function joinPath(directory: string, name: string): string {
  * The resolved Workspace is kept and reused. A failed resolution is not
  * kept, so the next operation tries again. To start over with a new client,
  * for example after disposing the old one, assign a new `lazyWorkspace`.
+ *
+ * Only `fs` is forwarded, so the agent gets the file tools but no `exec`:
+ * the exec tool lists the Workspace's backends synchronously, before
+ * anything has been resolved.
  *
  * @param resolve - Produces the Workspace.
  * @returns A Workspace whose `fs` forwards to the resolved one.

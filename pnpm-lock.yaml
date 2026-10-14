@@ -4938,9 +4938,6 @@ importers:
       chat:
         specifier: ^4.31.0
         version: 4.31.0(ai@7.0.18(zod@4.5.4))(supports-color@10.2.2)(zod@4.5.4)
-      just-bash:
-        specifier: ^3.0.2
-        version: 3.0.2(supports-color@10.2.2)
       workers-ai-provider:
         specifier: ^4.0.0
         version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.5.4))(@ai-sdk/google@4.0.10(zod@4.5.4))(@ai-sdk/openai@4.0.9(zod@4.5.4))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.5.4))

@@ -21,7 +21,7 @@ export interface ExtensionToolsOptions {
  *
  * getTools() {
  *   return {
- *     ...createWorkspaceTools(this.workspace),
+ *     ...createAITools({ workspace: this.workspace }),
  *     ...extensionTools,
  *     ...extensions.getTools(), // tools from loaded extensions
  *   };

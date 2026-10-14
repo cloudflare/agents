@@ -416,7 +416,6 @@ path.
 | `getSkills()`              | `[]`                             | Return Agent Skills sources for on-demand skill activation                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `skillWorkspace`           | `false`                          | Project skills into the Workspace as files; `{}` enables with defaults                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `getSkillScriptRunner()`   | `null`                           | Enable the optional `run_skill_script` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `workspaceBash`            | `true`                           | Include or configure the default workspace `bash` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `fetchTools`               | `false`                          | Opt-in allowlisted, read-only HTTP fetch tools (`fetch_url` + per-binding `fetch_<name>`). Set to a config object; see [Fetch tool](#fetch-tool)                                                                                                                                                                                                                                                                                                                                                                            |
 | `messageConcurrency`       | `"queue"`                        | How overlapping submits behave — see [Client Tools](./client-tools.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `includeMcpTools`          | `true`                           | Automatically convert connected MCP tools to AI SDK tools and merge them into model turns                                                                                                                                                                                                                                                                                                                                                                                                                                   |
@@ -1017,7 +1016,6 @@ A compaction threshold that the compacted history still exceeds compacts on ever
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
 | `@cloudflare/think/workflows`           | `ThinkWorkflow`, `step.prompt()` — Workflow prompts           |
-| `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
 | `@cloudflare/think/tools/fetch`         | `createFetchTools()` — opt-in allowlisted HTTP reads          |
 | `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
 | `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
@@ -1033,6 +1031,10 @@ Think's workspace is a `Workspace` from [`@cloudflare/computer`](https://github.
 - For a Workspace another Durable Object owns, use `lazyWorkspace(async () => getWorkspace(stub))`. It resolves on first use and keeps the client.
 - Think writes its own files under `/workspace`: evicted media under `/workspace/attachments/evicted/`, fetched responses under `/workspace/fetched/`, and skills under `/workspace/.agents/skills`.
 - `createExecuteTool(this)` no longer builds `state.*` from the workspace; pass `state` yourself.
+- The workspace tools are `@cloudflare/computer`'s `createAITools`: `read`, `ls`, `find`, `grep`, `write`, `edit`, and `delete`, plus `exec` when the Workspace has backends. `list` is now `ls`. `exec` offers every backend the Workspace has.
+- `workspaceBash`, `createWorkspaceTools`, and `@cloudflare/think/tools/workspace` are removed, with no replacement. There is no in-process `bash` tool: add a backend to the Workspace to get `exec`. To change a built-in tool, return a same-name tool from `getTools()`; to hide tools for a turn, return `activeTools` from `beforeTurn`.
+- Every Think agent has `__getWorkspaceStub()`, so `getWorkspace(stub)` and the Worker shell backend can reach a Workspace it owns.
+- Image and PDF reads stored by the old `read` tool replay as an error asking the model to read the file again.
 - Agent Skills (`agents/skills`) accept only a Computer Workspace, for both projection and `skills.runner({ workspaceInstance })`. Relative paths in skill scripts resolve against `/workspace`.
 
 Files a Shell Workspace stored are not moved. [Migrating to `@cloudflare/computer`](../shell/migrating-to-computer.md) documents both storage schemas and a copy script.
@@ -1051,10 +1053,9 @@ Peer dependencies you provide:
 
 Bundled with `@cloudflare/think`:
 
-| Package                | Notes                                                 |
-| ---------------------- | ----------------------------------------------------- |
-| `@cloudflare/codemode` | Code execution for `createExecuteTool()`              |
-| `just-bash`            | Sandboxed shell for the default workspace `bash` tool |
+| Package                | Notes                                    |
+| ---------------------- | ---------------------------------------- |
+| `@cloudflare/codemode` | Code execution for `createExecuteTool()` |
 
 The Agent Skills engine and its script runner live in
 [`agents/skills`](https://github.com/cloudflare/agents/blob/main/packages/agents/AGENTS.md) (so skill scripts pull
