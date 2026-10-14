@@ -4,6 +4,7 @@ import {
   normalizeThrownError
 } from "./errors";
 import { isCatalogModelId, isWorkersAIId } from "./catalog";
+import { type ResumeFetch, resumableBody } from "./resume";
 import type { GatewayProviderName } from "./gateway-providers";
 import type { AISettings, ResolvedGateway } from "./settings";
 
@@ -315,6 +316,57 @@ function runOptions(request: TransportRequest): {
 }
 
 /**
+ * The binding's resume route for the run a response names. Only called for a
+ * response {@link withResume} has checked carries `cf-aig-run-id`.
+ */
+function resumeUrl(
+  gatewayId: string,
+  response: Response,
+  from: number
+): string {
+  const runId = response.headers.get("cf-aig-run-id") ?? "";
+  return `${BINDING_ORIGIN}/ai-gateway/gateways/${encodeURIComponent(
+    gatewayId
+  )}/run/${encodeURIComponent(runId)}/resume?from=${from}`;
+}
+
+/**
+ * A streamed `/run` answer that names its run (`cf-aig-run-id`) resumes from
+ * the last complete event if the connection drops; see `resume.ts`. Anything
+ * else — a JSON answer, an error, a Workers AI stream with no run id — is
+ * returned as it is.
+ */
+function withResume(
+  response: Response,
+  request: TransportRequest,
+  resume: ResumeFetch
+): Response {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (
+    !response.ok ||
+    response.body === null ||
+    !contentType.includes("text/event-stream") ||
+    response.headers.get("cf-aig-run-id") === null
+  ) {
+    return response;
+  }
+  return new Response(
+    resumableBody({
+      initial: response.body,
+      model: request.model,
+      resume,
+      signal: request.signal,
+      url: "workers-ai-binding"
+    }),
+    {
+      headers: response.headers,
+      status: response.status,
+      statusText: response.statusText
+    }
+  );
+}
+
+/**
  * What `/run` calls each request format in the binding's `openaiEndpoint`
  * option, which `aig-entry` turns into `/run`'s `requestFormat`.
  */
@@ -448,11 +500,18 @@ function bindingTransport(binding: Ai): Transport {
           returnRawResponse: true,
           signal: request.signal
         });
+        const resumable = withResume(response, request, (from, signal) =>
+          // The binding's own `fetch`; aig-entry serves the resume route for it.
+          (binding as unknown as FetchingBinding).fetch(
+            resumeUrl(run.gateway.id, response, from),
+            { method: "GET", signal }
+          )
+        );
         const logId = binding.aiGatewayLogId;
         if (logId !== null && logId !== undefined) {
-          logIds.set(response, logId);
+          logIds.set(resumable, logId);
         }
-        return response;
+        return resumable;
       } catch (error) {
         // `returnRawResponse` resolves with a `Response` for upstream errors,
         // so a throw here means the binding itself failed (e.g. code 3040,

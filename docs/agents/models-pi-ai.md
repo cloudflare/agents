@@ -298,6 +298,15 @@ A failed dispatch ends the stream with an `error` event whose message carries a
 `cloudflare-error` diagnostic (`status`, `code`, `logId`), and `onResponse` fires with the raw
 status and headers for every request.
 
+## Stream resume
+
+A model from pi's AI Gateway catalog streams from `/run`, which names the run in
+`cf-aig-run-id` and keeps its events. If the connection drops, the provider reconnects through
+the binding and replays from the last complete event, so the stream continues with nothing lost
+or repeated. It gives up after five drops or once the gateway no longer holds the run, and an
+abort never resumes. Workers AI streams and models on the provider-native path have no run id
+and are not resumed. The run id is on the `cloudflare` diagnostic as `runId`.
+
 ## Fallback
 
 ```ts
