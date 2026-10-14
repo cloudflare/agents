@@ -431,6 +431,99 @@ describe("Browser.resolve", () => {
   });
 });
 
+describe("Browser Run typed binding methods", () => {
+  function notImplemented(method: string) {
+    return new TypeError(
+      `The RPC receiver does not implement the method "${method}".`
+    );
+  }
+
+  it("creates and closes through acquire() and closeSession()", async () => {
+    const fake = createFakeBrowser();
+    const acquired: unknown[] = [];
+    const closed: string[] = [];
+    const binding: BrowserBinding = {
+      fetch: fake.browser.fetch,
+      async acquire(options) {
+        acquired.push(options);
+        return { sessionId: "session-typed" };
+      },
+      async closeSession(sessionId) {
+        closed.push(sessionId);
+        return { status: "closed" };
+      }
+    };
+    const named = createBrowser(binding, new MemorySessionStore(), {
+      run: {
+        recording: true,
+        guardrails: { allowedDomains: ["example.com"] }
+      }
+    });
+
+    expect((await named.resolve()).sessionId).toBe("session-typed");
+    expect(await named.close()).toBe(true);
+
+    expect(acquired).toEqual([
+      {
+        keepAlive: BROWSER_SESSION_KEEP_ALIVE_MAX_MS,
+        recording: true,
+        guardrails: { allowedDomains: ["example.com"] }
+      }
+    ]);
+    expect(closed).toEqual(["session-typed"]);
+    // Nothing went through the HTTP create and delete routes.
+    expect(creates(fake.requests)).toHaveLength(0);
+    expect(deletes(fake.requests)).toHaveLength(0);
+  });
+
+  it("falls back to HTTP when the binding doesn't have the typed methods", async () => {
+    // Fully local dev: the methods look like functions but throw when called.
+    const fake = createFakeBrowser();
+    const binding: BrowserBinding = {
+      fetch: fake.browser.fetch,
+      acquire: () => Promise.reject(notImplemented("acquire")),
+      closeSession: () => Promise.reject(notImplemented("closeSession"))
+    };
+    const named = createBrowser(binding, new MemorySessionStore());
+
+    expect((await named.resolve()).sessionId).toBe("session-1");
+    expect(await named.close()).toBe(true);
+
+    expect(creates(fake.requests)).toHaveLength(1);
+    expect(deletes(fake.requests, "session-1")).toHaveLength(1);
+  });
+
+  it("counts a session closeSession() doesn't know as closed", async () => {
+    // What Browser Run's binding throws for an unknown session id.
+    const fake = createFakeBrowser();
+    const binding: BrowserBinding = {
+      fetch: fake.browser.fetch,
+      acquire: async () => ({ sessionId: "session-typed" }),
+      closeSession: () => Promise.reject(new Error("Not Found (status=404)"))
+    };
+    const named = createBrowser(binding, new MemorySessionStore());
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await named.resolve();
+    expect(await named.close()).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
+    expect(deletes(fake.requests)).toHaveLength(0);
+    warn.mockRestore();
+  });
+
+  it("doesn't fall back to HTTP when acquire() fails for another reason", async () => {
+    const fake = createFakeBrowser();
+    const binding: BrowserBinding = {
+      fetch: fake.browser.fetch,
+      acquire: () => Promise.reject(new Error("Browser time limit exceeded"))
+    };
+    const named = createBrowser(binding, new MemorySessionStore());
+
+    await expect(named.resolve()).rejects.toThrow("Browser time limit");
+    expect(creates(fake.requests)).toHaveLength(0);
+  });
+});
+
 describe("Browser.close", () => {
   it("retires the record and deletes the Browser Run session", async () => {
     const { browser, requests } = createFakeBrowser();
