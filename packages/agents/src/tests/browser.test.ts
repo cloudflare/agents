@@ -328,6 +328,23 @@ describe("Browser.resolve", () => {
     }
   });
 
+  it("reads the provider's options at each create", async () => {
+    const { browser, requests } = createFakeBrowser({ listStatuses: [404] });
+    const options: BrowserRunOptions = { keepAliveMs: 600_000 };
+    const named = new Browser({
+      provider: browserRun(browser, options),
+      store: new MemorySessionStore()
+    });
+
+    await named.resolve();
+    options.keepAliveMs = 30_000;
+    await named.resolve(); // dead — recreated
+
+    const [first, second] = creates(requests);
+    expect(first.url).toContain("keep_alive=600000");
+    expect(second.url).toContain("keep_alive=30000");
+  });
+
   it("never holds the store lock across Browser Run calls", async () => {
     const store = new MemorySessionStore();
     const violations: string[] = [];

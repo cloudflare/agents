@@ -71,14 +71,18 @@ export function browserRunAdapter(
   provider: BrowserRunProvider
 ): BrowserProviderAdapter {
   const { binding, options } = provider;
-  const keepAliveMs = options.keepAliveMs ?? BROWSER_SESSION_KEEP_ALIVE_MAX_MS;
+  // Options are read on every use, like `recording` and `guardrails` below.
+  const keepAliveMs = () =>
+    options.keepAliveMs ?? BROWSER_SESSION_KEEP_ALIVE_MAX_MS;
 
   return {
-    keepAliveMs,
+    get keepAliveMs() {
+      return keepAliveMs();
+    },
 
     async create() {
       const { sessionId } = await createBrowserSession(binding, {
-        keepAliveMs,
+        keepAliveMs: keepAliveMs(),
         recording: options.recording,
         guardrails: options.guardrails
       });
