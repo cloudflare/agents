@@ -201,7 +201,7 @@ middleware:
 wrapLanguageModel({ model: ai(anthropic("claude-opus-4-8")), middleware });
 ```
 
-### Keys, ZDR and BYOK aliases
+### Unified billing and BYOK
 
 The vendor's credential header (`authorization`, `x-api-key`,
 `x-goog-api-key`, `api-key`) is stripped by default, so the gateway supplies

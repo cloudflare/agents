@@ -18,8 +18,7 @@
  * Gateway catalog ids and dynamic routes — and answers OpenCode's AI SDK hook
  * with `agents/models/ai-sdk`'s models, so requests go through the `AI`
  * binding on `env.AI.run`: no account id, API token, or HTTP route in your
- * Worker, and nothing patched globally. Catalog streams resume after a
- * dropped connection, as they do in `agents/models/ai-sdk`.
+ * Worker, and nothing patched globally.
  *
  * @experimental The surface may change in any release.
  *

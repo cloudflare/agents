@@ -130,16 +130,18 @@ function requestUrl(input: RequestInfo | URL): string {
 
 /**
  * The body of either `fetch` call form: the `RequestInit`'s when one was
- * given, else the `Request`'s own, read from a clone so the caller's object
- * is neither consumed nor mutated.
+ * given, else the `Request`'s own, from a clone so the caller's object is
+ * neither consumed nor mutated.
  */
-async function requestBody(
+function requestBody(
   input: RequestInfo | URL,
   init: RequestInit | undefined
-): Promise<BodyInit | null | undefined> {
+): BodyInit | null | undefined {
   if (init?.body !== undefined) return init.body;
+  // A clone's body streams through to the binding rather than being read
+  // into memory first, so a large upload costs nothing extra here.
   if (input instanceof Request && input.body !== null) {
-    return await input.clone().arrayBuffer();
+    return input.clone().body;
   }
   return undefined;
 }
@@ -218,7 +220,7 @@ function routedFetch(context: {
   ): Promise<Response> => {
     const url = requestUrl(input);
     const route = requireGatewayProvider(url);
-    const body = await requestBody(input, init);
+    const body = requestBody(input, init);
     const { resolved } = context;
     const response = await context.config.transport.native({
       body,

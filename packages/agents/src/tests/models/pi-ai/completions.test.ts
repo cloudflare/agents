@@ -108,6 +108,42 @@ describe("pi-ai: Workers AI chat completions", () => {
     expect(message.stopReason).toBe("stop");
   });
 
+  it("reads OpenAI chunks that carry usage: null until the last one", async () => {
+    // A dynamic route served by an OpenAI model streams OpenAI's own chunks:
+    // `usage` is `null` on every chunk but the final one (live capture).
+    const chunk = (extra: Record<string, unknown>) =>
+      JSON.stringify({
+        id: "chatcmpl-1",
+        model: "gpt-5-mini-2025-08-07",
+        object: "chat.completion.chunk",
+        usage: null,
+        ...extra
+      });
+    const binding = fakeBinding(() =>
+      sseResponse([
+        chunk({
+          choices: [
+            { delta: { content: "one, two", role: "assistant" }, index: 0 }
+          ]
+        }),
+        chunk({ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] }),
+        chunk({
+          choices: [],
+          usage: { completion_tokens: 4, prompt_tokens: 9, total_tokens: 13 }
+        }),
+        "[DONE]"
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.stream(ai("dynamic/support"), userContext("count"))
+    );
+    expect(message.stopReason).toBe("stop");
+    expect(message.content).toEqual([{ text: "one, two", type: "text" }]);
+    expect(message.usage.input).toBe(9);
+    expect(message.usage.output).toBe(4);
+  });
+
   it("sends the chat-completions body through the binding with gateway options", async () => {
     const binding = fakeBinding(() => sseResponse(workersAITextStream()));
     const ai = createAI({

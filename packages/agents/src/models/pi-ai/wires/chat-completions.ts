@@ -118,7 +118,8 @@ interface Chunk {
   id?: string;
   model?: string;
   choices?: Choice[];
-  usage?: OpenAIUsage;
+  /** OpenAI sends `null` on every chunk but the last. */
+  usage?: OpenAIUsage | null;
   error?: { message?: string; type?: string };
 }
 
@@ -361,7 +362,7 @@ class CompletionAssembler {
     ) {
       this.output.responseModel ??= chunk.model;
     }
-    if (chunk.usage !== undefined) {
+    if (chunk.usage !== undefined && chunk.usage !== null) {
       this.output.usage = usageFromOpenAI(this.model, chunk.usage);
     }
     const finished = this.applyFinishReason(choice?.finish_reason);

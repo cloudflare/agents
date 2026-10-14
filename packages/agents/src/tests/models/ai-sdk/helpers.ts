@@ -185,14 +185,20 @@ export function fakeGatewayBinding(options: {
       new Headers(init?.headers).forEach((value, key) => {
         headers[key] = value;
       });
+      // A streamed body (a `Request`'s, passed through) is read here, as the
+      // gateway would read it.
+      const body =
+        init?.body instanceof ReadableStream
+          ? await new Response(init.body).text()
+          : init?.body;
       const call: NativeCall = {
-        body: init?.body,
+        body,
         endpoint: match[3] ?? "",
         gatewayId: decodeURIComponent(match[1] ?? ""),
         headers,
         method: init?.method ?? "GET",
         provider: match[2] ?? "",
-        query: parsedQuery(init?.body)
+        query: parsedQuery(body)
       };
       native.push(call);
       return (
