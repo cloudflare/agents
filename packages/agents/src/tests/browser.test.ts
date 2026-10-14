@@ -218,7 +218,7 @@ describe("new Browser", () => {
 });
 
 describe("Browser.resolve", () => {
-  it("creates on first use, pins keep_alive to the platform max, restarted: false", async () => {
+  it("creates on first use, pins keep_alive to the 10-minute default, restarted: false", async () => {
     const { browser, requests } = createFakeBrowser();
     const store = new MemorySessionStore();
     const named = createBrowser(browser, store);
