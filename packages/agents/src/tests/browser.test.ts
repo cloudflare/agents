@@ -7,7 +7,7 @@ import {
   namedBrowserSessionKey
 } from "../browser/browser";
 import {
-  BROWSER_SESSION_KEEP_ALIVE_MAX_MS,
+  BROWSER_SESSION_KEEP_ALIVE_DEFAULT_MS,
   type BrowserRunOptions,
   browserRun
 } from "../browser/providers/browser-run";
@@ -232,7 +232,7 @@ describe("Browser.resolve", () => {
 
     const [create] = creates(requests);
     expect(create.url).toContain(
-      `keep_alive=${BROWSER_SESSION_KEEP_ALIVE_MAX_MS}`
+      `keep_alive=${BROWSER_SESSION_KEEP_ALIVE_DEFAULT_MS}`
     );
 
     // The record lives under the named keyspace; sessionId stays internal.
@@ -465,7 +465,7 @@ describe("Browser Run typed binding methods", () => {
 
     expect(acquired).toEqual([
       {
-        keepAlive: BROWSER_SESSION_KEEP_ALIVE_MAX_MS,
+        keepAlive: BROWSER_SESSION_KEEP_ALIVE_DEFAULT_MS,
         recording: true,
         guardrails: { allowedDomains: ["example.com"] }
       }
@@ -732,7 +732,7 @@ describe("Browser.connect", () => {
     const key = namedBrowserSessionKey("work");
     const stale = {
       ...store.sessions.get(key)!,
-      updatedAt: Date.now() - BROWSER_SESSION_KEEP_ALIVE_MAX_MS * 2
+      updatedAt: Date.now() - BROWSER_SESSION_KEEP_ALIVE_DEFAULT_MS * 2
     };
     store.sessions.set(key, stale);
 

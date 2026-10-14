@@ -22,7 +22,7 @@ const browser = new Browser({
 ```
 
 - **One object, one browser.** The name tells browsers apart when a Durable Object has more than one. The model never sees the name.
-- **Provider.** `browserRun(binding, options)` runs the browser on Browser Run. Its options (`keepAliveMs`, `recording`, `guardrails`) apply every time a browser is created, including replacements. `keepAliveMs` defaults to the platform maximum of 10 minutes. Browser Run is the only provider today; bring-your-own-browser would be another one.
+- **Provider.** `browserRun(binding, options)` runs the browser on Browser Run. Its options (`keepAliveMs`, `recording`, `guardrails`) apply every time a browser is created, including replacements. `keepAliveMs` defaults to 10 minutes; Browser Run accepts up to 20. Browser Run is the only provider today; bring-your-own-browser would be another one.
 - **`connect({ scope })`** reattaches to the browser if it's still running and starts a new one if not. It returns a `CdpConnection`; closing that connection leaves the browser running. `resolve()` does the same without opening a connection.
 - **Scopes** say who is driving. Each scope remembers its own active tab (`activeTargetId`, `setActiveTarget`), so two conversations on one browser don't drive each other's page. Cookies, logins, and the tabs themselves are shared. Leaving `scope` out uses `"shared"`.
 - **`restarted: true`** means the browser this scope last worked in was lost (closed, idle too long, or crashed), and its tabs and logins are gone, whichever scope noticed first. A scope's first connection reports `false`.
@@ -80,5 +80,5 @@ On an `Agent`, call `this.lifecycle.use(this.browser)` in the constructor instea
 
 - `createBrowserTools` still has its own ways of keeping a browser across runs (the connector's `reuse` and `dynamic` modes). They overlap `Browser` until that tool moves onto it.
 - Without a cleanup job, the record of a browser that timed out stays in storage until the next `connect()` or `close()`.
-- To shut idle browsers down sooner than 10 minutes, lower `keepAliveMs`.
+- An abandoned browser bills until `keepAliveMs` runs out. Lower it to shut idle browsers down sooner, or raise it (up to 20 minutes) to survive longer gaps between turns.
 - Retired markers pile up, one per name ever used. That's fine for a few fixed names; per-user or per-task names would need a way to forget them.
