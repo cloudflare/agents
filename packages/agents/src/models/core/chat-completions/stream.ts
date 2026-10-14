@@ -21,6 +21,7 @@
  * SSE decoder and either framework's OpenAI chunk parser.
  */
 
+import { createAnthropicStreamTranslator } from "./anthropic-stream";
 import { isWorkersAI, quirksFor } from "./quirks";
 import { normalizeToolCall } from "./response";
 
@@ -119,6 +120,7 @@ export function normalizeChatCompletionsStream(
   // cumulative figure in its native tail; other vendors only ever put usage on
   // the final `choices: []` chunk, so theirs is left alone.
   const perDeltaUsage = isWorkersAI(modelId);
+  const translateAnthropic = createAnthropicStreamTranslator();
 
   const envelope = (extra: Record_): Record_ => ({
     ...(id !== undefined ? { id } : {}),
@@ -162,6 +164,110 @@ export function normalizeChatCompletionsStream(
     if (sawDone) controller.enqueue("[DONE]");
   };
 
+  /** Normalizes one chat-completions chunk (or native Workers AI event). */
+  const handle = (
+    parsed: Record_,
+    controller: TransformStreamDefaultController<string>
+  ): void => {
+    const chunk = stripEchoSuffix(stripNoise(parsed), modelId);
+
+    if (typeof chunk.id === "string") id ??= chunk.id;
+    if (typeof chunk.model === "string") model ??= chunk.model;
+    if (typeof chunk.created === "number") created ??= chunk.created;
+
+    // An error payload passes through untouched for the consumer to surface;
+    // it also ends the generation, so no finish reason is synthesized after it.
+    if (isRecord(chunk.error)) {
+      sawFinishReason = true;
+      controller.enqueue(JSON.stringify(chunk));
+      return;
+    }
+
+    if (Array.isArray(chunk.choices)) {
+      if (chunk.choices.length === 0) {
+        // Heartbeat, or OpenAI's own final usage chunk: hold the usage
+        // until the end so exactly one usage chunk is emitted.
+        if (isRecord(chunk.usage)) {
+          finalUsage = chunk.usage;
+          finalUsageTemplate = { ...chunk, usage: undefined };
+          delete finalUsageTemplate.usage;
+        }
+        return;
+      }
+      const choices = chunk.choices.map((choice) => {
+        if (!isRecord(choice)) return choice;
+        if (typeof choice.finish_reason === "string") sawFinishReason = true;
+        const delta = isRecord(choice.delta)
+          ? normalizeDelta(choice.delta, relabelReasoning)
+          : choice.delta;
+        if (isRecord(delta)) {
+          if (typeof delta.content === "string" && delta.content !== "")
+            sawContent = true;
+          if (typeof delta.reasoning_content === "string") sawContent = true;
+          if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0)
+            sawToolCalls = true;
+        }
+        if (!perDeltaUsage) return { ...choice, delta };
+        const { usage: _perDeltaUsage, ...rest } = choice;
+        return { ...rest, delta };
+      });
+      if (perDeltaUsage) {
+        // The cumulative figure comes with the native tail.
+        const { usage: _usage, ...rest } = chunk;
+        emit(controller, { ...rest, choices });
+      } else {
+        emit(controller, { ...chunk, choices });
+      }
+      return;
+    }
+
+    // Native Workers AI events.
+    if ("response" in chunk || "tool_calls" in chunk) {
+      const text = chunk.response;
+      const hasText = typeof text === "string" && text !== "";
+      const calls = Array.isArray(chunk.tool_calls)
+        ? chunk.tool_calls
+            .map((call, index) => normalizeToolCall(call, index))
+            .filter((call): call is Record_ => call !== undefined)
+        : [];
+      if (hasText || calls.length > 0) {
+        if (hasText) sawContent = true;
+        if (calls.length > 0) sawToolCalls = true;
+        emit(
+          controller,
+          envelope({
+            choices: [
+              {
+                delta: {
+                  ...(hasText ? { content: text } : {}),
+                  ...(calls.length > 0 ? { tool_calls: calls } : {})
+                },
+                finish_reason: null,
+                index: 0
+              }
+            ]
+          })
+        );
+      }
+      if (isRecord(chunk.usage)) {
+        // The native tail: cumulative usage for the whole stream.
+        finalUsage = chunk.usage;
+        finalUsageTemplate = undefined;
+      }
+      if (typeof chunk.finish_reason === "string") {
+        sawFinishReason = true;
+        emit(
+          controller,
+          envelope({
+            choices: [
+              { delta: {}, finish_reason: chunk.finish_reason, index: 0 }
+            ]
+          })
+        );
+      }
+    }
+  };
+
   return new TransformStream<string, string>({
     flush(controller) {
       emitTail(controller);
@@ -181,102 +287,10 @@ export function normalizeChatCompletionsStream(
         return;
       }
       if (!isRecord(parsed)) return;
-      const chunk = stripEchoSuffix(stripNoise(parsed), modelId);
-
-      if (typeof chunk.id === "string") id ??= chunk.id;
-      if (typeof chunk.model === "string") model ??= chunk.model;
-      if (typeof chunk.created === "number") created ??= chunk.created;
-
-      // An error payload passes through untouched for the consumer to surface;
-      // it also ends the generation, so no finish reason is synthesized after it.
-      if (isRecord(chunk.error)) {
-        sawFinishReason = true;
-        controller.enqueue(JSON.stringify(chunk));
-        return;
-      }
-
-      if (Array.isArray(chunk.choices)) {
-        if (chunk.choices.length === 0) {
-          // Heartbeat, or OpenAI's own final usage chunk: hold the usage
-          // until the end so exactly one usage chunk is emitted.
-          if (isRecord(chunk.usage)) {
-            finalUsage = chunk.usage;
-            finalUsageTemplate = { ...chunk, usage: undefined };
-            delete finalUsageTemplate.usage;
-          }
-          return;
-        }
-        const choices = chunk.choices.map((choice) => {
-          if (!isRecord(choice)) return choice;
-          if (typeof choice.finish_reason === "string") sawFinishReason = true;
-          const delta = isRecord(choice.delta)
-            ? normalizeDelta(choice.delta, relabelReasoning)
-            : choice.delta;
-          if (isRecord(delta)) {
-            if (typeof delta.content === "string" && delta.content !== "")
-              sawContent = true;
-            if (typeof delta.reasoning_content === "string") sawContent = true;
-            if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0)
-              sawToolCalls = true;
-          }
-          if (!perDeltaUsage) return { ...choice, delta };
-          const { usage: _perDeltaUsage, ...rest } = choice;
-          return { ...rest, delta };
-        });
-        if (perDeltaUsage) {
-          // The cumulative figure comes with the native tail.
-          const { usage: _usage, ...rest } = chunk;
-          emit(controller, { ...rest, choices });
-        } else {
-          emit(controller, { ...chunk, choices });
-        }
-        return;
-      }
-
-      // Native Workers AI events.
-      if ("response" in chunk || "tool_calls" in chunk) {
-        const text = chunk.response;
-        const hasText = typeof text === "string" && text !== "";
-        const calls = Array.isArray(chunk.tool_calls)
-          ? chunk.tool_calls
-              .map((call, index) => normalizeToolCall(call, index))
-              .filter((call): call is Record_ => call !== undefined)
-          : [];
-        if (hasText || calls.length > 0) {
-          if (hasText) sawContent = true;
-          if (calls.length > 0) sawToolCalls = true;
-          emit(
-            controller,
-            envelope({
-              choices: [
-                {
-                  delta: {
-                    ...(hasText ? { content: text } : {}),
-                    ...(calls.length > 0 ? { tool_calls: calls } : {})
-                  },
-                  finish_reason: null,
-                  index: 0
-                }
-              ]
-            })
-          );
-        }
-        if (isRecord(chunk.usage)) {
-          // The native tail: cumulative usage for the whole stream.
-          finalUsage = chunk.usage;
-          finalUsageTemplate = undefined;
-        }
-        if (typeof chunk.finish_reason === "string") {
-          sawFinishReason = true;
-          emit(
-            controller,
-            envelope({
-              choices: [
-                { delta: {}, finish_reason: chunk.finish_reason, index: 0 }
-              ]
-            })
-          );
-        }
+      // A streamed Claude catalog model answers in Anthropic events; they
+      // become chat-completions chunks first, then normalize like any other.
+      for (const event of translateAnthropic(parsed) ?? [parsed]) {
+        handle(event, controller);
       }
     }
   });

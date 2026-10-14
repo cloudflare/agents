@@ -3,7 +3,11 @@ import type {
   LanguageModelV4CallOptions,
   SharedV4ProviderOptions
 } from "@ai-sdk/provider";
-import type { DynamicRouteId, WorkersAIModelId } from "../core/catalog";
+import type {
+  CatalogModelId,
+  DynamicRouteId,
+  WorkersAIModelId
+} from "../core/catalog";
 import {
   type ModelOptions as CoreModelOptions,
   PROVIDER_OPTIONS_KEY,
@@ -26,35 +30,42 @@ export {
 } from "../core/settings";
 
 /**
- * One leg of a fallback chain: a Workers AI id, an AI Gateway dynamic route,
- * or any AI SDK language model — including one this provider has already
- * wrapped for the gateway.
+ * A language model id: a Workers AI id, an AI Gateway catalog id
+ * (`<author>/<model>`), or a dynamic route (`dynamic/<route>`). All three run
+ * on `env.AI.run`.
  *
  * @experimental This surface is experimental and may change.
  */
-export type FallbackLeg = WorkersAIModelId | DynamicRouteId | LanguageModelV4;
+export type CloudflareLanguageModelId =
+  | WorkersAIModelId
+  | DynamicRouteId
+  | (CatalogModelId & {});
 
 /**
- * Per-model and per-call options.
+ * One leg of a fallback chain: a language model id, or any AI SDK language
+ * model — which is routed through AI Gateway like `ai(model)`.
  *
- * The framework-neutral options, with the fallback leg type this module
- * accepts: a leg may be a model object as well as a Workers AI id, because a
- * third-party model is never an id here — it is a model its own provider
- * package built.
+ * @experimental This surface is experimental and may change.
+ */
+export type FallbackLeg = CloudflareLanguageModelId | LanguageModelV4;
+
+/**
+ * Per-model and per-call options: the framework-neutral options, with the
+ * fallback leg type this module accepts.
  *
  * @experimental This surface is experimental and may change.
  */
 export type ModelOptions = CoreModelOptions<FallbackLeg>;
 
 /**
- * Which key authenticates a vendor model routed through AI Gateway.
+ * Which key authenticates a vendor model object routed through AI Gateway.
  *
  * @experimental This surface is experimental and may change.
  */
 export interface VendorKeyOptions {
   /**
    * `"gateway"` (the default) strips the key the vendor's provider put on the
-   * request, so the gateway supplies one: unified billing, or a BYOK key
+   * request, so the gateway supplies one: Unified Billing, or a BYOK key
    * stored on the gateway. `"request"` forwards that key to the vendor, for a
    * key you hold yourself, e.g. `createAnthropic({ apiKey: env.ANTHROPIC_KEY })`.
    *
@@ -79,10 +90,9 @@ export type GatewayModelOptions = ModelOptions & VendorKeyOptions;
  *
  * A routed embedding, image, speech or transcription model is the vendor's
  * own, and only its transport is ours — there is no chain to fall back through
- * (a leg for one of those modalities would have to be another vendor's model,
- * which this module cannot build) and no Workers AI reasoning knob to apply.
- * They are absent from the type rather than dropped at runtime, so the mistake
- * is a compile error naming the option.
+ * and no Workers AI reasoning knob to apply. They are absent from the type
+ * rather than dropped at runtime, so the mistake is a compile error naming the
+ * option.
  *
  * @experimental This surface is experimental and may change.
  */

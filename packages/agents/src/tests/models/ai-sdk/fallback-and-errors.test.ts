@@ -1,10 +1,8 @@
 import { generateText } from "ai";
 import { describe, expect, it } from "vitest";
 import { CloudflareAIError, createAI } from "../../../models/ai-sdk";
-import { createAnthropic } from "@ai-sdk/anthropic";
 import {
   asAi,
-  fakeGatewayBinding,
   callOptions,
   collect,
   fakeBinding,
@@ -322,7 +320,7 @@ describe("fallback", () => {
     expect(binding.calls.map((call) => call.model)).toEqual([SECOND, MODEL]);
   });
 
-  it("refuses a third-party id in a per-call fallback list", async () => {
+  it("refuses an id that names no model in a per-call fallback list", async () => {
     const binding = fakeBinding(() => jsonResponse(okBody));
     const ai = createAI({ binding: asAi(binding) });
 
@@ -330,7 +328,7 @@ describe("fallback", () => {
       .doGenerate(
         callOptions({
           providerOptions: {
-            cloudflare: { fallback: ["google/gemini-3-flash"] }
+            cloudflare: { fallback: ["gemini-3-flash"] }
           }
         })
       )
@@ -340,7 +338,9 @@ describe("fallback", () => {
       );
 
     expect(caught).toBeInstanceOf(TypeError);
-    expect((caught as TypeError).message).toMatch(/@ai-sdk\/google/);
+    expect((caught as TypeError).message).toMatch(
+      /not a model id this provider knows/
+    );
     // Nothing ran: the leg is refused where it was written, not mid-chain.
     expect(binding.calls).toHaveLength(0);
   });
@@ -359,28 +359,20 @@ describe("fallback", () => {
   });
 });
 
-describe("fallback chains that end on a vendor leg", () => {
-  it("carries the vendor leg's own failure into the chain error", async () => {
-    // The primary fails in the gateway (a billing envelope); the fallback leg
-    // is a vendor model whose own 400 must survive as the chain's verdict.
-    const anthropic = createAnthropic({ apiKey: "cloudflare" });
-    const binding = fakeGatewayBinding({
-      universal: (_call, index) =>
-        index === 0
-          ? jsonResponse(gatewayError(2021, "Insufficient balance", 402), {
-              status: 402
-            })
-          : jsonResponse(
-              {
-                error: { message: "bad body", type: "invalid_request_error" },
-                type: "error"
-              },
-              { status: 400 }
-            )
-    });
+describe("fallback chains that end on a catalog leg", () => {
+  it("carries the last leg's own failure into the chain error", async () => {
+    // The primary fails with a billing error; the leg's own 400 must survive
+    // as the chain's verdict.
+    const binding = fakeBinding((_call, index) =>
+      index === 0
+        ? jsonResponse(gatewayError(2021, "Insufficient balance", 402), {
+            status: 402
+          })
+        : jsonResponse({ error: "bad body" }, { status: 400 })
+    );
     const ai = createAI({ binding: asAi(binding) });
-    const model = ai(anthropic("claude-opus-4-8"), {
-      fallback: [ai(anthropic("claude-haiku-4-5"))]
+    const model = ai("anthropic/claude-opus-4.8", {
+      fallback: ["anthropic/claude-haiku-4.5"]
     });
     const error = await failure(() => model.doGenerate(callOptions()));
 
@@ -390,10 +382,10 @@ describe("fallback chains that end on a vendor leg", () => {
     expect(error.isRetryable).toBe(false);
     expect(error.responseBody).toContain("bad body");
     expect(error.attempts?.map((attempt) => attempt.model)).toEqual([
-      "claude-opus-4-8",
-      "claude-haiku-4-5"
+      "anthropic/claude-opus-4.8",
+      "anthropic/claude-haiku-4.5"
     ]);
-    expect(binding.universal).toHaveLength(2);
+    expect(binding.calls).toHaveLength(2);
   });
 });
 

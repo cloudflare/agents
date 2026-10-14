@@ -1,6 +1,6 @@
 /**
  * Chat-completions wire: Workers AI on the run path, and any pi-ai model whose
- * `api` is `openai-completions` on AI Gateway's universal endpoint.
+ * `api` is `openai-completions`, through AI Gateway.
  *
  * The request is shaped with pi-ai's own message converter so replay rules
  * (tool-call id normalization, reasoning replay, role bridging) match pi's
@@ -39,7 +39,7 @@ import {
   correlationDetails,
   openAIVendorHeaders,
   responseInfo,
-  sendUniversal,
+  sendGateway,
   startMessage,
   usageFromOpenAI,
   withIdleDeadline,
@@ -118,7 +118,8 @@ interface Chunk {
   id?: string;
   model?: string;
   choices?: Choice[];
-  usage?: OpenAIUsage;
+  /** OpenAI sends `null` on every chunk but the last. */
+  usage?: OpenAIUsage | null;
   error?: { message?: string; type?: string };
 }
 
@@ -361,7 +362,7 @@ class CompletionAssembler {
     ) {
       this.output.responseModel ??= chunk.model;
     }
-    if (chunk.usage !== undefined) {
+    if (chunk.usage !== undefined && chunk.usage !== null) {
       this.output.usage = usageFromOpenAI(this.model, chunk.usage);
     }
     const finished = this.applyFinishReason(choice?.finish_reason);
@@ -529,8 +530,8 @@ export function streamCompletions(
         stream: true,
         stream_options: { include_usage: true }
       };
-      // The run path names the model in the call; the universal request names
-      // it in the body, in the vendor's own spelling.
+      // The run path names the model in the call; a provider-native request
+      // names it in the body, in the vendor's own spelling.
       if (!workersAI) strict.model = wireModelId(model);
       const tools = getCurrentTools(context.messages);
       if (tools.length > 0) strict.tools = convertTools(tools);
@@ -566,17 +567,19 @@ export function streamCompletions(
 
       response = workersAI
         ? await transport.run({
+            format: "chat-completions",
             gateway: resolved.gateway,
             headers: request.headers,
             input: payload,
             model: model.id,
             signal: options.signal
           })
-        : await sendUniversal(
+        : await sendGateway(
             request,
             transport,
             payload,
-            openAIVendorHeaders()
+            openAIVendorHeaders(),
+            "chat-completions"
           );
       await options.onResponse?.(responseInfo(response), model);
       attachCorrelation(

@@ -1,7 +1,4 @@
-import { createAnthropic } from "@ai-sdk/anthropic";
-import { createOpenAI } from "@ai-sdk/openai";
-import type { LanguageModelV4 } from "@ai-sdk/provider";
-import { createAI, type WorkersAIModelId } from "agents/models/ai-sdk";
+import { createAI, type CloudflareLanguageModelId } from "agents/models/ai-sdk";
 import { handlePi } from "./pi";
 import {
   embedMany,
@@ -18,20 +15,12 @@ import {
 import { z } from "zod";
 
 /**
- * The repo-standard Workers AI model. Every route takes either
- * `?model=@cf/<author>/<model>` — a Workers AI id, the one catalog this
- * package keeps up with — or `?vendor=anthropic:claude-opus-4-8` /
- * `?vendor=openai:gpt-5-mini`, which builds the model with that vendor's own
- * provider package and routes it through AI Gateway.
+ * The repo-standard Workers AI model. Every text route takes
+ * `?model=` — a Workers AI id (`@cf/<author>/<model>`), an AI Gateway catalog
+ * id (`anthropic/claude-opus-4.8`, `openai/gpt-5.5`), or a dynamic route
+ * (`dynamic/<route>`). All of them run on `env.AI.run`.
  */
 const DEFAULT_MODEL = "@cf/zai-org/glm-4.7-flash";
-
-/**
- * The gateway holds the real credential (unified billing, or a BYOK key), so
- * the vendor providers are constructed with a placeholder.
- */
-const anthropic = createAnthropic({ apiKey: "cloudflare" });
-const openai = createOpenAI({ apiKey: "cloudflare" });
 
 const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
 
@@ -60,42 +49,22 @@ const factSchema = z.object({
   confidence: z.number().min(0).max(1)
 });
 
-function modelOf(url: URL, fallback = DEFAULT_MODEL): WorkersAIModelId {
-  // Validated by `ai()`, which throws a TypeError naming the fix for anything
-  // that is not a `@cf/` id.
-  return (url.searchParams.get("model") ?? fallback) as WorkersAIModelId;
+function modelOf(
+  url: URL,
+  fallback = DEFAULT_MODEL
+): CloudflareLanguageModelId {
+  // Validated by `ai()`, which throws a TypeError naming the three id forms
+  // for anything else.
+  return (url.searchParams.get("model") ??
+    fallback) as CloudflareLanguageModelId;
 }
 
 /**
- * `?vendor=<slug>:<id>` builds a third-party model with its own provider. A
- * vendor id is never a string this provider accepts: only its own package
- * knows that catalog.
+ * The model for a modality route. Those are Workers AI only, so `?model=` is a
+ * `@cf/` id; the modality methods throw a TypeError for anything else.
  */
-function vendorOf(url: URL): LanguageModelV4 | undefined {
-  const spec = url.searchParams.get("vendor");
-  if (spec === null) return undefined;
-  const separator = spec.indexOf(":");
-  const slug = separator === -1 ? spec : spec.slice(0, separator);
-  const id = separator === -1 ? "" : spec.slice(separator + 1);
-  if (slug === "anthropic") return anthropic(id || "claude-opus-4-8");
-  if (slug === "openai") return openai.responses(id || "gpt-5-mini");
-  throw new Error(
-    `Unknown vendor "${slug}". Use vendor=anthropic:<id> or vendor=openai:<id>.`
-  );
-}
-
-/** What the response reports as the model, on either form. */
-function labelOf(url: URL): string {
-  return url.searchParams.get("vendor") ?? modelOf(url);
-}
-
-/**
- * The model for a text route: the vendor's own object when `?vendor=` is set,
- * a Workers AI id otherwise. Both come back as one `LanguageModelV4`.
- */
-function pick(ai: ReturnType<typeof createAI>, url: URL): LanguageModelV4 {
-  const vendor = vendorOf(url);
-  return vendor === undefined ? ai(modelOf(url)) : ai(vendor);
+function workersAIModelOf(url: URL, fallback: string): `@cf/${string}` {
+  return (url.searchParams.get("model") ?? fallback) as `@cf/${string}`;
 }
 
 function promptOf(url: URL, fallback: string): string {
@@ -132,12 +101,12 @@ export default {
       switch (url.pathname) {
         case "/": {
           const result = await generateText({
-            model: pick(ai, url),
+            model: ai(modelOf(url)),
             prompt: promptOf(url, "Say hello in one short sentence.")
           });
           return Response.json({
             text: result.text,
-            model: labelOf(url),
+            model: modelOf(url),
             usage: result.usage,
             // Typed observability: the gateway log id, cache status and the
             // model that actually answered, without walking response objects.
@@ -147,7 +116,7 @@ export default {
 
         case "/stream": {
           const result = streamText({
-            model: pick(ai, url),
+            model: ai(modelOf(url)),
             // A failure raised before the stream starts cannot reach the
             // response body, which is already a 200; log it so the reason for
             // an empty stream is visible in `wrangler dev`.
@@ -159,7 +128,7 @@ export default {
 
         case "/tools": {
           const result = await generateText({
-            model: pick(ai, url),
+            model: ai(modelOf(url)),
             prompt: promptOf(url, "What is the weather in Lisbon?"),
             tools: { getWeather },
             // Let the model call the tool and then answer with the result.
@@ -167,7 +136,7 @@ export default {
           });
           return Response.json({
             text: result.text,
-            model: labelOf(url),
+            model: modelOf(url),
             steps: result.steps.map((step) => ({
               text: step.text,
               toolCalls: step.toolCalls.map((call) => ({
@@ -184,12 +153,12 @@ export default {
 
         case "/json": {
           const result = await generateText({
-            model: pick(ai, url),
+            model: ai(modelOf(url)),
             prompt: promptOf(url, "One surprising fact about octopuses."),
             output: Output.object({ schema: factSchema })
           });
           return Response.json({
-            model: labelOf(url),
+            model: modelOf(url),
             object: result.output,
             cloudflare: result.providerMetadata?.cloudflare
           });
@@ -214,7 +183,7 @@ export default {
           // The answer is a PNG for the diffusion models and a base64 JPEG
           // for flux; `GeneratedFile` hides the difference either way.
           const result = await generateImage({
-            model: ai.image(modelOf(url, IMAGE_MODEL)),
+            model: ai.image(workersAIModelOf(url, IMAGE_MODEL)),
             prompt: promptOf(url, "A cyberpunk lizard, neon, high contrast"),
             providerOptions: { cloudflare: { steps: 4 } }
           });
@@ -225,7 +194,7 @@ export default {
 
         case "/speech": {
           const result = await generateSpeech({
-            model: ai.speech(modelOf(url, SPEECH_MODEL)),
+            model: ai.speech(workersAIModelOf(url, SPEECH_MODEL)),
             text: url.searchParams.get("text") ?? "Hello from Cloudflare.",
             ...(url.searchParams.get("voice") === null
               ? {}
@@ -251,7 +220,7 @@ export default {
                 ).audio.uint8Array;
           const result = await transcribe({
             audio,
-            model: ai.transcription(modelOf(url, TRANSCRIPTION_MODEL))
+            model: ai.transcription(workersAIModelOf(url, TRANSCRIPTION_MODEL))
           });
           return Response.json({
             durationInSeconds: result.durationInSeconds,
@@ -268,7 +237,7 @@ export default {
               documents.length > 0
                 ? documents
                 : ["a cyberpunk lizard", "a rainy Tuesday", "a cyberpunk cat"],
-            model: ai.reranking(modelOf(url, RERANKING_MODEL)),
+            model: ai.reranking(workersAIModelOf(url, RERANKING_MODEL)),
             query: url.searchParams.get("query") ?? "Which one is cooler?"
           });
           return Response.json({
@@ -282,12 +251,12 @@ export default {
         }
 
         case "/fallback": {
-          // Try the vendor model first; if it fails before producing any
-          // output — no BYOK key, an unpaid gateway — the Workers AI leg
-          // answers instead. `cloudflare.model` reports which one did.
+          // Try the catalog model first; if it fails before producing any
+          // output — an unpaid gateway, an upstream outage — the Workers AI
+          // leg answers instead. `cloudflare.model` reports which one did.
           const result = await generateText({
-            model: ai(anthropic("claude-opus-4-8"), {
-              fallback: [ai(DEFAULT_MODEL)]
+            model: ai("anthropic/claude-opus-4.8", {
+              fallback: [DEFAULT_MODEL]
             }),
             prompt: promptOf(url, "Say hello in one short sentence.")
           });

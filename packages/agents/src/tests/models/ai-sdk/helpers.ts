@@ -121,68 +121,96 @@ export function field(body: unknown, path: string): unknown {
   return current;
 }
 
-/** One recorded `binding.gateway(id).run(request, options)` call. */
-export interface UniversalCall {
+/** One recorded provider-native request: `env.AI.fetch` to the gateway. */
+export interface NativeCall {
   gatewayId: string;
   provider: string;
   endpoint: string;
+  method: string;
+  /** Request headers, names lowercased. */
   headers: Record<string, string>;
+  /** The raw body the vendor sent. */
+  body: BodyInit | null | undefined;
+  /** The body parsed as JSON, or `{}` when it is not JSON. */
   query: Record<string, unknown>;
-  options: Record<string, unknown>;
 }
 
 export interface FakeGatewayBinding extends FakeBinding {
-  universal: UniversalCall[];
-  gateway(id: string): {
-    run(
-      request: Record<string, unknown>,
-      options: Record<string, unknown>
-    ): Promise<Response>;
-  };
+  native: NativeCall[];
+  fetch(input: string, init?: RequestInit): Promise<Response>;
+}
+
+/** The binding route aig-entry serves for the provider-native path. */
+const NATIVE_ROUTE =
+  /^https:\/\/workers-binding\.ai\/ai-gateway\/gateways\/([^/]+)\/([^/]+)\/(.*)$/;
+
+function parsedQuery(
+  body: BodyInit | null | undefined
+): Record<string, unknown> {
+  const text =
+    typeof body === "string"
+      ? body
+      : body instanceof ArrayBuffer
+        ? new TextDecoder().decode(body)
+        : undefined;
+  if (text === undefined) return {};
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return parsed !== null && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 /**
- * An `Ai` binding that answers both paths: `run` for Workers AI models and
- * `gateway(id).run` for the universal request a routed vendor model makes.
- * Both are recorded, so one fake covers a mixed fallback chain.
+ * An `Ai` binding that answers both halves: `run` for model ids and `fetch`
+ * for the provider-native requests a vendor's model object makes. Both are
+ * recorded, so one fake covers a mixed fallback chain.
  */
 export function fakeGatewayBinding(options: {
   run?: (call: RunCall, index: number) => Response | Promise<Response>;
-  universal?: (
-    call: UniversalCall,
-    index: number
-  ) => Response | Promise<Response>;
+  native?: (call: NativeCall, index: number) => Response | Promise<Response>;
 }): FakeGatewayBinding {
   const calls: RunCall[] = [];
-  const universal: UniversalCall[] = [];
+  const native: NativeCall[] = [];
   return {
     aiGatewayLogId: null,
     calls,
-    gateway(gatewayId: string) {
-      return {
-        async run(request, runOptions) {
-          const call: UniversalCall = {
-            endpoint: String(request.endpoint),
-            gatewayId,
-            headers: request.headers as Record<string, string>,
-            options: runOptions,
-            provider: String(request.provider),
-            query: request.query as Record<string, unknown>
-          };
-          universal.push(call);
-          return (
-            (await options.universal?.(call, universal.length - 1)) ??
-            jsonResponse({})
-          );
-        }
+    async fetch(input, init) {
+      const match = NATIVE_ROUTE.exec(input);
+      if (match === null) throw new Error(`unexpected binding fetch: ${input}`);
+      const headers: Record<string, string> = {};
+      new Headers(init?.headers).forEach((value, key) => {
+        headers[key] = value;
+      });
+      // A streamed body (a `Request`'s, passed through) is read here, as the
+      // gateway would read it.
+      const body =
+        init?.body instanceof ReadableStream
+          ? await new Response(init.body).text()
+          : init?.body;
+      const call: NativeCall = {
+        body,
+        endpoint: match[3] ?? "",
+        gatewayId: decodeURIComponent(match[1] ?? ""),
+        headers,
+        method: init?.method ?? "GET",
+        provider: match[2] ?? "",
+        query: parsedQuery(body)
       };
+      native.push(call);
+      return (
+        (await options.native?.(call, native.length - 1)) ?? jsonResponse({})
+      );
     },
+    native,
     async run(model, input, runOptions) {
       const call: RunCall = { input, model, options: runOptions };
       calls.push(call);
       return (await options.run?.(call, calls.length - 1)) ?? jsonResponse({});
-    },
-    universal
+    }
   };
 }
 

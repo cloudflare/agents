@@ -185,14 +185,14 @@ function anthropicResponse(): Response {
 describe("universal gateway request", () => {
   it("routes an Anthropic model by host and keeps its body verbatim", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding) });
     const result = await ai(anthropic("claude-opus-4-8")).doGenerate(
       callOptions({ maxOutputTokens: 8 })
     );
 
-    const call = binding.universal[0];
+    const call = binding.native[0];
     expect(call.provider).toBe("anthropic");
     expect(call.endpoint).toBe("v1/messages");
     expect(call.gatewayId).toBe("default");
@@ -214,7 +214,7 @@ describe("universal gateway request", () => {
 
   it("routes an OpenAI Responses model to the responses endpoint", async () => {
     const binding = fakeGatewayBinding({
-      universal: () =>
+      native: () =>
         new Response(OPENAI_RESPONSES_BODY, {
           headers: { "content-type": "application/json", ...gatewayHeaders() },
           status: 200
@@ -226,7 +226,7 @@ describe("universal gateway request", () => {
     expect(model.provider).toBe("openai.responses");
 
     const result = await model.doGenerate(callOptions());
-    const call = binding.universal[0];
+    const call = binding.native[0];
     expect(call.provider).toBe("openai");
     expect(call.endpoint).toBe("v1/responses");
     expect(call.query.model).toBe("gpt-5-mini");
@@ -247,7 +247,7 @@ describe("universal gateway request", () => {
       return new Response("unexpected direct request", { status: 599 });
     }) as typeof globalThis.fetch;
     const binding = fakeGatewayBinding({
-      universal: (call) =>
+      native: (call) =>
         call.provider === "anthropic"
           ? anthropicResponse()
           : new Response(OPENAI_RESPONSES_BODY, {
@@ -272,7 +272,7 @@ describe("universal gateway request", () => {
     await ai(openaiWithFetch.responses("gpt-5-mini")).doGenerate(callOptions());
 
     expect(direct).toEqual([]);
-    expect(binding.universal.map((call) => call.provider)).toEqual([
+    expect(binding.native.map((call) => call.provider)).toEqual([
       "anthropic",
       "openai"
     ]);
@@ -280,7 +280,7 @@ describe("universal gateway request", () => {
 
   it("never touches the caller's model object", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding) });
     const model = anthropic("claude-opus-4-8");
@@ -298,7 +298,7 @@ describe("universal gateway request", () => {
 describe("gateway options", () => {
   it("merges provider, model and per-call layers in that order", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({
       binding: asAi(binding),
@@ -319,20 +319,24 @@ describe("gateway options", () => {
       })
     );
 
-    const call = binding.universal[0];
+    const call = binding.native[0];
     expect(call.gatewayId).toBe("prod");
-    expect(call.options.gateway).toMatchObject({
-      cacheTtl: 5,
-      collectLog: true,
-      id: "prod",
-      metadata: { app: "next-models", route: "chat" },
-      skipCache: false
+    // The provider-native path has no options object: every option is a
+    // `cf-aig-*` header, in the gateway's own names.
+    expect(call.headers).toMatchObject({
+      "cf-aig-cache-ttl": "5",
+      "cf-aig-collect-log": "true",
+      "cf-aig-skip-cache": "false"
+    });
+    expect(JSON.parse(call.headers["cf-aig-metadata"] ?? "{}")).toEqual({
+      app: "next-models",
+      route: "chat"
     });
   });
 
   it("reads providerOptions.cloudflare and hides it from the vendor", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding) });
     await ai(anthropic("claude-opus-4-8")).doGenerate(
@@ -344,16 +348,16 @@ describe("gateway options", () => {
       })
     );
 
-    const call = binding.universal[0];
+    const call = binding.native[0];
     expect(call.gatewayId).toBe("per-call");
-    expect(call.options.gateway).toMatchObject({ skipCache: true });
+    expect(call.headers["cf-aig-skip-cache"]).toBe("true");
     // Ours is read and removed; the vendor's own key is left alone.
     expect(call.query).not.toHaveProperty("cloudflare");
   });
 
   it("warns that the Workers AI knobs do not reach a vendor model", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding) });
     const result = await ai(anthropic("claude-opus-4-8"), {
@@ -368,15 +372,13 @@ describe("gateway options", () => {
       expect.objectContaining({ feature: "chatTemplateKwargs" })
     );
     // Nothing of ours reaches the vendor's body.
-    expect(binding.universal[0].query).not.toHaveProperty("reasoning_effort");
-    expect(binding.universal[0].query).not.toHaveProperty(
-      "chat_template_kwargs"
-    );
+    expect(binding.native[0].query).not.toHaveProperty("reasoning_effort");
+    expect(binding.native[0].query).not.toHaveProperty("chat_template_kwargs");
   });
 
   it("sends the extra headers and the session affinity key", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding) });
     await ai(anthropic("claude-opus-4-8"), {
@@ -384,7 +386,7 @@ describe("gateway options", () => {
       sessionAffinity: "user-7"
     }).doGenerate(callOptions());
 
-    expect(binding.universal[0].options.extraHeaders).toEqual({
+    expect(binding.native[0].headers).toMatchObject({
       "x-session-affinity": "user-7",
       "x-team": "agents"
     });
@@ -392,29 +394,34 @@ describe("gateway options", () => {
 });
 
 describe("ZDR and vendor keys", () => {
-  it("sends zdr as cf-aig-zdr on the universal request itself", async () => {
+  it("sends zdr as cf-aig-zdr on the provider-native request", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding), zdr: true });
     await ai(anthropic("claude-opus-4-8"), {
       headers: { "x-team": "agents" }
     }).doGenerate(callOptions());
 
-    const call = binding.universal[0];
-    // The gateway reads it off the request, not off the provider entry.
-    expect(call.options.extraHeaders).toEqual({
+    const call = binding.native[0];
+    expect(call.headers).toMatchObject({
       "cf-aig-zdr": "true",
       "x-team": "agents"
     });
-    expect(call.headers).not.toHaveProperty("cf-aig-zdr");
-    // The binding's own gateway options have no such field.
-    expect(call.options.gateway).not.toHaveProperty("zdr");
+  });
+
+  it("sends byokAlias as cf-aig-byok-alias on the provider-native request", async () => {
+    const binding = fakeGatewayBinding({
+      native: () => anthropicResponse()
+    });
+    const ai = createAI({ binding: asAi(binding), byokAlias: "team-a" });
+    await ai(anthropic("claude-opus-4-8")).doGenerate(callOptions());
+    expect(binding.native[0].headers["cf-aig-byok-alias"]).toBe("team-a");
   });
 
   it("reads zdr per call, where it wins over the model's", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding) });
     await ai(anthropic("claude-opus-4-8"), { zdr: true }).doGenerate(
@@ -423,8 +430,8 @@ describe("ZDR and vendor keys", () => {
       })
     );
 
-    const call = binding.universal[0];
-    expect(call.options.extraHeaders).toEqual({ "cf-aig-zdr": "false" });
+    const call = binding.native[0];
+    expect(call.headers["cf-aig-zdr"]).toBe("false");
     expect(call.query).not.toHaveProperty("cloudflare");
   });
 
@@ -441,20 +448,36 @@ describe("ZDR and vendor keys", () => {
     expect(options).not.toHaveProperty("extraHeaders");
   });
 
+  it("forwards the vendor's beta headers on the provider-native request", async () => {
+    const binding = fakeGatewayBinding({
+      native: () => anthropicResponse()
+    });
+    const ai = createAI({ binding: asAi(binding) });
+    const beta = createAnthropic({
+      apiKey: "cloudflare",
+      headers: { "anthropic-beta": "interleaved-thinking-2025-05-14" }
+    });
+    await ai(beta("claude-opus-4-8")).doGenerate(callOptions());
+
+    expect(binding.native[0].headers["anthropic-beta"]).toContain(
+      "interleaved-thinking-2025-05-14"
+    );
+  });
+
   it("strips the vendor key by default", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding) });
     const keyed = createAnthropic({ apiKey: "sk-ant-mine" });
     await ai(keyed("claude-opus-4-8")).doGenerate(callOptions());
 
-    expect(binding.universal[0].headers).not.toHaveProperty("x-api-key");
+    expect(binding.native[0].headers).not.toHaveProperty("x-api-key");
   });
 
   it("forwards the vendor key with vendorKey: request", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding) });
     const keyed = createAnthropic({ apiKey: "sk-ant-mine" });
@@ -462,14 +485,14 @@ describe("ZDR and vendor keys", () => {
       callOptions()
     );
 
-    const headers = binding.universal[0].headers;
+    const headers = binding.native[0].headers;
     expect(headers["x-api-key"]).toBe("sk-ant-mine");
     expect(headers).not.toHaveProperty("content-length");
   });
 
   it("forwards the vendor key on a routed non-language model", async () => {
     const binding = fakeGatewayBinding({
-      universal: () =>
+      native: () =>
         jsonResponse(
           {
             data: [{ embedding: [0.1, 0.2], index: 0 }],
@@ -486,26 +509,26 @@ describe("ZDR and vendor keys", () => {
       })
       .doEmbed({ providerOptions: {}, values: ["hi"] });
 
-    expect(binding.universal[0].headers.authorization).toBe("Bearer sk-mine");
+    expect(binding.native[0].headers.authorization).toBe("Bearer sk-mine");
   });
 
   it("keeps vendorKey with the model when it is re-wrapped", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding) });
     const keyed = createAnthropic({ apiKey: "sk-ant-mine" });
     const model = ai(keyed("claude-opus-4-8"), { vendorKey: "request" });
     await ai(model, { id: "prod" }).doGenerate(callOptions());
 
-    expect(binding.universal[0].gatewayId).toBe("prod");
-    expect(binding.universal[0].headers["x-api-key"]).toBe("sk-ant-mine");
+    expect(binding.native[0].gatewayId).toBe("prod");
+    expect(binding.native[0].headers["x-api-key"]).toBe("sk-ant-mine");
   });
 
   it("does not hand the chain's vendorKey to a fallback leg", async () => {
     let attempt = 0;
     const binding = fakeGatewayBinding({
-      universal: () =>
+      native: () =>
         attempt++ === 0
           ? jsonResponse(gatewayError, { status: 402 })
           : anthropicResponse()
@@ -517,16 +540,16 @@ describe("ZDR and vendor keys", () => {
       vendorKey: "request"
     }).doGenerate(callOptions());
 
-    expect(binding.universal).toHaveLength(2);
-    expect(binding.universal[0].headers["x-api-key"]).toBe("sk-ant-mine");
-    expect(binding.universal[1].headers).not.toHaveProperty("x-api-key");
+    expect(binding.native).toHaveLength(2);
+    expect(binding.native[0].headers["x-api-key"]).toBe("sk-ant-mine");
+    expect(binding.native[1].headers).not.toHaveProperty("x-api-key");
   });
 });
 
 describe("provider metadata", () => {
   it("adds cloudflare metadata to a generation without losing the vendor's", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding), id: "prod" });
     const result = await ai(anthropic("claude-opus-4-8")).doGenerate(
@@ -553,7 +576,7 @@ describe("provider metadata", () => {
 
   it("stamps the finish part of a stream", async () => {
     const binding = fakeGatewayBinding({
-      universal: () =>
+      native: () =>
         rawSseResponse(ANTHROPIC_STREAM, { headers: gatewayHeaders() })
     });
     const ai = createAI({ binding: asAi(binding) });
@@ -562,7 +585,7 @@ describe("provider metadata", () => {
     );
     const parts = await collect(stream);
 
-    expect(binding.universal[0].query.stream).toBe(true);
+    expect(binding.native[0].query.stream).toBe(true);
     expect(
       parts
         .filter((part) => part.type === "text-delta")
@@ -583,7 +606,7 @@ describe("provider metadata", () => {
 describe("through the AI SDK", () => {
   it("generateText reads a routed vendor answer", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding) });
     const result = await generateText({
@@ -595,7 +618,7 @@ describe("through the AI SDK", () => {
 
   it("streamText reads the vendor's own SSE through the gateway", async () => {
     const binding = fakeGatewayBinding({
-      universal: () =>
+      native: () =>
         rawSseResponse(ANTHROPIC_STREAM, { headers: gatewayHeaders() })
     });
     const ai = createAI({ binding: asAi(binding) });
@@ -612,7 +635,7 @@ describe("through the AI SDK", () => {
 describe("errors", () => {
   it("lifts the gateway's own error envelope into CloudflareAIError", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => jsonResponse(gatewayError, { status: 402 })
+      native: () => jsonResponse(gatewayError, { status: 402 })
     });
     const ai = createAI({ binding: asAi(binding) });
     let caught: unknown;
@@ -635,7 +658,7 @@ describe("errors", () => {
     // The dotted-id 404 from `research/43-demos-anthropic-dotted.json`: this
     // is Anthropic's error shape, not the gateway's, so Anthropic reads it.
     const binding = fakeGatewayBinding({
-      universal: () =>
+      native: () =>
         jsonResponse(
           {
             error: {
@@ -652,7 +675,7 @@ describe("errors", () => {
     await expect(
       ai(anthropic("claude-opus-4.8")).doGenerate(callOptions())
     ).rejects.toThrow(/Did you mean claude-opus-4-8/);
-    expect(binding.universal[0].query.model).toBe("claude-opus-4.8");
+    expect(binding.native[0].query.model).toBe("claude-opus-4.8");
   });
 
   it("refuses a host AI Gateway has no provider for", async () => {
@@ -665,19 +688,26 @@ describe("errors", () => {
     await expect(
       ai(elsewhere("claude-opus-4-8")).doGenerate(callOptions())
     ).rejects.toThrow(/anthropic\.internal\.test/);
-    expect(binding.universal).toHaveLength(0);
+    expect(binding.native).toHaveLength(0);
   });
 
-  it("refuses a body the universal request cannot carry", async () => {
-    const binding = fakeGatewayBinding({});
+  it("sends a multipart body unchanged", async () => {
+    const binding = fakeGatewayBinding({
+      native: () =>
+        jsonResponse({ text: "hello" }, { headers: gatewayHeaders() })
+    });
     const ai = createAI({ binding: asAi(binding) });
     const model = ai.routed(openai.transcription("whisper-1"));
-    await expect(
-      model.doGenerate({
-        audio: new Uint8Array([1, 2, 3]),
-        mediaType: "audio/wav"
-      })
-    ).rejects.toThrow(/JSON body only/);
+    const result = await model.doGenerate({
+      audio: new Uint8Array([1, 2, 3]),
+      mediaType: "audio/wav"
+    });
+
+    const call = binding.native[0];
+    expect(call.provider).toBe("openai");
+    expect(call.endpoint).toBe("v1/audio/transcriptions");
+    expect(call.body).toBeInstanceOf(FormData);
+    expect(result.text).toBe("hello");
   });
 
   it("refuses a model whose provider hides its settings", () => {
@@ -696,27 +726,25 @@ describe("errors", () => {
     expect(() => ai(opaque)).toThrow(/no `config` setting/);
   });
 
-  it("refuses a third-party id as a string", () => {
+  it("refuses a string that names no model", () => {
     const binding = fakeGatewayBinding({});
     const ai = createAI({ binding: asAi(binding) });
-    expect(() => ai("anthropic/claude-opus-4-8" as typeof WORKERS_AI)).toThrow(
-      /@ai-sdk\/anthropic/
+    expect(() => ai("claude-opus-4-8" as typeof WORKERS_AI)).toThrow(
+      /not a model id this provider knows/
     );
   });
 
-  it("refuses a third-party id in a per-call fallback list", async () => {
+  it("refuses a bad id in a per-call fallback list before any request", async () => {
     const binding = fakeGatewayBinding({
       run: () => jsonResponse(workersAIBody),
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding) });
 
     const caught = await ai(anthropic("claude-opus-4-8"))
       .doGenerate(
         callOptions({
-          providerOptions: {
-            cloudflare: { fallback: ["anthropic/claude-opus-4.8"] }
-          }
+          providerOptions: { cloudflare: { fallback: ["claude-opus-4-8"] } }
         })
       )
       .then(
@@ -725,21 +753,22 @@ describe("errors", () => {
       );
 
     expect(caught).toBeInstanceOf(TypeError);
-    expect((caught as TypeError).message).toMatch(/@ai-sdk\/anthropic/);
-    // The vendor id never reaches either path — least of all `env.AI.run`.
     expect(binding.calls).toHaveLength(0);
-    expect(binding.universal).toHaveLength(0);
+    expect(binding.native).toHaveLength(0);
   });
 
-  it("refuses a third-party id written as a per-model leg", () => {
-    const binding = fakeGatewayBinding({});
+  it("takes a catalog id as a leg of a model object", async () => {
+    const binding = fakeGatewayBinding({
+      run: () => jsonResponse(workersAIBody),
+      native: () => jsonResponse(gatewayError, { status: 402 })
+    });
     const ai = createAI({ binding: asAi(binding) });
-    expect(() =>
-      ai(anthropic("claude-opus-4-8"), {
-        // Only a cast can write this; the throw closes that last door.
-        fallback: ["openai/gpt-5-mini" as typeof WORKERS_AI]
-      })
-    ).toThrow(/@ai-sdk\/openai/);
+    await ai(anthropic("claude-opus-4-8"), {
+      fallback: ["anthropic/claude-opus-4.8"]
+    }).doGenerate(callOptions());
+
+    expect(binding.native).toHaveLength(1);
+    expect(binding.calls[0].model).toBe("anthropic/claude-opus-4.8");
   });
 });
 
@@ -747,14 +776,14 @@ describe("fallback across kinds", () => {
   it("falls back from a vendor model to a Workers AI model", async () => {
     const binding = fakeGatewayBinding({
       run: () => jsonResponse(workersAIBody),
-      universal: () => jsonResponse(gatewayError, { status: 402 })
+      native: () => jsonResponse(gatewayError, { status: 402 })
     });
     const ai = createAI({ binding: asAi(binding) });
     const result = await ai(anthropic("claude-opus-4-8"), {
       fallback: [ai(WORKERS_AI)]
     }).doGenerate(callOptions());
 
-    expect(binding.universal).toHaveLength(1);
+    expect(binding.native).toHaveLength(1);
     expect(binding.calls.map((call) => call.model)).toEqual([WORKERS_AI]);
     expect(result.content).toEqual([{ text: "from @cf", type: "text" }]);
     expect(result.providerMetadata?.cloudflare).toMatchObject({
@@ -765,7 +794,7 @@ describe("fallback across kinds", () => {
   it("accepts a bare Workers AI id as a leg", async () => {
     const binding = fakeGatewayBinding({
       run: () => jsonResponse(workersAIBody),
-      universal: () => jsonResponse(gatewayError, { status: 402 })
+      native: () => jsonResponse(gatewayError, { status: 402 })
     });
     const ai = createAI({ binding: asAi(binding) });
     const result = await ai(anthropic("claude-opus-4-8"), {
@@ -781,7 +810,7 @@ describe("fallback across kinds", () => {
           { errors: [{ code: 1, message: "nope" }] },
           { status: 500 }
         ),
-      universal: () => anthropicResponse()
+      native: () => anthropicResponse()
     });
     const ai = createAI({ binding: asAi(binding) });
     const result = await ai(WORKERS_AI, {
@@ -813,7 +842,7 @@ describe("routed non-language models", () => {
 
   it("gives an image result the `images` array its metadata must live in", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => jsonResponse(IMAGE_BODY, { headers: gatewayHeaders() })
+      native: () => jsonResponse(IMAGE_BODY, { headers: gatewayHeaders() })
     });
     const ai = createAI({ binding: asAi(binding), id: "prod" });
     const model = ai.routed(openai.image("gpt-image-1"));
@@ -829,8 +858,8 @@ describe("routed non-language models", () => {
       size: undefined
     });
 
-    expect(binding.universal[0].provider).toBe("openai");
-    expect(binding.universal[0].endpoint).toBe("v1/images/generations");
+    expect(binding.native[0].provider).toBe("openai");
+    expect(binding.native[0].endpoint).toBe("v1/images/generations");
     // `ImageModelV4ProviderMetadata` requires an `images` array on every
     // provider block; `generateImage` spreads it and crashes without one.
     const ours = result.providerMetadata?.cloudflare;
@@ -845,7 +874,7 @@ describe("routed non-language models", () => {
 
   it("survives `generateImage`, which merges the metadata per image", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => jsonResponse(IMAGE_BODY, { headers: gatewayHeaders() })
+      native: () => jsonResponse(IMAGE_BODY, { headers: gatewayHeaders() })
     });
     const ai = createAI({ binding: asAi(binding) });
     const result = await generateImage({
@@ -858,7 +887,7 @@ describe("routed non-language models", () => {
 
   it("hides our per-call bag from the vendor and warns about our knobs", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => jsonResponse(IMAGE_BODY, { headers: gatewayHeaders() })
+      native: () => jsonResponse(IMAGE_BODY, { headers: gatewayHeaders() })
     });
     const ai = createAI({ binding: asAi(binding) });
     /** A vendor model whose own method records what it was asked with. */
@@ -890,9 +919,7 @@ describe("routed non-language models", () => {
 
     // Read for the gateway layer, then removed — as the language path does.
     expect(seen[0]).toEqual({ vendor: { style: "vivid" } });
-    expect(binding.universal[0].options.gateway).toMatchObject({
-      cacheTtl: 30
-    });
+    expect(binding.native[0].headers["cf-aig-cache-ttl"]).toBe("30");
     // The result has a `warnings` array, so the ignored knob is reported.
     expect(result.warnings).toContainEqual(
       expect.objectContaining({
@@ -909,12 +936,12 @@ describe("routed non-language models", () => {
     ai.routed(openai.image("gpt-image-1"), { fallback: [WORKERS_AI] });
     // @ts-expect-error `reasoningEffort` is a Workers AI setting.
     ai.routed(openai.image("gpt-image-1"), { reasoningEffort: "high" });
-    expect(binding.universal).toHaveLength(0);
+    expect(binding.native).toHaveLength(0);
   });
 
   it("leaves a non-image routed result's metadata bare", async () => {
     const binding = fakeGatewayBinding({
-      universal: () =>
+      native: () =>
         jsonResponse(
           { data: [{ embedding: [0.1, 0.2], index: 0 }], model: "x" },
           { headers: gatewayHeaders() }
@@ -941,7 +968,7 @@ describe("fallback legs", () => {
           { errors: [{ code: 1, message: "nope" }] },
           { status: 500 }
         ),
-      universal: () => jsonResponse(gatewayError, { status: 402 })
+      native: () => jsonResponse(gatewayError, { status: 402 })
     });
     const ai = createAI({ binding: asAi(binding) });
 
@@ -958,7 +985,7 @@ describe("fallback legs", () => {
 
     // One vendor attempt and one Workers AI attempt: the leg must not read the
     // same per-call list and rebuild the chain it is already part of.
-    expect(binding.universal).toHaveLength(1);
+    expect(binding.native).toHaveLength(1);
     expect(binding.calls).toHaveLength(1);
     expect(caught).toBeInstanceOf(CloudflareAIError);
     expect((caught as CloudflareAIError).attempts?.map((a) => a.model)).toEqual(
@@ -969,7 +996,7 @@ describe("fallback legs", () => {
   it("keeps the rest of the per-call bag on a leg", async () => {
     const binding = fakeGatewayBinding({
       run: () => jsonResponse(workersAIBody),
-      universal: () => jsonResponse(gatewayError, { status: 402 })
+      native: () => jsonResponse(gatewayError, { status: 402 })
     });
     const ai = createAI({ binding: asAi(binding) });
     await ai(anthropic("claude-opus-4-8"), {
@@ -988,7 +1015,7 @@ describe("fallback legs", () => {
   it("keeps a configured leg's own Workers AI knobs and headers", async () => {
     const binding = fakeGatewayBinding({
       run: () => jsonResponse(workersAIBody),
-      universal: () => jsonResponse(gatewayError, { status: 402 })
+      native: () => jsonResponse(gatewayError, { status: 402 })
     });
     const ai = createAI({ binding: asAi(binding) });
     const leg = ai(WORKERS_AI, {
@@ -1016,7 +1043,7 @@ describe("fallback legs", () => {
   it("sends the chain's gateway to a leg that named its own", async () => {
     const binding = fakeGatewayBinding({
       run: () => jsonResponse(workersAIBody),
-      universal: () => jsonResponse(gatewayError, { status: 402 })
+      native: () => jsonResponse(gatewayError, { status: 402 })
     });
     const ai = createAI({ binding: asAi(binding) });
     const leg = ai(WORKERS_AI, { cacheTtl: 0, id: "cheap" });
@@ -1087,7 +1114,7 @@ describe("re-wrapping a configured model", () => {
             }
           ]
         }),
-      universal: () => jsonResponse(billing, { status: 402 })
+      native: () => jsonResponse(billing, { status: 402 })
     });
     const ai = createAI({ binding: asAi(binding) });
     const configured = ai(anthropic("claude-opus-4-8"), {
@@ -1099,7 +1126,7 @@ describe("re-wrapping a configured model", () => {
     const result = await rewrapped.doGenerate(callOptions());
     expect(result.content).toEqual([{ text: "ok", type: "text" }]);
     // Both the vendor call and the Workers AI leg went through "new".
-    expect(binding.universal[0]?.gatewayId).toBe("new");
+    expect(binding.native[0]?.gatewayId).toBe("new");
     expect(field(binding.calls[0]?.options, "gateway.id")).toBe("new");
   });
 });
@@ -1146,13 +1173,13 @@ describe("fetch call forms", () => {
 
   it("reads the body and headers from a Request when the provider passes one", async () => {
     const binding = fakeGatewayBinding({
-      universal: () => jsonResponse({ text: "routed" })
+      native: () => jsonResponse({ text: "routed" })
     });
     const ai = createAI({ binding: asAi(binding) });
     const result = await ai(new RequestFormModel()).doGenerate(callOptions());
 
     expect(result.content).toEqual([{ text: "routed", type: "text" }]);
-    const call = binding.universal[0];
+    const call = binding.native[0];
     expect(call?.provider).toBe("anthropic");
     expect(call?.endpoint).toBe("v1/messages");
     expect(call?.query).toEqual({ max_tokens: 8, model: "acme-1" });

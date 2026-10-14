@@ -56,8 +56,8 @@ export interface CloudflareMetadata {
   /** The gateway id the request went through. */
   gateway: string;
   /**
-   * The gateway provider slug the request was routed to, for a model reached
-   * through the universal gateway path. Absent for Workers AI.
+   * The gateway provider slug, for a vendor's model object sent to the
+   * provider-native path. Absent for a model id.
    */
   provider?: string;
   /** `cf-aig-log-id`, or the binding's last log id. */
@@ -429,6 +429,7 @@ export class CloudflareLanguageModel implements LanguageModelV4 {
     resolved: ResolvedOptions
   ): Promise<Response> {
     const response = await this.#config.transport.run({
+      format: "chat-completions",
       gateway: resolved.gateway,
       headers: callHeaders(options, resolved),
       input: request.body,

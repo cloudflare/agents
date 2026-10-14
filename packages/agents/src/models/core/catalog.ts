@@ -125,6 +125,44 @@ export function isDynamicRouteId(modelId: string): modelId is DynamicRouteId {
 }
 
 /**
+ * Whether an id names a Workers AI model, served by Workers AI itself rather
+ * than by AI Gateway's `/run`.
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export function isWorkersAIId(modelId: string): boolean {
+  return modelId.startsWith("@cf/") || modelId.startsWith("@hf/");
+}
+
+/**
+ * A model from the AI Gateway catalog, by its catalog id:
+ * `<author>/<model>`, such as `openai/gpt-5.5`,
+ * `anthropic/claude-opus-4.8` or `cloudflare/auto`.
+ *
+ * The catalog id is the gateway's own spelling, which can differ from the
+ * vendor's (`claude-opus-4.8`, not `claude-opus-4-8`). It runs on
+ * `env.AI.run`, where AI Gateway's `/run` engine picks the provider, converts
+ * the request, and bills through Unified Billing or a key stored on the
+ * gateway.
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export type CatalogModelId = `${string}/${string}`;
+
+/**
+ * Whether an id names an AI Gateway catalog model: an author and a model,
+ * neither empty, and none of the other id namespaces (`@cf/`, `@hf/`,
+ * `dynamic/`).
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export function isCatalogModelId(modelId: string): modelId is CatalogModelId {
+  if (modelId.startsWith("@") || modelId.startsWith("dynamic/")) return false;
+  const slash = modelId.indexOf("/");
+  return slash > 0 && slash < modelId.length - 1;
+}
+
+/**
  * Whether a string names a language model that runs on `env.AI.run`: a
  * Workers AI id or an AI Gateway dynamic route.
  *

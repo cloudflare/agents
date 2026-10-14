@@ -63,12 +63,13 @@ describe("core compat — quirks", () => {
   it("defaults to strict OpenAI for unknown ids", () => {
     expect(quirksFor("acme/new-model")).toMatchObject({
       imageUrls: "any",
-      maxTokensField: "max_tokens",
+      maxTokensField: "max_completion_tokens",
       reasoningOff: "unsupported",
       reasoningReplay: "drop"
     });
     expect(quirksFor("@cf/acme/new-model")).toMatchObject({
       imageUrls: "data-only",
+      maxTokensField: "max_tokens",
       reasoningOff: "chat-template",
       reasoningReplay: "reasoning_content"
     });
@@ -161,13 +162,14 @@ describe("core compat — request preparation", () => {
     ).toBe("low");
   });
 
-  it("leaves the output-token cap as max_tokens", () => {
+  it("keeps max_tokens for Workers AI and renames it for everything else", () => {
     expect(prepareChatCompletionsRequest({ max_tokens: 5 }, GLM).body).toEqual({
       max_tokens: 5
     });
+    // `openai/gpt-5*` on `/run` rejects `max_tokens` outright (live).
     expect(
       prepareChatCompletionsRequest({ max_tokens: 5 }, STRICT).body
-    ).toEqual({ max_tokens: 5 });
+    ).toEqual({ max_completion_tokens: 5 });
   });
 
   it("drops the OpenAI-only strict flag, and the format itself for Mistral", () => {

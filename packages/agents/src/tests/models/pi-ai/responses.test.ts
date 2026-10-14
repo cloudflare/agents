@@ -31,7 +31,7 @@ describe("pi-ai: OpenAI Responses over the universal gateway", () => {
       })
     );
 
-    const call = binding.universal[0];
+    const call = binding.native[0];
     expect(binding.calls).toHaveLength(0);
     expect(call?.provider).toBe("openai");
     expect(call?.endpoint).toBe("v1/responses");
@@ -98,9 +98,7 @@ describe("pi-ai: OpenAI Responses over the universal gateway", () => {
         ]
       })
     );
-    expect(field(binding.universal[0]?.query, "tools.0.name")).toBe(
-      "getWeather"
-    );
+    expect(field(binding.native[0]?.query, "tools.0.name")).toBe("getWeather");
     expect(message.stopReason).toBe("toolUse");
     const call = message.content.find((c) => c.type === "toolCall");
     expect(call).toMatchObject({
@@ -158,7 +156,7 @@ describe("pi-ai: OpenAI Responses over the universal gateway", () => {
         ]
       })
     );
-    const input = field(binding.universal[0]?.query, "input") as unknown[];
+    const input = field(binding.native[0]?.query, "input") as unknown[];
     expect(input).toContainEqual({
       encrypted_content: "gAAAAABqmZk3",
       id: "rs_1",
@@ -206,12 +204,8 @@ describe("pi-ai: the reasoning level is the model's to decide", () => {
         reasoning: "minimal"
       })
     );
-    expect(field(binding.universal[0]?.query, "reasoning.effort")).toBe(
-      "xhigh"
-    );
-    expect(field(binding.universal[1]?.query, "reasoning.effort")).toBe(
-      "minimal"
-    );
+    expect(field(binding.calls[0]?.input, "reasoning.effort")).toBe("xhigh");
+    expect(field(binding.calls[1]?.input, "reasoning.effort")).toBe("minimal");
   });
 
   it("forwards an explicitly named level unchanged", async () => {
@@ -224,9 +218,7 @@ describe("pi-ai: the reasoning level is the model's to decide", () => {
         reasoningEffort: "xhigh"
       } as never)
     );
-    expect(field(binding.universal[0]?.query, "reasoning.effort")).toBe(
-      "xhigh"
-    );
+    expect(field(binding.calls[0]?.input, "reasoning.effort")).toBe("xhigh");
   });
 
   it("follows the call's level over the Workers AI reasoningEffort setting", async () => {
@@ -241,7 +233,7 @@ describe("pi-ai: the reasoning level is the model's to decide", () => {
         { reasoning: "high" }
       )
     );
-    expect(field(binding.universal[0]?.query, "reasoning.effort")).toBe("high");
+    expect(field(binding.calls[0]?.input, "reasoning.effort")).toBe("high");
     const warnings = (
       message.diagnostics?.find((d) => d.type === "cloudflare-compat")
         ?.details as { warnings: { feature: string }[] } | undefined
@@ -259,7 +251,7 @@ describe("pi-ai: the reasoning level is the model's to decide", () => {
     await collectEvents(ai.stream(ai(MODEL), userContext("hi")));
     // `gpt-5-mini` declares `thinkingLevelMap: { off: null }`, i.e. it cannot
     // be asked for no reasoning at all.
-    const query = binding.universal[0]?.query;
+    const query = binding.native[0]?.query;
     expect(field(query, "reasoning")).toBeUndefined();
     // It still reasons, so its items need their encrypted content for the
     // next turn to replay them with `store: false`.

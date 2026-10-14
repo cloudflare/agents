@@ -73,7 +73,10 @@ const STRICT_OPENAI: ChatCompletionsQuirks = {
   imageUrls: "any",
   jsonSchema: "supported",
   jsonSchemaStrict: false,
-  maxTokensField: "max_tokens",
+  // The field OpenAI's current models require; `max_tokens` is rejected by
+  // `openai/gpt-5*` on `/run` ("Use 'max_completion_tokens' instead"), and
+  // `/run` converts it for every other catalog model.
+  maxTokensField: "max_completion_tokens",
   modelEchoSuffix: undefined,
   nullAssistantContent: "allowed",
   reasoningEffortLevels: "basic",
@@ -89,6 +92,7 @@ const STRICT_OPENAI: ChatCompletionsQuirks = {
 const WORKERS_AI: ChatCompletionsQuirks = {
   ...STRICT_OPENAI,
   chatTemplateKwargs: "supported",
+  maxTokensField: "max_tokens",
   imageUrls: "data-only",
   nullAssistantContent: "empty-string",
   reasoningOff: "chat-template",

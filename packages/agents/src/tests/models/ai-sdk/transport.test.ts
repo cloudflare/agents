@@ -359,24 +359,17 @@ describe("provider shape", () => {
 });
 
 describe("model ids", () => {
-  it("takes Workers AI ids only, and says what to do with the rest", () => {
+  it("takes Workers AI, catalog and dynamic route ids, and refuses the rest", () => {
     const binding = fakeBinding(() => jsonResponse(plainBody));
     const ai = createAI({ binding: asAi(binding) });
 
     expect(ai(MODEL).modelId).toBe(MODEL);
-    // A vendor id is not an id here: the vendor's own provider builds it.
-    expect(() => ai("openai/gpt-5-mini" as typeof MODEL)).toThrow(TypeError);
-    expect(() => ai("openai/gpt-5-mini" as typeof MODEL)).toThrow(
-      /@ai-sdk\/openai/
-    );
-    expect(() => ai("anthropic/claude-opus-4-8" as typeof MODEL)).toThrow(
-      /@ai-sdk\/anthropic/
-    );
-    expect(() => ai("google/gemini-3-flash" as typeof MODEL)).toThrow(
-      /@ai-sdk\/google/
-    );
+    expect(ai("openai/gpt-5.5").modelId).toBe("openai/gpt-5.5");
+    expect(ai("dynamic/support").modelId).toBe("dynamic/support");
+    // A bare vendor id names no catalog model.
+    expect(() => ai("gpt-5-mini" as typeof MODEL)).toThrow(TypeError);
     expect(() => ai("gpt-5-mini" as typeof MODEL)).toThrow(
-      /is not a Workers AI model id/
+      /catalog id \("<author>\/<model>"/
     );
   });
 

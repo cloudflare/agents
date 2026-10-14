@@ -1,6 +1,7 @@
 /**
  * OpenAI Responses wire: pi-ai's own Responses converters and stream
- * processor, over AI Gateway's universal endpoint.
+ * processor, over AI Gateway: `/run` for a catalog model, the provider-native
+ * path otherwise.
  *
  * Only the transport differs from talking to OpenAI directly: the body goes to
  * the gateway, which forwards it to `api.openai.com/v1/responses` with the key
@@ -30,7 +31,7 @@ import {
   correlationDetails,
   openAIVendorHeaders,
   responseInfo,
-  sendUniversal,
+  sendGateway,
   sseJson,
   startMessage,
   withIdleDeadline,
@@ -80,7 +81,7 @@ export function streamResponses(
           context,
           TOOL_CALL_ID_PROVIDERS
         ),
-        // The universal request carries the vendor's own spelling of the id.
+        // The vendor's own spelling of the id; `/run` takes the catalog id.
         model: wireModelId(model),
         store: false,
         stream: true
@@ -132,11 +133,12 @@ export function streamResponses(
           ? body
           : (overridden as Record<string, unknown>);
 
-      response = await sendUniversal(
+      response = await sendGateway(
         request,
         transport,
         payload,
-        openAIVendorHeaders()
+        openAIVendorHeaders(),
+        "responses"
       );
       await options.onResponse?.(responseInfo(response), model);
       attachCorrelation(

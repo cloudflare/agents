@@ -58,12 +58,12 @@ describe("catalog ids are `@cf/` only", () => {
     expect([notSuggested, suggested, stillAssignable]).toHaveLength(3);
   });
 
-  it("refuses a non-`@cf/` id at runtime too, with the same advice", () => {
+  it("refuses an `@hf/` id at runtime too", () => {
     const ai = createAI({
       binding: asAi(fakeBinding(() => jsonResponse({})))
     });
     expect(() =>
       ai("@hf/thebloke/llama-2-13b-chat-awq" as WorkersAIModelId)
-    ).toThrow(/not a Workers AI model id/);
+    ).toThrow(/not a model id this provider knows/);
   });
 });

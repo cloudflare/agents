@@ -6,7 +6,8 @@
  * The `api` is the model author's declaration, not a guess of ours: Workers AI
  * models carry {@link CLOUDFLARE_AI_API} and run on `env.AI.run`; every other
  * model carries whatever protocol its registry says it speaks, and goes to AI
- * Gateway's universal endpoint.
+ * Gateway in that protocol: `/run` for a catalog model, the provider-native
+ * path otherwise.
  */
 
 import {

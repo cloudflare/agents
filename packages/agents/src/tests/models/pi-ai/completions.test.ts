@@ -98,7 +98,7 @@ describe("pi-ai: Workers AI chat completions", () => {
       ai.stream(ai("dynamic/support"), userContext("hi"))
     );
 
-    expect(binding.universal).toHaveLength(0);
+    expect(binding.native).toHaveLength(0);
     expect(binding.calls[0]?.model).toBe("dynamic/support");
     expect(binding.calls[0]?.input).not.toHaveProperty("model");
     expect(binding.calls[0]?.options).toMatchObject({
@@ -106,6 +106,42 @@ describe("pi-ai: Workers AI chat completions", () => {
     });
     expect(message.content).toEqual([{ text: "Routed", type: "text" }]);
     expect(message.stopReason).toBe("stop");
+  });
+
+  it("reads OpenAI chunks that carry usage: null until the last one", async () => {
+    // A dynamic route served by an OpenAI model streams OpenAI's own chunks:
+    // `usage` is `null` on every chunk but the final one (live capture).
+    const chunk = (extra: Record<string, unknown>) =>
+      JSON.stringify({
+        id: "chatcmpl-1",
+        model: "gpt-5-mini-2025-08-07",
+        object: "chat.completion.chunk",
+        usage: null,
+        ...extra
+      });
+    const binding = fakeBinding(() =>
+      sseResponse([
+        chunk({
+          choices: [
+            { delta: { content: "one, two", role: "assistant" }, index: 0 }
+          ]
+        }),
+        chunk({ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] }),
+        chunk({
+          choices: [],
+          usage: { completion_tokens: 4, prompt_tokens: 9, total_tokens: 13 }
+        }),
+        "[DONE]"
+      ])
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const { message } = await collectEvents(
+      ai.stream(ai("dynamic/support"), userContext("count"))
+    );
+    expect(message.stopReason).toBe("stop");
+    expect(message.content).toEqual([{ text: "one, two", type: "text" }]);
+    expect(message.usage.input).toBe(9);
+    expect(message.usage.output).toBe(4);
   });
 
   it("sends the chat-completions body through the binding with gateway options", async () => {
@@ -167,7 +203,7 @@ describe("pi-ai: Workers AI chat completions", () => {
         { sessionId: "s" }
       )
     );
-    expect(binding.universal[0]?.options.extraHeaders).toBeUndefined();
+    expect(binding.native[0]?.headers).not.toHaveProperty("x-session-affinity");
   });
 
   it("emits a tool call that arrives complete in one delta", async () => {
@@ -598,7 +634,7 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
       )
     );
 
-    const query = binding.universal[0]?.query;
+    const query = binding.native[0]?.query;
     expect(query).not.toHaveProperty("chat_template_kwargs");
     expect(query).not.toHaveProperty("reasoning_effort");
     const warnings = (
@@ -620,7 +656,7 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
         userContext("hi")
       )
     );
-    expect(binding.universal[0]?.query).not.toHaveProperty("reasoning_effort");
+    expect(binding.native[0]?.query).not.toHaveProperty("reasoning_effort");
     const warnings = (
       message.diagnostics?.find((d) => d.type === "cloudflare-compat")
         ?.details as { warnings: { feature: string }[] } | undefined
@@ -640,7 +676,7 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
         { reasoning: "high" }
       )
     );
-    expect(binding.universal[0]?.query).not.toHaveProperty("reasoning_effort");
+    expect(binding.native[0]?.query).not.toHaveProperty("reasoning_effort");
   });
 
   it("remaps the level through the model's own thinkingLevelMap", async () => {
@@ -653,7 +689,7 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
         { reasoning: "xhigh" }
       )
     );
-    expect(binding.universal[0]?.query.reasoning_effort).toBe("max");
+    expect(binding.native[0]?.query.reasoning_effort).toBe("max");
   });
 
   it("says so when the model asks for a thinking shape this wire does not build", async () => {
@@ -666,7 +702,7 @@ describe("pi-ai: the vendor's own compat profile decides the body", () => {
         { reasoning: "high" }
       )
     );
-    expect(binding.universal[0]?.query).not.toHaveProperty("reasoning_effort");
+    expect(binding.native[0]?.query).not.toHaveProperty("reasoning_effort");
     const warnings = (
       message.diagnostics?.find((d) => d.type === "cloudflare-compat")
         ?.details as { warnings: { feature: string }[] } | undefined
