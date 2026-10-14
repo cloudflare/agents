@@ -4,11 +4,11 @@
  */
 
 import {
+  acquireBrowserSession,
   type BrowserBinding,
   type BrowserSessionGuardrails,
+  closeBrowserSession,
   connectBrowserSession,
-  createBrowserSession,
-  deleteBrowserSession,
   isMissingBrowserSession,
   listBrowserTargets
 } from "../browser-run";
@@ -81,12 +81,11 @@ export function browserRunAdapter(
     },
 
     async create() {
-      const { sessionId } = await createBrowserSession(binding, {
+      return acquireBrowserSession(binding, {
         keepAliveMs: keepAliveMs(),
         recording: options.recording,
         guardrails: options.guardrails
       });
-      return { sessionId };
     },
 
     async isAlive(sessionId) {
@@ -112,7 +111,7 @@ export function browserRunAdapter(
 
     async close(sessionId) {
       try {
-        await deleteBrowserSession(binding, sessionId);
+        await closeBrowserSession(binding, sessionId);
       } catch (error) {
         if (!isMissingBrowserSession(error)) throw error;
       }
