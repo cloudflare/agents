@@ -124,7 +124,7 @@ A Think instance holds one conversation on the default Sessions handle. Multi-ch
 
 ### Workspace
 
-`this.workspace` is typed `WorkspaceLike`. By default it is a `Workspace` from `@cloudflare/shell` over the object's SQLite; a subclass can assign its own, for example one with R2 spillover or a proxy to a parent-owned workspace. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, and `bash`) are merged into every turn. The factories are exported from `@cloudflare/think/tools/workspace` for custom backends.
+`this.workspace` is typed `ThinkWorkspace`, which needs only `workspace.fs`. By default it is a `Workspace` from `@cloudflare/computer` over the object's SQLite, with no execution backends; a subclass can assign its own, for example one with backends, or `lazyWorkspace(() => getWorkspace(parentStub))` for a parent-owned workspace. Think's internals (media eviction, skills projection, fetch spill, extension host functions) go through one adapter over `workspace.fs`, and Think writes its own files under `/workspace`. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, and `bash`) are merged into every turn. The factories are exported from `@cloudflare/think/tools/workspace` for custom backends.
 
 ### Code execution (`@cloudflare/think/tools/execute`)
 

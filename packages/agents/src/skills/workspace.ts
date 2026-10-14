@@ -1,50 +1,28 @@
 import type { SkillResource } from "./types";
 
 /**
- * Computer-style Workspace shape used for Agent Skills projection.
- * `@cloudflare/computer.Workspace` satisfies this through `workspace.fs`.
+ * The Workspace Agent Skills read and write: a `Workspace` from
+ * `@cloudflare/computer`, or anything with the same `fs` methods.
  */
-export interface ComputerSkillWorkspace {
+export interface SkillWorkspace {
   readonly fs: {
-    stat(path: string): Promise<unknown>;
-    readFile(
-      path: string,
-      options?: { byteOffset?: number; byteLength?: number }
-    ): Promise<ReadableStream<Uint8Array>>;
-    readFile(path: string, encoding: "utf8"): Promise<string>;
-    writeFile(path: string, content: string | Uint8Array): Promise<void>;
+    stat(path: string): Promise<{ size: number; isDirectory: boolean }>;
+    readFile(path: string): Promise<ReadableStream<Uint8Array>>;
+    writeFile(path: string, content: Uint8Array): Promise<void>;
     mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
+    readdir(
+      path: string
+    ): Promise<Array<{ name: string; size: number; isDirectory: boolean }>>;
+    find(
+      directory: string,
+      pattern?: string
+    ): Promise<Array<{ path: string; type: "file" | "dir" }>>;
   };
 }
 
-/**
- * Legacy direct filesystem shape used for Agent Skills projection.
- * `@cloudflare/shell.Workspace` and Think `WorkspaceLike` satisfy this shape.
- */
-export interface LegacySkillWorkspace {
-  stat(path: string): Promise<unknown | null>;
-  readFile(path: string): Promise<string | null>;
-  readFileBytes(path: string): Promise<Uint8Array | null>;
-  writeFile(path: string, content: string): Promise<void>;
-  writeFileBytes(
-    path: string,
-    content: Uint8Array | ArrayBuffer,
-    mediaType?: string
-  ): Promise<void>;
-  mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
-}
-
-/** Workspace accepted by `SkillRegistry.seedWorkspace()`. */
-export type SkillProjectionWorkspace =
-  | ComputerSkillWorkspace
-  | LegacySkillWorkspace;
-
 /** Options for projecting Agent Skills into a Workspace. */
 export interface SkillWorkspaceSeedOptions {
-  /**
-   * Destination directory. Defaults to `/workspace/.agents/skills` for a
-   * Computer Workspace and `/.agents/skills` for a legacy Shell Workspace.
-   */
+  /** Destination directory. Defaults to `/workspace/.agents/skills`. */
   readonly root?: string;
   /** Existing-file policy. Default `"preserve"` keeps Workspace edits. */
   readonly onConflict?: "preserve" | "replace";
@@ -78,54 +56,26 @@ export interface SkillWorkspaceFiles {
   writeResource(path: string, resource: SkillResource): Promise<void>;
 }
 
-/** @internal Parse and adapt a Computer or legacy Shell Workspace. */
+/** Directory skill scripts and relative paths resolve against. */
+const WORKSPACE_ROOT = "/workspace";
+const TEXT_ENCODER = new TextEncoder();
+const TEXT_DECODER = new TextDecoder();
+
+/** @internal Adapt a Workspace for projecting skills into it. */
 export function createSkillWorkspaceFiles(
-  workspace: SkillProjectionWorkspace,
+  workspace: SkillWorkspace,
   rootOverride?: string
 ): SkillWorkspaceFiles {
-  const computer = isComputerWorkspace(workspace);
-  const root = parseRoot(
-    rootOverride ?? (computer ? "/workspace/.agents/skills" : "/.agents/skills")
-  );
-
-  const exists = async (path: string): Promise<boolean> => {
-    try {
-      const stat = computer
-        ? await workspace.fs.stat(path)
-        : await workspace.stat(path);
-      return stat !== null && stat !== undefined;
-    } catch (error) {
-      if (isNotFound(error)) return false;
-      throw error;
-    }
-  };
-
-  const readText = async (path: string): Promise<string | null> => {
-    try {
-      return computer
-        ? await workspace.fs.readFile(path, "utf8")
-        : await workspace.readFile(path);
-    } catch (error) {
-      if (isNotFound(error)) return null;
-      throw error;
-    }
-  };
+  const root = parseRoot(rootOverride ?? `${WORKSPACE_ROOT}/.agents/skills`);
+  const access = createSkillWorkspaceAccess(workspace);
 
   const readBytes = async (path: string): Promise<Uint8Array | null> => {
-    if (!computer) return workspace.readFileBytes(path);
     try {
       return await drain(await workspace.fs.readFile(path));
     } catch (error) {
       if (isNotFound(error)) return null;
       throw error;
     }
-  };
-
-  const mkdirParent = async (path: string): Promise<void> => {
-    const parent = path.slice(0, path.lastIndexOf("/"));
-    if (!parent) return;
-    if (computer) await workspace.fs.mkdir(parent, { recursive: true });
-    else await workspace.mkdir(parent, { recursive: true });
   };
 
   return {
@@ -135,12 +85,14 @@ export function createSkillWorkspaceFiles(
       const safeRelative = parseRelativePath(relativePath);
       return `${root}/${safeName}/${safeRelative}`;
     },
-    exists,
-    readText,
+    async exists(path) {
+      return (await access.stat(path)) !== null;
+    },
+    readText: (path) => access.readFile(path),
     async readResource(path, descriptor) {
       const encoding = descriptor.encoding ?? "text";
       if (encoding === "text") {
-        const content = await readText(path);
+        const content = await access.readFile(path);
         return content === null ? null : { ...descriptor, content };
       }
       const bytes = await readBytes(path);
@@ -148,29 +100,124 @@ export function createSkillWorkspaceFiles(
         ? null
         : { ...descriptor, content: encodeBase64(bytes) };
     },
-    async writeText(path, content) {
-      await mkdirParent(path);
-      if (computer) await workspace.fs.writeFile(path, content);
-      else await workspace.writeFile(path, content);
-    },
+    writeText: (path, content) => access.writeFile(path, content),
     async writeResource(path, resource) {
-      await mkdirParent(path);
-      if ((resource.encoding ?? "text") === "text") {
-        if (computer) await workspace.fs.writeFile(path, resource.content);
-        else await workspace.writeFile(path, resource.content);
-        return;
-      }
-      const bytes = decodeBase64(resource.content);
-      if (computer) await workspace.fs.writeFile(path, bytes);
-      else await workspace.writeFileBytes(path, bytes, resource.mimeType);
+      await access.writeFile(
+        path,
+        (resource.encoding ?? "text") === "text"
+          ? resource.content
+          : decodeBase64(resource.content)
+      );
     }
   };
 }
 
-function isComputerWorkspace(
-  workspace: SkillProjectionWorkspace
-): workspace is ComputerSkillWorkspace {
-  return "fs" in workspace;
+/** @internal File operations a skill script reaches through its host. */
+export interface SkillWorkspaceAccess {
+  /** Read UTF-8 text, or `null` when the file does not exist. */
+  readFile(path: string): Promise<string | null>;
+  /** List a directory. */
+  listFiles(
+    path: string
+  ): Promise<Array<{ path: string; name: string; type: string; size: number }>>;
+  /** Find paths matching a glob. */
+  glob(
+    pattern: string
+  ): Promise<Array<{ path: string; type: string; size: number }>>;
+  /** Describe a path, or `null` when it does not exist. */
+  stat(path: string): Promise<{ type: string; size: number } | null>;
+  /** Write a file, creating missing parent directories. */
+  writeFile(path: string, content: string | Uint8Array): Promise<void>;
+}
+
+/**
+ * @internal Adapt a Workspace for skill scripts. Relative paths resolve
+ * against `/workspace`.
+ */
+export function createSkillWorkspaceAccess(
+  workspace: SkillWorkspace
+): SkillWorkspaceAccess {
+  const { fs } = workspace;
+  const access: SkillWorkspaceAccess = {
+    async readFile(path) {
+      try {
+        return TEXT_DECODER.decode(
+          await drain(await fs.readFile(resolvePath(path)))
+        );
+      } catch (error) {
+        if (isNotFound(error)) return null;
+        throw error;
+      }
+    },
+    async listFiles(path) {
+      const directory = resolvePath(path);
+      const entries = await fs.readdir(directory);
+      return entries.map((entry) => ({
+        path: `${directory.replace(/\/$/, "")}/${entry.name}`,
+        name: entry.name,
+        type: entry.isDirectory ? "directory" : "file",
+        size: entry.size
+      }));
+    },
+    async glob(pattern) {
+      const segments = resolvePath(pattern).split("/").filter(Boolean);
+      const firstGlob = segments.findIndex((part) => /[*?[\]{}]/.test(part));
+      if (firstGlob === -1) {
+        const path = `/${segments.join("/")}`;
+        const found = await access.stat(path);
+        return found === null ? [] : [{ path, ...found }];
+      }
+      let matches: Array<{ path: string; type: "file" | "dir" }>;
+      try {
+        matches = await fs.find(
+          `/${segments.slice(0, firstGlob).join("/")}`,
+          segments.slice(firstGlob).join("/")
+        );
+      } catch (error) {
+        if (isNotFound(error)) return [];
+        throw error;
+      }
+      return Promise.all(
+        matches.map(async (match) =>
+          match.type === "dir"
+            ? { path: match.path, type: "directory", size: 0 }
+            : {
+                path: match.path,
+                type: "file",
+                size: (await fs.stat(match.path)).size
+              }
+        )
+      );
+    },
+    async stat(path) {
+      try {
+        const info = await fs.stat(resolvePath(path));
+        return {
+          type: info.isDirectory ? "directory" : "file",
+          size: info.size
+        };
+      } catch (error) {
+        if (isNotFound(error)) return null;
+        throw error;
+      }
+    },
+    async writeFile(path, content) {
+      const absolute = resolvePath(path);
+      const parent = absolute.slice(0, absolute.lastIndexOf("/"));
+      if (parent) await fs.mkdir(parent, { recursive: true });
+      await fs.writeFile(
+        absolute,
+        typeof content === "string" ? TEXT_ENCODER.encode(content) : content
+      );
+    }
+  };
+  return access;
+}
+
+function resolvePath(path: string): string {
+  if (path.startsWith("/")) return path;
+  const relative = path.replace(/^\.(\/|$)/, "");
+  return relative === "" ? WORKSPACE_ROOT : `${WORKSPACE_ROOT}/${relative}`;
 }
 
 function parseRoot(root: string): string {

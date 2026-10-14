@@ -3,38 +3,10 @@ import { env } from "cloudflare:workers";
 import { tool } from "ai";
 import { z } from "zod";
 import * as skills from "../skills";
-import type { SkillWorkspace } from "../skills";
+import { MemorySkillWorkspace } from "./memory-skill-workspace";
 
-function testWorkspace(files: Record<string, string>): SkillWorkspace {
-  const info = (path: string) => ({
-    name: path,
-    path,
-    size: files[path].length,
-    type: "file" as const,
-    mimeType: "text/plain",
-    createdAt: 0,
-    updatedAt: 0
-  });
-
-  return {
-    async readFile(path: string) {
-      return files[path] ?? null;
-    },
-    async writeFile(path: string, content: string) {
-      files[path] = content;
-    },
-    async readDir() {
-      return Object.keys(files).map(info);
-    },
-    async glob() {
-      return Object.keys(files).map(info);
-    },
-    async stat(path: string) {
-      const content = files[path];
-      if (content === undefined) return null;
-      return info(path);
-    }
-  };
+function testWorkspace(files: Record<string, string>): MemorySkillWorkspace {
+  return new MemorySkillWorkspace(files);
 }
 
 describe("skill script runner", () => {
@@ -329,7 +301,7 @@ export {
       ]
     });
     // Output artifacts are scratch, not durable workspace writes.
-    await expect(workspace.readFile("notes.md")).resolves.toBeNull();
+    await expect(workspace.readText("notes.md")).resolves.toBeNull();
   });
 
   it("rejects oversized output artifacts", async () => {
@@ -375,6 +347,39 @@ export {
 }`
       })
     ).resolves.toBe("hello from workspace");
+  });
+
+  it("returns sizes from ctx.workspace.glob, and nothing for a missing directory", async () => {
+    const runner = skills.runner({
+      loader: env.LOADER,
+      workspaceInstance: testWorkspace({
+        "notes/a.md": "abc",
+        "notes/b.md": "hello"
+      })
+    });
+
+    await expect(
+      runner.run({
+        skill: {
+          name: "workspace-reader",
+          description: "Read workspace files.",
+          body: "Use JS."
+        },
+        path: "scripts/glob.js",
+        input: {},
+        source: `export default async function run(input, ctx) {
+  const found = await ctx.workspace.glob("notes/*.md");
+  const missing = await ctx.workspace.glob("missing/**/*");
+  return { found, missing };
+}`
+      })
+    ).resolves.toEqual({
+      found: [
+        { path: "/workspace/notes/a.md", type: "file", size: 3 },
+        { path: "/workspace/notes/b.md", type: "file", size: 5 }
+      ],
+      missing: []
+    });
   });
 
   it("normalizes ctx.workspace.stat to { type, size }", async () => {
@@ -445,7 +450,7 @@ export {
 }`
       })
     ).resolves.toBe("done");
-    await expect(writeWorkspace.readFile("generated.md")).resolves.toBe("ok");
+    await expect(writeWorkspace.readText("generated.md")).resolves.toBe("ok");
   });
 
   it("denies ctx.workspace access when no workspace is provided", async () => {
@@ -851,7 +856,7 @@ print("done")`
       })
     ).rejects.toThrow("Workspace write access is not available");
 
-    await expect(workspace.readFile("generated.txt")).resolves.toBeNull();
+    await expect(workspace.readText("generated.txt")).resolves.toBeNull();
   });
 
   it("surfaces python script failures", async () => {
@@ -943,6 +948,6 @@ print("done")`
       exitCode: 127
     });
 
-    await expect(workspace.readFile("generated.txt")).resolves.toBeNull();
+    await expect(workspace.readText("generated.txt")).resolves.toBeNull();
   });
 });

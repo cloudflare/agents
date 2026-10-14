@@ -1,44 +1,21 @@
-import type { Workspace, FileInfo } from "@cloudflare/shell";
 import type { JSONValue, Tool } from "ai";
 import type { InitialFiles } from "just-bash";
 import { Bash } from "just-bash";
 import { tool } from "ai";
 import { z } from "zod";
+import {
+  WorkspaceFiles,
+  type ThinkWorkspace,
+  type WorkspaceEntry
+} from "../workspace-files";
 
-// ── WorkspaceLike ─────────────────────────────────────────────────
-//
-// Minimum workspace surface that Think's internals rely on. Covers the
-// methods called by `createWorkspaceTools()` below plus the handful
-// Think itself uses (`readFile`/`writeFile`/`readDir`/`rm` in
-// `think.ts`). The read tool also needs `readFileBytes` so image/PDF
-// reads can be rehydrated as AI SDK multimodal content. A concrete
-// `Workspace` from `@cloudflare/shell` satisfies this; so do custom
-// implementations like the `SharedWorkspace` proxy in `examples/assistant`
-// that forwards to a parent DO.
-//
-// Consumers who reach for the fuller filesystem API (e.g.
-// `createWorkspaceStateBackend` for codemode's `state.*` in a sandbox)
-// still need a concrete `Workspace`.
-//
-// @experimental The API surface may change before stabilizing.
-
-export type WorkspaceLike = Pick<
-  Workspace,
-  | "readFile"
-  | "readFileBytes"
-  | "writeFile"
-  | "readDir"
-  | "rm"
-  | "glob"
-  | "mkdir"
-  | "stat"
-> &
-  /**
-   * Optional so a custom workspace written before it existed still
-   * satisfies the type. Media eviction and skills projection need it and
-   * become no-ops (with a warning) when it is absent.
-   */
-  Partial<Pick<Workspace, "writeFileBytes">>;
+/**
+ * One workspace entry as the built-in tools see it.
+ *
+ * `mimeType` is optional: the read tool sniffs the content when it is absent
+ * or generic.
+ */
+export type FileInfo = WorkspaceEntry & { readonly mimeType?: string };
 
 // ── Operations interfaces ─────────────────────────────────────────
 // Abstractions over file I/O so the same tools can work against
@@ -98,68 +75,29 @@ export interface BashOperations {
   ): Promise<void>;
 }
 
-// ── Workspace-backed operation factories ──────────────────────────
+// ── Workspace-backed operations ───────────────────────────────────
 
-function workspaceReadOps(ws: WorkspaceLike): ReadOperations {
+function workspaceOps(
+  workspace: ThinkWorkspace
+): ReadOperations &
+  WriteOperations &
+  EditOperations &
+  ListOperations &
+  FindOperations &
+  DeleteOperations &
+  GrepOperations &
+  BashOperations {
+  const files = new WorkspaceFiles(workspace);
   return {
-    readFile: (path) => ws.readFile(path),
-    readFileBytes: (path) => ws.readFileBytes(path),
-    stat: (path) => ws.stat(path)
-  };
-}
-
-function workspaceWriteOps(ws: WorkspaceLike): WriteOperations {
-  return {
-    writeFile: (path, content) => ws.writeFile(path, content),
-    mkdir: (path, opts) => ws.mkdir(path, opts)
-  };
-}
-
-function workspaceEditOps(ws: WorkspaceLike): EditOperations {
-  return {
-    readFile: (path) => ws.readFile(path),
-    writeFile: (path, content) => ws.writeFile(path, content)
-  };
-}
-
-function workspaceListOps(ws: WorkspaceLike): ListOperations {
-  return {
-    readDir: (dir, opts) => ws.readDir(dir, opts)
-  };
-}
-
-function workspaceFindOps(ws: WorkspaceLike): FindOperations {
-  return {
-    glob: (pattern) => ws.glob(pattern)
-  };
-}
-
-function workspaceDeleteOps(ws: WorkspaceLike): DeleteOperations {
-  return {
-    rm: (path, opts) => ws.rm(path, opts)
-  };
-}
-
-function workspaceGrepOps(ws: WorkspaceLike): GrepOperations {
-  return {
-    glob: (pattern) => ws.glob(pattern),
-    readFile: (path) => ws.readFile(path)
-  };
-}
-
-function workspaceBashOps(ws: WorkspaceLike): BashOperations {
-  const maybeBytesWriter = ws as WorkspaceLike & {
-    writeFileBytes?: (path: string, content: Uint8Array) => Promise<void>;
-  };
-  return {
-    readDir: (dir, opts) => ws.readDir(dir, opts),
-    readFileBytes: (path) => ws.readFileBytes(path),
-    writeFile: (path, content) => ws.writeFile(path, content),
-    writeFileBytes: maybeBytesWriter.writeFileBytes
-      ? (path, content) => maybeBytesWriter.writeFileBytes!(path, content)
-      : undefined,
-    mkdir: (path, opts) => ws.mkdir(path, opts),
-    rm: (path, opts) => ws.rm(path, opts)
+    readFile: (path) => files.readText(path),
+    readFileBytes: (path) => files.readBytes(path),
+    stat: (path) => files.stat(path),
+    writeFile: (path, content) => files.write(path, content),
+    writeFileBytes: (path, content) => files.write(path, content),
+    mkdir: (path, opts) => files.mkdir(path, opts),
+    readDir: (dir, opts) => files.list(dir, opts),
+    glob: (pattern) => files.glob(pattern),
+    rm: (path, opts) => files.remove(path, opts)
   };
 }
 
@@ -185,16 +123,16 @@ export type WorkspaceTools = {
 /**
  * Create a complete set of AI SDK tools backed by a workspace.
  *
- * Accepts either a concrete `Workspace` from `@cloudflare/shell` or any
- * `WorkspaceLike` implementation — e.g. a proxy that forwards calls to a
- * shared workspace owned by a parent DO.
+ * Accepts a `Workspace` from `@cloudflare/computer`, or the client
+ * `getWorkspace(stub)` returns for a Workspace owned by another Durable
+ * Object.
  *
  * ```ts
- * import { Workspace } from "@cloudflare/shell";
- * import { createWorkspaceTools } from "@cloudflare/think";
+ * import { Workspace } from "@cloudflare/computer";
+ * import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
  *
  * class MyAgent extends Agent<Env> {
- *   workspace = new Workspace({ sql: this.ctx.storage.sql, name: () => this.name });
+ *   workspace = new Workspace({ storage: this.ctx.storage });
  *
  *   async onChatMessage() {
  *     const tools = createWorkspaceTools(this.workspace);
@@ -205,23 +143,24 @@ export type WorkspaceTools = {
  * ```
  */
 export function createWorkspaceTools(
-  workspace: WorkspaceLike,
+  workspace: ThinkWorkspace,
   options: WorkspaceToolsOptions = {}
 ): WorkspaceTools {
+  const ops = workspaceOps(workspace);
   const tools: WorkspaceTools = {
-    read: createReadTool({ ops: workspaceReadOps(workspace) }),
-    write: createWriteTool({ ops: workspaceWriteOps(workspace) }),
-    edit: createEditTool({ ops: workspaceEditOps(workspace) }),
-    list: createListTool({ ops: workspaceListOps(workspace) }),
-    find: createFindTool({ ops: workspaceFindOps(workspace) }),
-    grep: createGrepTool({ ops: workspaceGrepOps(workspace) }),
-    delete: createDeleteTool({ ops: workspaceDeleteOps(workspace) })
+    read: createReadTool({ ops }),
+    write: createWriteTool({ ops }),
+    edit: createEditTool({ ops }),
+    list: createListTool({ ops }),
+    find: createFindTool({ ops }),
+    grep: createGrepTool({ ops }),
+    delete: createDeleteTool({ ops })
   };
 
   if (options.bash !== false) {
     tools.bash = createBashTool({
       ...(typeof options.bash === "object" ? options.bash : {}),
-      ops: workspaceBashOps(workspace)
+      ops
     });
   }
 

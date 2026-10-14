@@ -1,12 +1,13 @@
 import { callable } from "agents";
+import { getWorkspace, type WorkspaceHandle } from "@cloudflare/computer";
 import {
   Think,
   Session,
   skills,
-  defaultContextOverflowClassifier
+  defaultContextOverflowClassifier,
+  lazyWorkspace
 } from "@cloudflare/think";
 import bundledSkills from "agents:skills";
-import type { WorkspaceFsLike } from "@cloudflare/shell";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
@@ -26,7 +27,6 @@ import type { ToolSet } from "ai";
 import { z } from "zod";
 import { AssistantDirectory } from "../../agent";
 import { SharedMCPClient } from "../../shared-mcp-client";
-import { SharedWorkspace } from "../../shared-workspace";
 import type { AgentConfig } from "../../types";
 
 // ── MyAssistant — one Think DO per chat (a facet of the directory) ────
@@ -59,28 +59,24 @@ export class MyAssistant extends Think<Env> {
   };
 
   /**
-   * Override Think's default per-chat workspace with a proxy into the
-   * shared `AssistantDirectory.workspace`. This class field runs in the
-   * subclass's synthetic constructor after `super(ctx, env)`, so by the
-   * time Think's wrapped `onStart` fires its `!this.workspace` default-
-   * init check, the shared proxy is already in place — Think never
-   * creates a per-chat `Workspace` at all.
+   * Override Think's default per-chat workspace with the shared
+   * `AssistantDirectory.workspace`. `getWorkspace()` asks the directory for
+   * an RPC stub (see `AssistantDirectory.__getWorkspaceStub`), and
+   * `lazyWorkspace` defers that until a turn first touches a file, so a
+   * chat that never reads or writes files never reaches the directory.
    *
-   * Declared as `WorkspaceFsLike` (the wider interface from
-   * `@cloudflare/shell`) rather than Think's `WorkspaceLike` so that
-   * `createWorkspaceStateBackend(this.workspace)` in `getTools()` sees
-   * the full filesystem surface it needs. `WorkspaceFsLike` is a strict
-   * superset of `WorkspaceLike`, so Think's internals keep working.
-   *
-   * All workspace-aware code — the builtin tools from
-   * `createWorkspaceTools`, lifecycle hooks, the `listWorkspaceFiles`
-   * / `readWorkspaceFile` RPCs below, and codemode's `state.*` sandbox
-   * API via `createWorkspaceStateBackend` — routes through this proxy
-   * transparently.
+   * Everything workspace-aware routes through this: the built-in tools from
+   * `createWorkspaceTools`, skill scripts, the fetch tool's saved responses,
+   * and the `listWorkspaceFiles` / `readWorkspaceFile` callables below.
    */
-  override workspace: WorkspaceFsLike = new SharedWorkspace(() =>
-    this.parentAgent(AssistantDirectory)
-  );
+  override workspace = lazyWorkspace(async () => {
+    const directory = await this.parentAgent(AssistantDirectory);
+    // SAFETY: AssistantDirectory implements `__getWorkspaceStub()`, which is
+    // what getWorkspace() calls. The DO stub types its result as
+    // `Stub<WorkspaceStub>` while WorkspaceHandle expects `WorkspaceStub`,
+    // so TypeScript cannot relate the two.
+    return getWorkspace(directory as unknown as WorkspaceHandle);
+  });
 
   /**
    * Proxy to the directory's MCP state. Used by `beforeTurn` below to
@@ -164,7 +160,7 @@ export class MyAssistant extends Think<Env> {
             `${persona}
 
 Be concise. Prefer short, direct answers over lengthy explanations.
-The execute tool runs JavaScript you write in a sandboxed environment. Use it for multi-file operations, data transformations, or any task that would require many sequential tool calls. Inside that sandbox the only globals are the connector namespaces listed in the tool description (e.g. \`state.*\` for workspace files, \`tools.*\` for your tools) plus \`codemode\` — there is no \`host\` object, \`fs\`, or Node.js API.
+The execute tool runs JavaScript you write in a sandboxed environment. Use it for multi-file operations, data transformations, or any task that would require many sequential tool calls. Inside that sandbox the only globals are the connector namespaces listed in the tool description (e.g. \`tools.*\` for your tools, including the workspace file tools) plus \`codemode\` — there is no \`host\` object, \`fs\`, or Node.js API.
 For reading a known URL or API, prefer the \`fetch_url\` tool — it is a fast, read-only HTTP GET over any public URL, and large responses spill to the workspace. For rendered pages, link discovery, or AI extraction, use the one-shot Quick Action tools — \`browser_markdown\` to read a page, \`browser_extract\` to pull structured data, \`browser_links\` to list links, \`browser_scrape\` to grab elements — and only reach for the interactive \`cdp.*\` API inside execute when you need to click, type, or navigate across multiple steps.
 You can create extensions: new tools that persist for the rest of this conversation. Offer to create one when a recurring task would benefit from it.
 When you learn something about the user or their project, save it to memory.`
@@ -195,10 +191,9 @@ When you learn something about the user or their project, save it to memory.`
 
     return {
       // Agent one-liner with overrides: the executor comes from
-      // `env.LOADER`, `cdp.*` from `env.BROWSER` (if bound), and `state.*`
-      // inside the sandbox is backed by the SHARED workspace — the
-      // `SharedWorkspace` proxy satisfies `WorkspaceFsLike`, so
-      // `state.planEdits`/`applyEdits` in chat B sees and mutates the same
+      // `env.LOADER` and `cdp.*` from `env.BROWSER` (if bound). The
+      // workspace tools are exposed inside the sandbox as `tools.*`, backed
+      // by the SHARED workspace, so code in chat B sees and edits the same
       // files chat A just wrote. This also assigns `this.codemode`, which
       // powers the built-in `approveExecution` / `rejectExecution` /
       // `pendingExecutions` callables behind the approval card.
@@ -331,6 +326,15 @@ When you learn something about the user or their project, save it to memory.`
   async onChatResponse(result: ChatResponseResult): Promise<void> {
     console.log(`Turn ${result.status}: ${result.message.parts.length} parts`);
 
+    // The turn may have written files. Let every open tab refresh its file
+    // browser. Best-effort, like the preview below.
+    try {
+      const directory = await this.parentAgent(AssistantDirectory);
+      await directory.workspaceChanged();
+    } catch (err) {
+      console.warn("[MyAssistant] Failed to announce workspace change:", err);
+    }
+
     // Update the sidebar preview on the parent directory. Best-effort —
     // the chat should still function if the RPC fails.
     const preview = result.message.parts
@@ -400,18 +404,27 @@ When you learn something about the user or their project, save it to memory.`
   }
 
   @callable()
-  async listWorkspaceFiles(path: string = "/") {
+  async listWorkspaceFiles(
+    path: string = "/workspace"
+  ): Promise<
+    Array<{ name: string; type: "file" | "directory"; size: number }>
+  > {
     try {
-      return await this.workspace.readDir(path);
+      const entries = await this.workspace.fs.readdir(path);
+      return entries.map((entry) => ({
+        name: entry.name,
+        type: entry.isDirectory ? "directory" : "file",
+        size: entry.size
+      }));
     } catch {
       return [];
     }
   }
 
   @callable()
-  async readWorkspaceFile(path: string) {
+  async readWorkspaceFile(path: string): Promise<string | null> {
     try {
-      return await this.workspace.readFile(path);
+      return await this.workspace.fs.readFile(path, "utf8");
     } catch {
       return null;
     }

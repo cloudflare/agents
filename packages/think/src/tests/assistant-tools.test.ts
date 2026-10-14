@@ -338,6 +338,14 @@ describe("assistant tools — find", () => {
     expect(result.files).toContain("/src/a.ts");
     expect(result.files).toContain("/src/b.ts");
   });
+
+  it("finds nothing under a directory that does not exist", async () => {
+    const agent = await freshAgent("find-missing");
+    const result = (await agent.toolFind("/missing/**/*.ts")) as {
+      count: number;
+    };
+    expect(result.count).toBe(0);
+  });
 });
 
 // ── Grep tool ─────────────────────────────────────────────────────────

@@ -594,7 +594,7 @@ function Chat({
 
   const refreshWorkspaceFiles = useCallback(async () => {
     try {
-      const files = await agent.call("listWorkspaceFiles", ["/"]);
+      const files = await agent.call("listWorkspaceFiles", ["/workspace"]);
       setWorkspaceFiles(
         files as { name: string; type: string; size?: number }[]
       );
@@ -1034,11 +1034,11 @@ function Chat({
                               if (f.type === "file") {
                                 const content = await agent.call(
                                   "readWorkspaceFile",
-                                  [`/${f.name}`]
+                                  [`/workspace/${f.name}`]
                                 );
                                 if (content)
                                   setFileContent({
-                                    path: `/${f.name}`,
+                                    path: `/workspace/${f.name}`,
                                     content: content as string
                                   });
                               }

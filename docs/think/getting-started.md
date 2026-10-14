@@ -25,7 +25,7 @@ npm init -y
 Install dependencies:
 
 ```sh
-npm install @cloudflare/think agents ai @cloudflare/shell zod react react-dom
+npm install @cloudflare/think @cloudflare/computer agents ai zod react react-dom
 npm install -D wrangler @cloudflare/vite-plugin @cloudflare/workers-types @vitejs/plugin-react @tailwindcss/vite tailwindcss typescript vite
 ```
 

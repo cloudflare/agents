@@ -21,10 +21,11 @@ import type {
   ChatRecoveryOptions,
   ChatResponseResult,
   ThinkSubmissionStatus,
+  ThinkWorkspace,
   ToolCallResultContext,
   TurnContext
 } from "@cloudflare/think";
-import { skills, Think } from "@cloudflare/think";
+import { lazyWorkspace, skills, Think } from "@cloudflare/think";
 import type { ContextConfig } from "agents/context";
 import type { WorkspaceAgent } from "./workspace-agent";
 import type { LanguageModel, ToolSet } from "ai";
@@ -169,8 +170,6 @@ export class ThinkAgent extends ThinkBase {
    */
   override workspaceBash = false;
 
-  // This proxy presents Think's legacy direct-method shape even though the
-  // remote owner is Computer. Keep skills in Computer's mounted tree.
   override skillWorkspace = { root: "/workspace/.agents/skills" };
 
   readonly #workspaceAgent: DurableObjectStub<WorkspaceAgent>;
@@ -196,12 +195,22 @@ export class ThinkAgent extends ThinkBase {
     );
     // Do not call getWorkspace here: dispatch must submit without attaching a
     // container. The first durable turn operation resolves it lazily.
-    this.workspace = adaptToThinkWorkspace(() => this.#getWorkspace());
+    this.workspace = this.#lazyWorkspace();
 
     this.ctx.blockConcurrencyWhile(async () => {
       this.#context =
         (await this.ctx.storage.get<RunContext>(CONTEXT_KEY)) ?? null;
     });
+  }
+
+  #lazyWorkspace(): ThinkWorkspace {
+    return lazyWorkspace(
+      async () =>
+        // SAFETY: The remote Workspace is Computer's Workspace behind an RPC
+        // stub. Its published types come from @cloudflare/workspace, which
+        // predates the rename, so TypeScript cannot relate the two.
+        (await this.#getWorkspace()) as unknown as ThinkWorkspace
+    );
   }
 
   #getWorkspace(): Promise<RemoteWorkspace> {
@@ -214,6 +223,8 @@ export class ThinkAgent extends ThinkBase {
   async #disposeWorkspaceStub(): Promise<void> {
     const workspaceReady = this.#workspaceReady;
     this.#workspaceReady = null;
+    // Think's own file operations resolve a fresh stub next turn too.
+    this.workspace = this.#lazyWorkspace();
     if (!workspaceReady) return;
     try {
       const workspace = await workspaceReady;
@@ -734,157 +745,6 @@ function adaptToFileWorkspace(
       readdir: async (path) => (await fs()).readdir(path)
     }
   };
-}
-
-function adaptToThinkWorkspace(getWorkspace: () => Promise<RemoteWorkspace>) {
-  const fs = async () =>
-    (await getWorkspace()).fs as unknown as ConstructorParameters<
-      typeof WorkspaceFileStore
-    >[0]["fs"] & {
-      readFile(path: string, encoding: "utf8"): Promise<string>;
-      find(
-        directory: string,
-        pattern?: string
-      ): Promise<Array<{ path: string; type: "file" | "dir" }>>;
-    };
-  return {
-    async readFile(path: string): Promise<string | null> {
-      try {
-        return await (await fs()).readFile(path, "utf8");
-      } catch (err) {
-        if (isEnoent(err)) return null;
-        throw err;
-      }
-    },
-    async writeFile(path: string, content: string): Promise<void> {
-      await (await fs()).writeFile(path, new TextEncoder().encode(content));
-    },
-    async writeFileBytes(
-      path: string,
-      content: Uint8Array | ArrayBuffer
-    ): Promise<void> {
-      const bytes =
-        content instanceof Uint8Array ? content : new Uint8Array(content);
-      await (await fs()).writeFile(path, bytes);
-    },
-    async mkdir(path: string, opts?: { recursive?: boolean }): Promise<void> {
-      await (
-        await fs()
-      ).mkdir(path, opts?.recursive ? { recursive: true } : {});
-    },
-    async rm(
-      path: string,
-      opts?: { recursive?: boolean; force?: boolean }
-    ): Promise<void> {
-      await (
-        await fs()
-      ).rm(path, {
-        ...(opts?.recursive ? { recursive: true as const } : {}),
-        ...(opts?.force ? { force: true as const } : {})
-      });
-    },
-    async stat(path: string) {
-      try {
-        const s = await (await fs()).stat(path);
-        return {
-          path,
-          name: path.split("/").pop() ?? path,
-          type: s.isDirectory ? ("directory" as const) : ("file" as const),
-          mimeType: s.isDirectory
-            ? "inode/directory"
-            : "application/octet-stream",
-          size: s.size,
-          createdAt: s.mtime,
-          updatedAt: s.mtime
-        };
-      } catch (err) {
-        if (isEnoent(err)) return null;
-        throw err;
-      }
-    },
-    async readDir(dir: string) {
-      const entries = await (await fs()).readdir(dir);
-      return entries.map((e) => ({
-        path: `${dir}/${e.name}`,
-        name: e.name,
-        type: e.isDirectory ? ("directory" as const) : ("file" as const),
-        mimeType: e.isDirectory
-          ? "inode/directory"
-          : "application/octet-stream",
-        size: 0,
-        createdAt: 0,
-        updatedAt: 0
-      }));
-    },
-    async readFileBytes(path: string): Promise<Uint8Array | null> {
-      try {
-        const stream = await (await fs()).readFile(path);
-        const chunks: Uint8Array[] = [];
-        for await (const chunk of stream) chunks.push(chunk);
-        const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
-        let offset = 0;
-        for (const chunk of chunks) {
-          out.set(chunk, offset);
-          offset += chunk.length;
-        }
-        return out;
-      } catch (err) {
-        if (isEnoent(err)) return null;
-        throw err;
-      }
-    },
-    // Think's built-in find/grep tools call glob with model-supplied
-    // patterns. ws.fs.find matches a glob relative to a base directory, so
-    // split the pattern at its first wildcard segment into base + rest.
-    // Relative patterns root at /workspace (where all agent work lives).
-    async glob(pattern: string) {
-      const absolute = pattern.startsWith("/")
-        ? pattern
-        : `/workspace/${pattern}`;
-      const segments = absolute.split("/").filter(Boolean);
-      const baseParts: string[] = [];
-      let i = 0;
-      for (; i < segments.length && !/[*?[\]{]/.test(segments[i]); i++) {
-        baseParts.push(segments[i]);
-      }
-      const rest = segments.slice(i).join("/");
-      const toInfo = (
-        path: string,
-        isDirectory: boolean,
-        size = 0,
-        mtime = 0
-      ) => ({
-        path,
-        name: path.split("/").pop() ?? path,
-        type: isDirectory ? ("directory" as const) : ("file" as const),
-        mimeType: isDirectory ? "inode/directory" : "application/octet-stream",
-        size,
-        createdAt: mtime,
-        updatedAt: mtime
-      });
-      try {
-        if (rest.length === 0) {
-          // No wildcards: a literal path — stat it directly.
-          const path = `/${baseParts.join("/")}`;
-          const s = await (await fs()).stat(path);
-          return [toInfo(path, s.isDirectory, s.size, s.mtime)];
-        }
-        const base = baseParts.length === 0 ? "/" : `/${baseParts.join("/")}`;
-        const entries = await (await fs()).find(base, rest);
-        return entries.map((e) => toInfo(e.path, e.type === "dir"));
-      } catch (err) {
-        if (isEnoent(err)) return [];
-        throw err;
-      }
-    }
-  };
-}
-
-function isEnoent(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const e = err as { code?: string; message?: string };
-  if (e.code === "ENOENT") return true;
-  return typeof e.message === "string" && /ENOENT|no such/i.test(e.message);
 }
 
 function shellQuote(value: string): string {

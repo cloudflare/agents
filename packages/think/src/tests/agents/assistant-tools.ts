@@ -1,13 +1,12 @@
 import { Agent } from "agents";
-import { Workspace } from "@cloudflare/shell";
+import { Workspace } from "@cloudflare/computer";
+import { WorkspaceFiles } from "../../workspace-files";
 import { createWorkspaceTools } from "../../tools/workspace";
 import type { WorkspaceToolsOptions } from "../../tools/workspace";
 
 export class TestAssistantToolsAgent extends Agent {
-  workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    name: () => this.name
-  });
+  workspace = new Workspace({ storage: this.ctx.storage });
+  private files = new WorkspaceFiles(this.workspace);
 
   private getTools() {
     return createWorkspaceTools(this.workspace);
@@ -16,28 +15,20 @@ export class TestAssistantToolsAgent extends Agent {
   // Seed workspace with files for testing
   async seed(files: Array<{ path: string; content: string }>): Promise<void> {
     for (const f of files) {
-      const parent = f.path.replace(/\/[^/]+$/, "");
-      if (parent && parent !== "/") {
-        await this.workspace.mkdir(parent, { recursive: true });
-      }
-      await this.workspace.writeFile(f.path, f.content);
+      await this.files.write(f.path, f.content);
     }
   }
 
   async seedBytes(
     path: string,
     bytes: number[],
-    mimeType?: string
+    _mimeType?: string
   ): Promise<void> {
-    const parent = path.replace(/\/[^/]+$/, "");
-    if (parent && parent !== "/") {
-      await this.workspace.mkdir(parent, { recursive: true });
-    }
-    await this.workspace.writeFileBytes(path, new Uint8Array(bytes), mimeType);
+    await this.files.write(path, new Uint8Array(bytes));
   }
 
   async seedDir(path: string): Promise<void> {
-    await this.workspace.mkdir(path, { recursive: true });
+    await this.files.mkdir(path, { recursive: true });
   }
 
   async toolRead(
@@ -182,14 +173,10 @@ export class TestAssistantToolsAgent extends Agent {
   }
 
   async seedLargeFile(path: string, sizeBytes: number): Promise<void> {
-    const parent = path.replace(/\/[^/]+$/, "");
-    if (parent && parent !== "/") {
-      this.workspace.mkdir(parent, { recursive: true });
-    }
     // Generate content of approximately the requested size
     const line = "x".repeat(99) + "\n"; // 100 bytes per line
     const lines = Math.ceil(sizeBytes / 100);
     const content = line.repeat(lines);
-    await this.workspace.writeFile(path, content);
+    await this.files.write(path, content);
   }
 }

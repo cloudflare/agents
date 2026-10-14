@@ -17,7 +17,8 @@
  * ```
  *
  * `workspaceRevision` is a monotonically increasing counter the
- * directory bumps every time the shared workspace changes. Use it as a
+ * directory bumps after every chat turn, when the shared workspace may
+ * have changed. Use it as a
  * `useEffect` dep to keep workspace-backed UI live across chats and
  * open tabs without polling.
  *
@@ -51,8 +52,8 @@ export interface UseChats {
   /** Ordered chat list, most-recently-active first. */
   chats: ChatSummary[];
   /**
-   * Ticks up every time the shared workspace changes, regardless of
-   * which chat caused the change. Consumers can pass this as a
+   * Ticks up after every chat turn in any chat, since the turn may have
+   * changed the shared workspace. Consumers can pass this as a
    * `useEffect` dependency to refresh workspace-backed UI (file
    * browsers, tree views, etc.).
    */
@@ -81,13 +82,11 @@ export interface UseChats {
 }
 
 function isWorkspaceChangeMessage(value: unknown): boolean {
-  if (typeof value !== "object" || value === null) return false;
-  const msg = value as Record<string, unknown>;
-  if (msg.type !== "workspace-change") return false;
-  const event = msg.event;
-  if (typeof event !== "object" || event === null) return false;
-  const ev = event as Record<string, unknown>;
-  return typeof ev.path === "string" && typeof ev.type === "string";
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>).type === "workspace-change"
+  );
 }
 
 export function useChats(): UseChats {
@@ -103,17 +102,10 @@ export function useChats(): UseChats {
     onMcpUpdate: useCallback((state: MCPServersState) => {
       setMcpState(state);
     }, []),
-    // The directory broadcasts `{ type: "workspace-change", event }` on
-    // every shared-workspace mutation (see AssistantDirectory.workspace's
-    // onChange hook). `useAgent` passes through anything it doesn't
-    // recognize internally, so we parse here and expose a revision
-    // counter for downstream effects to key on.
-    //
-    // We intentionally don't expose the `event` payload itself here —
-    // nothing in the example reads it yet, and routing it reactively
-    // would need a state update rather than a ref. If a future consumer
-    // needs per-event details, change this to a `useState<{ revision,
-    // event }>` and expose both fields at once.
+    // The directory broadcasts `{ type: "workspace-change" }` after every
+    // chat turn (see AssistantDirectory.workspaceChanged). `useAgent`
+    // passes through anything it doesn't recognize internally, so we parse
+    // here and expose a revision counter for downstream effects to key on.
     onMessage: (message) => {
       if (typeof message.data !== "string") return;
       let parsed: unknown;

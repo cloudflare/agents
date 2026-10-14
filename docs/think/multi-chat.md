@@ -46,7 +46,7 @@ Browser tab
                     - messages and branches
                     - memory and other context blocks
                     - extensions, config, skills
-                    - SharedWorkspace / SharedMCPClient proxies → directory
+                    - workspace client / SharedMCPClient proxy → directory
 ```
 
 The browser keeps two connections open: one to the directory for the sidebar,
@@ -56,7 +56,7 @@ conversation itself.
 | Resource                                        | Owner     | How chats reach it                              |
 | ----------------------------------------------- | --------- | ----------------------------------------------- |
 | Chat list, titles, previews                     | Directory | Chats push updates over Durable Object RPC      |
-| Workspace files                                 | Directory | `SharedWorkspace` proxy, one RPC per file call  |
+| Workspace files                                 | Directory | `getWorkspace()` client, one RPC per file call  |
 | MCP registry, OAuth tokens, live connections    | Directory | `SharedMCPClient` proxy, merged in `beforeTurn` |
 | Cross-chat scheduled work                       | Directory | Directory RPCs into the selected chat           |
 | Messages, branches, compaction                  | Chat      | Local Session                                   |
@@ -335,78 +335,47 @@ deleted from another tab, the app selects the most recently active chat.
 
 ## Share the workspace
 
-The directory owns one `Workspace` backed by its own SQLite, so a file written in
-one chat is visible in every other chat for that user:
+The directory owns one `@cloudflare/computer` `Workspace` backed by its own
+SQLite, so a file written in one chat is visible in every other chat for that
+user:
 
 ```typescript
+import { Workspace, type WorkspaceStub } from "@cloudflare/computer";
+
 export class AssistantDirectory extends Think<Env, DirectoryState> {
-  workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    name: () => this.name,
-    onChange: (event) =>
-      this.broadcast(JSON.stringify({ type: "workspace-change", event }))
-  });
+  override workspace = new Workspace({ storage: this.ctx.storage });
 
-  // One-line delegates, called by child chats over Durable Object RPC.
-  // Not @callable(): browsers must not write files through the sidebar socket.
-  async readFile(path: string): Promise<string | null> {
-    return this.workspace.readFile(path);
+  // getWorkspace() from @cloudflare/computer calls this over Durable Object RPC.
+  // Not @callable(): browsers must not reach the workspace through the sidebar socket.
+  async __getWorkspaceStub(): Promise<WorkspaceStub> {
+    await this.workspace.ready();
+    return this.workspace.stub();
   }
-
-  async writeFile(
-    path: string,
-    content: string,
-    mimeType?: Parameters<Workspace["writeFile"]>[2]
-  ): Promise<void> {
-    return this.workspace.writeFile(path, content, mimeType);
-  }
-
-  // ...readFileBytes, writeFileBytes, appendFile, exists, readDir, rm, glob,
-  // mkdir, stat, lstat, cp, mv, symlink, readlink
 }
 ```
 
-Each chat replaces Think's default workspace with a `SharedWorkspace` proxy that
-forwards every call to the directory. Assigning it as a class field means Think
-never creates a per-chat `Workspace`:
+Each chat replaces
+Think's default workspace with a client for the directory's. `lazyWorkspace`
+defers `getWorkspace()` until a turn first touches a file, and assigning it as a
+class field means Think never creates a per-chat `Workspace`:
 
 ```typescript
-import type { WorkspaceFsLike } from "@cloudflare/shell";
+import { getWorkspace } from "@cloudflare/computer";
+import { lazyWorkspace } from "@cloudflare/think";
 
 export class MyAssistant extends Think<Env> {
-  override workspace: WorkspaceFsLike = new SharedWorkspace(() =>
-    this.parentAgent(AssistantDirectory)
+  override workspace = lazyWorkspace(async () =>
+    getWorkspace(await this.parentAgent(AssistantDirectory))
   );
-}
-
-export class SharedWorkspace implements WorkspaceFsLike {
-  #stubPromise?: Promise<DurableObjectStub<AssistantDirectory>>;
-
-  constructor(
-    private getParent: () => Promise<DurableObjectStub<AssistantDirectory>>
-  ) {}
-
-  private parent() {
-    this.#stubPromise ??= this.getParent();
-    return this.#stubPromise;
-  }
-
-  async readFile(path: string) {
-    return (await this.parent()).readFile(path);
-  }
-
-  // ...every other WorkspaceFsLike method forwards the same way
 }
 ```
 
-The proxy implements `WorkspaceFsLike` from `@cloudflare/shell`, which is wider
-than the `WorkspaceLike` type Think requires. That lets the same object drive
-Think's built-in workspace tools, `createWorkspaceTools(this.workspace)`, the
-`state.*` API inside `createExecuteTool(this, ...)`, `fetchTools` workspace
-spill, and skill script runners.
+Think's workspace tools, the fetch tool's saved responses, and skill script
+runners all go through it.
 
-To keep file browsers live across chats and tabs, `useChats()` listens for the
-directory's `workspace-change` broadcasts and exposes a `workspaceRevision`
+To keep file browsers fresh across chats and tabs, each chat calls a
+`workspaceChanged()` method on the directory after every turn, which broadcasts
+`{ type: "workspace-change" }`. `useChats()` listens for those broadcasts and exposes a `workspaceRevision`
 counter that chat panes use as a `useEffect` dependency:
 
 ```typescript

@@ -12,7 +12,7 @@ Think builds on packages that are installed alongside it:
 
 - `agents/docs/index.md` — Durable Objects, state, routing, sessions, scheduling, MCP, and shared agent primitives
 - `@cloudflare/codemode/docs/index.md` — sandboxed execution, tool providers, connectors, approvals, and snippets
-- `@cloudflare/shell/docs/index.md` — Workspace, filesystem operations, and the `state.*` and `git.*` providers used by Think's tools
+- [`@cloudflare/computer`](https://github.com/cloudflare/computer/tree/main/packages/computer) — the Workspace, its execution backends, and the workspace tools
 
 ## Why Think
 
@@ -31,7 +31,7 @@ If you only need a chat-protocol adapter where you own the loop and the `Respons
 ### Install
 
 ```sh
-npm install @cloudflare/think agents ai @cloudflare/shell zod
+npm install @cloudflare/think @cloudflare/computer agents ai zod
 ```
 
 `workers-ai-provider` is bundled with Think, so the common case needs no extra provider package — `getModel()` can return a model id string.
@@ -530,14 +530,14 @@ agent (including a plain `@cloudflare/ai-chat` `onChatMessage`) can build a
 Think can also project each resolved `SKILL.md` into the active workspace so
 the agent can read and edit skills as files. This is off by default: skills
 load from their sources and nothing is written to the Workspace. Set
-`skillWorkspace = {}` to enable it. Computer uses `/workspace/.agents/skills`;
-legacy Shell uses `/.agents/skills`. Existing workspace edits are preserved and
+`skillWorkspace = {}` to enable it. Skills land under `/workspace/.agents/skills`.
+Existing workspace edits are preserved and
 affect later activation. Resources copy into the workspace when first requested
 rather than at startup. A durable source fingerprint lets unchanged cold wakes
 attach to the existing projection without statting or rewriting every file.
 
-Set `skillWorkspace = { root: "/workspace/.agents/skills" }` when a custom
-Computer proxy presents Think's legacy direct-method shape.
+Set `skillWorkspace = { root: "/some/other/dir" }` to project skills somewhere
+else.
 
 Sources are applied in order; the first source to register a skill name wins,
 and later duplicates (or a source that fails to load) are skipped with a logged
@@ -957,20 +957,20 @@ Two things do change on upgrade:
 
 Annotate a `configureSession` override with `Session` imported from `@cloudflare/think`. The `Session` class exported by `agents/sessions` is the raw storage handle and is not assignable to Think's.
 
-`sessionAttachments` is gone (Sessions stores media out of the row on its own), `MediaEvictionConfig.externalizeToWorkspace` is ignored (bytes are always preserved), and `WorkspaceLike.writeFileBytes` is optional (a workspace without it disables media eviction and skills projection with a one-time warning).
+`sessionAttachments` is gone (Sessions stores media out of the row on its own), `MediaEvictionConfig.externalizeToWorkspace` is ignored (bytes are always preserved), and the workspace is now a `@cloudflare/computer` Workspace (`ThinkWorkspace`).
 
 Think's `this.messages` getter reads directly from the Session tree. Compaction overlays and search are handled by Sessions.
 
 ### Message storage
 
-Sessions stores MESSAGES; it is not a file store. A message rides in one SQLite row until its serialized JSON exceeds the 1.5 MiB row budget; a message larger than that is split across continuation rows and reassembled on read, byte for byte. Nothing is truncated and no message is too large to store, so there is no size error to handle and nothing to configure. Splitting never reclaims database space — the continuation rows live in the same Durable Object as the message — and Sessions imposes no upper bound on a single message, so a Durable Object's 10 GB ceiling is the real bound on how much one conversation can hold and bounding untrusted input is the application's job. Files belong in the Workspace, which spills to R2; put a reference to one in the message. This is a storage detail: it is invisible to the model, and it is unrelated to media eviction.
+Sessions stores MESSAGES; it is not a file store. A message rides in one SQLite row until its serialized JSON exceeds the 1.5 MiB row budget; a message larger than that is split across continuation rows and reassembled on read, byte for byte. Nothing is truncated and no message is too large to store, so there is no size error to handle and nothing to configure. Splitting never reclaims database space — the continuation rows live in the same Durable Object as the message — and Sessions imposes no upper bound on a single message, so a Durable Object's 10 GB ceiling is the real bound on how much one conversation can hold and bounding untrusted input is the application's job. Files belong in the Workspace; put a reference to one in the message. This is a storage detail: it is invisible to the model, and it is unrelated to media eviction.
 
 ### Media eviction
 
 Media eviction is a different concern: a context-window technique, not a storage one. Sending a screenshot the model has already looked at back through the context on every subsequent turn is pure cost, so once a message has aged past `mediaEviction.keepRecentMessages` (8 by default) on the active path, Think takes the media out of the conversation and leaves a marker in its place:
 
 ```
-[evicted image/png, 812004 bytes; preserved at /attachments/evicted/msg_01H8-0.png]
+[evicted image/png, 812004 bytes; preserved at /workspace/attachments/evicted/msg_01H8-0.png]
 ```
 
 The bytes are written to the Workspace at that path, raw and with their real mime type — not as a `data:` URL string. The workspace `read` tool recognises `image/*`, so when the agent decides it needs to look at the picture again it reads the path out of the marker and the actual image goes back into context. Eviction is visible to the model and lossy on purpose; nothing reconstructs it behind the model's back.
@@ -1023,6 +1023,20 @@ A compaction threshold that the compacted history still exceeds compacts on ever
 | `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
 | `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
 
+## Upgrading to a Computer workspace
+
+Think's workspace is a `Workspace` from [`@cloudflare/computer`](https://github.com/cloudflare/computer), which replaces `@cloudflare/shell`:
+
+- Install `@cloudflare/computer`; it is a peer dependency. Import `Workspace` from it rather than from `@cloudflare/think`.
+- `workspace` is typed `ThinkWorkspace`, which needs only `workspace.fs`. `WorkspaceLike` is gone.
+- The default Workspace lives on the agent's own storage and has no execution backends. Override `workspace` with `new Workspace({ storage: this.ctx.storage, ... })` to add backends, mounts, or git.
+- For a Workspace another Durable Object owns, use `lazyWorkspace(async () => getWorkspace(stub))`. It resolves on first use and keeps the client.
+- Think writes its own files under `/workspace`: evicted media under `/workspace/attachments/evicted/`, fetched responses under `/workspace/fetched/`, and skills under `/workspace/.agents/skills`.
+- `createExecuteTool(this)` no longer builds `state.*` from the workspace; pass `state` yourself.
+- Agent Skills (`agents/skills`) accept only a Computer Workspace, for both projection and `skills.runner({ workspaceInstance })`. Relative paths in skill scripts resolve against `/workspace`.
+
+Files a Shell Workspace stored are not moved. [Migrating to `@cloudflare/computer`](../shell/migrating-to-computer.md) documents both storage schemas and a copy script.
+
 ## Dependencies
 
 Peer dependencies you provide:
@@ -1032,13 +1046,13 @@ Peer dependencies you provide:
 | `agents`                 | yes      | Cloudflare Agents SDK            |
 | `ai`                     | yes      | Vercel AI SDK v6                 |
 | `zod`                    | yes      | Schema validation (v4)           |
+| `@cloudflare/computer`   | yes      | Workspace and workspace tools    |
 | `@chat-adapter/telegram` | optional | Required for Telegram messengers |
 
 Bundled with `@cloudflare/think`:
 
 | Package                | Notes                                                 |
 | ---------------------- | ----------------------------------------------------- |
-| `@cloudflare/shell`    | `Workspace` filesystem                                |
 | `@cloudflare/codemode` | Code execution for `createExecuteTool()`              |
 | `just-bash`            | Sandboxed shell for the default workspace `bash` tool |
 
