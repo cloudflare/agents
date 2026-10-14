@@ -1,6 +1,6 @@
 /**
- * `agents/models/opencode` — Workers AI as an OpenCode provider, with the
- * same shape as `agents/models/ai-sdk` and `agents/models/pi-ai`.
+ * `agents/models/opencode` — Cloudflare's models as an OpenCode provider, with
+ * the same shape as `agents/models/ai-sdk` and `agents/models/pi-ai`.
  *
  * ```ts
  * import { createAI } from "agents/models/opencode";
@@ -9,14 +9,17 @@
  * const ai = createAI({ binding: env.AI });
  *
  * const model = ai("@cf/moonshotai/kimi-k2.7-code"); // { providerID, id }
+ * ai("anthropic/claude-opus-4.8"); // an AI Gateway catalog model
  * await OpenCodeWorkerd.create({ storage, plugins: [ai.plugin] });
  * ```
  *
  * `ai.plugin` is an OpenCode plugin. It adds a `cloudflare` provider whose
- * models are the ids you have called `ai(id)` with, and answers OpenCode's
- * AI SDK hook with `agents/models/ai-sdk`'s models, so requests go through
- * the `AI` binding: no account id, API token, or HTTP route to Workers AI in
- * your Worker, and nothing patched globally.
+ * models are the ids you have called `ai(id)` with — Workers AI ids, AI
+ * Gateway catalog ids and dynamic routes — and answers OpenCode's AI SDK hook
+ * with `agents/models/ai-sdk`'s models, so requests go through the `AI`
+ * binding on `env.AI.run`: no account id, API token, or HTTP route in your
+ * Worker, and nothing patched globally. Catalog streams resume after a
+ * dropped connection, as they do in `agents/models/ai-sdk`.
  *
  * @experimental The surface may change in any release.
  *
@@ -24,17 +27,21 @@
  */
 
 import { Model, Provider, type Plugin } from "@opencode/plugin";
-import type { WorkersAIModelId } from "../core/catalog";
-import type { AISettings, ModelOptions } from "../core/settings";
-import { createAI as createAISDK } from "../ai-sdk";
+import type { AISettings } from "../core/settings";
+import {
+  createAI as createAISDK,
+  type CloudflareLanguageModelId,
+  type ModelOptions
+} from "../ai-sdk";
 import { asLanguageModelV3 } from "./language-v3";
 
-export type { WorkersAIModelId } from "../core/catalog";
 export type {
-  AISettings,
-  GatewayOptions,
-  ModelOptions
-} from "../core/settings";
+  CatalogModelId,
+  DynamicRouteId,
+  WorkersAIModelId
+} from "../core/catalog";
+export type { AISettings, GatewayOptions } from "../core/settings";
+export type { CloudflareLanguageModelId, ModelOptions } from "../ai-sdk";
 
 /** The OpenCode provider id `createAI`'s plugin registers. */
 export const CLOUDFLARE_PROVIDER_ID = "cloudflare";
@@ -77,15 +84,19 @@ export type OpenCodeModelOptions = ModelOptions & {
 const DEFAULT_LIMIT: OpenCodeModelLimit = { context: 128_000, output: 8_192 };
 
 /**
- * The provider `createAI` returns. Call it with a Workers AI id to register
- * the model with the plugin and get OpenCode's reference to it.
+ * The provider `createAI` returns. Call it with a model id — a Workers AI id,
+ * an AI Gateway catalog id, or a dynamic route — to register the model with
+ * the plugin and get OpenCode's reference to it.
  */
 export interface AI {
-  /** A Workers AI model, registered with the plugin. */
-  (modelId: WorkersAIModelId, options?: OpenCodeModelOptions): OpenCodeModel;
+  /** A model, registered with the plugin. */
+  (
+    modelId: CloudflareLanguageModelId,
+    options?: OpenCodeModelOptions
+  ): OpenCodeModel;
   /** Same as calling the provider directly. */
   model(
-    modelId: WorkersAIModelId,
+    modelId: CloudflareLanguageModelId,
     options?: OpenCodeModelOptions
   ): OpenCodeModel;
   /** The OpenCode plugin. Pass it in `OpenCodeWorkerd.create({ plugins })`. */
@@ -93,7 +104,7 @@ export interface AI {
 }
 
 /**
- * Create the Workers AI provider for OpenCode.
+ * Create Cloudflare's model provider for OpenCode.
  *
  * @param settings - The `AI` binding and gateway defaults, as for
  *   `agents/models/ai-sdk`.
@@ -122,7 +133,7 @@ export function createAI(settings: AISettings): AI {
         editor.add({
           info: {
             id: providerID,
-            name: "Cloudflare Workers AI",
+            name: "Cloudflare",
             activation: "enabled",
             package: CARRIER_PACKAGE,
             settings: { baseURL: UNREACHABLE_BASE_URL, apiKey: "binding" }
@@ -151,9 +162,12 @@ export function createAI(settings: AISettings): AI {
   };
 
   const model = (
-    modelId: WorkersAIModelId,
+    modelId: CloudflareLanguageModelId,
     options?: OpenCodeModelOptions
   ): OpenCodeModel => {
+    // The same gate `agents/models/ai-sdk` applies, at the line that named the
+    // model rather than at OpenCode's first request.
+    aiSdk.languageModel(modelId, options);
     const changed =
       !models.has(modelId) ||
       JSON.stringify(models.get(modelId)?.limit) !==

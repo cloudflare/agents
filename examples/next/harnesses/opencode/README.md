@@ -49,8 +49,10 @@ This example is the only documentation for them for now.
 - **Hibernation.** An open OpenCode runs background timers that keep the
   object in memory. The harness closes OpenCode 30 seconds after its last
   use, once nothing is running, and reopens it on the next call.
-- **`createAI` from `agents/models/opencode`.** Workers AI as an OpenCode
-  plugin, over the `AI` binding: no account id or API token.
+- **`createAI` from `agents/models/opencode`.** Cloudflare's models as an
+  OpenCode plugin, over the `AI` binding: Workers AI ids, AI Gateway catalog
+  ids (`anthropic/claude-opus-4.8`) and dynamic routes, with no account id or
+  API token.
 - **App glue that isn't part of the harness.**
   - `sockets.ts` puts sessions on `WebSockets`. Each socket gets a snapshot
     of the transcript. While a session runs, one stream from
