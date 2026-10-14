@@ -128,7 +128,7 @@ A Think instance holds one conversation on the default Sessions handle. Multi-ch
 
 ### Code execution (`@cloudflare/think/tools/execute`)
 
-`createExecuteTool(this, overrides?)` builds a codemode runtime from the agent (`ctx`, `env.LOADER`, optional `env.BROWSER`) and returns the `execute` tool. The model writes JavaScript that runs in a Dynamic Worker with `tools.*`, `state.*` (the workspace), and `cdp.*` connectors. The runtime is assigned to `this.codemode`, which backs the `approveExecution` / `rejectExecution` / `pendingExecutions` callables for approval-gated sandbox tools. See [think-execute-hitl.md](./think-execute-hitl.md).
+`createExecuteTool(this, overrides?)` builds a codemode runtime from the agent (`ctx`, `env.LOADER`, optional `env.BROWSER`) and returns the `execute` tool. The model writes JavaScript that runs in a Dynamic Worker with `tools.*` and `cdp.*` connectors; pass `createAITools({ workspace: this.workspace })` as `tools` to reach the workspace. The runtime is assigned to `this.codemode`, which backs the `approveExecution` / `rejectExecution` / `pendingExecutions` callables for approval-gated sandbox tools. See [think-execute-hitl.md](./think-execute-hitl.md).
 
 ### Fetch tools (`@cloudflare/think/tools/fetch`)
 
