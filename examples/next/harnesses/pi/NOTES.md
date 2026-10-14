@@ -248,10 +248,10 @@ schemas, and its `exec` runs on a Workspace backend. What came up:
   rather than its `cli()`, which gives the model return values it can use
   directly. The model still sometimes tries `node:path` first; the error
   names the module and it recovers.
-- **Git is opt-in twice.** The backend installs `ws:git`, but every call
-  fails until the `Workspace` gets `git: createGitClient()`, which needs the
-  optional `@platformatic/vfs` peer. Network operations also need
-  `allowGitNetwork: true` on the backend.
+- **Git is opt-in twice.** The backend gets `ws:git` from
+  `createGitModule()`, but every call fails until the `Workspace` gets
+  `git: createGitClient()`, which needs the optional `@platformatic/vfs`
+  peer. Network operations also need `createGitModule({ allowNetwork: true })`.
 - **`ws:git` paths are not the client's.** The git client's types say `dir`
   defaults to `/`. Through `ws:git` the host resolves `dir` against the
   module's working directory and keeps it inside the backend root. The

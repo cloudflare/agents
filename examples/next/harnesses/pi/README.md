@@ -86,7 +86,7 @@ export class PiAgent extends DurableObject<Env> {
       new WorkerJavaScriptBackend({
         id: JAVASCRIPT_BACKEND,
         loader: this.env.LOADER,
-        allowGitNetwork: true
+        modules: { "ws:git": createGitModule({ allowNetwork: true }) }
       })
     ]
   });
@@ -176,8 +176,9 @@ JavaScript that includes the `ws:git` TypeScript interface (`clone`,
 
 Git needs two things besides the backend: `git: createGitClient()` from
 `@cloudflare/computer/git` on the `Workspace`, which needs the
-`@platformatic/vfs` peer, and `allowGitNetwork: true` on the backend for
-`clone`. Git runs in the host, through isomorphic-git on the workspace
+`@platformatic/vfs` peer, and the `ws:git` module from
+`createGitModule({ allowNetwork: true })` (`@cloudflare/computer/modules/git`)
+on the backend, which `clone` needs. Git runs in the host, through isomorphic-git on the workspace
 files, so cloning works while the module itself has no network.
 
 ## Package sources
@@ -186,8 +187,8 @@ Pi comes from npm: `@earendil-works/pi-durable`, `pi-ai`, `chord` and
 `pi-telemetry` at `^1.0.0`. Pi is MIT licensed; see
 [`licenses/mit-earendil-pi.txt`](./licenses/mit-earendil-pi.txt).
 
-`@cloudflare/computer` comes from npm at `^0.4.0`, the first release with
-`@cloudflare/computer/tools/pi-ai`.
+`@cloudflare/computer` comes from npm at `^0.5.1`. 0.5 is the first release with
+the `ws:git` module that `exec` uses for git.
 
 Note that the repository sets `minimumReleaseAge: 1440` in
 `pnpm-workspace.yaml`, so a pi release less than 24 hours old will not

@@ -12,7 +12,7 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/computer": "^0.4.0",
+    "@cloudflare/computer": "^0.5.1",
     "@cloudflare/kumo": "^2.6.0",
     "@opencode/plugin": "2.0.24",
     "@opencode/sdk": "2.0.24",
