@@ -20,11 +20,18 @@ import {
 } from "./provider-adapter";
 
 /**
- * Browser Run's server-side `keep_alive` maximum (600 seconds). A `Browser`
- * pins keep-alive here by default so it survives quiet spells between agent
- * turns; the platform reclaims it only after this long idle.
+ * Default `keep_alive` for a `Browser` on Browser Run: 10 minutes. Long
+ * enough to survive quiet spells between agent turns, while an abandoned
+ * browser bills for at most 10 idle minutes (a whole day of Workers Free
+ * browser time).
  */
-export const BROWSER_SESSION_KEEP_ALIVE_MAX_MS = 600_000;
+export const BROWSER_SESSION_KEEP_ALIVE_DEFAULT_MS = 600_000;
+
+/**
+ * Browser Run's `keep_alive` maximum: 20 minutes. Browser Run rejects
+ * anything longer.
+ */
+export const BROWSER_SESSION_KEEP_ALIVE_MAX_MS = 1_200_000;
 
 /**
  * Browser Run settings applied every time a browser is created — including
@@ -34,8 +41,9 @@ export const BROWSER_SESSION_KEEP_ALIVE_MAX_MS = 600_000;
 export interface BrowserRunOptions {
   /**
    * Platform `keep_alive` in milliseconds: how long an idle browser lives.
-   * Defaults to {@link BROWSER_SESSION_KEEP_ALIVE_MAX_MS} (the platform
-   * maximum).
+   * Defaults to {@link BROWSER_SESSION_KEEP_ALIVE_DEFAULT_MS} (10 minutes).
+   * Browser Run accepts up to {@link BROWSER_SESSION_KEEP_ALIVE_MAX_MS}
+   * (20 minutes).
    */
   keepAliveMs?: number;
   /** Opt into Browser Run session recording (rrweb capture). */
@@ -73,7 +81,7 @@ export function browserRunAdapter(
   const { binding, options } = provider;
   // Options are read on every use, like `recording` and `guardrails` below.
   const keepAliveMs = () =>
-    options.keepAliveMs ?? BROWSER_SESSION_KEEP_ALIVE_MAX_MS;
+    options.keepAliveMs ?? BROWSER_SESSION_KEEP_ALIVE_DEFAULT_MS;
 
   return {
     get keepAliveMs() {

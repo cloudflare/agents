@@ -355,8 +355,8 @@ export class Browser extends LifecycleCapability {
    *
    * The provider close is best-effort: the retired record is the durable
    * outcome, and a browser whose close failed is unreachable through this
-   * store, so the provider reclaims it once idle (Browser Run: the pinned
-   * `keep_alive`, ≤600s).
+   * store, so the provider reclaims it once idle (Browser Run: after
+   * `keepAliveMs`, at most 20 minutes).
    */
   async close(): Promise<boolean> {
     let stored: StoredBrowserSession | undefined;

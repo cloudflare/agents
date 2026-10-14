@@ -240,7 +240,7 @@ export class MyAgent extends Think<Env> {
 - Tabs the page opens itself come back as `newTabs` in the result.
 - If the browser was lost (idle past `keepAliveMs`, closed, or crashed), the code still runs in a new browser and the result includes `restarted: true`.
 - Call `this.browser.liveView()` to give a person a Live View link into the same browser, and `this.browser.close()` to shut it down.
-- Set `keepAliveMs`, `recording`, and `guardrails` on `browserRun(binding, options)`. Use a different `name` for each extra browser on the same agent.
+- Set `keepAliveMs`, `recording`, and `guardrails` on `browserRun(binding, options)`. `keepAliveMs` is how long an idle browser stays alive: 10 minutes by default, up to 20. Browser Run bills the idle time, so a longer value keeps tabs and logins across longer gaps between turns but costs more when a conversation is abandoned. Use a different `name` for each extra browser on the same agent.
 - Each run times out after `timeoutMs` (default 60 seconds).
 - The tool's description covers the `cdp` API, the CDP mistakes models commonly make, and this time limit, so the model doesn't need a discovery pass first.
 - A single `cdp.send` result can be at most 1 MB, so a full-page screenshot of a long page fails. The model is told to capture the viewport or use JPEG instead.

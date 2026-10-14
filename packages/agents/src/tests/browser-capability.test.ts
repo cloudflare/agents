@@ -13,7 +13,7 @@ import {
   namedBrowserSessionKey
 } from "../browser/browser";
 import {
-  BROWSER_SESSION_KEEP_ALIVE_MAX_MS,
+  BROWSER_SESSION_KEEP_ALIVE_DEFAULT_MS,
   browserRun
 } from "../browser/providers/browser-run";
 import type {
@@ -210,7 +210,7 @@ describe("Browser capability", () => {
       await capability.resolve();
       // Quiet past the keep-alive window on record, but still alive — e.g.
       // a human already driving it through an earlier Live View link.
-      const quietSince = Date.now() - BROWSER_SESSION_KEEP_ALIVE_MAX_MS;
+      const quietSince = Date.now() - BROWSER_SESSION_KEEP_ALIVE_DEFAULT_MS;
       await backdateStoredSession(storage, "default", {
         updatedAt: quietSince
       });
