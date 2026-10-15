@@ -4,8 +4,8 @@
  * Uses vitest-pool-workers — tests run inside a real Workers runtime
  * with a real WorkerLoader binding, no mocks needed.
  */
-import { describe, it, expect, vi } from "vitest";
-import { env } from "cloudflare:workers";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { env, RpcTarget } from "cloudflare:workers";
 import {
   DynamicWorkerExecutor,
   ToolDispatcher,
@@ -641,5 +641,121 @@ describe("provider prelude", () => {
 
     expect(result.error).toBeUndefined();
     expect(result.result).toEqual({ v: "cached", ran: false });
+  });
+});
+
+// A program may return while a tool call it started is still pending:
+// `async () => { t.ping({ x: "slow" }); return 1 }`. The Dynamic Worker is
+// counted as in-flight for as long as it has an outstanding call to the host,
+// so a pending call must not outlive execute() — otherwise every such program
+// leaks a concurrency slot and a Durable Object hits "Dynamic worker
+// concurrency limit exceeded" after ten of them.
+describe("tool calls left pending when the program returns", () => {
+  async function waitFor(check: () => boolean, ms = 2000) {
+    const deadline = Date.now() + ms;
+    while (!check() && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    return check();
+  }
+
+  // Workers RPC calls `[Symbol.dispose]` on a host RpcTarget once the remote
+  // side (the sandbox) has dropped every reference to it and has no call on
+  // it outstanding — i.e. once the sandbox no longer holds a request open on
+  // the host. Patch the base class to observe that for every target the
+  // executor hands the sandbox (connector bindings, tool dispatchers), whether
+  // or not it is wrapped.
+  let released: RpcTarget[] = [];
+  const proto = RpcTarget.prototype as unknown as Record<symbol, unknown>;
+  beforeEach(() => {
+    released = [];
+    proto[Symbol.dispose] = function (this: RpcTarget) {
+      released.push(this);
+    };
+  });
+  afterEach(() => {
+    delete proto[Symbol.dispose];
+  });
+
+  /** A connector binding whose `ping` never settles on the host. */
+  class HangingConnector extends RpcTarget {
+    calls: Array<{ method: string; args: unknown }> = [];
+    callTool(method: string, args: unknown): Promise<unknown> {
+      this.calls.push({ method, args });
+      return new Promise(() => {});
+    }
+  }
+
+  it("releases the sandbox's hold on a connector whose call is still pending", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const conn = new HangingConnector();
+    const result = await executor.execute(
+      `async () => { t.ping({ x: "slow" }); return 1 }`,
+      [],
+      { connectors: [{ name: "t", binding: conn }] }
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.result).toBe(1);
+
+    // The unawaited call still reaches the host (fire-and-forget works)...
+    expect(await waitFor(() => conn.calls.length > 0)).toBe(true);
+    expect(conn.calls).toEqual([{ method: "ping", args: { x: "slow" } }]);
+    // ...and although the host never settles it, the sandbox must not stay
+    // in flight on it once the program has returned.
+    expect(await waitFor(() => released.length > 0)).toBe(true);
+  });
+
+  it("releases the sandbox's hold on a provider whose call is still pending", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    let calls = 0;
+    const result = await executor.execute(
+      `async () => { codemode.hang({}); return 1 }`,
+      [
+        codemodeProvider({
+          hang: () => {
+            calls++;
+            return new Promise(() => {});
+          }
+        })
+      ]
+    );
+    expect(result.result).toBe(1);
+    expect(await waitFor(() => calls > 0)).toBe(true);
+    expect(await waitFor(() => released.length > 0)).toBe(true);
+  });
+
+  it("does not leak across many programs that leave a connector call pending", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const conn = new HangingConnector();
+    // More than the 10 concurrent Dynamic Workers a Durable Object may have.
+    for (let i = 0; i < 12; i++) {
+      const result = await executor.execute(
+        `async () => { t.ping({ i: ${i} }); return ${i} }`,
+        [],
+        { connectors: [{ name: "t", binding: conn }] }
+      );
+      expect(result.result).toBe(i);
+    }
+    expect(await waitFor(() => released.length === 12)).toBe(true);
+  });
+
+  it("still delivers results for connector calls the program awaits", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    let release: (() => void) | undefined;
+    const binding = new (class extends RpcTarget {
+      callTool(): Promise<unknown> {
+        return new Promise((resolve) => {
+          release = () => resolve({ pong: true });
+        });
+      }
+    })();
+    const pending = executor.execute(`async () => await t.ping({})`, [], {
+      connectors: [{ name: "t", binding }]
+    });
+    expect(await waitFor(() => release !== undefined)).toBe(true);
+    release?.();
+    const result = await pending;
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({ pong: true });
   });
 });

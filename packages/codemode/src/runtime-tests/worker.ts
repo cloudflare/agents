@@ -7,14 +7,14 @@
  * decision. Connector calls travel over real Workers RPC (the binding bug that
  * unit tests can't see).
  */
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, RpcTarget } from "cloudflare:workers";
 import {
   CodemodeConnector,
   type ConnectorTools,
   type ExecutionEndStatus,
   type PassEndStatus
 } from "../connectors";
-import { DynamicWorkerExecutor } from "../executor";
+import { DynamicWorkerExecutor, ToolDispatcher } from "../executor";
 import { createCodemodeRuntime } from "../runtime-handle";
 import {
   getCodemodeRuntime,
@@ -109,6 +109,12 @@ class ItemsConnector extends CodemodeConnector<Env> {
           this.deleted.push(result);
         }
       },
+      hang: {
+        // Never settles — a program that doesn't await it returns while the
+        // call is still pending on the host.
+        description: "Never settles.",
+        execute: () => new Promise(() => {})
+      },
       boom: {
         // Always throws — exercises the host→sandbox error path: the binding
         // must return an error marker (never reject across RPC) so the run ends
@@ -156,6 +162,7 @@ export class CodemodeTestHost extends DurableObject<Env> {
   // When set, the runtime wraps every completed result so tests can assert the
   // transformResult hook fires on both the initial run and a resume.
   #shape = false;
+  #connectorReleases = 0;
 
   #items() {
     this.#connector ??= new ItemsConnector(this.ctx, this.env);
@@ -172,6 +179,28 @@ export class CodemodeTestHost extends DurableObject<Env> {
       maxExecutions: options?.maxExecutions,
       transformResult: this.#shape ? (r) => ({ shaped: r }) : undefined
     });
+  }
+
+  /**
+   * Count the connector RpcTargets the sandbox has released. Workers RPC calls
+   * `[Symbol.dispose]` on a host RpcTarget once the remote side holds no
+   * reference to it and has no call on it outstanding — so a connector target
+   * that is never released means a sandbox that stays in flight (and keeps a
+   * Dynamic Worker concurrency slot) for the life of this Durable Object.
+   */
+  trackConnectorReleases() {
+    this.#connectorReleases = 0;
+    const onRelease = () => {
+      this.#connectorReleases++;
+    };
+    const proto = RpcTarget.prototype as unknown as Record<symbol, unknown>;
+    proto[Symbol.dispose] = function (this: RpcTarget) {
+      if (!(this instanceof ToolDispatcher)) onRelease();
+    };
+  }
+
+  connectorReleases() {
+    return this.#connectorReleases;
   }
 
   enableShaping() {
