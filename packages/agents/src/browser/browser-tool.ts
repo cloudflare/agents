@@ -17,6 +17,10 @@ import {
   type BrowserNewTab,
   type BrowserSource
 } from "./session-connector";
+import {
+  InternalHostsConnector,
+  internalHostsDescription
+} from "./hosts-connector";
 import { resolveCtx, transformBrowserResult } from "./tool-helpers";
 
 export interface BrowserToolOptions {
@@ -191,6 +195,8 @@ export function createBrowserToolCore(
   // model to search before every new connector (search doesn't cover CDP
   // commands), and describes approvals, snippets, and replay, which this
   // tool doesn't use.
+  const internalHosts = options.browser.internalHosts;
+  const hostsSection = internalHostsDescription(internalHosts);
   const rules = [
     BROWSER_INSTRUCTIONS,
     `Each run times out after ${Math.round(timeout / 1000)}s, so split long jobs (crawling a site, say) across runs.`,
@@ -203,7 +209,7 @@ export function createBrowserToolCore(
   const description = [
     "Run JavaScript that drives a persistent Chrome browser over the Chrome DevTools Protocol (CDP).",
     "",
-    "Write an async arrow function, `async () => { ... }`, and return a small JSON value. Use the `cdp` global to reach the browser. `fetch` is blocked and there is no file system or Node.js API.",
+    `Write an async arrow function, \`async () => { ... }\`, and return a small JSON value. Use the \`cdp\` global to reach the browser${hostsSection ? " and `hosts` for its internal sites" : ""}. \`fetch\` is blocked and there is no file system or Node.js API.`,
     "",
     "## cdp",
     "",
@@ -212,6 +218,7 @@ export function createBrowserToolCore(
     '- `cdp.spec()` returns the whole protocol (about 650 KB) as `{ domains: [{ name, commands, events, types }] }`. Filter it in code, for example `spec.domains.find((d) => d.name === "Page").commands.find((c) => c.name === "navigate")`.',
     "- `cdp.getDebugLog()` returns recent protocol traffic, for when a command fails or times out.",
     "",
+    ...(hostsSection ? [hostsSection, ""] : []),
     "## Rules",
     "",
     rules,
@@ -241,7 +248,9 @@ export function createBrowserToolCore(
     const runtime = createCodemodeRuntime({
       ctx: durableCtx,
       executor,
-      connectors: [connector],
+      connectors: internalHosts
+        ? [connector, new InternalHostsConnector(durableCtx, internalHosts)]
+        : [connector],
       name: browserRuntimeName(options.browser.name),
       transformResult: transformBrowserResult
     });

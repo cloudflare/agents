@@ -117,6 +117,25 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
     return { sessionId, restarted };
   }
 
+  /** The internal browser's tool description. */
+  internalToolDescription(): string {
+    return browserTool({
+      ctx: this.ctx,
+      browser: this.internalBrowser,
+      loader: this.env.LOADER
+    }).description;
+  }
+
+  /** Run model code in the internal browser's tool. */
+  async internalToolRun(code: string): Promise<unknown> {
+    const tool = browserTool({
+      ctx: this.ctx,
+      browser: this.internalBrowser,
+      loader: this.env.LOADER
+    });
+    return tool.execute({ code }, {});
+  }
+
   /** The host wiring the docs show: one `Browser`, a tool built per turn. */
   browserTool(scope?: string): BrowserTool {
     return browserTool({

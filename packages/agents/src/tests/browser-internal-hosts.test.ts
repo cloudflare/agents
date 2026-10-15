@@ -253,6 +253,43 @@ describe("Browser internal hosts", () => {
       }
     );
   });
+
+  it("lists the hosts in the browser tool and lets the model assign them", async () => {
+    await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
+      const description = instance.internalToolDescription();
+      expect(description).toContain("## hosts");
+      expect(description).toContain(
+        "- http://echo.internal/ — Echoes the request"
+      );
+      expect(description).toContain(
+        '- http://preview.internal/ — A port. Assignable; target schema: {"type":"object"'
+      );
+
+      const run = (await instance.internalToolRun(
+        `async () => {
+          const assigned = await hosts.assign({ host: "preview.internal", target: { port: 3001 } });
+          const list = await hosts.list();
+          return { assigned, target: list.find((h) => h.host === "preview.internal").target };
+        }`
+      )) as { status: string; result?: unknown };
+      expect(run.status).toBe("completed");
+      expect(run.result).toEqual({
+        assigned: { url: "http://preview.internal/" },
+        target: { port: 3001 }
+      });
+
+      const bad = (await instance.internalToolRun(
+        `async () => hosts.assign({ host: "preview.internal", target: { port: 1 } })`
+      )) as { status: string; error?: string };
+      expect(bad.status).not.toBe("completed");
+    });
+  });
+
+  it("leaves the default browser's tool without a hosts section", async () => {
+    await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
+      expect(instance.browserTool().description).not.toContain("## hosts");
+    });
+  });
 });
 
 describe("Browser internal hosts on a plain Durable Object", () => {

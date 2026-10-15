@@ -11,7 +11,11 @@ import {
   CdpProtocolError,
   type CdpConnection
 } from "./cdp-connection";
-import type { BrowserConnection, BrowserConnectOptions } from "./browser";
+import type {
+  BrowserConnection,
+  BrowserConnectOptions,
+  BrowserInternalHosts
+} from "./browser";
 import type { SearchableCdpSpec } from "./spec";
 
 /**
@@ -27,6 +31,11 @@ export interface BrowserSource {
    * every caller.
    */
   connect(options?: BrowserConnectOptions): Promise<BrowserConnection>;
+  /**
+   * The browser's internal hostnames, when it has any. The browser tool
+   * lists them and gives the model a `hosts` connector.
+   */
+  readonly internalHosts?: BrowserInternalHosts;
 }
 
 export interface BrowserSessionConnectorOptions {
