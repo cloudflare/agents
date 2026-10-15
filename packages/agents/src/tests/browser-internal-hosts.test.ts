@@ -9,6 +9,7 @@ import type {
 import { namedBrowserSessionKey } from "../browser/browser";
 import { browserRun } from "../browser/providers/browser-run";
 import {
+  fetcherRoute,
   MAX_INTERNAL_HOSTS,
   type InternalHostRouterLoopback
 } from "../browser/internal-hosts";
@@ -85,6 +86,23 @@ describe("browserRun internalHosts validation", () => {
         }
       })
     ).not.toThrow();
+  });
+});
+
+describe("fetcherRoute", () => {
+  it("passes a service binding through", () => {
+    expect(fetcherRoute(binding as unknown as Fetcher)).toBe(binding);
+  });
+
+  it("calls a ctx.exports entrypoint loopback to get a Fetcher", () => {
+    const fetcher = { fetch } as unknown as Fetcher;
+    const calls: unknown[] = [];
+    const loopback = (init: unknown) => {
+      calls.push(init);
+      return fetcher;
+    };
+    expect(fetcherRoute(loopback as unknown as Fetcher)).toBe(fetcher);
+    expect(calls).toEqual([{ props: {} }]);
   });
 });
 

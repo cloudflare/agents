@@ -43,7 +43,11 @@ export interface InternalHost {
 export interface InternalFetcherHost {
   /** Shown to the model next to the hostname. */
   description?: string;
-  /** The Worker that serves this hostname. */
+  /**
+   * The Worker that serves this hostname: a service binding, or an
+   * entrypoint of your own Worker (`this.ctx.exports.DocsSite`). Requests
+   * go straight to it, without waking your agent.
+   */
   fetcher: Fetcher;
   fetch?: never;
 }
@@ -139,6 +143,17 @@ export function internalHostsSignature(
     .map(([host, config]) => `${host}=${config.fetcher ? "fetcher" : "fetch"}`)
     .sort()
     .join(",");
+}
+
+/**
+ * The route Browser Run gets for a `fetcher` host. A `ctx.exports`
+ * entrypoint is a loopback stub that Browser Run can't take as is, so it's
+ * called (with empty props) to get a Fetcher it can.
+ */
+export function fetcherRoute(fetcher: Fetcher): Fetcher {
+  if (typeof fetcher !== "function") return fetcher;
+  const loopback = fetcher as unknown as (init: { props: object }) => Fetcher;
+  return loopback({ props: {} });
 }
 
 // ── Router ─────────────────────────────────────────────────────────────────
