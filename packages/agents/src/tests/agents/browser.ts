@@ -44,6 +44,17 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
           );
         }
       },
+      "preview.internal": {
+        description: "A port",
+        target: {
+          type: "object",
+          properties: { port: { type: "integer", minimum: 1024 } },
+          required: ["port"],
+          additionalProperties: false
+        },
+        fetch: async (_request: Request, target: unknown) =>
+          new Response(`port ${(target as { port: number }).port}`)
+      },
       "broken.internal": {
         fetch: async (): Promise<Response> => {
           throw new Error("dev server not listening");
@@ -81,6 +92,18 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
       text: await response.text(),
       headers: [...response.headers]
     };
+  }
+
+  internalHostsAssign(host: string, target: unknown) {
+    return this.internalBrowser.internalHosts!.assign(host, target);
+  }
+
+  internalHostsClear(host: string) {
+    return this.internalBrowser.internalHosts!.clear(host);
+  }
+
+  internalHostsList() {
+    return this.internalBrowser.internalHosts!.list();
   }
 
   /** The route props each internal host got at the last acquire. */

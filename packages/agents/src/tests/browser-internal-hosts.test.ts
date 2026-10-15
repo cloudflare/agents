@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import type { TestBrowserAgent } from "./agents/browser";
 import type {
   InternalHostsNoMethodObject,
@@ -11,6 +12,7 @@ import { browserRun } from "../browser/providers/browser-run";
 import {
   fetcherRoute,
   MAX_INTERNAL_HOSTS,
+  validateTarget,
   type InternalHostRouterLoopback
 } from "../browser/internal-hosts";
 import type { StoredBrowserSession } from "../browser/session-store";
@@ -106,13 +108,40 @@ describe("fetcherRoute", () => {
   });
 });
 
+describe("validateTarget", () => {
+  it("validates and transforms with a Standard Schema", async () => {
+    const schema = z.object({ port: z.coerce.number().int() });
+    expect(await validateTarget(schema, { port: "5173" })).toEqual({
+      ok: true,
+      value: { port: 5173 }
+    });
+    const bad = await validateTarget(schema, { port: "x" });
+    expect(bad.ok).toBe(false);
+    expect(!bad.ok && bad.error).toMatch(/^port: /);
+  });
+
+  it("validates with a plain JSON Schema", async () => {
+    const schema = {
+      type: "object",
+      properties: { folder: { type: "string" } },
+      required: ["folder"]
+    };
+    expect(await validateTarget(schema, { folder: "/a" })).toEqual({
+      ok: true,
+      value: { folder: "/a" }
+    });
+    expect((await validateTarget(schema, {})).ok).toBe(false);
+  });
+});
+
 describe("Browser internal hosts", () => {
   it("starts the browser with one route per hostname", async () => {
     await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
       await instance.internalResolve();
       expect(instance.internalRouteHosts().sort()).toEqual([
         "broken.internal",
-        "echo.internal"
+        "echo.internal",
+        "preview.internal"
       ]);
     });
   });
@@ -134,6 +163,51 @@ describe("Browser internal hosts", () => {
     });
   });
 
+  it("answers 502 until an assignable host is assigned", async () => {
+    await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
+      const before = await instance.internalHostFetch(
+        "http://preview.internal/"
+      );
+      expect(before.status).toBe(502);
+      expect(before.text).toMatch(/hosts\.assign/);
+
+      await expect(
+        instance.internalHostsAssign("preview.internal", { port: 80 })
+      ).rejects.toThrow(/Invalid target for preview.internal: port/);
+      await expect(
+        instance.internalHostsAssign("echo.internal", { port: 5173 })
+      ).rejects.toThrow(/no target/);
+      await expect(
+        instance.internalHostsAssign("nope.internal", { port: 5173 })
+      ).rejects.toThrow(/isn't an internal hostname/);
+
+      expect(
+        await instance.internalHostsAssign("preview.internal", { port: 5173 })
+      ).toEqual({ url: "http://preview.internal/" });
+      const after = await instance.internalHostFetch(
+        "http://preview.internal/"
+      );
+      expect(after).toMatchObject({ status: 200, text: "port 5173" });
+
+      const listed = await instance.internalHostsList();
+      expect(listed.find((info) => info.host === "preview.internal")).toEqual({
+        host: "preview.internal",
+        url: "http://preview.internal/",
+        description: "A port",
+        assignable: true,
+        targetSchema: expect.objectContaining({ type: "object" }),
+        target: { port: 5173 }
+      });
+
+      expect(await instance.internalHostsClear("preview.internal")).toBe(true);
+      expect(await instance.internalHostsClear("preview.internal")).toBe(false);
+      const cleared = await instance.internalHostFetch(
+        "http://preview.internal/"
+      );
+      expect(cleared.status).toBe(502);
+    });
+  });
+
   it("turns a throwing fetch into a 502 with the reason", async () => {
     await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
       const response = await instance.internalHostFetch(
@@ -141,6 +215,20 @@ describe("Browser internal hosts", () => {
       );
       expect(response.status).toBe(502);
       expect(response.text).toBe("broken.internal: dev server not listening");
+    });
+  });
+
+  it("keeps assignments when the browser is replaced", async () => {
+    await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
+      await instance.internalHostsAssign("preview.internal", { port: 5173 });
+      const first = await instance.internalResolve();
+      await instance.internalBrowser.close();
+      const second = await instance.internalResolve();
+      expect(second.sessionId).not.toBe(first.sessionId);
+      const response = await instance.internalHostFetch(
+        "http://preview.internal/"
+      );
+      expect(response.text).toBe("port 5173");
     });
   });
 
@@ -152,7 +240,7 @@ describe("Browser internal hosts", () => {
         const key = `browser-session:${namedBrowserSessionKey("internal")}`;
         const stored = await state.storage.get<StoredBrowserSession>(key);
         expect(stored?.internalHosts).toBe(
-          "broken.internal=fetch,echo.internal=fetch"
+          "broken.internal=fetch,echo.internal=fetch,preview.internal=fetch"
         );
         await state.storage.put(key, { ...stored, internalHosts: "old=fetch" });
 
