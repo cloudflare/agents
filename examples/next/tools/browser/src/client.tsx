@@ -1,35 +1,39 @@
 import {
-  Badge,
   Button,
-  Empty,
-  InputArea,
+  Dialog,
   PoweredByCloudflare,
-  Surface,
-  Text
+  Tooltip,
+  TooltipProvider
 } from "@cloudflare/kumo";
 import {
-  BrainIcon,
-  CheckCircleIcon,
-  GearIcon,
-  GlobeIcon,
+  AppWindowIcon,
+  CompassIcon,
+  InfoIcon,
   MoonIcon,
-  PackageIcon,
-  RocketLaunchIcon,
-  PaperPlaneRightIcon,
-  PlusIcon,
-  StopIcon,
+  NotePencilIcon,
   SunIcon,
-  WrenchIcon,
-  XCircleIcon,
   XIcon
 } from "@phosphor-icons/react";
-import { code } from "@streamdown/code";
-import { useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Streamdown } from "streamdown";
+import { AboutDialog, HostChip, HOSTS } from "./about-dialog";
 import { BrowserPanel, useBrowserState } from "./browser-panel";
-import type { ToolInfo, TranscriptMessage, TranscriptPart } from "./protocol";
+import {
+  ChatFeed,
+  Composer,
+  ConnectionDot,
+  Pending,
+  useColorMode
+} from "./chat-ui";
+import {
+  AgentTurn,
+  groupTurns,
+  messageText,
+  resultsById,
+  TurnError,
+  UserMessage,
+  type ZoomImage
+} from "./messages";
 import { MODEL_ID } from "./shared";
 import { usePiSession } from "./use-pi-session";
 import "./styles.css";
@@ -38,24 +42,21 @@ const SESSION_KEY = "browser-tool-session";
 
 const SUGGESTIONS = [
   {
-    icon: <RocketLaunchIcon size={15} />,
-    label: "Build the demo site",
-    value:
+    title: "Build the demo site",
+    prompt:
       "Build the site the docs describe, run it on the dev server, and show it to me in your browser."
   },
   {
-    icon: <PackageIcon size={15} />,
-    label: "Preview the build",
-    value:
+    title: "Preview a production build",
+    prompt:
       "Make a production build of the site and open it on files.internal. Check the Launch button still works."
   },
   {
-    icon: <GlobeIcon size={15} />,
-    label: "Try vinext",
-    value:
+    title: "Try vinext",
+    prompt:
       "In /workspace, run `npm create vinext-app@latest vinext-app -- --yes --use-npm --platform node --disable-git`. Set up its dev server for preview.internal the way the docs say, start it, and show me the home page."
   }
-] satisfies Array<{ icon: ReactNode; label: string; value: string }>;
+];
 
 function getSession(): string {
   const existing = localStorage.getItem(SESSION_KEY);
@@ -65,330 +66,157 @@ function getSession(): string {
   return created;
 }
 
-function ModeToggle() {
-  const [mode, setMode] = useState(
-    () => localStorage.getItem("theme") ?? "light"
-  );
-
-  useEffect(() => {
-    document.documentElement.setAttribute("data-mode", mode);
-    document.documentElement.style.colorScheme = mode;
-    localStorage.setItem("theme", mode);
-  }, [mode]);
-
-  return (
-    <Button
-      variant="ghost"
-      shape="square"
-      aria-label="Toggle theme"
-      onClick={() => setMode((value) => (value === "light" ? "dark" : "light"))}
-      icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
-    />
-  );
-}
-
-function JsonBlock({ value }: { value: unknown }) {
-  return (
-    <pre className="max-h-40 overflow-auto rounded-lg bg-kumo-elevated p-2.5 text-xs leading-5 whitespace-pre-wrap break-words">
-      {typeof value === "string" ? value : JSON.stringify(value, null, 2)}
-    </pre>
-  );
-}
-
-function ToolCallCard({
-  part,
-  running
+function EmptyState({
+  disabled,
+  onPick
 }: {
-  part: Extract<TranscriptPart, { type: "tool-call" }>;
-  running: boolean;
+  disabled: boolean;
+  onPick: (prompt: string) => void;
 }) {
   return (
-    <details className="rounded-xl border border-kumo-line bg-kumo-base">
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
-        {running ? (
-          <GearIcon size={14} className="animate-spin text-kumo-inactive" />
-        ) : (
-          <CheckCircleIcon size={14} className="text-kumo-success" />
-        )}
-        <span className="min-w-0 flex-1 truncate text-xs font-semibold">
-          {part.name}
-        </span>
-        <Badge variant="secondary">{running ? "Running" : "Called"}</Badge>
-      </summary>
-      <div className="border-t border-kumo-line px-3 py-3">
-        <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
-          Arguments
+    <div className="flex flex-1 flex-col items-center justify-center gap-8 py-12">
+      <div className="flex flex-col items-center gap-3 text-center">
+        <div className="flex size-10 items-center justify-center rounded-xl bg-kumo-tint text-kumo-brand">
+          <CompassIcon size={20} weight="duotone" />
+        </div>
+        <h2 className="text-xl font-semibold text-kumo-default">
+          What should the agent build?
+        </h2>
+        <p className="max-w-md text-sm text-kumo-subtle">
+          It builds in a container and checks its work in a browser that can
+          open sites nobody else can reach:
         </p>
-        <JsonBlock value={part.arguments} />
+        <div className="flex flex-wrap justify-center gap-1.5">
+          {HOSTS.map(({ host }) => (
+            <HostChip key={host} host={host} />
+          ))}
+        </div>
       </div>
-    </details>
-  );
-}
-
-function ToolResultCard({
-  part
-}: {
-  part: Extract<TranscriptPart, { type: "tool-result" }>;
-}) {
-  const text = part.content
-    .filter((content) => content.type === "text")
-    .map((content) => (content.type === "text" ? content.text : ""))
-    .join("\n");
-  const images = part.content.filter((content) => content.type === "image");
-  return (
-    <details className="rounded-xl border border-kumo-line bg-kumo-base">
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5">
-        {part.error ? (
-          <XCircleIcon size={14} className="text-kumo-danger" />
-        ) : (
-          <CheckCircleIcon size={14} className="text-kumo-success" />
-        )}
-        <span className="min-w-0 flex-1 truncate text-xs">
-          <span className="font-semibold">{part.name}</span>
-          {text ? <span className="ml-2 text-kumo-subtle">{text}</span> : null}
-        </span>
-        <Badge variant={part.error ? "destructive" : "secondary"}>
-          {part.error ? "Failed" : "Done"}
-        </Badge>
-      </summary>
-      <div className="space-y-3 border-t border-kumo-line px-3 py-3">
-        {text ? (
-          <div>
-            <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
-              Result
-            </p>
-            <JsonBlock value={text} />
-          </div>
-        ) : null}
-        {images.map((image, index) =>
-          image.type === "image" ? (
-            <img
-              key={index}
-              src={`data:${image.mimeType};base64,${image.data}`}
-              alt={`${part.name} output`}
-              className="max-w-full rounded-lg"
-            />
-          ) : null
-        )}
-        {part.details !== undefined ? (
-          <div>
-            <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-kumo-inactive">
-              Details
-            </p>
-            <JsonBlock value={part.details} />
-          </div>
-        ) : null}
-      </div>
-    </details>
-  );
-}
-
-function AssistantPart({
-  part,
-  running
-}: {
-  part: TranscriptPart;
-  running: boolean;
-}) {
-  switch (part.type) {
-    case "text":
-      return (
-        <Streamdown
-          className="sd-theme text-sm leading-6"
-          plugins={{ code }}
-          controls={false}
-        >
-          {part.text}
-        </Streamdown>
-      );
-    case "thinking":
-      return (
-        <details className="rounded-xl border border-kumo-line px-3 py-2">
-          <summary className="cursor-pointer list-none text-xs font-semibold text-kumo-subtle">
-            Thinking
-          </summary>
-          <p className="mt-2 whitespace-pre-wrap text-xs italic leading-5 text-kumo-subtle">
-            {part.text}
-          </p>
-        </details>
-      );
-    case "tool-call":
-      return <ToolCallCard part={part} running={running} />;
-    case "tool-result":
-      return <ToolResultCard part={part} />;
-    case "image":
-      return (
-        <img
-          src={`data:${part.mimeType};base64,${part.data}`}
-          alt=""
-          className="max-w-full rounded-lg"
-        />
-      );
-  }
-}
-
-function UserMessage({ message }: { message: TranscriptMessage }) {
-  const text = message.parts
-    .map((part) => (part.type === "text" ? part.text : ""))
-    .join("");
-  return (
-    <div className="flex justify-end">
-      <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-kumo-contrast px-4 py-2.5 text-sm leading-relaxed text-kumo-inverse">
-        {text}
+      <div className="grid w-full max-w-xl grid-cols-1 gap-2">
+        {SUGGESTIONS.map((suggestion) => (
+          <button
+            key={suggestion.title}
+            type="button"
+            disabled={disabled}
+            onClick={() => onPick(suggestion.prompt)}
+            className="flex flex-col gap-1 rounded-xl bg-kumo-base p-3 text-left ring-1 ring-kumo-line hover:bg-kumo-tint disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <span className="text-sm font-medium text-kumo-default">
+              {suggestion.title}
+            </span>
+            <span className="line-clamp-2 text-xs text-kumo-subtle">
+              {suggestion.prompt}
+            </span>
+          </button>
+        ))}
       </div>
     </div>
   );
 }
 
-function AssistantMessage({
-  message,
-  streaming = false,
-  runningTools
+/** Asks before a new chat replaces the current one. */
+function NewChatDialog({
+  open,
+  onOpenChange,
+  onConfirm
 }: {
-  message: TranscriptMessage;
-  streaming?: boolean;
-  runningTools: readonly string[];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
 }) {
   return (
-    <div className="flex items-start gap-3">
-      <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
-        <BrainIcon size={17} weight="bold" />
-      </div>
-      <div className="min-w-0 flex-1 space-y-3">
-        {message.parts.map((part, index) => (
-          <AssistantPart
-            key={`${message.id}-${index}`}
-            part={part}
-            running={
-              streaming &&
-              part.type === "tool-call" &&
-              runningTools.includes(part.name)
+    <Dialog.Root role="alertdialog" open={open} onOpenChange={onOpenChange}>
+      <Dialog className="flex flex-col gap-4 px-5 py-4 sm:w-[26rem]">
+        <div className="flex flex-col gap-1.5">
+          <Dialog.Title className="text-base font-semibold text-kumo-default">
+            Start a new chat?
+          </Dialog.Title>
+          <Dialog.Description className="text-sm text-kumo-subtle">
+            This replaces the current chat with a new agent that has an empty
+            workspace and a fresh browser. You can't go back to this
+            conversation or its files.
+          </Dialog.Description>
+        </div>
+        <div className="flex justify-end gap-2">
+          <Dialog.Close render={<Button variant="secondary" />}>
+            Cancel
+          </Dialog.Close>
+          <Button
+            variant="destructive"
+            onClick={() => {
+              onConfirm();
+              onOpenChange(false);
+            }}
+          >
+            Start new chat
+          </Button>
+        </div>
+      </Dialog>
+    </Dialog.Root>
+  );
+}
+
+/** A screenshot at full size. */
+function ImageDialog({
+  image,
+  open,
+  onOpenChange
+}: {
+  image: ZoomImage | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog className="flex max-h-[calc(100dvh-2rem)] flex-col sm:max-w-[min(72rem,calc(100vw-2rem))]">
+        <div className="flex items-center justify-between gap-4 border-b border-kumo-line py-2 pr-2 pl-4">
+          <Dialog.Title className="text-sm font-medium text-kumo-default">
+            {image?.alt ?? "Screenshot"}
+          </Dialog.Title>
+          <Dialog.Close
+            render={
+              <Button
+                size="sm"
+                variant="ghost"
+                shape="square"
+                aria-label="Close"
+                icon={<XIcon size={14} />}
+              />
             }
           />
-        ))}
-        {streaming ? <span className="streaming-cursor" /> : null}
-        {message.error ? (
-          <div
-            role="alert"
-            className="rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
-          >
-            {message.error}
-          </div>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function ToolMessage({ message }: { message: TranscriptMessage }) {
-  return (
-    <div className="ml-11 space-y-2">
-      {message.parts.map((part, index) =>
-        part.type === "tool-result" ? (
-          <ToolResultCard key={`${message.id}-${index}`} part={part} />
-        ) : null
-      )}
-    </div>
-  );
-}
-
-function Message({
-  message,
-  streaming = false,
-  runningTools
-}: {
-  message: TranscriptMessage;
-  streaming?: boolean;
-  runningTools: readonly string[];
-}) {
-  switch (message.role) {
-    case "user":
-      return <UserMessage message={message} />;
-    case "assistant":
-      return (
-        <AssistantMessage
-          message={message}
-          streaming={streaming}
-          runningTools={runningTools}
-        />
-      );
-    case "tool":
-      return <ToolMessage message={message} />;
-    case "notice":
-      return message.parts.length === 0 ? null : (
-        <p className="text-center text-xs text-kumo-inactive">
-          {message.parts
-            .map((part) => (part.type === "text" ? part.text : ""))
-            .join("")}
-        </p>
-      );
-  }
-}
-
-function Sidebar({
-  tools,
-  activeTools,
-  onClose
-}: {
-  tools: readonly ToolInfo[];
-  activeTools: readonly string[];
-  onClose: () => void;
-}) {
-  return (
-    <aside
-      className="flex min-h-0 flex-col border-l border-kumo-line bg-kumo-base"
-      aria-label="Tools"
-    >
-      <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
-        <Text size="sm" bold>
-          Tools
-        </Text>
-        <Button
-          variant="ghost"
-          shape="square"
-          aria-label="Close tools"
-          onClick={onClose}
-          icon={<XIcon size={16} />}
-        />
-      </div>
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
-        {tools.map((tool) => (
-          <Surface
-            key={tool.name}
-            className="rounded-lg p-3 ring ring-kumo-line"
-          >
-            <div className="flex items-center gap-2">
-              {activeTools.includes(tool.name) ? (
-                <GearIcon size={14} className="animate-spin text-kumo-accent" />
-              ) : (
-                <WrenchIcon size={14} className="text-kumo-inactive" />
-              )}
-              <code className="text-xs font-semibold">{tool.name}</code>
-            </div>
-            <p className="mt-1 text-xs text-kumo-subtle">{tool.description}</p>
-          </Surface>
-        ))}
-      </div>
-    </aside>
+        </div>
+        <div className="min-h-0 overflow-auto bg-kumo-recessed p-2">
+          {image ? (
+            <img
+              src={image.src}
+              alt={image.alt}
+              className="mx-auto block h-auto max-w-full bg-white"
+            />
+          ) : null}
+        </div>
+      </Dialog>
+    </Dialog.Root>
   );
 }
 
 function App() {
   const [session, setSession] = useState(getSession);
   const [prompt, setPrompt] = useState("");
-  // The right-hand panel: the agent's browser, or its tool list.
-  const [panel, setPanel] = useState<"browser" | "tools" | null>(() =>
-    window.matchMedia("(min-width: 1100px)").matches ? "browser" : null
-  );
-  const togglePanel = (next: "browser" | "tools") =>
-    setPanel((open) => (open === next ? null : next));
-  const endRef = useRef<HTMLDivElement>(null);
+  const [mode, toggleMode] = useColorMode();
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [newChatOpen, setNewChatOpen] = useState(false);
+  // Narrow screens only: the browser covers the chat while open.
+  const [browserOpen, setBrowserOpen] = useState(false);
+  // Kept after closing, so the dialog has its image while it animates out.
+  const [zoom, setZoom] = useState<ZoomImage | null>(null);
+  const [zoomOpen, setZoomOpen] = useState(false);
+
   const {
     status,
     messages,
     live,
     running,
-    tools: running_,
+    tools: runningTools,
     catalog,
     queued,
     retry,
@@ -396,272 +224,255 @@ function App() {
     submit: submitPrompt,
     abort
   } = usePiSession(session);
-  const runningTools = running_.map((tool) => tool.name);
   const browser = useBrowserState(session, running);
 
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, live, running]);
-
   const connected = status === "open";
+  const transcript = live ? [...messages, live] : messages;
+  const turns = groupTurns(transcript);
+  const results = resultsById(transcript);
+  const userMessageCount = messages.filter((m) => m.role === "user").length;
+  const empty = transcript.length === 0 && !running;
+  // Something is happening, but nothing on screen shows it yet.
+  const waiting =
+    running &&
+    runningTools.length === 0 &&
+    (live === null || live.parts.length === 0);
 
-  /** While a run is going, Enter queues a follow-up and Steer joins the run. */
-  const submit = (whenBusy: "followUp" | "steer" = "followUp") => {
-    const text = prompt.trim();
-    if (!text || !connected) return;
+  /** Idle: starts a turn. Busy: queued as a follow-up, or steers the turn. */
+  const send = (text: string, whenBusy: "followUp" | "steer" = "followUp") => {
+    const trimmed = text.trim();
+    if (!trimmed || !connected) return;
     setPrompt("");
-    submitPrompt(text, whenBusy);
+    submitPrompt(trimmed, whenBusy);
   };
 
-  const newSession = () => {
+  const newChat = () => {
     const next = crypto.randomUUID();
     localStorage.setItem(SESSION_KEY, next);
     setSession(next);
   };
 
-  const empty = messages.length === 0 && !live && !running;
+  const zoomImage = (image: ZoomImage) => {
+    setZoom(image);
+    setZoomOpen(true);
+  };
 
   return (
-    <div
-      className={`grid h-dvh overflow-hidden bg-kumo-elevated text-kumo-default ${
-        panel === "browser"
-          ? "lg:grid-cols-[minmax(460px,1fr)_minmax(420px,1.2fr)]"
-          : panel === "tools"
-            ? "lg:grid-cols-[minmax(520px,1fr)_minmax(300px,26vw)]"
-            : "grid-cols-1"
-      }`}
-    >
-      <section className="flex min-h-0 min-w-0 flex-col" aria-label="Chat">
-        <header className="shrink-0 border-b border-kumo-line bg-kumo-base">
-          <div className="mx-auto flex h-[68px] max-w-3xl items-center justify-between gap-3 px-5">
-            <div className="flex min-w-0 items-center gap-3">
-              <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-kumo-brand text-white">
-                <BrainIcon size={20} weight="bold" />
-              </div>
-              <div className="min-w-0">
-                <h1 className="truncate text-base font-semibold">
-                  Browser tool
-                </h1>
-                <p className="truncate text-xs text-kumo-subtle">
-                  Session <code>{session.slice(0, 8)}</code>
-                </p>
-              </div>
-            </div>
-            <div className="flex shrink-0 items-center gap-1.5">
-              <Badge variant="secondary" className="hidden sm:inline-flex">
-                {MODEL_ID.split("/").at(-1)}
-              </Badge>
-              <Badge variant={connected ? "success" : "secondary"}>
-                {connected
-                  ? "Live"
+    <TooltipProvider>
+      <div className="flex h-full flex-col bg-kumo-base">
+        <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-kumo-line px-4">
+          <div className="flex min-w-0 items-baseline gap-2">
+            <h1 className="text-sm font-semibold whitespace-nowrap text-kumo-default">
+              Browser tool
+            </h1>
+            <span
+              className="hidden truncate text-sm text-kumo-subtle sm:inline"
+              title={`Workers AI model: ${MODEL_ID}`}
+            >
+              pi · {MODEL_ID.split("/").at(-1)}
+            </span>
+          </div>
+          <div className="flex items-center gap-1">
+            <ConnectionDot
+              status={
+                connected
+                  ? "connected"
                   : status === "connecting"
-                    ? "Connecting"
-                    : "Reconnecting"}
-              </Badge>
-              <Button
-                variant="ghost"
-                shape="square"
-                aria-label="Browser"
-                aria-expanded={panel === "browser"}
-                onClick={() => togglePanel("browser")}
-                icon={<GlobeIcon size={16} />}
-              />
-              <Button
-                variant="ghost"
-                shape="square"
-                aria-label="Tools"
-                aria-expanded={panel === "tools"}
-                onClick={() => togglePanel("tools")}
-                icon={<WrenchIcon size={16} />}
-              />
-              <Button
-                variant="ghost"
-                shape="square"
-                aria-label="New session"
-                onClick={newSession}
-                icon={<PlusIcon size={16} />}
-              />
-              <ModeToggle />
-            </div>
+                    ? "connecting"
+                    : "disconnected"
+              }
+            />
+            <div className="mx-2 h-4 w-px bg-kumo-line" />
+            {/* Narrow screens show icons only; the tooltip names each one. */}
+            <Tooltip
+              content="Show the agent's browser"
+              render={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="lg:hidden"
+                  aria-label="Browser"
+                  icon={<AppWindowIcon size={14} />}
+                  onClick={() => setBrowserOpen(true)}
+                />
+              }
+            >
+              <span className="hidden sm:inline">Browser</span>
+            </Tooltip>
+            <Tooltip
+              content="What this demo does, and the agent's tools"
+              render={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label="How it works"
+                  icon={<InfoIcon size={14} />}
+                  onClick={() => setAboutOpen(true)}
+                />
+              }
+            >
+              <span className="hidden sm:inline">How it works</span>
+            </Tooltip>
+            <Tooltip
+              content="Replace this chat with a new agent, workspace, and browser"
+              render={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label="New chat"
+                  icon={<NotePencilIcon size={14} />}
+                  disabled={empty}
+                  onClick={() => setNewChatOpen(true)}
+                />
+              }
+            >
+              <span className="hidden sm:inline">New chat</span>
+            </Tooltip>
+            <Tooltip
+              content={
+                mode === "light"
+                  ? "Switch to dark mode"
+                  : "Switch to light mode"
+              }
+              render={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  shape="square"
+                  aria-label={
+                    mode === "light"
+                      ? "Switch to dark mode"
+                      : "Switch to light mode"
+                  }
+                  icon={
+                    mode === "light" ? (
+                      <MoonIcon size={14} />
+                    ) : (
+                      <SunIcon size={14} />
+                    )
+                  }
+                  onClick={toggleMode}
+                />
+              }
+            />
           </div>
         </header>
 
-        <main className="min-h-0 flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-3xl space-y-5 px-5 py-6">
-            {empty ? (
-              <div className="py-10 sm:py-16">
-                <Empty
-                  icon={<BrainIcon size={32} />}
-                  title="Ask the agent to build something"
-                  description="It works in a container and checks its work in a browser that only it, and you, can see."
-                />
-                <div className="mt-6 flex flex-wrap justify-center gap-2">
-                  {SUGGESTIONS.map((suggestion) => (
-                    <Button
-                      key={suggestion.label}
-                      variant="secondary"
-                      size="sm"
-                      icon={suggestion.icon}
-                      disabled={!connected}
-                      onClick={() => setPrompt(suggestion.value)}
-                    >
-                      {suggestion.label}
-                    </Button>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            {messages.map((message) => (
-              <Message
-                key={message.id}
-                message={message}
-                runningTools={runningTools}
-              />
-            ))}
-
-            {live ? (
-              <Message message={live} streaming runningTools={runningTools} />
-            ) : null}
-
-            {running && !live ? (
-              <div className="flex items-start gap-3">
-                <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand text-white">
-                  <BrainIcon size={17} weight="bold" />
-                </div>
-                <Surface className="rounded-xl px-4 py-3 ring ring-kumo-line">
-                  <div className="flex items-center gap-2 text-sm text-kumo-subtle">
-                    <GearIcon size={15} className="animate-spin" />
-                    {retry
-                      ? `Retrying: ${retry.error}`
-                      : runningTools.length > 0
-                        ? `Running ${runningTools.join(", ")}`
-                        : "Waiting for the model"}
-                  </div>
-                </Surface>
-              </div>
-            ) : null}
-
-            {running_.map((tool) =>
-              tool.output ? (
-                <pre
-                  key={tool.callId}
-                  className="ml-11 max-h-40 overflow-auto rounded-lg bg-kumo-elevated p-2.5 text-xs"
-                >
-                  {tool.output}
-                </pre>
-              ) : null
-            )}
-
-            {queued > 0 ? (
-              <p className="ml-11 text-xs text-kumo-subtle">
-                {queued} queued behind this run
-              </p>
-            ) : null}
-
-            {error ? (
-              <div
-                role="alert"
-                className="rounded-xl bg-kumo-danger/10 px-4 py-3 text-sm text-kumo-danger"
-              >
-                {error}
-              </div>
-            ) : null}
-
-            <div ref={endRef} />
-          </div>
-        </main>
-
-        <div className="shrink-0 border-t border-kumo-line bg-kumo-base">
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              submit();
-            }}
-            className="mx-auto max-w-3xl px-5 pt-4"
-          >
-            <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm transition-shadow focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-ring">
-              <InputArea
-                value={prompt}
-                onValueChange={setPrompt}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    submit();
+        <div className="flex min-h-0 flex-1">
+          <main className="flex min-w-0 flex-1 flex-col" aria-label="Chat">
+            <ChatFeed userMessageCount={userMessageCount}>
+              {empty ? (
+                <EmptyState disabled={!connected} onPick={send} />
+              ) : (
+                turns.map((turn, index) => {
+                  switch (turn.kind) {
+                    case "user":
+                      return (
+                        <UserMessage key={turn.message.id}>
+                          {messageText(turn.message)}
+                        </UserMessage>
+                      );
+                    case "notice":
+                      return (
+                        <p
+                          key={turn.message.id}
+                          className="text-center text-xs text-kumo-inactive"
+                        >
+                          {messageText(turn.message)}
+                        </p>
+                      );
+                    case "agent": {
+                      const last = index === turns.length - 1;
+                      return (
+                        <AgentTurn
+                          key={turn.id}
+                          messages={turn.messages}
+                          results={results}
+                          runningTools={runningTools}
+                          turnRunning={running && last}
+                          streaming={live !== null && last}
+                          onZoom={zoomImage}
+                        />
+                      );
+                    }
                   }
-                }}
+                })
+              )}
+              {waiting ? (
+                <Pending
+                  label={retry ? `Retrying: ${retry.error}` : "Thinking…"}
+                />
+              ) : null}
+              {queued > 0 ? (
+                <p className="text-xs text-kumo-subtle">
+                  {queued === 1
+                    ? "1 message queued after this turn"
+                    : `${queued} messages queued after this turn`}
+                </p>
+              ) : null}
+              {error ? <TurnError message={error} /> : null}
+            </ChatFeed>
+            {/* `relative` keeps the composer's ring above the feed's fade. */}
+            <div className="relative mx-auto w-full max-w-3xl px-4 pt-1 pb-3 sm:px-6">
+              <Composer
+                value={prompt}
+                onChange={setPrompt}
+                onSubmit={() => send(prompt)}
+                onSteer={() => send(prompt, "steer")}
+                onStop={abort}
+                busy={running}
+                disabled={!connected}
                 placeholder={
                   running
-                    ? "Queue a follow-up, or steer the running turn"
-                    : "Ask the agent to build something"
+                    ? "Queue a follow-up, or steer this turn…"
+                    : "Ask the agent to build something…"
                 }
-                aria-label="Message the agent"
-                disabled={!connected}
-                rows={2}
-                className="flex-1 !bg-transparent !shadow-none !ring-0 !outline-none focus:!ring-0"
               />
-              {running ? (
-                <div className="mb-0.5 flex gap-1.5">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    aria-label="Steer"
-                    disabled={prompt.trim() === ""}
-                    onClick={() => submit("steer")}
-                  >
-                    Steer
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    shape="square"
-                    aria-label="Stop"
-                    onClick={abort}
-                    icon={<StopIcon size={18} weight="fill" />}
-                  />
-                </div>
-              ) : (
-                <Button
-                  type="submit"
-                  variant="primary"
-                  shape="square"
-                  aria-label="Send message"
-                  disabled={!connected || prompt.trim() === ""}
-                  icon={<PaperPlaneRightIcon size={18} />}
-                  className="mb-0.5"
-                />
-              )}
+              <div className="mt-2 flex items-center justify-center gap-3">
+                <span className="hidden text-xs text-kumo-inactive sm:inline">
+                  {running
+                    ? "Enter queues a follow-up · Steer sends it into this turn"
+                    : "Enter to send · Shift+Enter for a new line"}
+                </span>
+                <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
+              </div>
             </div>
-          </form>
-          <div className="flex items-center justify-center gap-2 px-5 py-3">
-            <span className="hidden text-[10px] text-kumo-inactive sm:inline">
-              Enter to send · Shift+Enter for a new line
-            </span>
-            <span className="hidden text-kumo-line sm:inline">·</span>
-            <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
-          </div>
-        </div>
-      </section>
+          </main>
 
-      {panel === "browser" ? (
-        <BrowserPanel
-          state={browser.state}
-          busy={browser.busy}
-          error={browser.error}
-          onRefresh={() => void browser.refresh()}
-          onCloseBrowser={() => void browser.close()}
-          onClose={() => setPanel(null)}
-        />
-      ) : null}
-      {panel === "tools" ? (
-        <Sidebar
+          {/* Wide screens: always beside the chat. Narrow screens: opened
+              from the header, covering the chat. Stays mounted either way,
+              so Live View doesn't reload. */}
+          <aside
+            aria-label="Browser"
+            className={`${
+              browserOpen ? "fixed inset-0 z-40 flex" : "hidden"
+            } flex-col lg:static lg:z-auto lg:flex lg:w-[52%] lg:max-w-[60rem] lg:shrink-0 lg:border-l lg:border-kumo-line`}
+          >
+            <BrowserPanel
+              state={browser.state}
+              busy={browser.busy}
+              error={browser.error}
+              onRefresh={() => void browser.refresh()}
+              onCloseBrowser={() => void browser.close()}
+              onClose={() => setBrowserOpen(false)}
+            />
+          </aside>
+        </div>
+
+        <AboutDialog
+          open={aboutOpen}
+          onOpenChange={setAboutOpen}
           tools={catalog}
-          activeTools={runningTools}
-          onClose={() => setPanel(null)}
+          activeTools={runningTools.map((tool) => tool.name)}
         />
-      ) : null}
-    </div>
+        <NewChatDialog
+          open={newChatOpen}
+          onOpenChange={setNewChatOpen}
+          onConfirm={newChat}
+        />
+        <ImageDialog image={zoom} open={zoomOpen} onOpenChange={setZoomOpen} />
+      </div>
+    </TooltipProvider>
   );
 }
 

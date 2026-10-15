@@ -1,4 +1,4 @@
-import { Badge, Button, Surface, Text } from "@cloudflare/kumo";
+import { Button, Tooltip } from "@cloudflare/kumo";
 import {
   AppWindowIcon,
   ArrowClockwiseIcon,
@@ -79,7 +79,7 @@ function tabLabel(target: BrowserLiveViewTarget): string {
 /** A host's current target, in a few words. */
 function targetLabel(host: InternalHostInfo): string {
   if (!host.assignable) return "Docs Worker";
-  if (host.target === undefined) return "Unassigned";
+  if (host.target === undefined) return "Not assigned";
   if (typeof host.target !== "object" || host.target === null) {
     return String(host.target);
   }
@@ -88,32 +88,31 @@ function targetLabel(host: InternalHostInfo): string {
   return Object.values(target).map(String).join(", ");
 }
 
+/** Each internal hostname and where it points now, as one row of chips. */
 function HostList({ hosts }: { hosts: readonly InternalHostInfo[] }) {
   return (
-    <ul className="space-y-1.5" aria-label="Internal hostnames">
-      {hosts.map((host) => (
-        <li key={host.host}>
-          <Surface className="flex items-center justify-between gap-3 rounded-lg px-3 py-2 ring ring-kumo-line">
-            <div className="min-w-0">
-              <code className="text-xs font-semibold">{host.host}</code>
-              <p className="truncate text-[11px] text-kumo-subtle">
-                {host.description}
-              </p>
-            </div>
-            <Badge
-              variant={
-                host.assignable && host.target === undefined
-                  ? "secondary"
-                  : "success"
-              }
+    <ul className="flex flex-wrap gap-1.5" aria-label="Internal hostnames">
+      {hosts.map((host) => {
+        const unassigned = host.assignable && host.target === undefined;
+        return (
+          <li
+            key={host.host}
+            title={host.description}
+            className="flex items-center gap-1.5 rounded-md py-0.5 pr-2 pl-1 text-xs ring-1 ring-kumo-line"
+          >
+            <span className="rounded bg-kumo-tint px-1.5 py-0.5 font-mono text-kumo-default">
+              {host.host}
+            </span>
+            <span
+              className={`max-w-40 truncate ${
+                unassigned ? "text-kumo-inactive" : "text-kumo-default"
+              }`}
             >
-              <span className="max-w-40 truncate font-mono">
-                {targetLabel(host)}
-              </span>
-            </Badge>
-          </Surface>
-        </li>
-      ))}
+              {targetLabel(host)}
+            </span>
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -131,6 +130,7 @@ export function BrowserPanel({
   error: string | null;
   onRefresh: () => void;
   onCloseBrowser: () => void;
+  /** Closes the panel on narrow screens, where it covers the chat. */
   onClose: () => void;
 }) {
   const targets = useMemo(() => pageTargets(state), [state]);
@@ -152,45 +152,56 @@ export function BrowserPanel({
   }, [selected, embedded]);
 
   return (
-    <aside
-      className="flex min-h-0 flex-col border-l border-kumo-line bg-kumo-base"
-      aria-label="Browser"
-    >
-      <div className="flex h-[68px] shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
-        <Text size="sm" bold>
-          Browser
-        </Text>
+    <div className="flex h-full min-h-0 flex-col bg-kumo-base">
+      <div className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-kumo-line pr-2 pl-4">
+        <div className="flex min-w-0 items-baseline gap-2">
+          <h2 className="text-sm font-semibold text-kumo-default">Browser</h2>
+          <span className="hidden truncate text-xs text-kumo-subtle sm:inline">
+            Live View of the agent's browser
+          </span>
+        </div>
         <div className="flex items-center gap-1">
-          <Button
-            size="sm"
-            variant="ghost"
-            shape="square"
-            aria-label="Refresh"
-            disabled={busy}
-            icon={<ArrowClockwiseIcon size={14} />}
-            onClick={onRefresh}
+          <Tooltip
+            content="Refresh tabs and hosts"
+            render={
+              <Button
+                size="sm"
+                variant="ghost"
+                shape="square"
+                aria-label="Refresh tabs and hosts"
+                disabled={busy}
+                icon={<ArrowClockwiseIcon size={14} />}
+                onClick={onRefresh}
+              />
+            }
           />
-          <Button
-            size="sm"
-            variant="ghost"
-            icon={<PowerIcon size={14} />}
-            disabled={busy || !state?.liveView}
-            onClick={onCloseBrowser}
+          <Tooltip
+            content="Shut the browser down. The agent's next browser call starts a new one."
+            render={
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={<PowerIcon size={14} />}
+                disabled={busy || !state?.liveView}
+                onClick={onCloseBrowser}
+              />
+            }
           >
             Close browser
-          </Button>
+          </Tooltip>
           <Button
             size="sm"
             variant="ghost"
             shape="square"
-            aria-label="Close panel"
+            aria-label="Back to chat"
+            className="lg:hidden"
             icon={<XIcon size={14} />}
             onClick={onClose}
           />
         </div>
       </div>
 
-      <div className="shrink-0 border-b border-kumo-line p-3">
+      <div className="shrink-0 border-b border-kumo-line px-4 py-2.5">
         <HostList hosts={state?.hosts ?? []} />
       </div>
 
@@ -224,7 +235,7 @@ export function BrowserPanel({
                   aria-selected={target.targetId === selected.targetId}
                   title={target.pageUrl}
                   onClick={() => setSelectedId(target.targetId)}
-                  className={`max-w-48 shrink-0 truncate rounded-md px-2.5 py-1 text-xs transition-colors ${
+                  className={`max-w-48 shrink-0 truncate rounded-md px-2.5 py-1 text-xs ${
                     target.targetId === selected.targetId
                       ? "bg-kumo-tint text-kumo-default"
                       : "text-kumo-subtle hover:bg-kumo-tint"
@@ -243,6 +254,7 @@ export function BrowserPanel({
               href={selected.url}
               target="_blank"
               rel="noreferrer"
+              title="Open this Live View in a new tab"
               className="inline-flex shrink-0 items-center gap-1 text-xs text-kumo-subtle hover:text-kumo-default"
             >
               <ArrowSquareOutIcon size={12} />
@@ -264,6 +276,6 @@ export function BrowserPanel({
           </div>
         </>
       )}
-    </aside>
+    </div>
   );
 }
