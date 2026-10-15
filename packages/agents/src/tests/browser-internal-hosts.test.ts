@@ -385,4 +385,31 @@ describe("proxyTo", () => {
       globalThis.fetch = original;
     }
   });
+
+  it("rewrites an https upstream's redirects to its own host over http", async () => {
+    const original = globalThis.fetch;
+    const locations = [
+      "http://docs.example.com/next/1",
+      "http://other.example.com/away",
+      "http://docs.example.com:8080/port"
+    ];
+    let call = 0;
+    globalThis.fetch = (async () =>
+      new Response(null, {
+        status: 302,
+        headers: { location: locations[call++] }
+      })) as typeof fetch;
+    try {
+      const handler = proxyTo("https://docs.example.com");
+      const next = async () =>
+        (await handler(new Request("http://docs.internal/"))).headers.get(
+          "location"
+        );
+      expect(await next()).toBe("http://docs.internal/next/1");
+      expect(await next()).toBe("http://other.example.com/away");
+      expect(await next()).toBe("http://docs.example.com:8080/port");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
 });

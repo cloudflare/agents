@@ -530,7 +530,7 @@ export function proxyTo(
     const location = rewritten.get("location");
     if (location) {
       const resolved = new URL(location, target);
-      if (resolved.origin === upstream.origin) {
+      if (pointsAtUpstream(resolved, upstream)) {
         const path = resolved.pathname.startsWith(base)
           ? resolved.pathname.slice(base.length) || "/"
           : resolved.pathname;
@@ -553,6 +553,22 @@ export function proxyTo(
       headers: rewritten
     });
   };
+}
+
+/**
+ * Whether a redirect leads back to the upstream. An https site behind a
+ * TLS-terminating proxy often redirects to its own host over plain http
+ * (`http://httpbin.org/...`), so that counts too.
+ */
+function pointsAtUpstream(url: URL, upstream: URL): boolean {
+  if (url.origin === upstream.origin) return true;
+  return (
+    upstream.protocol === "https:" &&
+    url.protocol === "http:" &&
+    url.hostname === upstream.hostname &&
+    url.port === "" &&
+    upstream.port === ""
+  );
 }
 
 /**
