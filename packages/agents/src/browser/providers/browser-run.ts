@@ -13,6 +13,7 @@ import {
   listBrowserTargets
 } from "../browser-run";
 import {
+  fetcherRoute,
   internalHostsSignature,
   validateInternalHosts,
   type AnyInternalHost,
@@ -107,6 +108,10 @@ export function browserRun(
   return { kind: "browser-run", binding, options };
 }
 
+function isDataCloneError(error: unknown): boolean {
+  return error instanceof Error && error.name === "DataCloneError";
+}
+
 /** One `outboundByHost` route per internal hostname. */
 function internalHostRoutes(
   internalHosts: InternalHostsOptions,
@@ -119,7 +124,7 @@ function internalHostRoutes(
   ][];
   for (const [host, config] of hosts) {
     if (config.fetcher) {
-      routes[host] = config.fetcher;
+      routes[host] = fetcherRoute(config.fetcher);
       continue;
     }
     // validateInternalHosts made sure a fetch host has a router.
@@ -154,14 +159,26 @@ export function browserRunAdapter(
           "Internal hostnames need the Browser installed with Lifecycle.use() on a top-level agent"
         );
       }
-      return acquireBrowserSession(binding, {
-        keepAliveMs: keepAliveMs(),
-        recording: options.recording,
-        guardrails: options.guardrails,
-        ...(internalHosts && context?.owner
-          ? { outboundByHost: internalHostRoutes(internalHosts, context.owner) }
-          : {})
-      });
+      try {
+        return await acquireBrowserSession(binding, {
+          keepAliveMs: keepAliveMs(),
+          recording: options.recording,
+          guardrails: options.guardrails,
+          ...(internalHosts && context?.owner
+            ? {
+                outboundByHost: internalHostRoutes(internalHosts, context.owner)
+              }
+            : {})
+        });
+      } catch (error) {
+        if (internalHosts && isDataCloneError(error)) {
+          throw new Error(
+            "Browser Run couldn't take the internal hostname routes: a fetcher must be a service binding or an entrypoint of this Worker (this.ctx.exports.Name), not a Durable Object stub or a Dynamic Worker",
+            { cause: error }
+          );
+        }
+        throw error;
+      }
     },
 
     async isAlive(sessionId) {
