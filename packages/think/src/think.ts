@@ -1260,20 +1260,36 @@ function parseDeclaredTaskScheduleUnchecked(
   throw new Error(`Unsupported schedule DSL "${rawSchedule}"`);
 }
 
+// findZonedInstant calls getZonedParts once per minute across a 28-hour
+// window, so building a formatter per call dominated the CPU cost of resolving
+// a wall-clock occurrence. Formatters are stateless, so keep one per timezone.
+// The map holds at most one entry per distinct timezone, and an invalid
+// timezone throws before anything is cached.
+const zonedPartsFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function getZonedPartsFormatter(timezone: string): Intl.DateTimeFormat {
+  let formatter = zonedPartsFormatters.get(timezone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      calendar: "iso8601",
+      numberingSystem: "latn",
+      weekday: "short",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23"
+    });
+    zonedPartsFormatters.set(timezone, formatter);
+  }
+  return formatter;
+}
+
 function getZonedParts(date: Date, timezone: string): ZonedParts {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: timezone,
-    calendar: "iso8601",
-    numberingSystem: "latn",
-    weekday: "short",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23"
-  }).formatToParts(date);
+  const parts = getZonedPartsFormatter(timezone).formatToParts(date);
   const part = (type: Intl.DateTimeFormatPartTypes) =>
     parts.find((entry) => entry.type === type)?.value ?? "";
   return {
