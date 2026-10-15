@@ -18,19 +18,86 @@
  * you gave it.
  */
 
+import { Validator, type OutputUnit, type Schema } from "@cfworker/json-schema";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
 /** The most hostnames one browser can have. A Browser Run limit. */
 export const MAX_INTERNAL_HOSTS = 8;
 
+// ── Schemas ────────────────────────────────────────────────────────────────
+//
+// Standard Schema and Standard JSON Schema (standardschema.dev) are small
+// interfaces meant to be copied rather than depended on. zod 4.2+, ArkType,
+// and Valibot (through its adapter) implement both.
+
+/** A Standard Schema: something that validates a value. */
+export interface StandardSchemaV1<Input = unknown, Output = Input> {
+  readonly "~standard": {
+    readonly version: 1;
+    readonly vendor: string;
+    readonly validate: (
+      value: unknown
+    ) => StandardSchemaResult<Output> | Promise<StandardSchemaResult<Output>>;
+    readonly types?:
+      | { readonly input: Input; readonly output: Output }
+      | undefined;
+  };
+}
+
+type StandardSchemaResult<Output> =
+  | { readonly value: Output; readonly issues?: undefined }
+  | {
+      readonly issues: ReadonlyArray<{
+        readonly message: string;
+        readonly path?: ReadonlyArray<
+          PropertyKey | { readonly key: PropertyKey }
+        >;
+      }>;
+    };
+
+/** A Standard JSON Schema: something that can describe itself as JSON Schema. */
+export interface StandardJSONSchemaV1 {
+  readonly "~standard": {
+    readonly jsonSchema: {
+      readonly input: (options: {
+        readonly target: string;
+      }) => Record<string, unknown>;
+    };
+  };
+}
+
+/** A typed schema: validates (Standard Schema) and describes itself (Standard JSON Schema). */
+export type TypedTargetSchema = StandardSchemaV1 & StandardJSONSchemaV1;
+
+/** A plain JSON Schema object, such as TypeBox output or a hand-written one. */
+export type JsonSchemaObject = { readonly [key: string]: unknown };
+
+/**
+ * What the model passes to `browser.assignHost()` for a host. A typed schema (zod
+ * 4.2+, ArkType, Valibot) types `fetch`'s `target`; a plain JSON Schema
+ * leaves it `unknown`.
+ */
+export type TargetSchema = TypedTargetSchema | JsonSchemaObject;
+
+/** The value a schema validates to: typed for a Standard Schema, else `unknown`. */
+export type TargetOf<S> =
+  S extends StandardSchemaV1<unknown, infer Output> ? Output : unknown;
+
 // ── Hosts ──────────────────────────────────────────────────────────────────
 
 /** A host served by code in your agent. */
-export interface InternalHost {
+export interface InternalHost<S = unknown> {
   /** Shown to the model next to the hostname. */
   description?: string;
   /**
-   * Serves every browser request to this hostname. Runs in your agent.
+   * What the model passes to `browser.assignHost()` to point this host somewhere,
+   * as a schema. Omit it for a host that always serves the same thing.
+   */
+  target?: S & TargetSchema;
+  /**
+   * Serves every browser request to this hostname. Runs in your agent, with
+   * the target the model last assigned (validated by `target`), or
+   * `undefined` when the host has no `target` schema.
    *
    * Any http page open in the browser can send requests here, not only
    * pages on this host: a page on another internal hostname, or an http
@@ -41,7 +108,7 @@ export interface InternalHost {
    * If it throws, the browser gets a 502 and the error is logged, not shown
    * to the page.
    */
-  fetch: (request: Request) => Promise<Response>;
+  fetch: (request: Request, target: TargetOf<S>) => Promise<Response>;
   worker?: never;
 }
 
@@ -64,6 +131,7 @@ export interface InternalWorkerHost {
    * type-check: Browser Run accepts one, then resets every request.
    */
   worker: Fetcher & { id?: never };
+  target?: never;
   fetch?: never;
 }
 
@@ -76,12 +144,12 @@ export type InternalHostRouterLoopback = (init: {
  * `browserRun()`'s `internalHosts`: hostnames only this browser can open.
  *
  * Fixed when a browser starts. Adding or removing a hostname replaces the
- * browser (the model sees `restarted`); changing a host's `fetch` or
- * `description` doesn't. Nor does pointing a `worker` host at a different
- * Worker: the running browser keeps the old one until it is replaced, so
- * call `browser.close()` after such a change.
+ * browser (the model sees `restarted`); changing a host's `fetch`,
+ * `description` or `target` doesn't. Nor does pointing a `worker` host at
+ * a different Worker: the running browser keeps the old one until it is
+ * replaced, so call `browser.close()` after such a change.
  */
-export interface InternalHostsOptions {
+export interface InternalHostsOptions<S = Record<string, unknown>> {
   /**
    * Your Worker's {@link InternalHostRouter} export, as
    * `this.ctx.exports.InternalHostRouter`. Needed for `fetch` hosts.
@@ -92,11 +160,26 @@ export interface InternalHostsOptions {
    * scheme, port, or path, ending in a suffix that can't be a real site:
    * `.internal`, `.test`, `.example` or `.invalid`, like `preview.internal`.
    */
-  hosts: Record<string, InternalHost | InternalWorkerHost>;
+  hosts: { [K in keyof S]: InternalHost<S[K]> | InternalWorkerHost };
 }
 
-/** Either kind of host. */
-export type AnyInternalHost = InternalHost | InternalWorkerHost;
+/** A host as erased internally, once its schema type no longer matters. */
+export type AnyInternalHost = InternalHost<unknown> | InternalWorkerHost;
+
+/** One host, as the host API and the model see it. */
+export interface InternalHostInfo {
+  /** The hostname, such as `preview.internal`. */
+  host: string;
+  /** Where the browser opens it: `http://<host>/`. */
+  url: string;
+  description?: string;
+  /** Whether the model can point it somewhere with `browser.assignHost()`. */
+  assignable: boolean;
+  /** The JSON Schema `browser.assignHost()` checks the target against. */
+  targetSchema?: Record<string, unknown>;
+  /** The target last assigned, when there is one. */
+  target?: unknown;
+}
 
 const HOSTNAME =
   /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
@@ -155,11 +238,17 @@ export function validateInternalHosts(options: InternalHostsOptions): void {
         `Internal hostname "${host}" needs exactly one of fetch or worker`
       );
     }
+    if (hasWorker && config.target !== undefined) {
+      throw new Error(
+        `Internal hostname "${host}": target needs fetch; a worker host can't be assigned`
+      );
+    }
     if (hasFetch && typeof options.router !== "function") {
       throw new Error(
         `Internal hostname "${host}" uses fetch, which needs internalHosts.router: this.ctx.exports.InternalHostRouter (and \`export { InternalHostRouter } from "agents/browser"\` in your main module)`
       );
     }
+    if (config.target !== undefined) targetJsonSchema(host, config.target);
   }
 }
 
@@ -187,6 +276,102 @@ export function workerRoute(worker: Fetcher): Fetcher {
   if (typeof worker !== "function") return worker;
   const loopback = worker as unknown as (init: { props: object }) => Fetcher;
   return loopback({ props: {} });
+}
+
+// ── Targets ────────────────────────────────────────────────────────────────
+
+function isStandardSchema(schema: TargetSchema): schema is TypedTargetSchema {
+  return typeof schema === "object" && schema !== null && "~standard" in schema;
+}
+
+/** A host's target schema as JSON Schema, for the model and for plain validation. */
+export function targetJsonSchema(
+  host: string,
+  schema: TargetSchema
+): Record<string, unknown> {
+  if (!isStandardSchema(schema)) {
+    if (typeof schema !== "object" || schema === null) {
+      throw new Error(`Internal hostname "${host}": target must be a schema`);
+    }
+    return schema as Record<string, unknown>;
+  }
+  const { jsonSchema } = schema["~standard"];
+  if (!jsonSchema?.input) {
+    throw new Error(
+      `Internal hostname "${host}": target needs a schema that can describe itself as JSON Schema (Standard JSON Schema, such as zod 4.2+), or a plain JSON Schema object`
+    );
+  }
+  try {
+    return jsonSchema.input({ target: "draft-07" });
+  } catch {
+    return jsonSchema.input({ target: "draft-2020-12" });
+  }
+}
+
+const plainValidators = new WeakMap<object, Validator>();
+
+function formatIssues(
+  issues: ReadonlyArray<{ message: string; path?: string }>
+): string {
+  return issues
+    .map((issue) =>
+      issue.path ? `${issue.path}: ${issue.message}` : issue.message
+    )
+    .join("; ");
+}
+
+function pathString(
+  path: ReadonlyArray<PropertyKey | { readonly key: PropertyKey }> | undefined
+): string | undefined {
+  if (!path?.length) return undefined;
+  return path
+    .map((part) => String(typeof part === "object" ? part.key : part))
+    .join(".");
+}
+
+function plainIssues(errors: OutputUnit[]) {
+  const specific = errors.filter((error) => error.keyword !== "properties");
+  return (specific.length > 0 ? specific : errors).map((error) => ({
+    message: error.error,
+    path:
+      error.instanceLocation.replace(/^#\/?/, "").replaceAll("/", ".") ||
+      undefined
+  }));
+}
+
+/**
+ * Validate a target against a host's schema. Returns the validated value
+ * (a Standard Schema's output, which may differ from its input), or a
+ * message saying what's wrong.
+ */
+export async function validateTarget(
+  schema: TargetSchema,
+  value: unknown
+): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
+  if (isStandardSchema(schema)) {
+    const result = await schema["~standard"].validate(value);
+    if (result.issues) {
+      return {
+        ok: false,
+        error: formatIssues(
+          result.issues.map((issue) => ({
+            message: issue.message,
+            path: pathString(issue.path)
+          }))
+        )
+      };
+    }
+    return { ok: true, value: result.value };
+  }
+  let validator = plainValidators.get(schema);
+  if (!validator) {
+    validator = new Validator(schema as unknown as Schema, "7", false);
+    plainValidators.set(schema, validator);
+  }
+  const result = validator.validate(value);
+  return result.valid
+    ? { ok: true, value }
+    : { ok: false, error: formatIssues(plainIssues(result.errors)) };
 }
 
 // ── Router ─────────────────────────────────────────────────────────────────
