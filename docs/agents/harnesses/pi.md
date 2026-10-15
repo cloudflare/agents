@@ -27,6 +27,9 @@ import { Agent } from "agents";
 import { PiHarness } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
 
+// Skip Pi's idle caches (refer to the note below).
+const settings = { contextRetentionMs: 0, documentRetentionMs: 0 };
+
 export class Assistant extends Agent<Env> {
   ai = createAI({ binding: this.env.AI });
   registry = createRegistry();
@@ -37,12 +40,7 @@ export class Assistant extends Agent<Env> {
       models.setProvider(this.ai.provider);
       return Harness.open(
         storage,
-        {
-          models,
-          registry: this.registry,
-          // Skip Pi's idle caches (refer to the note below).
-          settings: { contextRetentionMs: 0, documentRetentionMs: 0 }
-        },
+        { models, registry: this.registry, settings },
         context
       );
     },
@@ -126,7 +124,11 @@ import { skills } from "agents/harness/pi";
 
 harness: async ({ storage, context }) => {
   this.registry.install(await skills(sources));
-  return Harness.open(storage, { models, registry: this.registry }, context);
+  return Harness.open(
+    storage,
+    { models, registry: this.registry, settings },
+    context
+  );
 };
 ```
 
@@ -149,7 +151,11 @@ harness: async ({ storage, context }) => {
       browserTool({ ctx: this.ctx, browser: this.browser, loader: this.env.LOADER })
     ]
   });
-  return Harness.open(storage, { models, registry: this.registry }, context);
+  return Harness.open(
+    storage,
+    { models, registry: this.registry, settings },
+    context
+  );
 };
 
 readonly lifecycle = Lifecycle.install(this).use(this.browser).use(this.harness);

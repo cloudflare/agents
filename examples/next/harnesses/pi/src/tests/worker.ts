@@ -17,6 +17,8 @@ import {
   type ToolRegistration
 } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
+import { Workspace, type DurableObjectStorageLike } from "@cloudflare/computer";
+import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
 import {
   PiHarness,
   type PiOperationResult,
@@ -27,6 +29,7 @@ import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
 import { PiSessionSockets } from "../sockets";
 import { EMPTY_VIEW, reduceEvents } from "../view";
+import { createWorkspaceTools, JAVASCRIPT_BACKEND } from "../workspace";
 
 const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
@@ -46,7 +49,8 @@ function textOf(content: Message["content"] | undefined): string {
  * the same answer after an eviction as before it:
  *
  * - `multiply N` calls `multiply`, `gate` calls `gate`, `gate-unsafe` calls
- *   `gate_unsafe`; anything else is echoed back.
+ *   `gate_unsafe`, `read PATH` calls the workspace's `read`; anything else
+ *   is echoed back.
  * - After a tool result it answers `tool said: <result>`.
  */
 function script(context: TranscriptContext): AssistantMessage {
@@ -68,6 +72,12 @@ function script(context: TranscriptContext): AssistantMessage {
       { stopReason: "toolUse" }
     );
   }
+  const read = /^read (\S+)$/.exec(prompt);
+  if (read) {
+    return fauxAssistantMessage([fauxToolCall("read", { path: read[1] })], {
+      stopReason: "toolUse"
+    });
+  }
   if (prompt === "gate" || prompt === "gate-unsafe") {
     return fauxAssistantMessage(
       [fauxToolCall(prompt === "gate" ? "gate" : "gate_unsafe", {})],
@@ -83,10 +93,26 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     tokensPerSecond: 200,
     tokenSize: { min: 2, max: 4 }
   });
+  // The example's workspace, over the object's SQLite.
+  readonly workspace = new Workspace({
+    storage: this.ctx.storage as unknown as DurableObjectStorageLike,
+    backends: [
+      new WorkerJavaScriptBackend({
+        id: JAVASCRIPT_BACKEND,
+        loader: this.env.LOADER,
+        root: "/workspace",
+        access: "read-write"
+      })
+    ]
+  });
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
     harness: async ({ storage, context }) => {
       this.registry.install(this.#testTools());
+      this.registry.install({
+        name: "workspace",
+        tools: createWorkspaceTools(this.workspace)
+      });
       const models = createModels();
       models.setProvider(this.#faux.provider);
       return Harness.open(
@@ -144,6 +170,12 @@ export class PiHarnessTestObject extends DurableObject<Env> {
 
   wait(operationId: string, session?: string): Promise<PiOperationResult> {
     return this.harness.wait(operationId, session ? { session } : {});
+  }
+
+  /** Write a file into the workspace, as a test's setup. */
+  async writeWorkspaceFile(path: string, text: string): Promise<void> {
+    await this.workspace.fs.mkdir("/workspace", { recursive: true });
+    await this.workspace.fs.writeFile(path, text);
   }
 
   /** Resolve once the gate tool has started `runs` times. */
