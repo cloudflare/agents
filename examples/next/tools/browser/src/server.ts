@@ -41,7 +41,7 @@ export { CodemodeRuntime, InternalHostRouter } from "agents/browser";
 export { WorkspaceProxy };
 export { DocsSite } from "./docs-site";
 
-const PREAMBLE = `You have a workspace with a Linux container (use exec for shell commands) and a browser that stays open between turns. Your instructions for building things are at http://${DOCS_HOST}/: read them first. Keep replies short.`;
+const PREAMBLE = `You have a workspace with a Linux container (use exec for shell commands) and a browser that stays open between turns. Your instructions for building things are a website at http://${DOCS_HOST}/, not a file: open it in your browser with the browser tool before you start. Keep replies short.`;
 
 /** What the model passes to `hosts.assign()` for preview.internal. */
 const previewTarget = z.object({
