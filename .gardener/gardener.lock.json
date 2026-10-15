@@ -9,9 +9,201 @@
     "workflowRef": "scuffi/gardener/.github/workflows/gardener-task.yml@4007bf661f62730882de20dd2df36b30c3e4a593"
   },
   "tasks": {
+    "bug-intake": {
+      "source": "tasks/bug-intake/TASK.md",
+      "bundleHash": "84e6c8975c81c79b3a9bb1a16edc36c5ca640bef220ab1c73fcc2a910458312e",
+      "workflow": ".github/workflows/gardener-bug-intake.yml",
+      "bundle": {
+        "schemaVersion": "gardener.task-bundle/v1",
+        "taskId": "bug-intake",
+        "name": "Bug intake",
+        "description": "Inspects repository conventions and helps issue authors provide actionable bug reports.",
+        "instructions": "Inspect the issue and the repository's relevant conventions.\n\nPropose one concise issue comment containing:\n\n1. The likely affected area.\n2. Missing reproduction information.\n3. Relevant test locations.\n4. A concrete next step for the author or maintainer.\n\nDo not claim that code was changed or that a persistent effect already occurred.",
+        "triggers": [
+          {
+            "kind": "github.issue.opened",
+            "labelsAll": [
+              "gardener-bug"
+            ],
+            "mentions": [],
+            "authors": "any"
+          },
+          {
+            "kind": "github.workflow_dispatch"
+          }
+        ],
+        "tools": [
+          "repository.list_files",
+          "repository.read_file"
+        ],
+        "effects": [
+          "issue.comment.create"
+        ],
+        "network": {
+          "default": "deny",
+          "allow": [],
+          "deny": []
+        },
+        "limits": {
+          "runtimeSeconds": 300,
+          "maxTurns": 16,
+          "maxToolCalls": 12,
+          "inputTokens": 60000,
+          "outputTokens": 16000
+        },
+        "model": "@cf/zai-org/glm-5.3"
+      },
+      "deployment": {
+        "schemaVersion": "gardener.github-actions-task-plan/v1",
+        "target": "github-actions/v1",
+        "taskId": "bug-intake",
+        "planningPermissions": {
+          "checks": "read",
+          "contents": "read",
+          "discussions": "read",
+          "id-token": "write",
+          "issues": "read",
+          "pull-requests": "read",
+          "statuses": "read"
+        },
+        "effectsPermissions": {
+          "id-token": "write",
+          "issues": "write"
+        },
+        "reactionPermissions": {
+          "issues": "write"
+        },
+        "callerPermissions": {
+          "checks": "read",
+          "contents": "read",
+          "discussions": "read",
+          "id-token": "write",
+          "issues": "write",
+          "pull-requests": "read",
+          "statuses": "read"
+        },
+        "triggers": [
+          {
+            "kind": "github.issue.opened",
+            "event": "issues",
+            "action": "opened",
+            "labelsExpression": "github.event.issue.labels.*.name",
+            "forkSensitive": false
+          },
+          {
+            "kind": "github.workflow_dispatch",
+            "event": "workflow_dispatch",
+            "forkSensitive": false
+          }
+        ],
+        "requiresSameRepositoryGuard": false,
+        "network": {
+          "default": "deny",
+          "allow": [],
+          "deny": []
+        },
+        "effectLimits": {}
+      }
+    },
+    "docs-helper": {
+      "source": "tasks/docs-helper/TASK.md",
+      "bundleHash": "8a46a9ec7033e4a1ce03b5deb3dc690fa76d4f5f9f752c5d0784926e740a6ed4",
+      "workflow": ".github/workflows/gardener-docs-helper.yml",
+      "bundle": {
+        "schemaVersion": "gardener.task-bundle/v1",
+        "taskId": "docs-helper",
+        "name": "Documentation helper",
+        "description": "Locates relevant documentation and suggests a concrete documentation plan.",
+        "instructions": "Inspect the issue and the repository's documentation structure.\n\nPropose one concise issue comment containing:\n\n1. The documentation files most likely involved.\n2. Related guidance already present in the repository.\n3. Missing information needed from the issue author.\n4. A concrete documentation update plan.\n\nDo not claim that documentation was changed or that a persistent effect already occurred.",
+        "triggers": [
+          {
+            "kind": "github.issue.opened",
+            "labelsAll": [
+              "gardener-docs"
+            ],
+            "mentions": [],
+            "authors": "any"
+          },
+          {
+            "kind": "github.workflow_dispatch"
+          }
+        ],
+        "tools": [
+          "repository.list_files",
+          "repository.read_file"
+        ],
+        "effects": [
+          "issue.comment.create"
+        ],
+        "network": {
+          "default": "deny",
+          "allow": [],
+          "deny": []
+        },
+        "limits": {
+          "runtimeSeconds": 300,
+          "maxTurns": 16,
+          "maxToolCalls": 12,
+          "inputTokens": 60000,
+          "outputTokens": 16000
+        },
+        "model": "@cf/zai-org/glm-5.3"
+      },
+      "deployment": {
+        "schemaVersion": "gardener.github-actions-task-plan/v1",
+        "target": "github-actions/v1",
+        "taskId": "docs-helper",
+        "planningPermissions": {
+          "checks": "read",
+          "contents": "read",
+          "discussions": "read",
+          "id-token": "write",
+          "issues": "read",
+          "pull-requests": "read",
+          "statuses": "read"
+        },
+        "effectsPermissions": {
+          "id-token": "write",
+          "issues": "write"
+        },
+        "reactionPermissions": {
+          "issues": "write"
+        },
+        "callerPermissions": {
+          "checks": "read",
+          "contents": "read",
+          "discussions": "read",
+          "id-token": "write",
+          "issues": "write",
+          "pull-requests": "read",
+          "statuses": "read"
+        },
+        "triggers": [
+          {
+            "kind": "github.issue.opened",
+            "event": "issues",
+            "action": "opened",
+            "labelsExpression": "github.event.issue.labels.*.name",
+            "forkSensitive": false
+          },
+          {
+            "kind": "github.workflow_dispatch",
+            "event": "workflow_dispatch",
+            "forkSensitive": false
+          }
+        ],
+        "requiresSameRepositoryGuard": false,
+        "network": {
+          "default": "deny",
+          "allow": [],
+          "deny": []
+        },
+        "effectLimits": {}
+      }
+    },
     "upstream-harness-watch": {
       "source": "tasks/upstream-harness-watch/TASK.md",
-      "bundleHash": "2c2d9faa9f32b327501a67722927c6e1700db01895823ba161d9e201fdcb4653",
+      "bundleHash": "8ad83eff3ed92ad5f25293b40cc2e41228abb3675eaa394025fbd6054a8cb409",
       "workflow": ".github/workflows/gardener-upstream-harness-watch.yml",
       "bundle": {
         "schemaVersion": "gardener.task-bundle/v1",
@@ -50,7 +242,7 @@
           "outputTokens": 60000,
           "maxEffectOperations": 2
         },
-        "model": "anthropic/claude-opus-4-6"
+        "model": "anthropic/claude-sonnet-5-5"
       },
       "deployment": {
         "schemaVersion": "gardener.github-actions-task-plan/v1",

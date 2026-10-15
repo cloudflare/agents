@@ -6,7 +6,7 @@ description: >-
   Reads new pi and opencode v2 releases and opens an issue only when a release
   breaks an API or behaviour that packages/agents actually imports. Silent
   otherwise.
-model: anthropic/claude-opus-4-6
+model: anthropic/claude-sonnet-5-5
 trigger:
   event: github.schedule
   cron: 0 9 * * 1-5
