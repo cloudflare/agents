@@ -66,7 +66,7 @@ describe("pi adapter", () => {
       context
     );
     expect(result.isError).toBeUndefined();
-    expect(result.content).toEqual([
+    expect(result.output).toEqual([
       {
         type: "text",
         text: expect.stringContaining(
@@ -93,7 +93,7 @@ describe("pi adapter", () => {
       context
     );
     expect(result.isError).toBe(true);
-    expect(result.content).toEqual([{ type: "text", text: MODEL_FAILURE }]);
+    expect(result.output).toEqual([{ type: "text", text: MODEL_FAILURE }]);
     expect(result.details).toEqual({
       ok: false,
       message: "Fetching example.com: DNS lookup failed.",

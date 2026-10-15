@@ -14,7 +14,7 @@ import { browserTool } from "../../../browser/tools/pi";
 import { Lifecycle } from "../../../lifecycle";
 import { createFakeBrowserBinding } from "../../../tests/capabilities/browser";
 import { PiHarness } from "../index";
-import { fauxModels, NO_RETRY } from "./faux";
+import { fauxModels, TEST_SETTINGS } from "./faux";
 import { setWakeTimingForTests } from "../harness";
 import { TEST_TIMING } from "./timing";
 
@@ -65,7 +65,7 @@ export class PiBrowserTestObject extends DurableObject<Cloudflare.Env> {
         {
           models: fauxModels(this.#faux.provider),
           registry: this.registry,
-          settings: { retry: NO_RETRY }
+          settings: TEST_SETTINGS
         },
         context
       );

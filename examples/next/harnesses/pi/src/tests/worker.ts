@@ -95,7 +95,11 @@ export class PiHarnessTestObject extends DurableObject<Env> {
           models,
           registry: this.registry,
           settings: {
-            retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
+            retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
+            // No idle caches: their timers keep the object from being evicted,
+            // so evictDurableObject would wait on them.
+            contextRetentionMs: 0,
+            documentRetentionMs: 0
           },
           onReport: (error) => console.warn("pi report", error)
         },
@@ -200,7 +204,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
         return {
-          content: [{ type: "text", text: `released after ${runs} runs` }]
+          output: [{ type: "text", text: `released after ${runs} runs` }]
         };
       }
     });
@@ -234,7 +238,7 @@ function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
     replay: "safe",
     async execute({ value }) {
       return {
-        content: [{ type: "text", text: String(value * 3) }],
+        output: [{ type: "text", text: String(value * 3) }],
         details: { result: value * 3 }
       };
     }

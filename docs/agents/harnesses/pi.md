@@ -14,7 +14,7 @@ Pi owns everything about a run: the transcript, the inbox of steers and follow-u
 npm install agents @earendil-works/pi-durable @earendil-works/pi-ai
 ```
 
-Both Pi packages are optional peer dependencies of `agents`, at `^1.0.0`. The examples use Workers AI through the `AI` binding. To configure the binding and choose other models, refer to [Models for pi-ai](../models-pi-ai.md).
+Both Pi packages are optional peer dependencies of `agents`, at `~1.2.0`. Pi ships breaking changes in minor releases, so `agents` supports one Pi minor at a time. The examples use Workers AI through the `AI` binding. To configure the binding and choose other models, refer to [Models for pi-ai](../models-pi-ai.md).
 
 ## Create the harness
 
@@ -37,7 +37,12 @@ export class Assistant extends Agent<Env> {
       models.setProvider(this.ai.provider);
       return Harness.open(
         storage,
-        { models, registry: this.registry },
+        {
+          models,
+          registry: this.registry,
+          // Skip Pi's idle caches (refer to the note below).
+          settings: { contextRetentionMs: 0, documentRetentionMs: 0 }
+        },
         context
       );
     },
@@ -62,6 +67,8 @@ export class Assistant extends Agent<Env> {
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `harness`  | Required. Receives `{ storage, context }` and returns Pi's `Harness`, usually from `Harness.open`. Models, the registry, `settings`, `env` and `onReport` are all yours to build here.  |
 | `defaults` | What a new session starts with: `model`, a pi-ai `Model` such as `ai("@cf/…")`, and `thinkingLevel`. Without a model, a session's prompts end unanswered (`no_model`) until one is set. |
+
+Set Pi's `contextRetentionMs` and `documentRetentionMs` settings to `0`. Pi keeps idle caches behind timers that default to ten minutes, and a pending timer keeps a Durable Object in memory: it cannot hibernate or be evicted, and it is billed for that time. The object's SQLite is local, so the caches save little.
 
 The factory runs as part of startup, once per isolate. If it throws the operation that triggered it fails and the next operation tries again.
 
@@ -89,7 +96,7 @@ const wordCount: ToolRegistration<typeof WordCount> = {
   // `text` is typed from `parameters` and is validated by Pi.
   async execute({ text }) {
     const words = text.split(/\s+/).filter(Boolean).length;
-    return { content: [{ type: "text", text: String(words) }] };
+    return { output: [{ type: "text", text: String(words) }] };
   }
 };
 

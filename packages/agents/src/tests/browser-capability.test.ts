@@ -558,7 +558,7 @@ describe("pi browserTool over a Browser", () => {
       {} as Parameters<PiTool["execute"]>[2]
     );
   const textOf = (result: Awaited<ReturnType<PiTool["execute"]>>) => {
-    const part = result.content?.[0];
+    const part = result.output?.[0];
     return part?.type === "text" ? JSON.parse(part.text) : undefined;
   };
 
@@ -637,8 +637,8 @@ describe("pi browserTool over a Browser", () => {
       instance.killBrowserSession("session-1");
 
       const result = await run(tool, screenshotCode("aGVsbG8="));
-      expect(result.content).toHaveLength(2);
-      expect(result.content?.[1]).toEqual({
+      expect(result.output).toHaveLength(2);
+      expect(result.output?.[1]).toEqual({
         type: "image",
         data: "aGVsbG8=",
         mimeType: "image/png"
@@ -649,7 +649,7 @@ describe("pi browserTool over a Browser", () => {
         result: expect.stringMatching(/^Screenshot attached as an image/),
         restarted: true
       });
-      expect(result.content?.[0]).not.toMatchObject({
+      expect(result.output?.[0]).not.toMatchObject({
         text: expect.stringContaining("aGVsbG8=")
       });
     });

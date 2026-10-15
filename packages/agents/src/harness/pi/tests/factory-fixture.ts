@@ -19,7 +19,7 @@ import {
   type Extension,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
-import { fauxModels, NO_RETRY } from "./faux";
+import { fauxModels, TEST_SETTINGS } from "./faux";
 import { PiHarness, skills } from "../index";
 
 /** What one request offered the model, folded from its system messages. */
@@ -87,7 +87,7 @@ const Shout = Type.Object({ text: Type.String() });
 const Sum = Type.Object({ values: Type.Array(Type.Number()) });
 
 function text(value: string) {
-  return { content: [{ type: "text" as const, text: value }] };
+  return { output: [{ type: "text" as const, text: value }] };
 }
 
 const shout: ToolRegistration<typeof Shout> = {
@@ -149,7 +149,7 @@ export class PiFactoryTestObject extends DurableObject<Cloudflare.Env> {
         {
           models: fauxModels(this.#faux.provider),
           registry: this.registry,
-          settings: { retry: NO_RETRY }
+          settings: TEST_SETTINGS
         },
         context
       );
@@ -225,7 +225,11 @@ export class PiFlakyFactoryTestObject extends DurableObject<Cloudflare.Env> {
       this.registry.install({ name: "flaky", tools: [shout] });
       return Harness.open(
         storage,
-        { models: fauxModels(this.#faux.provider), registry: this.registry },
+        {
+          models: fauxModels(this.#faux.provider),
+          registry: this.registry,
+          settings: TEST_SETTINGS
+        },
         context
       );
     },
