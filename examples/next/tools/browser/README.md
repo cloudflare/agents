@@ -27,7 +27,9 @@ The example composes:
 - a Browser panel in the UI: Live View of the browser's tabs and each
   host's current target.
 
-The model is Workers AI `@cf/zai-org/glm-5.3`, set in `src/shared.ts`.
+The model is Workers AI `@cf/moonshotai/kimi-k2.7-code`, set in
+`src/shared.ts`. It accepts images, so it sees the screenshots the browser
+tool returns.
 
 ## Run locally
 
@@ -55,8 +57,9 @@ pnpm run deploy
 - `Now make a production build and show me the built site on files.internal.`
 - `In /workspace, run npm create vinext-app@latest vinext-app -- --yes --use-npm --platform node --disable-git. Set up its dev server for preview.internal the way the docs say, start it, and show me the home page.`
 
-Open the Browser panel (globe icon) to watch the browser while the agent
-works.
+The Browser panel beside the chat shows the browser live while the agent
+works (on narrow screens, open it from the header). Screenshots the agent
+takes show up in the chat.
 
 ## Core pattern
 
