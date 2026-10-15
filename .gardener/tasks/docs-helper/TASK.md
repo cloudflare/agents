@@ -33,3 +33,4 @@ Propose one concise issue comment containing:
 4. A concrete documentation update plan.
 
 Do not claim that documentation was changed or that a persistent effect already occurred.
+Then finish.

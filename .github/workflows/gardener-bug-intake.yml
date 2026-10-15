@@ -2,7 +2,7 @@
 #
 # Source: .gardener/tasks/bug-intake/TASK.md
 # Task: bug-intake
-# Bundle: sha256:84e6c8975c81c79b3a9bb1a16edc36c5ca640bef220ab1c73fcc2a910458312e
+# Bundle: sha256:116177175322f000d216f8ba5a39201a6aa9c5c2148bd44bd633407ad8f3c6d4
 # Regenerate: gardener generate
 # Do not edit this workflow directly.
 name: "Gardener · Bug intake"
@@ -44,7 +44,7 @@ jobs:
       task-id: "bug-intake"
       task-name: "Bug intake"
       task-source: ".gardener/tasks/bug-intake/TASK.md"
-      task-bundle-hash: 84e6c8975c81c79b3a9bb1a16edc36c5ca640bef220ab1c73fcc2a910458312e
+      task-bundle-hash: 116177175322f000d216f8ba5a39201a6aa9c5c2148bd44bd633407ad8f3c6d4
       plan-timeout-minutes: 15
       reactions: >-
         ${{

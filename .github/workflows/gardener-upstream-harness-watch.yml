@@ -2,7 +2,7 @@
 #
 # Source: .gardener/tasks/upstream-harness-watch/TASK.md
 # Task: upstream-harness-watch
-# Bundle: sha256:8ad83eff3ed92ad5f25293b40cc2e41228abb3675eaa394025fbd6054a8cb409
+# Bundle: sha256:417d24781ea0f231a3c8c2c98b3c9827f5ede331e2f6cdf2860ebc9ebab31463
 # Regenerate: gardener generate
 # Do not edit this workflow directly.
 name: "Gardener · Upstream harness watch (pi, opencode)"
@@ -40,5 +40,5 @@ jobs:
       task-id: "upstream-harness-watch"
       task-name: "Upstream harness watch (pi, opencode)"
       task-source: ".gardener/tasks/upstream-harness-watch/TASK.md"
-      task-bundle-hash: 8ad83eff3ed92ad5f25293b40cc2e41228abb3675eaa394025fbd6054a8cb409
+      task-bundle-hash: 417d24781ea0f231a3c8c2c98b3c9827f5ede331e2f6cdf2860ebc9ebab31463
       plan-timeout-minutes: 30

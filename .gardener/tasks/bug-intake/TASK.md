@@ -33,3 +33,4 @@ Propose one concise issue comment containing:
 4. A concrete next step for the author or maintainer.
 
 Do not claim that code was changed or that a persistent effect already occurred.
+Then finish.

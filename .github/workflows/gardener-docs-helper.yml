@@ -2,7 +2,7 @@
 #
 # Source: .gardener/tasks/docs-helper/TASK.md
 # Task: docs-helper
-# Bundle: sha256:8a46a9ec7033e4a1ce03b5deb3dc690fa76d4f5f9f752c5d0784926e740a6ed4
+# Bundle: sha256:6745360be6c10af813a96d1251a052e6b24d166647acd9cecfe101867e96c88c
 # Regenerate: gardener generate
 # Do not edit this workflow directly.
 name: "Gardener · Documentation helper"
@@ -44,7 +44,7 @@ jobs:
       task-id: "docs-helper"
       task-name: "Documentation helper"
       task-source: ".gardener/tasks/docs-helper/TASK.md"
-      task-bundle-hash: 8a46a9ec7033e4a1ce03b5deb3dc690fa76d4f5f9f752c5d0784926e740a6ed4
+      task-bundle-hash: 6745360be6c10af813a96d1251a052e6b24d166647acd9cecfe101867e96c88c
       plan-timeout-minutes: 15
       reactions: >-
         ${{
