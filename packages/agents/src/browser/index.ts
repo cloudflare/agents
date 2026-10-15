@@ -42,6 +42,7 @@ export {
   type BrowserConnection,
   type BrowserConnectOptions,
   type BrowserOptions,
+  type BrowserInternalHosts,
   type BrowserProvider,
   type ResolvedBrowser
 } from "./browser";
@@ -51,10 +52,17 @@ export {
   MAX_INTERNAL_HOSTS,
   type InternalWorkerHost,
   type InternalHost,
+  type InternalHostInfo,
   type InternalHostMessage,
   type InternalHostRouterLoopback,
   type InternalHostRouterProps,
-  type InternalHostsOptions
+  type InternalHostsOptions,
+  type JsonSchemaObject,
+  type StandardJSONSchemaV1,
+  type StandardSchemaV1,
+  type TargetOf,
+  type TargetSchema,
+  type TypedTargetSchema
 } from "./internal-hosts";
 
 export {
