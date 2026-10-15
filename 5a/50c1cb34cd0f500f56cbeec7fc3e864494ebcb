@@ -1,0 +1,29 @@
+.gardener/SKILL.md
+  s_70eb9667041ad7::t_58187d2123078e 1-265
+.gardener/gardener.json
+  s_70eb9667041ad7::t_83cff9e4b58cf0 1-7
+.gardener/gardener.lock.json
+  s_70eb9667041ad7::t_91f35ba26aa1be 1-106
+.github/workflows/gardener-sync.yml
+  s_70eb9667041ad7::t_18a8becf4693d6 1-42
+.github/workflows/gardener-upstream-harness-watch.yml
+  s_70eb9667041ad7::t_65da8af51b5327 1-44
+.oxfmtrc.json
+  s_70eb9667041ad7::t_c8a16c2891e8bf 12-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5a50c1cb34cd0f500f56cbeec7fc3e864494ebcb",
+  "prompts": {},
+  "sessions": {
+    "s_70eb9667041ad7": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a13eed-a573-7ac1-a022-500197b326d7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}
