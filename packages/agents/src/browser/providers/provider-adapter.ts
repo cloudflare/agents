@@ -11,6 +11,7 @@
  */
 
 import type { CdpConnection } from "../cdp-connection";
+import type { InternalHostsOptions } from "../internal-hosts";
 import type { BrowserLiveView, LiveViewMode } from "../live-view";
 import type { SearchableCdpSpec } from "../spec";
 
@@ -29,9 +30,32 @@ export class BrowserSessionGoneError extends Error {
   }
 }
 
+/** Which agent and browser own a session's internal hostnames. */
+export interface InternalHostOwner {
+  /** The agent's class name, as exported from the Worker. */
+  readonly className: string;
+  /** The agent's name. */
+  readonly name: string;
+  /** The `Browser`'s name. */
+  readonly browser: string;
+}
+
 export interface BrowserProviderAdapter {
-  /** Start a new browser session. */
-  create(): Promise<{ sessionId: string }>;
+  /**
+   * Start a new browser session. `owner` is set when the provider has
+   * internal hostnames, so their routes can find the `Browser` again.
+   */
+  create(context?: { owner?: InternalHostOwner }): Promise<{
+    sessionId: string;
+  }>;
+  /** The provider's internal hostnames, when it has any. */
+  readonly internalHosts?: InternalHostsOptions;
+  /**
+   * Identifies the hostnames and how each is routed. A stored session made
+   * with a different signature is replaced, since routes are fixed when a
+   * session starts.
+   */
+  readonly internalHostsSignature?: string;
   /**
    * Whether the session still exists. `true` means alive and `false` means
    * definitely gone. Throw when the answer is unknown (a 5xx, a network

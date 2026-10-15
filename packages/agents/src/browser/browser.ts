@@ -12,8 +12,17 @@
  * the rest (see ./providers/provider-adapter.ts).
  */
 
-import { LifecycleCapability } from "../lifecycle/capability";
+import {
+  LifecycleCapability,
+  type LifecycleRouteContext
+} from "../lifecycle/capability";
 import type { CdpConnection } from "./cdp-connection";
+import {
+  internalHostError,
+  isInternalHostMessage,
+  type AnyInternalHost,
+  type InternalHostMessage
+} from "./internal-hosts";
 import type { BrowserLiveView, LiveViewMode } from "./live-view";
 import {
   browserRunAdapter,
@@ -21,7 +30,8 @@ import {
 } from "./providers/browser-run";
 import {
   BrowserSessionGoneError,
-  type BrowserProviderAdapter
+  type BrowserProviderAdapter,
+  type InternalHostOwner
 } from "./providers/provider-adapter";
 import { BrowserSession, type BrowserSessionOptions } from "./session";
 import {
@@ -237,8 +247,12 @@ export class Browser extends LifecycleCapability {
         return { name, restarted, ...resolvedFields(session) };
       }
 
-      // Live entry on record — probe it outside any lock.
-      const alive = await this.#adapter.isAlive(existing.sessionId);
+      // Live entry on record — probe it outside any lock. A session started
+      // with other internal hostnames counts as lost: its routes can't change.
+      const routesMatch =
+        existing.internalHosts === this.#adapter.internalHostsSignature;
+      const alive =
+        routesMatch && (await this.#adapter.isAlive(existing.sessionId));
       const lock = await this.#sessionStore.acquireLock(key);
       try {
         const current = await this.#sessionStore.get(key);
@@ -250,14 +264,15 @@ export class Browser extends LifecycleCapability {
           await this.#sessionStore.set(key, refreshed);
           return { name, restarted: false, ...resolvedFields(refreshed) };
         }
-        // The browser died upstream (expired or reclaimed). Retire the
-        // record under this lock, so any resolver that reads it during the
-        // replacement window sees the marker and reports restarted: true
-        // too.
+        // The browser died upstream (expired or reclaimed), or has stale
+        // routes. Retire the record under this lock, so any resolver that
+        // reads it during the replacement window sees the marker and
+        // reports restarted: true too.
         await this.#retire(current);
       } finally {
         await lock.release();
       }
+      if (!routesMatch) await this.#closeQuietly(existing.sessionId);
       // Re-enter the loop: the next attempt takes the create path.
     }
 
@@ -420,6 +435,109 @@ export class Browser extends LifecycleCapability {
       );
     }
     return view;
+  }
+
+  // ── Internal hostnames ───────────────────────────────────────────────────
+
+  /**
+   * Serve one browser request to an internal hostname. `InternalHostRouter`
+   * calls the agent's `fetchInternalHost()` with the message; `Agent` passes
+   * it here on its own. A plain Durable Object passes it on itself:
+   *
+   * ```ts
+   * fetchInternalHost(message: InternalHostMessage) {
+   *   return this.browser.fetchInternalHost(message);
+   * }
+   * ```
+   *
+   * Answers 502 with the reason when this browser doesn't serve the host.
+   */
+  async fetchInternalHost(message: InternalHostMessage): Promise<Response> {
+    if (message.browser !== this.name) {
+      return internalHostError(
+        502,
+        `${message.host} belongs to browser "${message.browser}", but was passed to browser "${this.name}"`
+      );
+    }
+    return this.#serveInternalHost(message.host, message.request);
+  }
+
+  /**
+   * `Agent.fetchInternalHost()` routes here through Lifecycle, so `Agent`
+   * needn't import the browser.
+   *
+   * @internal Called by Lifecycle; not part of the host API.
+   */
+  async onRoute(context: LifecycleRouteContext): Promise<unknown> {
+    const { payload } = context;
+    if (!isInternalHostMessage(payload)) {
+      throw new Error(`Browser "${this.name}" got an unknown routed message`);
+    }
+    return this.fetchInternalHost(payload);
+  }
+
+  async #serveInternalHost(host: string, request: Request): Promise<Response> {
+    const hosts = this.#adapter.internalHosts?.hosts as
+      | Record<string, AnyInternalHost>
+      | undefined;
+    const entry = hosts && Object.hasOwn(hosts, host) ? hosts[host] : undefined;
+    if (!entry?.fetch) {
+      return internalHostError(
+        502,
+        `${host} is no longer an internal hostname of browser "${this.name}"`
+      );
+    }
+    const fetch = entry.fetch;
+    try {
+      const response = await this.lifecycle.runInHostContext(() =>
+        fetch(request)
+      );
+      if (response instanceof Response) return response;
+      return internalHostError(
+        502,
+        `${host}: its fetch didn't return a Response`
+      );
+    } catch (error) {
+      return internalHostError(
+        502,
+        `${host}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Which agent and browser the session's routes lead back to. `undefined`
+   * without internal hostnames.
+   */
+  #internalHostOwner(): InternalHostOwner | undefined {
+    if (!this.#adapter.internalHosts) return undefined;
+    const services = this.lifecycleServices;
+    if (!services) {
+      throw new Error(
+        `Browser "${this.name}" has internal hostnames, which need it installed with Lifecycle.use()`
+      );
+    }
+    if (services.routes.source !== undefined) {
+      throw new Error(
+        `Browser "${this.name}" has internal hostnames, which sub-agents don't support yet`
+      );
+    }
+    return {
+      className: services.className,
+      name: services.name,
+      browser: this.name
+    };
+  }
+
+  async #closeQuietly(sessionId: string): Promise<void> {
+    try {
+      await this.#adapter.close(sessionId);
+    } catch (error) {
+      console.warn(
+        `[agents/browser] Failed to close browser session ${sessionId}`,
+        error
+      );
+    }
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
@@ -613,12 +731,16 @@ export class Browser extends LifecycleCapability {
     session: StoredBrowserSession;
     restarted: boolean;
   }> {
-    const info = await this.#adapter.create();
+    const info = await this.#adapter.create({
+      owner: this.#internalHostOwner()
+    });
     const now = Date.now();
+    const signature = this.#adapter.internalHostsSignature;
     const stored: StoredBrowserSession = {
       sessionId: info.sessionId,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      ...(signature !== undefined ? { internalHosts: signature } : {})
     };
 
     let winner: StoredBrowserSession | undefined;
