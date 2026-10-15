@@ -47,6 +47,17 @@ export {
 } from "./browser";
 
 export {
+  InternalHostRouter,
+  MAX_INTERNAL_HOSTS,
+  type InternalFetcherHost,
+  type InternalHost,
+  type InternalHostMessage,
+  type InternalHostRouterLoopback,
+  type InternalHostRouterProps,
+  type InternalHostsOptions
+} from "./internal-hosts";
+
+export {
   browserRun,
   type BrowserRunOptions,
   type BrowserRunProvider

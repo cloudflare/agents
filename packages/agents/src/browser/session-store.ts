@@ -17,6 +17,12 @@ export interface StoredBrowserSession {
    * long as the tab.
    */
   activeTargetId?: string;
+  /**
+   * Named browser records only: the internal hostnames the session was
+   * started with (see `internalHostsSignature`). Routes are fixed at launch,
+   * so a record made with different hostnames is replaced.
+   */
+  internalHosts?: string;
 }
 
 export interface BrowserSessionLock {

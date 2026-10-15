@@ -92,6 +92,7 @@ import {
   type WSMessage
 } from "./lifecycle/durable-object-lifecycle";
 import { abortWithoutAlarmRetry } from "./lifecycle/abort";
+import type { InternalHostMessage } from "./browser/internal-hosts";
 import type { LifecycleRouteAddress } from "./lifecycle/capability";
 import {
   getCurrentAgent as getCurrentLifecycleAgent,
@@ -3196,6 +3197,24 @@ export class Agent<
     envelope: LifecycleRouteEnvelope
   ): Promise<unknown> {
     return this._dynamicAgents.routeLifecycleToTarget(target, envelope);
+  }
+
+  /**
+   * Serves a browser's request to one of its internal hostnames. Browser
+   * Run's `InternalHostRouter` calls this over RPC; it passes the message to
+   * the `Browser` it names, which runs the host's `fetch`. Built in, so an
+   * Agent needs nothing extra for internal hostnames. Not `@callable`, so
+   * clients can't reach it.
+   */
+  async fetchInternalHost(message: InternalHostMessage): Promise<Response> {
+    await this.__unsafe_ensureInitialized();
+    // Routed by capability id rather than through the Browser itself, so
+    // Agent doesn't bundle the browser code.
+    return (await this.lifecycle.route({
+      capability: `browser:${message.browser}`,
+      source: undefined,
+      payload: message
+    })) as Response;
   }
 
   /** Single native-RPC aperture for routed Lifecycle capabilities. */
