@@ -12,11 +12,18 @@ import {
   isMissingBrowserSession,
   listBrowserTargets
 } from "../browser-run";
+import {
+  internalHostsSignature,
+  validateInternalHosts,
+  type AnyInternalHost,
+  type InternalHostsOptions
+} from "../internal-hosts";
 import { createLiveView } from "../live-view";
 import { loadCdpSpec } from "../spec";
 import {
   BrowserSessionGoneError,
-  type BrowserProviderAdapter
+  type BrowserProviderAdapter,
+  type InternalHostOwner
 } from "./provider-adapter";
 
 /**
@@ -48,8 +55,33 @@ export interface BrowserRunOptions {
   keepAliveMs?: number;
   /** Opt into Browser Run session recording (rrweb capture). */
   recording?: boolean;
-  /** Hostname guardrails, fixed at launch for every connection. */
+  /**
+   * Hostname guardrails, fixed at launch for every connection. They don't
+   * apply to `internalHosts`: `allowedDomains: []` leaves the browser able
+   * to open internal hostnames only.
+   */
   guardrails?: BrowserSessionGuardrails;
+  /**
+   * Hostnames only this browser can open, served by your agent or a Worker
+   * instead of the internet. Plain http on port 80; no HTTPS or WebSockets.
+   * Deployed Workers only: in local dev the browser starts without them.
+   *
+   * @example
+   * ```ts
+   * browserRun(this.env.BROWSER, {
+   *   internalHosts: {
+   *     router: this.ctx.exports.InternalHostRouter,
+   *     hosts: {
+   *       "preview.internal": {
+   *         description: "The dev server in your sandbox",
+   *         fetch: (request) => this.sandbox.fetchPort(5173, request)
+   *       }
+   *     }
+   *   }
+   * });
+   * ```
+   */
+  internalHosts?: InternalHostsOptions;
 }
 
 /** A {@link Browser} provider backed by Cloudflare Browser Run. */
@@ -71,7 +103,31 @@ export function browserRun(
   binding: BrowserBinding,
   options: BrowserRunOptions = {}
 ): BrowserRunProvider {
+  if (options.internalHosts) validateInternalHosts(options.internalHosts);
   return { kind: "browser-run", binding, options };
+}
+
+/** One `outboundByHost` route per internal hostname. */
+function internalHostRoutes(
+  internalHosts: InternalHostsOptions,
+  owner: InternalHostOwner
+): Record<string, Fetcher> {
+  const routes: Record<string, Fetcher> = {};
+  const hosts = Object.entries(internalHosts.hosts) as [
+    string,
+    AnyInternalHost
+  ][];
+  for (const [host, config] of hosts) {
+    if (config.fetcher) {
+      routes[host] = config.fetcher;
+      continue;
+    }
+    // validateInternalHosts made sure a fetch host has a router.
+    routes[host] = internalHosts.router!({
+      props: { v: 1, ...owner, host }
+    });
+  }
+  return routes;
 }
 
 /** The code behind {@link browserRun}. */
@@ -88,11 +144,23 @@ export function browserRunAdapter(
       return keepAliveMs();
     },
 
-    async create() {
+    internalHosts: options.internalHosts,
+    internalHostsSignature: internalHostsSignature(options.internalHosts),
+
+    async create(context) {
+      const { internalHosts } = options;
+      if (internalHosts && !context?.owner) {
+        throw new Error(
+          "Internal hostnames need the Browser installed with Lifecycle.use() on a top-level agent"
+        );
+      }
       return acquireBrowserSession(binding, {
         keepAliveMs: keepAliveMs(),
         recording: options.recording,
-        guardrails: options.guardrails
+        guardrails: options.guardrails,
+        ...(internalHosts && context?.owner
+          ? { outboundByHost: internalHostRoutes(internalHosts, context.owner) }
+          : {})
       });
     },
 
