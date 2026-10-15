@@ -49,7 +49,7 @@ const SUGGESTIONS = [
   {
     title: "Preview a production build",
     prompt:
-      "Make a production build of the site and open it on files.internal. Check the Launch button still works."
+      "If there's no site in the workspace yet, build the one the docs describe. Then make a production build and open it on files.internal. Check the Launch button still works."
   },
   {
     title: "Try vinext",
