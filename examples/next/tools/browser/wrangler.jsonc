@@ -1,0 +1,46 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "browser-tools-example",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI", "remote": true },
+  // Live View URLs and internal hostnames come from the real Browser Run
+  // service, so the browser binding runs remotely even in `vite dev`.
+  "browser": { "binding": "BROWSER", "remote": true },
+  // The browser tool runs the model's CDP code in a Dynamic Worker.
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/agents/*"]
+  },
+  // One container per agent, started by the agent itself through
+  // `ctx.container`. It runs computerd, the Computer workspace daemon, plus
+  // Node.js for npm and the dev server.
+  "containers": [
+    {
+      "class_name": "BrowserAgent",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "app": { "dockerfile": "./Dockerfile" }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BrowserAgent",
+        "class_name": "BrowserAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["BrowserAgent"]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
