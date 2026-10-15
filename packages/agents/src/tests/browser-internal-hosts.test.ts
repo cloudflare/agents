@@ -12,6 +12,7 @@ import { browserRun } from "../browser/providers/browser-run";
 import {
   fetcherRoute,
   MAX_INTERNAL_HOSTS,
+  proxyTo,
   validateTarget,
   type InternalHostRouterLoopback
 } from "../browser/internal-hosts";
@@ -140,6 +141,7 @@ describe("Browser internal hosts", () => {
       await instance.internalResolve();
       expect(instance.internalRouteHosts().sort()).toEqual([
         "broken.internal",
+        "docs.internal",
         "echo.internal",
         "preview.internal"
       ]);
@@ -240,7 +242,7 @@ describe("Browser internal hosts", () => {
         const key = `browser-session:${namedBrowserSessionKey("internal")}`;
         const stored = await state.storage.get<StoredBrowserSession>(key);
         expect(stored?.internalHosts).toBe(
-          "broken.internal=fetch,echo.internal=fetch,preview.internal=fetch"
+          "broken.internal=fetch,docs.internal=fetch,echo.internal=fetch,preview.internal=fetch"
         );
         await state.storage.put(key, { ...stored, internalHosts: "old=fetch" });
 
@@ -334,5 +336,53 @@ describe("Browser internal hosts on a plain Durable Object", () => {
         });
       }
     );
+  });
+});
+
+describe("proxyTo", () => {
+  it("forwards to the upstream and keeps the browser on the internal host", async () => {
+    const original = globalThis.fetch;
+    const seen: { url: string; headers: Headers; redirect?: string }[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ) => {
+      seen.push({
+        url: String(input),
+        headers: new Headers(init?.headers),
+        redirect: init?.redirect
+      });
+      const headers = new Headers({
+        location: "https://docs.example.com/base/login?next=1"
+      });
+      headers.append(
+        "set-cookie",
+        "sid=abc; Domain=docs.example.com; Path=/; Secure; HttpOnly; SameSite=None"
+      );
+      return new Response(null, { status: 302, headers });
+    }) as typeof fetch;
+    try {
+      const handler = proxyTo("https://docs.example.com/base/", {
+        headers: { authorization: "Bearer secret" }
+      });
+      const response = await handler(
+        new Request("http://docs.internal/guide?x=1", {
+          headers: { host: "docs.internal", cookie: "a=b" }
+        })
+      );
+      expect(seen[0].url).toBe("https://docs.example.com/base/guide?x=1");
+      expect(seen[0].headers.get("authorization")).toBe("Bearer secret");
+      expect(seen[0].headers.get("cookie")).toBe("a=b");
+      expect(seen[0].redirect).toBe("manual");
+      expect(response.status).toBe(302);
+      expect(response.headers.get("location")).toBe(
+        "http://docs.internal/login?next=1"
+      );
+      expect(response.headers.getSetCookie()).toEqual([
+        "sid=abc; Path=/; HttpOnly; SameSite=Lax"
+      ]);
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 });
