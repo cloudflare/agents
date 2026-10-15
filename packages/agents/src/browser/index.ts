@@ -50,6 +50,7 @@ export {
 export {
   InternalHostRouter,
   MAX_INTERNAL_HOSTS,
+  proxyTo,
   type InternalWorkerHost,
   type InternalHost,
   type InternalHostInfo,
@@ -58,6 +59,7 @@ export {
   type InternalHostRouterProps,
   type InternalHostsOptions,
   type JsonSchemaObject,
+  type ProxyToOptions,
   type TargetOf,
   type TargetSchema,
   type TypedTargetSchema

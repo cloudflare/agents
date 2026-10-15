@@ -4,7 +4,8 @@
  * A host maps a hostname such as `preview.internal` to code in your agent
  * (`fetch`) or to a deployed Worker (`worker`). Browser Run sends the
  * browser's requests for that hostname to it instead of the internet, so a
- * page can be served from a sandbox port or a workspace folder, without exposing anything publicly.
+ * page can be served from a sandbox port, a workspace folder, or a staging
+ * site behind credentials, without exposing anything publicly.
  *
  * How a request travels: Browser Run accepts only entrypoints of your own
  * Worker as routes, and keeps them for the whole browser session (observed
@@ -547,4 +548,96 @@ function isRouterProps(
     typeof props.browser === "string" &&
     typeof props.host === "string"
   );
+}
+
+// ── proxyTo ────────────────────────────────────────────────────────────────
+
+export interface ProxyToOptions {
+  /** Headers to set on every request, such as credentials. */
+  headers?: Record<string, string>;
+}
+
+/**
+ * A `fetch` for a host that forwards each request to `url`, keeping the path
+ * and query. The browser stays on the internal hostname: redirects to `url`
+ * are rewritten to the internal host, and cookies are stored for it.
+ *
+ * @example
+ * ```ts
+ * "docs.internal": {
+ *   fetch: proxyTo("https://docs-staging.example.com", {
+ *     headers: { Authorization: `Bearer ${this.env.DOCS_TOKEN}` }
+ *   })
+ * }
+ * ```
+ */
+export function proxyTo(
+  url: string,
+  options: ProxyToOptions = {}
+): (request: Request) => Promise<Response> {
+  const upstream = new URL(url);
+  const base = upstream.pathname.replace(/\/+$/, "");
+  return async (request) => {
+    const incoming = new URL(request.url);
+    const target = new URL(upstream.origin);
+    target.pathname = `${base}${incoming.pathname}`;
+    target.search = incoming.search;
+
+    const headers = new Headers(request.headers);
+    headers.delete("host");
+    for (const [name, value] of Object.entries(options.headers ?? {})) {
+      headers.set(name, value);
+    }
+    const hasBody = request.method !== "GET" && request.method !== "HEAD";
+    const response = await fetch(target, {
+      method: request.method,
+      headers,
+      ...(hasBody ? { body: request.body } : {}),
+      // Redirects go back to the browser, rewritten to the internal host.
+      redirect: "manual"
+    });
+
+    const rewritten = new Headers(response.headers);
+    const location = rewritten.get("location");
+    if (location) {
+      const resolved = new URL(location, target);
+      if (resolved.origin === upstream.origin) {
+        const path = resolved.pathname.startsWith(base)
+          ? resolved.pathname.slice(base.length) || "/"
+          : resolved.pathname;
+        rewritten.set(
+          "location",
+          `${incoming.origin}${path}${resolved.search}${resolved.hash}`
+        );
+      }
+    }
+    const cookies = response.headers.getSetCookie();
+    if (cookies.length > 0) {
+      rewritten.delete("set-cookie");
+      for (const cookie of cookies) {
+        rewritten.append("set-cookie", forInternalHost(cookie));
+      }
+    }
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: rewritten
+    });
+  };
+}
+
+/**
+ * Make an upstream cookie stick on the internal host: drop `Domain` (it
+ * names the upstream) and `Secure` (the internal host is plain http).
+ * `SameSite=None` needs `Secure`, so it becomes `Lax`. Cookies named
+ * `__Secure-` or `__Host-` need `Secure` too, and Chrome drops them.
+ */
+function forInternalHost(cookie: string): string {
+  return cookie
+    .split(";")
+    .filter((part) => !/^\s*(domain|secure)\s*(=|$)/i.test(part))
+    .map((part) =>
+      /^\s*samesite\s*=\s*none\s*$/i.test(part) ? " SameSite=Lax" : part
+    )
+    .join(";");
 }
