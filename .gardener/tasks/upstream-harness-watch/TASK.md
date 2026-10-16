@@ -154,7 +154,10 @@ These are **not** reportable, however interesting they are:
 
 Title: `[upstream-watch] <pi|opencode> <version>: <what broke, ≤ 60 chars>`
 
-Labels: `["dependencies"]`. Do not use any other label.
+Labels: every `issue.create` payload **must** include
+`"labels": ["dependencies"]`, exactly that and nothing else. Check it is
+there before you call `finish_task`; an issue without it is wrong. Follow-up
+comments carry no labels.
 
 Body, in this order, under about 350 words:
 
