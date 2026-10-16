@@ -6,6 +6,8 @@ the same gateway, returning pi-ai `Model` objects instead of AI SDK ones. Use it
 `stream`/`complete`, with [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable)'s
 `Harness`, or with any framework built on a pi-ai `Models` registry.
 
+Requires `@earendil-works/pi-ai` 1.0.1 or later.
+
 ## The rule
 
 **Workers AI is the catalog Cloudflare keeps up with. Every other vendor is pi-ai's.**
@@ -29,7 +31,7 @@ For convenience, pi-ai also ships a generated catalog of the models Cloudflare's
 serves, so a `<provider>/<id>` string resolves without importing anything:
 
 ```ts
-ai("anthropic/claude-opus-4.8"); // the same model, as AI Gateway's catalog names it
+ai("anthropic/claude-opus-4-8"); // the same model, as AI Gateway's catalog names it
 ai("openai/gpt-5.4");
 ```
 
@@ -85,7 +87,7 @@ export default {
 ai("@cf/zai-org/glm-4.7-flash");
 
 // 2. pi-ai's Cloudflare AI Gateway catalog — a string, resolved by pi, not us.
-ai("anthropic/claude-opus-4.8");
+ai("anthropic/claude-opus-4-8");
 
 // 2b. An AI Gateway dynamic route — the route on the gateway picks the model.
 ai("dynamic/support");
@@ -113,7 +115,7 @@ picked, and takes the same metadata defaults and overrides as a Workers AI id.
 The instance carries pi-ai's four entry points, so nothing global is registered:
 
 ```ts
-const model = ai("anthropic/claude-opus-4.8");
+const model = ai("anthropic/claude-opus-4-8");
 const context = {
   messages: [{ role: "user", content: "Hi", timestamp: Date.now() }]
 };
@@ -138,12 +140,17 @@ import { createModels } from "@earendil-works/pi-ai/models";
 const models = createModels();
 models.setProvider(ai.provider);
 const harness = await Harness.open(storage, { models, registry }, context);
-// a session's model: { provider: "cloudflare", modelId: "anthropic/claude-opus-4.8" }
+// a session's model: { provider: "cloudflare", modelId: "anthropic/claude-opus-4-8" }
 ```
 
 A session stores its model as `{ provider, modelId }`, not as a model object, so use the
 `@cf/…` and `<provider>/<id>` forms there. Options given to `ai(model, options)` do not reach a
 session; set them on `createAI` instead.
+
+When upgrading from pi-ai 1.0.0, replace dotted Claude gateway ids such as
+`anthropic/claude-opus-4.8` with `anthropic/claude-opus-4-8`, including `modelId`
+values in stored sessions. Dotted ids are not catalog aliases; `ai()` rejects them
+with a suggestion for the dashed spelling.
 
 `ai.streamFn` is `streamSimple`, bound, for frameworks that take a stream function, such as
 pi-agent-core's `Agent({ streamFn })`.
@@ -155,7 +162,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 
 const models = createModels();
 models.setProvider(ai.provider); // provider id: "cloudflare"
-models.getModel("cloudflare", "anthropic/claude-opus-4.8");
+models.getModel("cloudflare", "anthropic/claude-opus-4-8");
 models.streamSimple(ai("@cf/zai-org/glm-4.7-flash"), context);
 ```
 
@@ -170,7 +177,7 @@ Gateway options may be given flat or nested, on any of the three layers:
 ```ts
 const ai = createAI({ binding: env.AI, id: "prod", cacheTtl: 60 });
 
-ai("anthropic/claude-opus-4.8", {
+ai("anthropic/claude-opus-4-8", {
   gateway: { id: "my-gateway" }, // or a string id
   cacheTtl: 3600, // the same keys, flat
   skipCache: false,
@@ -220,7 +227,7 @@ then model, then `createAI` settings.
 | Any other model object                  | its own `api`        | the binding's `fetch` → AI Gateway's provider-native path |
 
 A model from pi's Cloudflare AI Gateway catalog runs on `env.AI.run` under its catalog id,
-which pi spells the gateway's way (`anthropic/claude-opus-4.8`). The body is pi-ai's own,
+which pi spells the gateway's way (`anthropic/claude-opus-4-8`). The body is pi-ai's own,
 built by pi-ai's converter for the model's `api`, and it is sent in that format: `/run`
 converts nothing, so the answer, streams included, is the shape pi-ai's stream processors
 read. `/run` picks the provider and bills through Unified Billing or a key stored on the

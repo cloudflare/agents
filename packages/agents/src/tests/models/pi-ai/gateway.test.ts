@@ -40,7 +40,7 @@ describe("pi-ai: ids this provider resolves", () => {
   it("resolves a <slug>/<id> id through pi-ai's gateway catalog", async () => {
     const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
     const ai = createAI({ binding: asAi(binding) });
-    const model = ai("anthropic/claude-opus-4.8");
+    const model = ai("anthropic/claude-opus-4-8");
     // The registry's metadata, verbatim: the compat profile is why the request
     // below asks for adaptive thinking.
     expect(model.api).toBe("anthropic-messages");
@@ -51,7 +51,7 @@ describe("pi-ai: ids this provider resolves", () => {
     );
     const call = binding.calls[0];
     // The catalog id runs on `/run`, in Messages, the model's own format.
-    expect(call?.model).toBe("anthropic/claude-opus-4.8");
+    expect(call?.model).toBe("anthropic/claude-opus-4-8");
     expect(call?.options.openaiEndpoint).toBe("/v1/messages");
     expect(field(call?.input, "thinking.type")).toBe("adaptive");
   });
@@ -73,10 +73,10 @@ describe("pi-ai: ids this provider resolves", () => {
     );
   });
 
-  it("suggests the catalog's spelling of a vendor-spelled id", () => {
+  it("suggests the dashed catalog id for a legacy dotted Claude id", () => {
     const ai = createAI({ binding: asAi(fakeBinding(() => new Response())) });
-    expect(() => ai("anthropic/claude-opus-4-8")).toThrow(
-      'Did you mean ai("anthropic/claude-opus-4.8")?'
+    expect(() => ai("anthropic/claude-opus-4.8")).toThrow(
+      'Did you mean ai("anthropic/claude-opus-4-8")?'
     );
     expect(() => ai("anthropic/claude-nope")).not.toThrow(/Did you mean/);
   });
@@ -100,11 +100,11 @@ describe("pi-ai: catalog models on /run", () => {
     const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
     const ai = createAI({ binding: asAi(binding), cacheTtl: 60, id: "prod" });
     const { message } = await collectEvents(
-      ai.streamSimple(ai("anthropic/claude-opus-4.8"), userContext("hi"))
+      ai.streamSimple(ai("anthropic/claude-opus-4-8"), userContext("hi"))
     );
     const call = binding.calls[0];
     expect(binding.native).toHaveLength(0);
-    expect(call?.model).toBe("anthropic/claude-opus-4.8");
+    expect(call?.model).toBe("anthropic/claude-opus-4-8");
     // Messages in, Messages out: `/run` converts nothing, streams included.
     expect(call?.options).toMatchObject({
       gateway: { cacheTtl: 60, id: "prod" },
@@ -142,7 +142,7 @@ describe("pi-ai: catalog models on /run", () => {
     );
     const ai = createAI({ binding: asAi(binding) });
     const { events, message } = await collectEvents(
-      ai.stream(ai("anthropic/claude-opus-4.8"), userContext("hi"))
+      ai.stream(ai("anthropic/claude-opus-4-8"), userContext("hi"))
     );
     expect(events.at(-1)?.type).toBe("error");
     expect(message.stopReason).toBe("error");
@@ -159,7 +159,7 @@ describe("pi-ai: catalog models on /run", () => {
     });
     await collectEvents(
       ai.streamSimple(
-        ai("anthropic/claude-opus-4.8", {
+        ai("anthropic/claude-opus-4-8", {
           cacheTtl: 60,
           headers: { "x-team": "growth" }
         }),
@@ -244,10 +244,10 @@ describe("pi-ai: a model that lost its symbol tags", () => {
     const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
     const ai = createAI({ binding: asAi(binding) });
     await collectEvents(
-      ai.stream(rehydrate(ai("anthropic/claude-opus-4.8")), userContext("hi"))
+      ai.stream(rehydrate(ai("anthropic/claude-opus-4-8")), userContext("hi"))
     );
     expect(binding.calls).toHaveLength(1);
-    expect(binding.calls[0]?.model).toBe("anthropic/claude-opus-4.8");
+    expect(binding.calls[0]?.model).toBe("anthropic/claude-opus-4-8");
     expect(binding.calls[0]?.options.openaiEndpoint).toBe("/v1/messages");
   });
 
@@ -270,12 +270,12 @@ describe("pi-ai: a model that lost its symbol tags", () => {
     const ai = createAI({ binding: asAi(binding) });
     const listed = ai.provider
       .getModels()
-      .find((entry) => entry.id === "anthropic/claude-opus-4.8");
+      .find((entry) => entry.id === "anthropic/claude-opus-4-8");
     expect(listed).toBeDefined();
     await collectEvents(
       ai.stream(rehydrate(listed as Model<Api>), userContext("hi"))
     );
-    expect(binding.calls[0]?.model).toBe("anthropic/claude-opus-4.8");
+    expect(binding.calls[0]?.model).toBe("anthropic/claude-opus-4-8");
   });
 });
 
@@ -284,7 +284,7 @@ describe("pi-ai: string legs and Workers AI knobs on vendor models", () => {
     const ai = createAI({ binding: asAi(fakeBinding(() => sseResponse([]))) });
     expect(() =>
       ai("@cf/zai-org/glm-4.7-flash", {
-        fallback: ["anthropic/claude-opus-4.8"]
+        fallback: ["anthropic/claude-opus-4-8"]
       })
     ).not.toThrow();
     expect(() =>

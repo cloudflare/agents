@@ -121,12 +121,12 @@ describe("pi-ai: ai.streamFn", () => {
     const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
     const ai = createAI({ binding: asAi(binding), id: "gw" });
     const { message } = await collectEvents(
-      ai.streamFn(ai("anthropic/claude-opus-4.8"), userContext("hi"))
+      ai.streamFn(ai("anthropic/claude-opus-4-8"), userContext("hi"))
     );
 
     expect(binding.native).toHaveLength(0);
     expect(binding.calls[0]).toMatchObject({
-      model: "anthropic/claude-opus-4.8",
+      model: "anthropic/claude-opus-4-8",
       options: { gateway: { id: "gw" }, openaiEndpoint: "/v1/messages" }
     });
     expect(message.stopReason).toBe("stop");
