@@ -1,8 +1,9 @@
 /**
- * The core transport over the AI binding: `env.AI.run` for model ids, and the
- * binding's own `fetch` for the provider-native path.
+ * The core transport over the AI binding (`env.AI.run` for model ids, the
+ * binding's own `fetch` for the provider-native path) and over HTTP with an
+ * account id and API token (the REST API and `gateway.ai.cloudflare.com`).
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudflareAIError } from "../../../models/core/errors";
 import type { ResolvedGateway } from "../../../models/core/settings";
 import {
@@ -194,10 +195,212 @@ describe("core transport - the run path", () => {
 });
 
 describe("core transport - settings", () => {
-  it("requires the AI binding: there is no HTTP transport", () => {
+  it("requires the AI binding or an account id and API token", () => {
     expect(() => createTransport({} as never)).toThrow(
-      /requires \{ binding \}/
+      /requires \{ binding \} \(the AI binding\) or \{ accountId, apiToken \}/
     );
+    expect(() =>
+      createTransport({ accountId: "acct", apiToken: "" } as never)
+    ).toThrow(/requires/);
+  });
+});
+
+const ACCOUNT = { accountId: "acct-1", apiToken: "token-1" };
+
+/** Stubs the global `fetch`, recording each call. */
+function stubFetch(response: () => Response) {
+  const calls: { url: string; init: RequestInit }[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    calls.push({ init: init ?? {}, url: String(input) });
+    return response();
+  });
+  return calls;
+}
+
+function headersOf(init: RequestInit): Record<string, string> {
+  return Object.fromEntries(new Headers(init.headers));
+}
+
+describe("core transport - the run path over HTTP", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("sends a catalog model to the REST API endpoint for its format, the model in the body", async () => {
+    const calls = stubFetch(() => new Response("{}"));
+    const transport = createTransport(ACCOUNT);
+    for (const format of [
+      "chat-completions",
+      "messages",
+      "responses"
+    ] as const) {
+      await transport.run({
+        format,
+        gateway: GATEWAY,
+        headers: {},
+        input: { max_tokens: 8, stream: true },
+        model: "anthropic/claude-opus-4.8"
+      });
+    }
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://api.cloudflare.com/client/v4/accounts/acct-1/ai/v1/chat/completions",
+      "https://api.cloudflare.com/client/v4/accounts/acct-1/ai/v1/messages",
+      "https://api.cloudflare.com/client/v4/accounts/acct-1/ai/v1/responses"
+    ]);
+    expect(calls[0]?.init.method).toBe("POST");
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual({
+      max_tokens: 8,
+      model: "anthropic/claude-opus-4.8",
+      stream: true
+    });
+  });
+
+  it("authenticates with the token and sends the gateway options as cf-aig-* headers", async () => {
+    const calls = stubFetch(() => new Response("{}"));
+    await createTransport(ACCOUNT).run({
+      gateway: {
+        byokAlias: "team-a",
+        cacheTtl: 60,
+        id: "prod",
+        metadata: { tenant: "acme" },
+        zdr: true
+      },
+      headers: { "x-session-affinity": "s-1" },
+      input: {},
+      model: "anthropic/claude-opus-4.8"
+    });
+    expect(headersOf(calls[0]!.init)).toEqual({
+      authorization: "Bearer token-1",
+      "cf-aig-byok-alias": "team-a",
+      "cf-aig-cache-ttl": "60",
+      "cf-aig-gateway-id": "prod",
+      "cf-aig-metadata": '{"tenant":"acme"}',
+      "content-type": "application/json",
+      "x-session-affinity": "s-1"
+    });
+  });
+
+  it("does not let a caller's header replace the token", async () => {
+    const calls = stubFetch(() => new Response("{}"));
+    await createTransport(ACCOUNT).run({
+      gateway: GATEWAY,
+      headers: { Authorization: "Bearer other" },
+      input: {},
+      model: "anthropic/claude-opus-4.8"
+    });
+    expect(headersOf(calls[0]!.init).authorization).toBe("Bearer token-1");
+  });
+
+  it("sends a Workers AI model to its own run route with its input, and unwraps the envelope", async () => {
+    const calls = stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            errors: [],
+            messages: [],
+            result: { response: "hi" },
+            success: true
+          }),
+          { headers: { "content-type": "application/json" } }
+        )
+    );
+    const response = await createTransport(ACCOUNT).run({
+      gateway: { byokAlias: "team-a", id: "prod" },
+      headers: {},
+      input: { messages: [{ content: "hi", role: "user" }] },
+      model: "@cf/zai-org/glm-4.7-flash"
+    });
+    expect(calls[0]?.url).toBe(
+      "https://api.cloudflare.com/client/v4/accounts/acct-1/ai/run/@cf/zai-org/glm-4.7-flash"
+    );
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual({
+      messages: [{ content: "hi", role: "user" }]
+    });
+    expect(headersOf(calls[0]!.init)).not.toHaveProperty("cf-aig-byok-alias");
+    expect(headersOf(calls[0]!.init)["cf-aig-gateway-id"]).toBe("prod");
+    expect(await response.json()).toEqual({ response: "hi" });
+  });
+
+  it("leaves a Workers AI error response for the caller", async () => {
+    stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            errors: [{ code: 5007, message: "No such model" }]
+          }),
+          { headers: { "content-type": "application/json" }, status: 400 }
+        )
+    );
+    const response = await createTransport(ACCOUNT).run({
+      gateway: GATEWAY,
+      headers: {},
+      input: {},
+      model: "@cf/nope/nope"
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("normalizes a thrown fetch failure into a CloudflareAIError", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
+    await expect(
+      createTransport(ACCOUNT).run({
+        gateway: GATEWAY,
+        headers: {},
+        input: {},
+        model: "anthropic/claude-opus-4.8"
+      })
+    ).rejects.toBeInstanceOf(CloudflareAIError);
+  });
+
+  // TODO: the public resume route (`gateway.ai.cloudflare.com/v1/{account}/
+  // {gateway}/run/{runId}/resume`) answers 2036 unless the gateway has AI
+  // Gateway's unified run flag, and the REST API has none. Turn this on once
+  // it is open to every gateway.
+  it.todo("resumes a dropped REST API stream from the last complete event");
+});
+
+describe("core transport - provider-native requests over HTTP", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("sends the vendor's request to gateway.ai.cloudflare.com with the token as cf-aig-authorization", async () => {
+    const calls = stubFetch(() => new Response(VENDOR_BODY, { status: 200 }));
+    const response = await createTransport(ACCOUNT).native(
+      nativeRequest({
+        gateway: { byokAlias: "team-a", id: "prod", zdr: true }
+      })
+    );
+    expect(calls[0]?.url).toBe(
+      "https://gateway.ai.cloudflare.com/v1/acct-1/prod/anthropic/v1/messages"
+    );
+    expect(calls[0]?.init.method).toBe("POST");
+    expect(headersOf(calls[0]!.init)).toEqual({
+      "anthropic-version": "2023-06-01",
+      "cf-aig-authorization": "Bearer token-1",
+      "cf-aig-byok-alias": "team-a",
+      "cf-aig-zdr": "true"
+    });
+    expect(await response.text()).toBe(VENDOR_BODY);
+  });
+
+  it("does not let a caller's header replace the token", async () => {
+    const calls = stubFetch(() => new Response(VENDOR_BODY));
+    await createTransport(ACCOUNT).native(
+      nativeRequest({
+        headers: { "CF-AIG-Authorization": "Bearer other" }
+      })
+    );
+    expect(headersOf(calls[0]!.init)["cf-aig-authorization"]).toBe(
+      "Bearer token-1"
+    );
+  });
+
+  it("returns the vendor's own error response untouched", async () => {
+    stubFetch(() => new Response('{"type":"error"}', { status: 429 }));
+    const response = await createTransport(ACCOUNT).native(nativeRequest());
+    expect(response.status).toBe(429);
+    expect(await response.text()).toBe('{"type":"error"}');
   });
 });
 

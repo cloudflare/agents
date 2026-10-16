@@ -43,9 +43,10 @@ design: a model this package cannot name exactly is yours to construct.
    created on first use.
 3. **No provider keys.** AI Gateway holds the credential — unified billing, or a key you
    store on the gateway (BYOK) — so nothing vendor-shaped needs a secret in your Worker.
-4. **The binding is the only way in.** Workers AI and catalog models go through
+4. **The binding, or an account id and token.** Workers AI and catalog models go through
    `env.AI.run`, other model objects through the binding's `fetch` to AI Gateway's
-   provider-native path; there is no HTTP transport and no API token to hold.
+   provider-native path. With [an account id and API token](#account-id-and-api-token) the
+   same requests go over HTTP instead.
 5. Everything here is in beta and may change in a minor release.
 
 ## Quick start
@@ -77,6 +78,26 @@ export default {
   }
 };
 ```
+
+### Account id and API token
+
+To use a gateway in another account, or to call from outside a Worker, pass `accountId` and
+`apiToken` instead of `binding`. Everything else is the same, and the gateway still defaults to
+`default`:
+
+```ts
+const ai = createAI({
+  accountId: "27b146402af2103944379f33841b6234",
+  apiToken: env.CLOUDFLARE_API_TOKEN,
+  gateway: "project-gateway"
+});
+```
+
+Workers AI and catalog models go to AI Gateway's
+[REST API](https://developers.cloudflare.com/ai-gateway/usage/rest-api/), which runs them on
+`/run` as `env.AI.run` does. Other model objects go to the provider-native path on
+`gateway.ai.cloudflare.com`, with the token as `cf-aig-authorization`. Create the token with
+**Workers AI Read** and **AI Gateway Run**; it is sent to those two hosts only.
 
 ## Where a model comes from
 
@@ -231,7 +252,10 @@ own id — goes to AI Gateway's **provider-native path** through the binding's `
 provider slug taken from the model's `baseUrl` host. The gateway forwards it to the vendor with
 the credential it holds and streams the vendor's own SSE back untouched.
 
-Either way no credential header leaves your Worker, and the model's `api`, `provider` and
+With an account id and token, the same requests go to the REST API and to
+`gateway.ai.cloudflare.com`; see [account id and API token](#account-id-and-api-token).
+
+Either way no vendor credential leaves your Worker, and the model's `api`, `provider` and
 `id` are never rewritten, so thinking signatures and encrypted reasoning items replay on the
 next turn.
 
@@ -300,7 +324,7 @@ status and headers for every request.
 
 ## Stream resume
 
-A model from pi's AI Gateway catalog streams from `/run`, which names the run in
+Through the binding, a model from pi's AI Gateway catalog streams from `/run`, which names the run in
 `cf-aig-run-id` and keeps its events. If the connection drops, the provider reconnects through
 the binding and replays from the last complete event, so the stream continues with nothing lost
 or repeated. It gives up after five drops or once the gateway no longer holds the run, and an

@@ -241,9 +241,10 @@ function buildModel(
 /**
  * Creates a pi-ai provider over Cloudflare's AI.
  *
- * The Workers AI binding is the only way in — Workers AI models go through
- * `env.AI.run`, vendor models through `env.AI.gateway(id).run`, and there is
- * no HTTP transport and no API token. Gateway options may be given flat
+ * Workers AI and catalog models go through `env.AI.run`, other model objects
+ * through the binding's `fetch` to AI Gateway's provider-native path. With
+ * `{ accountId, apiToken }` instead of `binding`, the same requests go to the
+ * REST API and to `gateway.ai.cloudflare.com`. Gateway options may be given flat
  * (`{ binding, id: "prod", cacheTtl: 60 }`) or nested under `gateway`;
  * per-model options and per-call pi-ai options (`headers`, `metadata`,
  * `sessionId`) override them in that order.

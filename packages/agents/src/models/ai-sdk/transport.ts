@@ -31,9 +31,9 @@ export function errorFromGatewayEnvelope(
 }
 
 /**
- * The transport this module uses, both halves through the binding:
- * `env.AI.run` for a model id, and the provider-native path for a vendor's
- * own model object.
+ * The transport this module uses: the run path for a model id, and the
+ * provider-native path for a vendor's own model object, through the binding
+ * or over HTTP.
  *
  * @experimental This surface is experimental and may change.
  */

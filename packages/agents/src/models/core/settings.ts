@@ -52,17 +52,50 @@ export interface GatewayOptions {
 }
 
 /**
- * How `createAI` reaches Cloudflare: the Workers AI binding, and nothing else.
- * Workers AI models go through `env.AI.run`, vendor models through
- * `env.AI.gateway(id).run` — both are the binding, so there is no HTTP
- * transport, no account id and no API token to hold.
+ * How `createAI` reaches Cloudflare: the `AI` binding, or an account id and
+ * API token. Both take the same routes — a model id to the run path, a
+ * vendor's model object to the provider-native path — and the same gateway
+ * options.
  *
  * @experimental This surface is experimental and may change.
  */
-export type AISettings = {
+export type AISettings = (BindingAccess | AccountAccess) &
+  ProviderGatewaySettings;
+
+/**
+ * Reach Cloudflare through the `AI` binding: no account id or token to hold,
+ * and the gateway is the Worker's own account's.
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export interface BindingAccess {
   /** The `AI` binding from a Worker's env. */
   binding: Ai;
-} & ProviderGatewaySettings;
+  accountId?: never;
+  apiToken?: never;
+}
+
+/**
+ * Reach Cloudflare over HTTP with an account id and API token, for a gateway
+ * in another account or code that runs outside a Worker. A model id goes to
+ * the REST API (`api.cloudflare.com/client/v4/accounts/{accountId}/ai/...`),
+ * a model object to the provider-native path
+ * (`gateway.ai.cloudflare.com/v1/{accountId}/{gateway}/...`). The token is
+ * only ever sent to those two hosts.
+ *
+ * @experimental This surface is experimental and may change.
+ */
+export interface AccountAccess {
+  /** The account the gateway belongs to. */
+  accountId: string;
+  /**
+   * A Cloudflare API token for that account, with Workers AI Read (model ids,
+   * on the REST API) and AI Gateway Run (model objects, on the
+   * provider-native path).
+   */
+  apiToken: string;
+  binding?: never;
+}
 
 /**
  * Provider-wide gateway defaults, in either spelling: nested under `gateway`,

@@ -1,7 +1,8 @@
 /**
  * `agents/models/ai-sdk` — Cloudflare's AI SDK provider.
  *
- * Two call forms, both through the `AI` binding:
+ * Two call forms, through the `AI` binding or, with `{ accountId, apiToken }`,
+ * over HTTP:
  *
  * 1. **A string** runs on `env.AI.run`: `ai("@cf/…")` is a Workers AI model,
  *    `ai("<author>/<model>")` a model from the AI Gateway catalog in the
@@ -218,10 +219,11 @@ export interface AI {
 /**
  * Creates a provider over Workers AI and the AI Gateway catalog.
  *
- * The Workers AI binding is the only way in: a Workers AI id goes to Workers
- * AI and a catalog id or dynamic route to AI Gateway's `/run`, both on
- * `env.AI.run`; a vendor's model object goes to AI Gateway's provider-native
- * path. There is no HTTP transport and no API token. Gateway
+ * A Workers AI id goes to Workers AI and a catalog id or dynamic route to AI
+ * Gateway's `/run`, both on `env.AI.run`; a vendor's model object goes to AI
+ * Gateway's provider-native path. With `{ accountId, apiToken }` instead of
+ * `binding`, the same requests go to the REST API and to
+ * `gateway.ai.cloudflare.com`. Gateway
  * options are flat (`id`, `cacheTtl`, …) or nested under `gateway`; per-model
  * options and per-call `providerOptions.cloudflare` override them in that
  * order.
