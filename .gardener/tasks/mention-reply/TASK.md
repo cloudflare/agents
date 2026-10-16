@@ -83,16 +83,19 @@ Your reply:
 1. Read `AGENTS.md`, and the nested `AGENTS.md` for the area you change (for example
    `packages/agents/AGENTS.md`). Follow their conventions.
 2. Read the relevant files, then edit them in the checkout using `repository.exec`.
-3. Check your change before proposing it:
-   - Install once with `pnpm install --frozen-lockfile`. If `pnpm` is missing, use
-     `npx -y pnpm@11.19.0` in its place.
-   - Format and lint what you touched: `pnpm exec oxfmt <files>` and
-     `pnpm exec oxlint <files>`.
-   - For changes under `packages/`, build the package (`pnpm exec nx run <package>:build`), then
-     run its typecheck and the tests closest to your change, for example
-     `pnpm exec vitest --run <test file>` from the package directory.
-   - Do not run the whole repository's test suite.
-   If a check cannot run here, say which in your reply rather than claiming it passed.
+3. Check your change before proposing it, the way CI does:
+   - This runner ships Node 22 without pnpm, and CI uses Node 24. Each command runs in a fresh
+     shell, so run every Node command through
+     `npx -y -p node@24 -p pnpm@11.19.0 -- <command>`, for example
+     `npx -y -p node@24 -p pnpm@11.19.0 -- pnpm install --frozen-lockfile`.
+   - Install once, then format what you touched with `pnpm exec oxfmt <files>`.
+   - Run `pnpm run build`, then `pnpm run check`, from the repository root. `AGENTS.md`
+     requires `check` before any change is done. Both must pass.
+   - Then run the tests closest to your change, for example
+     `pnpm exec vitest --run <test file>` from the package directory. Do not run the whole
+     repository's test suite.
+   If a check fails, fix it or say so in your reply and the pull request body. If a check cannot
+   run here, say which, rather than claiming it passed.
 4. Changes under `packages/` that fix a bug or change the public API need a changeset. Add
    `.changeset/<short-name>.md` in the same commit:
 
@@ -101,10 +104,12 @@ Your reply:
    "agents": patch
    ---
 
-   One sentence on what changed for users.
+   One line on what changed for users. See [Page title](https://developers.cloudflare.com/agents/...).
    ```
 
-   Use the package's real name from its `package.json`. Examples, guides and docs need none.
+   Keep it to that single line, as `AGENTS.md` asks, and link the relevant documentation page
+   when there is one. Use the package's real name from its `package.json` and the right bump.
+   Examples, guides and docs need none.
 5. Propose `branch.create` for `gardener/<short-name>` from the commit the run started at.
 6. Propose `commit.create` on that branch with a short message. Its files come from your edits.
 7. Propose `pull_request.open` (or `pull_request.open_draft` if they ask for a draft) into the
