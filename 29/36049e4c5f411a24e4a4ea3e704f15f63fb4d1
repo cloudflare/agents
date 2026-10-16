@@ -1,0 +1,21 @@
+.gardener/gardener.lock.json
+  s_d5236946d8dd8d::t_6f1a997afbf10d 206,213
+.github/workflows/gardener-upstream-harness-watch.yml
+  s_d5236946d8dd8d::t_167d24c5778258 5,43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2936049e4c5f411a24e4a4ea3e704f15f63fb4d1",
+  "prompts": {},
+  "sessions": {
+    "s_d5236946d8dd8d": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a144ee-481f-7550-aedb-3588984b2832",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}
