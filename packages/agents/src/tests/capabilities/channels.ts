@@ -195,6 +195,22 @@ export class ChannelsHarnessObject extends DurableObject<Cloudflare.Env> {
     return streams.map((status) => status.streamId);
   }
 
+  /**
+   * Open streams another capability left streaming, newer than any Channels
+   * response so far. Returns their ids.
+   */
+  async openForeignStreams(count: number): Promise<string[]> {
+    // Make them strictly newer: the list orders by creation time.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const ids: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const id = `other-${i}`;
+      await this.channels.streams.open(id, { tag: "other" });
+      ids.push(id);
+    }
+    return ids;
+  }
+
   /** Run startup again, as a new instance would. */
   async wake(): Promise<void> {
     await this.channels.onStart();
