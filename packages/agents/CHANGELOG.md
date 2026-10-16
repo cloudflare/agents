@@ -1,5 +1,19 @@
 # @cloudflare/agents
 
+## 0.29.0
+
+### Minor Changes
+
+- [#2560](https://github.com/cloudflare/agents/pull/2560) [`8c720d3`](https://github.com/cloudflare/agents/commit/8c720d3b0d7703741bf0f6e47b571d3e21c50742) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Agent Skills read and write a `@cloudflare/computer` Workspace, for both projection and `skills.runner()`. See [Upgrading to a Computer workspace](https://github.com/cloudflare/agents/blob/main/docs/think/index.md#upgrading-to-a-computer-workspace).
+
+### Patch Changes
+
+- [#2584](https://github.com/cloudflare/agents/pull/2584) [`3b3a88e`](https://github.com/cloudflare/agents/commit/3b3a88e487398f4120023f1c75830bc703b14216) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `Browser` creates and closes its Browser Run sessions with the binding's typed `acquire()` and `closeSession()`, falling back to the HTTP API in fully local dev. See [Browser](https://developers.cloudflare.com/agents/tools/browser/).
+
+- [#2576](https://github.com/cloudflare/agents/pull/2576) [`b048873`](https://github.com/cloudflare/agents/commit/b04887397fa99fd785f8323076e61a2b76e6ca5f) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `createAI` no longer uses AI Gateway's deprecated Universal Endpoint. Model ids, now including catalog ids like `anthropic/claude-opus-4.8`, run on `env.AI.run`; model objects go to the provider-native path. Adds `byokAlias`, fixes pi-ai catalog models and dynamic routes, and lets `agents/models/opencode` take catalog ids. See [the models docs](https://github.com/cloudflare/agents/blob/main/docs/agents/models.md).
+
+- [#2589](https://github.com/cloudflare/agents/pull/2589) [`841cc18`](https://github.com/cloudflare/agents/commit/841cc1813b21de3ca3228a08185e4ce1568eb972) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `createAI` resumes a catalog or dynamic route stream that drops mid-answer, with nothing lost or repeated. See [the models docs](https://github.com/cloudflare/agents/blob/main/docs/agents/models.md#stream-resume).
+
 ## 0.28.1
 
 ### Patch Changes
