@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/shell",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Deprecated: use @cloudflare/computer. Experimental sandboxed JS execution and filesystem runtime for Cloudflare Workers agents",
   "repository": {
     "directory": "packages/shell",
