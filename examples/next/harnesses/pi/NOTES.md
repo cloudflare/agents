@@ -68,7 +68,9 @@ A run of the job (`#wakeStep`) never admits or replays anything:
 - **Only background tasks:** reschedule in 30 s.
 - **Otherwise:** start `conversation.waitForIdle()` in the background,
   inside the alarm's work (`trackAlarmWork`), and reschedule the job 30 s out
-  as a heartbeat. When the wait ends, push the job due now to re-check.
+  as a heartbeat. When the wait ends, push the job due now to re-check. A
+  memory-limit reset during the wait is passed on, so it counts against the
+  job's alarm breaker, which then decides when the job runs again.
 
 The whole thing relies on one Lifecycle rule: a same-id `push()` made while
 the job is dispatching supersedes that dispatch's outcome. So a submit
@@ -152,21 +154,30 @@ Objects.
 
 ### Alarm wall time
 
-The wake's wait runs inside an alarm invocation (`trackAlarmWork`), and
-alarm handlers have a 15 minute wall-time limit. Outbound model streams keep
-an object alive for at most 15 minutes too. A wait therefore lasts at most 10
-minutes and then pushes the job due now, which starts a new alarm
-invocation. A single model request that streams for more than 15 minutes
-is still at the platform's mercy.
+The wake's wait runs inside an alarm invocation (`trackAlarmWork`), and so
+does pi's own work that the alarm starts or resumes: a 12 s model run
+started from an alarm shows up as a 12 s alarm. Alarm handlers have a 15
+minute wall-time limit, and outbound model streams keep an object alive for
+at most 15 minutes too. A wait therefore lasts at most 10 minutes and then
+pushes the job due now, which starts a new alarm invocation. The budget is
+the only thing that keeps a long run under the limit, so it cannot be
+removed without another way to hold pi's work. A single model request that
+streams for more than 15 minutes is still at the platform's mercy.
 
 ### Graceful eviction waits for the wake
 
 `evictDurableObject` waits for in-flight work to drain. The wake's purpose
 is to keep a wait in flight, so the tests crash the object with
-`abortAllDurableObjects()` instead. A deploy behaves the same way: the
-runtime gives in-flight work 30 s and then kills it. The recovery path is the
-same either way, but it is worth knowing that a running pi turn never lets
-the object drain.
+`abortAllDurableObjects()` to test recovery. A deploy behaves the same way:
+the runtime gives in-flight work 30 s and then kills it. The recovery path is
+the same either way, but it is worth knowing that a running pi turn never
+lets the object drain.
+
+The pool never evicts an idle object by itself, so a test cannot see work
+that only lives in memory being lost when nothing holds the object. The
+tests' `evictWhenIdle` asks for a graceful eviction and reports whether the
+object was kept, which is how they check that the wake still holds the
+object while a pi task waits without I/O.
 
 ### Reads the Harness does not offer
 

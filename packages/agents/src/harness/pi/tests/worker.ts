@@ -12,6 +12,7 @@ import {
   createRegistry,
   Harness,
   type AgentEvent,
+  type Conversation,
   type EntryRecord,
   type Extension,
   type ToolRegistration
@@ -30,6 +31,9 @@ import {
 
 const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
+const HOLD_RUNS_KEY = "test:hold:runs";
+/** Where the Lifecycle's alarm breaker counts memory-limit strikes. */
+const STRIKES_KEY = "cf_agents:oom_alarm_strikes";
 
 function textOf(content: Message["content"] | undefined): string {
   if (content === undefined) return "";
@@ -46,7 +50,7 @@ function textOf(content: Message["content"] | undefined): string {
  * the same answer after an eviction as before it:
  *
  * - `multiply N` calls `multiply`, `gate` calls `gate`, `gate-unsafe` calls
- *   `gate_unsafe`; anything else is echoed back.
+ *   `gate_unsafe`, `hold` calls `hold`; anything else is echoed back.
  * - After a tool result it answers `tool said: <result>`.
  */
 function script(context: TranscriptContext): AssistantMessage {
@@ -67,6 +71,11 @@ function script(context: TranscriptContext): AssistantMessage {
       [fauxToolCall("multiply", { value: Number(multiply[1]) })],
       { stopReason: "toolUse" }
     );
+  }
+  if (prompt === "hold") {
+    return fauxAssistantMessage([fauxToolCall("hold", {})], {
+      stopReason: "toolUse"
+    });
   }
   if (prompt === "gate" || prompt === "gate-unsafe") {
     return fauxAssistantMessage(
@@ -100,15 +109,17 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   readonly harness = new PiHarness({
     harness: async ({ storage, context }) => {
       this.registry.install(this.#testTools());
-      return Harness.open(
-        storage,
-        {
-          models: fauxModels(this.#faux.provider),
-          registry: this.registry,
-          settings: { retry: NO_RETRY },
-          onReport: (error) => console.warn("pi report", error)
-        },
-        context
+      return this.#observe(
+        await Harness.open(
+          storage,
+          {
+            models: fauxModels(this.#faux.provider),
+            registry: this.registry,
+            settings: { retry: NO_RETRY },
+            onReport: (error) => console.warn("pi report", error)
+          },
+          context
+        )
       );
     },
     defaults: { model: this.#faux.getModel() }
@@ -207,9 +218,106 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.getAlarm();
   }
 
+  /** Random per instance, so a test can tell the object was evicted. */
+  readonly #instance = crypto.randomUUID();
+  #releaseHold: (() => void) | undefined;
+
+  instance(): string {
+    return this.#instance;
+  }
+
+  async holdRuns(): Promise<number> {
+    return (await this.ctx.storage.get<number>(HOLD_RUNS_KEY)) ?? 0;
+  }
+
+  /** Resolve once the hold tool has started `runs` times. */
+  async holdStarted(runs: number): Promise<number> {
+    for (let i = 0; i < 200; i++) {
+      const count = await this.holdRuns();
+      if (count >= runs) return count;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error("The hold tool never started");
+  }
+
+  /** Release this instance's hold tool, if it is running here. */
+  releaseHold(): boolean {
+    const release = this.#releaseHold;
+    release?.();
+    return release !== undefined;
+  }
+
+  /** How many times the wake has waited on a conversation going idle. */
+  idleWaits(): number {
+    return this.#idleWaits;
+  }
+
+  /** Make the wake's next idle wait reject with `message`. */
+  failNextIdleWait(message: string): void {
+    this.#idleFailure = message;
+  }
+
+  async memoryLimitStrikes(): Promise<number> {
+    return (await this.ctx.storage.get<number>(STRIKES_KEY)) ?? 0;
+  }
+
+  setWaitBudget(waitBudgetMs: number): void {
+    setWakeTimingForTests(this.harness, { waitBudgetMs });
+  }
+
+  #idleWaits = 0;
+  #idleFailure: string | undefined;
+  readonly #observed = new WeakSet<Conversation>();
+
+  /**
+   * pi, with each conversation's `waitForIdle` counted. The methods are
+   * replaced on the instances: pi checks its own objects' brands, so a
+   * proxy would not pass for them.
+   */
+  #observe(pi: Harness): Harness {
+    const conversation = pi.conversation.bind(pi);
+    pi.conversation = async (...args) => {
+      const found = await conversation(...args);
+      if (found) this.#observeConversation(found);
+      return found;
+    };
+    return pi;
+  }
+
+  #observeConversation(conversation: Conversation): void {
+    // pi may hand back the same conversation object again.
+    if (this.#observed.has(conversation)) return;
+    this.#observed.add(conversation);
+    const waitForIdle = conversation.waitForIdle.bind(conversation);
+    conversation.waitForIdle = (...args) => {
+      this.#idleWaits++;
+      const failure = this.#idleFailure;
+      this.#idleFailure = undefined;
+      if (failure !== undefined) return Promise.reject(new Error(failure));
+      return waitForIdle(...args);
+    };
+  }
+
   /** The fixture's tools and preamble, as one pi extension. */
   #testTools(): Extension {
     const storage = this.ctx.storage;
+    // Waits on an in-memory promise and does no I/O, like a tool waiting
+    // for an approval. Only something else in flight keeps the object
+    // alive while it waits.
+    const holdTool = (): ToolRegistration<typeof NoParameters> => ({
+      name: "hold",
+      description: "Wait in memory until the test releases it.",
+      parameters: NoParameters,
+      replay: "safe",
+      execute: async () => {
+        const runs = ((await storage.get<number>(HOLD_RUNS_KEY)) ?? 0) + 1;
+        await storage.put(HOLD_RUNS_KEY, runs);
+        await new Promise<void>((resolve) => {
+          this.#releaseHold = resolve;
+        });
+        return { content: [{ type: "text", text: `held after ${runs} runs` }] };
+      }
+    });
     const gate = (
       name: string,
       replay: "safe" | "unsafe"
@@ -241,6 +349,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         }
       ],
       tools: [
+        holdTool(),
         multiplyTool(),
         gate("gate", "safe"),
         gate("gate_unsafe", "unsafe")
