@@ -58,7 +58,12 @@ export class PiAgent extends DurableObject<Env> {
           settings: {
             // pi doubles the delay before each retry: 1, 2, 4, 8 and 16 seconds,
             // so a rate-limited model gets about 30 seconds to recover.
-            retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 }
+            retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
+            // Pi keeps idle caches behind ten-minute timers by default. A
+            // pending timer keeps the object in memory and stops it from
+            // hibernating, and its SQLite is local, so skip the caches.
+            contextRetentionMs: 0,
+            documentRetentionMs: 0
           },
           onReport: (error) => console.warn("pi report", error)
         },

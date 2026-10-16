@@ -699,7 +699,7 @@ describe("adapters", () => {
     expect(tool.replay).toBe("safe");
     const result = await tool.execute({ query: "a" }, toolApi, context);
     expect(result.isError).toBeUndefined();
-    expect(result.content).toEqual([
+    expect(result.output).toEqual([
       { type: "text", text: expect.stringContaining("2 results") }
     ]);
     expect(result.details).toEqual({ ok: true, output: RESPONSE });
@@ -709,7 +709,7 @@ describe("adapters", () => {
     const tool = piWebSearchTool({ source: failingSource });
     const result = await tool.execute({ query: "a" }, toolApi, context);
     expect(result.isError).toBe(true);
-    expect(result.content).toEqual([
+    expect(result.output).toEqual([
       {
         type: "text",
         text: expect.stringMatching(/^Web search is unavailable here/)
@@ -751,7 +751,7 @@ describe("adapters", () => {
       source: okSource,
       maxDescriptionChars: 20
     }).execute({ query: "a" }, toolApi, context);
-    expect(pi.content).toEqual([
+    expect(pi.output).toEqual([
       { type: "text", text: expect.stringContaining("# Introducing Web…") }
     ]);
     const tanstack = await tanstackWebSearchTool({

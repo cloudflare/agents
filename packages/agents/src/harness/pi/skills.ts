@@ -35,7 +35,7 @@ export function skillsFingerprint(sources: readonly SkillSource[]): string {
 }
 
 function textResult(text: string): ToolExecutionResult {
-  return { content: [{ type: "text", text }] };
+  return { output: [{ type: "text", text }] };
 }
 
 function attributes(

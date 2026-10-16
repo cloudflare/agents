@@ -101,7 +101,7 @@ function browserToolResult(
   const screenshot = browserScreenshotOutput(output);
   if (!screenshot) {
     return {
-      content: [text(browserExecuteModelOutput(output).value)],
+      output: [text(browserExecuteModelOutput(output).value)],
       details: details(output),
       ...(isError ? { isError } : {})
     };
@@ -122,7 +122,7 @@ function browserToolResult(
     mimeType: screenshot.mediaType
   };
   return {
-    content: [text(summary), image],
+    output: [text(summary), image],
     details: details(output)
   };
 }
