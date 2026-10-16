@@ -255,9 +255,11 @@ export function withIdleDeadline(
           reader.read(),
           new Promise<never>((_, reject) => {
             timer = setTimeout(() => {
+              // "timed out" is wording pi-ai's retry classifier treats as a
+              // transient failure, so pi retries the request.
               reject(
                 new Error(
-                  `Model stream stalled: no data received for ${Math.round(idleMs / 1000)}s.`
+                  `Model stream timed out: no data received for ${Math.round(idleMs / 1000)}s.`
                 )
               );
             }, idleMs);

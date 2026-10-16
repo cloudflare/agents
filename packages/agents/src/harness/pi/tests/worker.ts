@@ -314,6 +314,7 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
 export class PiStoreTestObject extends DurableObject<Cloudflare.Env> {}
 
 export { PiBrowserTestObject } from "./browser-fixture";
+export { PiQuarantineTestObject, PiWakeTestObject } from "./wake-fixture";
 export { CodemodeRuntime } from "@cloudflare/codemode";
 export {
   PiFactoryTestObject,

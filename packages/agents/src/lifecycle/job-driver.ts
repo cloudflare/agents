@@ -182,6 +182,7 @@ export class JobDriver {
     let clean = false;
     try {
       try {
+        await this.#armStartupFallback();
         await initialize();
         await this.#driveDueJobs();
         await this.#alarmScope.run({ executing: undefined }, runHostAlarm);
@@ -278,6 +279,22 @@ export class JobDriver {
     if (this.#strikeRecordedThisIsolate) return;
     this.#strike = undefined;
     await this.#clearMemoryLimitStrikes();
+  }
+
+  /**
+   * Arm a fallback wake before startup runs, while the queue holds jobs.
+   * Startup can fail before the drive's own deadman is armed, and the
+   * platform retries a failing alarm only a few times; without this, the
+   * jobs would have no wake once those retries ran out. A clean alarm's
+   * final re-arm replaces it.
+   */
+  async #armStartupFallback(): Promise<void> {
+    if (this.#options.disabled()) return;
+    const now = Date.now();
+    if (this.#options.queue.nextAlarmTime(now) === null) return;
+    // Never sooner than the deadman delay: an overdue job's time would make
+    // a failing startup retry in a tight loop.
+    await this.#options.storage.setAlarm(now + DEADMAN_ALARM_DELAY_MS);
   }
 
   /** Drive every due job once, in due-time order. */

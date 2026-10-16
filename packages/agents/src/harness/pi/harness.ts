@@ -1,5 +1,6 @@
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
+  GenerationTask,
   LiveDoc,
   ROOT_CONVERSATION_ID,
   watchEvents,
@@ -18,7 +19,8 @@ import {
   LifecycleCapability,
   type CapabilityStartContext,
   type LifecycleJobContext,
-  type LifecycleJobOutcome
+  type LifecycleJobOutcome,
+  type MemoryLimitContext
 } from "../../lifecycle";
 import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "./context";
 import { openPiSessionStore } from "./session-store";
@@ -76,6 +78,12 @@ export function setWakeTimingForTests(
 }
 
 const WAKE_FN = "wake";
+
+/**
+ * Storage key of the sessions whose work sealed the alarm memory-limit
+ * breaker. The next open aborts their work before pi resumes it.
+ */
+const QUARANTINE_KEY = "pi-harness:quarantine";
 
 function wakeJobId(session: PiSessionId): string {
   return `pi-wake:${session}`;
@@ -264,6 +272,44 @@ export class PiHarness extends LifecycleCapability {
     if (context.job.fn !== WAKE_FN) return;
     const session = sessionOfJob(context.job.payload);
     if (session !== undefined) return this.#wakeStep(session);
+  }
+
+  /**
+   * A wake job whose dispatch failed through its retries. Lifecycle would
+   * complete it, and the object would sleep with pi's work unfinished, so
+   * try again on the heartbeat. A later step completes the job once pi
+   * reports nothing left in the session.
+   */
+  onJobError(context: LifecycleJobContext): LifecycleJobOutcome | void {
+    if (context.job.fn !== WAKE_FN) return;
+    return { rescheduleAt: Date.now() + this.#heartbeatMs };
+  }
+
+  /**
+   * The breaker sealed: the work it backed off kept exceeding memory.
+   * Lifecycle purged the wake jobs, but pi still holds the work, and the
+   * next open would resume it and wake for it again. So record the session
+   * whose wake struck, or every purged session when the strike has no job,
+   * and abort their work at the next open, before pi resumes. The isolate
+   * resets right after this, so it writes one small value and nothing else.
+   */
+  async onMemoryLimit(context: MemoryLimitContext): Promise<void> {
+    if (!context.sealed) return;
+    const wakes = context.executing
+      ? [context.executing]
+      : (context.purgedRecoveryLoopJobs ?? []);
+    const sessions = wakes
+      .filter(
+        (job) => job.capability === this.capabilityId && job.fn === WAKE_FN
+      )
+      .map((job) => sessionOfJob(job.payload))
+      .filter((session) => session !== undefined);
+    if (sessions.length === 0) return;
+    const storage = this.lifecycle.storage;
+    const quarantined = (await storage.get<string[]>(QUARANTINE_KEY)) ?? [];
+    await storage.put(QUARANTINE_KEY, [
+      ...new Set([...quarantined, ...sessions])
+    ]);
   }
 
   /** Close pi's in-memory resources. Durable state is untouched. */
@@ -474,7 +520,14 @@ export class PiHarness extends LifecycleCapability {
       // A submit between its wake and pi's admission: check again later.
       return this.#admitting.has(session) ? heartbeat : undefined;
     }
-    const wakeAt = await this.#longWait(pi, conversation.id, BG);
+    // The long wait is the generation's own deadline. Other work in the
+    // session may be due sooner, and pi does not report its deadlines, so
+    // only a session whose live work is all generation can park on it.
+    const wakeAt = tasks.every(
+      (task) => task.record.kind === GenerationTask.definition.name
+    )
+      ? await this.#longWait(pi, conversation.id, BG)
+      : undefined;
     if (wakeAt !== undefined) return { rescheduleAt: wakeAt };
     // Background tasks are outside the conversation's idle wait.
     if (tasks.every((task) => task.record.background)) return heartbeat;
@@ -485,9 +538,10 @@ export class PiHarness extends LifecycleCapability {
       void this.#wake(session);
     });
     this.#waits.set(session, wait);
-    // The wait runs past this dispatch, inside the alarm's work, so the
-    // object stays alive for it. The heartbeat covers an eviction.
-    this.lifecycle.trackAlarmWork(wait);
+    // The wait runs past this dispatch. Tracking it lets the alarm's
+    // memory-limit breaker see a reset it reports. The heartbeat covers an
+    // eviction.
+    if (!this.lifecycle.trackAlarmWork(wait)) wait.catch(() => {});
     return heartbeat;
   }
 
@@ -498,12 +552,15 @@ export class PiHarness extends LifecycleCapability {
       // Cancelling the wait never cancels pi's work.
       await conversation.waitForIdle(withAbortSignal(budget.signal, BG));
     } catch (error) {
-      if (!budget.signal.aborted) {
-        this.lifecycle.events.emit("pi:wake_error", {
-          session: String(conversation.id),
-          error: error instanceof Error ? error.message : String(error)
-        });
-      }
+      // The budget running out is the wait's own end, not a failure.
+      if (budget.signal.aborted) return;
+      this.lifecycle.events.emit("pi:wake_error", {
+        session: String(conversation.id),
+        error: error instanceof Error ? error.message : String(error)
+      });
+      // Rethrown so the tracked wait settles with it, and a memory-limit
+      // reset reaches the alarm's breaker.
+      throw error;
     } finally {
       clearTimeout(timer);
     }
@@ -531,10 +588,45 @@ export class PiHarness extends LifecycleCapability {
     const storage = await openPiSessionStore(this.lifecycle.storage);
     const pi = await this.#options.harness({ storage, context: BG });
     await pi.root(BG, { agent: this.agentDefaults() });
+    await this.#abortQuarantined(pi);
     // Continue whatever the last isolate left: pi reconciles tasks that were
     // running to pending and schedules them again.
     pi.resume();
     return { pi, storage };
+  }
+
+  /**
+   * Abort the work of sessions that sealed the memory-limit breaker, while
+   * pi is still paused, so none of it runs again. Each top-level task gets
+   * an abort mark, and pi runs its abort handler, not its phases, once it
+   * resumes; work the task owns is aborted with it. Queued inputs are
+   * withdrawn. The user sees those submissions end as aborted and can
+   * submit again.
+   */
+  async #abortQuarantined(pi: Harness): Promise<void> {
+    const storage = this.lifecycle.storage;
+    const quarantined = await storage.get<string[]>(QUARANTINE_KEY);
+    if (quarantined === undefined) return;
+    const ids = new Set(quarantined.map((session) => conversationId(session)));
+    const { tasks, submissions } = await pi.inspect(BG);
+    for (const task of tasks) {
+      const { record } = task;
+      if (record.owner === undefined && ids.has(record.conversationId)) {
+        await pi.abortTask(record.id, BG);
+      }
+    }
+    for (const submission of submissions) {
+      if (
+        submission.status === "queued" &&
+        ids.has(submission.conversationId)
+      ) {
+        await pi.abortSubmission(submission.id, BG, submission.conversationId);
+      }
+    }
+    await storage.delete(QUARANTINE_KEY);
+    for (const session of quarantined) {
+      this.lifecycle.events.emit("pi:quarantined", { session });
+    }
   }
 
   /** @internal The per-conversation defaults supported by pi-durable. */
