@@ -16,12 +16,21 @@ import { DurableObject } from "cloudflare:workers";
 import { Lifecycle, type LifecycleOptions } from "../../../lifecycle";
 import { setWakeTimingForTests } from "../harness";
 import { BACKGROUND_CONTEXT } from "../context";
-import { PiHarness } from "../index";
+import {
+  checkpointWakeAt,
+  PiHarness,
+  sleepUntil,
+  type PiHarnessOptions,
+  type PiTask
+} from "../index";
 import { fauxModels } from "./faux";
 import { TEST_TIMING } from "./timing";
 
 /** Long enough that a wake parked on it would miss everything else. */
 export const GENERATION_RETRY_DELAY_MS = 60_000;
+
+/** The longest a test's backed-off wake waits. */
+export const MAX_HEARTBEAT_MS = 8_000;
 
 /** Short enough that a test sees a wake's wait run out. */
 export const WAIT_BUDGET_MS = 300;
@@ -54,12 +63,50 @@ const SleepUntil = defineTask<{ runAt: number }, { phase: "wait" }, null>({
   }
 });
 
+/** Sleeps with the harness's `sleepUntil`, so its deadline is in its checkpoint. */
+const HelperSleep = defineTask<
+  { runAt: number },
+  { phase: "wait"; wakeAt?: number } | { phase: "done" },
+  null
+>({
+  name: "test.helper-sleep",
+  version: 1,
+  initial: () => ({ phase: "wait" }),
+  phases: {
+    wait: async (task, runtime, context) => {
+      await sleepUntil(runtime, new Date(task.input.runAt), context);
+      await runtime.commit(
+        () => ({ status: "running", checkpoint: { phase: "done" } }),
+        context
+      );
+    },
+    done: async (_task, runtime, context) => {
+      await runtime.commit(
+        () => ({
+          status: "terminal",
+          outcome: { status: "completed", result: null }
+        }),
+        context
+      );
+    }
+  },
+  abort: async (_task, runtime, context) => {
+    await runtime.commit(
+      () => ({ status: "terminal", outcome: { status: "aborted" } }),
+      context
+    );
+  }
+});
+
 /**
  * A harness whose first model request fails with a retryable error and
  * waits `GENERATION_RETRY_DELAY_MS` before retrying, so a generation can
  * sit in a long retry while other work in the session is due sooner.
  */
-function defineWakeTestObject(lifecycleOptions?: LifecycleOptions) {
+function defineWakeTestObject(
+  lifecycleOptions?: LifecycleOptions,
+  harnessOptions: Partial<PiHarnessOptions> = {}
+) {
   return class extends DurableObject<Cloudflare.Env> {
     readonly #faux = fauxProvider({
       tokensPerSecond: 200,
@@ -70,7 +117,10 @@ function defineWakeTestObject(lifecycleOptions?: LifecycleOptions) {
     readonly harness = new PiHarness({
       harness: async ({ storage, context }) => {
         const registry = createRegistry();
-        registry.install({ name: "test-tasks", tasks: [SleepUntil] });
+        registry.install({
+          name: "test-tasks",
+          tasks: [SleepUntil, HelperSleep]
+        });
         const pi = await Harness.open(
           storage,
           {
@@ -111,7 +161,8 @@ function defineWakeTestObject(lifecycleOptions?: LifecycleOptions) {
         };
         return pi;
       },
-      defaults: { model: this.#faux.getModel() }
+      defaults: { model: this.#faux.getModel() },
+      ...harnessOptions
     });
     readonly lifecycle = Lifecycle.install(this, lifecycleOptions).use(
       this.harness
@@ -121,7 +172,8 @@ function defineWakeTestObject(lifecycleOptions?: LifecycleOptions) {
       super(ctx, env);
       setWakeTimingForTests(this.harness, {
         ...TEST_TIMING,
-        waitBudgetMs: WAIT_BUDGET_MS
+        waitBudgetMs: WAIT_BUDGET_MS,
+        maxHeartbeatMs: MAX_HEARTBEAT_MS
       });
       this.#faux.setResponses([
         fauxAssistantMessage([], {
@@ -130,6 +182,42 @@ function defineWakeTestObject(lifecycleOptions?: LifecycleOptions) {
         }),
         fauxAssistantMessage([fauxText("recovered")])
       ]);
+    }
+
+    /** Create a background task that sleeps with `sleepUntil`. */
+    async helperSleep(runAt: number): Promise<TaskId> {
+      const pi = await this.harness.pi();
+      const root = await pi.root(BACKGROUND_CONTEXT);
+      return root.commit(
+        (tx) =>
+          tx.createTask(
+            HelperSleep,
+            { runAt },
+            { ownership: { kind: "conversation" }, background: true }
+          ),
+        BACKGROUND_CONTEXT
+      );
+    }
+
+    /** The stored checkpoints of a session's live tasks, as JSON. */
+    async checkpoints(session = "1"): Promise<string[]> {
+      const pi = await this.harness.pi();
+      const { tasks } = await pi.inspect(BACKGROUND_CONTEXT);
+      return tasks
+        .filter((task) => String(task.record.conversationId) === session)
+        .map((task) =>
+          JSON.stringify(
+            "checkpoint" in task.record.state
+              ? task.record.state.checkpoint
+              : null
+          )
+        );
+    }
+
+    /** Whether pi's scheduler is running, paused, or closing. */
+    async scheduling(): Promise<string> {
+      const pi = await this.harness.pi();
+      return (await pi.inspect(BACKGROUND_CONTEXT)).scheduling;
     }
 
     /** Run startup, which gives every session with live work a wake job. */
@@ -213,6 +301,26 @@ function defineWakeTestObject(lifecycleOptions?: LifecycleOptions) {
       return live?.generation?.retry?.at;
     }
 
+    /** Bring a session's wake job due now, as if its time had come. */
+    async makeWakeDue(session = "1"): Promise<void> {
+      this.ctx.storage.sql.exec(
+        "UPDATE cf_agents_jobs SET time = ? WHERE id = ?",
+        Date.now() - 1,
+        `pi-wake:${session}`
+      );
+    }
+
+    /** The backoff a session's wake keeps between beats, if any. */
+    async wakeState(
+      session = "1"
+    ): Promise<{ idle?: number; errors?: number } | null> {
+      return (
+        (await this.ctx.storage.get<{ idle?: number; errors?: number }>(
+          `pi-harness:wake:${session}`
+        )) ?? null
+      );
+    }
+
     /** The due time of a session's wake job, or null without one. */
     async wakeJobTime(session = "1"): Promise<number | null> {
       const rows = this.ctx.storage.sql
@@ -235,3 +343,15 @@ export const PiQuarantineTestObject = defineWakeTestObject({
 export type PiQuarantineTestObject = InstanceType<
   typeof PiQuarantineTestObject
 >;
+
+/** When a `test.sleep-until` task is due; nothing for other tasks. */
+export function sleepUntilWakeAt(task: PiTask): Date | undefined {
+  if (task.kind !== "test.sleep-until") return undefined;
+  return new Date((task.input as { runAt: number }).runAt);
+}
+
+/** Reports `test.sleep-until` deadlines through `wakeAt`. */
+export const PiDeadlineTestObject = defineWakeTestObject(undefined, {
+  wakeAt: (task) => sleepUntilWakeAt(task) ?? checkpointWakeAt(task)
+});
+export type PiDeadlineTestObject = InstanceType<typeof PiDeadlineTestObject>;

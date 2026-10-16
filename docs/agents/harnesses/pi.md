@@ -63,6 +63,7 @@ export class Assistant extends Agent<Env> {
 | `harness`  | Required. Receives `{ storage, context }` and returns Pi's `Harness`, usually from `Harness.open`. Models, the registry, `settings`, `env` and `onReport` are all yours to build here.                                                              |
 | `defaults` | What a new session starts with: `model`, a pi-ai `Model` such as `ai("@cf/…")`, and `thinkingLevel`. Without a model, a session's prompts end unanswered (`no_model`) until one is set.                                                             |
 | `onFail`   | What happens to inputs queued behind a run that fails. `"resume"` (the default) runs them, oldest first. `"abort"` withdraws them, and each ends `unanswered` with reason `aborted`. Pi itself would leave them queued until another input arrived. |
+| `wakeAt`   | `(task) => Date \| undefined`: when one of your live tasks next runs, so a session can sleep until then instead of polling. See [How recovery works](#how-recovery-works).                                                                          |
 
 The factory runs as part of startup, once per isolate. If it throws the operation that triggered it fails and the next operation tries again.
 
@@ -192,9 +193,39 @@ const result = await session.wait(receipt.operationId);
 
 The harness schedules one lifecycle job per session with work. The job waits on Pi's tasks, refreshes itself as a heartbeat while they run, and completes when they settle. If the object is evicted or crashes, the job is still due, so its alarm restarts the object. Pi reopens its stored state and resumes the session's work: a replay-safe tool call runs again, and an unsafe one is reported to the model as interrupted.
 
-When a session's only live work is a generation waiting more than a minute to retry or poll its model, the job sleeps until that deadline. If the session has any other live work, such as a background task, the job keeps its heartbeat instead, because that work may be due sooner.
+When the harness knows when every live task in a session next runs, and the earliest is more than a minute away, the job sleeps until then instead of beating. It knows a generation's retry backoff and deferred polls on its own. For your own tasks, pass `wakeAt`:
 
-If a wake job's dispatch keeps failing, for example because Pi's storage cannot be read, the job is not dropped. It tries again on the heartbeat until the session has no live work.
+```ts
+new PiHarness({
+  harness,
+  wakeAt: (task) =>
+    task.kind === "app.reminder" && task.checkpoint?.phase === "wait"
+      ? new Date(task.input.runAt)
+      : undefined
+});
+```
+
+`wakeAt` receives each live task's kind, session, input and checkpoint, and returns when it next runs, or `undefined` if you do not know. One task without a known time keeps the session on its heartbeat, so a missing answer costs alarms, never lateness. A task waiting on other tasks is skipped. A past date means due now.
+
+With `wakeAt` set, the harness can also leave Pi paused. When the object starts and every live task is asleep until a known time more than a minute away, it does not resume Pi's scheduler, so no task holds a timer and the object can hibernate until a wake's alarm. Pi resumes when that alarm arrives, for any new input or wait, and as soon as a task is committed by other means. Once running, Pi cannot pause again, so this saves the most after a restart.
+
+A task you write can report its own deadline. `sleepUntil(runtime, at, context)` commits `wakeAt` into the task's checkpoint and then sleeps, and `checkpointWakeAt(task)` reads it back:
+
+```ts
+import { checkpointWakeAt, sleepUntil } from "agents/harness/pi";
+
+// In a task phase. Commit the next phase after it returns.
+await sleepUntil(runtime, new Date(task.input.runAt), context);
+
+new PiHarness({
+  harness,
+  wakeAt: (task) => myDeadlines(task) ?? checkpointWakeAt(task)
+});
+```
+
+If a wake job's dispatch keeps failing, for example because Pi's storage cannot be read, the job is not dropped. It tries again until the session has no live work.
+
+The heartbeat adapts to what the session is doing. While a foreground run is going, it beats every 30 seconds, so a crash costs at most about that much time. When the session's only live work is background tasks, and a beat finds them unchanged, the next beat waits twice as long, up to 10 minutes. The same doubling applies while dispatches keep failing. New input, a finished run, or any change in the background work returns the session to 30 seconds. The backoff is stored, so it holds across restarts.
 
 A run that fails leaves the inputs queued behind it waiting. The session's wake applies `onFail` to them once nothing is running. To resume, it records an `agents.pi-harness.resume` entry in the transcript, which the model does not see, and Pi places the oldest queued input.
 

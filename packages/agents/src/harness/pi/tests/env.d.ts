@@ -28,6 +28,9 @@ declare namespace Cloudflare {
     PI_ON_FAIL_ABORT_TEST: DurableObjectNamespace<
       import("./worker").PiOnFailAbortTestObject
     >;
+    PI_DEADLINE_TEST: DurableObjectNamespace<
+      import("./worker").PiDeadlineTestObject
+    >;
     LOADER: WorkerLoader;
   }
 }

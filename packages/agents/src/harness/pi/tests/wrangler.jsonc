@@ -19,6 +19,10 @@
         "class_name": "PiQuarantineTestObject"
       },
       {
+        "name": "PI_DEADLINE_TEST",
+        "class_name": "PiDeadlineTestObject"
+      },
+      {
         "name": "PI_ON_FAIL_RESUME_TEST",
         "class_name": "PiOnFailResumeTestObject"
       },
@@ -46,6 +50,7 @@
         "PiBrowserTestObject",
         "PiWakeTestObject",
         "PiQuarantineTestObject",
+        "PiDeadlineTestObject",
         "PiOnFailResumeTestObject",
         "PiOnFailAbortTestObject"
       ]

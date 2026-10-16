@@ -15,8 +15,10 @@ export {
   type PiHarnessOptions,
   type PiOnFail,
   type PiModel,
-  type PiSessionDefaults
+  type PiSessionDefaults,
+  type PiTask
 } from "./harness";
+export { checkpointWakeAt, sleepUntil } from "./wake-at";
 export {
   openPiSessionStore,
   type PiSessionStoreOptions
