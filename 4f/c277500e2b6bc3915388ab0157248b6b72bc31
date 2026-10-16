@@ -1,0 +1,19 @@
+.gardener/tasks/mention-reply/TASK.md
+  s_70eb9667041ad7::t_a2d79975135f53 86-98,107,110-112
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4fc277500e2b6bc3915388ab0157248b6b72bc31",
+  "prompts": {},
+  "sessions": {
+    "s_70eb9667041ad7": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a13eed-a573-7ac1-a022-500197b326d7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}
