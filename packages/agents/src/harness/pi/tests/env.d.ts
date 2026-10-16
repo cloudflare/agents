@@ -22,6 +22,12 @@ declare namespace Cloudflare {
     PI_QUARANTINE_TEST: DurableObjectNamespace<
       import("./worker").PiQuarantineTestObject
     >;
+    PI_ON_FAIL_RESUME_TEST: DurableObjectNamespace<
+      import("./worker").PiOnFailResumeTestObject
+    >;
+    PI_ON_FAIL_ABORT_TEST: DurableObjectNamespace<
+      import("./worker").PiOnFailAbortTestObject
+    >;
     LOADER: WorkerLoader;
   }
 }

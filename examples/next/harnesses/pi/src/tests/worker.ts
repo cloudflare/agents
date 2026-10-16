@@ -142,6 +142,14 @@ export class PiHarnessTestObject extends DurableObject<Env> {
     return this.harness.wait(operationId, session ? { session } : {});
   }
 
+  /** The text of every user message in the root session, in order. */
+  async messages(): Promise<string[]> {
+    return (await this.harness.messages()).flatMap((entry) => {
+      const message = entry.model?.[0];
+      return message?.role === "user" ? [textOf(message.content)] : [];
+    });
+  }
+
   /** Resolve once the gate tool has started `runs` times. */
   async gateStarted(runs: number): Promise<number> {
     for (let i = 0; i < 200; i++) {

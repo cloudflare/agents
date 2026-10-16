@@ -160,13 +160,32 @@ type WakeTiming = {
   readonly heartbeatMs?: number;
 };
 
+/**
+ * What happens to inputs queued behind a run that fails. pi leaves them
+ * queued, and nothing runs them until another input arrives.
+ *
+ * - `"resume"`: run them, oldest first, as if the failed run had answered.
+ * - `"abort"`: withdraw them; each settles `unanswered` with reason
+ *   `aborted`.
+ */
+export type PiOnFail = "resume" | "abort";
+
 /** `PiHarness`'s options. Only `harness`, which opens pi, is required. */
 export type PiHarnessOptions = {
   /** Opens pi's `Harness` over the storage this object prepared. */
   readonly harness: PiHarnessFactory;
   /** What a new session starts with. */
   readonly defaults?: PiSessionDefaults;
+  /** Inputs queued behind a failed run. Default `"resume"`. */
+  readonly onFail?: PiOnFail;
 };
+
+/**
+ * Kind of the transcript entry `onFail: "resume"` writes. A queued write
+ * makes pi place the inbox; the entry has no model message, so the model
+ * never sees it.
+ */
+const RESUME_ENTRY_KIND = "agents.pi-harness.resume";
 
 type Opened = {
   readonly pi: Harness;
@@ -260,9 +279,14 @@ export class PiHarness extends LifecycleCapability {
     // Every session with live work gets a wake, including ones whose wake
     // failed out or that a subagent created without going through submit().
     const inspection = await pi.inspect(BG);
-    const sessions = new Set(
-      inspection.tasks.map((task) => String(task.record.conversationId))
-    );
+    const sessions = new Set([
+      ...inspection.tasks.map((task) => String(task.record.conversationId)),
+      // Inputs left queued by a failed run, which the wake applies
+      // `onFail` to.
+      ...inspection.submissions
+        .filter((submission) => submission.status === "queued")
+        .map((submission) => String(submission.conversationId))
+    ]);
     for (const session of sessions) await this.#wake(session);
   }
 
@@ -513,12 +537,38 @@ export class PiHarness extends LifecycleCapability {
     const conversation = await pi.conversation(conversationId(session), BG);
     if (!conversation) return undefined;
 
-    const tasks = (await pi.inspect(BG)).tasks.filter(
+    const inspection = await pi.inspect(BG);
+    const tasks = inspection.tasks.filter(
       (task) => task.record.conversationId === conversation.id
     );
     if (tasks.length === 0) {
       // A submit between its wake and pi's admission: check again later.
-      return this.#admitting.has(session) ? heartbeat : undefined;
+      if (this.#admitting.has(session)) return heartbeat;
+      // Nothing runs, so anything still queued was left by a failed run.
+      const queued = inspection.submissions.filter(
+        (submission) =>
+          submission.status === "queued" &&
+          submission.conversationId === conversation.id
+      );
+      if (queued.length === 0) return undefined;
+      if ((this.#options.onFail ?? "resume") === "abort") {
+        for (const submission of queued) {
+          await pi.abortSubmission(submission.id, BG, conversation.id);
+        }
+        return undefined;
+      }
+      // A queued write runs pi's boundary, which places the oldest queued
+      // input and starts its run. Its request id is the oldest submission's,
+      // so a repeated wake does not write it twice.
+      await conversation.submit(
+        {
+          type: "write",
+          requestId: `${RESUME_ENTRY_KIND}:${queued[0]!.id}`,
+          entry: { kind: RESUME_ENTRY_KIND }
+        },
+        BG
+      );
+      return heartbeat;
     }
     // The long wait is the generation's own deadline. Other work in the
     // session may be due sooner, and pi does not report its deadlines, so

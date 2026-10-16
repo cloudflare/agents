@@ -58,10 +58,11 @@ export class Assistant extends Agent<Env> {
 }
 ```
 
-| Option     | What it is                                                                                                                                                                              |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `harness`  | Required. Receives `{ storage, context }` and returns Pi's `Harness`, usually from `Harness.open`. Models, the registry, `settings`, `env` and `onReport` are all yours to build here.  |
-| `defaults` | What a new session starts with: `model`, a pi-ai `Model` such as `ai("@cf/…")`, and `thinkingLevel`. Without a model, a session's prompts end unanswered (`no_model`) until one is set. |
+| Option     | What it is                                                                                                                                                                                                                                          |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `harness`  | Required. Receives `{ storage, context }` and returns Pi's `Harness`, usually from `Harness.open`. Models, the registry, `settings`, `env` and `onReport` are all yours to build here.                                                              |
+| `defaults` | What a new session starts with: `model`, a pi-ai `Model` such as `ai("@cf/…")`, and `thinkingLevel`. Without a model, a session's prompts end unanswered (`no_model`) until one is set.                                                             |
+| `onFail`   | What happens to inputs queued behind a run that fails. `"resume"` (the default) runs them, oldest first. `"abort"` withdraws them, and each ends `unanswered` with reason `aborted`. Pi itself would leave them queued until another input arrived. |
 
 The factory runs as part of startup, once per isolate. If it throws the operation that triggered it fails and the next operation tries again.
 
@@ -194,6 +195,8 @@ The harness schedules one lifecycle job per session with work. The job waits on 
 When a session's only live work is a generation waiting more than a minute to retry or poll its model, the job sleeps until that deadline. If the session has any other live work, such as a background task, the job keeps its heartbeat instead, because that work may be due sooner.
 
 If a wake job's dispatch keeps failing, for example because Pi's storage cannot be read, the job is not dropped. It tries again on the heartbeat until the session has no live work.
+
+A run that fails leaves the inputs queued behind it waiting. The session's wake applies `onFail` to them once nothing is running. To resume, it records an `agents.pi-harness.resume` entry in the transcript, which the model does not see, and Pi places the oldest queued input.
 
 Work that keeps exceeding the object's memory is stopped rather than retried forever. When the lifecycle's memory-limit breaker seals, the harness records the session whose wake job struck, or every purged session when the breaker cannot tell which one. On the next start, before Pi resumes, it aborts that session's tasks and withdraws its queued inputs. Those submissions end as `unanswered` with reason `aborted`, other sessions keep running, and the `pi:quarantined` lifecycle event names each session it stopped.
 
