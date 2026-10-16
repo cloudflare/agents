@@ -25,7 +25,7 @@ limits:
   runtime-seconds: 1200
   max-turns: 80
   max-tool-calls: 80
-  input-tokens: 180000
+  input-tokens: 250000
   output-tokens: 60000
   max-effect-operations: 2
 ---
@@ -66,14 +66,19 @@ tool, not a dependency.
    A manual run whose prompt asks for a backfill may widen the window. Never
    look further back than the baseline. If no versions fall in the window,
    finish without proposing anything.
-3. **Our surface.** Find exactly what we use: list `packages/agents/src` and
-   read the files that import `@earendil-works/*` or `@opencode/*`. The main
-   ones are under `src/harness/pi`, `src/harness/opencode`, `src/models/pi-ai`
-   and `src/models/opencode`. Note each imported symbol, subpath and type, and
-   any upstream event names, message shapes, storage formats or protocol
-   fields our code depends on. Smaller users are under `src/browser`,
-   `src/web` and `src/experimental/channels/web/tui` (`pi-tui`). Skip test
-   directories: `tests`, `__tests__` and `tests-d`.
+3. **Our surface.** Find exactly what we use. Read every non-test file in
+   these directories, not a sample: `src/harness/pi`, `src/harness/opencode`,
+   `src/models/pi-ai` (including `models/` and `wires/`) and
+   `src/models/opencode`. Smaller users are under `src/browser`, `src/web`
+   and `src/experimental/channels/web/tui` (`pi-tui`). Skip test directories:
+   `tests`, `__tests__` and `tests-d`.
+   - Note each imported symbol, subpath and type.
+   - Note any upstream event names, message shapes, storage formats or
+     protocol fields our code depends on.
+   - Note **imported data**: catalogs, generated model lists and ID tables
+     (for example `CLOUDFLARE_AI_GATEWAY_MODELS`). Note how our code keys
+   into them and which IDs our docs and errors tell users to write.
+   - Never rule out a change to an upstream whose files you have not read.
 4. **Collect the changes.** For pi, the notes of each release in the window.
    For opencode, the range runs from the v2 tag just before the oldest version
    in the window (or the baseline, if that is later) up to the newest v2 tag.
@@ -108,9 +113,10 @@ tool, not a dependency.
 All three conditions must hold. If any one fails, it is not reportable.
 
 1. **It changes something we use.** It touches a symbol, subpath export, type,
-   option, event or message shape, storage format or default that step 3 found
-   in our code. Changes to providers, models, CLI commands, TUI widgets or
-   packages we do not import do not count.
+   option, event or message shape, storage format, default or imported data
+   (a catalog entry, model ID or key) that step 3 found in our code. Changes
+   to providers, models, CLI commands, TUI widgets or packages we do not
+   import do not count.
 2. **It would break us.** It would make our code fail to compile, throw, or
    behave differently. Examples:
    - an export or subpath was removed or renamed;
@@ -121,14 +127,20 @@ All three conditions must hold. If any one fails, it is not reportable.
    - a default changed that our code relies on;
    - a runtime requirement changed, such as a new Node-only API or a change to
      workerd support;
-   - something we call is now deprecated and scheduled for removal.
+   - something we call is now deprecated and scheduled for removal;
+   - IDs or keys in data we import were renamed, so a lookup our code or docs
+     perform (for example `ai("<slug>/<id>")`) stops resolving.
+   How upstream files the change (Fixed, Added, Changed) does not matter;
+   only its effect on our surface does. A "fix" that renames IDs, changes a
+   default or changes a shape we use is a break.
 3. **You can cite both sides.** You have the exact upstream line (a release note
    bullet, or a commit message plus the changed declaration) and the exact file
    and line in `packages/agents/src` that it affects.
 
 These are **not** reportable, however interesting they are:
 
-- bug fixes, including bugs we work around or features we do not support;
+- bug fixes that leave our surface unchanged, including fixes for bugs we work
+  around or features we do not support;
 - new features, providers, models or options, even ones we could adopt;
 - performance, docs, refactors, dependency bumps or internal changes with no
   effect on the public surface;
