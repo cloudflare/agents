@@ -16,10 +16,11 @@
  * `ai.plugin` is an OpenCode plugin. It adds a `cloudflare` provider whose
  * models are the ids you have called `ai(id)` with — Workers AI ids, AI
  * Gateway catalog ids and dynamic routes — and answers OpenCode's AI SDK hook
- * with `agents/models/ai-sdk`'s models, so requests go through the `AI`
- * binding on `env.AI.run`: no account id, API token, or HTTP route in your
- * Worker, and nothing patched globally. Catalog streams resume after a
- * dropped connection, as they do in `agents/models/ai-sdk`.
+ * with `agents/models/ai-sdk`'s models, so requests go the way that
+ * provider sends them: through the `AI` binding, or over HTTP with an account
+ * id and API token. Nothing is patched globally. Catalog streams through the
+ * binding resume after a dropped connection, as they do in
+ * `agents/models/ai-sdk`.
  *
  * @experimental The surface may change in any release.
  *
@@ -106,8 +107,8 @@ export interface AI {
 /**
  * Create Cloudflare's model provider for OpenCode.
  *
- * @param settings - The `AI` binding and gateway defaults, as for
- *   `agents/models/ai-sdk`.
+ * @param settings - The `AI` binding, or an account id and API token, and
+ *   gateway defaults, as for `agents/models/ai-sdk`.
  * @returns The provider: call it with model ids; register `plugin`.
  */
 export function createAI(settings: AISettings): AI {

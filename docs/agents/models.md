@@ -1,7 +1,8 @@
 # Models (Experimental)
 
 `agents/models/ai-sdk` is Cloudflare's AI SDK provider. It takes two call
-forms, both through the `AI` binding:
+forms, through the `AI` binding or
+[an account id and API token](#account-id-and-api-token):
 
 ```ts
 // A string runs on env.AI.run.
@@ -101,6 +102,30 @@ const { embeddings } = await embedMany({
   values: ["hello", "world"]
 });
 ```
+
+### Account id and API token
+
+To use a gateway in another account, or to call from outside a Worker, pass
+`accountId` and `apiToken` instead of `binding`:
+
+```ts
+const ai = createAI({
+  accountId: "27b146402af2103944379f33841b6234",
+  apiToken: env.CLOUDFLARE_API_TOKEN,
+  gateway: "project-gateway"
+});
+```
+
+The call forms and options are the same, and the gateway still defaults to
+`default`. A string goes to AI Gateway's
+[REST API](https://developers.cloudflare.com/ai-gateway/usage/rest-api/)
+(`api.cloudflare.com/client/v4/accounts/{accountId}/ai/...`), which runs it on
+`/run` as `env.AI.run` does. A model object goes to the provider-native path,
+`gateway.ai.cloudflare.com/v1/{accountId}/{gateway}/{provider}/...`, with the
+token as `cf-aig-authorization`. The token is sent to those two hosts only.
+
+Create the token with **Workers AI Read** for strings and **AI Gateway Run**
+for model objects.
 
 ## Registry and default provider
 
@@ -423,8 +448,8 @@ own fallback on the gateway.
 
 ## Stream resume
 
-A streamed answer from AI Gateway's `/run` (a catalog model or a dynamic
-route) carries `cf-aig-run-id`, and the gateway keeps every event of the run.
+A streamed answer from AI Gateway's `/run` through the binding (a catalog
+model or a dynamic route) carries `cf-aig-run-id`, and the gateway keeps every event of the run.
 If the connection drops mid-stream, the provider reconnects through the
 binding and replays the run from the last complete event, so the stream you
 read continues with nothing lost or repeated. There is nothing to configure:
