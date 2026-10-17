@@ -1,5 +1,7 @@
 # Approvals
 
+> **Deprecated.** Computer doesn't have durable approvals yet, so keep using codemode if you rely on them. Rollback won't be carried over. See [Moving to `@cloudflare/computer`](./moving-to-computer.md#approvals).
+
 A tool with `requiresApproval: true` pauses the run when the model's code calls it (the run aborts), the action is recorded as pending, and the user is asked to approve. On approval the execution **continues via replay** — see [Runtime](./runtime.md) for the mechanism.
 
 ## Marking tools

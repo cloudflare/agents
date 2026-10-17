@@ -1,5 +1,7 @@
 # Codemode Example
 
+> **Deprecated.** Use the `exec` tool from [`@cloudflare/computer`](https://github.com/cloudflare/computer) on a Workspace with a JavaScript backend. See [Moving to `@cloudflare/computer`](https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md).
+
 A project management chat app where the LLM writes and executes code to orchestrate tools, instead of calling them one at a time. Built with `@cloudflare/codemode` and `@cloudflare/ai-chat`.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/agents/tree/main/examples/codemode)

@@ -1,5 +1,7 @@
 # codemode-mcp
 
+> **Deprecated, with no replacement.** `codeMcpServer` is deprecated along with `@cloudflare/codemode`. See [Moving to `@cloudflare/computer`](https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md).
+
 Demonstrates how to wrap any MCP server with `codeMcpServer` so an LLM gets a single `code` tool instead of a long list of individual tools.
 
 > `@cloudflare/codemode` currently produces an MCP SDK v1 server, so this example intentionally uses the retained `createLegacyMcpHandler` API. Migrating Codemode's in-memory client/server bridge to SDK v2 is separate work.

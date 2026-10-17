@@ -273,6 +273,9 @@ export function jsonSchemaToTypeString(
 
 /**
  * Convert a JSON Schema to a TypeScript type declaration.
+ *
+ * @deprecated Deprecated along with `@cloudflare/codemode`, with no
+ * replacement. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function jsonSchemaToType(
   schema: JSONSchema7,
@@ -330,6 +333,9 @@ export type JsonSchemaToolDescriptors = Record<
  *
  * Use this when you have raw JSON Schema (e.g. from OpenAPI specs, MCP tool
  * definitions, etc.) and don't need the AI SDK.
+ *
+ * @deprecated Deprecated along with `@cloudflare/codemode`, with no
+ * replacement. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function generateTypesFromJsonSchema(
   tools: JsonSchemaToolDescriptors

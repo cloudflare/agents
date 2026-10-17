@@ -128,6 +128,11 @@ export interface CodemodeRuntimeHandle {
   deleteSnippet(name: string): Promise<boolean>;
 }
 
+/**
+ * @deprecated Use `exec` on a `@cloudflare/computer` Workspace. Computer has
+ * no durable approvals yet, so keep using this if you rely on them. See
+ * https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md#approvals
+ */
 export function createCodemodeRuntime(
   options: CreateCodemodeRuntimeOptions
 ): CodemodeRuntimeHandle {

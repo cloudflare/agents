@@ -14,6 +14,10 @@ import type { Plugin } from "vite";
 const RUNTIME_EXPORT =
   'export { CodemodeRuntime } from "@cloudflare/codemode";';
 
+/**
+ * @deprecated Deprecated along with `@cloudflare/codemode`, with no
+ * replacement. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
+ */
 export default function codemodeVitePlugin(): Plugin {
   let projectRoot: string;
 

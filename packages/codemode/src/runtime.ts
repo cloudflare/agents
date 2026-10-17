@@ -140,7 +140,13 @@ export type BeginOptions = {
   connectors?: string[];
 };
 
-/** Default number of terminal executions to retain per runtime. */
+/**
+ * Default number of terminal executions to retain per runtime.
+ *
+ * @deprecated Use `exec` on a `@cloudflare/computer` Workspace. Computer has
+ * no durable approvals yet, so keep using this if you rely on them. See
+ * https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md#approvals
+ */
 export const DEFAULT_MAX_EXECUTIONS = 50;
 
 /**
@@ -149,10 +155,20 @@ export const DEFAULT_MAX_EXECUTIONS = 50;
  * at ~2MB; 1MB leaves headroom for the rest of the row. Truncating stored
  * values is never an option — replay would feed resumed code corrupted data —
  * so a breach fails the run with a model-actionable error instead.
+ *
+ * @deprecated Use `exec` on a `@cloudflare/computer` Workspace. Computer has
+ * no durable approvals yet, so keep using this if you rely on them. See
+ * https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md#approvals
  */
 export const MAX_DURABLE_VALUE_BYTES = 1_000_000;
 
-/** Default age after which a paused (awaiting-approval) run can be expired. */
+/**
+ * Default age after which a paused (awaiting-approval) run can be expired.
+ *
+ * @deprecated Use `exec` on a `@cloudflare/computer` Workspace. Computer has
+ * no durable approvals yet, so keep using this if you rely on them. See
+ * https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md#approvals
+ */
 export const DEFAULT_PAUSED_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Model-actionable error for a value too large to record durably. */
@@ -296,6 +312,11 @@ function toStored(what: string, value: unknown): string | null {
 // CodemodeRuntime facet
 // ---------------------------------------------------------------------------
 
+/**
+ * @deprecated Use `exec` on a `@cloudflare/computer` Workspace. Computer has
+ * no durable approvals yet, so keep using this if you rely on them. See
+ * https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md#approvals
+ */
 export class CodemodeRuntime extends DurableObject<unknown> {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
