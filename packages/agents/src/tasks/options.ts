@@ -1,5 +1,5 @@
 import type { TaskDurationString } from "./duration";
-import type { TaskCallbacks, TaskHandlers, TaskStepConfig } from "./types";
+import type { TaskCallbacks, TaskHandlers, TaskRetryConfig } from "./types";
 
 /** Events emitted while Tasks accepts, executes, retries, or settles runs. */
 export type TaskEventType =
@@ -31,11 +31,24 @@ export interface TasksOptions<Handlers extends TaskHandlers = TaskCallbacks> {
   readonly definitions?: Handlers;
 
   /** Default step retry policy, overridable per `step.do()`. */
-  readonly retries?: TaskStepConfig["retries"];
+  readonly retries?: TaskRetryConfig;
 
   /** Default timeout of one step callback attempt. Default: 5 minutes. */
   readonly stepTimeout?: number | TaskDurationString;
 
-  /** Observe terminal run failures. Runs inside the host invocation context. */
-  readonly onError?: (error: unknown) => void | Promise<void>;
+  /**
+   * Observe terminal run failures, including those Tasks records without
+   * running the handler (a missing definition, a spent interruption retry
+   * budget, a passed deadline). Runs inside the host invocation context.
+   */
+  readonly onError?: (
+    error: unknown,
+    run: TaskFailedRun
+  ) => void | Promise<void>;
+}
+
+/** The run an `onError` observation belongs to. */
+export interface TaskFailedRun {
+  readonly runId: string;
+  readonly definition: string;
 }
