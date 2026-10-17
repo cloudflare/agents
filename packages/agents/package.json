@@ -417,6 +417,11 @@
       "import": "./dist/browser/tools/pi.js",
       "require": "./dist/browser/tools/pi.js"
     },
+    "./browser/computer": {
+      "types": "./dist/browser/tools/computer.d.ts",
+      "import": "./dist/browser/tools/computer.js",
+      "require": "./dist/browser/tools/computer.js"
+    },
     "./webfetch": {
       "types": "./dist/web/fetch/index.d.ts",
       "import": "./dist/web/fetch/index.js",

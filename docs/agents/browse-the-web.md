@@ -8,6 +8,8 @@ One durable tool is provided:
 
 > **Experimental** — this feature may have breaking changes in future releases.
 
+> **`createBrowserTools` and `createBrowserRuntime` are deprecated**, along with `@cloudflare/codemode` that they run on. Use [`browserTool`](#persistent-browser), or the [`ws:browser` module](#from-exec-in-a-computer-workspace) for a Computer Workspace. Pausing a run with its session kept while a person works in Live View has no replacement yet, so keep using `createBrowserTools` if you rely on it.
+
 ## When to use browser tools
 
 Browser tools are useful when your agent needs to:
@@ -283,6 +285,66 @@ this.registry.install({
 - A conversation's calls run one at a time, since they share its tab.
 - pi doesn't rerun a browser call cut off by an eviction, because the code may have clicked or submitted something. The model gets an interrupted result and can try again; the browser itself is still there.
 - Stopping a conversation doesn't stop a browser call already running. It finishes or times out (`timeoutMs`, default 60 seconds).
+
+## From `exec` in a Computer Workspace
+
+If your agent has a [`@cloudflare/computer`](https://github.com/cloudflare/computer) Workspace with a JavaScript backend, give that backend the browser as a `ws:browser` module. The model then drives the browser from the same `exec` tool it uses for everything else, and can mix browser calls with file reads and writes in one run:
+
+```ts
+import { Workspace } from "@cloudflare/computer";
+import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { Browser, browserRun } from "agents/browser";
+import { createBrowserModule } from "agents/browser/computer";
+
+export class MyAgent extends Think<Env> {
+  browser = new Browser({ provider: browserRun(this.env.BROWSER) });
+
+  override workspace = new Workspace({
+    storage: this.ctx.storage,
+    backends: [
+      new WorkerJavaScriptBackend({
+        loader: this.env.LOADER,
+        modules: {
+          "ws:browser": createBrowserModule({ browser: this.browser })
+        }
+      })
+    ]
+  });
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.browser);
+  }
+}
+```
+
+Code the model runs with `exec`:
+
+```js
+import { writeFile } from "node:fs/promises";
+import { Buffer } from "node:buffer";
+import { send } from "ws:browser";
+
+export default async function () {
+  await send({
+    method: "Page.navigate",
+    params: { url: "https://example.com" },
+    sessionId: "active"
+  });
+  const { data } = await send({
+    method: "Page.captureScreenshot",
+    sessionId: "active"
+  });
+  await writeFile("/workspace/page.png", Buffer.from(data, "base64"));
+  return "saved /workspace/page.png";
+}
+```
+
+- The module exports `send`, `attachToTarget`, `spec`, `getDebugLog` and `clearDebugLog`, the same calls as `cdp.*` in `browserTool`. `sessionId: "active"`, scopes, and the rules about other tabs work the same way.
+- The model looks at a screenshot by saving it to the Workspace and opening it with the `read` tool.
+- Each run gets its own connection to the browser. When the run ends, the module saves the scope's active tab and closes the connection. If the browser was restarted, or the page opened tabs, it says so on the run's standard error.
+- The module's description, which the `exec` tool shows the model, covers the calls and the common CDP mistakes.
+- It needs `@cloudflare/computer` with host module `executionId`, `log` and `defer` (cloudflare/computer#247).
 
 ## Quick Actions (stateless browsing)
 

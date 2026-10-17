@@ -17,6 +17,7 @@ import {
   type BrowserNewTab,
   type BrowserSource
 } from "./session-connector";
+import { browserReportNotices } from "./session-driver";
 import { resolveCtx, transformBrowserResult } from "./tool-helpers";
 
 export interface BrowserToolOptions {
@@ -79,15 +80,6 @@ export type BrowserToolOutput = ProxyToolOutput & {
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 
-const RESTARTED_NOTICE =
-  "The browser was restarted before this run (it expired or was closed): earlier tabs, logins, and page state are gone. Your code ran in a fresh browser — navigate again before relying on page state.";
-
-const TAB_CLOSED_NOTICE =
-  'The tab you were working in was closed (by another conversation using this browser, or a person). `sessionId: "active"` now opens a blank tab — navigate again before relying on page state.';
-
-const TAB_SHARED_NOTICE =
-  "Another conversation using this browser is also working in your tab, so its page may change between your runs. Open a tab of your own with Target.createTarget if you need one.";
-
 /** Scopes whose runtime and connector stay built; older ones are rebuilt. */
 const MAX_CACHED_SCOPES = 32;
 
@@ -134,11 +126,7 @@ function withBrowserReport(
   report: BrowserExecutionReport | undefined
 ): BrowserToolOutput {
   if (!report) return output;
-  const notices = [
-    report.restarted && RESTARTED_NOTICE,
-    report.tabClosed && !report.restarted && TAB_CLOSED_NOTICE,
-    report.tabShared && TAB_SHARED_NOTICE
-  ].filter((notice) => typeof notice === "string");
+  const notices = browserReportNotices(report);
   return {
     ...output,
     ...(report.restarted ? { restarted: true as const } : {}),

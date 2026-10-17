@@ -40,6 +40,10 @@ export type { CreateBrowserToolsOptions } from "./ai";
  *   messages,
  * });
  * ```
+ *
+ * @deprecated Runs on `@cloudflare/codemode`, which is deprecated. Use
+ * `browserTool`, or `createBrowserModule` from `agents/browser/computer`
+ * for a Computer Workspace. See https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md
  */
 export function createBrowserTools(
   options: CreateBrowserToolsOptions
