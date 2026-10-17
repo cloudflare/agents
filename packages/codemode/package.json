@@ -1,7 +1,7 @@
 {
   "name": "@cloudflare/codemode",
   "version": "0.5.4",
-  "description": "Code Mode: use LLMs to generate executable code that performs tool calls",
+  "description": "Deprecated: use @cloudflare/computer. Code Mode: use LLMs to generate executable code that performs tool calls",
   "repository": {
     "directory": "packages/codemode",
     "type": "git",

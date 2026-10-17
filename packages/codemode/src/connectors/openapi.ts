@@ -66,6 +66,9 @@ type OpenApiOperation = {
  *
  * (The sandbox-facing escape hatch is `request`, not `fetch`, because `fetch`
  * is reserved by `WorkerEntrypoint`.)
+ *
+ * @deprecated Use a host module (`ws:<name>`) or `ws:tools` on a
+ * `@cloudflare/computer` `WorkerJavaScriptBackend`. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export abstract class OpenApiConnector<
   Env = unknown,

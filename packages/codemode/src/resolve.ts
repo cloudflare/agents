@@ -59,6 +59,10 @@ export function extractFns(
  *
  * This version does NOT perform schema validation on inputs.
  * Import from `@cloudflare/codemode/ai` for the schema-validating version.
+ *
+ * @deprecated Use the `exec` tool from `@cloudflare/computer` on a Workspace
+ * with a `WorkerJavaScriptBackend`, and give code your tools through a
+ * `ws:tools` module. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function resolveProvider(provider: ToolProvider): ResolvedProvider {
   const name = provider.name ?? "codemode";

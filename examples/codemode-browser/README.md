@@ -1,5 +1,7 @@
 # Browser Codemode Example
 
+> **Deprecated, with no replacement.** `IframeSandboxExecutor` and `createBrowserCodeTool` are deprecated along with `@cloudflare/codemode`. See [Moving to `@cloudflare/computer`](https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md).
+
 A minimal codemode app where the LLM calls a single `codemode` client tool, and
 that tool runs generated JavaScript in a browser iframe sandbox via
 `IframeSandboxExecutor`.

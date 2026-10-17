@@ -7,6 +7,10 @@
 
 import type { Executor, ToolProvider, ToolProviderTools } from "./executor";
 
+/**
+ * @deprecated Deprecated along with `@cloudflare/codemode`, with no
+ * replacement. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
+ */
 export const DEFAULT_DESCRIPTION = `Execute code to achieve a goal.
 
 Available:
@@ -43,6 +47,10 @@ function isToolProviderArray(
 /**
  * Normalize the tools option into a list of ToolProviders.
  * Raw ToolSet/ToolDescriptors are wrapped as a single default provider.
+ *
+ * @deprecated Use the `exec` tool from `@cloudflare/computer` on a Workspace
+ * with a `WorkerJavaScriptBackend`, and give code your tools through a
+ * `ws:tools` module. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function normalizeProviders(
   tools: ToolProviderTools | ToolProvider[]

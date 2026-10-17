@@ -31,6 +31,10 @@ export interface ToolSetConnectorOptions {
   tools: ToolSet;
 }
 
+/**
+ * @deprecated Use a host module (`ws:<name>`) or `ws:tools` on a
+ * `@cloudflare/computer` `WorkerJavaScriptBackend`. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
+ */
 export class ToolSetConnector extends CodemodeConnector {
   #options: ToolSetConnectorOptions;
   #warnedSkipped = false;
@@ -169,7 +173,12 @@ async function outputJsonSchema(
   }
 }
 
-/** Convenience constructor mirroring `stateConnector` / `new BrowserConnector`. */
+/**
+ * Convenience constructor mirroring `stateConnector` / `new BrowserConnector`.
+ *
+ * @deprecated Use a host module (`ws:<name>`) or `ws:tools` on a
+ * `@cloudflare/computer` `WorkerJavaScriptBackend`. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
+ */
 export function toolSetConnector(
   ctx: DurableObjectState | ExecutionContext,
   options: ToolSetConnectorOptions

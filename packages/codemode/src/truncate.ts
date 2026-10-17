@@ -49,6 +49,9 @@ function budget(options?: TruncateOptions): {
  * Truncate a text response to a character budget, appending a marker that notes
  * the original size so the model knows the output was clipped. Returns the
  * input unchanged when it is within budget.
+ *
+ * @deprecated Deprecated along with `@cloudflare/codemode`, with no
+ * replacement. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function truncateResponse(
   text: string,
@@ -74,6 +77,9 @@ export function truncateResponse(
  *
  * Values that can't be serialized (cycles, bigint, `undefined`) are returned
  * unchanged.
+ *
+ * @deprecated Deprecated along with `@cloudflare/codemode`, with no
+ * replacement. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function truncateResult(
   value: unknown,

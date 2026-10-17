@@ -1,5 +1,7 @@
 # Codemode Connectors Example
 
+> **Deprecated.** Connectors become host modules (`ws:<name>`) and `ws:tools` on a [`@cloudflare/computer`](https://github.com/cloudflare/computer) JavaScript backend. See [Moving to `@cloudflare/computer`](https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md).
+
 This example shows how to build class-based codemode connectors that expose external services inside a sandboxed code execution environment.
 
 The model gets one tool (`codemode`) that executes TypeScript. Inside the sandbox, connector SDKs and a platform discovery SDK are available as globals:

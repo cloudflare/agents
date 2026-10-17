@@ -6,7 +6,7 @@ Code Mode generates TypeScript type definitions from your tools for LLM context,
 
 The published package includes the Codemode guides at `docs/index.md`.
 
-> **Experimental** — may have breaking changes. Use with caution in production.
+> **Deprecated.** Use the `exec` tool from [`@cloudflare/computer`](https://github.com/cloudflare/computer) on a Workspace with a JavaScript backend. See [Moving to `@cloudflare/computer`](https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md).
 
 ## Installation
 

@@ -11,6 +11,10 @@ function stripCodeFences(code: string): string {
   return match ? match[1] : code;
 }
 
+/**
+ * @deprecated Deprecated along with `@cloudflare/codemode`, with no
+ * replacement. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
+ */
 export function normalizeCode(code: string): string {
   const trimmed = stripCodeFences(code.trim());
   if (!trimmed.trim()) return "async () => {}";
