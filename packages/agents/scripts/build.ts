@@ -49,6 +49,7 @@ const entries = [
   "src/browser/tools/ai-sdk.ts",
   "src/browser/tools/tanstack-ai.ts",
   "src/browser/tools/pi.ts",
+  "src/browser/tools/computer.ts",
   "src/web/search/index.ts",
   "src/web/search/tools/pi.ts",
   "src/web/search/tools/ai-sdk.ts",

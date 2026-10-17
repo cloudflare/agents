@@ -21,6 +21,39 @@ function formatToolValidationError(
   return `Invalid arguments for ${connector}.${tool}${details.join(";")}`;
 }
 
+const validators = new WeakMap<object, Validator>();
+
+function validatorFor(schema: unknown): Validator {
+  const key = schema as object;
+  let validator = validators.get(key);
+  if (!validator) {
+    // Both types describe draft-7 schemas, but @cfworker's `Schema` type is
+    // narrower than JSONSchema7 around boolean subschemas.
+    validator = new Validator(schema as Schema, "7", false);
+    validators.set(key, validator);
+  }
+  return validator;
+}
+
+/**
+ * Check `args` against a draft-7 input schema and throw an error naming
+ * what to fix. An omitted argument counts as `{}`: argumentless calls are
+ * documented as `cdp.spec()`. Returns the arguments to use.
+ */
+export function validateArgs(
+  connector: string,
+  name: string,
+  schema: unknown,
+  args: unknown
+): unknown {
+  const input = args === undefined ? {} : args;
+  const result = validatorFor(schema).validate(input);
+  if (!result.valid) {
+    throw new Error(formatToolValidationError(connector, name, result.errors));
+  }
+  return input;
+}
+
 /**
  * Validate a connector tool's arguments against its input schema before it
  * runs, so the model gets a precise error instead of a failure deep inside
@@ -33,22 +66,10 @@ export function validateConnectorArgs(
   tool: ConnectorTool
 ): ConnectorTool {
   if (!tool.inputSchema) return tool;
-
-  // Both types describe draft-7 schemas, but @cfworker's `Schema` type is
-  // narrower than JSONSchema7 around boolean subschemas.
-  const schema = tool.inputSchema as unknown as Schema;
-  const validator = new Validator(schema, "7", false);
+  const schema = tool.inputSchema;
   return {
     ...tool,
-    execute: async (args, ctx) => {
-      const input = args === undefined ? {} : args;
-      const result = validator.validate(input);
-      if (!result.valid) {
-        throw new Error(
-          formatToolValidationError(connector, name, result.errors)
-        );
-      }
-      return await tool.execute(input, ctx);
-    }
+    execute: async (args, ctx) =>
+      await tool.execute(validateArgs(connector, name, schema, args), ctx)
   };
 }
