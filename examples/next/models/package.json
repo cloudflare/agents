@@ -13,7 +13,7 @@
   "dependencies": {
     "@ai-sdk/provider": "^4.0.0",
     "@earendil-works/pi-agent-core": "^1.0.0",
-    "@earendil-works/pi-ai": "^1.0.0",
+    "@earendil-works/pi-ai": "1.0.1",
     "agents": "*",
     "ai": "^7.0.0",
     "zod": "^4.5.4"

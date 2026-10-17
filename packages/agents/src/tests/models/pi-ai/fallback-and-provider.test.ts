@@ -399,12 +399,12 @@ describe("pi-ai: models and the provider", () => {
     expect(ai.provider.id).toBe("cloudflare");
     const ids = ai.provider.getModels().map((entry) => entry.id);
     expect(ids).toContain("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
-    expect(ids).toContain("anthropic/claude-opus-4.8");
+    expect(ids).toContain("anthropic/claude-opus-4-8");
     expect(ids).toContain("openai/gpt-5.4");
     // `/compat` entries alias Workers AI ids; they stay on the run path.
     expect(ids.some((id) => id.startsWith("workers-ai/"))).toBe(false);
     expect(
-      models.getModel("cloudflare", "anthropic/claude-opus-4.8")
+      models.getModel("cloudflare", "anthropic/claude-opus-4-8")
     ).toBeDefined();
 
     const message = await models

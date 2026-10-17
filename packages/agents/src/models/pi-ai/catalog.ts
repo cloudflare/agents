@@ -284,8 +284,8 @@ function looseId(id: string): string {
 
 /**
  * Catalog specifiers that differ from `specifier` only in case or separators.
- * AI Gateway's catalog spells `anthropic/claude-opus-4.8` where Anthropic
- * spells `claude-opus-4-8`, and the difference is easy to miss.
+ * For example, pi-ai 1.0.1 changed Claude gateway ids from dotted to dashed
+ * spellings, so a legacy `anthropic/claude-opus-4.8` gets a useful suggestion.
  */
 function nearSpecifiers(
   specifier: string,

@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^1.0.0",
-    "@earendil-works/pi-ai": "^1.0.0",
+    "@earendil-works/pi-ai": "1.0.1",
     "agents": "*"
   },
   "devDependencies": {
