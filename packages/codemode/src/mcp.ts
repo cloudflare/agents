@@ -122,6 +122,10 @@ export interface CodeMcpServerOptions {
   description?: string;
 }
 
+/**
+ * @deprecated Deprecated along with `@cloudflare/codemode`, with no
+ * replacement. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
+ */
 export async function codeMcpServer(
   options: CodeMcpServerOptions
 ): Promise<McpServer> {
@@ -415,6 +419,9 @@ return await (${normalized})();
  * The search tool lets the LLM query the spec to find endpoints.
  * The execute tool lets the LLM call the API via a user-provided
  * request function that runs on the host (auth never enters the sandbox).
+ *
+ * @deprecated Deprecated along with `@cloudflare/codemode`, with no
+ * replacement. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function openApiMcpServer(options: OpenApiMcpServerOptions): McpServer {
   const {

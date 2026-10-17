@@ -136,6 +136,9 @@ function hasNeedsApproval(tool: Record<string, unknown>): boolean {
  * Tools with `needsApproval` are excluded, matching the current codemode
  * behavior for approval-gated tools. JSON Schema is used for prompt/type
  * generation only and is not enforced at runtime.
+ *
+ * @deprecated Deprecated along with `@cloudflare/codemode`, with no
+ * replacement. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function createBrowserCodeTool(
   options: CreateBrowserCodeToolOptions

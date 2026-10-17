@@ -98,6 +98,9 @@ function createExecutionNonce(): string {
  * For each execution, a hidden iframe is created with `sandbox="allow-scripts"`,
  * the runtime is injected via `srcdoc`, and the iframe is removed after completion.
  * Tool calls are dispatched via `postMessage`.
+ *
+ * @deprecated Deprecated along with `@cloudflare/codemode`, with no
+ * replacement. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export class IframeSandboxExecutor implements Executor {
   #timeout: number;

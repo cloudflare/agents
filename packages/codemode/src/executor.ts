@@ -161,6 +161,9 @@ export interface ToolProvider {
  * An RpcTarget that dispatches tool calls from the sandboxed Worker
  * back to the host. Passed via Workers RPC to the dynamic Worker's
  * evaluate() method — no globalOutbound or Fetcher bindings needed.
+ *
+ * @deprecated Use `WorkerJavaScriptBackend` from
+ * `@cloudflare/computer/backends/worker-javascript`. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export class ToolDispatcher extends RpcTarget {
   #fns: Record<string, (...args: unknown[]) => Promise<unknown>>;
@@ -237,6 +240,9 @@ export interface DynamicWorkerExecutorOptions {
  * ]);
  * // sandbox has both codemode.search() and state.readFile()
  * ```
+ *
+ * @deprecated Use `WorkerJavaScriptBackend` from
+ * `@cloudflare/computer/backends/worker-javascript`. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export class DynamicWorkerExecutor implements Executor {
   #loader: WorkerLoader;

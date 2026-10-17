@@ -1,5 +1,7 @@
 # Connectors
 
+> **Deprecated.** Connectors become host modules (`ws:<name>`) and `ws:tools` on a [`@cloudflare/computer`](https://github.com/cloudflare/computer) JavaScript backend. See [Moving to `@cloudflare/computer`](./moving-to-computer.md).
+
 Connectors are class-based integrations that bridge external services into the codemode sandbox.
 
 **Why this exists:** there should be one way to add a capability. Whether the source is an MCP server, an OpenAPI spec, an AI SDK toolset, or your own service, the answer is the same — wrap it in a connector class, put it in a runtime, and the model sees it as a typed global (`github.list_pull_requests(...)`). The model-facing protocol never changes; only the class you subclass does.

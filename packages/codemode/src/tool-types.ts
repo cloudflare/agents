@@ -217,6 +217,9 @@ function safeOutputSchemaToTs(schema: unknown, typeName: string): string {
  *
  * Requires the `ai` peer dependency. For a version that works with plain JSON Schema
  * objects (no AI SDK), use `generateTypesFromJsonSchema` from the main entry point.
+ *
+ * @deprecated Deprecated along with `@cloudflare/codemode`, with no
+ * replacement. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function generateTypes(
   tools: ToolDescriptors | ToolSet,

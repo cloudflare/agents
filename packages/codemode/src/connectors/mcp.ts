@@ -71,6 +71,9 @@ function unwrapMcpResult(result: CallToolResult): unknown {
  * Subclass and implement `createConnection()`. To mark a derived tool as
  * requiring approval or to attach a revert, override the `tool(name, t)`
  * decoration hook from the base class.
+ *
+ * @deprecated Use a host module (`ws:<name>`) or `ws:tools` on a
+ * `@cloudflare/computer` `WorkerJavaScriptBackend`. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export abstract class McpConnector<
   Env = unknown,
