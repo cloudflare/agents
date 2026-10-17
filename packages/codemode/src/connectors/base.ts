@@ -77,6 +77,9 @@ function toolInputSchema(t: ConnectorTool): JSONSchema7 {
  * The RPC surface (`describe`, `executeTool`, `revertAction`,
  * `getTypeScriptTypes`) is wire plumbing derived from the tools record — the
  * proxy tool calls it; connector authors don't implement it.
+ *
+ * @deprecated Use a host module (`ws:<name>`) or `ws:tools` on a
+ * `@cloudflare/computer` `WorkerJavaScriptBackend`. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export abstract class CodemodeConnector<
   Env = unknown,

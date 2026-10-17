@@ -1,10 +1,10 @@
-# Codemode (Experimental)
+# Codemode (deprecated)
 
 Codemode lets LLMs write and execute code that orchestrates your tools, instead of calling them one at a time. Inspired by [CodeAct](https://machinelearning.apple.com/research/codeact), it works because LLMs are better at writing code than making individual tool calls — they have seen millions of lines of real-world TypeScript but only contrived tool-calling examples.
 
 The `@cloudflare/codemode` package converts your tools into typed TypeScript APIs, gives the LLM a single "write code" tool, and executes the generated code in a secure, isolated Worker sandbox.
 
-> **Experimental** — this feature may have breaking changes in future releases. Use with caution in production.
+> **Deprecated.** Use the `exec` tool from [`@cloudflare/computer`](https://github.com/cloudflare/computer) on a Workspace with a JavaScript backend. See [Moving to `@cloudflare/computer`](../codemode/moving-to-computer.md).
 
 ## When to use Codemode
 

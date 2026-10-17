@@ -72,6 +72,9 @@ function toJsonSchema7(schema: unknown): JSONSchema7 | null {
  *
  * Uses the tools' schemas (Zod, ArkType, JSON Schema, etc.) to produce type
  * declarations that the LLM sees in the code-tool description.
+ *
+ * @deprecated Deprecated along with `@cloudflare/codemode`, with no
+ * replacement. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function generateTypes(
   tools: TanStackTool[],
@@ -174,6 +177,10 @@ ${availableTools}
  *   executor,
  * });
  * ```
+ *
+ * @deprecated Use the `exec` tool from `@cloudflare/computer` on a Workspace
+ * with a `WorkerJavaScriptBackend`, and give code your tools through a
+ * `ws:tools` module. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function tanstackTools(
   tools: TanStackTool[],
@@ -229,6 +236,10 @@ export function tanstackTools(
  *   executor,
  * });
  * ```
+ *
+ * @deprecated Use the `exec` tool from `@cloudflare/computer` on a Workspace
+ * with a `WorkerJavaScriptBackend`, and give code your tools through a
+ * `ws:tools` module. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function createCodeTool(
   options: CreateCodeToolOptions

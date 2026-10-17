@@ -1,5 +1,7 @@
 # Runtime
 
+> **Deprecated.** Use the `exec` tool from [`@cloudflare/computer`](https://github.com/cloudflare/computer) on a Workspace with a JavaScript backend. Computer doesn't have durable approvals yet, so keep using this runtime if you rely on them. See [Moving to `@cloudflare/computer`](./moving-to-computer.md#approvals).
+
 The **Executor** is a simple, stateless sandbox: it runs a block of code once and dispatches tool calls back. The **Runtime** wraps an executor and makes execution durable.
 
 **Why this exists:** approvals can take minutes or hours, and agents hibernate. A model may write a script that reads data, asks to create an issue, and continues after the user approves — possibly in a different request, after the Durable Object restarted. That needs durable state, which cannot live in the executor or in a single request. The runtime is where it lives.

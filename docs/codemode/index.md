@@ -1,5 +1,7 @@
 # Codemode
 
+> **Deprecated.** Use the `exec` tool from [`@cloudflare/computer`](https://github.com/cloudflare/computer) on a Workspace with a JavaScript backend. See [Moving to `@cloudflare/computer`](./moving-to-computer.md).
+
 Codemode lets a model use external systems by **writing TypeScript** instead of making individual tool calls. The model gets one tool — `codemode({ code })` — that executes its code in a sandboxed Worker. Inside the sandbox, every integration the developer configured is available as a typed global, and a four-method platform SDK handles discovery, side effects, and reuse.
 
 ```ts
@@ -186,6 +188,7 @@ sandbox: github.create_issue(args)
 
 ## Docs
 
+- [Moving to `@cloudflare/computer`](./moving-to-computer.md) — what replaces each piece
 - [Using Codemode with Agents and AI SDK tools](https://github.com/cloudflare/agents/blob/main/docs/agents/codemode.md) — turn tool sets into a single sandboxed code tool
 - [Connectors](./connectors.md) — write one class per service; MCP, OpenAPI, toolset, and custom bases
 - [Runtime](./runtime.md) — both API surfaces (handle + sandbox SDK), the durable log, abort-and-replay

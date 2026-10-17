@@ -70,6 +70,10 @@ function extractFns(
  *   executor,
  * });
  * ```
+ *
+ * @deprecated Use the `exec` tool from `@cloudflare/computer` on a Workspace
+ * with a `WorkerJavaScriptBackend`, and give code your tools through a
+ * `ws:tools` module. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function aiTools(tools: ToolDescriptors | ToolSet): ToolProvider {
   return { tools };
@@ -78,6 +82,10 @@ export function aiTools(tools: ToolDescriptors | ToolSet): ToolProvider {
 /**
  * Resolve a ToolProvider into a ResolvedProvider ready for execution.
  * Filters out tools with `needsApproval` and validates inputs via AI SDK's `asSchema`.
+ *
+ * @deprecated Use the `exec` tool from `@cloudflare/computer` on a Workspace
+ * with a `WorkerJavaScriptBackend`, and give code your tools through a
+ * `ws:tools` module. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function resolveProvider(provider: ToolProvider): ResolvedProvider {
   const name = provider.name ?? "codemode";
@@ -86,6 +94,11 @@ export function resolveProvider(provider: ToolProvider): ResolvedProvider {
   return resolved;
 }
 
+/**
+ * @deprecated Use the `exec` tool from `@cloudflare/computer` on a Workspace
+ * with a `WorkerJavaScriptBackend`, and give code your tools through a
+ * `ws:tools` module. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
+ */
 export function createCodeTool(
   options: CreateCodeToolOptions
 ): Tool<CodeInput, CodeOutput> {

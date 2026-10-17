@@ -1,5 +1,7 @@
 # Snippets
 
+> **Deprecated, with no replacement.** Save the code as a Workspace file and import it from `exec` code instead. See [Moving to `@cloudflare/computer`](./moving-to-computer.md).
+
 A **snippet** is a saved sandbox script — a reusable pattern that already ran and worked. Snippets are durable: they live on the [Runtime](./runtime.md) facet, are addressable by name, and accumulate over time.
 
 Connectors provide raw capability. Snippets are recipes that worked. The split is deliberate: **the model writes and reuses scripts; the developer decides which ones are worth keeping.** Promotion is a curation decision — wire it to a "save this script" button, an eval, or your own heuristics, not to the model's judgement.

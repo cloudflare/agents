@@ -70,6 +70,9 @@ const JS_RESERVED = new Set([
  * Sanitize a tool name into a valid JavaScript identifier.
  * Replaces hyphens, dots, and spaces with `_`, strips other invalid chars,
  * prefixes digit-leading names with `_`, and appends `_` to JS reserved words.
+ *
+ * @deprecated Deprecated along with `@cloudflare/codemode`, with no
+ * replacement. See https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md
  */
 export function sanitizeToolName(name: string): string {
   if (!name) return "_";
