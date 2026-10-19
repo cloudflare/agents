@@ -3508,6 +3508,45 @@ describe("Think — onChatRecovery", () => {
     });
   });
 
+  it("seals a turn whose replayed attempts keep dying, even when each streams output inside the debounce window (#2613)", async () => {
+    const agent = await freshRecoveryAgent("recovery-interrupted-attempts");
+    // A high attempt cap so only the interruption budget can seal; the
+    // default maxInterruptedAttempts (5) applies.
+    await agent.enableExhaustedCaptureForTest(100);
+    await agent.setRecoveryOverride({ continue: false });
+
+    for (let death = 1; death <= 5; death++) {
+      // Each attempt streamed a little before its isolate died, and the
+      // replay comes inside the debounce window. Neither resets the count.
+      await agent.bumpRecoveryProgressForTest();
+      await agent.insertInterruptedFiber(
+        "__cf_internal_chat_turn:req-crash-loop"
+      );
+      await agent.triggerFiberRecovery();
+    }
+
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      attempt: number;
+      interruptedAttempts?: number;
+      status: string;
+      reason?: string;
+    }>;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0]).toMatchObject({
+      attempt: 1,
+      interruptedAttempts: 5,
+      status: "exhausted",
+      reason: "interrupted_attempts_exceeded"
+    });
+    const exhausted = (await agent.getExhaustedContextsForTest()) as Array<{
+      reason: string;
+    }>;
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0].reason).toBe("interrupted_attempts_exceeded");
+    // The first four replays reached onChatRecovery; the fifth sealed first.
+    expect(await agent.getRecoveryContexts()).toHaveLength(4);
+  });
+
   it("continuation does not replay a trailing assistant message (assistant prefill)", async () => {
     const agent = await freshRecoveryAgent("continuation-prefill");
 
@@ -6004,6 +6043,24 @@ describe("Think — onChatRecovery", () => {
     expect(result.exhaustedReason).toBe("recovery_error");
     expect(result.terminalBroadcast).toBe(terminalMessage);
     expect(result.incidentStatus).toBe("exhausted");
+  });
+
+  it("re-throws a memory-limit reset from a recovery callback without writing anything (#2613)", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-memory-limit");
+
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage:
+        "Durable Object's isolate exceeded its memory limit and was reset.",
+      errorShape: "sql-wrapped"
+    });
+
+    // The isolate is condemned, so the callback records nothing: no give-up,
+    // no banner, and the incident stays as its opening left it. The next
+    // isolate's replay of the interrupted run counts the attempt.
+    expect(result.threw).toBe(true);
+    expect(result.exhaustedContexts).toBe(0);
+    expect(result.terminalBroadcast).toBeUndefined();
+    expect(result.incidentStatus).toBe("attempting");
   });
 
   it("re-throws a deploy code-update reset (preserve the row to re-run on the fresh isolate) and does NOT terminalize", async () => {

@@ -370,6 +370,45 @@ describe("onChatRecovery", () => {
     });
   });
 
+  it("seals a turn whose replayed attempts keep dying, even when each streams output inside the debounce window (#2613)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    // A high attempt cap so only the interruption budget can seal; the
+    // default maxInterruptedAttempts (5) applies.
+    await agentStub.enableExhaustedCaptureForTest(100);
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    for (let death = 1; death <= 5; death++) {
+      // Each attempt streamed a little before its isolate died, and the
+      // replay comes inside the debounce window. Neither resets the count.
+      await agentStub.bumpRecoveryProgressForTest();
+      await agentStub.insertInterruptedFiber(
+        "__cf_internal_chat_turn:req-crash-loop"
+      );
+      await agentStub.triggerFiberRecovery();
+    }
+
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        attempt: number;
+        interruptedAttempts?: number;
+        status: string;
+        reason?: string;
+      }>;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0]).toMatchObject({
+      attempt: 1,
+      interruptedAttempts: 5,
+      status: "exhausted",
+      reason: "interrupted_attempts_exceeded"
+    });
+    const exhausted = await agentStub.getExhaustedContextsForTest();
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0].reason).toBe("interrupted_attempts_exceeded");
+    // The first four replays reached onChatRecovery; the fifth sealed first.
+    expect(await agentStub.getRecoveryContexts()).toHaveLength(4);
+  });
+
   it("resets the attempt budget when recovery makes forward progress", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);

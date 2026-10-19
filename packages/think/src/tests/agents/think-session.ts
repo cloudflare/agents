@@ -58,7 +58,12 @@ import {
   enforceRowSizeLimit,
   StreamAccumulator
 } from "agents/chat";
-import type { ClientToolSchema, ResumableStream, TurnQueue } from "agents/chat";
+import type {
+  ChatRecoveryTrigger,
+  ClientToolSchema,
+  ResumableStream,
+  TurnQueue
+} from "agents/chat";
 import type { Schedule } from "agents";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
@@ -9819,25 +9824,43 @@ export class ThinkRecoveryTestAgent extends Think {
     latestUserMessageId?: string | null;
     recoveryKind: "retry" | "continue";
     nowMs?: number;
+    /** Open the incident as the replay of this interrupted run. */
+    interruptedRunId?: string;
   }): Promise<{
     incidentId: string;
     attempt: number;
     exhausted: boolean;
     reason?: string;
+    interruptedAttempts?: number;
   }> {
+    const { interruptedRunId, ...identity } = input;
+    const trigger: ChatRecoveryTrigger =
+      interruptedRunId === undefined
+        ? { kind: "stalled" }
+        : { kind: "interrupted", runId: interruptedRunId };
     const self = this as unknown as {
-      _beginChatRecoveryIncident(i: typeof input): Promise<{
-        incident: { incidentId: string; attempt: number; reason?: string };
+      _beginChatRecoveryIncident(
+        i: typeof identity & { trigger: ChatRecoveryTrigger }
+      ): Promise<{
+        incident: {
+          incidentId: string;
+          attempt: number;
+          reason?: string;
+          interruptedAttempts?: number;
+        };
         exhausted: boolean;
       }>;
     };
-    const { incident, exhausted } =
-      await self._beginChatRecoveryIncident(input);
+    const { incident, exhausted } = await self._beginChatRecoveryIncident({
+      ...identity,
+      trigger
+    });
     return {
       incidentId: incident.incidentId,
       attempt: incident.attempt,
       exhausted,
-      reason: incident.reason
+      reason: incident.reason,
+      interruptedAttempts: incident.interruptedAttempts
     };
   }
 

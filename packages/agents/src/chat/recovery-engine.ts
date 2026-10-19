@@ -25,7 +25,8 @@ import {
 import type {
   ChatRecoveryIncident,
   ChatRecoveryIncidentEvent,
-  ChatRecoveryKind
+  ChatRecoveryKind,
+  ChatRecoveryTrigger
 } from "./recovery-incident";
 
 /** The scheduled-callback entrypoints a recovery schedule can target. */
@@ -86,6 +87,11 @@ export interface BeginChatRecoveryIncidentInput {
   recoveryRootRequestId?: string | null;
   latestUserMessageId?: string | null;
   recoveryKind: ChatRecoveryKind;
+  /**
+   * Why the incident is being opened. Only an `interrupted` trigger counts
+   * against `maxInterruptedAttempts`.
+   */
+  trigger: ChatRecoveryTrigger;
   /** Test-only clock injection for deterministic debounce/window timing. */
   nowMs?: number;
 }
@@ -149,6 +155,14 @@ export interface ChatRecoveryAdapter {
   listActiveIncidents?(): Promise<ChatRecoveryIncident[]>;
   /** Persist the evaluated incident under `key`. */
   putIncident(key: string, incident: ChatRecoveryIncident): Promise<void>;
+  /**
+   * Resolve once every write issued so far is durably confirmed (Durable
+   * Object `storage.sync()`). {@link ChatRecoveryEngine.beginIncident} waits
+   * on it before returning: the attempt that follows can run in the same
+   * invocation, and a memory-limit reset discards writes that were not yet
+   * confirmed, which would lose the interruption count (#2613).
+   */
+  syncStorage(): Promise<void>;
   /**
    * Delete the incident record under `key`. The engine calls this on the
    * terminal `completed` transition (a completed recovery is never retried, so
@@ -444,11 +458,14 @@ export class ChatRecoveryEngine {
     });
     const recoveryRootRequestId = snapshot?.recoveryRootRequestId ?? requestId;
 
+    // A recovered fiber is a run whose isolate died before it finished, so
+    // this opening counts one interrupted attempt for the turn (#2613).
     const { incident, config, exhausted } = await this.beginIncident({
       requestId,
       recoveryRootRequestId,
       latestUserMessageId: snapshot?.latestUserMessageId,
-      recoveryKind
+      recoveryKind,
+      trigger: { kind: "interrupted", runId: ctx.id }
     });
 
     if (exhausted) {
@@ -588,6 +605,7 @@ export class ChatRecoveryEngine {
 
     const { incident, exhausted, events } = await evaluateChatRecoveryIncident({
       identity: input,
+      trigger: input.trigger,
       config,
       existing,
       currentProgress,
@@ -599,6 +617,10 @@ export class ChatRecoveryEngine {
     });
 
     await adapter.putIncident(key, incident);
+    // Confirm the record before the caller acts on it. The next attempt may
+    // run in this invocation, and if it hits a memory-limit reset, writes that
+    // were not yet confirmed are discarded with it.
+    await adapter.syncStorage();
     for (const event of events) {
       adapter.emitRecoveryEvent(event);
     }
@@ -752,67 +774,6 @@ export class ChatRecoveryEngine {
       incident?.status === "skipped" &&
       incident.reason === CHAT_RECOVERY_CANCELLED_REASON
     );
-  }
-
-  /**
-   * Record that a recovery callback observed a Durable Object memory-limit reset
-   * (the isolate exceeded its 128 MB limit — `isDurableObjectMemoryLimitReset`)
-   * and decide what to do next (#1825).
-   *
-   * Bumps the incident's durable `oomAttempts` counter, then:
-   *  - if it is still within `maxOomRetries`, issues a delayed, NON-idempotent
-   *    reschedule of the SAME callback (same machinery as
-   *    {@link rescheduleAfterStableTimeout}: the executing attempt settles
-   *    only after the callback returns, so an idempotent reschedule would
-   *    dedup onto that doomed attempt) and returns `"rescheduled"`. The small
-   *    delay lets a transient memory spike clear before the re-run;
-   *  - otherwise leaves the incremented count persisted (so a begin-path
-   *    re-evaluation agrees) and returns `"exhausted"` — the caller then
-   *    terminalizes via the give-up path with `reason="out_of_memory"`.
-   *
-   * Returns `"exhausted"` when there is no incident to track against (no id /
-   * record gone): an OOM we cannot bound must seal rather than loop. Unlike a
-   * stable-state retry this is gated by the OOM-specific budget, NOT the generic
-   * attempt cap — re-running an OOM streams a little "progress" that would
-   * otherwise reset the attempt cap forever (the #1825 loop).
-   */
-  async recordOomAndDecide(input: {
-    incidentId: string | undefined;
-    callback: ChatRecoveryScheduleCallback;
-    data: Record<string, unknown> | undefined;
-    maxOomRetries: number;
-  }): Promise<"rescheduled" | "exhausted"> {
-    const { adapter } = this;
-    if (!input.incidentId) return "exhausted";
-    const key = chatRecoveryIncidentKey(input.incidentId);
-    const incident = await adapter.getIncident(key);
-    if (!incident) return "exhausted";
-    const oomAttempts = (incident.oomAttempts ?? 0) + 1;
-    if (oomAttempts > input.maxOomRetries) {
-      // Persist the crossed count so the begin-path backstop in
-      // `evaluateChatRecoveryIncident` agrees, then let the caller terminalize.
-      await adapter.putIncident(key, {
-        ...incident,
-        oomAttempts,
-        lastAttemptAt: adapter.now(),
-        reason: "out_of_memory"
-      });
-      return "exhausted";
-    }
-    await adapter.putIncident(key, {
-      ...incident,
-      oomAttempts,
-      status: "scheduled",
-      lastAttemptAt: adapter.now(),
-      reason: "oom_retry"
-    });
-    await adapter.scheduleRecovery(
-      input.callback,
-      input.data ?? {},
-      "stable_timeout_retry",
-      CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
-    );
-    return "rescheduled";
   }
 
   /**

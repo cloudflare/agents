@@ -36,6 +36,7 @@ import {
   ResumableStream,
   chatRecoveryTaskRunOptions
 } from "agents/chat";
+import type { ChatRecoveryTrigger } from "agents/chat";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<
@@ -2367,25 +2368,43 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     latestUserMessageId?: string | null;
     recoveryKind: "retry" | "continue";
     nowMs?: number;
+    /** Open the incident as the replay of this interrupted run. */
+    interruptedRunId?: string;
   }): Promise<{
     incidentId: string;
     attempt: number;
     exhausted: boolean;
     reason?: string;
+    interruptedAttempts?: number;
   }> {
+    const { interruptedRunId, ...identity } = input;
+    const trigger: ChatRecoveryTrigger =
+      interruptedRunId === undefined
+        ? { kind: "stalled" }
+        : { kind: "interrupted", runId: interruptedRunId };
     const self = this as unknown as {
-      _beginChatRecoveryIncident(i: typeof input): Promise<{
-        incident: { incidentId: string; attempt: number; reason?: string };
+      _beginChatRecoveryIncident(
+        i: typeof identity & { trigger: ChatRecoveryTrigger }
+      ): Promise<{
+        incident: {
+          incidentId: string;
+          attempt: number;
+          reason?: string;
+          interruptedAttempts?: number;
+        };
         exhausted: boolean;
       }>;
     };
-    const { incident, exhausted } =
-      await self._beginChatRecoveryIncident(input);
+    const { incident, exhausted } = await self._beginChatRecoveryIncident({
+      ...identity,
+      trigger
+    });
     return {
       incidentId: incident.incidentId,
       attempt: incident.attempt,
       exhausted,
-      reason: incident.reason
+      reason: incident.reason,
+      interruptedAttempts: incident.interruptedAttempts
     };
   }
 

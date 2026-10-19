@@ -87,6 +87,7 @@ describe("cutover: incident records", () => {
         latestUserMessageId: "user-old",
         recoveryKind: existing.recoveryKind
       },
+      trigger: { kind: "interrupted", runId: "fiber-legacy" },
       config: resolveChatRecoveryConfig(true),
       existing,
       currentProgress: 0,

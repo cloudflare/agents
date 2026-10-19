@@ -38,6 +38,22 @@ import type {
 export type ChatRecoveryKind = "retry" | "continue";
 
 /**
+ * Why an incident evaluation is running.
+ *
+ * - `interrupted`: a later isolate is replaying a turn run whose isolate died
+ *   before the run finished. `runId` names that run. This is the only point
+ *   where the system durably learns that an attempt was interrupted: the
+ *   isolate that died (for example after a memory-limit reset) cannot write
+ *   anything, so the interruption budget is counted here (#2613).
+ * - `stalled`: a live isolate caught a stalled or failed stream. Nothing
+ *   died, so it does not count as an interrupted attempt; transient retries
+ *   are bounded by `transientRetries` instead.
+ */
+export type ChatRecoveryTrigger =
+  | { readonly kind: "interrupted"; readonly runId: string }
+  | { readonly kind: "stalled" };
+
+/**
  * Durable per-incident recovery record.
  *
  * PERSISTED CONTRACT — this shape round-trips across deploys (including the
@@ -88,17 +104,22 @@ export type ChatRecoveryIncident = {
    */
   workBaseline?: number;
   /**
-   * Count of recovery attempts for this incident that ended in a Durable Object
-   * memory-limit reset (the isolate exceeded its 128 MB limit — see
-   * `isDurableObjectMemoryLimitReset`). An OOM is a poison signal: re-running the
-   * same memory-heavy turn deterministically re-OOMs, so unlike a deploy/eviction
-   * it must NOT credit forward progress and must be bounded by a tight,
-   * OOM-specific budget (`maxOomRetries`) rather than the generic attempt cap
-   * (which resets on progress). Bumped by `ChatRecoveryEngine.recordOomAndDecide`
-   * when a recovery callback observes an OOM; exceeding `maxOomRetries` seals the
-   * incident with `reason="out_of_memory"` (#1825). Optional for backward-compat.
+   * How many of this turn's attempts were interrupted: their isolate died
+   * before they finished. Counted when a later isolate replays the interrupted
+   * run (an `interrupted` {@link ChatRecoveryTrigger}), never on the failure
+   * path, because an isolate killed by a memory-limit reset cannot write
+   * (#2613). Never reset by progress: a turn that re-runs and dies again
+   * streams output too. Reaching `maxInterruptedAttempts` seals the incident
+   * with `reason="interrupted_attempts_exceeded"`. Optional for
+   * backward-compat.
    */
-  oomAttempts?: number;
+  interruptedAttempts?: number;
+  /**
+   * The run whose interruption was counted last. A replay of the same run
+   * (a retried incident opening, or two recovery paths reporting one death)
+   * does not count again.
+   */
+  lastInterruptedRunId?: string;
   /**
    * Recoveries scheduled for this incident after a transient or rate-limited
    * stream error. Drives the retry backoff and is capped by `maxAttempts`.
@@ -179,18 +200,14 @@ export const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 10;
  */
 export const DEFAULT_CHAT_RECOVERY_MAX_WORK = 10_000;
 /**
- * Tight, OOM-specific retry budget (#1825). A Durable Object memory-limit reset
- * (`isDurableObjectMemoryLimitReset`) is usually deterministic — the turn's
- * working set no longer fits in the isolate's 128 MB — so re-running it re-OOMs.
- * But a single OOM CAN be a transient spike (the isolate's 128 MB is shared
- * across the global scope / noisy neighbors), so recovery retries a small number
- * of times before sealing with `reason="out_of_memory"` rather than abandoning a
- * turn that one more attempt might have completed. Far tighter than the generic
- * `maxRecoveryWork` backstop because an OOM is attributable and re-running it is
- * expensive (it re-runs the model). Counts attempts that ended in an OOM, not
- * total attempts, so a turn interrupted by deploys (no OOM) is unaffected.
+ * Default number of interrupted attempts a turn may accumulate before recovery
+ * seals it with `reason="interrupted_attempts_exceeded"` (#2613). The original
+ * turn counts, so a turn that dies every time runs the model at most five
+ * times. A deterministic memory-limit reset dies every time; a deploy rarely
+ * lands on the same turn five times in a row, so five tolerates churn while
+ * still bounding a crash loop.
  */
-export const DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES = 3;
+export const DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS = 5;
 export const DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS = 10_000;
 /**
  * Delay before retrying a recovery that timed out waiting for stable state.
@@ -261,15 +278,32 @@ export function resolveChatRecoveryConfig(
       typeof custom?.maxRecoveryWork === "number" && custom.maxRecoveryWork >= 0
         ? custom.maxRecoveryWork
         : DEFAULT_CHAT_RECOVERY_MAX_WORK,
-    maxOomRetries:
-      typeof custom?.maxOomRetries === "number" && custom.maxOomRetries >= 0
-        ? Math.floor(custom.maxOomRetries)
-        : DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES,
+    maxInterruptedAttempts: resolveMaxInterruptedAttempts(custom),
     ...(custom?.shouldKeepRecovering
       ? { shouldKeepRecovering: custom.shouldKeepRecovering }
       : {}),
     ...(custom?.onExhausted ? { onExhausted: custom.onExhausted } : {})
   };
+}
+
+/**
+ * Read the interruption budget, honoring the deprecated `maxOomRetries` alias
+ * as `maxOomRetries + 1` so an explicit retry count keeps its meaning. A
+ * negative or non-numeric value falls back to the default; `Infinity` is kept
+ * and disables the bound.
+ */
+function resolveMaxInterruptedAttempts(
+  custom: Exclude<ChatRecoveryConfig, true> | undefined
+): number {
+  const attempts = custom?.maxInterruptedAttempts;
+  if (typeof attempts === "number" && attempts >= 0) {
+    return Math.max(1, Math.floor(attempts));
+  }
+  const legacyRetries = custom?.maxOomRetries;
+  if (typeof legacyRetries === "number" && legacyRetries >= 0) {
+    return Math.floor(legacyRetries) + 1;
+  }
+  return DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS;
 }
 
 /**
@@ -630,6 +664,8 @@ export type EvaluateChatRecoveryIncidentInput = {
     latestUserMessageId?: string | null;
     recoveryKind: ChatRecoveryKind;
   };
+  /** Why this evaluation is running; decides whether it counts an interruption. */
+  trigger: ChatRecoveryTrigger;
   /** Fully-resolved recovery config. */
   config: ResolvedChatRecoveryConfig;
   /** The existing incident for this identity, or `null` if this is fresh. */
@@ -676,6 +712,10 @@ export type EvaluateChatRecoveryIncidentResult = {
  *    no-progress alarm loop.
  *  - RUNAWAY — the work budget seals a loop that keeps emitting content but
  *    never converges. Keyed to WORK done, not wall-clock. Defaults to no cap.
+ *  - CRASH-LOOP — the interruption budget counts attempts whose isolate died
+ *    before they finished, once per interrupted run, and never resets on
+ *    progress. It is counted here, by the isolate that replays the run,
+ *    because the isolate that died cannot record anything (#2613).
  *  - CALLER — `shouldKeepRecovering` lets the integrator express a
  *    token/cost/step budget the SDK should not hardcode. Consulted only when no
  *    hard bound has already sealed the incident, and never on first detection.
@@ -688,6 +728,7 @@ export async function evaluateChatRecoveryIncident(
 ): Promise<EvaluateChatRecoveryIncidentResult> {
   const {
     identity,
+    trigger,
     config,
     existing,
     currentProgress,
@@ -728,20 +769,24 @@ export async function evaluateChatRecoveryIncident(
     Number.isFinite(config.maxRecoveryWork) &&
     work > config.maxRecoveryWork;
 
-  // OOM budget (#1825). `oomAttempts` is bumped out-of-band by
-  // `recordOomAndDecide` when a recovery callback observes a memory-limit reset;
-  // it is carried forward across begins here so the count is not lost, and seals
-  // the incident once it crosses the tight OOM-specific budget. Unlike the
-  // attempt cap this never resets on progress — an OOM that streams a little
-  // before it dies must still count, since that "progress" is the very re-run
-  // that re-OOMs. The seal authority is shared with `recordOomAndDecide` (which
-  // seals on the catchable path); this begin-path check is the backstop for a
-  // fiber re-detection that reopens the incident after the count crossed.
-  const oomAttempts = existing?.oomAttempts ?? 0;
-  const oomBudgetExceeded =
-    existing != null &&
+  // Interruption budget (#2613). This evaluation is the first durable point
+  // after an attempt's isolate died, so the count is taken here: the isolate
+  // that died (for example after a memory-limit reset) cannot write anything.
+  // A run counts once, however many times its replay re-enters. Neither
+  // progress nor debounce resets it: a turn that re-runs and dies again
+  // streams output, and can die faster than the debounce window.
+  const countsInterruption =
+    trigger.kind === "interrupted" &&
+    trigger.runId !== existing?.lastInterruptedRunId;
+  const interruptedAttempts =
+    (existing?.interruptedAttempts ?? 0) + (countsInterruption ? 1 : 0);
+  const lastInterruptedRunId =
+    trigger.kind === "interrupted"
+      ? trigger.runId
+      : existing?.lastInterruptedRunId;
+  const interruptedBudgetExceeded =
     !awaitingClientInteraction &&
-    oomAttempts > config.maxOomRetries;
+    interruptedAttempts >= config.maxInterruptedAttempts;
 
   const transientRetries = existing?.transientRetries ?? 0;
   const transientBudgetExceeded =
@@ -771,7 +816,7 @@ export async function evaluateChatRecoveryIncident(
     config.shouldKeepRecovering &&
     !noProgressExceeded &&
     !workBudgetExceeded &&
-    !oomBudgetExceeded &&
+    !interruptedBudgetExceeded &&
     !transientBudgetExceeded &&
     attempt <= config.maxAttempts
   ) {
@@ -795,7 +840,7 @@ export async function evaluateChatRecoveryIncident(
 
   const exhausted =
     !awaitingClientInteraction &&
-    (oomBudgetExceeded ||
+    (interruptedBudgetExceeded ||
       noProgressExceeded ||
       workBudgetExceeded ||
       abortedByCaller ||
@@ -815,14 +860,13 @@ export async function evaluateChatRecoveryIncident(
     lastProgressAt,
     progress,
     workBaseline,
-    // Carry the OOM count forward so a begin-path re-evaluation never loses what
-    // `recordOomAndDecide` accrued between begins.
-    ...(oomAttempts > 0 ? { oomAttempts } : {}),
+    ...(interruptedAttempts > 0 ? { interruptedAttempts } : {}),
+    ...(lastInterruptedRunId !== undefined ? { lastInterruptedRunId } : {}),
     ...(transientRetries > 0 ? { transientRetries } : {}),
     ...(exhausted
       ? {
-          reason: oomBudgetExceeded
-            ? "out_of_memory"
+          reason: interruptedBudgetExceeded
+            ? "interrupted_attempts_exceeded"
             : workBudgetExceeded
               ? "work_budget_exceeded"
               : noProgressExceeded

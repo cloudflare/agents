@@ -557,20 +557,28 @@ export class JobDriver {
     const { queue, storage } = this.#options;
 
     let strikes = 1;
+    let counted = true;
     try {
       const prior = await storage.get<number>(OOM_ALARM_STRIKES_KEY);
       strikes = (typeof prior === "number" ? prior : 0) + 1;
       await storage.put(OOM_ALARM_STRIKES_KEY, strikes);
     } catch {
-      // even the strike write OOMed; still progress toward sealing
+      // The reset isolate's storage rejects every call, so this strike cannot
+      // be counted and the counter cannot reach the seal from here. Chat
+      // recovery bounds that loop itself: the next isolate counts the
+      // interrupted attempt before re-running it (#2613).
+      counted = false;
     }
 
     const limit =
       this.#options.maxMemoryLimitStrikes() ??
       DEFAULT_MAX_ALARM_MEMORY_LIMIT_STRIKES;
     const sealed = strikes >= limit;
+    const strikeLabel = counted
+      ? `strike ${strikes}/${limit}`
+      : "strike not counted: storage rejected it after the reset";
     console.error(
-      `Alarm hit a Durable Object memory-limit reset (strike ${strikes}/${limit}` +
+      `Alarm hit a Durable Object memory-limit reset (${strikeLabel}` +
         `${sealed ? ", sealing recovery" : ", will retry with backoff"}). ` +
         "Breaking the platform alarm-retry loop (#1825).",
       error instanceof Error ? error.message : String(error)

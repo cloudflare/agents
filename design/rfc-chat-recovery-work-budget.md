@@ -317,3 +317,57 @@ total, so an incident whose recorded high-water mark predates the upgrade
 never sees the marker read lower, a seed can never swallow segments retired
 before it, and a repeated seed is idempotent. The key is not deleted: a
 rollback resumes from a value no lower than it left.
+
+## Follow-up 3: count interrupted attempts when the run is replayed (#2613)
+
+Production evidence: one Durable Object logged "strike 1/3" 10,800 times in a
+day, for eight days, and never reached 2/3. The OOM budget and the alarm
+breaker above share one flaw: both are written after the reset. A Durable
+Object's own memory-limit reset condemns the actor. Every storage call in that
+invocation rejects, and writes that were not yet confirmed are discarded. So
+`recordOomAndDecide` failed at its first read, the give-up's seal failed too,
+and the breaker's strike `get`/`put` threw and fell back to `strikes = 1` on
+every alarm. The "outermost frame" argument in Follow-up 2 does not hold for
+this case: unwinding frees the JS heap but does not bring the actor's storage
+back. The begin path, described above as the reliable terminator, only sealed
+on counts the failure path had written, and its own counters (attempt cap,
+no-progress window) reset whenever the re-run streamed output.
+
+**Decision: count when the next attempt is admitted.** The next isolate replays
+the interrupted turn run (Tasks reclaims it, or `_checkRunFibers` finds its
+fiber row) and calls `beginIncident` with an `interrupted` trigger naming that
+run, before anything heavy runs. `evaluateChatRecoveryIncident` counts one
+interrupted attempt per distinct run id (`interruptedAttempts`,
+`lastInterruptedRunId`), never resets the count on progress or debounce, and
+seals at `maxInterruptedAttempts` (default 5, the original turn included) with
+`reason="interrupted_attempts_exceeded"`. `beginIncident` then waits for
+`storage.sync()`, because the next attempt can run in the same invocation and
+a reset discards unconfirmed writes. The failure path writes nothing:
+`recordOomAndDecide` and both packages' `_handleRecoveryOom` are removed, Think
+re-throws a caught memory-limit reset, and `AIChatAgent` drops its OOM-only
+`catch`.
+
+**Tradeoff.** The next isolate cannot tell a memory-limit reset from a deploy,
+so the count ignores the cause. A turn interrupted five times in a row by
+deploys is sealed too, which replaces the earlier promise that a progressing
+turn survives unbounded interruption. `maxOomRetries` stays as a deprecated
+alias, read as `maxInterruptedAttempts: maxOomRetries + 1` so an explicit retry
+count keeps its meaning.
+
+**Alternatives considered.**
+
+- Make the alarm breaker write ahead: mark before dispatch, and count leftover
+  marks on the next wake. That would cover every capability, but its identity
+  is the job row or the whole object, while each chat cycle creates a new turn
+  run and a new recovery run. Only the incident spans the loop. Kept as a
+  follow-up for non-chat recovery loops (Tasks, PiHarness).
+- Count in Tasks when it reclaims an interrupted step. Same identity problem,
+  and the chat-turn step replays once by design to run recovery.
+- Keep the cause-aware OOM counter and add `sync()`. The counter is still
+  written after the reset, so `sync()` rejects as well.
+
+**What remains.** The breaker still counts strikes only while storage works,
+for example when a D1 memory-limit error surfaces in a healthy isolate, and its
+log now says when a strike could not be counted instead of printing `strike
+1/3`. A reset before any turn run exists (boot hydration) is not counted by this
+budget.

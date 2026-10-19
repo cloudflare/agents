@@ -993,13 +993,12 @@ export interface AgentStaticOptions {
    * reset (the isolate exceeded its 128 MB limit) before the alarm-boundary
    * circuit breaker stops the platform's auto-retry loop and seals the looping
    * recovery work (#1825). Default: 3. Set to `0` to seal on the first such
-   * reset. This is the universal backstop for the case where the in-DO recovery
-   * budgets (`chatRecovery.maxOomRetries` / `maxRecoveryWork`) can't engage
-   * because the OOM bypasses them — e.g. it is thrown before the budget code
-   * runs, or its own writes also OOM. The boundary handler runs at the outermost
-   * alarm frame, after the heavy turn has unwound and GC has reclaimed its
-   * footprint, so its small seal/purge writes can land where mid-turn writes
-   * could not.
+   * reset. The strike counter is written after the reset, so it only advances
+   * when that isolate's storage still accepts writes, for example when the
+   * reset error came from another isolate such as D1. A Durable Object's own
+   * memory-limit reset rejects every later storage call in that invocation, so
+   * chat recovery does not rely on this counter: it counts each interrupted
+   * attempt in the next isolate (`chatRecovery.maxInterruptedAttempts`, #2613).
    */
   maxAlarmMemoryLimitStrikes?: number;
 }

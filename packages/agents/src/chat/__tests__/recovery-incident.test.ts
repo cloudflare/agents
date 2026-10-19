@@ -12,7 +12,7 @@ import {
   chatRecoveryIncidentId,
   chatRecoveryIncidentKey,
   DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
-  DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES,
+  DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS,
   DEFAULT_CHAT_RECOVERY_MAX_WORK,
   DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS,
   DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
@@ -48,7 +48,7 @@ function config(
     terminalMessage: DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
     noProgressTimeoutMs: DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS,
     maxRecoveryWork: Number.POSITIVE_INFINITY,
-    maxOomRetries: DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES,
+    maxInterruptedAttempts: DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS,
     ...overrides
   };
 }
@@ -65,6 +65,9 @@ function evaluate(
 ) {
   return evaluateChatRecoveryIncident({
     identity,
+    // A stall counts nothing, so tests about the other budgets are unaffected
+    // by the interruption budget unless they opt in.
+    trigger: { kind: "stalled" },
     config: config(),
     existing: null,
     currentProgress: 0,
@@ -119,7 +122,7 @@ describe("resolveChatRecoveryConfig", () => {
       maxAttempts: DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
       noProgressTimeoutMs: DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS,
       maxRecoveryWork: DEFAULT_CHAT_RECOVERY_MAX_WORK,
-      maxOomRetries: DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES,
+      maxInterruptedAttempts: DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS,
       terminalMessage: DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE
     });
   });
@@ -161,21 +164,45 @@ describe("resolveChatRecoveryConfig", () => {
     ).toBe(Number.POSITIVE_INFINITY);
   });
 
-  it("defaults, floors, and clamps maxOomRetries (#1825)", () => {
-    expect(resolveChatRecoveryConfig(true).maxOomRetries).toBe(
-      DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES
-    );
-    // 0 is a legitimate "seal on the first OOM" choice and must be preserved.
-    expect(resolveChatRecoveryConfig({ maxOomRetries: 0 }).maxOomRetries).toBe(
-      0
-    );
+  it("defaults maxInterruptedAttempts to 5, floors it, and keeps Infinity (#2613)", () => {
+    expect(DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS).toBe(5);
+    expect(resolveChatRecoveryConfig(true).maxInterruptedAttempts).toBe(5);
     expect(
-      resolveChatRecoveryConfig({ maxOomRetries: 5.9 }).maxOomRetries
+      resolveChatRecoveryConfig({ maxInterruptedAttempts: 2.9 })
+        .maxInterruptedAttempts
+    ).toBe(2);
+    // Sealing on the first interruption is the lowest meaningful budget.
+    expect(
+      resolveChatRecoveryConfig({ maxInterruptedAttempts: 0 })
+        .maxInterruptedAttempts
+    ).toBe(1);
+    expect(
+      resolveChatRecoveryConfig({ maxInterruptedAttempts: -1 })
+        .maxInterruptedAttempts
     ).toBe(5);
-    // Negative is invalid → fall back to the default.
-    expect(resolveChatRecoveryConfig({ maxOomRetries: -1 }).maxOomRetries).toBe(
-      DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES
-    );
+    expect(
+      resolveChatRecoveryConfig({
+        maxInterruptedAttempts: Number.POSITIVE_INFINITY
+      }).maxInterruptedAttempts
+    ).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("reads the deprecated maxOomRetries N as maxInterruptedAttempts N + 1", () => {
+    // Three retries meant four attempts in total; the alias keeps that.
+    expect(
+      resolveChatRecoveryConfig({ maxOomRetries: 3 }).maxInterruptedAttempts
+    ).toBe(4);
+    expect(
+      resolveChatRecoveryConfig({ maxOomRetries: 0 }).maxInterruptedAttempts
+    ).toBe(1);
+    expect(
+      resolveChatRecoveryConfig({ maxOomRetries: -1 }).maxInterruptedAttempts
+    ).toBe(5);
+    // The new name wins when both are set.
+    expect(
+      resolveChatRecoveryConfig({ maxInterruptedAttempts: 2, maxOomRetries: 9 })
+        .maxInterruptedAttempts
+    ).toBe(2);
   });
 
   it("passes through shouldKeepRecovering and onExhausted when present", () => {
@@ -784,48 +811,78 @@ describe("evaluateChatRecoveryIncident", () => {
     expect(incident.reason).toBe("work_budget_exceeded");
   });
 
-  it("carries oomAttempts forward and seals once over the OOM budget (#1825)", async () => {
-    // The catchable-OOM fast path: `recordOomAndDecide` bumps `oomAttempts`
-    // between begins. A begin-path re-evaluation must (a) preserve the count and
-    // (b) seal with `out_of_memory` once it crosses `maxOomRetries` — even
-    // though the attempt cap and no-progress clock are both reset (fresh
-    // progress) and the wake is inside the debounce window.
-    const defaults = resolveChatRecoveryConfig(true);
+  it("seals a turn whose attempts keep dying, even when each streams output inside the debounce window (#2613)", async () => {
+    // Each death is followed by a replay of its run in a fresh isolate. Every
+    // attempt streamed a little before dying, which resets the attempt cap and
+    // the no-progress clock, and the deaths come faster than the debounce
+    // window. Only the interruption count still climbs.
+    let existing: ChatRecoveryIncident | null = null;
+    for (let death = 1; death <= 5; death++) {
+      const { incident, exhausted } = await evaluate({
+        trigger: { kind: "interrupted", runId: `run-${death}` },
+        existing,
+        currentProgress: death * 3,
+        now: T0 + death * 1000
+      });
+      expect(incident.interruptedAttempts).toBe(death);
+      expect(incident.lastInterruptedRunId).toBe(`run-${death}`);
+      expect(incident.attempt).toBe(1);
+      if (death < 5) {
+        expect(exhausted).toBe(false);
+      } else {
+        expect(exhausted).toBe(true);
+        expect(incident.status).toBe("exhausted");
+        expect(incident.reason).toBe("interrupted_attempts_exceeded");
+      }
+      existing = incident;
+    }
+  });
+
+  it("counts a replayed run once", async () => {
+    const first = await evaluate({
+      trigger: { kind: "interrupted", runId: "run-1" }
+    });
+    const replay = await evaluate({
+      trigger: { kind: "interrupted", runId: "run-1" },
+      existing: first.incident,
+      now: T0 + 1000
+    });
+    expect(replay.incident.interruptedAttempts).toBe(1);
+    expect(replay.incident.lastInterruptedRunId).toBe("run-1");
+  });
+
+  it("does not count a stall, and keeps the interruption count", async () => {
+    const interrupted = await evaluate({
+      trigger: { kind: "interrupted", runId: "run-1" }
+    });
+    const stalled = await evaluate({
+      trigger: { kind: "stalled" },
+      existing: interrupted.incident,
+      now: T0 + 1000
+    });
+    expect(stalled.incident.interruptedAttempts).toBe(1);
+    expect(stalled.incident.lastInterruptedRunId).toBe("run-1");
+    expect(stalled.exhausted).toBe(false);
+  });
+
+  it("seals the first interruption when maxInterruptedAttempts is 1", async () => {
+    const { exhausted, incident } = await evaluate({
+      trigger: { kind: "interrupted", runId: "run-1" },
+      config: config({ maxInterruptedAttempts: 1 })
+    });
+    expect(exhausted).toBe(true);
+    expect(incident.reason).toBe("interrupted_attempts_exceeded");
+  });
+
+  it("never seals on interruptions when maxInterruptedAttempts is Infinity", async () => {
     const base = (await evaluate()).incident;
-
-    // Still within budget (oomAttempts == maxOomRetries): keep recovering, and
-    // the count must survive the rebuild.
-    const within = await evaluate({
-      existing: {
-        ...base,
-        attempt: 1,
-        oomAttempts: DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES,
-        lastProgressAt: T0
-      },
-      config: defaults,
-      currentProgress: 5,
-      now: T0 + CHAT_RECOVERY_ALARM_DEBOUNCE_MS - 1
+    const { exhausted } = await evaluate({
+      trigger: { kind: "interrupted", runId: "run-1001" },
+      config: config({ maxInterruptedAttempts: Number.POSITIVE_INFINITY }),
+      existing: { ...base, interruptedAttempts: 1000 },
+      now: T0 + CHAT_RECOVERY_ALARM_DEBOUNCE_MS + 1
     });
-    expect(within.exhausted).toBe(false);
-    expect(within.incident.oomAttempts).toBe(
-      DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES
-    );
-
-    // One past the budget → seal with the OOM reason.
-    const over = await evaluate({
-      existing: {
-        ...base,
-        attempt: 1,
-        oomAttempts: DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES + 1,
-        lastProgressAt: T0
-      },
-      config: defaults,
-      currentProgress: 6,
-      now: T0 + CHAT_RECOVERY_ALARM_DEBOUNCE_MS - 1
-    });
-    expect(over.incident.attempt).toBe(1); // attempt cap untouched (reset on progress)
-    expect(over.exhausted).toBe(true);
-    expect(over.incident.reason).toBe("out_of_memory");
+    expect(exhausted).toBe(false);
   });
 
   it("carries transientRetries forward and seals once it reaches maxAttempts", async () => {
@@ -857,22 +914,24 @@ describe("evaluateChatRecoveryIncident", () => {
     expect(over.incident.reason).toBe("max_attempts_exceeded");
   });
 
-  it("does not seal on OOM while a client interaction is pending", async () => {
-    // A parked HITL turn must never be sealed by the OOM budget either.
-    const defaults = resolveChatRecoveryConfig(true);
+  it("does not seal on interruptions while a client interaction is pending", async () => {
+    // A parked HITL turn is budget-free, the interruption budget included.
     const base = (await evaluate()).incident;
-    const { exhausted } = await evaluate({
+    const { exhausted, incident } = await evaluate({
+      trigger: { kind: "interrupted", runId: "run-parked" },
       existing: {
         ...base,
         attempt: 1,
-        oomAttempts: DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES + 5,
+        interruptedAttempts: DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS + 5,
         lastProgressAt: T0
       },
-      config: defaults,
       awaitingClientInteraction: true,
       currentProgress: 5,
       now: T0 + CHAT_RECOVERY_ALARM_DEBOUNCE_MS - 1
     });
     expect(exhausted).toBe(false);
+    expect(incident.interruptedAttempts).toBe(
+      DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS + 6
+    );
   });
 });
