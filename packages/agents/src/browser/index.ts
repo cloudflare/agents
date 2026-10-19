@@ -49,7 +49,7 @@ export {
 export {
   InternalHostRouter,
   MAX_INTERNAL_HOSTS,
-  type InternalFetcherHost,
+  type InternalWorkerHost,
   type InternalHost,
   type InternalHostMessage,
   type InternalHostRouterLoopback,
