@@ -1,23 +1,17 @@
 /**
- * The harness-neutral core of `createBrowserTool`, shared by the adapters in
- * `tools/` (`agents/browser/ai-sdk`, `agents/browser/tanstack-ai`,
- * `agents/browser/pi`).
- * Internal — not an entry point.
+ * The harness-neutral core of `createBrowserTool`, shared by the adapters
+ * in `tools/` (`agents/browser/ai-sdk`, `agents/browser/tanstack-ai`,
+ * `agents/browser/pi`). Internal — not an entry point.
  */
-import {
-  createCodemodeRuntime,
-  DynamicWorkerExecutor,
-  type ProxyToolOutput
-} from "@cloudflare/codemode";
 import { DEFAULT_BROWSER_SCOPE } from "./browser";
+import { runBrowserCode } from "./sandbox";
 import {
-  BROWSER_INSTRUCTIONS,
-  BrowserSessionConnector,
-  type BrowserExecutionReport,
+  BrowserSession,
   type BrowserNewTab,
+  type BrowserSessionReport,
   type BrowserSource
-} from "./session-connector";
-import { resolveCtx, transformBrowserResult } from "./tool-helpers";
+} from "./session";
+import { transformBrowserResult } from "./tool-helpers";
 
 export interface BrowserToolOptions {
   /**
@@ -27,13 +21,14 @@ export interface BrowserToolOptions {
   browser: BrowserSource;
 
   /**
-   * WorkerLoader binding for sandboxed code execution.
+   * Worker Loader binding the model's code runs in. Each run gets a fresh
+   * Dynamic Worker with no network access.
    *
    * Requires `"worker_loaders": [{ "binding": "LOADER" }]` in wrangler.jsonc.
    */
   loader: WorkerLoader;
 
-  /** Sandbox execution timeout in milliseconds. Defaults to 60000 (60s). */
+  /** How long one run may take, in milliseconds. Defaults to 60000 (60s). */
   timeoutMs?: number;
 
   /**
@@ -45,12 +40,8 @@ export interface BrowserToolOptions {
   scope?: string;
 
   /**
-   * Durable Object state for the codemode runtime facet. Optional inside an
-   * Agent (resolved via `getCurrentAgent()`); pass it explicitly elsewhere.
-   *
-   * The worker must export the `CodemodeRuntime` class (the
-   * `@cloudflare/codemode/vite` plugin does this automatically, or add
-   * `export { CodemodeRuntime } from "@cloudflare/codemode"` to your entry).
+   * @deprecated Not needed any more: the tool no longer runs on a codemode
+   * facet. Ignored.
    */
   ctx?: DurableObjectState;
 }
@@ -60,11 +51,8 @@ export interface BrowserToolInput {
   code: string;
 }
 
-/**
- * The result of one `createBrowserTool` run: the codemode execution result,
- * plus what happened to the browser.
- */
-export type BrowserToolOutput = ProxyToolOutput & {
+/** What happened to the browser during a run, added to its result. */
+interface BrowserReportFields {
   /** The browser was replaced before this run; earlier tabs are gone. */
   restarted?: true;
   /**
@@ -75,9 +63,49 @@ export type BrowserToolOutput = ProxyToolOutput & {
   notice?: string;
   /** Tabs the page opened itself (popups, `target=_blank` links). */
   newTabs?: BrowserNewTab[];
-};
+}
+
+/**
+ * The result of one `createBrowserTool` run: the code's result, or the
+ * error it threw, plus what happened to the browser. Errors are returned,
+ * not thrown, so the model can read them and try again.
+ */
+export type BrowserToolOutput = (
+  | {
+      status: "completed";
+      /** Identifies the run, for logs and UIs. */
+      executionId: string;
+      result: unknown;
+      /** What the code wrote to the console. */
+      logs?: string[];
+    }
+  | {
+      status: "error";
+      executionId: string;
+      error: string;
+      logs?: string[];
+    }
+) &
+  BrowserReportFields;
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * How to use `cdp`, one rule per line. Each rule fixes a mistake models make
+ * with CDP, or states something about this browser they can't know; leave
+ * out what a model knows already.
+ */
+const BROWSER_RULES = [
+  "The browser persists between runs: tabs, cookies, and logins are still there next time. You never start or close it.",
+  "If the browser was replaced (idle timeout, crash), the result says restarted: true and earlier tabs and logins are gone. Before an action that matters (submitting a form, a purchase), check you're on the page you expect.",
+  'Page-scoped commands (Page.*, Runtime.*, DOM.*, Input.*, Network.*, Emulation.*) need sessionId: "active", your tab, which is remembered between runs. Browser.* and Target.* commands take no sessionId.',
+  "Other open tabs (Target.getTargets) may belong to other conversations using this browser: don't close, navigate, or attach to a tab you didn't open unless the user asks.",
+  "Target.createTarget opens a tab and makes it active. To switch to another open tab, call cdp.attachToTarget({ targetId }); the sessionId it returns keeps working in later runs, while one from a raw Target.attachToTarget only works in the current run.",
+  "Tabs a page opens itself (popups, target=_blank links) don't become active; the result lists them as newTabs.",
+  "Runtime.evaluate: pass returnByValue: true, or objects come back as a remote reference with no value, and awaitPromise: true for async expressions. The value is at result.value. A thrown error doesn't reject: check exceptionDetails.",
+  "Page.navigate returns before the page loads and doesn't throw when it fails: check errorText, then poll document.readyState with Runtime.evaluate until it is 'complete'.",
+  "Pick out what you need inside Runtime.evaluate and return only that. Results over about 24,000 characters are cut short, and a single cdp.send result over 1 MB (a full-page screenshot, say) fails the run."
+];
 
 const RESTARTED_NOTICE =
   "The browser was restarted before this run (it expired or was closed): earlier tabs, logins, and page state are gone. Your code ran in a fresh browser — navigate again before relying on page state.";
@@ -88,21 +116,50 @@ const TAB_CLOSED_NOTICE =
 const TAB_SHARED_NOTICE =
   "Another conversation using this browser is also working in your tab, so its page may change between your runs. Open a tab of your own with Target.createTarget if you need one.";
 
-/** Scopes whose runtime and connector stay built; older ones are rebuilt. */
-const MAX_CACHED_SCOPES = 32;
-
 /**
- * A codemode runtime name per browser. Browser names are host-chosen and
- * unrestricted; runtime names allow only `[a-zA-Z0-9_.-]`, so anything else
- * (including `.`, the escape) is hex-escaped.
+ * The model's input schema, as a Standard Schema with a JSON Schema view,
+ * so the AI SDK and TanStack AI both accept it without zod.
  */
-function browserRuntimeName(name: string): string {
-  const escaped = name.replace(
-    /[^a-zA-Z0-9_-]/g,
-    (char) => `.${char.codePointAt(0)?.toString(16)}.`
-  );
-  return `browser-tool_${escaped}`;
-}
+const inputJsonSchema = {
+  type: "object",
+  properties: {
+    code: {
+      type: "string",
+      description: "An async arrow function that drives the browser with `cdp`"
+    }
+  },
+  required: ["code"],
+  additionalProperties: false
+};
+
+const browserToolInputSchema = {
+  "~standard": {
+    version: 1 as const,
+    vendor: "agents",
+    types: undefined as
+      | { readonly input: BrowserToolInput; readonly output: BrowserToolInput }
+      | undefined,
+    validate: (
+      value: unknown
+    ):
+      | { readonly value: BrowserToolInput }
+      | { readonly issues: ReadonlyArray<{ readonly message: string }> } =>
+      typeof value === "object" &&
+      value !== null &&
+      "code" in value &&
+      typeof value.code === "string"
+        ? { value: { code: value.code } }
+        : {
+            issues: [
+              { message: "Expected an object with a string code property" }
+            ]
+          },
+    jsonSchema: {
+      input: (_options: { readonly target: string }) => inputJsonSchema,
+      output: (_options: { readonly target: string }) => inputJsonSchema
+    }
+  }
+};
 
 /**
  * The latest run queued per browser and scope, so runs in one scope go one
@@ -128,19 +185,17 @@ function queued<T>(
   return next;
 }
 
-/** Add what happened to the browser to the codemode result. */
-function withBrowserReport(
-  output: ProxyToolOutput,
-  report: BrowserExecutionReport | undefined
-): BrowserToolOutput {
-  if (!report) return output;
+/** The report as fields on the result, with notices the model reads. */
+function reportFields(
+  report: BrowserSessionReport | undefined
+): BrowserReportFields {
+  if (!report) return {};
   const notices = [
     report.restarted && RESTARTED_NOTICE,
     report.tabClosed && !report.restarted && TAB_CLOSED_NOTICE,
     report.tabShared && TAB_SHARED_NOTICE
   ].filter((notice) => typeof notice === "string");
   return {
-    ...output,
     ...(report.restarted ? { restarted: true as const } : {}),
     ...(notices.length > 0 ? { notice: notices.join(" ") } : {}),
     ...(report.newTabs.length > 0 ? { newTabs: report.newTabs } : {})
@@ -160,12 +215,13 @@ export function browserReportNotes(output: BrowserToolOutput): string[] {
 }
 
 /**
- * Build the codemode runtime and connector for one `createBrowserTool`, and wrap
- * `execute` so each result carries the browser report.
+ * Build the description and `execute` for one `createBrowserTool`.
  *
- * Each scope gets its own connector (which knows its scope) on the same
- * codemode runtime, built on first use. Runs in one scope wait for each
- * other, since they drive one tab; runs in different scopes go in parallel.
+ * Each run opens a session on the browser in its scope, runs the model's
+ * code in a fresh Dynamic Worker with `cdp` bound to that session, closes
+ * the session, and adds its report to the result. Runs in one scope wait
+ * for each other, since they drive one tab; runs in different scopes go in
+ * parallel.
  */
 export function createBrowserToolCore(
   options: BrowserToolOptions,
@@ -174,30 +230,13 @@ export function createBrowserToolCore(
     screenshotHint: string;
   }
 ) {
-  const ctx = resolveCtx(options);
-  if (!ctx) {
-    throw new Error(
-      "createBrowserTool requires a Durable Object 'ctx' — pass it explicitly, or call from within an Agent so it can be resolved via getCurrentAgent()"
-    );
-  }
-
-  const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const executor = new DynamicWorkerExecutor({
-    loader: options.loader,
-    timeout
-  });
-
-  // Our own description, not codemode's generic one: that one tells the
-  // model to search before every new connector (search doesn't cover CDP
-  // commands), and describes approvals, snippets, and replay, which this
-  // tool doesn't use.
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const rules = [
-    BROWSER_INSTRUCTIONS,
-    `Each run times out after ${Math.round(timeout / 1000)}s, so split long jobs (crawling a site, say) across runs.`,
-    adapter.screenshotHint
+    ...BROWSER_RULES,
+    `Each run times out after ${Math.round(timeoutMs / 1000)}s, so split long jobs (crawling a site, say) across runs.`,
+    adapter.screenshotHint,
+    "If your code doesn't parse, the line number in the error counts from wrapper code, not yours. Check regex literals and escapes."
   ]
-    .join("\n")
-    .split("\n")
     .map((rule) => `- ${rule}`)
     .join("\n");
   const description = [
@@ -214,64 +253,50 @@ export function createBrowserToolCore(
     "",
     "## Rules",
     "",
-    rules,
-    '- A `SyntaxError` from "Failed to start Worker" means your code didn\'t parse; its line number points into wrapper code, not yours. Check regex literals and escapes.'
+    rules
   ].join("\n");
-  type CodemodeTool = ReturnType<
-    ReturnType<typeof createCodemodeRuntime>["tool"]
-  >;
-  interface ScopedTool {
-    connector: BrowserSessionConnector;
-    tool: CodemodeTool;
-  }
-  const durableCtx: DurableObjectState = ctx;
-  const scopes = new Map<string, ScopedTool>();
-  function scoped(scope: string): ScopedTool {
-    const cached = scopes.get(scope);
-    if (cached) {
-      // Most recently used last, so the first entry is the one to drop.
-      scopes.delete(scope);
-      scopes.set(scope, cached);
-      return cached;
-    }
-    const connector = new BrowserSessionConnector(durableCtx, {
-      browser: options.browser,
-      scope
-    });
-    const runtime = createCodemodeRuntime({
-      ctx: durableCtx,
-      executor,
-      connectors: [connector],
-      name: browserRuntimeName(options.browser.name),
-      transformResult: transformBrowserResult
-    });
-    const built = { connector, tool: runtime.tool({ description }) };
-    scopes.set(scope, built);
-    if (scopes.size > MAX_CACHED_SCOPES) {
-      const oldest = scopes.keys().next().value;
-      if (oldest !== undefined) scopes.delete(oldest);
-    }
-    return built;
-  }
 
   const defaultScope = options.scope ?? DEFAULT_BROWSER_SCOPE;
-  const { inputSchema } = scoped(defaultScope).tool;
+
+  async function run(input: BrowserToolInput, scope: string) {
+    const executionId = crypto.randomUUID();
+    const session = new BrowserSession(options.browser, { scope });
+    let output: BrowserToolOutput;
+    try {
+      const ran = await runBrowserCode({
+        loader: options.loader,
+        code: input.code,
+        session,
+        timeoutMs
+      });
+      const logs = ran.logs.length > 0 ? { logs: ran.logs } : {};
+      output =
+        "error" in ran
+          ? { status: "error", executionId, error: ran.error, ...logs }
+          : {
+              status: "completed",
+              executionId,
+              result: transformBrowserResult(ran.result),
+              ...logs
+            };
+    } catch (error) {
+      output = {
+        status: "error",
+        executionId,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+    return { ...output, ...reportFields(await session.close()) };
+  }
 
   return {
     description,
-    inputSchema,
+    inputSchema: browserToolInputSchema,
     /** Run `input` in `scope`, which defaults to the tool's `scope`. */
     execute: (
       input: BrowserToolInput,
       scope: string = defaultScope
     ): Promise<BrowserToolOutput> =>
-      queued(options.browser, scope, async () => {
-        const { connector, tool } = scoped(scope);
-        const output = await tool.execute(input, undefined);
-        return withBrowserReport(
-          output,
-          connector.takeReport(output.executionId)
-        );
-      })
+      queued(options.browser, scope, () => run(input, scope))
   };
 }

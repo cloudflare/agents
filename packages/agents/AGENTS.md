@@ -191,8 +191,11 @@ src/
     live-view.ts        # Live View URL minting shared by Browser and BrowserConnector
     spec.ts             # CDP protocol spec loader (cdp.spec())
     quick-actions.ts    # Stateless Quick Action primitives (browserMarkdown, …)
-    ai.ts               # createBrowserTools + createQuickActionTools (AI SDK)
+    ai.ts               # deprecated createBrowserTools (codemode) + createQuickActionTools (deprecated)
+    session.ts          # BrowserSession — one run's CDP session: active tab, handles, error hints, report
+    sandbox.ts          # runs createBrowserTool's code in a Dynamic Worker with `cdp` bound to a session
     browser-tool.ts     # harness-neutral createBrowserTool core shared by the tools/ adapters
+    truncate.ts         # truncateResult, copied from codemode
     tool-helpers.ts     # model-output + ctx helpers shared by ai.ts and the tools/ adapters
     tanstack-ai.ts      # legacy createBrowserTools for TanStack AI (re-exported by tools/tanstack-ai.ts)
     tools/              # createBrowserTool adapters for a persistent Browser: ai-sdk.ts, tanstack-ai.ts, pi.ts

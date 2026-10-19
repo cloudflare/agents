@@ -23,6 +23,7 @@ import {
   BrowserSessionGoneError,
   type BrowserProviderAdapter
 } from "./providers/provider-adapter";
+import { BrowserSession, type BrowserSessionOptions } from "./session";
 import {
   DurableBrowserSessionStore,
   type ListableBrowserSessionStore,
@@ -298,6 +299,17 @@ export class Browser extends LifecycleCapability {
       cdp.disconnect();
       throw error;
     }
+  }
+
+  /**
+   * Start a session on this browser for one run: connects on its first
+   * call, resolves `sessionId: "active"` to the scope's tab, and reports
+   * what happened to the browser when you close it. Code a model writes
+   * drives the browser through a session; `createBrowserTool` and
+   * `@cloudflare/computer`'s `ws:browser` module both use one per run.
+   */
+  session(options?: BrowserSessionOptions): BrowserSession {
+    return new BrowserSession(this, options);
   }
 
   #connection(

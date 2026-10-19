@@ -54,7 +54,6 @@ export class PiBrowserTestObject extends DurableObject<Cloudflare.Env> {
         name: "browser",
         tools: [
           createBrowserTool({
-            ctx: this.ctx,
             browser: this.browser,
             loader: this.env.LOADER
           })

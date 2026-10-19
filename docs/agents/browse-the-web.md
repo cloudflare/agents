@@ -47,7 +47,7 @@ Add the Browser Rendering and Worker Loader bindings to your `wrangler.jsonc`:
 
 ### 2. Export the runtime class
 
-The durable runtime behind the tool lives in a Durable Object facet, so your worker entry must export it (the `@cloudflare/codemode/vite` plugin does this automatically):
+The durable runtime behind `createBrowserTools` lives in a Durable Object facet, so your worker entry must export it (the `@cloudflare/codemode/vite` plugin does this automatically):
 
 ```ts
 export { CodemodeRuntime } from "agents/browser";
@@ -240,6 +240,7 @@ export class MyAgent extends Think<Env> {
 ```
 
 - The model writes CDP code as with `createBrowserTools`. `sessionId: "active"` points at the tab it's working in, and that tab is remembered across turns.
+- The code runs in a fresh Dynamic Worker from `loader`, with no network access: `cdp` is its only way out. The tool doesn't run on codemode, so it needs no `CodemodeRuntime` export.
 - If several chats or users share one `Browser` (for example, many threads on one agent), pass each one's id as `scope`: `createBrowserTool({ browser, loader, scope: threadId })`. Each scope keeps its own active tab, so one chat never drives another's page, while cookies and logins stay shared. Tools that leave `scope` out share one tab. Runs in the same scope wait for each other; runs in different scopes run in parallel.
 - When another chat closes the model's tab, or works in it too, the result's `notice` says so.
 - Tabs the page opens itself come back as `newTabs` in the result.
@@ -250,7 +251,7 @@ export class MyAgent extends Think<Env> {
 - The tool's description covers the `cdp` API, the CDP mistakes models commonly make, and this time limit, so the model doesn't need a discovery pass first.
 - A single `cdp.send` result can be at most 1 MB, so a full-page screenshot of a long page fails. The model is told to capture the viewport or use JPEG instead.
 
-Only Chromium on a Browser Run binding is supported. It needs the same `LOADER` binding and `CodemodeRuntime` export as `createBrowserTools`.
+Only Chromium on a Browser Run binding is supported. It needs the same `LOADER` binding as `createBrowserTools`, but no `CodemodeRuntime` export.
 
 For TanStack AI, import `createBrowserTool` from `agents/browser/tanstack-ai` instead. It takes the same options plus an optional `name` (default `"browser"`) and returns a `ServerTool`:
 
@@ -268,7 +269,7 @@ const stream = chat({
 
 The TanStack AI tool doesn't support screenshots yet. TanStack AI gives the host and the model the same output, so if the model returns a screenshot, the tool replaces it with a note saying it was left out, and the tool's instructions tell the model to read the page with `Runtime.evaluate` instead.
 
-For [pi-durable](./harnesses/pi.md), import `createBrowserTool` from `agents/browser/pi` and install it in an extension. It takes the same options plus an optional `name` (default `"browser"`). Outside an `Agent`, pass `ctx`:
+For [pi-durable](./harnesses/pi.md), import `createBrowserTool` from `agents/browser/pi` and install it in an extension. It takes the same options plus an optional `name` (default `"browser"`):
 
 ```ts
 import { createBrowserTool } from "agents/browser/pi";
@@ -277,7 +278,6 @@ this.registry.install({
   name: "browser",
   tools: [
     createBrowserTool({
-      ctx: this.ctx,
       browser: this.browser,
       loader: this.env.LOADER
     })
@@ -290,6 +290,84 @@ this.registry.install({
 - A conversation's calls run one at a time, since they share its tab.
 - pi doesn't rerun a browser call cut off by an eviction, because the code may have clicked or submitted something. The model gets an interrupted result and can try again; the browser itself is still there.
 - Stopping a conversation doesn't stop a browser call already running. It finishes or times out (`timeoutMs`, default 60 seconds).
+
+### Driving the browser from your own code
+
+`browser.session()` gives you what the tool's `cdp` object is built on: one run's connection to the browser, with the same `sessionId: "active"` handling and error hints. Close it when the run ends to save the scope's active tab and get a report of what happened to the browser:
+
+```ts
+const session = this.browser.session({ scope: threadId });
+try {
+  await session.send({
+    method: "Page.navigate",
+    params: { url: "https://example.com" },
+    sessionId: "active"
+  });
+} finally {
+  const report = await session.close();
+  // { restarted, newTabs, tabClosed, tabShared }, or undefined if unused
+}
+```
+
+## From `exec` in a Computer Workspace
+
+If your agent has a [`@cloudflare/computer`](https://github.com/cloudflare/computer) Workspace with a JavaScript backend, give that backend the browser as a `ws:browser` module. The module comes from `@cloudflare/computer/modules/browser` and drives your `Browser` through `browser.session()`: it takes any object with `Browser`'s `name` and `session()`, so `agents` and `@cloudflare/computer` don't depend on each other. The model then drives the browser from the same `exec` tool it uses for everything else, and can mix browser calls with file reads and writes in one run:
+
+```ts
+import { Workspace } from "@cloudflare/computer";
+import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { Browser, browserRun } from "agents/browser";
+import { createBrowserModule } from "@cloudflare/computer/modules/browser";
+
+export class MyAgent extends Think<Env> {
+  browser = new Browser({ provider: browserRun(this.env.BROWSER) });
+
+  override workspace = new Workspace({
+    storage: this.ctx.storage,
+    backends: [
+      new WorkerJavaScriptBackend({
+        loader: this.env.LOADER,
+        modules: {
+          "ws:browser": createBrowserModule({ browser: this.browser })
+        }
+      })
+    ]
+  });
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.browser);
+  }
+}
+```
+
+Code the model runs with `exec`:
+
+```js
+import { writeFile } from "node:fs/promises";
+import { Buffer } from "node:buffer";
+import { send } from "ws:browser";
+
+export default async function () {
+  await send({
+    method: "Page.navigate",
+    params: { url: "https://example.com" },
+    sessionId: "active"
+  });
+  const { data } = await send({
+    method: "Page.captureScreenshot",
+    sessionId: "active"
+  });
+  await writeFile("/workspace/page.png", Buffer.from(data, "base64"));
+  return "saved /workspace/page.png";
+}
+```
+
+- The module exports `send`, `attachToTarget`, `spec`, `getDebugLog` and `clearDebugLog`, the same calls as `cdp.*` in `createBrowserTool`. `sessionId: "active"`, scopes, and the rules about other tabs work the same way.
+- The model looks at a screenshot by saving it to the Workspace and opening it with the `read` tool.
+- Each run gets its own `browser.session()`. When the run ends, the module closes it, which saves the scope's active tab and closes the connection. If the browser was restarted, or the page opened tabs, it says so on the run's standard error.
+- The module's description, which the `exec` tool shows the model, covers the calls and the common CDP mistakes.
+- The module is experimental in `@cloudflare/computer`. See [`ws:browser`](https://github.com/cloudflare/computer/blob/main/docs/17_isolate_javascript.md#wsbrowser) for the details.
 
 ## Quick Actions (stateless browsing)
 
