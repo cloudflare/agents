@@ -156,7 +156,7 @@ interface ExecutionState {
 
 /**
  * How to use the `cdp` connector, one rule per line. `codemode.describe("cdp")`
- * returns these, and `browserTool` puts them in its description. Each rule
+ * returns these, and `createBrowserCDPTool` puts them in its description. Each rule
  * fixes a mistake models make with CDP, or states something about this
  * browser they can't know; leave out what a model knows already.
  */

@@ -205,7 +205,7 @@ const ATTACH_HANDLE_PREFIX = "target:";
  * across network calls to Browser Run or while a socket is open.
  *
  * @deprecated Runs on `@cloudflare/codemode`, which is deprecated. Use
- * `browserTool`, or `createBrowserModule` from `@cloudflare/computer/modules/browser`
+ * `createBrowserCDPTool`, or `createBrowserModule` from `@cloudflare/computer/modules/browser`
  * for a Computer Workspace. See https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md
  */
 export class BrowserConnector extends CodemodeConnector {

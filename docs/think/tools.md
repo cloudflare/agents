@@ -416,7 +416,7 @@ This adds the durable CDP tool plus — whenever a `browser` binding is present 
 | `browser_links`    | List every link on a page                                                                 |
 | `browser_scrape`   | Scrape specific elements by CSS selector                                                  |
 
-Pass `quickActions: false` to keep only `browser_execute`, or `quickActions: { actions, maxChars, options }` to configure them. They share the `browser` binding, need no Worker Loader, and `ctx` is resolved from the current Agent automatically (you only need to pass it outside an Agent). For the stateless tools _without_ the CDP tool, import `createQuickActionTools` directly from `@cloudflare/think/tools/browser`.
+Pass `quickActions: false` to keep only `browser_execute`, or `quickActions: { actions, maxChars, options }` to configure them. They share the `browser` binding, need no Worker Loader, and `ctx` is resolved from the current Agent automatically (you only need to pass it outside an Agent). For the stateless tools _without_ the CDP tool, import `createBrowserQuickActionTools` directly from `@cloudflare/think/tools/browser`.
 
 `browser_execute` is backed by a codemode runtime with the `cdp` connector: the model writes async arrow functions that run in a sandboxed Worker isolate, with `cdp.send()`, `cdp.attachToTarget()`, `cdp.spec()` (the live, normalized protocol description), session helpers (`cdp.startSession()`, `cdp.sessionInfo()`, `cdp.closeSession()`), and debug-log helpers. Executions are recorded for abort-and-replay, so browser sessions survive approval pauses.
 

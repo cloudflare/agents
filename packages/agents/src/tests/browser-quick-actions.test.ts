@@ -10,7 +10,7 @@ import {
   browserSnapshot,
   type QuickActionBinding
 } from "../browser/quick-actions";
-import { createQuickActionTools } from "../browser/ai";
+import { createBrowserQuickActionTools } from "../browser/ai";
 
 type Call = { action: string; params: Record<string, unknown> };
 
@@ -203,10 +203,10 @@ describe("quick action helpers", () => {
   });
 });
 
-describe("createQuickActionTools", () => {
+describe("createBrowserQuickActionTools", () => {
   it("exposes the default text tool set", () => {
     const { browser } = fakeBrowser(() => jsonResult(""));
-    const tools = createQuickActionTools({ browser });
+    const tools = createBrowserQuickActionTools({ browser });
     expect(Object.keys(tools).sort()).toEqual([
       "browser_extract",
       "browser_links",
@@ -217,7 +217,7 @@ describe("createQuickActionTools", () => {
 
   it("honors the actions allow-list, including opt-in content", () => {
     const { browser } = fakeBrowser(() => jsonResult(""));
-    const tools = createQuickActionTools({
+    const tools = createBrowserQuickActionTools({
       browser,
       actions: ["markdown", "content"]
     });
@@ -229,7 +229,7 @@ describe("createQuickActionTools", () => {
 
   it("rejects stringified extraction schemas", async () => {
     const { browser } = fakeBrowser(() => jsonResult({ ok: true }));
-    const tool = createQuickActionTools({ browser }).browser_extract;
+    const tool = createBrowserQuickActionTools({ browser }).browser_extract;
     const schema = asSchema(tool.inputSchema);
     if (!schema.validate)
       throw new Error("Expected a runtime schema validator");
@@ -256,7 +256,7 @@ describe("createQuickActionTools", () => {
 
   it("truncates long markdown results to maxChars", async () => {
     const { browser } = fakeBrowser(() => jsonResult("x".repeat(100)));
-    const tools = createQuickActionTools({ browser, maxChars: 10 });
+    const tools = createBrowserQuickActionTools({ browser, maxChars: 10 });
     const result = (await runTool(tools.browser_markdown, {
       url: "https://example.com"
     })) as string;
@@ -267,7 +267,7 @@ describe("createQuickActionTools", () => {
 
   it("maps the extract tool's schema onto response_format.json_schema", async () => {
     const { browser, calls } = fakeBrowser(() => jsonResult({ ok: true }));
-    const tools = createQuickActionTools({ browser });
+    const tools = createBrowserQuickActionTools({ browser });
     await runTool(tools.browser_extract, {
       url: "https://example.com",
       prompt: "grab it",
@@ -282,7 +282,7 @@ describe("createQuickActionTools", () => {
 
   it("maps the scrape tool's selectors onto elements", async () => {
     const { browser, calls } = fakeBrowser(() => jsonResult([]));
-    const tools = createQuickActionTools({ browser });
+    const tools = createBrowserQuickActionTools({ browser });
     await runTool(tools.browser_scrape, {
       url: "https://example.com",
       selectors: ["h1", ".price"]
@@ -296,7 +296,7 @@ describe("createQuickActionTools", () => {
 
   it("merges host options into every request without exposing them to the model", async () => {
     const { browser, calls } = fakeBrowser(() => jsonResult("# ok"));
-    const tools = createQuickActionTools({
+    const tools = createBrowserQuickActionTools({
       browser,
       options: {
         authenticate: { username: "u", password: "p" },
@@ -313,7 +313,7 @@ describe("createQuickActionTools", () => {
 
   it("keeps the per-call page alongside host options", async () => {
     const { browser, calls } = fakeBrowser(() => jsonResult("# ok"));
-    const tools = createQuickActionTools({
+    const tools = createBrowserQuickActionTools({
       browser,
       options: { userAgent: "agents-test" }
     });
@@ -325,7 +325,7 @@ describe("createQuickActionTools", () => {
   it("trims oversized arrays (links) but keeps them arrays", async () => {
     const many = Array.from({ length: 50 }, (_, i) => `https://x.com/${i}`);
     const { browser } = fakeBrowser(() => jsonResult(many));
-    const tools = createQuickActionTools({ browser, maxChars: 100 });
+    const tools = createBrowserQuickActionTools({ browser, maxChars: 100 });
     const result = (await runTool(tools.browser_links, {
       url: "https://example.com"
     })) as string[];
@@ -340,7 +340,7 @@ describe("createQuickActionTools", () => {
   it("replaces an oversized object (extract) with a truncated preview note", async () => {
     const big = { blob: "y".repeat(500) };
     const { browser } = fakeBrowser(() => jsonResult(big));
-    const tools = createQuickActionTools({ browser, maxChars: 50 });
+    const tools = createBrowserQuickActionTools({ browser, maxChars: 50 });
     const result = (await runTool(tools.browser_extract, {
       url: "https://example.com",
       prompt: "grab it"
@@ -355,7 +355,7 @@ describe("createQuickActionTools", () => {
     // would read as "no matches" — so it degrades to the truncated-preview note.
     const huge = [{ selector: "h1", html: "z".repeat(500) }];
     const { browser } = fakeBrowser(() => jsonResult(huge));
-    const tools = createQuickActionTools({ browser, maxChars: 50 });
+    const tools = createBrowserQuickActionTools({ browser, maxChars: 50 });
     const result = (await runTool(tools.browser_scrape, {
       url: "https://example.com",
       selectors: ["h1"]
@@ -366,7 +366,7 @@ describe("createQuickActionTools", () => {
 
   it("returns small results unchanged when within budget", async () => {
     const { browser } = fakeBrowser(() => jsonResult(["https://a.com"]));
-    const tools = createQuickActionTools({ browser, maxChars: 1000 });
+    const tools = createBrowserQuickActionTools({ browser, maxChars: 1000 });
     const result = await runTool(tools.browser_links, {
       url: "https://example.com"
     });

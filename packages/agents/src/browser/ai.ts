@@ -105,7 +105,7 @@ export interface CreateBrowserToolsOptions {
   name?: string;
 
   /**
-   * Also expose stateless {@link createQuickActionTools | Quick Action} tools
+   * Also expose stateless {@link createBrowserQuickActionTools | Quick Action} tools
    * (`browser_markdown`, `browser_extract`, …) alongside the durable
    * `browser_execute` tool.
    *
@@ -195,7 +195,7 @@ function connectorOptions(
  * ```
  *
  * @deprecated Runs on `@cloudflare/codemode`, which is deprecated. Use
- * `browserTool`, or `createBrowserModule` from `@cloudflare/computer/modules/browser`
+ * `createBrowserCDPTool`, or `createBrowserModule` from `@cloudflare/computer/modules/browser`
  * for a Computer Workspace. See https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md
  */
 export function createBrowserRuntime(
@@ -264,7 +264,7 @@ export function createBrowserRuntime(
     if (quickActionBrowser) {
       Object.assign(
         tools,
-        createQuickActionTools({
+        createBrowserQuickActionTools({
           browser: quickActionBrowser,
           actions: qa.actions,
           maxChars: qa.maxChars,
@@ -318,7 +318,7 @@ export function createBrowserRuntime(
  * ```
  *
  * @deprecated Runs on `@cloudflare/codemode`, which is deprecated. Use
- * `browserTool`, or `createBrowserModule` from `@cloudflare/computer/modules/browser`
+ * `createBrowserCDPTool`, or `createBrowserModule` from `@cloudflare/computer/modules/browser`
  * for a Computer Workspace. See https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md
  */
 export function createBrowserTools(
@@ -464,13 +464,13 @@ function boundArray(value: unknown[], maxChars: number): unknown[] {
  *
  * @example
  * ```ts
- * import { createQuickActionTools } from "agents/browser/ai";
+ * import { createBrowserQuickActionTools } from "agents/browser/ai";
  *
- * const tools = createQuickActionTools({ browser: this.env.BROWSER });
+ * const tools = createBrowserQuickActionTools({ browser: this.env.BROWSER });
  * const result = await generateText({ model, tools, messages });
  * ```
  */
-export function createQuickActionTools(
+export function createBrowserQuickActionTools(
   options: CreateQuickActionToolsOptions
 ): ToolSet {
   const { browser } = options;
@@ -592,3 +592,9 @@ export function createQuickActionTools(
 
   return tools;
 }
+
+/**
+ * @deprecated Renamed to {@link createBrowserQuickActionTools}. This alias
+ * will be removed in a future release.
+ */
+export const createQuickActionTools = createBrowserQuickActionTools;

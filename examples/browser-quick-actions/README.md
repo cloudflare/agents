@@ -36,12 +36,12 @@ export class QuickActionsAgent extends Agent<Env> {
 To let a model decide when to browse, use the AI SDK tools instead — this is what the **Ask AI** action does (see the `ask` method in `src/server.ts`):
 
 ```ts
-import { createQuickActionTools } from "agents/browser/ai";
+import { createBrowserQuickActionTools } from "agents/browser/ai";
 import { generateText, isStepCount } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
 const workersai = createWorkersAI({ binding: this.env.AI });
-const tools = createQuickActionTools({ browser: this.env.BROWSER });
+const tools = createBrowserQuickActionTools({ browser: this.env.BROWSER });
 // browser_markdown, browser_extract, browser_links, browser_scrape
 
 const { text } = await generateText({

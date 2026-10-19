@@ -19,7 +19,7 @@ export type { CreateBrowserToolsOptions } from "./ai";
  * survive pauses.
  *
  * The stateless Quick Action tools are not surfaced through this TanStack
- * wrapper (it exposes only `browser_execute`); use `createQuickActionTools`
+ * wrapper (it exposes only `browser_execute`); use `createBrowserQuickActionTools`
  * from `agents/browser/ai` if you want them.
  *
  * @example
@@ -42,7 +42,7 @@ export type { CreateBrowserToolsOptions } from "./ai";
  * ```
  *
  * @deprecated Runs on `@cloudflare/codemode`, which is deprecated. Use
- * `browserTool`, or `createBrowserModule` from `@cloudflare/computer/modules/browser`
+ * `createBrowserCDPTool`, or `createBrowserModule` from `@cloudflare/computer/modules/browser`
  * for a Computer Workspace. See https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md
  */
 export function createBrowserTools(

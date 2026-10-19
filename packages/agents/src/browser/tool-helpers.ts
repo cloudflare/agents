@@ -1,6 +1,6 @@
 /**
  * Helpers shared by the browser tools: `createBrowserTools` in `ai.ts`, and
- * the `browserTool` adapters in `tools/`. Internal — not an entry point.
+ * the `createBrowserCDPTool` adapters in `tools/`. Internal — not an entry point.
  */
 import type { JSONValue } from "ai";
 import { truncateResult } from "@cloudflare/codemode";
