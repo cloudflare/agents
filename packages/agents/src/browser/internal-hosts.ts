@@ -92,6 +92,10 @@ export interface InternalHost<S = unknown> {
   /**
    * What the model passes to `browser.assignHost()` to point this host somewhere,
    * as a schema. Omit it for a host that always serves the same thing.
+   *
+   * The model picks this value, so if part of it becomes a path, URL or
+   * command in `fetch`, limit it in the schema (an enum, a pattern, a range)
+   * rather than trusting it.
    */
   target?: S & TargetSchema;
   /**
@@ -177,7 +181,7 @@ export interface InternalHostInfo {
   assignable: boolean;
   /** The JSON Schema `browser.assignHost()` checks the target against. */
   targetSchema?: Record<string, unknown>;
-  /** The target last assigned, when there is one. */
+  /** The target last assigned, as assigned (before the schema transforms it). */
   target?: unknown;
 }
 
