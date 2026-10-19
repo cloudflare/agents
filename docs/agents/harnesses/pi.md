@@ -139,7 +139,7 @@ harness: async ({ storage, context }) => {
   this.registry.install({
     name: "browser",
     tools: [
-      createBrowserTool({ ctx: this.ctx, browser: this.browser, loader: this.env.LOADER })
+      createBrowserTool({ browser: this.browser, loader: this.env.LOADER })
     ]
   });
   return Harness.open(storage, { models, registry: this.registry }, context);

@@ -192,7 +192,10 @@ type StoredSessions = Record<
   { sessionId: string; createdAt: number; updatedAt: number }
 >;
 
-interface NamedRunOutput extends RunOutput {
+interface NamedRunOutput {
+  status: "completed" | "error";
+  result?: unknown;
+  error?: string;
   report: {
     restarted: boolean;
     newTabs: Array<{ targetId: string; url?: string }>;
@@ -603,7 +606,8 @@ describe("browser connector e2e", () => {
       await callAgent("closeSession", ["reuse"]);
     });
   });
-  // The persistent named browser behind BrowserSessionConnector. These run
+  // The persistent named browser, driven through a BrowserSession and
+  // runBrowserCode as createBrowserTool does. These run
   // against real Chrome, so they also check what the unit-test fake assumes.
   describe("persistent named browser", () => {
     afterAll(async () => {
@@ -700,30 +704,6 @@ describe("browser connector e2e", () => {
           "about:blank#rel-noopener"
         ])
       );
-    });
-
-    it("keeps the active tab across a pause for approval", async () => {
-      const output = await runNamed(`async () => {
-        await cdp.send({
-          method: "Runtime.evaluate",
-          params: { expression: "document.title = 'paused'" },
-          sessionId: "active"
-        });
-        await gate.confirm({ label: "continue" });
-        const { result } = await cdp.send({
-          method: "Runtime.evaluate",
-          params: { expression: "document.title", returnByValue: true },
-          sessionId: "active"
-        });
-        return result.value;
-      }`);
-      expect(output.status).toBe("paused");
-
-      const resumed = (await callAgent("approveNamed", [
-        output.executionId
-      ])) as RunOutput;
-      expect(resumed.status).toBe("completed");
-      expect(resumed.result).toBe("paused");
     });
 
     it("passes a raw Target.attachToTarget through to Chrome", async () => {
