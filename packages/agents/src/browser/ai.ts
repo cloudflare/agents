@@ -194,9 +194,9 @@ function connectorOptions(
  * }
  * ```
  *
- * @deprecated Runs on `@cloudflare/codemode`, which is deprecated. Use
- * `createBrowserTool`, or `createBrowserModule` from `@cloudflare/computer/modules/browser`
- * for a Computer Workspace. See https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md
+ * @deprecated Use `createBrowserTool` from `agents/browser/ai-sdk`,
+ * `agents/browser/tanstack-ai` or `agents/browser/pi`. See
+ * https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser
  */
 export function createBrowserRuntime(
   options: CreateBrowserToolsOptions
@@ -317,9 +317,9 @@ export function createBrowserRuntime(
  * });
  * ```
  *
- * @deprecated Runs on `@cloudflare/codemode`, which is deprecated. Use
- * `createBrowserTool`, or `createBrowserModule` from `@cloudflare/computer/modules/browser`
- * for a Computer Workspace. See https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md
+ * @deprecated Use `createBrowserTool` from `agents/browser/ai-sdk`,
+ * `agents/browser/tanstack-ai` or `agents/browser/pi`. See
+ * https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser
  */
 export function createBrowserTools(
   options: CreateBrowserToolsOptions
