@@ -7,6 +7,7 @@ import type {
   InternalHostRouterLoopback
 } from "../../browser/internal-hosts";
 import { Lifecycle } from "../../lifecycle";
+import { z } from "zod";
 
 /** One request the fake Browser Run binding served, in arrival order. */
 export interface RecordedBrowserRequest {
@@ -228,6 +229,13 @@ function internalHostsBrowser(ctx: DurableObjectState) {
               new Response(
                 `echo ${new URL(request.url).pathname} from ${ctx.id.name}`
               )
+          },
+          // A Standard Schema with a transform: stored as assigned, passed
+          // to fetch as parsed.
+          "port.internal": {
+            target: z.object({ port: z.coerce.number().int() }),
+            fetch: async (_request: Request, { port }) =>
+              new Response(`port ${port} (${typeof port})`)
           }
         }
       }
