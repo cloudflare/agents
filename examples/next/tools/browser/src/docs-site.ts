@@ -8,7 +8,7 @@ import {
 
 /**
  * The docs the agent reads at http://docs.internal/: a few static pages
- * that say how to build the demo site. A `fetcher` host, so Browser Run
+ * that say how to build the demo site. A `worker` host, so Browser Run
  * calls this entrypoint directly and the agent never wakes for it.
  */
 export class DocsSite extends WorkerEntrypoint<Env> {

@@ -116,7 +116,7 @@ export class BrowserAgent extends withWorkspaceContainer(BrowserAgentBase) {
           },
           [DOCS_HOST]: {
             description: "Your instructions for building things.",
-            fetcher: this.ctx.exports.DocsSite
+            worker: this.ctx.exports.DocsSite
           }
         }
       }

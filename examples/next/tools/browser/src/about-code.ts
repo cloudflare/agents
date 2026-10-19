@@ -97,7 +97,7 @@ export class BrowserAgent extends withWorkspaceContainer(Base) {
           // Served by a Worker directly, without waking the agent. //+
           "docs.internal": { //+
             description: "Your instructions for building things.", //+
-            fetcher: this.ctx.exports.DocsSite //+
+            worker: this.ctx.exports.DocsSite //+
           } //+
         } //+
       } //+
@@ -175,7 +175,7 @@ export const CODE_STEPS: readonly CodeStep[] = [
       label: "Add the browser",
       title: "Add a browser with three internal hosts",
       caption:
-        "A host with fetch is served by your agent's code, with the target the model assigned. A host with fetcher is served by a Worker directly."
+        "A host with fetch is served by your agent's code, with the target the model assigned. A host with worker is served by a Worker directly."
     },
     WITH_BROWSER
   ),
