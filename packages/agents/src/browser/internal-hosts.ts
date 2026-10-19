@@ -103,6 +103,9 @@ const HOSTNAME =
  * Suffixes reserved so they never resolve on the internet. A real domain
  * would be served by the host over http but reach the real site over https
  * (and Chrome tries https first), so internal hostnames must use one.
+ * Single labels like `preview` would work, but Browser Run doesn't route
+ * labels that are real TLDs (`docs`, `app`) and gives no error for them, so
+ * they're rejected rather than checked against a TLD list.
  */
 const RESERVED_SUFFIXES = [".internal", ".test", ".example", ".invalid"];
 
