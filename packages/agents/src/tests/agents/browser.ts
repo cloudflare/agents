@@ -2,7 +2,10 @@ import type { AgentContext } from "../../index.ts";
 import { Agent } from "../../index.ts";
 import { Browser } from "../../browser/browser";
 import { browserRun } from "../../browser/providers/browser-run";
-import type { InternalHostRouterLoopback } from "../../browser/internal-hosts";
+import type {
+  InternalHostRouterLoopback,
+  InternalHostRouterProps
+} from "../../browser/internal-hosts";
 import { browserTool, type BrowserTool } from "../../browser/tools/ai-sdk";
 import { browserTool as piBrowserTool } from "../../browser/tools/pi";
 import { browserTool as tanStackBrowserTool } from "../../browser/tools/tanstack-ai";
@@ -29,20 +32,32 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
   /** A second browser with internal hostnames, on a typed binding. */
   readonly #internalBinding = createFakeBrowserBinding({ typed: true });
   readonly internalAcquired = this.#internalBinding.acquired;
+  /** HTTP requests to the internal browser's binding, e.g. session closes. */
+  readonly internalBindingRequests = this.#internalBinding.requests;
   /** Every request the `echo.internal` host served. */
   readonly internalRequests: string[] = [];
+  readonly #exports = (
+    this.ctx as unknown as { exports: Record<string, unknown> }
+  ).exports;
   readonly internalHostsConfig = {
-    router: (this.ctx as unknown as { exports: Record<string, unknown> })
-      .exports.InternalHostRouter as InternalHostRouterLoopback,
+    router: this.#exports.InternalHostRouter as InternalHostRouterLoopback,
     hosts: {
       "echo.internal": {
         description: "Echoes the request",
         fetch: async (request: Request) => {
           this.internalRequests.push(request.url);
+          const body = await request.text();
           return new Response(
-            `echo ${request.method} ${new URL(request.url).pathname} from ${this.name}`
+            `echo ${request.method} ${new URL(request.url).pathname} from ${this.name}` +
+              (body
+                ? ` body=${body} x-test=${request.headers.get("x-test")}`
+                : "")
           );
         }
+      },
+      "docs.internal": {
+        // Passed as is: the SDK calls it to get a Fetcher.
+        fetcher: this.#exports.InternalHostsDocsSite as Fetcher
       },
       "broken.internal": {
         fetch: async (): Promise<Response> => {
@@ -81,6 +96,18 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
       text: await response.text(),
       headers: [...response.headers]
     };
+  }
+
+  /** Fetch `url` through `InternalHostRouter` with the given props. */
+  async routerFetch(
+    props: Partial<InternalHostRouterProps> | undefined,
+    url: string
+  ): Promise<{ status: number; text: string }> {
+    const router = this.internalHostsConfig.router as unknown as (init: {
+      props: unknown;
+    }) => Fetcher;
+    const response = await router({ props }).fetch(url);
+    return { status: response.status, text: await response.text() };
   }
 
   /** The route props each internal host got at the last acquire. */

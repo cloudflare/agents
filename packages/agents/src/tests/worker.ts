@@ -77,6 +77,7 @@ export { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
 import type { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
 export {
   BrowserHarnessObject,
+  InternalHostsDocsSite,
   InternalHostsNoMethodObject,
   InternalHostsPlainObject
 } from "./capabilities/browser.ts";

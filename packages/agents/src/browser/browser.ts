@@ -16,6 +16,7 @@ import {
   LifecycleCapability,
   type LifecycleRouteContext
 } from "../lifecycle/capability";
+import { browserCapabilityId } from "./capability-id";
 import type { CdpConnection } from "./cdp-connection";
 import {
   internalHostError,
@@ -218,7 +219,7 @@ export class Browser extends LifecycleCapability {
 
   constructor(options: BrowserOptions) {
     const name = options.name ?? DEFAULT_BROWSER_NAME;
-    super(`browser:${name}`);
+    super(browserCapabilityId(name));
     if (name.trim() === "") {
       throw new Error("Browser names must be non-empty");
     }
@@ -489,8 +490,9 @@ export class Browser extends LifecycleCapability {
     }
     const fetch = entry.fetch;
     try {
-      const response = await this.lifecycle.runInHostContext(() =>
-        fetch(request)
+      const response = await this.lifecycle.runInHostContext(
+        () => fetch(request),
+        { request }
       );
       if (response instanceof Response) return response;
       return internalHostError(
@@ -498,10 +500,9 @@ export class Browser extends LifecycleCapability {
         `${host}: its fetch didn't return a Response`
       );
     } catch (error) {
-      return internalHostError(
-        502,
-        `${host}: ${error instanceof Error ? error.message : String(error)}`
-      );
+      // Logged, not shown: the page on this host can read the response.
+      console.error(`[agents/browser] ${host}: its fetch threw`, error);
+      return internalHostError(502, `${host}: its fetch failed`);
     }
   }
 
