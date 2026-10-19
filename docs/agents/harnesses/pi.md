@@ -14,7 +14,7 @@ Pi owns everything about a run: the transcript, the inbox of steers and follow-u
 npm install agents @earendil-works/pi-durable @earendil-works/pi-ai
 ```
 
-Both Pi packages are optional peer dependencies of `agents`, at `~1.2.0`. pi-durable is experimental, and its API can change in minor releases, so `agents` supports one Pi minor at a time. The examples use Workers AI through the `AI` binding. To configure the binding and choose other models, refer to [Models for pi-ai](../models-pi-ai.md).
+Both Pi packages are optional peer dependencies of `agents`, at `~1.3.0`. pi-durable is experimental, and its API can change in minor releases, so `agents` supports one Pi minor at a time. The examples use Workers AI through the `AI` binding. To configure the binding and choose other models, refer to [Models for pi-ai](../models-pi-ai.md).
 
 ## Create the harness
 
