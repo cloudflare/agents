@@ -27,9 +27,6 @@ import { Agent } from "agents";
 import { PiHarness } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
 
-// Skip Pi's idle caches (refer to the note below).
-const settings = { contextRetentionMs: 0, documentRetentionMs: 0 };
-
 export class Assistant extends Agent<Env> {
   ai = createAI({ binding: this.env.AI });
   registry = createRegistry();
@@ -40,7 +37,7 @@ export class Assistant extends Agent<Env> {
       models.setProvider(this.ai.provider);
       return Harness.open(
         storage,
-        { models, registry: this.registry, settings },
+        { models, registry: this.registry },
         context
       );
     },
@@ -65,8 +62,6 @@ export class Assistant extends Agent<Env> {
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `harness`  | Required. Receives `{ storage, context }` and returns Pi's `Harness`, usually from `Harness.open`. Models, the registry, `settings`, `env` and `onReport` are all yours to build here.  |
 | `defaults` | What a new session starts with: `model`, a pi-ai `Model` such as `ai("@cf/…")`, and `thinkingLevel`. Without a model, a session's prompts end unanswered (`no_model`) until one is set. |
-
-Set Pi's `contextRetentionMs` and `documentRetentionMs` settings to `0`. Pi keeps idle caches behind timers that default to ten minutes, and a pending timer keeps a Durable Object in memory: it cannot hibernate or be evicted, and it is billed for that time. The object's SQLite is local, so the caches save little.
 
 The factory runs as part of startup, once per isolate. If it throws the operation that triggered it fails and the next operation tries again.
 
@@ -124,11 +119,7 @@ import { skills } from "agents/harness/pi";
 
 harness: async ({ storage, context }) => {
   this.registry.install(await skills(sources));
-  return Harness.open(
-    storage,
-    { models, registry: this.registry, settings },
-    context
-  );
+  return Harness.open(storage, { models, registry: this.registry }, context);
 };
 ```
 
@@ -153,7 +144,7 @@ harness: async ({ storage, context }) => {
   });
   return Harness.open(
     storage,
-    { models, registry: this.registry, settings },
+    { models, registry: this.registry },
     context
   );
 };

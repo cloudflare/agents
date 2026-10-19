@@ -11,14 +11,7 @@ export function fauxModels(provider: Provider) {
 /** No generation retries, so a failing test fails at once. */
 export const NO_RETRY = { enabled: false, maxRetries: 0, baseDelayMs: 0 };
 
-/**
- * Settings for every test harness: no retries, and no idle caches. Pi keeps
- * idle caches behind timers (ten minutes by default), and a pending timer
- * keeps a Durable Object from being evicted, so `evictDurableObject` would
- * wait on them.
- */
+/** Settings for every test harness: no retries. */
 export const TEST_SETTINGS = {
-  retry: NO_RETRY,
-  contextRetentionMs: 0,
-  documentRetentionMs: 0
+  retry: NO_RETRY
 };

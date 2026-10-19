@@ -97,7 +97,7 @@ describe("pi session store", () => {
       const version = state.storage.sql
         .exec<{ version: number }>("SELECT version FROM pi_durable_schema")
         .one().version;
-      expect(version).toBe(1);
+      expect(version).toBe(2);
     });
   });
 
