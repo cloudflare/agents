@@ -13,7 +13,7 @@ import {
   listBrowserTargets
 } from "../browser-run";
 import {
-  fetcherRoute,
+  workerRoute,
   internalHostsSignature,
   validateInternalHosts,
   type AnyInternalHost,
@@ -127,8 +127,8 @@ function internalHostRoutes(
     AnyInternalHost
   ][];
   for (const [host, config] of hosts) {
-    if (config.fetcher) {
-      routes[host] = fetcherRoute(config.fetcher);
+    if (config.worker) {
+      routes[host] = workerRoute(config.worker);
       continue;
     }
     // validateInternalHosts made sure a fetch host has a router.
@@ -177,7 +177,7 @@ export function browserRunAdapter(
       } catch (error) {
         if (internalHosts && isDataCloneError(error)) {
           throw new Error(
-            "Browser Run couldn't take the internal hostname routes: a fetcher must be a service binding or an entrypoint of this Worker (this.ctx.exports.Name), not a Dynamic Worker or another object it can't hold",
+            "Browser Run couldn't take the internal hostname routes: a worker host must be a service binding or an entrypoint of this Worker (this.ctx.exports.Name), not a Dynamic Worker or another object it can't hold",
             { cause: error }
           );
         }

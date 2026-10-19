@@ -2,7 +2,7 @@
  * Internal hostnames: sites only this agent's browser can open.
  *
  * A host maps a hostname such as `preview.internal` to code in your agent
- * (`fetch`) or to a deployed Worker (`fetcher`). Browser Run sends the
+ * (`fetch`) or to a deployed Worker (`worker`). Browser Run sends the
  * browser's requests for that hostname to it instead of the internet, so a
  * page can be served from a sandbox port or a workspace folder, without exposing anything publicly.
  *
@@ -14,7 +14,7 @@
  * own the host, and nothing else. It calls the agent's `fetchInternalHost()`
  * over RPC, and the agent's `Browser` runs the host's `fetch`. `Agent` has
  * that method built in; a plain Durable Object adds it (see
- * {@link InternalHostMessage}). A `fetcher` host goes straight to the Worker
+ * {@link InternalHostMessage}). A `worker` host goes straight to the Worker
  * you gave it.
  */
 
@@ -42,7 +42,7 @@ export interface InternalHost {
    * to the page.
    */
   fetch: (request: Request) => Promise<Response>;
-  fetcher?: never;
+  worker?: never;
 }
 
 /**
@@ -50,7 +50,7 @@ export interface InternalHost {
  * agent: a service binding, or an entrypoint of your own Worker. Not a
  * Dynamic Worker or Durable Object stub — Browser Run can't hold those.
  */
-export interface InternalFetcherHost {
+export interface InternalWorkerHost {
   /** Shown to the model next to the hostname. */
   description?: string;
   /**
@@ -63,7 +63,7 @@ export interface InternalFetcherHost {
    * (`this.ctx.exports.DocsSite({ props })`). A Durable Object stub doesn't
    * type-check: Browser Run accepts one, then resets every request.
    */
-  fetcher: Fetcher & { id?: never };
+  worker: Fetcher & { id?: never };
   fetch?: never;
 }
 
@@ -90,11 +90,11 @@ export interface InternalHostsOptions {
    * scheme, port, or path, ending in a suffix that can't be a real site:
    * `.internal`, `.test`, `.example` or `.invalid`, like `preview.internal`.
    */
-  hosts: Record<string, InternalHost | InternalFetcherHost>;
+  hosts: Record<string, InternalHost | InternalWorkerHost>;
 }
 
 /** Either kind of host. */
-export type AnyInternalHost = InternalHost | InternalFetcherHost;
+export type AnyInternalHost = InternalHost | InternalWorkerHost;
 
 const HOSTNAME =
   /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
@@ -144,10 +144,10 @@ export function validateInternalHosts(options: InternalHostsOptions): void {
       throw new Error(`Internal hostname "${host}": ${problem}`);
     }
     const hasFetch = typeof config.fetch === "function";
-    const hasFetcher = config.fetcher !== undefined;
-    if (hasFetch === hasFetcher) {
+    const hasWorker = config.worker !== undefined;
+    if (hasFetch === hasWorker) {
       throw new Error(
-        `Internal hostname "${host}" needs exactly one of fetch or fetcher`
+        `Internal hostname "${host}" needs exactly one of fetch or worker`
       );
     }
     if (hasFetch && typeof options.router !== "function") {
@@ -168,19 +168,19 @@ export function internalHostsSignature(
   if (!options) return undefined;
   const hosts = Object.entries(options.hosts) as [string, AnyInternalHost][];
   return hosts
-    .map(([host, config]) => `${host}=${config.fetcher ? "fetcher" : "fetch"}`)
+    .map(([host, config]) => `${host}=${config.worker ? "worker" : "fetch"}`)
     .sort()
     .join(",");
 }
 
 /**
- * The route Browser Run gets for a `fetcher` host. A `ctx.exports`
+ * The route Browser Run gets for a `worker` host. A `ctx.exports`
  * entrypoint is a loopback stub that Browser Run can't take as is, so it's
  * called (with empty props) to get a Fetcher it can.
  */
-export function fetcherRoute(fetcher: Fetcher): Fetcher {
-  if (typeof fetcher !== "function") return fetcher;
-  const loopback = fetcher as unknown as (init: { props: object }) => Fetcher;
+export function workerRoute(worker: Fetcher): Fetcher {
+  if (typeof worker !== "function") return worker;
+  const loopback = worker as unknown as (init: { props: object }) => Fetcher;
   return loopback({ props: {} });
 }
 
