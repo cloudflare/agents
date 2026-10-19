@@ -204,7 +204,7 @@ const ATTACH_HANDLE_PREFIX = "target:";
  * Locks on the session store are held only around store reads/writes, never
  * across network calls to Browser Run or while a socket is open.
  *
- * @deprecated Use `createBrowserTool` from `agents/browser/ai-sdk`,
+ * @deprecated Use `browserTool` from `agents/browser/ai-sdk`,
  * `agents/browser/tanstack-ai` or `agents/browser/pi`. See
  * https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser
  */

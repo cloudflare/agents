@@ -135,7 +135,7 @@ function conversationScope(api: ToolExecutionApi): string {
  * Create a pi-durable tool that lets the model drive a persistent browser
  * with JavaScript and the Chrome DevTools Protocol.
  *
- * Works like `createBrowserTool` in `agents/browser/ai-sdk`: tabs, cookies, and
+ * Works like `browserTool` in `agents/browser/ai-sdk`: tabs, cookies, and
  * logins carry over between runs, `sessionId: "active"` addresses the tab the
  * model last worked in, and a replaced browser is reported as
  * `restarted: true`. A returned screenshot comes back as an image part that
@@ -151,7 +151,7 @@ function conversationScope(api: ToolExecutionApi): string {
  * @example
  * ```ts
  * import { Browser, browserRun } from "agents/browser";
- * import { createBrowserTool } from "agents/browser/pi";
+ * import { browserTool } from "agents/browser/pi";
  *
  * export class MyAgent extends DurableObject<Env> {
  *   readonly browser = new Browser({ provider: browserRun(this.env.BROWSER) });
@@ -161,7 +161,7 @@ function conversationScope(api: ToolExecutionApi): string {
  *       this.registry.install({
  *         name: "browser",
  *         tools: [
- *           createBrowserTool({
+ *           browserTool({
  *             ctx: this.ctx,
  *             browser: this.browser,
  *             loader: this.env.LOADER
@@ -177,7 +177,7 @@ function conversationScope(api: ToolExecutionApi): string {
  * }
  * ```
  */
-export function createBrowserTool<TName extends string = "browser">(
+export function browserTool<TName extends string = "browser">(
   options: PiBrowserToolOptions<TName>
 ): PiBrowserTool<TName> {
   const { scope = conversationScope, ...coreOptions } = options;
@@ -201,9 +201,3 @@ export function createBrowserTool<TName extends string = "browser">(
     }
   };
 }
-
-/**
- * @deprecated Renamed to {@link createBrowserTool}. This alias will be
- * removed in a future release.
- */
-export const browserTool = createBrowserTool;

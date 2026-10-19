@@ -4,23 +4,16 @@ import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { expectTypeOf } from "vitest";
 import {
   browserTool,
-  createBrowserTool,
   type BrowserTool,
   type BrowserToolOutput
 } from "../browser/tools/ai-sdk";
 import { Browser, browserRun } from "../browser";
-import {
-  browserTool as piBrowserToolAlias,
-  createBrowserTool as piBrowserTool
-} from "../browser/tools/pi";
-import {
-  browserTool as tanStackBrowserToolAlias,
-  createBrowserTool as tanStackBrowserTool
-} from "../browser/tools/tanstack-ai";
+import { browserTool as piBrowserTool } from "../browser/tools/pi";
+import { browserTool as tanStackBrowserTool } from "../browser/tools/tanstack-ai";
 
 declare const env: { BROWSER: Fetcher; LOADER: WorkerLoader };
 
-const tool = createBrowserTool({
+const tool = browserTool({
   browser: new Browser({ provider: browserRun(env.BROWSER) }),
   loader: env.LOADER
 });
@@ -38,7 +31,7 @@ expectTypeOf<BrowserToolOutput["restarted"]>().toEqualTypeOf<
 expectTypeOf<BrowserTool["toModelOutput"]>().toBeFunction();
 
 // The tool takes a browser object, not a session name.
-createBrowserTool({
+browserTool({
   // @ts-expect-error pass a Browser, not a name
   browser: "research",
   loader: env.LOADER
@@ -77,8 +70,3 @@ expectTypeOf(
     name: "web"
   }).name
 ).toEqualTypeOf<"web">();
-
-// The old names are deprecated aliases of the new ones.
-expectTypeOf(browserTool).toEqualTypeOf(createBrowserTool);
-expectTypeOf(piBrowserToolAlias).toEqualTypeOf(piBrowserTool);
-expectTypeOf(tanStackBrowserToolAlias).toEqualTypeOf(tanStackBrowserTool);

@@ -122,7 +122,7 @@ export interface QuickActionSnapshot {
  * otherwise.
  *
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */
@@ -133,7 +133,7 @@ export function runQuickAction(
 ): Promise<Response>;
 /**
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */
@@ -144,7 +144,7 @@ export function runQuickAction(
 ): Promise<Response>;
 /**
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */
@@ -155,7 +155,7 @@ export function runQuickAction(
 ): Promise<Response>;
 /**
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */
@@ -246,7 +246,7 @@ async function quickActionBinary(
  * Fetch a page's fully rendered HTML via `/content`.
  *
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */
@@ -261,7 +261,7 @@ export function browserContent(
  * Convert a page (or raw HTML) to Markdown via `/markdown`.
  *
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */
@@ -277,7 +277,7 @@ export function browserMarkdown(
  * a `response_format` JSON Schema, or both.
  *
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */
@@ -292,7 +292,7 @@ export function browserExtract<T = unknown>(
  * Retrieve every link on a page via `/links`.
  *
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */
@@ -307,7 +307,7 @@ export function browserLinks(
  * Scrape specific elements (by CSS selector) via `/scrape`.
  *
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */
@@ -322,7 +322,7 @@ export function browserScrape(
  * Capture rendered HTML plus a base64 screenshot in one request via `/snapshot`.
  *
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */
@@ -340,7 +340,7 @@ export function browserSnapshot(
  * data-URI string instead of binary, which this helper hands back verbatim.
  *
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */
@@ -355,7 +355,7 @@ export function browserScreenshot(
  * Render a PDF via `/pdf`. Returns the PDF bytes.
  *
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */

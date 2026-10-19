@@ -300,7 +300,7 @@ describe("Browser on an Agent subclass", () => {
   });
 });
 
-describe("createBrowserTool over a Browser", () => {
+describe("browserTool over a Browser", () => {
   const code = `async () => cdp.send({
     method: "Runtime.evaluate",
     params: { expression: "document.title" },
@@ -313,7 +313,7 @@ describe("createBrowserTool over a Browser", () => {
     await runInDurableObject(
       stub,
       async (instance: TestBrowserAgent, state) => {
-        const first = await instance.createBrowserTool().execute({ code }, {});
+        const first = await instance.browserTool().execute({ code }, {});
         expect(first.status).toBe("completed");
         expect(first.status === "completed" && first.result).toEqual({
           result: { value: "evaluated in target-session-1-2" }
@@ -327,7 +327,7 @@ describe("createBrowserTool over a Browser", () => {
         expect(stored?.activeTargetId).toBe("target-session-1-2");
 
         // A tool rebuilt next turn reuses the same browser.
-        const second = await instance.createBrowserTool().execute({ code }, {});
+        const second = await instance.browserTool().execute({ code }, {});
         expect(second.status).toBe("completed");
         const creates = instance.browserRequests.filter(
           (request) => request.method === "POST" && !request.upgrade
@@ -341,9 +341,9 @@ describe("createBrowserTool over a Browser", () => {
     const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
 
     await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
-      const a = await instance.createBrowserTool("a").execute({ code }, {});
-      const b = await instance.createBrowserTool("b").execute({ code }, {});
-      const again = await instance.createBrowserTool("a").execute({ code }, {});
+      const a = await instance.browserTool("a").execute({ code }, {});
+      const b = await instance.browserTool("b").execute({ code }, {});
+      const again = await instance.browserTool("a").execute({ code }, {});
 
       expect(a.status === "completed" && a.result).toEqual({
         result: { value: "evaluated in target-session-1-2" }
@@ -367,12 +367,12 @@ describe("createBrowserTool over a Browser", () => {
 
     await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
       // Create the browser first, so neither run below races to create it.
-      await instance.createBrowserTool().execute({ code }, {});
+      await instance.browserTool().execute({ code }, {});
 
       // Tools built separately (a turn each, say) still share the queue.
       await Promise.all([
-        instance.createBrowserTool("a").execute({ code: waitCode(40) }, {}),
-        instance.createBrowserTool("a").execute({ code: waitCode(41) }, {})
+        instance.browserTool("a").execute({ code: waitCode(40) }, {}),
+        instance.browserTool("a").execute({ code: waitCode(41) }, {})
       ]);
       expect(instance.browserEvents.splice(0)).toEqual([
         "start wait:40",
@@ -382,8 +382,8 @@ describe("createBrowserTool over a Browser", () => {
       ]);
 
       await Promise.all([
-        instance.createBrowserTool("b").execute({ code: waitCode(40) }, {}),
-        instance.createBrowserTool("c").execute({ code: waitCode(41) }, {})
+        instance.browserTool("b").execute({ code: waitCode(40) }, {}),
+        instance.browserTool("c").execute({ code: waitCode(41) }, {})
       ]);
       expect(instance.browserEvents.slice(0, 2).sort()).toEqual([
         "start wait:40",
@@ -396,7 +396,7 @@ describe("createBrowserTool over a Browser", () => {
     const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
 
     await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
-      const tool = instance.createBrowserTool();
+      const tool = instance.browserTool();
       await tool.execute({ code }, {});
       instance.killBrowserSession("session-1");
 
@@ -422,7 +422,7 @@ describe("createBrowserTool over a Browser", () => {
     const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
 
     await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
-      const { description } = instance.createBrowserTool();
+      const { description } = instance.browserTool();
       // No discovery pass needed: the rules are right there.
       expect(description).toContain('sessionId: "active"');
       expect(description).toContain("returnByValue: true");
@@ -441,7 +441,7 @@ describe("createBrowserTool over a Browser", () => {
 
     await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
       const capture = (bytes: number) =>
-        instance.createBrowserTool().execute(
+        instance.browserTool().execute(
           {
             code: `async () => (await cdp.send({ method: "Page.captureScreenshot", params: { fakeBytes: ${bytes} }, sessionId: "active" })).data.length`
           },
@@ -466,7 +466,7 @@ describe("createBrowserTool over a Browser", () => {
   });
 });
 
-describe("TanStack AI createBrowserTool over a Browser", () => {
+describe("TanStack AI browserTool over a Browser", () => {
   const code = `async () => cdp.send({
     method: "Runtime.evaluate",
     params: { expression: "document.title" },
@@ -537,7 +537,7 @@ describe("TanStack AI createBrowserTool over a Browser", () => {
   });
 });
 
-describe("pi createBrowserTool over a Browser", () => {
+describe("pi browserTool over a Browser", () => {
   const code = `async () => cdp.send({
     method: "Runtime.evaluate",
     params: { expression: "document.title" },

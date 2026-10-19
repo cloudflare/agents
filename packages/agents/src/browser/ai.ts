@@ -194,7 +194,7 @@ function connectorOptions(
  * }
  * ```
  *
- * @deprecated Use `createBrowserTool` from `agents/browser/ai-sdk`,
+ * @deprecated Use `browserTool` from `agents/browser/ai-sdk`,
  * `agents/browser/tanstack-ai` or `agents/browser/pi`. See
  * https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser
  */
@@ -317,7 +317,7 @@ export function createBrowserRuntime(
  * });
  * ```
  *
- * @deprecated Use `createBrowserTool` from `agents/browser/ai-sdk`,
+ * @deprecated Use `browserTool` from `agents/browser/ai-sdk`,
  * `agents/browser/tanstack-ai` or `agents/browser/pi`. See
  * https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser
  */
@@ -331,7 +331,7 @@ export function createBrowserTools(
  * A Quick Action exposed as an AI SDK tool.
  *
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */
@@ -344,7 +344,7 @@ export type QuickActionToolName =
 
 /**
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */
@@ -484,7 +484,7 @@ function boundArray(value: unknown[], maxChars: number): unknown[] {
  * ```
  *
  * @deprecated Quick Actions are deprecated and won't change. Use
- * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `browserTool` to drive a browser, the `web_fetch` tool from
  * `agents/webfetch` to read a page, or call the binding's
  * `quickAction()` directly.
  */

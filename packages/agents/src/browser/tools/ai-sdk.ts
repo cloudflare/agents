@@ -31,7 +31,7 @@ export {
 } from "../ai";
 
 /**
- * The AI SDK tool {@link createBrowserTool} returns. Assignable to the AI SDK's
+ * The AI SDK tool {@link browserTool} returns. Assignable to the AI SDK's
  * `Tool`, and `execute` / `toModelOutput` are always present.
  */
 export interface BrowserTool {
@@ -60,7 +60,7 @@ export interface BrowserTool {
  * @example
  * ```ts
  * import { Browser, browserRun } from "agents/browser";
- * import { createBrowserTool } from "agents/browser/ai-sdk";
+ * import { browserTool } from "agents/browser/ai-sdk";
  *
  * export class MyAgent extends Agent<Env> {
  *   browser = new Browser({ provider: browserRun(this.env.BROWSER) });
@@ -72,14 +72,14 @@ export interface BrowserTool {
  *
  *   async onChatMessage() {
  *     const tools = {
- *       browser: createBrowserTool({ browser: this.browser, loader: this.env.LOADER })
+ *       browser: browserTool({ browser: this.browser, loader: this.env.LOADER })
  *     };
  *     // …pass `tools` to streamText / generateText
  *   }
  * }
  * ```
  */
-export function createBrowserTool(options: BrowserToolOptions): BrowserTool {
+export function browserTool(options: BrowserToolOptions): BrowserTool {
   const core = createBrowserToolCore(options, {
     screenshotHint:
       "To show a screenshot, return { type: 'browser_screenshot', mediaType, data } with data from Page.captureScreenshot and mediaType 'image/png', or 'image/jpeg' if you captured with format: 'jpeg'. The user sees the image; you get a short text summary."
@@ -92,9 +92,3 @@ export function createBrowserTool(options: BrowserToolOptions): BrowserTool {
       browserExecuteModelOutput(output, browserReportNotes(output))
   };
 }
-
-/**
- * @deprecated Renamed to {@link createBrowserTool}. This alias will be
- * removed in a future release.
- */
-export const browserTool = createBrowserTool;

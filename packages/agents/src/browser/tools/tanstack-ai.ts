@@ -50,7 +50,7 @@ function browserToolModelResult(output: BrowserToolOutput): unknown {
  * Create a TanStack AI tool that lets the model drive a persistent browser
  * with JavaScript and the Chrome DevTools Protocol.
  *
- * Works like `createBrowserTool` in `agents/browser/ai-sdk`: tabs, cookies, and
+ * Works like `browserTool` in `agents/browser/ai-sdk`: tabs, cookies, and
  * logins carry over between runs, `sessionId: "active"` addresses the tab the
  * model last worked in, and a replaced browser is reported as
  * `restarted: true`. The tool is named `browser` unless you pass `name`.
@@ -62,7 +62,7 @@ function browserToolModelResult(output: BrowserToolOutput): unknown {
  * @example
  * ```ts
  * import { Browser, browserRun } from "agents/browser";
- * import { createBrowserTool } from "agents/browser/tanstack-ai";
+ * import { browserTool } from "agents/browser/tanstack-ai";
  * import { chat } from "@tanstack/ai";
  *
  * export class MyAgent extends Agent<Env> {
@@ -76,14 +76,14 @@ function browserToolModelResult(output: BrowserToolOutput): unknown {
  *   async onChatMessage() {
  *     const stream = chat({
  *       adapter,
- *       tools: [createBrowserTool({ browser: this.browser, loader: this.env.LOADER })],
+ *       tools: [browserTool({ browser: this.browser, loader: this.env.LOADER })],
  *       messages
  *     });
  *   }
  * }
  * ```
  */
-export function createBrowserTool<TName extends string = "browser">(
+export function browserTool<TName extends string = "browser">(
   options: TanStackBrowserToolOptions<TName>
 ) {
   const core = createBrowserToolCore(options, {
@@ -96,12 +96,6 @@ export function createBrowserTool<TName extends string = "browser">(
     inputSchema: core.inputSchema
   }).server(async (input) => browserToolModelResult(await core.execute(input)));
 }
-
-/**
- * @deprecated Renamed to {@link createBrowserTool}. This alias will be
- * removed in a future release.
- */
-export const browserTool = createBrowserTool;
 
 export {
   createBrowserTools,

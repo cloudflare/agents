@@ -10,7 +10,7 @@ import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
 import { Browser } from "../../../browser/browser";
 import { browserRun } from "../../../browser/providers/browser-run";
-import { createBrowserTool } from "../../../browser/tools/pi";
+import { browserTool } from "../../../browser/tools/pi";
 import { Lifecycle } from "../../../lifecycle";
 import { createFakeBrowserBinding } from "../../../tests/capabilities/browser";
 import { PiHarness } from "../index";
@@ -53,7 +53,7 @@ export class PiBrowserTestObject extends DurableObject<Cloudflare.Env> {
       this.registry.install({
         name: "browser",
         tools: [
-          createBrowserTool({
+          browserTool({
             ctx: this.ctx,
             browser: this.browser,
             loader: this.env.LOADER

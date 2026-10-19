@@ -8,7 +8,7 @@ One durable tool is provided:
 
 > **Experimental** — this feature may have breaking changes in future releases.
 
-> **`createBrowserTools` and `createBrowserRuntime` are deprecated.** Use [`createBrowserTool`](#persistent-browser). Pausing a run with its session kept while a person works in Live View has no replacement yet, so keep using `createBrowserTools` if you rely on it.
+> **`createBrowserTools` and `createBrowserRuntime` are deprecated.** Use [`browserTool`](#persistent-browser). Pausing a run with its session kept while a person works in Live View has no replacement yet, so keep using `createBrowserTools` if you rely on it.
 
 ## When to use browser tools
 
@@ -209,12 +209,12 @@ await runtime.expirePaused(); // reject stale never-approved pauses, freeing the
 
 ## Persistent browser
 
-`createBrowserTool` gives the model one browser that stays open between turns, so tabs, cookies, and logins carry over. You create the browser once on your agent and pass it in; the model never starts or closes it. This example uses a [Think](../think/index.md) agent, whose `getTools()` runs every turn:
+`browserTool` gives the model one browser that stays open between turns, so tabs, cookies, and logins carry over. You create the browser once on your agent and pass it in; the model never starts or closes it. This example uses a [Think](../think/index.md) agent, whose `getTools()` runs every turn:
 
 ```ts
 import { Think } from "@cloudflare/think";
 import { Browser, browserRun } from "agents/browser";
-import { createBrowserTool } from "agents/browser/ai-sdk";
+import { browserTool } from "agents/browser/ai-sdk";
 
 export class MyAgent extends Think<Env> {
   browser = new Browser({ provider: browserRun(this.env.BROWSER) });
@@ -230,17 +230,14 @@ export class MyAgent extends Think<Env> {
 
   getTools() {
     return {
-      browser: createBrowserTool({
-        browser: this.browser,
-        loader: this.env.LOADER
-      })
+      browser: browserTool({ browser: this.browser, loader: this.env.LOADER })
     };
   }
 }
 ```
 
 - The model writes CDP code as with `createBrowserTools`. `sessionId: "active"` points at the tab it's working in, and that tab is remembered across turns.
-- If several chats or users share one `Browser` (for example, many threads on one agent), pass each one's id as `scope`: `createBrowserTool({ browser, loader, scope: threadId })`. Each scope keeps its own active tab, so one chat never drives another's page, while cookies and logins stay shared. Tools that leave `scope` out share one tab. Runs in the same scope wait for each other; runs in different scopes run in parallel.
+- If several chats or users share one `Browser` (for example, many threads on one agent), pass each one's id as `scope`: `browserTool({ browser, loader, scope: threadId })`. Each scope keeps its own active tab, so one chat never drives another's page, while cookies and logins stay shared. Tools that leave `scope` out share one tab. Runs in the same scope wait for each other; runs in different scopes run in parallel.
 - When another chat closes the model's tab, or works in it too, the result's `notice` says so.
 - Tabs the page opens itself come back as `newTabs` in the result.
 - If the browser was lost (idle past `keepAliveMs`, closed, or crashed), the code still runs in a new browser and the result includes `restarted: true`.
@@ -252,31 +249,29 @@ export class MyAgent extends Think<Env> {
 
 Only Chromium on a Browser Run binding is supported. It needs the same `LOADER` binding and `CodemodeRuntime` export as `createBrowserTools`.
 
-For TanStack AI, import `createBrowserTool` from `agents/browser/tanstack-ai` instead. It takes the same options plus an optional `name` (default `"browser"`) and returns a `ServerTool`:
+For TanStack AI, import `browserTool` from `agents/browser/tanstack-ai` instead. It takes the same options plus an optional `name` (default `"browser"`) and returns a `ServerTool`:
 
 ```ts
-import { createBrowserTool } from "agents/browser/tanstack-ai";
+import { browserTool } from "agents/browser/tanstack-ai";
 
 const stream = chat({
   adapter,
-  tools: [
-    createBrowserTool({ browser: this.browser, loader: this.env.LOADER })
-  ],
+  tools: [browserTool({ browser: this.browser, loader: this.env.LOADER })],
   messages
 });
 ```
 
 The TanStack AI tool doesn't support screenshots yet. TanStack AI gives the host and the model the same output, so if the model returns a screenshot, the tool replaces it with a note saying it was left out, and the tool's instructions tell the model to read the page with `Runtime.evaluate` instead.
 
-For [pi-durable](./harnesses/pi.md), import `createBrowserTool` from `agents/browser/pi` and install it in an extension. It takes the same options plus an optional `name` (default `"browser"`). Outside an `Agent`, pass `ctx`:
+For [pi-durable](./harnesses/pi.md), import `browserTool` from `agents/browser/pi` and install it in an extension. It takes the same options plus an optional `name` (default `"browser"`). Outside an `Agent`, pass `ctx`:
 
 ```ts
-import { createBrowserTool } from "agents/browser/pi";
+import { browserTool } from "agents/browser/pi";
 
 this.registry.install({
   name: "browser",
   tools: [
-    createBrowserTool({
+    browserTool({
       ctx: this.ctx,
       browser: this.browser,
       loader: this.env.LOADER
@@ -293,7 +288,7 @@ this.registry.install({
 
 ## Quick Actions (stateless browsing)
 
-> **Quick Actions are deprecated** and won't change: `createQuickActionTools`, `runQuickAction` and the `browserMarkdown`-style helpers keep working until they're removed. Use [`createBrowserTool`](#persistent-browser) to drive a browser, the [`web_fetch` tool](./fetch-the-web.md) from `agents/webfetch` to read a page, or call the binding's `quickAction()` directly.
+> **Quick Actions are deprecated** and won't change: `createQuickActionTools`, `runQuickAction` and the `browserMarkdown`-style helpers keep working until they're removed. Use [`browserTool`](#persistent-browser) to drive a browser, the [`web_fetch` tool](./fetch-the-web.md) from `agents/webfetch` to read a page, or call the binding's `quickAction()` directly.
 
 `browser_execute` drives a full, stateful CDP session — the right tool for interactive, multi-step automation. But a lot of agent browsing is really one-shot: _read this page as Markdown_, _extract these fields_, _list the links_. For those, [Quick Actions](https://developers.cloudflare.com/browser-run/quick-actions/) are simpler, faster, and cheaper. They need only the `browser` binding — no Durable Object, Worker Loader, or sandbox — so they work from any Worker.
 
