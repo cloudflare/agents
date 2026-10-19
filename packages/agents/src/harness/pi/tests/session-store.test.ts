@@ -3,10 +3,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { BACKGROUND_CONTEXT } from "../context";
 import { registerStorageConformance } from "@earendil-works/pi-durable/testing";
 import { describe, expect, it } from "vitest";
-import {
-  DurableObjectSqliteDatabase,
-  openPiSessionStore
-} from "../session-store";
+import { openPiSessionStore } from "../session-store";
 
 // pi's own storage conformance suite, run against the session store on a
 // real Durable Object's SQLite database. Each case gets a fresh object.
@@ -26,7 +23,55 @@ registerStorageConformance(
   }
 );
 
+function schemaNames(storage: DurableObjectStorage): string[] {
+  return storage.sql
+    .exec<{ type: string; name: string }>(
+      "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'"
+    )
+    .toArray()
+    .map((row) => `${row.type}:${row.name}`)
+    .sort();
+}
+
 describe("pi session store", () => {
+  // Objects opened by earlier releases already hold pi's data under these
+  // names. If pi renames one, existing sessions would silently vanish.
+  it("keeps the table and index names existing objects use", async () => {
+    const stub = env.PI_STORE_TEST.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (_instance, state) => {
+      await openPiSessionStore(state.storage);
+      expect(schemaNames(state.storage)).toEqual(
+        [
+          "index:pi_conversations_by_owner_conversation",
+          "index:pi_conversations_by_owner_task",
+          "index:pi_document_revisions_by_kind",
+          "index:pi_documents_by_address",
+          "index:pi_documents_by_scope",
+          "index:pi_documents_by_scope_kind",
+          "index:pi_entries_by_conversation",
+          "index:pi_entry_heads_by_conversation",
+          "index:pi_submissions_by_conversation",
+          "index:pi_submissions_by_request",
+          "index:pi_submissions_by_status",
+          "index:pi_tasks_by_abort_requested",
+          "index:pi_tasks_by_background",
+          "index:pi_tasks_by_conversation",
+          "index:pi_tasks_by_kind",
+          "index:pi_tasks_by_status",
+          "table:pi_conversations",
+          "table:pi_document_revisions",
+          "table:pi_documents",
+          "table:pi_durable_metadata",
+          "table:pi_durable_schema",
+          "table:pi_entries",
+          "table:pi_record_ids",
+          "table:pi_submissions",
+          "table:pi_tasks"
+        ].sort()
+      );
+    });
+  });
+
   it("keeps pi's tables under its prefix", async () => {
     const stub = env.PI_STORE_TEST.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (_instance, state) => {
@@ -56,93 +101,22 @@ describe("pi session store", () => {
     });
   });
 
-  it("runs a call made during a transaction after it, outside it", async () => {
-    const stub = env.PI_STORE_TEST.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (_instance, state) => {
-      const db = new DurableObjectSqliteDatabase(state.storage);
-      await db.exec("CREATE TABLE notes (text TEXT)");
-      let release = () => {};
-      const held = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      let opened = () => {};
-      const open = new Promise<void>((resolve) => {
-        opened = resolve;
-      });
-      const rolledBack = db.transaction(async (tx) => {
-        await tx.run("INSERT INTO notes VALUES (?)", "inside");
-        opened();
-        await held;
-        throw new Error("roll back");
-      });
-      await open;
-      // Issued while the transaction is open: it must not join it.
-      const outside = db.run("INSERT INTO notes VALUES (?)", "outside");
-      const seen = db.all<{ text: string }>("SELECT text FROM notes");
-      release();
-      await expect(rolledBack).rejects.toThrow("roll back");
-      await outside;
-      expect(await seen).toEqual([{ text: "outside" }]);
-    });
+  it("rejects a prefix Durable Objects reserve", async () => {
+    for (const prefix of ["_cf_x", "_CF_x"]) {
+      await expect(
+        openPiSessionStore({} as DurableObjectStorage, { prefix })
+      ).rejects.toThrow("_cf_");
+    }
   });
 
-  it("runs a statement at once when no transaction is open", async () => {
+  it("uses another prefix when asked", async () => {
     const stub = env.PI_STORE_TEST.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (_instance, state) => {
-      const db = new DurableObjectSqliteDatabase(state.storage);
-      await db.exec("CREATE TABLE notes (text TEXT)");
-      const written = db.run("INSERT INTO notes VALUES (?)", "now");
-      // Not awaited yet: the write already happened, in this tick.
+      await openPiSessionStore(state.storage, { prefix: "chat_" });
+      expect(schemaNames(state.storage)).toContain("table:chat_tasks");
       expect(
-        state.storage.sql.exec("SELECT text FROM notes").toArray()
-      ).toEqual([{ text: "now" }]);
-      await written;
+        schemaNames(state.storage).some((name) => name.includes(":pi_"))
+      ).toBe(false);
     });
-  });
-
-  it("runs calls in call order", async () => {
-    const stub = env.PI_STORE_TEST.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (_instance, state) => {
-      const db = new DurableObjectSqliteDatabase(state.storage);
-      await db.exec("CREATE TABLE notes (n INTEGER)");
-      const committed = db.transaction(async (tx) => {
-        await tx.run("INSERT INTO notes VALUES (?)", 1);
-        await new Promise((resolve) => setTimeout(resolve, 10));
-        await tx.run("INSERT INTO notes VALUES (?)", 2);
-      });
-      const after = db.run("INSERT INTO notes VALUES (?)", 3);
-      const read = db.all<{ n: number }>("SELECT n FROM notes ORDER BY rowid");
-      await Promise.all([committed, after]);
-      expect(await read).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }]);
-    });
-  });
-
-  it("keeps running calls after one fails", async () => {
-    const stub = env.PI_STORE_TEST.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (_instance, state) => {
-      const db = new DurableObjectSqliteDatabase(state.storage);
-      const failed = db.run("INSERT INTO missing VALUES (1)");
-      const next = db.get<{ one: number }>("SELECT 1 AS one");
-      await expect(failed).rejects.toThrow();
-      expect(await next).toEqual({ one: 1 });
-    });
-  });
-
-  it("rejects a transaction handle used after its transaction", async () => {
-    const stub = env.PI_STORE_TEST.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (_instance, state) => {
-      const db = new DurableObjectSqliteDatabase(state.storage);
-      const escaped = await db.transaction(async (tx) => tx);
-      await expect(escaped.get("SELECT 1")).rejects.toThrow("no longer active");
-    });
-  });
-
-  it("rejects a prefix Durable Objects reserve", () => {
-    expect(
-      () =>
-        new DurableObjectSqliteDatabase({} as DurableObjectStorage, {
-          prefix: "_cf_x"
-        })
-    ).toThrow();
   });
 });
