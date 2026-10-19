@@ -133,6 +133,7 @@ export default () => listIssues({ state: "open" });
 
 `agents/browser` doesn't depend on Computer, and Computer doesn't depend on `agents`. Your Durable Object imports both and passes the same `Browser` to each:
 
-- `createBrowserCDPTool` (formerly `browserTool`) stays in `agents/browser`. It runs the model's code on the Worker Loader you pass it, and stops using codemode in a later release.
+- `createBrowserTool` (formerly `browserTool`) stays in `agents/browser`. It runs the model's code on the Worker Loader you pass it, and stops using codemode in a later release.
 - For a Computer Workspace, pass the `Browser` to `createBrowserModule` from `@cloudflare/computer/modules/browser`, so code run with `exec` imports the browser from `ws:browser`. See [From `exec` in a Computer Workspace](../agents/browse-the-web.md#from-exec-in-a-computer-workspace).
 - `createBrowserTools` and `createBrowserRuntime` are deprecated with codemode. Keep using them only if a run has to pause while a person works in Live View, which nothing else can do yet.
+- The Quick Action helpers (`createQuickActionTools`, `runQuickAction`, `browserMarkdown` and the rest) are deprecated and won't change.
