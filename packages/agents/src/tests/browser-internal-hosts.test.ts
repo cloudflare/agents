@@ -1,13 +1,21 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TestBrowserAgent } from "./agents/browser";
 import type {
   InternalHostsNoMethodObject,
   InternalHostsPlainObject
 } from "./capabilities/browser";
 import { namedBrowserSessionKey } from "../browser/browser";
-import { browserRun } from "../browser/providers/browser-run";
+import {
+  browserRun,
+  browserRunAdapter
+} from "../browser/providers/browser-run";
+import {
+  acquireBrowserSession,
+  type BrowserBinding
+} from "../browser/browser-run";
+import { createFakeBrowserBinding } from "./capabilities/browser";
 import {
   fetcherRoute,
   MAX_INTERNAL_HOSTS,
@@ -20,6 +28,10 @@ const router = (() => {
 }) as unknown as InternalHostRouterLoopback;
 const binding = { fetch: () => Promise.resolve(new Response()) };
 const fetch = async () => new Response("ok");
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function agent() {
   return env.TestBrowserAgent.getByName(crypto.randomUUID());
@@ -45,7 +57,12 @@ describe("browserRun internalHosts validation", () => {
     ["A.internal", /lowercase/],
     ["10.0.0.1", /IP/],
     ["localhost", /localhost/],
-    ["-bad.internal", /valid/]
+    ["app.localhost", /localhost/],
+    ["-bad.internal", /valid/],
+    ["a..b.internal", /valid/],
+    [`${"a".repeat(250)}.test`, /valid/],
+    ["docs.example.com", /can't be a real site/],
+    ["preview", /can't be a real site/]
   ])("rejects %s", (host, message) => {
     expect(() =>
       browserRun(binding, {
@@ -53,6 +70,17 @@ describe("browserRun internalHosts validation", () => {
       })
     ).toThrow(message);
   });
+
+  it.each(["a.internal", "a.test", "a.example", "a.invalid"])(
+    "accepts %s",
+    (host) => {
+      expect(() =>
+        browserRun(binding, {
+          internalHosts: { router, hosts: { [host]: { fetch } } }
+        })
+      ).not.toThrow();
+    }
+  );
 
   it("needs a router for fetch hosts", () => {
     expect(() =>
@@ -106,12 +134,50 @@ describe("fetcherRoute", () => {
   });
 });
 
+describe("browserRun internalHosts acquire", () => {
+  const owner = { className: "A", name: "a", browser: "b" };
+  const fetcher = { fetch } as unknown as Fetcher;
+
+  it("explains a route Browser Run can't hold", async () => {
+    const failing = {
+      ...binding,
+      acquire: async () => {
+        throw new DOMException("could not serialize", "DataCloneError");
+      }
+    } as BrowserBinding;
+    const adapter = browserRunAdapter(
+      browserRun(failing, {
+        internalHosts: { hosts: { "a.internal": { fetcher } } }
+      })
+    );
+    await expect(adapter.create({ owner })).rejects.toThrow(
+      /a fetcher must be a service binding or an entrypoint of this Worker/
+    );
+  });
+
+  it("starts without routes, with a warning, on a binding without acquire()", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fake = createFakeBrowserBinding();
+    const { sessionId } = await acquireBrowserSession(fake.browser, {
+      outboundByHost: { "a.internal": fetcher }
+    });
+    expect(sessionId).toBe("session-1");
+    expect(fake.requests[0]?.body).not.toHaveProperty("outboundByHost");
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "Internal hostnames (a.internal) only work once deployed"
+      )
+    );
+  });
+});
+
 describe("Browser internal hosts", () => {
   it("starts the browser with one route per hostname", async () => {
     await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
       await instance.internalResolve();
       expect(instance.internalRouteHosts().sort()).toEqual([
         "broken.internal",
+        "docs.internal",
         "echo.internal"
       ]);
     });
@@ -122,11 +188,11 @@ describe("Browser internal hosts", () => {
     await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
       const response = await instance.internalHostFetch(
         "http://echo.internal/page?x=1",
-        { method: "POST", body: "hi" }
+        { method: "POST", body: "hi", headers: { "x-test": "yes" } }
       );
       expect(response).toMatchObject({
         status: 200,
-        text: `echo POST /page from ${instance.name}`
+        text: `echo POST /page from ${instance.name} body=hi x-test=yes`
       });
       expect(instance.internalRequests).toEqual([
         "http://echo.internal/page?x=1"
@@ -134,13 +200,35 @@ describe("Browser internal hosts", () => {
     });
   });
 
-  it("turns a throwing fetch into a 502 with the reason", async () => {
+  it("serves a fetcher host from the Worker, calling a ctx.exports entrypoint", async () => {
+    await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
+      expect(
+        await instance.internalHostFetch("http://docs.internal/guide")
+      ).toMatchObject({ status: 200, text: "docs /guide props {}" });
+      expect(instance.internalRequests).toEqual([]);
+    });
+  });
+
+  it("turns a throwing fetch into a 502 and logs the error", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
       const response = await instance.internalHostFetch(
         "http://broken.internal/"
       );
       expect(response.status).toBe(502);
-      expect(response.text).toBe("broken.internal: dev server not listening");
+      expect(response.text).toBe("broken.internal: its fetch failed");
+    });
+    expect(error).toHaveBeenCalledWith(
+      "[agents/browser] broken.internal: its fetch threw",
+      expect.objectContaining({ message: "dev server not listening" })
+    );
+  });
+
+  it("rejects a routed message that isn't an internal host request", async () => {
+    await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
+      await expect(
+        instance.internalBrowser.onRoute({ source: undefined, payload: {} })
+      ).rejects.toThrow(/unknown routed message/);
     });
   });
 
@@ -152,7 +240,7 @@ describe("Browser internal hosts", () => {
         const key = `browser-session:${namedBrowserSessionKey("internal")}`;
         const stored = await state.storage.get<StoredBrowserSession>(key);
         expect(stored?.internalHosts).toBe(
-          "broken.internal=fetch,echo.internal=fetch"
+          "broken.internal=fetch,docs.internal=fetcher,echo.internal=fetch"
         );
         await state.storage.put(key, { ...stored, internalHosts: "old=fetch" });
 
@@ -162,8 +250,51 @@ describe("Browser internal hosts", () => {
           restarted: true
         });
         expect(instance.internalAcquired).toHaveLength(2);
+        expect(instance.internalBindingRequests).toContainEqual(
+          expect.objectContaining({
+            method: "DELETE",
+            url: expect.stringContaining(first.sessionId)
+          })
+        );
       }
     );
+  });
+});
+
+describe("InternalHostRouter", () => {
+  const props = {
+    v: 1 as const,
+    className: "TestBrowserAgent",
+    name: "x",
+    browser: "internal",
+    host: "echo.internal"
+  };
+
+  it("answers 502 without route props", async () => {
+    await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
+      for (const bad of [undefined, {}, { ...props, v: 2 as never }]) {
+        expect(
+          await instance.routerFetch(bad, "http://echo.internal/")
+        ).toEqual({
+          status: 502,
+          text: expect.stringContaining("called without route props")
+        });
+      }
+    });
+  });
+
+  it("answers 502 when the agent class isn't exported", async () => {
+    await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
+      expect(
+        await instance.routerFetch(
+          { ...props, className: "Nope" },
+          "http://echo.internal/"
+        )
+      ).toEqual({
+        status: 502,
+        text: 'echo.internal: the agent class "Nope" isn\'t exported from this Worker'
+      });
+    });
   });
 });
 

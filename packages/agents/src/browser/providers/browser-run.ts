@@ -67,6 +67,10 @@ export interface BrowserRunOptions {
    * instead of the internet. Plain http on port 80; no HTTPS or WebSockets.
    * Deployed Workers only: in local dev the browser starts without them.
    *
+   * Any http page open in the browser can send requests to these hosts, so
+   * a host whose requests have side effects should check `Origin` (see
+   * `InternalHost.fetch`).
+   *
    * @example
    * ```ts
    * browserRun(this.env.BROWSER, {
@@ -173,7 +177,7 @@ export function browserRunAdapter(
       } catch (error) {
         if (internalHosts && isDataCloneError(error)) {
           throw new Error(
-            "Browser Run couldn't take the internal hostname routes: a fetcher must be a service binding or an entrypoint of this Worker (this.ctx.exports.Name), not a Durable Object stub or a Dynamic Worker",
+            "Browser Run couldn't take the internal hostname routes: a fetcher must be a service binding or an entrypoint of this Worker (this.ctx.exports.Name), not a Dynamic Worker or another object it can't hold",
             { cause: error }
           );
         }

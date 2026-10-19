@@ -1,4 +1,4 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import type { BrowserBinding } from "../../browser/browser-run";
 import { Browser } from "../../browser/browser";
 import { browserRun } from "../../browser/providers/browser-run";
@@ -266,4 +266,16 @@ export class InternalHostsNoMethodObject extends DurableObject<Cloudflare.Env> {
   readonly browser = this.#internal.browser;
   readonly fetchThroughRoute = this.#internal.fetchThroughRoute;
   readonly lifecycle = Lifecycle.install(this).use(this.browser);
+}
+
+/**
+ * A Worker entrypoint served as a `fetcher` host. Echoes the path and the
+ * props it was called with, so tests can see how the route was made.
+ */
+export class InternalHostsDocsSite extends WorkerEntrypoint {
+  override fetch(request: Request): Response {
+    return new Response(
+      `docs ${new URL(request.url).pathname} props ${JSON.stringify(this.ctx.props)}`
+    );
+  }
 }

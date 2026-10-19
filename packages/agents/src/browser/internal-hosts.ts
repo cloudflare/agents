@@ -7,8 +7,9 @@
  * page can be served from a sandbox port or a workspace folder, without exposing anything publicly.
  *
  * How a request travels: Browser Run accepts only entrypoints of your own
- * Worker as routes, and keeps them for the whole browser session, across
- * redeploys. So every `fetch` host routes to {@link InternalHostRouter}, which
+ * Worker as routes, and keeps them for the whole browser session (observed
+ * across redeploys and Durable Object eviction; Browser Run doesn't document
+ * this yet). So every `fetch` host routes to {@link InternalHostRouter}, which
  * you export from your main module. Its props say which agent and browser
  * own the host, and nothing else. It calls the agent's `fetchInternalHost()`
  * over RPC, and the agent's `Browser` runs the host's `fetch`. `Agent` has
@@ -30,6 +31,15 @@ export interface InternalHost {
   description?: string;
   /**
    * Serves every browser request to this hostname. Runs in your agent.
+   *
+   * Any http page open in the browser can send requests here, not only
+   * pages on this host: a page on another internal hostname, or an http
+   * site the guardrails allow, can POST to `http://preview.internal`. Chrome
+   * doesn't send `Sec-Fetch-*` headers to http hosts, so if a request has
+   * side effects, check that its `Origin` is this host.
+   *
+   * If it throws, the browser gets a 502 and the error is logged, not shown
+   * to the page.
    */
   fetch: (request: Request) => Promise<Response>;
   fetcher?: never;
@@ -37,7 +47,7 @@ export interface InternalHost {
 
 /**
  * A host served by a deployed Worker directly, without going through your
- * agent: a service binding, or `this.ctx.exports.SomeEntrypoint(...)`. Not a
+ * agent: a service binding, or an entrypoint of your own Worker. Not a
  * Dynamic Worker or Durable Object stub — Browser Run can't hold those.
  */
 export interface InternalFetcherHost {
@@ -45,10 +55,15 @@ export interface InternalFetcherHost {
   description?: string;
   /**
    * The Worker that serves this hostname: a service binding, or an
-   * entrypoint of your own Worker (`this.ctx.exports.DocsSite`). Requests
-   * go straight to it, without waking your agent.
+   * entrypoint of your own Worker. Requests go straight to it, without
+   * waking your agent.
+   *
+   * An entrypoint passed as is (`this.ctx.exports.DocsSite`) is called with
+   * empty props; to give it props, call it yourself
+   * (`this.ctx.exports.DocsSite({ props })`). A Durable Object stub doesn't
+   * type-check: Browser Run accepts one, then resets every request.
    */
-  fetcher: Fetcher;
+  fetcher: Fetcher & { id?: never };
   fetch?: never;
 }
 
@@ -72,8 +87,8 @@ export interface InternalHostsOptions {
   router?: InternalHostRouterLoopback;
   /**
    * At most {@link MAX_INTERNAL_HOSTS} hostnames: bare and lowercase, no
-   * scheme, port, or path. Use a name that can't be a real site, like
-   * `preview.internal`.
+   * scheme, port, or path, ending in a suffix that can't be a real site:
+   * `.internal`, `.test`, `.example` or `.invalid`, like `preview.internal`.
    */
   hosts: Record<string, InternalHost | InternalFetcherHost>;
 }
@@ -84,15 +99,28 @@ export type AnyInternalHost = InternalHost | InternalFetcherHost;
 const HOSTNAME =
   /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 
+/**
+ * Suffixes reserved so they never resolve on the internet. A real domain
+ * would be served by the host over http but reach the real site over https
+ * (and Chrome tries https first), so internal hostnames must use one.
+ */
+const RESERVED_SUFFIXES = [".internal", ".test", ".example", ".invalid"];
+
 /** Why `host` can't be an internal hostname, or undefined when it can. */
 function hostnameProblem(host: string): string | undefined {
   if (host.includes("://")) return "drop the scheme";
   if (host.includes("/")) return "drop the path";
   if (host.includes(":")) return "drop the port (only port 80 is routed)";
   if (host !== host.toLowerCase()) return "use lowercase";
+  // HOSTNAME alone would accept this: its labels may be all digits.
   if (/^\d+(\.\d+){3}$/.test(host)) return "use a name, not an IP address";
-  if (host === "localhost") return "Chrome blocks localhost";
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    return "Chrome sends localhost to the browser's own machine";
+  }
   if (!HOSTNAME.test(host)) return "not a valid hostname";
+  if (!RESERVED_SUFFIXES.some((suffix) => host.endsWith(suffix))) {
+    return `use a name that can't be a real site: end it in ${RESERVED_SUFFIXES.join(", ")}`;
+  }
   return undefined;
 }
 
@@ -122,7 +150,7 @@ export function validateInternalHosts(options: InternalHostsOptions): void {
         `Internal hostname "${host}" needs exactly one of fetch or fetcher`
       );
     }
-    if (hasFetch && !options.router) {
+    if (hasFetch && typeof options.router !== "function") {
       throw new Error(
         `Internal hostname "${host}" uses fetch, which needs internalHosts.router: this.ctx.exports.InternalHostRouter (and \`export { InternalHostRouter } from "agents/browser"\` in your main module)`
       );
@@ -226,7 +254,12 @@ type OwnerNamespace = {
   getByName(name: string): InternalHostTarget;
 };
 
-/** Whether an RPC call failed because the agent has no `fetchInternalHost()`. */
+/**
+ * Whether an RPC call failed because the agent has no `fetchInternalHost()`.
+ * workerd says: `The RPC receiver does not implement the method
+ * "fetchInternalHost".` If that wording changes, the router falls back to its
+ * generic 502, which names the method too.
+ */
 function isMissingMethod(error: unknown): boolean {
   return (
     error instanceof Error &&
@@ -256,7 +289,15 @@ export class InternalHostRouter extends WorkerEntrypoint<
   InternalHostRouterProps
 > {
   override async fetch(request: Request): Promise<Response> {
-    const props = this.ctx.props;
+    const props = this.ctx.props as
+      | Partial<InternalHostRouterProps>
+      | undefined;
+    if (!isRouterProps(props)) {
+      return internalHostError(
+        502,
+        "InternalHostRouter was called without route props. Only Browser Run calls it, with the routes browserRun({ internalHosts }) gives it."
+      );
+    }
     const exports = (
       this.ctx as unknown as { exports?: Record<string, unknown> }
     ).exports;
@@ -285,10 +326,26 @@ export class InternalHostRouter extends WorkerEntrypoint<
           `${props.host}: ${props.className} has no fetchInternalHost() method. Agent has it built in; on a plain Durable Object add: fetchInternalHost(message) { return this.browser.fetchInternalHost(message); }`
         );
       }
+      console.error(
+        `[agents/browser] ${props.className} failed to serve ${props.host}`,
+        error
+      );
       return internalHostError(
         502,
-        `${props.host}: ${error instanceof Error ? error.message : String(error)}`
+        `${props.host}: the agent failed to serve this request`
       );
     }
   }
+}
+
+function isRouterProps(
+  props: Partial<InternalHostRouterProps> | undefined
+): props is InternalHostRouterProps {
+  return (
+    props?.v === 1 &&
+    typeof props.className === "string" &&
+    typeof props.name === "string" &&
+    typeof props.browser === "string" &&
+    typeof props.host === "string"
+  );
 }
