@@ -102,9 +102,11 @@ describe("pi session store", () => {
   });
 
   it("rejects a prefix Durable Objects reserve", async () => {
-    await expect(
-      openPiSessionStore({} as DurableObjectStorage, { prefix: "_cf_x" })
-    ).rejects.toThrow("_cf_");
+    for (const prefix of ["_cf_x", "_CF_x"]) {
+      await expect(
+        openPiSessionStore({} as DurableObjectStorage, { prefix })
+      ).rejects.toThrow("_cf_");
+    }
   });
 
   it("uses another prefix when asked", async () => {

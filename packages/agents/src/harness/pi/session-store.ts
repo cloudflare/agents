@@ -31,8 +31,8 @@ export function openPiSessionStore(
 ): Promise<SqliteStorage> {
   const prefix = options.prefix ?? DEFAULT_PREFIX;
   // pi validates the prefix as a SQLite identifier; Durable Objects also
-  // reserve `_cf_`, which pi does not know about.
-  if (prefix.startsWith("_cf_")) {
+  // reserve `_cf_` in any case, which pi does not know about.
+  if (prefix.toLowerCase().startsWith("_cf_")) {
     return Promise.reject(
       new Error("The pi session store prefix must not start with _cf_")
     );
