@@ -55,6 +55,7 @@ interface Host {
   passEnds(): Promise<Array<{ executionId: string; status: string }>>;
   enableShaping(): Promise<void>;
   trackConnectorReleases(): Promise<void>;
+  untrackConnectorReleases(): Promise<void>;
   connectorReleases(): Promise<number>;
   raceRejectDuringApprovedExecute(): Promise<{
     decisionKind: string;
@@ -929,21 +930,25 @@ describe("codemode durable runtime (e2e)", () => {
     await h.trackConnectorReleases();
 
     const runs = 12;
-    for (let i = 0; i < runs; i++) {
-      const out = (await h.run(
-        `async () => { items.hang({ x: "slow" }); return ${i}; }`
-      )) as ProxyToolOutput;
-      expect(out.status).toBe("completed");
-      if (out.status === "completed") expect(out.result).toBe(i);
-    }
+    try {
+      for (let i = 0; i < runs; i++) {
+        const out = (await h.run(
+          `async () => { items.hang({ x: "slow" }); return ${i}; }`
+        )) as ProxyToolOutput;
+        expect(out.status).toBe("completed");
+        if (out.status === "completed") expect(out.result).toBe(i);
+      }
 
-    // Every pass's connector target is released by its sandbox even though
-    // the host never settles the hanging calls.
-    const deadline = Date.now() + 3000;
-    while ((await h.connectorReleases()) < runs && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 25));
+      // Every pass's connector target is released by its sandbox even though
+      // the host never settles the hanging calls.
+      const deadline = Date.now() + 3000;
+      while ((await h.connectorReleases()) < runs && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(await h.connectorReleases()).toBe(runs);
+    } finally {
+      await h.untrackConnectorReleases();
     }
-    expect(await h.connectorReleases()).toBe(runs);
 
     // The terminal runs were still disposed exactly once each.
     const { disposed } = await h.lifecycle();

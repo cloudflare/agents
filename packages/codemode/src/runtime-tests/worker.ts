@@ -163,6 +163,7 @@ export class CodemodeTestHost extends DurableObject<Env> {
   // transformResult hook fires on both the initial run and a resume.
   #shape = false;
   #connectorReleases = 0;
+  #restoreDispose: (() => void) | undefined;
 
   #items() {
     this.#connector ??= new ItemsConnector(this.ctx, this.env);
@@ -189,14 +190,30 @@ export class CodemodeTestHost extends DurableObject<Env> {
    * Dynamic Worker concurrency slot) for the life of this Durable Object.
    */
   trackConnectorReleases() {
+    this.untrackConnectorReleases();
     this.#connectorReleases = 0;
     const onRelease = () => {
       this.#connectorReleases++;
     };
-    const proto = RpcTarget.prototype as unknown as Record<symbol, unknown>;
-    proto[Symbol.dispose] = function (this: RpcTarget) {
-      if (!(this instanceof ToolDispatcher)) onRelease();
+    const proto = RpcTarget.prototype;
+    const original = Object.getOwnPropertyDescriptor(proto, Symbol.dispose);
+    Object.defineProperty(proto, Symbol.dispose, {
+      configurable: true,
+      writable: true,
+      value: function (this: RpcTarget) {
+        if (!(this instanceof ToolDispatcher)) onRelease();
+      }
+    });
+    this.#restoreDispose = () => {
+      if (original) Object.defineProperty(proto, Symbol.dispose, original);
+      else delete (proto as unknown as Record<symbol, unknown>)[Symbol.dispose];
     };
+  }
+
+  /** Undo `trackConnectorReleases` so later tests see the stock prototype. */
+  untrackConnectorReleases() {
+    this.#restoreDispose?.();
+    this.#restoreDispose = undefined;
   }
 
   connectorReleases() {
