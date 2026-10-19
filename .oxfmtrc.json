@@ -9,6 +9,8 @@
     "site/agents/.astro",
     "**/routeTree.gen.ts",
     "**/think.d.ts",
-    "**/*.generated.ts"
+    "**/*.generated.ts",
+    ".gardener",
+    ".github/workflows/gardener-*.yml"
   ]
 }

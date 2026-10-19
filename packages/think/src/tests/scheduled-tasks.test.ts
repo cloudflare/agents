@@ -60,6 +60,11 @@ type ThinkScheduledTasksTestStub = {
       previousScheduledFor?: number;
     }
   ): Promise<number>;
+  countDateTimeFormatConstructionsForTest(
+    schedule: string,
+    nowIso: string,
+    timezone: string
+  ): Promise<number>;
   listDeclaredScheduledTaskRowsForTest(): Promise<
     DeclaredScheduledTaskRowForTest[]
   >;
@@ -281,6 +286,23 @@ describe("Think scheduled tasks", () => {
       { timezone: "Europe/London" }
     );
     expect(new Date(fallBack).toISOString()).toBe("2026-10-25T00:30:00.000Z");
+  });
+
+  it("reuses one date formatter per timezone when resolving wall-clock occurrences", async () => {
+    const agent = await freshAgent();
+    const countConstructions = () =>
+      agent.countDateTimeFormatConstructionsForTest(
+        "every week on mon,fri at 23:30",
+        "2026-01-01T12:00:00.000Z",
+        "America/New_York"
+      );
+
+    // The first call may build the cached formatter for this timezone.
+    await countConstructions();
+    // Resolving a local time scans a 28-hour window minute by minute. A
+    // formatter per step cost thousands of constructions per occurrence; now
+    // only timezone validation builds one.
+    expect(await countConstructions()).toBeLessThanOrEqual(2);
   });
 
   it("submits scheduled work idempotently and schedules the next occurrence", async () => {
