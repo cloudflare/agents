@@ -3,6 +3,7 @@
   "main": "worker.ts",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
+  "worker_loaders": [{ "binding": "LOADER" }],
   "durable_objects": {
     "bindings": [
       { "name": "PI_HARNESS_TEST", "class_name": "PiHarnessTestObject" }

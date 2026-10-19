@@ -20,7 +20,7 @@ import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
 import { setWakeTimingForTests } from "../harness";
 import { TEST_TIMING } from "./timing";
-import { fauxModels, NO_RETRY } from "./faux";
+import { fauxModels, TEST_SETTINGS } from "./faux";
 import {
   PiHarness,
   type PiOperationResult,
@@ -105,7 +105,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         {
           models: fauxModels(this.#faux.provider),
           registry: this.registry,
-          settings: { retry: NO_RETRY },
+          settings: TEST_SETTINGS,
           onReport: (error) => console.warn("pi report", error)
         },
         context
@@ -227,7 +227,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
         return {
-          content: [{ type: "text", text: `released after ${runs} runs` }]
+          output: [{ type: "text", text: `released after ${runs} runs` }]
         };
       }
     });
@@ -261,7 +261,7 @@ function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
     replay: "safe",
     async execute({ value }) {
       return {
-        content: [{ type: "text", text: String(value * 3) }],
+        output: [{ type: "text", text: String(value * 3) }],
         details: { result: value * 3 }
       };
     }
@@ -283,7 +283,8 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
         storage,
         {
           models: fauxModels(this.#faux.provider),
-          registry: createRegistry()
+          registry: createRegistry(),
+          settings: TEST_SETTINGS
         },
         context
       )

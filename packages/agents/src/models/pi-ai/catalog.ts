@@ -42,7 +42,7 @@ export type CloudflareAIApi = typeof CLOUDFLARE_AI_API;
 
 /**
  * The pi-ai provider id. A `Models` registry resolves specifiers as
- * `cloudflare/<id>`, e.g. `cloudflare/anthropic/claude-opus-4-8`.
+ * `cloudflare/<id>`, e.g. `cloudflare/anthropic/claude-opus-4.8`.
  *
  * @beta This surface is in beta and may change.
  */
@@ -252,10 +252,26 @@ function slugOf(entry: Model<Api>): string | undefined {
   return segments.at(-1);
 }
 
+/**
+ * The id AI Gateway's model catalog — `env.AI.run` — knows a registry entry
+ * by. pi-ai spells Claude ids as Anthropic does (`claude-opus-4-8`), because pi
+ * sends them through the gateway's Anthropic passthrough, while the catalog
+ * puts a dot between version numbers (`anthropic/claude-opus-4.8`) and answers
+ * `Model not found` to the dashed spelling. Checked against the live catalog
+ * for every entry in pi-ai 1.2: that dot is the only difference, and only
+ * Anthropic ids have it.
+ */
+function gatewayCatalogId(slug: string, id: string): string {
+  const catalogId =
+    slug === "anthropic" ? id.replace(/(\d)-(\d)(?!\d)/g, "$1.$2") : id;
+  return `${slug}/${catalogId}`;
+}
+
 let gatewayRegistry: Map<string, Model<Api>> | undefined;
 
 /**
- * pi-ai's generated Cloudflare AI Gateway registry, keyed by `<slug>/<id>`.
+ * pi-ai's generated Cloudflare AI Gateway registry, keyed by the id AI
+ * Gateway's catalog runs each entry under (see {@link gatewayCatalogId}).
  * `/compat` entries are skipped: they alias `@cf/` ids the Workers AI registry
  * already declares, and those belong on the run path.
  */
@@ -266,7 +282,7 @@ function buildGatewayRegistry(): Map<string, Model<Api>> {
   ) as Model<Api>[]) {
     const slug = slugOf(entry);
     if (slug === undefined || slug === "compat") continue;
-    map.set(`${slug}/${entry.id}`, entry);
+    map.set(gatewayCatalogId(slug, entry.id), entry);
   }
   return map;
 }

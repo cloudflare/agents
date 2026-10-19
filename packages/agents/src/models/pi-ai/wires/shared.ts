@@ -355,8 +355,8 @@ export function openAIVendorHeaders(): Record<string, string> {
 
 /**
  * The AI Gateway catalog id a model runs under on `/run`, when it has one: the
- * `<author>/<model>` specifier it was resolved from, which pi's gateway
- * catalog spells the gateway's way.
+ * `<author>/<model>` specifier it was resolved from, spelled as the gateway's
+ * catalog spells it (`anthropic/claude-opus-4.8`, not pi's `claude-opus-4-8`).
  */
 function catalogIdOf(model: Model<Api>): string | undefined {
   const specifier = specifierOf(model);

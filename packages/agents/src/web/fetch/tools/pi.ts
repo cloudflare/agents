@@ -103,7 +103,7 @@ export function webFetchTool(
       const run = await core.run(input, { signal: context.abortSignal });
       if (run.ok) {
         return {
-          content: [{ type: "text", text: run.text }],
+          output: [{ type: "text", text: run.text }],
           details: { ok: true, output: run.output }
         };
       }
@@ -119,7 +119,7 @@ export function webFetchTool(
         details.contentType = run.error.contentType;
       }
       return {
-        content: [{ type: "text", text: run.text }],
+        output: [{ type: "text", text: run.text }],
         isError: true,
         details
       };

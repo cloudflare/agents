@@ -131,7 +131,7 @@ export function createWorkspaceTools(
           { id: api.callId, name: tool.name, arguments: args },
           { abortSignal: context.abortSignal }
         );
-        return { content, isError };
+        return { output: content, isError };
       }
     };
   });

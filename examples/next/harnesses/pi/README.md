@@ -184,7 +184,7 @@ files, so cloning works while the module itself has no network.
 ## Package sources
 
 Pi comes from npm: `@earendil-works/pi-durable`, `pi-ai`, `chord` and
-`pi-telemetry` at `^1.0.0`. Pi is MIT licensed; see
+`pi-telemetry` at `~1.3.0`. Pi is MIT licensed; see
 [`licenses/mit-earendil-pi.txt`](./licenses/mit-earendil-pi.txt).
 
 `@cloudflare/computer` comes from npm at `^0.5.1`. 0.5 is the first release with
