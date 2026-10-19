@@ -20,7 +20,11 @@ import {
   type LifecycleJobContext,
   type LifecycleJobOutcome
 } from "../../lifecycle";
-import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "./context";
+import {
+  BACKGROUND_CONTEXT,
+  withAbortSignal,
+  type Context
+} from "@earendil-works/chord/context";
 import { openPiSessionStore } from "./session-store";
 import type {
   PiOperationResult,
