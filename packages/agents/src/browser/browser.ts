@@ -96,12 +96,13 @@ function browserScopeKeyPrefix(name: string): string {
 }
 
 /**
- * Where a browser's internal-host assignments live: one JSON object, keyed
- * by hostname. Length-prefixed like scope records. Kept apart from the
- * session record, so assignments survive the browser being replaced.
+ * Where a browser's internal-host targets live: one key per host, under a
+ * prefix per browser (length-prefixed like scope records, so one browser's
+ * prefix never matches another's). Kept apart from the session record, so
+ * targets survive the browser being replaced.
  */
-function internalHostAssignmentsKey(name: string): string {
-  return `browser:hosts:${name.length}:${name}`;
+function internalHostTargetsPrefix(name: string): string {
+  return `browser:hosts:${name.length}:${name}:`;
 }
 
 /** Where a {@link Browser} gets its browser from. */
@@ -507,12 +508,12 @@ export class Browser extends LifecycleCapability {
     return {
       describe,
       list: async () => {
-        const assigned = await this.#readAssignments();
-        return describe().map((info) =>
-          Object.hasOwn(assigned, info.host)
-            ? { ...info, target: assigned[info.host] }
-            : info
-        );
+        const prefix = internalHostTargetsPrefix(this.name);
+        const stored = await this.lifecycle.storage.list({ prefix });
+        return describe().map((info) => {
+          const key = prefix + info.host;
+          return stored.has(key) ? { ...info, target: stored.get(key) } : info;
+        });
       },
       assign: async (host, target) => {
         const schema = assignable(host);
@@ -527,12 +528,12 @@ export class Browser extends LifecycleCapability {
         if (!checked.ok) {
           throw new Error(`Invalid target for ${host}: ${checked.error}`);
         }
-        await this.#writeAssignment(host, json);
+        await this.lifecycle.storage.put(this.#targetKey(host), json);
         return { url: `http://${host}/` };
       },
       clear: async (host) => {
         assignable(host);
-        return this.#writeAssignment(host, undefined);
+        return this.lifecycle.storage.delete(this.#targetKey(host));
       }
     };
   }
@@ -587,15 +588,15 @@ export class Browser extends LifecycleCapability {
     }
     let target: unknown;
     if (entry.target !== undefined) {
-      const assigned = await this.#readAssignments();
-      if (!Object.hasOwn(assigned, host)) {
+      const assigned = await this.lifecycle.storage.get(this.#targetKey(host));
+      if (assigned === undefined) {
         return internalHostError(
           502,
           `${host} isn't pointed anywhere yet. Call browser.assignHost({ host: "${host}", target }) first.`
         );
       }
       // Validate again: the schema may have changed since the assignment.
-      const checked = await validateTarget(entry.target, assigned[host]);
+      const checked = await validateTarget(entry.target, assigned);
       if (!checked.ok) {
         return internalHostError(
           502,
@@ -646,32 +647,9 @@ export class Browser extends LifecycleCapability {
     };
   }
 
-  async #readAssignments(): Promise<Record<string, unknown>> {
-    return (
-      (await this.lifecycle.storage.get<Record<string, unknown>>(
-        internalHostAssignmentsKey(this.name)
-      )) ?? {}
-    );
-  }
-
-  /** Set (or with `undefined`, clear) one host's target. Returns whether it changed. */
-  async #writeAssignment(host: string, target: unknown): Promise<boolean> {
-    const key = internalHostAssignmentsKey(this.name);
-    const lock = await this.#sessionStore.acquireLock(key);
-    try {
-      const assigned = await this.#readAssignments();
-      const had = Object.hasOwn(assigned, host);
-      if (target === undefined) {
-        if (!had) return false;
-        delete assigned[host];
-      } else {
-        assigned[host] = target;
-      }
-      await this.lifecycle.storage.put(key, assigned);
-      return true;
-    } finally {
-      await lock.release();
-    }
+  /** The storage key of one host's target. */
+  #targetKey(host: string): string {
+    return internalHostTargetsPrefix(this.name) + host;
   }
 
   async #closeQuietly(sessionId: string): Promise<void> {

@@ -399,6 +399,23 @@ describe("Browser internal hosts on a plain Durable Object", () => {
     );
   });
 
+  it("stores a Standard Schema target as assigned and passes fetch the parsed value", async () => {
+    await runInDurableObject(
+      env.InternalHostsPlainObject.getByName(crypto.randomUUID()),
+      async (instance: InternalHostsPlainObject) => {
+        const hosts = instance.browser.internalHosts!;
+        await hosts.assign("port.internal", { port: "5173" });
+        const listed = await hosts.list();
+        expect(
+          listed.find((info) => info.host === "port.internal")?.target
+        ).toEqual({ port: "5173" });
+        expect(
+          await instance.fetchThroughRoute("http://port.internal/")
+        ).toEqual({ status: 200, text: "port 5173 (number)" });
+      }
+    );
+  });
+
   it("answers 502 when the message names another browser", async () => {
     await runInDurableObject(
       env.InternalHostsPlainObject.getByName(crypto.randomUUID()),

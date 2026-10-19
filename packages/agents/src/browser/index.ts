@@ -58,8 +58,6 @@ export {
   type InternalHostRouterProps,
   type InternalHostsOptions,
   type JsonSchemaObject,
-  type StandardJSONSchemaV1,
-  type StandardSchemaV1,
   type TargetOf,
   type TargetSchema,
   type TypedTargetSchema
