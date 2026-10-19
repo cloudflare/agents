@@ -39,10 +39,10 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/skills`                           | `src/skills/index.ts`                         | Framework-agnostic Agent Skills engine — sources, `SkillRegistry`, runner                                                                     |
 | `agents/experimental/webmcp`              | `src/experimental/webmcp.ts`                  | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`                                                                       |
 | `agents/browser`                          | `src/browser/index.ts`                        | Browser Run helpers — CDP sessions, connector, Quick Action primitives                                                                        |
-| `agents/browser/ai`                       | `src/browser/ai.ts`                           | AI SDK browser tools — `createBrowserTools` (CDP) + `createBrowserQuickActionTools`                                                           |
-| `agents/browser/ai-sdk`                   | `src/browser/tools/ai-sdk.ts`                 | AI SDK `createBrowserCDPTool` for a persistent `Browser` (+ `createBrowserQuickActionTools` re-export)                                        |
-| `agents/browser/tanstack-ai`              | `src/browser/tools/tanstack-ai.ts`            | TanStack AI `createBrowserCDPTool` for a persistent `Browser` (+ legacy `createBrowserTools`)                                                 |
-| `agents/browser/pi`                       | `src/browser/tools/pi.ts`                     | pi-durable `createBrowserCDPTool` for a persistent `Browser`                                                                                  |
+| `agents/browser/ai`                       | `src/browser/ai.ts`                           | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools`                                                                  |
+| `agents/browser/ai-sdk`                   | `src/browser/tools/ai-sdk.ts`                 | AI SDK `createBrowserTool` for a persistent `Browser` (+ `createQuickActionTools` re-export)                                                  |
+| `agents/browser/tanstack-ai`              | `src/browser/tools/tanstack-ai.ts`            | TanStack AI `createBrowserTool` for a persistent `Browser` (+ legacy `createBrowserTools`)                                                    |
+| `agents/browser/pi`                       | `src/browser/tools/pi.ts`                     | pi-durable `createBrowserTool` for a persistent `Browser`                                                                                     |
 | `agents/websearch`                        | `src/web/search/index.ts`                     | Web Search API sources (`createAIWebSearch`, `createHTTPWebSearch`), `WebSearchError`, renderer                                               |
 | `agents/websearch/pi`                     | `src/web/search/tools/pi.ts`                  | pi harness `webSearchTool`                                                                                                                    |
 | `agents/websearch/ai-sdk`                 | `src/web/search/tools/ai-sdk.ts`              | AI SDK `webSearchTool`                                                                                                                        |
@@ -191,11 +191,11 @@ src/
     live-view.ts        # Live View URL minting shared by Browser and BrowserConnector
     spec.ts             # CDP protocol spec loader (cdp.spec())
     quick-actions.ts    # Stateless Quick Action primitives (browserMarkdown, …)
-    ai.ts               # createBrowserTools + createBrowserQuickActionTools (AI SDK)
-    browser-tool.ts     # harness-neutral createBrowserCDPTool core shared by the tools/ adapters
+    ai.ts               # createBrowserTools + createQuickActionTools (AI SDK)
+    browser-tool.ts     # harness-neutral createBrowserTool core shared by the tools/ adapters
     tool-helpers.ts     # model-output + ctx helpers shared by ai.ts and the tools/ adapters
     tanstack-ai.ts      # legacy createBrowserTools for TanStack AI (re-exported by tools/tanstack-ai.ts)
-    tools/              # createBrowserCDPTool adapters for a persistent Browser: ai-sdk.ts, tanstack-ai.ts, pi.ts
+    tools/              # createBrowserTool adapters for a persistent Browser: ai-sdk.ts, tanstack-ai.ts, pi.ts
 
   web/                  # Tools that reach the public web
     url-policy.ts       # URL + host checks shared by web_fetch and Think's fetch tools

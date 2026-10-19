@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 /**
- * `createBrowserCDPTool` from `agents/browser/pi`, run by pi itself: pi validates
+ * `createBrowserTool` from `agents/browser/pi`, run by pi itself: pi validates
  * the call against the tool's schema, runs it as a durable task, and
  * stores the result, image included, in the transcript.
  */

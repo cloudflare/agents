@@ -1,5 +1,7 @@
 # Browser Quick Actions
 
+> **Deprecated:** the Quick Action helpers in `agents/browser` are deprecated and won't change. See [Quick Actions](../../docs/agents/browse-the-web.md#quick-actions-stateless-browsing) for what to use instead.
+
 Read the web with Browser Run [Quick Actions](https://developers.cloudflare.com/browser-run/quick-actions/) — stateless, one-shot browser tasks that need only the `BROWSER` binding (no Durable Object, Worker Loader, sandbox, or CDP session).
 
 Enter a URL and pick an action: render the page to **Markdown**, list its **Links**, **Extract** structured data with AI, capture a **Screenshot**, or **Ask AI** — which hands the same Quick Actions to a model (via Workers AI) as tools and lets it browse to answer your question.
@@ -36,12 +38,12 @@ export class QuickActionsAgent extends Agent<Env> {
 To let a model decide when to browse, use the AI SDK tools instead — this is what the **Ask AI** action does (see the `ask` method in `src/server.ts`):
 
 ```ts
-import { createBrowserQuickActionTools } from "agents/browser/ai";
+import { createQuickActionTools } from "agents/browser/ai";
 import { generateText, isStepCount } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
 const workersai = createWorkersAI({ binding: this.env.AI });
-const tools = createBrowserQuickActionTools({ browser: this.env.BROWSER });
+const tools = createQuickActionTools({ browser: this.env.BROWSER });
 // browser_markdown, browser_extract, browser_links, browser_scrape
 
 const { text } = await generateText({

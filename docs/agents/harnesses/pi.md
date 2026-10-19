@@ -127,11 +127,11 @@ The existing `@cloudflare/think` skills work out-of-the-box.
 
 ### Browser
 
-`createBrowserCDPTool` from `agents/browser/pi` gives the model a persistent browser it drives with the Chrome DevTools Protocol. Put a `Browser` on the object's Lifecycle and install the tool in an extension:
+`createBrowserTool` from `agents/browser/pi` gives the model a persistent browser it drives with the Chrome DevTools Protocol. Put a `Browser` on the object's Lifecycle and install the tool in an extension:
 
 ```ts
 import { Browser, browserRun } from "agents/browser";
-import { createBrowserCDPTool } from "agents/browser/pi";
+import { createBrowserTool } from "agents/browser/pi";
 
 readonly browser = new Browser({ provider: browserRun(this.env.BROWSER) });
 
@@ -139,7 +139,7 @@ harness: async ({ storage, context }) => {
   this.registry.install({
     name: "browser",
     tools: [
-      createBrowserCDPTool({ ctx: this.ctx, browser: this.browser, loader: this.env.LOADER })
+      createBrowserTool({ ctx: this.ctx, browser: this.browser, loader: this.env.LOADER })
     ]
   });
   return Harness.open(storage, { models, registry: this.registry }, context);

@@ -50,7 +50,7 @@ function browserToolModelResult(output: BrowserToolOutput): unknown {
  * Create a TanStack AI tool that lets the model drive a persistent browser
  * with JavaScript and the Chrome DevTools Protocol.
  *
- * Works like `createBrowserCDPTool` in `agents/browser/ai-sdk`: tabs, cookies, and
+ * Works like `createBrowserTool` in `agents/browser/ai-sdk`: tabs, cookies, and
  * logins carry over between runs, `sessionId: "active"` addresses the tab the
  * model last worked in, and a replaced browser is reported as
  * `restarted: true`. The tool is named `browser` unless you pass `name`.
@@ -62,7 +62,7 @@ function browserToolModelResult(output: BrowserToolOutput): unknown {
  * @example
  * ```ts
  * import { Browser, browserRun } from "agents/browser";
- * import { createBrowserCDPTool } from "agents/browser/tanstack-ai";
+ * import { createBrowserTool } from "agents/browser/tanstack-ai";
  * import { chat } from "@tanstack/ai";
  *
  * export class MyAgent extends Agent<Env> {
@@ -76,14 +76,14 @@ function browserToolModelResult(output: BrowserToolOutput): unknown {
  *   async onChatMessage() {
  *     const stream = chat({
  *       adapter,
- *       tools: [createBrowserCDPTool({ browser: this.browser, loader: this.env.LOADER })],
+ *       tools: [createBrowserTool({ browser: this.browser, loader: this.env.LOADER })],
  *       messages
  *     });
  *   }
  * }
  * ```
  */
-export function createBrowserCDPTool<TName extends string = "browser">(
+export function createBrowserTool<TName extends string = "browser">(
   options: TanStackBrowserToolOptions<TName>
 ) {
   const core = createBrowserToolCore(options, {
@@ -98,10 +98,10 @@ export function createBrowserCDPTool<TName extends string = "browser">(
 }
 
 /**
- * @deprecated Renamed to {@link createBrowserCDPTool}. This alias will be
+ * @deprecated Renamed to {@link createBrowserTool}. This alias will be
  * removed in a future release.
  */
-export const browserTool = createBrowserCDPTool;
+export const browserTool = createBrowserTool;
 
 export {
   createBrowserTools,

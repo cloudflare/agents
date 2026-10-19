@@ -11,7 +11,7 @@ import bundledSkills from "agents:skills";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
-import { createBrowserQuickActionTools } from "@cloudflare/think/tools/browser";
+import { createQuickActionTools } from "@cloudflare/think/tools/browser";
 import { createCompactFunction } from "agents/sessions";
 import { AgentSearchProvider, type ContextConfig } from "agents/context";
 import type {
@@ -225,7 +225,7 @@ When you learn something about the user or their project, save it to memory.`
       // elements. Complements the interactive `cdp.*` inside `execute` above —
       // the model picks Quick Actions for simple reads and `execute` for
       // multi-step automation. Shares the same `BROWSER` binding.
-      ...createBrowserQuickActionTools({ browser: this.env.BROWSER }),
+      ...createQuickActionTools({ browser: this.env.BROWSER }),
 
       getWeather: tool({
         description: "Get the current weather for a city",

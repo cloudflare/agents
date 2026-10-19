@@ -25,14 +25,13 @@ export type { BrowserNewTab, BrowserSource } from "../session-connector";
 
 // Stateless Quick Action tools, so one import covers both.
 export {
-  createBrowserQuickActionTools,
   createQuickActionTools,
   type CreateQuickActionToolsOptions,
   type QuickActionToolName
 } from "../ai";
 
 /**
- * The AI SDK tool {@link createBrowserCDPTool} returns. Assignable to the AI SDK's
+ * The AI SDK tool {@link createBrowserTool} returns. Assignable to the AI SDK's
  * `Tool`, and `execute` / `toModelOutput` are always present.
  */
 export interface BrowserTool {
@@ -61,7 +60,7 @@ export interface BrowserTool {
  * @example
  * ```ts
  * import { Browser, browserRun } from "agents/browser";
- * import { createBrowserCDPTool } from "agents/browser/ai-sdk";
+ * import { createBrowserTool } from "agents/browser/ai-sdk";
  *
  * export class MyAgent extends Agent<Env> {
  *   browser = new Browser({ provider: browserRun(this.env.BROWSER) });
@@ -73,14 +72,14 @@ export interface BrowserTool {
  *
  *   async onChatMessage() {
  *     const tools = {
- *       browser: createBrowserCDPTool({ browser: this.browser, loader: this.env.LOADER })
+ *       browser: createBrowserTool({ browser: this.browser, loader: this.env.LOADER })
  *     };
  *     // …pass `tools` to streamText / generateText
  *   }
  * }
  * ```
  */
-export function createBrowserCDPTool(options: BrowserToolOptions): BrowserTool {
+export function createBrowserTool(options: BrowserToolOptions): BrowserTool {
   const core = createBrowserToolCore(options, {
     screenshotHint:
       "To show a screenshot, return { type: 'browser_screenshot', mediaType, data } with data from Page.captureScreenshot and mediaType 'image/png', or 'image/jpeg' if you captured with format: 'jpeg'. The user sees the image; you get a short text summary."
@@ -95,7 +94,7 @@ export function createBrowserCDPTool(options: BrowserToolOptions): BrowserTool {
 }
 
 /**
- * @deprecated Renamed to {@link createBrowserCDPTool}. This alias will be
+ * @deprecated Renamed to {@link createBrowserTool}. This alias will be
  * removed in a future release.
  */
-export const browserTool = createBrowserCDPTool;
+export const browserTool = createBrowserTool;

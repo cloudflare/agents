@@ -1,6 +1,5 @@
 ---
 "agents": minor
-"@cloudflare/think": minor
 ---
 
-`browserTool` is renamed to `createBrowserCDPTool` in `agents/browser/ai-sdk`, `agents/browser/tanstack-ai` and `agents/browser/pi`, and `createQuickActionTools` is renamed to `createBrowserQuickActionTools` in `agents/browser/ai`, `agents/browser/ai-sdk` and `@cloudflare/think/tools/browser`. The old names still work as deprecated aliases.
+`browserTool` is renamed to `createBrowserTool` in `agents/browser/ai-sdk`, `agents/browser/tanstack-ai` and `agents/browser/pi`. `browserTool` still works as a deprecated alias. The Quick Action helpers (`createQuickActionTools`, `runQuickAction`, `browserMarkdown` and the rest) are deprecated and won't change.

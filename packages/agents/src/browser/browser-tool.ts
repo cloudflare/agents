@@ -1,5 +1,5 @@
 /**
- * The harness-neutral core of `createBrowserCDPTool`, shared by the adapters in
+ * The harness-neutral core of `createBrowserTool`, shared by the adapters in
  * `tools/` (`agents/browser/ai-sdk`, `agents/browser/tanstack-ai`,
  * `agents/browser/pi`).
  * Internal — not an entry point.
@@ -55,13 +55,13 @@ export interface BrowserToolOptions {
   ctx?: DurableObjectState;
 }
 
-/** The model's input to `createBrowserCDPTool`: JavaScript to run. */
+/** The model's input to `createBrowserTool`: JavaScript to run. */
 export interface BrowserToolInput {
   code: string;
 }
 
 /**
- * The result of one `createBrowserCDPTool` run: the codemode execution result,
+ * The result of one `createBrowserTool` run: the codemode execution result,
  * plus what happened to the browser.
  */
 export type BrowserToolOutput = ProxyToolOutput & {
@@ -160,7 +160,7 @@ export function browserReportNotes(output: BrowserToolOutput): string[] {
 }
 
 /**
- * Build the codemode runtime and connector for one `createBrowserCDPTool`, and wrap
+ * Build the codemode runtime and connector for one `createBrowserTool`, and wrap
  * `execute` so each result carries the browser report.
  *
  * Each scope gets its own connector (which knows its scope) on the same
@@ -177,7 +177,7 @@ export function createBrowserToolCore(
   const ctx = resolveCtx(options);
   if (!ctx) {
     throw new Error(
-      "createBrowserCDPTool requires a Durable Object 'ctx' — pass it explicitly, or call from within an Agent so it can be resolved via getCurrentAgent()"
+      "createBrowserTool requires a Durable Object 'ctx' — pass it explicitly, or call from within an Agent so it can be resolved via getCurrentAgent()"
     );
   }
 

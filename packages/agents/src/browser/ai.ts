@@ -105,7 +105,7 @@ export interface CreateBrowserToolsOptions {
   name?: string;
 
   /**
-   * Also expose stateless {@link createBrowserQuickActionTools | Quick Action} tools
+   * Also expose stateless {@link createQuickActionTools | Quick Action} tools
    * (`browser_markdown`, `browser_extract`, …) alongside the durable
    * `browser_execute` tool.
    *
@@ -195,7 +195,7 @@ function connectorOptions(
  * ```
  *
  * @deprecated Runs on `@cloudflare/codemode`, which is deprecated. Use
- * `createBrowserCDPTool`, or `createBrowserModule` from `@cloudflare/computer/modules/browser`
+ * `createBrowserTool`, or `createBrowserModule` from `@cloudflare/computer/modules/browser`
  * for a Computer Workspace. See https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md
  */
 export function createBrowserRuntime(
@@ -264,7 +264,7 @@ export function createBrowserRuntime(
     if (quickActionBrowser) {
       Object.assign(
         tools,
-        createBrowserQuickActionTools({
+        createQuickActionTools({
           browser: quickActionBrowser,
           actions: qa.actions,
           maxChars: qa.maxChars,
@@ -318,7 +318,7 @@ export function createBrowserRuntime(
  * ```
  *
  * @deprecated Runs on `@cloudflare/codemode`, which is deprecated. Use
- * `createBrowserCDPTool`, or `createBrowserModule` from `@cloudflare/computer/modules/browser`
+ * `createBrowserTool`, or `createBrowserModule` from `@cloudflare/computer/modules/browser`
  * for a Computer Workspace. See https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md
  */
 export function createBrowserTools(
@@ -327,7 +327,14 @@ export function createBrowserTools(
   return createBrowserRuntime(options).tools;
 }
 
-/** A Quick Action exposed as an AI SDK tool. */
+/**
+ * A Quick Action exposed as an AI SDK tool.
+ *
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
+ */
 export type QuickActionToolName =
   | "markdown"
   | "extract"
@@ -335,6 +342,12 @@ export type QuickActionToolName =
   | "scrape"
   | "content";
 
+/**
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
+ */
 export interface CreateQuickActionToolsOptions {
   /**
    * Browser Run binding with Quick Actions support (`env.BROWSER`). Requires a
@@ -464,13 +477,18 @@ function boundArray(value: unknown[], maxChars: number): unknown[] {
  *
  * @example
  * ```ts
- * import { createBrowserQuickActionTools } from "agents/browser/ai";
+ * import { createQuickActionTools } from "agents/browser/ai";
  *
- * const tools = createBrowserQuickActionTools({ browser: this.env.BROWSER });
+ * const tools = createQuickActionTools({ browser: this.env.BROWSER });
  * const result = await generateText({ model, tools, messages });
  * ```
+ *
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `createBrowserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
  */
-export function createBrowserQuickActionTools(
+export function createQuickActionTools(
   options: CreateQuickActionToolsOptions
 ): ToolSet {
   const { browser } = options;
@@ -592,9 +610,3 @@ export function createBrowserQuickActionTools(
 
   return tools;
 }
-
-/**
- * @deprecated Renamed to {@link createBrowserQuickActionTools}. This alias
- * will be removed in a future release.
- */
-export const createQuickActionTools = createBrowserQuickActionTools;

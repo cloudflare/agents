@@ -3,11 +3,11 @@ import { Agent } from "../../index.ts";
 import { Browser } from "../../browser/browser";
 import { browserRun } from "../../browser/providers/browser-run";
 import {
-  createBrowserCDPTool,
+  createBrowserTool,
   type BrowserTool
 } from "../../browser/tools/ai-sdk";
-import { createBrowserCDPTool as piBrowserTool } from "../../browser/tools/pi";
-import { createBrowserCDPTool as tanStackBrowserTool } from "../../browser/tools/tanstack-ai";
+import { createBrowserTool as piBrowserTool } from "../../browser/tools/pi";
+import { createBrowserTool as tanStackBrowserTool } from "../../browser/tools/tanstack-ai";
 import {
   createFakeBrowserBinding,
   type RecordedBrowserRequest
@@ -34,8 +34,8 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
   }
 
   /** The host wiring the docs show: one `Browser`, a tool built per turn. */
-  createBrowserCDPTool(scope?: string): BrowserTool {
-    return createBrowserCDPTool({
+  createBrowserTool(scope?: string): BrowserTool {
+    return createBrowserTool({
       ctx: this.ctx,
       browser: this.browser,
       loader: this.env.LOADER,

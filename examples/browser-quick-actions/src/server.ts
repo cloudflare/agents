@@ -5,7 +5,7 @@ import {
   browserMarkdown,
   browserScreenshot
 } from "agents/browser";
-import { createBrowserQuickActionTools } from "agents/browser/ai";
+import { createQuickActionTools } from "agents/browser/ai";
 import { generateText, isStepCount } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
@@ -61,7 +61,7 @@ export class QuickActionsAgent extends Agent<Env> {
 
   /**
    * The same Quick Actions, but exposed to a model as tools so it can decide
-   * which to call. `createBrowserQuickActionTools` turns the `BROWSER` binding into a
+   * which to call. `createQuickActionTools` turns the `BROWSER` binding into a
    * `browser_markdown` / `browser_extract` / `browser_links` / `browser_scrape`
    * tool set; the model reads the page and answers on its own.
    */
@@ -71,7 +71,7 @@ export class QuickActionsAgent extends Agent<Env> {
     question: string
   ): Promise<{ answer: string; toolsUsed: string[] }> {
     const workersai = createWorkersAI({ binding: this.env.AI });
-    const tools = createBrowserQuickActionTools({ browser: this.env.BROWSER });
+    const tools = createQuickActionTools({ browser: this.env.BROWSER });
 
     const result = await generateText({
       model: workersai("@cf/moonshotai/kimi-k2.7-code"),

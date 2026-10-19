@@ -2,7 +2,6 @@ import type { ToolSet } from "ai";
 import {
   createBrowserRuntime,
   createBrowserTools as createBrowserToolsForAi,
-  createBrowserQuickActionTools,
   createQuickActionTools,
   type BrowserRuntime,
   type CreateBrowserToolsOptions,
@@ -18,9 +17,8 @@ export {
 
 // Stateless Quick Action tools — re-exported so a Think agent can expose them
 // from `getTools()` with a single import, including the loader-free path
-// (`createBrowserQuickActionTools`) that needs only the `browser` binding.
+// (`createQuickActionTools`) that needs only the `browser` binding.
 export {
-  createBrowserQuickActionTools,
   createQuickActionTools,
   type CreateQuickActionToolsOptions,
   type QuickActionToolName
@@ -56,9 +54,9 @@ export {
  * `cdp.attachToTarget`, `cdp.spec`, …); executions are recorded for
  * abort-and-replay, and browser sessions are keyed by execution (they survive
  * pauses and, in `reuse`/`dynamic` modes, span executions) — plus the stateless
- * {@link createBrowserQuickActionTools | Quick Action} tools (`browser_markdown`,
+ * {@link createQuickActionTools | Quick Action} tools (`browser_markdown`,
  * `browser_extract`, …) by default whenever a `browser` binding is present.
- * Pass `quickActions: false` to omit them, or use `createBrowserQuickActionTools`
+ * Pass `quickActions: false` to omit them, or use `createQuickActionTools`
  * directly for the stateless tools alone (no Worker Loader required).
  *
  * Setup checklist:
