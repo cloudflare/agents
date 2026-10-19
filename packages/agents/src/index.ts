@@ -93,6 +93,7 @@ import {
 } from "./lifecycle/durable-object-lifecycle";
 import { abortWithoutAlarmRetry } from "./lifecycle/abort";
 import type { InternalHostMessage } from "./browser/internal-hosts";
+import { browserCapabilityId } from "./browser/capability-id";
 import type { LifecycleRouteAddress } from "./lifecycle/capability";
 import {
   getCurrentAgent as getCurrentLifecycleAgent,
@@ -3210,7 +3211,7 @@ export class Agent<
     // Routed by capability id rather than through the Browser itself, so
     // Agent doesn't bundle the browser code.
     return (await this.lifecycle.route({
-      capability: `browser:${message.browser}`,
+      capability: browserCapabilityId(message.browser),
       source: undefined,
       payload: message
     })) as Response;
