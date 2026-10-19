@@ -57,7 +57,7 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
       },
       "docs.internal": {
         // Passed as is: the SDK calls it to get a Fetcher.
-        fetcher: this.#exports.InternalHostsDocsSite as Fetcher
+        worker: this.#exports.InternalHostsDocsSite as Fetcher
       },
       "broken.internal": {
         fetch: async (): Promise<Response> => {

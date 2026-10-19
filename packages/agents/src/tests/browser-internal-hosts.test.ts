@@ -17,7 +17,7 @@ import {
 } from "../browser/browser-run";
 import { createFakeBrowserBinding } from "./capabilities/browser";
 import {
-  fetcherRoute,
+  workerRoute,
   MAX_INTERNAL_HOSTS,
   type InternalHostRouterLoopback
 } from "../browser/internal-hosts";
@@ -90,7 +90,7 @@ describe("browserRun internalHosts validation", () => {
     ).toThrow(/InternalHostRouter/);
   });
 
-  it("takes exactly one of fetch or fetcher", () => {
+  it("takes exactly one of fetch or worker", () => {
     expect(() =>
       browserRun(binding, {
         internalHosts: {
@@ -98,7 +98,7 @@ describe("browserRun internalHosts validation", () => {
           hosts: {
             "a.internal": {
               fetch,
-              fetcher: binding as unknown as Fetcher
+              worker: binding as unknown as Fetcher
             } as never
           }
         }
@@ -106,37 +106,37 @@ describe("browserRun internalHosts validation", () => {
     ).toThrow(/exactly one/);
   });
 
-  it("needs a router-free config for fetcher-only hosts", () => {
+  it("needs a router-free config for worker-only hosts", () => {
     expect(() =>
       browserRun(binding, {
         internalHosts: {
-          hosts: { "a.internal": { fetcher: binding as unknown as Fetcher } }
+          hosts: { "a.internal": { worker: binding as unknown as Fetcher } }
         }
       })
     ).not.toThrow();
   });
 });
 
-describe("fetcherRoute", () => {
+describe("workerRoute", () => {
   it("passes a service binding through", () => {
-    expect(fetcherRoute(binding as unknown as Fetcher)).toBe(binding);
+    expect(workerRoute(binding as unknown as Fetcher)).toBe(binding);
   });
 
   it("calls a ctx.exports entrypoint loopback to get a Fetcher", () => {
-    const fetcher = { fetch } as unknown as Fetcher;
+    const worker = { fetch } as unknown as Fetcher;
     const calls: unknown[] = [];
     const loopback = (init: unknown) => {
       calls.push(init);
-      return fetcher;
+      return worker;
     };
-    expect(fetcherRoute(loopback as unknown as Fetcher)).toBe(fetcher);
+    expect(workerRoute(loopback as unknown as Fetcher)).toBe(worker);
     expect(calls).toEqual([{ props: {} }]);
   });
 });
 
 describe("browserRun internalHosts acquire", () => {
   const owner = { className: "A", name: "a", browser: "b" };
-  const fetcher = { fetch } as unknown as Fetcher;
+  const worker = { fetch } as unknown as Fetcher;
 
   it("explains a route Browser Run can't hold", async () => {
     const failing = {
@@ -147,11 +147,11 @@ describe("browserRun internalHosts acquire", () => {
     } as BrowserBinding;
     const adapter = browserRunAdapter(
       browserRun(failing, {
-        internalHosts: { hosts: { "a.internal": { fetcher } } }
+        internalHosts: { hosts: { "a.internal": { worker } } }
       })
     );
     await expect(adapter.create({ owner })).rejects.toThrow(
-      /a fetcher must be a service binding or an entrypoint of this Worker/
+      /a worker host must be a service binding or an entrypoint of this Worker/
     );
   });
 
@@ -159,7 +159,7 @@ describe("browserRun internalHosts acquire", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const fake = createFakeBrowserBinding();
     const { sessionId } = await acquireBrowserSession(fake.browser, {
-      outboundByHost: { "a.internal": fetcher }
+      outboundByHost: { "a.internal": worker }
     });
     expect(sessionId).toBe("session-1");
     expect(fake.requests[0]?.body).not.toHaveProperty("outboundByHost");
@@ -200,7 +200,7 @@ describe("Browser internal hosts", () => {
     });
   });
 
-  it("serves a fetcher host from the Worker, calling a ctx.exports entrypoint", async () => {
+  it("serves a worker host from the Worker, calling a ctx.exports entrypoint", async () => {
     await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
       expect(
         await instance.internalHostFetch("http://docs.internal/guide")
@@ -240,7 +240,7 @@ describe("Browser internal hosts", () => {
         const key = `browser-session:${namedBrowserSessionKey("internal")}`;
         const stored = await state.storage.get<StoredBrowserSession>(key);
         expect(stored?.internalHosts).toBe(
-          "broken.internal=fetch,docs.internal=fetcher,echo.internal=fetch"
+          "broken.internal=fetch,docs.internal=worker,echo.internal=fetch"
         );
         await state.storage.put(key, { ...stored, internalHosts: "old=fetch" });
 

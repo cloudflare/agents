@@ -269,7 +269,7 @@ export class InternalHostsNoMethodObject extends DurableObject<Cloudflare.Env> {
 }
 
 /**
- * A Worker entrypoint served as a `fetcher` host. Echoes the path and the
+ * A Worker entrypoint served as a `worker` host. Echoes the path and the
  * props it was called with, so tests can see how the route was made.
  */
 export class InternalHostsDocsSite extends WorkerEntrypoint {
