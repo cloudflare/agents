@@ -79,7 +79,7 @@ new Agent({
 ```
 
 pi ships a generated Cloudflare AI Gateway registry, so that module also takes
-`ai("anthropic/claude-opus-4.8")` as a string — pi's catalog knowledge, not
+`ai("anthropic/claude-opus-4-8")` as a string — pi's catalog knowledge, not
 ours. The AI SDK module has no such registry and takes `@cf/` strings only.
 
 ## Run it
