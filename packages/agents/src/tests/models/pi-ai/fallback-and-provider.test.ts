@@ -401,6 +401,12 @@ describe("pi-ai: models and the provider", () => {
     expect(ids).toContain("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
     expect(ids).toContain("anthropic/claude-opus-4.8");
     expect(ids).toContain("openai/gpt-5.4");
+    // pi-ai spells Claude ids as Anthropic does (`claude-opus-4-8`); AI
+    // Gateway's catalog answers `Model not found` to that spelling on `/run`.
+    expect(ids).not.toContain("anthropic/claude-opus-4-8");
+    expect(
+      ids.filter((id) => id.startsWith("anthropic/") && /\d-\d/.test(id))
+    ).toEqual([]);
     // `/compat` entries alias Workers AI ids; they stay on the run path.
     expect(ids.some((id) => id.startsWith("workers-ai/"))).toBe(false);
     expect(

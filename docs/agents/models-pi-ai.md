@@ -219,8 +219,9 @@ then model, then `createAI` settings.
 | `openai/…` from pi's gateway catalog    | `openai-responses`   | `env.AI.run` → AI Gateway `/run`, Responses in and out    |
 | Any other model object                  | its own `api`        | the binding's `fetch` → AI Gateway's provider-native path |
 
-A model from pi's Cloudflare AI Gateway catalog runs on `env.AI.run` under its catalog id,
-which pi spells the gateway's way (`anthropic/claude-opus-4.8`). The body is pi-ai's own,
+A model from pi's Cloudflare AI Gateway catalog runs on `env.AI.run` under the gateway's
+catalog id (`anthropic/claude-opus-4.8`). pi-ai spells Claude ids as Anthropic does
+(`claude-opus-4-8`), so `agents` lists and resolves them with the catalog's dot instead. The body is pi-ai's own,
 built by pi-ai's converter for the model's `api`, and it is sent in that format: `/run`
 converts nothing, so the answer, streams included, is the shape pi-ai's stream processors
 read. `/run` picks the provider and bills through Unified Billing or a key stored on the
