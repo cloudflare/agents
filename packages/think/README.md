@@ -228,19 +228,8 @@ import { getWeather } from "ws:tools";
 export default async () => (await getWeather({ city: "Lisbon" })).text;
 ```
 
-To work in a Workspace another Durable Object owns, use `lazyWorkspace`:
-
-```ts
-import { getWorkspace } from "@cloudflare/computer";
-import { lazyWorkspace } from "@cloudflare/think";
-
-override workspace = lazyWorkspace(async () =>
-  getWorkspace(await this.parentAgent(Directory))
-);
-```
-
-Every Think agent can hand out its own Workspace the same way: `getWorkspace`
-calls the agent's `__getWorkspaceStub()` over RPC.
+Every Think agent can hand out its own Workspace: `getWorkspace(stub)` from
+`@cloudflare/computer` calls the agent's `__getWorkspaceStub()` over RPC.
 
 ## Agent Skills
 
@@ -384,7 +373,7 @@ Script execution requires a Worker Loader binding:
 
 | Export                                  | Description                                                   |
 | --------------------------------------- | ------------------------------------------------------------- |
-| `@cloudflare/think`                     | `Think`, `Session`, `lazyWorkspace` — main class + re-exports |
+| `@cloudflare/think`                     | `Think`, `Session` — main class + re-exports                  |
 | `agents/sessions`                       | `Sessions`, `Session`, `createCompactFunction`, attachments   |
 | `agents/context`                        | `ContextBlocks`, providers, `ContextConfig` — prompt assembly |
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |

@@ -104,23 +104,6 @@ Tools that need approval, and tools that run in the browser, are not exported: n
 
 `exec` offers every backend the Workspace has, and each backend describes itself to the model. To change a built-in tool, return a tool with the same name from `getTools()`; it replaces the built-in. To hide tools for a turn, return `activeTools` from `beforeTurn`.
 
-### A shared workspace
-
-To work in a Workspace another Durable Object owns, wrap `getWorkspace` in `lazyWorkspace`. The owner is only contacted when a turn first touches a file:
-
-```typescript
-import { getWorkspace } from "@cloudflare/computer";
-import { Think, lazyWorkspace } from "@cloudflare/think";
-
-export class Chat extends Think<Env> {
-  override workspace = lazyWorkspace(async () =>
-    getWorkspace(await this.parentAgent(Directory))
-  );
-}
-```
-
-Every Think agent can hand out its Workspace this way: `getWorkspace(stub)` calls the agent's `__getWorkspaceStub()` method over RPC. A lazy Workspace gets the file tools but no `exec`.
-
 ## Custom Tools
 
 Override `getTools()` to add your own tools. These are standard AI SDK `tool()` definitions with Zod schemas:
