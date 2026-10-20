@@ -332,11 +332,11 @@ a `compatibility` warning.
 The run path generates one image per call, so `maxImagesPerCall` is 1 and
 `generateImage` fans a larger `n` out into parallel calls.
 
-`@cf/deepgram/nova-3` and `@cf/deepgram/flux` are not supported: they want the
-audio as an object body (`audio: { body, contentType }`) that the JSON run path
-cannot carry, and every documented encoding of it answers `400` live. They
-throw a `CloudflareAIError` before any request is made, pointing at
-`@cf/openai/whisper-large-v3-turbo`.
+`@cf/deepgram/nova-3` takes its audio as a raw body (`audio: { body,
+contentType }`), and the provider sends it as one. Of the transcription options
+it takes `language`; the whisper-only ones come back in `warnings`.
+`@cf/deepgram/flux` takes websocket connections only, so it throws a
+`CloudflareAIError` before any request is made.
 
 ## Options
 
@@ -515,7 +515,7 @@ providerMetadata?.cloudflare;
 | Field         | Source header         | Notes                                          |
 | ------------- | --------------------- | ---------------------------------------------- |
 | `model`       | —                     | The leg that answered, after any fallback.     |
-| `gateway`     | —                     | The gateway id the request went through.       |
+| `gateway`     | —                     | The gateway id, when one handled the request.  |
 | `provider`    | —                     | The gateway provider slug, for a model object. |
 | `logId`       | `cf-aig-log-id`       | Falls back to the binding's last log id.       |
 | `eventId`     | `cf-aig-event-id`     | Correlates the requests of one gateway event.  |
@@ -525,7 +525,7 @@ providerMetadata?.cloudflare;
 | `cacheStatus` | `cf-aig-cache-status` | `HIT` / `MISS`.                                |
 | `step`        | `cf-aig-step`         | Which step of a gateway route answered.        |
 
-Every field except `model` and `gateway` is optional, and which ones arrive
+Every field except `model` is optional, and which ones arrive
 depends on the path and the call. Read the fields you find rather than assuming
 any particular one is there. `response.headers` and `response.modelId` are
 populated too.

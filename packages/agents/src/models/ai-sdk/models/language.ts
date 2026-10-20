@@ -53,8 +53,8 @@ import {
 export interface CloudflareMetadata {
   /** The model that actually answered — the fallback leg, when one was used. */
   model: string;
-  /** The gateway id the request went through. */
-  gateway: string;
+  /** The gateway id the request went through. Absent when none handled it. */
+  gateway?: string;
   /**
    * The gateway provider slug, for a vendor's model object sent to the
    * provider-native path. Absent for a model id.
@@ -106,7 +106,7 @@ function callHeaders(
  */
 export function cloudflareMetadata(
   model: string,
-  resolved: ResolvedOptions,
+  gateway: string | undefined,
   response: Response,
   transport: Transport,
   provider?: string
@@ -115,7 +115,7 @@ export function cloudflareMetadata(
   const rawStep = headers.get("cf-aig-step");
   const step = rawStep === null ? Number.NaN : Number(rawStep);
   const metadata: CloudflareMetadata = {
-    gateway: resolved.gateway.id,
+    ...(gateway === undefined ? {} : { gateway }),
     model,
     ...(provider === undefined ? {} : { provider }),
     ...(Number.isNaN(step) ? {} : { step })
@@ -320,7 +320,7 @@ export class CloudflareLanguageModel implements LanguageModelV4 {
           finishReason: generation.finishReason,
           providerMetadata: cloudflareMetadata(
             modelId,
-            resolved,
+            resolved.gateway.id,
             response,
             this.#config.transport
           ),
@@ -352,7 +352,7 @@ export class CloudflareLanguageModel implements LanguageModelV4 {
         const response = await this.#send(modelId, request, options, resolved);
         const providerMetadata = cloudflareMetadata(
           modelId,
-          resolved,
+          resolved.gateway.id,
           response,
           this.#config.transport
         );

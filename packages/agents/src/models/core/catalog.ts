@@ -244,20 +244,17 @@ export type CloudflareSpeechModelId =
   | (`@cf/${string}` & {});
 
 /**
- * Deepgram's recognition models want the audio as an object body
- * (`audio: { body, contentType }`) rather than as base64, which the JSON run
- * path cannot carry — every documented variant answered `400` live. They stay
- * out of the suggested arm, and the transcription model answers a clear error
- * for them.
+ * Deepgram's Flux takes websocket connections only. It stays out of the
+ * suggested arm, and the transcription model answers a clear error for it.
  */
-type UnsupportedTranscriptionId = "@cf/deepgram/nova-3" | "@cf/deepgram/flux";
+type UnsupportedTranscriptionId = "@cf/deepgram/flux";
 
 /**
  * A speech-recognition model id accepted by `ai.transcription()`.
  *
- * Deepgram's recognition models (`@cf/deepgram/nova-3`, `@cf/deepgram/flux`)
- * are deliberately not suggested: the run path rejects their documented input
- * shape, so this provider answers a clear error for them rather than a 400.
+ * Deepgram's Flux (`@cf/deepgram/flux`) is deliberately not suggested: it
+ * takes websocket connections only, so this provider answers a clear error
+ * for it rather than a 400.
  *
  * @experimental This surface is experimental and may change.
  */

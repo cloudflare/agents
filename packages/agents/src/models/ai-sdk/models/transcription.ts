@@ -1,11 +1,11 @@
 /**
  * Speech recognition over the Cloudflare run path.
  *
- * Whisper is the family that works here. `whisper-large-v3-turbo` takes the
- * audio as base64 (`{ audio: "<base64>" }`, verified live); the two older
- * whisper ids take it as an unsigned-byte array. Deepgram's recognition models
- * want an object body the JSON run path cannot carry, so they are refused with
- * a clear error rather than a platform `400`.
+ * `whisper-large-v3-turbo` takes the audio as base64 (`{ audio: "<base64>" }`,
+ * verified live); the two older whisper ids take it as an unsigned-byte array.
+ * Deepgram's Nova-3 takes it as a raw body (`audio: { body, contentType }`),
+ * which the transport sends as one, its other fields alongside. Flux takes
+ * websocket connections only, so it is refused with a clear error.
  */
 
 import type {
@@ -22,6 +22,7 @@ import {
   CloudflareModalityModel,
   toBase64,
   toBytes,
+  unsupported,
   type ModalityConfig,
   type ModalityRequest
 } from "./modality";
@@ -38,13 +39,14 @@ const BYTE_ARRAY_AUDIO = new Set([
 ]);
 
 /**
- * Deepgram's recognition models declare `audio: { body: object, contentType }`.
- * Every documented encoding of that shape answered `400 required properties at
- * '/audio' are 'body,contentType'` on the live run path, because `body` has to
- * be the audio object itself and JSON cannot carry it. Refuse early rather
- * than send a body known to fail.
+ * Models that declare `audio: { body, contentType }`. JSON cannot carry that
+ * body (base64 and byte arrays answer `400 required properties at '/audio' are
+ * 'body,contentType'`), so the audio travels as a raw body.
  */
-const UNSUPPORTED = new Set(["@cf/deepgram/nova-3", "@cf/deepgram/flux"]);
+const RAW_AUDIO = new Set(["@cf/deepgram/nova-3"]);
+
+/** Deepgram's Flux answers `only supports websocket connections` over HTTP. */
+const WEBSOCKET_ONLY = new Set(["@cf/deepgram/flux"]);
 
 /** Recognition knobs read from `providerOptions.cloudflare`. */
 interface TranscriptionOptions {
@@ -77,13 +79,43 @@ function transcriptionOptions(
   };
 }
 
-/** Builds the run-path body for one whisper leg. */
+/**
+ * Builds the request for a raw-audio model: the audio as a raw body, and
+ * `language` as a field. The whisper-only options have no equivalent there.
+ */
+function buildRawAudioRequest(
+  modelId: string,
+  options: TranscriptionModelV4CallOptions,
+  extra: TranscriptionOptions
+): ModalityRequest {
+  const warnings: SharedV4Warning[] = [];
+  for (const feature of [
+    "task",
+    "initialPrompt",
+    "prefix",
+    "vadFilter"
+  ] as const) {
+    if (extra[feature] !== undefined) {
+      warnings.push(unsupported(feature, `${modelId} has no ${feature}.`));
+    }
+  }
+  return {
+    audio: { bytes: toBytes(options.audio), contentType: options.mediaType },
+    input: extra.language === undefined ? {} : { language: extra.language },
+    warnings
+  };
+}
+
+/** Builds the run-path body for one leg. */
 export function buildTranscriptionRequest(
   modelId: string,
   options: TranscriptionModelV4CallOptions
 ): ModalityRequest {
   const warnings: SharedV4Warning[] = [];
   const extra = transcriptionOptions(options.providerOptions);
+  if (RAW_AUDIO.has(modelId)) {
+    return buildRawAudioRequest(modelId, options, extra);
+  }
   const input: Record<string, unknown> = BYTE_ARRAY_AUDIO.has(modelId)
     ? { audio: Array.from(toBytes(options.audio)) }
     : { audio: toBase64(options.audio) };
@@ -101,6 +133,68 @@ interface Segment {
   text: string;
   startSecond: number;
   endSecond: number;
+}
+
+/** What one transcription answer reads as, whichever family sent it. */
+interface Transcript {
+  text: string;
+  segments: Segment[];
+  language: string | undefined;
+  durationInSeconds: number | undefined;
+}
+
+/** Reads a timed `{ text|word, start, end }` entry as a segment. */
+function timed(entry: unknown, textKeys: string[]): Segment[] {
+  const item = record(entry);
+  if (item === undefined) return [];
+  const value = textKeys.map((key) => text(item[key])).find(Boolean);
+  if (value === undefined) return [];
+  return [
+    {
+      endSecond: count(item.end) ?? 0,
+      startSecond: count(item.start) ?? 0,
+      text: value
+    }
+  ];
+}
+
+/**
+ * Reads a Deepgram answer: `results.channels[0].alternatives[0]`. Its
+ * sentences are the segments when it sends paragraphs, and its words
+ * otherwise.
+ */
+function readDeepgram(body: Record<string, unknown>): Transcript {
+  const channel = record(array(record(body.results)?.channels)?.[0]);
+  const alternative = record(array(channel?.alternatives)?.[0]);
+  const paragraphs = array(record(alternative?.paragraphs)?.paragraphs) ?? [];
+  const sentences = paragraphs.flatMap(
+    (paragraph) => array(record(paragraph)?.sentences) ?? []
+  );
+  const segments =
+    sentences.length > 0
+      ? sentences.flatMap((sentence) => timed(sentence, ["text"]))
+      : (array(alternative?.words) ?? []).flatMap((word) =>
+          timed(word, ["punctuated_word", "word"])
+        );
+  return {
+    durationInSeconds: count(record(body.metadata)?.duration),
+    language:
+      text(array(alternative?.languages)?.[0]) ??
+      text(channel?.detected_language),
+    segments,
+    text: text(alternative?.transcript) ?? ""
+  };
+}
+
+/** Reads a whisper answer. */
+function readWhisper(body: Record<string, unknown>): Transcript {
+  const info = record(body.transcription_info);
+  return {
+    durationInSeconds: count(info?.duration),
+    language: text(info?.language),
+    segments: readSegments(body),
+    text: text(body.text) ?? ""
+  };
 }
 
 /**
@@ -163,13 +257,13 @@ export class CloudflareTranscriptionModel
       // Checked per leg, so an unsupported model is skipped without a request
       // and the next leg of a fallback chain still runs.
       build: (modelId) => {
-        if (UNSUPPORTED.has(modelId)) {
+        if (WEBSOCKET_ONLY.has(modelId)) {
           throw new CloudflareAIError({
             code: "bad-request",
             isRetryable: false,
             message:
-              `${modelId} takes the audio as an object body, which the JSON ` +
-              "run path cannot carry. Use @cf/openai/whisper-large-v3-turbo.",
+              `${modelId} takes websocket connections only. Use ` +
+              "@cf/deepgram/nova-3 or @cf/openai/whisper-large-v3-turbo.",
             model: modelId,
             requestBodyValues: undefined,
             url: this.endpoint
@@ -182,12 +276,14 @@ export class CloudflareTranscriptionModel
     });
 
     const body = record(answer.json) ?? {};
-    const info = record(body.transcription_info);
-    const language = text(info?.language);
-    const duration = count(info?.duration);
+    // The answer's shape decides how to read it, never the model id.
+    const transcript =
+      record(body.results) === undefined
+        ? readWhisper(body)
+        : readDeepgram(body);
     return {
-      durationInSeconds: duration,
-      language,
+      durationInSeconds: transcript.durationInSeconds,
+      language: transcript.language,
       providerMetadata: answer.providerMetadata as Record<string, JSONObject>,
       request: { body: JSON.stringify(answer.input) },
       response: {
@@ -196,8 +292,8 @@ export class CloudflareTranscriptionModel
         modelId: answer.modelId,
         timestamp: answer.timestamp
       },
-      segments: readSegments(body),
-      text: text(body.text) ?? "",
+      segments: transcript.segments,
+      text: transcript.text,
       warnings: answer.warnings
     };
   }

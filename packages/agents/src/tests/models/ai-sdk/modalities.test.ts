@@ -9,6 +9,51 @@ const AURA = "@cf/deepgram/aura-1";
 const MELOTTS = "@cf/myshell-ai/melotts";
 const WHISPER = "@cf/openai/whisper-large-v3-turbo";
 const WHISPER_TINY = "@cf/openai/whisper-tiny-en";
+const NOVA_3 = "@cf/deepgram/nova-3";
+const DEEPGRAM_FLUX = "@cf/deepgram/flux";
+
+/** A live Nova-3 answer with `smart_format`, trimmed to two words. */
+const nova3Body = {
+  results: {
+    channels: [
+      {
+        alternatives: [
+          {
+            confidence: 0.98,
+            languages: ["en"],
+            paragraphs: {
+              paragraphs: [
+                {
+                  end: 2.96,
+                  sentences: [
+                    { end: 2.96, start: 1.04, text: "Hello from Lisbon." }
+                  ],
+                  start: 1.04
+                }
+              ],
+              transcript: "\nHello from Lisbon."
+            },
+            transcript: "Hello from Lisbon.",
+            words: [
+              {
+                end: 1.36,
+                punctuated_word: "Hello",
+                start: 1.04,
+                word: "hello"
+              },
+              {
+                end: 2.96,
+                punctuated_word: "Lisbon.",
+                start: 1.6,
+                word: "lisbon"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+};
 const RERANKER = "@cf/baai/bge-reranker-base";
 
 /** The first bytes of a JPEG, as flux-1-schnell's base64 starts. */
@@ -501,27 +546,120 @@ describe("transcription", () => {
     });
   });
 
-  it("refuses Deepgram recognition models without calling the run path", async () => {
+  it("sends Nova-3 its audio as a raw body, straight to Workers AI", async () => {
+    const binding = fakeBinding(() => jsonResponse(nova3Body));
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai.transcription(NOVA_3).doGenerate({
+      audio: new Uint8Array([0, 1, 2]),
+      mediaType: "audio/mpeg",
+      providerOptions: { cloudflare: { language: "en" } }
+    });
+
+    const call = binding.calls[0];
+    const audio = call.input.audio as {
+      body: ReadableStream;
+      contentType: string;
+    };
+    expect(audio.contentType).toBe("audio/mpeg");
+    expect(
+      new Uint8Array(await new Response(audio.body).arrayBuffer())
+    ).toEqual(new Uint8Array([0, 1, 2]));
+    expect(call.input.language).toBe("en");
+    // AI Gateway refuses a stream body, so the call names no gateway.
+    expect(call.options).not.toHaveProperty("gateway");
+    expect(result.text).toBe("Hello from Lisbon.");
+    expect(result.language).toBe("en");
+    expect(result.segments).toEqual([
+      { endSecond: 2.96, startSecond: 1.04, text: "Hello from Lisbon." }
+    ]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("shows Nova-3's audio in the request body, and names no gateway", async () => {
+    const binding = fakeBinding(() => jsonResponse(nova3Body));
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai.transcription(NOVA_3).doGenerate({
+      audio: new Uint8Array([0, 1, 2]),
+      mediaType: "audio/mpeg"
+    });
+
+    expect(JSON.parse(String(result.request?.body))).toEqual({
+      audio: { body: "AAEC", contentType: "audio/mpeg" }
+    });
+    expect(result.providerMetadata?.cloudflare).not.toHaveProperty("gateway");
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("warns that gateway options do not apply to Nova-3 when any are set", async () => {
+    const binding = fakeBinding(() => jsonResponse(nova3Body));
+    const ai = createAI({ binding: asAi(binding), cacheTtl: 60, id: "prod" });
+    const result = await ai
+      .transcription(NOVA_3)
+      .doGenerate({ audio: "AAEC", mediaType: "audio/mpeg" });
+
+    expect(result.warnings).toEqual([
+      expect.objectContaining({ feature: "gateway", type: "unsupported" })
+    ]);
+  });
+
+  it("reads Nova-3's words as segments when it sends no paragraphs", async () => {
+    const { paragraphs: _paragraphs, ...alternative } =
+      nova3Body.results.channels[0].alternatives[0];
+    const binding = fakeBinding(() =>
+      jsonResponse({ results: { channels: [{ alternatives: [alternative] }] } })
+    );
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai
+      .transcription(NOVA_3)
+      .doGenerate({ audio: "AAEC", mediaType: "audio/mpeg" });
+
+    expect(result.segments).toEqual([
+      { endSecond: 1.36, startSecond: 1.04, text: "Hello" },
+      { endSecond: 2.96, startSecond: 1.6, text: "Lisbon." }
+    ]);
+  });
+
+  it("warns for the whisper options Nova-3 has no equivalent for", async () => {
+    const binding = fakeBinding(() => jsonResponse(nova3Body));
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai.transcription(NOVA_3).doGenerate({
+      audio: "AAEC",
+      mediaType: "audio/mpeg",
+      providerOptions: { cloudflare: { prefix: "Note:", task: "translate" } }
+    });
+
+    expect(
+      result.warnings.map((warning) =>
+        "feature" in warning ? warning.feature : undefined
+      )
+    ).toEqual(["task", "prefix"]);
+    expect(binding.calls[0].input).not.toHaveProperty("task");
+  });
+
+  // TODO: AI Gateway refuses a raw audio body today (the binding throws "AI
+  // Gateway does not support ReadableStreams yet" when `gateway` is set, and
+  // the REST API answers 500). Turn this on once it takes one.
+  it.todo("sends Nova-3 through the gateway, with its options");
+
+  it("refuses Flux, which takes websockets only, without calling the run path", async () => {
     const binding = fakeBinding(() => jsonResponse(whisperBody));
     const ai = createAI({ binding: asAi(binding) });
     const error = await Promise.resolve(
       ai
-        .transcription("@cf/deepgram/nova-3")
+        .transcription(DEEPGRAM_FLUX)
         .doGenerate({ audio: "AAEC", mediaType: "audio/mpeg" })
     ).catch((thrown: unknown) => thrown);
 
     expect(error).toBeInstanceOf(CloudflareAIError);
-    expect((error as CloudflareAIError).message).toContain(
-      "@cf/openai/whisper-large-v3-turbo"
-    );
+    expect((error as CloudflareAIError).message).toContain("websocket");
     expect(binding.calls).toHaveLength(0);
   });
 
-  it("falls back past an unsupported Deepgram model without calling it", async () => {
+  it("falls back past Flux without calling it", async () => {
     const binding = fakeBinding(() => jsonResponse(whisperBody));
     const ai = createAI({ binding: asAi(binding) });
     const result = await ai
-      .transcription("@cf/deepgram/nova-3", { fallback: [WHISPER] })
+      .transcription(DEEPGRAM_FLUX, { fallback: [WHISPER] })
       .doGenerate({ audio: "AAEC", mediaType: "audio/mpeg" });
 
     expect(binding.calls.map((call) => call.model)).toEqual([WHISPER]);

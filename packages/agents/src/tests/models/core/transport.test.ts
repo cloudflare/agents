@@ -182,6 +182,27 @@ describe("core transport - the run path", () => {
     expect(runs[0]?.options.gateway).toEqual({ id: "prod" });
   });
 
+  it("sends a raw audio body as a stream, without a gateway", async () => {
+    const { binding, runs } = fakeBinding(() => new Response("{}"));
+    await createTransport({ binding }).run({
+      audio: { bytes: new Uint8Array([0, 1, 2]), contentType: "audio/mpeg" },
+      gateway: { cacheTtl: 60, id: "prod" },
+      headers: {},
+      input: { language: "en" },
+      model: "@cf/deepgram/nova-3"
+    });
+    const input = runs[0]?.input as {
+      audio: { body: ReadableStream; contentType: string };
+      language: string;
+    };
+    expect(input.language).toBe("en");
+    expect(input.audio.contentType).toBe("audio/mpeg");
+    expect(
+      new Uint8Array(await new Response(input.audio.body).arrayBuffer())
+    ).toEqual(new Uint8Array([0, 1, 2]));
+    expect(runs[0]?.options).not.toHaveProperty("gateway");
+  });
+
   it("leaves a Workers AI request to Workers AI", async () => {
     const { binding, runs } = fakeBinding(() => new Response("{}"));
     await createTransport({ binding }).run({
@@ -337,6 +358,34 @@ describe("core transport - the run path over HTTP", () => {
         model: "anthropic/claude-opus-4.8"
       })
     ).rejects.toBeInstanceOf(CloudflareAIError);
+  });
+
+  it("sends a raw audio body to Workers AI's run route, the other fields as query parameters", async () => {
+    const calls = stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({ result: { results: {} }, success: true }),
+          {
+            headers: { "content-type": "application/json" }
+          }
+        )
+    );
+    const response = await createTransport(ACCOUNT).run({
+      audio: { bytes: new Uint8Array([0, 1, 2]), contentType: "audio/mpeg" },
+      gateway: { cacheTtl: 60, id: "prod" },
+      headers: {},
+      input: { language: "en" },
+      model: "@cf/deepgram/nova-3"
+    });
+    expect(calls[0]?.url).toBe(
+      "https://api.cloudflare.com/client/v4/accounts/acct-1/ai/run/@cf/deepgram/nova-3?language=en"
+    );
+    expect(calls[0]?.init.body).toEqual(new Uint8Array([0, 1, 2]));
+    expect(headersOf(calls[0])).toEqual({
+      authorization: "Bearer token-1",
+      "content-type": "audio/mpeg"
+    });
+    expect(await response.json()).toEqual({ results: {} });
   });
 
   // TODO: the public resume route (`gateway.ai.cloudflare.com/v1/{account}/

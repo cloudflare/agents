@@ -12,10 +12,13 @@ import type {
 } from "@ai-sdk/provider";
 import { CloudflareAIError, requireWorkersAIId } from "../errors";
 import {
+  DEFAULT_GATEWAY_ID,
   parseModalityCallOptions,
   resolveOptions,
-  type ModelOptions
+  type ModelOptions,
+  type ResolvedGateway
 } from "../settings";
+import type { RawAudio } from "../../core/transport";
 import {
   definedHeaders,
   errorFromResponse,
@@ -25,7 +28,9 @@ import {
 import { withFallback } from "./fallback";
 import { cloudflareMetadata, type LanguageModelConfig } from "./language";
 
-export { toBase64 } from "../wires/shared";
+import { toBase64 } from "../wires/shared";
+
+export { toBase64 };
 
 /** Everything a non-language model needs from the provider that created it. */
 export type ModalityConfig = LanguageModelConfig;
@@ -33,6 +38,8 @@ export type ModalityConfig = LanguageModelConfig;
 /** A run-path body plus whatever the conversion had to drop. */
 export interface ModalityRequest {
   input: Record<string, unknown>;
+  /** Audio sent as a raw body, for a model that takes one. */
+  audio?: RawAudio;
   warnings: SharedV4Warning[];
 }
 
@@ -74,6 +81,12 @@ export interface ModalityAnswer {
   timestamp: Date;
   /** The endpoint that answered, for error reporting. */
   url: string;
+}
+
+/** Whether the caller set any gateway option, the id included. */
+function gatewayConfigured(gateway: ResolvedGateway): boolean {
+  const { id, ...options } = gateway;
+  return id !== DEFAULT_GATEWAY_ID || Object.keys(options).length > 0;
 }
 
 /** The `unsupported` warning shape, which every modality needs. */
@@ -151,7 +164,31 @@ export abstract class CloudflareModalityModel {
       transport.url,
       async (modelId) => {
         const request = call.build(modelId);
+        // A raw audio body goes to Workers AI directly (see the transport),
+        // so no gateway handles it and the gateway options do not apply.
+        const direct = request.audio !== undefined;
+        const sent =
+          request.audio === undefined
+            ? request.input
+            : {
+                ...request.input,
+                audio: {
+                  body: toBase64(request.audio.bytes),
+                  contentType: request.audio.contentType
+                }
+              };
+        const warnings =
+          direct && gatewayConfigured(resolved.gateway)
+            ? [
+                ...request.warnings,
+                unsupported(
+                  "gateway",
+                  `${modelId} goes to Workers AI directly, so the gateway options do not apply.`
+                )
+              ]
+            : request.warnings;
         const response = await transport.run({
+          ...(request.audio === undefined ? {} : { audio: request.audio }),
           gateway: resolved.gateway,
           headers: {
             // The AI SDK types these as `string | undefined`; an undefined
@@ -169,7 +206,7 @@ export abstract class CloudflareModalityModel {
         if (!response.ok) {
           throw await errorFromResponse(response, {
             model: modelId,
-            requestBodyValues: request.input,
+            requestBodyValues: sent,
             url: transport.url
           });
         }
@@ -178,26 +215,21 @@ export abstract class CloudflareModalityModel {
           .split(";")[0]
           .trim()
           .toLowerCase();
-        const body = await this.#decode(
-          response,
-          modelId,
-          request.input,
-          mediaType
-        );
+        const body = await this.#decode(response, modelId, sent, mediaType);
         const answer: ModalityAnswer = {
           headers: headersToObject(response.headers),
-          input: request.input,
+          input: sent,
           mediaType,
           modelId,
           providerMetadata: cloudflareMetadata(
             modelId,
-            resolved,
+            direct ? undefined : resolved.gateway.id,
             response,
             transport
           ),
           timestamp: new Date(),
           url: transport.url,
-          warnings: request.warnings,
+          warnings,
           ...body
         };
         call.check?.(answer);
