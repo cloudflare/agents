@@ -1,5 +1,7 @@
 # codemode-mcp
 
+> **Legacy, with no replacement.** `codeMcpServer` is part of the feature-frozen Code Mode API. See [The legacy Code Mode API](https://github.com/cloudflare/agents/blob/main/docs/codemode/legacy.md).
+
 Demonstrates how to wrap any MCP server with `codeMcpServer` so an LLM gets a single `code` tool instead of a long list of individual tools.
 
 > `@cloudflare/codemode` currently produces an MCP SDK v1 server, so this example intentionally uses the retained `createLegacyMcpHandler` API. Migrating Codemode's in-memory client/server bridge to SDK v2 is separate work.
@@ -70,4 +72,4 @@ async () => {
 ## Related
 
 - [codemode-mcp-openapi](../codemode-mcp-openapi/) — same pattern but driven from an OpenAPI spec
-- [`@cloudflare/codemode` docs](../../packages/codemode/README.md)
+- [Legacy Code Mode API reference](../../docs/codemode/legacy-reference.md)

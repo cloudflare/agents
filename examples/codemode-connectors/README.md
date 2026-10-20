@@ -1,5 +1,7 @@
 # Codemode Connectors Example
 
+> **Legacy.** Connectors are part of the feature-frozen Code Mode API. In new code, a connector is a host module (`ws:<name>`) on `WorkerJavaScriptBackend`. See [The legacy Code Mode API](https://github.com/cloudflare/agents/blob/main/docs/codemode/legacy.md).
+
 This example shows how to build class-based codemode connectors that expose external services inside a sandboxed code execution environment.
 
 The model gets one tool (`codemode`) that executes TypeScript. Inside the sandbox, connector SDKs and a platform discovery SDK are available as globals:

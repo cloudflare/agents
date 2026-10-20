@@ -1,5 +1,7 @@
 # Runtime
 
+> **Legacy, feature-frozen.** The durable runtime keeps working and won't change, but it is no longer maintained. `WorkerJavaScriptBackend` has no durable approvals yet. See [The legacy Code Mode API](./legacy.md#approvals).
+
 The **Executor** is a simple, stateless sandbox: it runs a block of code once and dispatches tool calls back. The **Runtime** wraps an executor and makes execution durable.
 
 **Why this exists:** approvals can take minutes or hours, and agents hibernate. A model may write a script that reads data, asks to create an issue, and continues after the user approves — possibly in a different request, after the Durable Object restarted. That needs durable state, which cannot live in the executor or in a single request. The runtime is where it lives.

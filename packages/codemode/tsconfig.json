@@ -1,4 +1,8 @@
 {
   "extends": "agents/tsconfig",
-  "exclude": ["src/tests/**/*.ts", "src/e2e/**/*.ts"]
+  "exclude": [
+    "src/tests/**/*.ts",
+    "src/legacy/tests/**/*.ts",
+    "src/e2e/**/*.ts"
+  ]
 }

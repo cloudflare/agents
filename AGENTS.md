@@ -11,7 +11,7 @@ packages/          # Published npm packages (need changesets for changes)
   agents/          # Core SDK (see packages/agents/AGENTS.md)
   ai-chat/         # @cloudflare/ai-chat — higher-level AI chat agent
   hono-agents/     # Hono framework integration
-  codemode/        # @cloudflare/codemode — experimental code generation
+  codemode/        # @cloudflare/codemode — WorkerJavaScriptBackend, plus the frozen legacy API in src/legacy
 
 examples/          # Self-contained demo apps (see examples/AGENTS.md)
   playground/      # Main showcase app — all SDK features in one UI (uses Kumo design system)
@@ -173,6 +173,7 @@ CI runs on every PR (`pnpm install --frozen-lockfile && pnpm run build && pnpm r
 ## Learned Workspace Facts
 
 - `packages/shell/` (`@cloudflare/shell`) is deprecated. Agent workspaces are a `Workspace` from `@cloudflare/computer` (github.com/cloudflare/computer); do not add new uses of Shell.
+- `packages/codemode/` (`@cloudflare/codemode`) exports `WorkerJavaScriptBackend`, which `@cloudflare/computer` builds on. Everything in `packages/codemode/src/legacy` is the feature-frozen Code Mode API: don't change it or add new uses. Code a model writes runs through `exec` on a Computer `Workspace` and imports the agent's tools from `ws:tools`.
 - Think's `workspace` is a Computer `Workspace`. Its workspace tools are Computer's `createAITools`, called with no options; execution backends and their modules are configured on the `Workspace`. Do not add Think options for them.
 
 ## Learned User Preferences
