@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-`PiHarness` `submit()` and `steer()` take pi-durable's `entry` option, so a host can place input the user did not type as an entry of its own kind. See [Pi harness](https://developers.cloudflare.com/agents/harnesses/pi/#work-with-sessions).
+`PiHarness` `submit()` and `steer()` now accept pi-durable's `entry` option, which labels an input with a transcript kind of your own (for example `app.approval`) instead of `pi.user`. Before, the harness had no way to pass it. See [Label input the user did not type](https://developers.cloudflare.com/agents/harnesses/pi/#label-input-the-user-did-not-type).
