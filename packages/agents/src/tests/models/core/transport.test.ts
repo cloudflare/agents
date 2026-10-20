@@ -404,7 +404,7 @@ describe("core transport - provider-native requests over HTTP", () => {
     }).body;
     await createTransport(ACCOUNT).native(nativeRequest({ body }));
     expect(calls[0]?.init.body).toBe(body);
-    expect((calls[0]?.init as { duplex?: string }).duplex).toBe("half");
+    expect((calls[0]!.init as { duplex?: string }).duplex).toBe("half");
   });
 
   it("returns the vendor's own error response untouched", async () => {
