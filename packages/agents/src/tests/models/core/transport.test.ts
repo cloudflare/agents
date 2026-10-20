@@ -396,6 +396,17 @@ describe("core transport - provider-native requests over HTTP", () => {
     );
   });
 
+  it("streams a stream body, half-duplex as Node's fetch requires", async () => {
+    const calls = stubFetch(() => new Response(VENDOR_BODY));
+    const body = new Request("https://example.com", {
+      body: "{}",
+      method: "POST"
+    }).body;
+    await createTransport(ACCOUNT).native(nativeRequest({ body }));
+    expect(calls[0]?.init.body).toBe(body);
+    expect((calls[0]?.init as { duplex?: string }).duplex).toBe("half");
+  });
+
   it("returns the vendor's own error response untouched", async () => {
     stubFetch(() => new Response('{"type":"error"}', { status: 429 }));
     const response = await createTransport(ACCOUNT).native(nativeRequest());

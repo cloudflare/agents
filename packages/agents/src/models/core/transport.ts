@@ -679,6 +679,11 @@ function httpTransport({ accountId, apiToken }: AccountAccess): Transport {
       try {
         return await fetch(url, {
           body: request.body ?? null,
+          // A stream body needs `duplex: "half"` in Node's fetch, which
+          // rejects the request without it. workerd accepts it too.
+          ...(request.body instanceof ReadableStream
+            ? ({ duplex: "half" } as RequestInit)
+            : {}),
           headers: withCredential(
             { ...request.headers, ...gatewayHeaders(request.gateway) },
             "cf-aig-authorization",

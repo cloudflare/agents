@@ -233,12 +233,12 @@ then model, then `createAI` settings.
 
 ## How a request travels
 
-| Model                                   | `api`                | Transport                                                 |
-| --------------------------------------- | -------------------- | --------------------------------------------------------- |
-| `@cf/…`, `dynamic/…`                    | `cloudflare-ai`      | `env.AI.run` + Cloudflare's compat layer                  |
-| `anthropic/…` from pi's gateway catalog | `anthropic-messages` | `env.AI.run` → AI Gateway `/run`, Messages in and out     |
-| `openai/…` from pi's gateway catalog    | `openai-responses`   | `env.AI.run` → AI Gateway `/run`, Responses in and out    |
-| Any other model object                  | its own `api`        | the binding's `fetch` → AI Gateway's provider-native path |
+| Model                                   | `api`                | Through the binding                                       | With an account id and token                           |
+| --------------------------------------- | -------------------- | --------------------------------------------------------- | ------------------------------------------------------ |
+| `@cf/…`, `dynamic/…`                    | `cloudflare-ai`      | `env.AI.run` + Cloudflare's compat layer                  | the REST API + Cloudflare's compat layer               |
+| `anthropic/…` from pi's gateway catalog | `anthropic-messages` | `env.AI.run` → AI Gateway `/run`, Messages in and out     | the REST API's `/ai/v1/messages` → AI Gateway `/run`   |
+| `openai/…` from pi's gateway catalog    | `openai-responses`   | `env.AI.run` → AI Gateway `/run`, Responses in and out    | the REST API's `/ai/v1/responses` → AI Gateway `/run`  |
+| Any other model object                  | its own `api`        | the binding's `fetch` → AI Gateway's provider-native path | `gateway.ai.cloudflare.com` → the provider-native path |
 
 A model from pi's Cloudflare AI Gateway catalog runs on `env.AI.run` under its catalog id,
 which pi spells the gateway's way (`anthropic/claude-opus-4.8`). The body is pi-ai's own,
@@ -251,9 +251,6 @@ Any other model object — one from pi's Anthropic, OpenAI or Groq registry, wit
 own id — goes to AI Gateway's **provider-native path** through the binding's `fetch`, with the
 provider slug taken from the model's `baseUrl` host. The gateway forwards it to the vendor with
 the credential it holds and streams the vendor's own SSE back untouched.
-
-With an account id and token, the same requests go to the REST API and to
-`gateway.ai.cloudflare.com`; see [account id and API token](#account-id-and-api-token).
 
 Either way no vendor credential leaves your Worker, and the model's `api`, `provider` and
 `id` are never rewritten, so thinking signatures and encrypted reasoning items replay on the
