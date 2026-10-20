@@ -10,7 +10,7 @@ here is in `agents`.
 | Before (#2210)                               | Now                                                             |
 | -------------------------------------------- | --------------------------------------------------------------- |
 | pi-agent-core `AgentHarness`                 | pi-durable `Harness`                                            |
-| `Tasks` run per lane, replay-driving pi      | one Lifecycle wake job, driven by `pi.wake()`                   |
+| `Tasks` run per lane, replay-driving pi      | one Lifecycle wake job, driven by pi's `onWake`                 |
 | intake table for queued submissions          | pi's own inbox                                                  |
 | `Streams` log per operation, cursors, replay | pi's `watchEvents`: snapshot, then one batch per commit         |
 | pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (session store) |
@@ -65,9 +65,10 @@ A run of the job (`#wakeStep`) never admits or replays anything. It calls
 which covers every conversation, background tasks included:
 
 - **`active`:** pi has work running or ready. Start a wait in the
-  background, inside the alarm's work (`trackAlarmWork`), that re-reads
-  `pi.wake()` every second until it is no longer active, for at most 10
-  minutes. Reschedule the job 30 s out as a heartbeat. When the wait ends,
+  background, inside the alarm's work (`trackAlarmWork`), until
+  `pi.wake()` is no longer active, for at most 10 minutes. pi's `onWake`
+  ends the wait when it changes; without `onWake`, the wait re-reads it
+  every second. Reschedule the job 30 s out as a heartbeat. When the wait ends,
   push the job due now to re-check.
 - **`at`:** pi's tasks are asleep until then. Reschedule the job to `at`.
 - **Neither:** complete the job, so there is no alarm. If a submit is
@@ -118,7 +119,7 @@ against it:
 
 ## Hard or unresolved
 
-### pi's timers are in memory
+### pi's timers were in memory
 
 pi sleeps with `setTimeout`: `runtime.sleep(until)` in the scheduler, which
 the generation task uses for retry backoff (`{ phase: "retry", until }`) and
@@ -130,25 +131,24 @@ nothing wakes it until the next request.
 
 Pi 1.4 records sleeps as scheduler state, and `pi.wake()` returns the
 earliest one as `at`. The wake job reschedules itself to `at`, so an
-evicted object is restarted when the sleep ends. Until then, pi's own timer
-keeps the object in memory, billed, for up to the platform's limit on
-pending timers. Before Pi 1.4 the job read the deadline from pi's `LiveDoc`
+evicted object is restarted when the sleep ends.
+
+The factory passes the harness's `onWake` to `Harness.open`. pi calls it
+after open and whenever `pi.wake()` changes, and then sets no in-memory
+timer for a sleeping task: the host's alarm calls `resume()`. So the object
+can hibernate while a task sleeps. A factory that leaves `onWake` out still
+works: pi's own timer runs the task, but keeps the object in memory, billed,
+for up to the platform's limit on pending timers, and the harness warns
+once when it opens pi.
+
+Before Pi 1.4 the job read the deadline from pi's `LiveDoc`
 (`generation.retry.at`, `generation.deferred.pollAt`), a presentation
 document that only covered the generation task.
 
-**Ask Mario** (either would do):
-
-- **Scheduler-owned sleeps.** `runtime.sleep(until)` records the deadline
-  as scheduler state, and `inspect()` returns `nextWakeAt`, the earliest
-  deadline over live tasks, with a way to subscribe to changes. The host
-  sets its alarm to `nextWakeAt`, and pi's own timer becomes an
-  optimization.
-- **An injectable timer.** `HarnessOptions.timers: { sleep(until, signal) }`,
-  or an `onWakeNeeded(at)` callback, so a host can back every pi sleep
-  with its alarm.
-
-Either removes `#longWait` and makes custom task sleeps safe on Durable
-Objects.
+Pi 1.4 shipped what we asked for here: scheduler-owned sleeps
+(`runtime.sleepUntil`, `pi.wake()`) and a callback for the host's alarm
+(`onWake`). That removed `#longWait` and made custom task sleeps safe on
+Durable Objects.
 
 ### Alarm wall time
 

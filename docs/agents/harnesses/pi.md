@@ -32,12 +32,12 @@ export class Assistant extends Agent<Env> {
   registry = createRegistry();
 
   harness = new PiHarness({
-    harness: ({ storage, context }) => {
+    harness: ({ storage, context, onWake }) => {
       const models = createModels();
       models.setProvider(this.ai.provider);
       return Harness.open(
         storage,
-        { models, registry: this.registry },
+        { models, registry: this.registry, onWake },
         context
       );
     },
@@ -58,10 +58,10 @@ export class Assistant extends Agent<Env> {
 }
 ```
 
-| Option     | What it is                                                                                                                                                                              |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `harness`  | Required. Receives `{ storage, context }` and returns Pi's `Harness`, usually from `Harness.open`. Models, the registry, `settings`, `env` and `onReport` are all yours to build here.  |
-| `defaults` | What a new session starts with: `model`, a pi-ai `Model` such as `ai("@cf/…")`, and `thinkingLevel`. Without a model, a session's prompts end unanswered (`no_model`) until one is set. |
+| Option     | What it is                                                                                                                                                                                                                                                                                                                          |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `harness`  | Required. Receives `{ storage, context, onWake }` and returns Pi's `Harness`, usually from `Harness.open`. Pass `onWake` to `Harness.open`, so the object can hibernate while Pi's tasks sleep (see [How recovery works](#how-recovery-works)). Models, the registry, `settings`, `env` and `onReport` are all yours to build here. |
+| `defaults` | What a new session starts with: `model`, a pi-ai `Model` such as `ai("@cf/…")`, and `thinkingLevel`. Without a model, a session's prompts end unanswered (`no_model`) until one is set.                                                                                                                                             |
 
 The factory runs as part of startup, once per isolate. If it throws the operation that triggered it fails and the next operation tries again.
 
@@ -117,9 +117,13 @@ Pi's extensions can do more: hooks on model requests and tool calls (`hook(ToolT
 ```ts
 import { skills } from "agents/harness/pi";
 
-harness: async ({ storage, context }) => {
+harness: async ({ storage, context, onWake }) => {
   this.registry.install(await skills(sources));
-  return Harness.open(storage, { models, registry: this.registry }, context);
+  return Harness.open(
+    storage,
+    { models, registry: this.registry, onWake },
+    context
+  );
 };
 ```
 
@@ -135,7 +139,7 @@ import { browserTool } from "agents/browser/pi";
 
 readonly browser = new Browser({ provider: browserRun(this.env.BROWSER) });
 
-harness: async ({ storage, context }) => {
+harness: async ({ storage, context, onWake }) => {
   this.registry.install({
     name: "browser",
     tools: [
@@ -144,7 +148,7 @@ harness: async ({ storage, context }) => {
   });
   return Harness.open(
     storage,
-    { models, registry: this.registry },
+    { models, registry: this.registry, onWake },
     context
   );
 };
@@ -209,7 +213,7 @@ The example app folds the transcript into chat messages, ignores `kind` and `dat
 
 ## How recovery works
 
-The harness schedules one lifecycle job, driven by Pi's `wake()`. While Pi has work running, the job waits on it and refreshes itself as a heartbeat. While Pi's tasks sleep, such as a retry backoff, the job is due when the first one wakes. When Pi has nothing to do, including when Pi's restart limit has parked a task, the job completes. If the object is evicted or crashes, the job is still due, so its alarm restarts the object. Pi reopens its stored state and resumes the session's work: a replay-safe tool call runs again, and an unsafe one is reported to the model as interrupted.
+The harness schedules one lifecycle job, driven by Pi's `wake()`. While Pi has work running, the job waits on it and refreshes itself as a heartbeat. While Pi's tasks sleep, such as a retry backoff, the job is due when the first one wakes. Pi says when through the `onWake` the factory passes to `Harness.open`, and sets no in-memory timer of its own, so the object can hibernate until then. Without `onWake` the harness still works, but Pi's timer keeps the object in memory, and billed, while a task sleeps, and the harness logs a warning. When Pi has nothing to do, including when Pi's restart limit has parked a task, the job completes. If the object is evicted or crashes, the job is still due, so its alarm restarts the object. Pi reopens its stored state and resumes the session's work: a replay-safe tool call runs again, and an unsafe one is reported to the model as interrupted.
 
 Every operation waits for the object's startup, which runs the factory. A call over RPC that arrives first waits for it rather than opening Pi on its own.
 

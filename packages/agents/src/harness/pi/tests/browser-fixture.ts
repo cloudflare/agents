@@ -49,7 +49,7 @@ export class PiBrowserTestObject extends DurableObject<Cloudflare.Env> {
   });
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    harness: async ({ storage, context }) => {
+    harness: async ({ storage, context, onWake }) => {
       this.registry.install({
         name: "browser",
         tools: [
@@ -65,7 +65,8 @@ export class PiBrowserTestObject extends DurableObject<Cloudflare.Env> {
         {
           models: fauxModels(this.#faux.provider),
           registry: this.registry,
-          settings: TEST_SETTINGS
+          settings: TEST_SETTINGS,
+          onWake
         },
         context
       );

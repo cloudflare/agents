@@ -61,7 +61,10 @@ const WAIT_BUDGET_MS = 10 * 60_000;
  */
 const HEARTBEAT_MS = 30_000;
 
-/** How often a wait on pi's running work re-reads `pi.wake()`. */
+/**
+ * How often a wait re-reads `pi.wake()` when the factory did not pass
+ * `onWake`, so nothing tells the harness when it changes.
+ */
 const POLL_MS = 1_000;
 
 let setWakeTiming: (harness: PiHarness, timing: WakeTiming) => void;
@@ -86,7 +89,7 @@ const WAKE_FN = "wake";
 const WAKE_JOB_ID = "pi-wake";
 
 /**
- * What the factory is handed: the two things only the harness can build.
+ * What the factory is handed: the things only the harness can build.
  * Everything else `Harness.open` takes (models, registry, settings, env,
  * onReport) the factory builds itself.
  */
@@ -95,16 +98,28 @@ export type PiHarnessContext = {
   readonly storage: SqliteStorage;
   /** Background context, for the open itself. */
   readonly context: Context;
+  /**
+   * Pass this to `Harness.open` as its `onWake` option. pi calls it when it
+   * next needs to run, and the harness sets this object's alarm for then.
+   *
+   * With it, pi sets no in-memory timer for a sleeping task (a retry
+   * backoff, a poll, a `sleepUntil`), so the object can hibernate until the
+   * alarm. Without it the harness still works, but pi's timer keeps the
+   * object in memory, and billed, while a task sleeps, and the harness logs
+   * a warning when it opens pi.
+   */
+  readonly onWake: (wake: Wake) => void;
 };
 
 /**
- * Opens pi's `Harness`. The harness adopts what it returns.
+ * Opens pi's `Harness`. The harness adopts what it returns. Pass `onWake`
+ * through to `Harness.open`.
  *
  * ```ts
- * harness: async ({ storage, context }) => {
+ * harness: async ({ storage, context, onWake }) => {
  *   const registry = createRegistry();
  *   registry.install(await skills(sources));
- *   return Harness.open(storage, { models, registry }, context);
+ *   return Harness.open(storage, { models, registry, onWake }, context);
  * }
  * ```
  */
@@ -143,7 +158,7 @@ type WakeTiming = {
   readonly waitBudgetMs?: number;
   /** Heartbeat while waiting. Default 30_000. */
   readonly heartbeatMs?: number;
-  /** How often a wait re-reads `pi.wake()`. Default 1_000. */
+  /** How often a wait re-reads `pi.wake()` without `onWake`. Default 1_000. */
   readonly pollMs?: number;
 };
 
@@ -201,9 +216,9 @@ function signalContext(signal: AbortSignal | undefined): Context {
  * with one Lifecycle job driven by `pi.wake()`. Input goes to pi once, in
  * `submit()`, after the job is scheduled. While pi has work running, the
  * job waits on it, rescheduling itself as a heartbeat. While pi's tasks
- * sleep, the job is due when the first one wakes, in case the object is
- * evicted before pi's own timer fires. When pi has nothing to do, the job
- * completes. An eviction mid-run leaves the job due,
+ * sleep, the job is due when the first one wakes; pi tells the harness
+ * through the `onWake` the factory passes to `Harness.open`. When pi has
+ * nothing to do, the job completes. An eviction mid-run leaves the job due,
  * so its alarm restarts the object, pi reopens and resumes its own tasks,
  * and the job waits again.
  *
@@ -214,8 +229,12 @@ export class PiHarness extends LifecycleCapability {
   readonly #options: PiHarnessOptions;
   /** The in-memory wait on pi's running work, inside an alarm's work. */
   #waiting: Promise<void> | undefined;
+  /** Resolves the current wait's sleep early: `pi.wake()` changed. */
+  #changed: (() => void) | undefined;
   /** Submissions between their wake and pi's admission. */
   #admitting = 0;
+  /** Whether pi has called `onWake`, so the factory passed it. */
+  #onWakeWired = false;
   #waitBudgetMs = WAIT_BUDGET_MS;
   #heartbeatMs = HEARTBEAT_MS;
   #pollMs = POLL_MS;
@@ -247,7 +266,8 @@ export class PiHarness extends LifecycleCapability {
   override async onStart(_context: CapabilityStartContext): Promise<void> {
     const { pi } = await this.#open();
     // Whatever the last isolate left gets a wake, including work whose wake
-    // failed out or that a subagent started without going through submit().
+    // failed out. With `onWake`, pi has already said so; this covers a
+    // factory without it.
     await this.#wakeFor(pi.wake());
   }
 
@@ -457,6 +477,19 @@ export class PiHarness extends LifecycleCapability {
   }
 
   /**
+   * pi's `onWake`, handed to the factory. pi calls it after open and
+   * whenever `pi.wake()` changes. It must not block, so the job push is
+   * left running.
+   */
+  readonly #onWake = (wake: Wake): void => {
+    this.#onWakeWired = true;
+    this.#changed?.();
+    // A running wait re-reads pi.wake() and steps again when it ends.
+    if (this.#waiting) return;
+    this.#wakeFor(wake).catch((error: unknown) => this.#wakeError(error));
+  };
+
+  /**
    * One run of the wake job. It never admits or replays anything: it reads
    * `pi.wake()`, which is all of pi's sessions at once. Running work is
    * waited on; a sleep reschedules the job for when it ends; no work
@@ -483,8 +516,6 @@ export class PiHarness extends LifecycleCapability {
     }
     // A submit between its wake and pi's admission: check again later.
     if (this.#admitting > 0) return heartbeat;
-    // pi's own timer runs the sleeping task if the object is still in
-    // memory then; the alarm restarts it if it is not.
     if (wake.at !== undefined) return { rescheduleAt: wake.at };
     // Nothing to do. A task parked by pi's restart limit is not work: it
     // waits for `pi.retryTask()`.
@@ -492,8 +523,8 @@ export class PiHarness extends LifecycleCapability {
   }
 
   /**
-   * Wait while pi has work running, up to the wait budget, re-reading
-   * `pi.wake()` every `pollMs`. It is an in-memory read.
+   * Wait while pi has work running, up to the wait budget. With `onWake`, a
+   * change ends each sleep early; without it, the sleep is `pollMs`.
    */
   async #waitWhileActive(pi: Harness): Promise<void> {
     const deadline = Date.now() + this.#waitBudgetMs;
@@ -501,9 +532,17 @@ export class PiHarness extends LifecycleCapability {
       while (pi.wake().active) {
         const left = deadline - Date.now();
         if (left <= 0) return;
-        await new Promise((resolve) =>
-          setTimeout(resolve, Math.min(left, this.#pollMs))
-        );
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(
+            resolve,
+            this.#onWakeWired ? left : Math.min(left, this.#pollMs)
+          );
+          this.#changed = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+        this.#changed = undefined;
       }
     } catch (error) {
       this.#wakeError(error);
@@ -536,11 +575,25 @@ export class PiHarness extends LifecycleCapability {
 
   async #doOpen(): Promise<Opened> {
     const storage = await openPiSessionStore(this.lifecycle.storage);
-    const pi = await this.#options.harness({ storage, context: BG });
+    const pi = await this.#options.harness({
+      storage,
+      context: BG,
+      onWake: this.#onWake
+    });
     await pi.root(BG, { agent: this.agentDefaults() });
     // Continue whatever the last isolate left: pi reconciles tasks that were
     // running to pending and schedules them again.
     pi.resume();
+    // pi calls onWake right after open, from a microtask.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (!this.#onWakeWired) {
+      console.warn(
+        "PiHarness: the harness factory did not pass onWake to Harness.open, " +
+          "so pi's timers keep this Durable Object in memory while a task " +
+          "sleeps. Pass it: harness: ({ storage, context, onWake }) => " +
+          "Harness.open(storage, { ...options, onWake }, context)"
+      );
+    }
     return { pi, storage };
   }
 

@@ -41,7 +41,7 @@ export class PiAgent extends DurableObject<Env> {
   });
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    harness: async ({ storage, context }) => {
+    harness: async ({ storage, context, onWake }) => {
       // pi's own extension: the system prompt and the workspace tools.
       this.registry.install({
         name: "playground",
@@ -55,6 +55,7 @@ export class PiAgent extends DurableObject<Env> {
         {
           models,
           registry: this.registry,
+          onWake,
           settings: {
             // pi doubles the delay before each retry: 1, 2, 4, 8 and 16 seconds,
             // so a rate-limited model gets about 30 seconds to recover.

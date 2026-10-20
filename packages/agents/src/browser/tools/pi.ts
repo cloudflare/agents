@@ -157,7 +157,7 @@ function conversationScope(api: ToolExecutionApi): string {
  *   readonly browser = new Browser({ provider: browserRun(this.env.BROWSER) });
  *   readonly registry = createRegistry();
  *   readonly harness = new PiHarness({
- *     harness: ({ storage, context }) => {
+ *     harness: ({ storage, context, onWake }) => {
  *       this.registry.install({
  *         name: "browser",
  *         tools: [
@@ -168,7 +168,11 @@ function conversationScope(api: ToolExecutionApi): string {
  *           })
  *         ]
  *       });
- *       return Harness.open(storage, { models, registry: this.registry }, context);
+ *       return Harness.open(
+ *         storage,
+ *         { models, registry: this.registry, onWake },
+ *         context
+ *       );
  *     }
  *   });
  *   readonly lifecycle = Lifecycle.install(this)

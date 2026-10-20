@@ -38,14 +38,16 @@ const FLAKY_KEY = "test:flaky:failed";
  * Variants of `PiHarnessTestObject`, by the prefix of the object's name, so
  * a variant survives a restart:
  *
+ * - `nowake:` opens pi without `onWake`.
  * - `retry:` retries a failed generation once, after two seconds.
  * - `park:` parks a task after its first restart.
  */
 function variantSettings(name: string) {
-  if (name.startsWith("retry:")) {
+  const plain = name.replace(/^nowake:/, "");
+  if (plain.startsWith("retry:")) {
     return { retry: { enabled: true, maxRetries: 1, baseDelayMs: 2_000 } };
   }
-  if (name.startsWith("park:")) return { ...TEST_SETTINGS, restartLimit: 1 };
+  if (plain.startsWith("park:")) return { ...TEST_SETTINGS, restartLimit: 1 };
   return TEST_SETTINGS;
 }
 
@@ -133,15 +135,17 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   });
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    harness: async ({ storage, context }) => {
+    harness: async ({ storage, context, onWake }) => {
       this.registry.install(this.#testTools());
+      const name = this.ctx.id.name ?? "";
       return this.#observe(
         await Harness.open(
           storage,
           {
             models: fauxModels(this.#faux.provider),
             registry: this.registry,
-            settings: variantSettings(this.ctx.id.name ?? ""),
+            settings: variantSettings(name),
+            ...(name.startsWith("nowake:") ? {} : { onWake }),
             onReport: (error) => console.warn("pi report", error)
           },
           context
@@ -443,7 +447,8 @@ function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {
 
 /**
  * A harness given only its providers: no `defaults`, so new sessions start
- * without a model until one is set.
+ * without a model until one is set. Its factory does not pass `onWake`
+ * either, so it runs on the polling fallback.
  */
 export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
   readonly #faux = fauxProvider({

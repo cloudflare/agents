@@ -278,8 +278,34 @@ describe("PiHarness on pi-durable", () => {
     expect((await stub.prompt("again")).text).toBe("echo: again");
   });
 
-  it("answers after pi sleeps for a retry", async () => {
-    const stub = fresh(`retry:${crypto.randomUUID()}`);
+  it("sets the alarm for pi's sleeping retry, so the object can be evicted until then", async () => {
+    const name = `retry:${crypto.randomUUID()}`;
+    const stub = fresh(name);
+    const receipt = await stub.submit("flaky");
+    // The first generation fails as retryable; pi sleeps until its retry.
+    let wake = await stub.piWake();
+    for (let i = 0; i < 100 && wake.at === undefined; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      wake = await stub.piWake();
+    }
+    expect(wake).toEqual({ active: false, at: expect.any(Number) });
+    // onWake moved the wake job to the retry, not the heartbeat.
+    let alarm = await stub.alarmTime();
+    for (let i = 0; i < 50 && alarm !== wake.at; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      alarm = await stub.alarmTime();
+    }
+    expect(alarm).toBe(wake.at);
+    // pi holds no timer, so nothing keeps the object in memory.
+    await evictDurableObject(stub);
+
+    // The alarm restarts the object at the retry, and pi runs it.
+    const result = await stub.wait(receipt.operationId);
+    expect(result).toMatchObject({ status: "done", text: "echo: flaky" });
+  });
+
+  it("answers after a sleeping retry without onWake, on pi's own timer", async () => {
+    const stub = fresh(`nowake:retry:${crypto.randomUUID()}`);
     const result = await stub.prompt("flaky");
     expect(result).toMatchObject({ status: "done", text: "echo: flaky" });
   });
