@@ -12,7 +12,7 @@ export default defineConfig({
   test: {
     name: "workers",
     retry: 3,
-    include: ["src/tests/**/*.test.ts"],
-    exclude: ["src/tests/**/*.browser.test.ts"]
+    include: ["src/legacy/tests/**/*.test.ts"],
+    exclude: ["src/legacy/tests/**/*.browser.test.ts"]
   }
 });
