@@ -204,7 +204,9 @@ await session.submit("The deploy was approved. Run the migration.", {
 });
 ```
 
-The kind is a label, not authorization: to the model the input is still a user message, so don't put text in it you wouldn't let the user send.
+Each entry from `messages()` and `events()` carries its `kind` and `data`. The example's transcript projection below does not keep them, so read them from the entry if your UI shows labelled input differently.
+
+The kind is a label, not authorization: to the model the input is still a user message, so do not put text in it you would not let the user send.
 
 `harness.prompt()`, `submit()`, `wait()`, `abort()`, `messages()` and `pending()` act on the root session, or on `{ session }`. `harness.sessions` has `create()`, `fork(from)`, `get(id)` and `list()`, which includes sessions subagents created. `ROOT_SESSION` is the root's id.
 
