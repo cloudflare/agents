@@ -163,8 +163,8 @@ importers:
         specifier: workspace:*
         version: link:../packages/ai-chat
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/think':
         specifier: workspace:*
         version: link:../packages/think
@@ -297,8 +297,8 @@ importers:
   examples/agent-skills:
     dependencies:
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)
@@ -358,8 +358,8 @@ importers:
   examples/agents-as-tools:
     dependencies:
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)
@@ -510,8 +510,8 @@ importers:
         specifier: '*'
         version: link:../../packages/codemode
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)
@@ -647,8 +647,8 @@ importers:
         specifier: '*'
         version: link:../../packages/codemode
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)
@@ -778,8 +778,8 @@ importers:
         specifier: ^4.31.0
         version: 4.31.0(ai@7.0.18(zod@4.5.4))(supports-color@10.2.2)(zod@4.5.4)
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)
@@ -1126,8 +1126,8 @@ importers:
   examples/context-overflow-recovery:
     dependencies:
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)
@@ -1230,8 +1230,8 @@ importers:
         specifier: ^4.0.0
         version: 4.0.10(zod@4.5.4)
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)
@@ -2210,8 +2210,8 @@ importers:
         specifier: ^4.0.0
         version: 4.0.2
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.5.4)
@@ -2293,8 +2293,8 @@ importers:
   examples/next/harnesses/opencode:
     dependencies:
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.1.8))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.1.8)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.1.8))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.1.8)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.1.8)
@@ -2357,8 +2357,8 @@ importers:
   examples/next/harnesses/pi:
     dependencies:
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.5.4)
@@ -2445,8 +2445,8 @@ importers:
         specifier: ^4.0.0
         version: 4.0.2
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.5.4)
@@ -3121,8 +3121,8 @@ importers:
         specifier: '*'
         version: link:../../packages/ai-chat
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)
@@ -3322,8 +3322,8 @@ importers:
         specifier: ^4.31.0
         version: 4.31.0(ai@7.0.18(zod@4.5.4))(supports-color@10.2.2)(zod@4.5.4)
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)
@@ -3383,8 +3383,8 @@ importers:
   examples/think-submissions:
     dependencies:
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)
@@ -3444,8 +3444,8 @@ importers:
   examples/think-workflows:
     dependencies:
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/think':
         specifier: '*'
         version: link:../../packages/think
@@ -3936,8 +3936,8 @@ importers:
         specifier: '*'
         version: link:../../packages/ai-chat
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)
@@ -4061,8 +4061,8 @@ importers:
         specifier: '*'
         version: link:../../packages/ai-chat
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/kumo':
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.5.4)
@@ -4277,8 +4277,8 @@ importers:
         specifier: ^4.0.0
         version: 4.0.2
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/think':
         specifier: '*'
         version: link:../../packages/think
@@ -4482,8 +4482,8 @@ importers:
         specifier: ^4.0.0
         version: 4.0.2
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/think':
         specifier: '*'
         version: link:../../packages/think
@@ -4512,8 +4512,8 @@ importers:
   experimental/ops-approval-agent:
     dependencies:
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@cloudflare/think':
         specifier: '*'
         version: link:../../packages/think
@@ -4949,8 +4949,8 @@ importers:
         specifier: workspace:*
         version: link:../ai-chat
       '@cloudflare/computer':
-        specifier: https://pkg.pr.new/@cloudflare/computer@9e798fb
-        version: https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
+        specifier: ^0.6.0
+        version: 0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
       '@testing-library/react':
         specifier: ^16.3.2
         version: 16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -6054,9 +6054,8 @@ packages:
     resolution: {integrity: sha512-qeRpKNXtvqhTtagx/5cLmDaFx/voBhWJ1S6SdFdBkE3OtgcPVz+Q8MtIG26zltW9Z0Icsu2FGBxV5RFmuHI/Bg==}
     hasBin: true
 
-  '@cloudflare/computer@https://pkg.pr.new/@cloudflare/computer@9e798fb':
-    resolution: {integrity: sha512-Gvr51Cyq/fZ7FeM2LPTvDe/9ZyiPRUEJ8yjaVhqB94hHxHNQlGayg0vNJ4Pex0YwsrpqG8K18G4olAXNC5nh3A==, tarball: https://pkg.pr.new/@cloudflare/computer@9e798fb}
-    version: 0.5.1
+  '@cloudflare/computer@0.6.0':
+    resolution: {integrity: sha512-XUcYP+krjStI5uQZe303nlFKrfBGfr+jG2b875o6vqvoKO5pTns6GbiL530cYW5DpXzcpjVS9mX3eN1Mbd9yUQ==}
     peerDependencies:
       '@cloudflare/workers-types': ^4.20260616.1 || ^5.20260921.1
       '@platformatic/vfs': '*'
@@ -15943,7 +15942,7 @@ snapshots:
 
   '@cloudflare/codemods@0.4.0': {}
 
-  '@cloudflare/computer@https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.1.8))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.1.8)':
+  '@cloudflare/computer@0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.1.8))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.1.8)':
     dependencies:
       capnweb: 0.10.0
     optionalDependencies:
@@ -15954,7 +15953,7 @@ snapshots:
       vite: 8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
       zod: 4.1.8
 
-  '@cloudflare/computer@https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)':
+  '@cloudflare/computer@0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)':
     dependencies:
       capnweb: 0.10.0
     optionalDependencies:
@@ -15965,7 +15964,7 @@ snapshots:
       vite: 8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
       zod: 4.5.4
 
-  '@cloudflare/computer@https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)':
+  '@cloudflare/computer@0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)':
     dependencies:
       capnweb: 0.10.0
     optionalDependencies:
@@ -15976,7 +15975,7 @@ snapshots:
       vite: 8.1.0(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
       zod: 4.5.4
 
-  '@cloudflare/computer@https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)':
+  '@cloudflare/computer@0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)':
     dependencies:
       capnweb: 0.10.0
     optionalDependencies:
@@ -15987,7 +15986,7 @@ snapshots:
       vite: 8.2.2(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
       zod: 4.5.4
 
-  '@cloudflare/computer@https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)':
+  '@cloudflare/computer@0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)':
     dependencies:
       capnweb: 0.10.0
     optionalDependencies:
@@ -15998,7 +15997,7 @@ snapshots:
       vite: 8.2.2(@types/node@26.4.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
       zod: 4.5.4
 
-  '@cloudflare/computer@https://pkg.pr.new/@cloudflare/computer@9e798fb(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)':
+  '@cloudflare/computer@0.6.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.5.4))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)':
     dependencies:
       capnweb: 0.10.0
     optionalDependencies:
