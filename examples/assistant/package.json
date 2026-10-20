@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@cloudflare/codemode": "*",
-    "@cloudflare/computer": "^0.5.1",
+    "@cloudflare/computer": "https://pkg.pr.new/@cloudflare/computer@9e798fb",
     "@cloudflare/kumo": "^2.6.0",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",
