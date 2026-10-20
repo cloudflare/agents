@@ -167,12 +167,16 @@ class AssistantDirectory extends Think<Env, DirectoryState> {
 ```
 
 Each `MyAssistant` overrides `this.workspace` with a client for it from
-`getWorkspace()`, so its tools work on the shared files:
+`getWorkspace()`, which reaches the directory on the first file call, so
+its tools work on the shared files:
 
 ```ts
+import { getWorkspace } from "@cloudflare/computer";
 import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
 class MyAssistant extends Think<Env> {
+  override workspace = getWorkspace(() => this.parentAgent(AssistantDirectory));
+
   getTools() {
     return {
       // tools.* in the sandbox adds the workspace tools, backed by the
