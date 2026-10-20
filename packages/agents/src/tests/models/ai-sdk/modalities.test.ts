@@ -548,7 +548,7 @@ describe("transcription", () => {
 
   it("sends Nova-3 its audio as a raw body, straight to Workers AI", async () => {
     const binding = fakeBinding(() => jsonResponse(nova3Body));
-    const ai = createAI({ binding: asAi(binding), id: "prod" });
+    const ai = createAI({ binding: asAi(binding) });
     const result = await ai.transcription(NOVA_3).doGenerate({
       audio: new Uint8Array([0, 1, 2]),
       mediaType: "audio/mpeg",
@@ -573,6 +573,33 @@ describe("transcription", () => {
       { endSecond: 2.96, startSecond: 1.04, text: "Hello from Lisbon." }
     ]);
     expect(result.warnings).toEqual([]);
+  });
+
+  it("shows Nova-3's audio in the request body, and names no gateway", async () => {
+    const binding = fakeBinding(() => jsonResponse(nova3Body));
+    const ai = createAI({ binding: asAi(binding) });
+    const result = await ai.transcription(NOVA_3).doGenerate({
+      audio: new Uint8Array([0, 1, 2]),
+      mediaType: "audio/mpeg"
+    });
+
+    expect(JSON.parse(String(result.request?.body))).toEqual({
+      audio: { body: "AAEC", contentType: "audio/mpeg" }
+    });
+    expect(result.providerMetadata?.cloudflare).not.toHaveProperty("gateway");
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("warns that gateway options do not apply to Nova-3 when any are set", async () => {
+    const binding = fakeBinding(() => jsonResponse(nova3Body));
+    const ai = createAI({ binding: asAi(binding), cacheTtl: 60, id: "prod" });
+    const result = await ai
+      .transcription(NOVA_3)
+      .doGenerate({ audio: "AAEC", mediaType: "audio/mpeg" });
+
+    expect(result.warnings).toEqual([
+      expect.objectContaining({ feature: "gateway", type: "unsupported" })
+    ]);
   });
 
   it("reads Nova-3's words as segments when it sends no paragraphs", async () => {

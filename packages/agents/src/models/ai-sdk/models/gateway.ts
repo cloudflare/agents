@@ -527,7 +527,7 @@ export class GatewayLanguageModel implements LanguageModelV4 {
     const response = capture.response ?? new Response(null);
     return cloudflareMetadata(
       this.modelId,
-      resolved,
+      resolved.gateway.id,
       response,
       this.#config.transport,
       capture.provider
@@ -660,7 +660,7 @@ export function routed<T extends object>(
               result,
               cloudflareMetadata(
                 String((target as RoutableModel).modelId ?? ""),
-                resolved,
+                resolved.gateway.id,
                 capture.response ?? new Response(null),
                 config.transport,
                 capture.provider

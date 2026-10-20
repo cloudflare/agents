@@ -39,11 +39,11 @@ const BYTE_ARRAY_AUDIO = new Set([
 ]);
 
 /**
- * Deepgram's Nova-3 declares `audio: { body, contentType }`. JSON cannot carry
- * that body (base64 and byte arrays answer `400 required properties at
- * '/audio' are 'body,contentType'`), so the audio travels as a raw body.
+ * Models that declare `audio: { body, contentType }`. JSON cannot carry that
+ * body (base64 and byte arrays answer `400 required properties at '/audio' are
+ * 'body,contentType'`), so the audio travels as a raw body.
  */
-const NOVA_3 = "@cf/deepgram/nova-3";
+const RAW_AUDIO = new Set(["@cf/deepgram/nova-3"]);
 
 /** Deepgram's Flux answers `only supports websocket connections` over HTTP. */
 const WEBSOCKET_ONLY = new Set(["@cf/deepgram/flux"]);
@@ -80,10 +80,11 @@ function transcriptionOptions(
 }
 
 /**
- * Builds the request for Nova-3: the audio as a raw body, and `language` as a
- * field. The whisper-only options have no Nova-3 equivalent.
+ * Builds the request for a raw-audio model: the audio as a raw body, and
+ * `language` as a field. The whisper-only options have no equivalent there.
  */
-function buildNova3Request(
+function buildRawAudioRequest(
+  modelId: string,
   options: TranscriptionModelV4CallOptions,
   extra: TranscriptionOptions
 ): ModalityRequest {
@@ -95,7 +96,7 @@ function buildNova3Request(
     "vadFilter"
   ] as const) {
     if (extra[feature] !== undefined) {
-      warnings.push(unsupported(feature, `${NOVA_3} has no ${feature}.`));
+      warnings.push(unsupported(feature, `${modelId} has no ${feature}.`));
     }
   }
   return {
@@ -112,7 +113,9 @@ export function buildTranscriptionRequest(
 ): ModalityRequest {
   const warnings: SharedV4Warning[] = [];
   const extra = transcriptionOptions(options.providerOptions);
-  if (modelId === NOVA_3) return buildNova3Request(options, extra);
+  if (RAW_AUDIO.has(modelId)) {
+    return buildRawAudioRequest(modelId, options, extra);
+  }
   const input: Record<string, unknown> = BYTE_ARRAY_AUDIO.has(modelId)
     ? { audio: Array.from(toBytes(options.audio)) }
     : { audio: toBase64(options.audio) };
@@ -156,10 +159,11 @@ function timed(entry: unknown, textKeys: string[]): Segment[] {
 }
 
 /**
- * Reads a Nova-3 answer: `results.channels[0].alternatives[0]`. Its sentences
- * are the segments when it sends paragraphs, and its words otherwise.
+ * Reads a Deepgram answer: `results.channels[0].alternatives[0]`. Its
+ * sentences are the segments when it sends paragraphs, and its words
+ * otherwise.
  */
-function readNova3(body: Record<string, unknown>): Transcript {
+function readDeepgram(body: Record<string, unknown>): Transcript {
   const channel = record(array(record(body.results)?.channels)?.[0]);
   const alternative = record(array(channel?.alternatives)?.[0]);
   const paragraphs = array(record(alternative?.paragraphs)?.paragraphs) ?? [];
@@ -259,7 +263,7 @@ export class CloudflareTranscriptionModel
             isRetryable: false,
             message:
               `${modelId} takes websocket connections only. Use ` +
-              `${NOVA_3} or @cf/openai/whisper-large-v3-turbo.`,
+              "@cf/deepgram/nova-3 or @cf/openai/whisper-large-v3-turbo.",
             model: modelId,
             requestBodyValues: undefined,
             url: this.endpoint
@@ -272,8 +276,11 @@ export class CloudflareTranscriptionModel
     });
 
     const body = record(answer.json) ?? {};
+    // The answer's shape decides how to read it, never the model id.
     const transcript =
-      answer.modelId === NOVA_3 ? readNova3(body) : readWhisper(body);
+      record(body.results) === undefined
+        ? readWhisper(body)
+        : readDeepgram(body);
     return {
       durationInSeconds: transcript.durationInSeconds,
       language: transcript.language,

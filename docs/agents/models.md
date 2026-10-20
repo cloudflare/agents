@@ -515,7 +515,7 @@ providerMetadata?.cloudflare;
 | Field         | Source header         | Notes                                          |
 | ------------- | --------------------- | ---------------------------------------------- |
 | `model`       | —                     | The leg that answered, after any fallback.     |
-| `gateway`     | —                     | The gateway id the request went through.       |
+| `gateway`     | —                     | The gateway id, when one handled the request.  |
 | `provider`    | —                     | The gateway provider slug, for a model object. |
 | `logId`       | `cf-aig-log-id`       | Falls back to the binding's last log id.       |
 | `eventId`     | `cf-aig-event-id`     | Correlates the requests of one gateway event.  |
@@ -525,7 +525,7 @@ providerMetadata?.cloudflare;
 | `cacheStatus` | `cf-aig-cache-status` | `HIT` / `MISS`.                                |
 | `step`        | `cf-aig-step`         | Which step of a gateway route answered.        |
 
-Every field except `model` and `gateway` is optional, and which ones arrive
+Every field except `model` is optional, and which ones arrive
 depends on the path and the call. Read the fields you find rather than assuming
 any particular one is there. `response.headers` and `response.modelId` are
 populated too.

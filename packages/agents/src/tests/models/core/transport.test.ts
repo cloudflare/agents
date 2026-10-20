@@ -381,7 +381,7 @@ describe("core transport - the run path over HTTP", () => {
       "https://api.cloudflare.com/client/v4/accounts/acct-1/ai/run/@cf/deepgram/nova-3?language=en"
     );
     expect(calls[0]?.init.body).toEqual(new Uint8Array([0, 1, 2]));
-    expect(headersOf(calls[0]!.init)).toEqual({
+    expect(headersOf(calls[0])).toEqual({
       authorization: "Bearer token-1",
       "content-type": "audio/mpeg"
     });
