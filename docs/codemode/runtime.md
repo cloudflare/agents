@@ -1,6 +1,6 @@
 # Runtime
 
-> **Deprecated.** Use the `exec` tool from [`@cloudflare/computer`](https://github.com/cloudflare/computer) on a Workspace with a JavaScript backend. Computer doesn't have durable approvals yet, so keep using this runtime if you rely on them. See [Moving to `@cloudflare/computer`](./moving-to-computer.md#approvals).
+> **Legacy, feature-frozen.** The durable runtime keeps working and won't change, but it is no longer maintained. `WorkerJavaScriptBackend` has no durable approvals yet. See [The legacy Code Mode API](./legacy.md#approvals).
 
 The **Executor** is a simple, stateless sandbox: it runs a block of code once and dispatches tool calls back. The **Runtime** wraps an executor and makes execution durable.
 

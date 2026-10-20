@@ -1,6 +1,6 @@
 # Connectors
 
-> **Deprecated.** Connectors become host modules (`ws:<name>`) and `ws:tools` on a [`@cloudflare/computer`](https://github.com/cloudflare/computer) JavaScript backend. See [Moving to `@cloudflare/computer`](./moving-to-computer.md).
+> **Legacy, feature-frozen.** Connectors keep working and won't change, but they are no longer maintained. In new code, a connector is a host module (`ws:<name>`) on `WorkerJavaScriptBackend`. See [The legacy Code Mode API](./legacy.md#a-connector).
 
 Connectors are class-based integrations that bridge external services into the codemode sandbox.
 

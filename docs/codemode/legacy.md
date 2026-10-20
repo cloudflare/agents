@@ -1,13 +1,23 @@
-# Moving to `@cloudflare/computer`
+# The legacy Code Mode API
 
-`@cloudflare/codemode` is deprecated. To let a model run code, give it the `exec` tool from [`@cloudflare/computer`](https://github.com/cloudflare/computer) on a `Workspace` with a `WorkerJavaScriptBackend`. Codemode keeps working until it is removed, so nothing breaks when you upgrade.
+Everything `@cloudflare/codemode` exports apart from [`WorkerJavaScriptBackend`](./worker-javascript.md) is the original Code Mode API. It is feature-frozen:
+
+- It keeps working, from the same import paths, and upgrading the package doesn't change it.
+- It gets no new features and no maintenance. Bugs in it won't be fixed.
+- Every export is marked `@deprecated`, so your editor flags each use.
+
+The code lives in [`packages/codemode/src/legacy`](../../packages/codemode/src/legacy). If you rely on a pattern in it, such as connectors or the approval runtime, copy the folder into your project and own it from there. Nothing in it imports from outside the folder. Besides `cloudflare:workers` and `acorn`, it uses `ai`, `zod`, `@tanstack/ai` and `@modelcontextprotocol/sdk` in the entry points built on them.
+
+The old guides are still here: [How the legacy API works](./legacy-overview.md) and the [legacy API reference](./legacy-reference.md), which was the package README.
+
+For new code, use `WorkerJavaScriptBackend` directly, or the `exec` tool from [`@cloudflare/computer`](https://github.com/cloudflare/computer), which runs code on it.
 
 ## What replaces what
 
-| Codemode                                      | Computer                                                                          |
+| Legacy API                                    | Replacement                                                                       |
 | --------------------------------------------- | --------------------------------------------------------------------------------- |
 | `createCodeTool` (`/ai`, `/tanstack-ai`)      | The `exec` tool from `createAITools`, `createTanStackTools` or `createPiTools`    |
-| `DynamicWorkerExecutor`, `Executor`           | `WorkerJavaScriptBackend` and `workspace.runtime.exec()`                          |
+| `DynamicWorkerExecutor`, `Executor`           | `WorkerJavaScriptBackend`, on its own or through `workspace.runtime.exec()`       |
 | Tools as `codemode.*` globals, `ToolProvider` | Tools imported from `ws:tools`, built with `createToolBindings()`                 |
 | `CodemodeConnector`, `OpenApiConnector`       | A host module, `modules: { "ws:<name>": { fn } }`                                 |
 | `McpConnector`, `ToolSetConnector`            | `ws:tools` with `forAISDKTools(() => tools)`, for example `this.mcp.getAITools()` |
@@ -42,7 +52,7 @@ After:
 
 ```ts
 import { Workspace } from "@cloudflare/computer";
-import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+import { WorkerJavaScriptBackend } from "@cloudflare/codemode";
 import { createToolBindings } from "@cloudflare/computer/modules/tools";
 import {
   createAITools,
@@ -86,7 +96,7 @@ In Think, put the backend on the agent's `workspace`. Think already exposes `exe
 
 ## A connector
 
-A connector's methods become functions of a host module. The functions run in your Durable Object and get the arguments as an array.
+A connector's methods become functions of a host module. The functions run in your Durable Object and get the arguments as an array. This works with or without Computer.
 
 Before:
 
@@ -127,13 +137,13 @@ export default () => listIssues({ state: "open" });
 
 ## Approvals
 
-`ws:tools` leaves out tools that set `needsApproval`, and Computer has no durable pause yet. If you rely on codemode's approvals (`requiresApproval`, `runtime.approve()`), keep using codemode for now. The Computer replacement is planned on the JavaScript backend's replay journal.
+`ws:tools` leaves out tools that set `needsApproval`, and Computer has no durable pause yet. If you rely on the legacy approvals (`requiresApproval`, `runtime.approve()`), keep using them. They won't change. Durable pauses for `WorkerJavaScriptBackend` are being designed on its replay journal.
 
 ## Browser tools
 
 `agents/browser` doesn't depend on Computer, and Computer doesn't depend on `agents`. Your Durable Object imports both and passes the same `Browser` to each:
 
-- `createBrowserTool` (formerly `browserTool`) stays in `agents/browser`. It runs the model's code on the Worker Loader you pass it, and stops using codemode in a later release.
+- `createBrowserTool` (formerly `browserTool`) stays in `agents/browser`. It runs the model's code on the Worker Loader you pass it, and stops using the legacy API in a later release.
 - For a Computer Workspace, pass the `Browser` to `createBrowserModule` from `@cloudflare/computer/modules/browser`, so code run with `exec` imports the browser from `ws:browser`. See [From `exec` in a Computer Workspace](../agents/browse-the-web.md#from-exec-in-a-computer-workspace).
-- `createBrowserTools` and `createBrowserRuntime` are deprecated with codemode. Keep using them only if a run has to pause while a person works in Live View, which nothing else can do yet.
+- `createBrowserTools` and `createBrowserRuntime` are deprecated, since they're built on the legacy runtime. Keep using them only if a run has to pause while a person works in Live View, which nothing else can do yet.
 - The Quick Action helpers (`createQuickActionTools`, `runQuickAction`, `browserMarkdown` and the rest) are deprecated and won't change.
