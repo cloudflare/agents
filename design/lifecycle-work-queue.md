@@ -144,7 +144,11 @@ and `Lifecycle` wires them to the host and capabilities through the narrow
 
 `Lifecycle.alarm()`:
 
-1. Ensure startup.
+1. If the queue holds jobs: arm a **startup fallback alarm** at the next
+   job's time, but no sooner than now + 30s, so a startup that throws (or an
+   isolate that dies mid-startup) still leaves a wake, whether or not the
+   platform's own alarm retries run, and is retried then. Then ensure
+   startup.
 2. If jobs are due: arm the **deadman pre-alarm** (now + 30s) so an isolate
    death mid-drive still wakes the object; the final re-arm overwrites it.
 3. Drive due jobs (`time <= now`, ordered by time). For each:
