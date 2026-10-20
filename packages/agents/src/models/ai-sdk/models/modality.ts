@@ -16,6 +16,7 @@ import {
   resolveOptions,
   type ModelOptions
 } from "../settings";
+import type { RawAudio } from "../../core/transport";
 import {
   definedHeaders,
   errorFromResponse,
@@ -33,6 +34,8 @@ export type ModalityConfig = LanguageModelConfig;
 /** A run-path body plus whatever the conversion had to drop. */
 export interface ModalityRequest {
   input: Record<string, unknown>;
+  /** Audio sent as a raw body, for a model that takes one. */
+  audio?: RawAudio;
   warnings: SharedV4Warning[];
 }
 
@@ -152,6 +155,7 @@ export abstract class CloudflareModalityModel {
       async (modelId) => {
         const request = call.build(modelId);
         const response = await transport.run({
+          ...(request.audio === undefined ? {} : { audio: request.audio }),
           gateway: resolved.gateway,
           headers: {
             // The AI SDK types these as `string | undefined`; an undefined

@@ -59,6 +59,19 @@ export interface TransportRequest {
   headers: Record<string, string>;
   /** Abort signal, forwarded to the binding or to `fetch`. */
   signal?: AbortSignal;
+  /**
+   * Audio for a Workers AI model that takes it as a raw body
+   * (`audio: { body, contentType }`, as Deepgram's Nova-3 does). `input`
+   * carries the model's other fields. The request goes to Workers AI
+   * directly: AI Gateway does not accept the body.
+   */
+  audio?: RawAudio;
+}
+
+/** Audio bytes and their media type, sent as a request body of their own. */
+export interface RawAudio {
+  bytes: Uint8Array;
+  contentType: string;
 }
 
 /**
@@ -486,6 +499,27 @@ function bindingTransport(binding: Ai): Transport {
     },
     async run(request) {
       try {
+        if (request.audio !== undefined) {
+          // TODO: send this through the gateway once AI Gateway takes a stream
+          // body; today the binding refuses one when `gateway` is set.
+          return await raw.run(
+            request.model,
+            {
+              ...request.input,
+              audio: {
+                body: new Response(new Uint8Array(request.audio.bytes)).body,
+                contentType: request.audio.contentType
+              }
+            },
+            {
+              ...(Object.keys(request.headers).length > 0
+                ? { extraHeaders: request.headers }
+                : {}),
+              returnRawResponse: true,
+              signal: request.signal
+            }
+          );
+        }
         // Called as a method, never detached: the binding reads private
         // fields and throws on a detached reference.
         const run = runOptions(request);
@@ -619,11 +653,56 @@ async function bareWorkersAIAnswer(response: Response): Promise<Response> {
 function httpTransport({ accountId, apiToken }: AccountAccess): Transport {
   const account = encodeURIComponent(accountId);
   const runBase = `${REST_API_ORIGIN}/${account}/ai`;
+  /**
+   * A raw audio body goes to Workers AI's own run route, with the model's
+   * other fields as query parameters. TODO: send it through the gateway once
+   * AI Gateway accepts the body; today the REST API answers `500` when
+   * `cf-aig-gateway-id` is set.
+   */
+  async function runRawAudio(
+    request: TransportRequest,
+    audio: RawAudio
+  ): Promise<Response> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(request.input)) {
+      if (
+        typeof value === "string" ||
+        typeof value === "number" ||
+        typeof value === "boolean"
+      ) {
+        query.set(key, String(value));
+      }
+    }
+    const search = query.size > 0 ? `?${query}` : "";
+    const url = `${runBase}/run/${request.model}${search}`;
+    try {
+      const response = await fetch(url, {
+        body: new Uint8Array(audio.bytes),
+        headers: withCredential(
+          { ...request.headers, "content-type": audio.contentType },
+          "authorization",
+          apiToken
+        ),
+        method: "POST",
+        signal: request.signal
+      });
+      return await bareWorkersAIAnswer(response);
+    } catch (error) {
+      throw normalizeThrownError(error, {
+        model: request.model,
+        requestBodyValues: request.input,
+        url
+      });
+    }
+  }
+
   return {
     logIdFallback() {
       return undefined;
     },
     async run(request) {
+      if (request.audio !== undefined)
+        return runRawAudio(request, request.audio);
       const workersAI = isWorkersAIId(request.model);
       const run = runOptions(request);
       const url = workersAI
