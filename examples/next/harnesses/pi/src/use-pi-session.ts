@@ -1,5 +1,6 @@
 import { useAgent } from "agents/react";
 import { useCallback, useEffect, useState } from "react";
+import { PiCommandOutbox } from "./outbox";
 import { EMPTY_VIEW, reduceEvents } from "./view";
 import type {
   ClientMessage,
@@ -26,10 +27,14 @@ const INITIAL_STATE: State = {
  * One pi session over the harness's WebSocket protocol, connected with
  * `useAgent`. The server sends pi's own agent events; this folds them with
  * the same `reduceEvents` the server tests use. A reconnect gets a fresh
- * snapshot, so there is nothing to resume from.
+ * snapshot, and the client sends again every submit whose answer the
+ * socket never delivered; the harness deduplicates them by operation id, so
+ * each runs once.
  */
 export function usePiSession(object: string) {
   const [state, setState] = useState<State>(INITIAL_STATE);
+  // Unanswered submits, sent again each time the socket opens.
+  const [outbox] = useState(() => new PiCommandOutbox());
 
   const agent = useAgent({
     agent: "pi-agent",
@@ -43,6 +48,7 @@ export function usePiSession(object: string) {
       } catch {
         return;
       }
+      outbox.receive(message);
       switch (message.type) {
         case "hello":
           setState((current) => ({ ...current, catalog: message.tools }));
@@ -64,7 +70,14 @@ export function usePiSession(object: string) {
 
   useEffect(() => {
     setState(INITIAL_STATE);
-  }, [object]);
+    // Submits belong to the last object's session: never send them here.
+    outbox.clear();
+  }, [object, outbox]);
+
+  useEffect(() => {
+    if (state.status !== "open") return;
+    outbox.sendPending((data) => agent.send(data));
+  }, [state.status, agent, outbox]);
 
   const send = useCallback(
     (message: ClientMessage) => {
@@ -75,11 +88,15 @@ export function usePiSession(object: string) {
     [agent]
   );
 
-  /** Idle: starts a run. Busy: queued as a follow-up, or steers the run. */
+  /**
+   * Idle: starts a run. Busy: queued as a follow-up, or steers the run.
+   * Kept in the outbox until answered, and sent again if the socket drops
+   * first.
+   */
   const submit = useCallback(
     (text: string, whenBusy: "followUp" | "steer" = "followUp") =>
-      send({ type: "submit", id: crypto.randomUUID(), input: text, whenBusy }),
-    [send]
+      send(outbox.submit(text, whenBusy)),
+    [send, outbox]
   );
 
   const abort = useCallback(
