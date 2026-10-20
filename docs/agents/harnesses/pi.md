@@ -212,6 +212,32 @@ The kind is a label, not a permission. It records what your code said the input 
 
 The example app folds the transcript into chat messages, ignores `kind` and `data`, and shows every input as a user message. To show labelled input differently, read them from the entry.
 
+### Inputs queued behind a failed run
+
+A run fails with `model_error` when the model errors and Pi does not retry or the error outlasts its retries, and with `no_model` when the session has no usable model. Its own operation settles `unanswered` with that reason. Pi's `settings.afterFailedRun` decides what happens to the inputs queued behind it. Refer to [Failures and Recovery](https://github.com/earendil-works/pi/tree/main/packages/durable#failures-and-recovery) in the pi-durable README for what each value does. Set it in the factory:
+
+```ts
+harness: ({ storage, context, onWake }) =>
+  Harness.open(
+    storage,
+    {
+      models,
+      registry: this.registry,
+      onWake,
+      settings: { afterFailedRun: "withdraw" }
+    },
+    context
+  );
+```
+
+| Value            | What callers see                                                                                                                                                                                               |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `keep` (default) | `pending()` lists the inputs as `queued`, `busy()` is `false`, and `wait()` keeps waiting. The next `submit()` runs them first, in order, then the new input. The next `reset()` runs them in the new context. |
+| `continue`       | `wait()` returns their results as usual. If the cause persists, such as a missing model, each queued input fails in its own run.                                                                               |
+| `withdraw`       | `wait()` returns `{ status: "unanswered", reason: "run_failed" }`, and `pending()` no longer lists them.                                                                                                       |
+
+With `keep`, the kept inputs are not work to Pi: its `wake()` counts tasks, not queued inputs. The wake job completes, and the object can hibernate until the next `submit()` or `reset()`. Pass a `signal` to `wait()` if a caller should not wait that long. To withdraw a kept input, call `abort(operationId)`, which settles it `unanswered` with reason `aborted`. `session.abort()` with no id stops the whole session, which withdraws every kept input too.
+
 ## How recovery works
 
 The harness schedules one lifecycle job, driven by Pi's `wake()`. While Pi has work running, the job waits on it and refreshes itself as a heartbeat. While Pi's tasks sleep, such as a retry backoff, the job is due when the first one wakes. Pi says when through the `onWake` the factory passes to `Harness.open`, and sets no in-memory timer of its own, so the object can hibernate until then. Without `onWake` the harness still works, but Pi's timer keeps the object in memory, and billed, while a task sleeps, and the harness logs a warning. When Pi has nothing to do, the job completes. If the object is evicted or crashes, the job is still due, so its alarm restarts the object. Pi reopens its stored state and resumes the session's work: a replay-safe tool call runs again, and an unsafe one is reported to the model as interrupted.
