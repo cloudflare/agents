@@ -1,6 +1,6 @@
 # Codemode Connectors Example
 
-> **Deprecated.** Connectors become host modules (`ws:<name>`) and `ws:tools` on a [`@cloudflare/computer`](https://github.com/cloudflare/computer) JavaScript backend. See [Moving to `@cloudflare/computer`](https://github.com/cloudflare/agents/blob/main/docs/codemode/moving-to-computer.md).
+> **Legacy.** Connectors are part of the feature-frozen Code Mode API. In new code, a connector is a host module (`ws:<name>`) on `WorkerJavaScriptBackend`. See [The legacy Code Mode API](https://github.com/cloudflare/agents/blob/main/docs/codemode/legacy.md).
 
 This example shows how to build class-based codemode connectors that expose external services inside a sandboxed code execution environment.
 

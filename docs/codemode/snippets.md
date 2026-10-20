@@ -1,6 +1,6 @@
 # Snippets
 
-> **Deprecated, with no replacement.** Save the code as a Workspace file and import it from `exec` code instead. See [Moving to `@cloudflare/computer`](./moving-to-computer.md).
+> **Legacy, feature-frozen, with no replacement.** Snippets keep working and won't change. In new code, save the source as a file and import it. See [The legacy Code Mode API](./legacy.md).
 
 A **snippet** is a saved sandbox script — a reusable pattern that already ran and worked. Snippets are durable: they live on the [Runtime](./runtime.md) facet, are addressable by name, and accumulate over time.
 

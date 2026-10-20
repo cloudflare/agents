@@ -4,7 +4,7 @@ Codemode lets LLMs write and execute code that orchestrates your tools, instead 
 
 The `@cloudflare/codemode` package converts your tools into typed TypeScript APIs, gives the LLM a single "write code" tool, and executes the generated code in a secure, isolated Worker sandbox.
 
-> **Deprecated.** Use the `exec` tool from [`@cloudflare/computer`](https://github.com/cloudflare/computer) on a Workspace with a JavaScript backend. See [Moving to `@cloudflare/computer`](../codemode/moving-to-computer.md).
+> **Legacy, feature-frozen.** This page covers the legacy Code Mode API (`createCodeTool`, `DynamicWorkerExecutor`). It keeps working and won't change, but it is no longer maintained. For new code, use the `exec` tool from [`@cloudflare/computer`](https://github.com/cloudflare/computer) on a Workspace with a `WorkerJavaScriptBackend`. See [The legacy Code Mode API](../codemode/legacy.md).
 
 ## When to use Codemode
 

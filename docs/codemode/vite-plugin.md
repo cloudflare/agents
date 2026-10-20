@@ -1,6 +1,6 @@
 # Vite Plugin
 
-> **Deprecated, with no replacement.** Computer's JavaScript backend has no facet class to export. See [Moving to `@cloudflare/computer`](./moving-to-computer.md).
+> **Legacy, feature-frozen, with no replacement.** `WorkerJavaScriptBackend` has no facet class to export, so it doesn't need the plugin. See [The legacy Code Mode API](./legacy.md).
 
 The `@cloudflare/codemode/vite` plugin exports the `CodemodeRuntime` facet class from your Worker entry module.
 
