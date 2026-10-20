@@ -148,6 +148,14 @@ export type ChatRecoveryIncident = {
 
 export const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
 /**
+ * The KV progress counter of releases before 0.23, bumped per credited
+ * chunk. The marker is now derived from the stream log
+ * (`ResumableStream.progressMarker`). Current code only reads this key, once,
+ * to seed an object that was upgraded directly from such a release; nothing
+ * writes it.
+ */
+export const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
+/**
  * Durable record of an in-progress recovery so a "recovering…" status (#1620)
  * can be broadcast live and survive the set/clear happening in different
  * isolates (a continuation runs in a later alarm invocation).
@@ -429,6 +437,16 @@ export async function classifyAgentToolChildRecovery(
     }
   }
   return failed ? "failed" : "none";
+}
+
+/**
+ * Read the KV progress counter of releases before 0.23 (0 when unset), for
+ * `ResumableStream.seedProgress`. Shared by `AIChatAgent` and `Think`.
+ */
+export async function readChatRecoveryProgress(
+  storage: Pick<DurableObjectStorage, "get">
+): Promise<number> {
+  return (await storage.get<number>(CHAT_RECOVERY_PROGRESS_KEY)) ?? 0;
 }
 
 /**

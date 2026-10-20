@@ -2478,6 +2478,11 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     }
   }
 
+  /** Write the KV progress counter a release before 0.23 kept. */
+  async setLegacyProgressCounterForTest(value: number): Promise<void> {
+    await this.ctx.storage.put("cf:chat-recovery:progress", value);
+  }
+
   async getChatRecoveryIncidentsForTest(): Promise<unknown[]> {
     const entries = await this.ctx.storage.list({
       prefix: "cf:chat-recovery:incident:"

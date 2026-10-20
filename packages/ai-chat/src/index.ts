@@ -93,6 +93,7 @@ import {
   iterateWithStallWatchdog,
   sweepStaleChatRecoveryIncidents,
   listActiveChatRecoveryIncidents,
+  readChatRecoveryProgress,
   classifyAgentToolChildRecovery,
   recordChatTerminal,
   clearChatTerminal,
@@ -220,7 +221,9 @@ type AIChatRecoveryClassification = { shouldRetryPreStream: boolean };
 // The monotonic forward-progress marker the recovery budget keys off is
 // derived from the stream log (`ResumableStream.progressMarker`): durably
 // flushed segments, folded into a retired total as their rows are deleted.
-// Nothing is written per chunk.
+// Nothing is written per chunk. An object upgraded directly from a release
+// before 0.23 has its old KV counter (`CHAT_RECOVERY_PROGRESS_KEY`) folded
+// in once; nothing writes that key any more.
 // Recovery budget defaults (maxAttempts, maxRecoveryWork, stableTimeoutMs,
 // terminalMessage, noProgressTimeoutMs, alarm debounce) now live in the shared
 // incident engine (agents/chat) and are applied by `resolveChatRecoveryConfig`
@@ -5018,10 +5021,31 @@ export class AIChatAgent<
    * when new content lands durably, a reconnect replay or a recovery
    * re-persist reads it without appending (#1637), and compaction rewrites
    * the transcript, not the log. Nothing is written per chunk.
+   *
+   * An object upgraded directly from a release before 0.23 has its old KV
+   * counter folded in once, so an incident that release opened never sees
+   * the marker read lower. Any other object skips the read.
    */
   private async _chatRecoveryProgressMarker(): Promise<number> {
+    // Memoized as the promise, not a flag: two concurrent readers both wait
+    // for the seed to land, so neither can hand the engine an unseeded
+    // marker as an incident's work baseline. A failed read is not cached:
+    // the next evaluation retries it instead of failing for the isolate's
+    // life on a transient storage error.
+    if (this._resumableStream.needsLegacySeed) {
+      this._progressSeed ??= readChatRecoveryProgress(this.ctx.storage).then(
+        (legacy) => this._resumableStream.seedProgress(legacy),
+        (error: unknown) => {
+          this._progressSeed = null;
+          throw error;
+        }
+      );
+      await this._progressSeed;
+    }
     return this._resumableStream.progressMarker();
   }
+
+  private _progressSeed: Promise<void> | null = null;
 
   /** Per-isolate N9 throttle gate (shared `agents/chat` helper); reset per
    *  isolate so the first forwarded chunk after a restart always credits. */

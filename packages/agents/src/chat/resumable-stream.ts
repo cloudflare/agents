@@ -225,6 +225,9 @@ export class ResumableStream {
     this.ops.ensureTables();
     this._sql = sql;
     this._ensureProgressTable();
+    // Decided before the legacy migration and restore below, which can
+    // retire segments and create the row themselves.
+    this._needsLegacySeed = !this._hasProgressRow();
     // Every path that removes a chat row's log — this adapter's cutover,
     // reclaim and clear, and the capability's public `delete()` — folds the
     // row's segments into the retired total first. Registered before the
@@ -261,10 +264,21 @@ export class ResumableStream {
   private readonly _sql: SqlTaggedTemplate;
 
   /**
+   * Whether this object had no progress row when the adapter was built.
+   * Only then can the KV counter still hold a value worth carrying over:
+   * one a release before 0.23 wrote. Releases 0.23 to 0.28 also wrote that
+   * key, mirroring this table's total after every retire, and a retire
+   * always creates the row. Seeding from the mirror added the retired
+   * segments to the marker again on every isolate start, so an object that
+   * already has a row is never seeded.
+   */
+  private readonly _needsLegacySeed: boolean;
+
+  /**
    * One row: `retired` accumulates the segments of deleted streams and
-   * explicit credits. `legacy` holds the value an `agents` release before
-   * 0.23 seeded from its KV counter. Nothing writes it any more, but it is
-   * still counted, so an object that was seeded never reads a lower marker.
+   * explicit credits; `legacy` holds the KV counter of a release before
+   * 0.23, carried over once by {@link seedProgress}. They are separate
+   * columns so a seed can never swallow segments retired before it landed.
    */
   private _ensureProgressTable(): void {
     this._sql`
@@ -274,6 +288,14 @@ export class ResumableStream {
         legacy INTEGER NOT NULL DEFAULT 0
       ) WITHOUT ROWID
     `;
+  }
+
+  private _hasProgressRow(): boolean {
+    return (
+      this._sql<{ key: string }>`
+        SELECT key FROM cf_agents_chat_progress WHERE key = 'chat'
+      `.length > 0
+    );
   }
 
   private _retiredSegments(): number {
@@ -333,6 +355,34 @@ export class ResumableStream {
    */
   creditProgress(): void {
     this._retire(1);
+  }
+
+  /**
+   * Whether {@link seedProgress} would write: this object had no progress
+   * row when the adapter was built. Lets a host skip reading the KV counter
+   * when there is nothing to carry over.
+   */
+  get needsLegacySeed(): boolean {
+    return this._needsLegacySeed;
+  }
+
+  /**
+   * Carry the KV counter of a release before 0.23 forward, so an incident
+   * that release opened never sees the marker read lower after a direct
+   * upgrade: it would ignore new output until the log caught up, and could
+   * seal a turn that is still making progress. Folded into its own column by
+   * max, so a repeated seed in the same isolate changes nothing. A no-op for
+   * zero, and for an object that already had a progress row (see
+   * {@link needsLegacySeed}).
+   */
+  seedProgress(legacyTotal: number): void {
+    if (!this._needsLegacySeed || legacyTotal <= 0) return;
+    this._sql`
+      INSERT INTO cf_agents_chat_progress (key, retired, legacy)
+      VALUES ('chat', 0, ${legacyTotal})
+      ON CONFLICT(key) DO UPDATE
+        SET legacy = MAX(legacy, excluded.legacy)
+    `;
   }
 
   /**

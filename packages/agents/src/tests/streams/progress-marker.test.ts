@@ -65,6 +65,30 @@ describe("ResumableStream.progressMarker", () => {
     });
   });
 
+  it("does not re-seed an object that already has a progress row from the mirrored KV value", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
+      // Four two-segment turns across four isolates: the marker counts the
+      // eight segments that landed. The 0.23-0.28 seed read
+      // [2, 4, 6, 10, 12, 18, 20] here, adding the retired total once per
+      // isolate.
+      expect(await instance.probeMirroredSeed()).toEqual([2, 2, 4, 4, 6, 6, 8]);
+    });
+  });
+
+  it("seeds an object upgraded directly from before 0.23 once", async () => {
+    const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: StreamBenchObject) => {
+      expect(await instance.probeDirectUpgradeSeed()).toEqual({
+        needsSeed: true,
+        seeded: 500,
+        retired: 502,
+        laterNeedsSeed: false,
+        later: 502
+      });
+    });
+  });
+
   it("keeps counting a legacy value an older release seeded", async () => {
     const stub = env.StreamBenchObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: StreamBenchObject) => {
