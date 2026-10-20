@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@ai-sdk/provider": "^4.0.0",
-    "@cloudflare/computer": "^0.5.1",
+    "@cloudflare/computer": "https://pkg.pr.new/@cloudflare/computer@9e798fb",
     "@cloudflare/think": "*",
     "agents": "*",
     "ai": "^7.0.0"

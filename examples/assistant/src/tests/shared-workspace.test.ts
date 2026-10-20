@@ -5,7 +5,7 @@
  * written inside chat A is visible verbatim inside chat B, because both
  * `MyAssistant` facets reach the directory's single `Workspace` through
  * `getWorkspace()` from `@cloudflare/computer`. Each chat resolves it
- * lazily on first use (`lazyWorkspace`), then forwards each operation
+ * on its first file call, then forwards each operation
  * over one DO RPC hop.
  *
  * We write through the directory's workspace client (the same

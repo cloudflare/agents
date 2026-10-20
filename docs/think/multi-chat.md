@@ -349,8 +349,18 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
 
 Every Think agent has a `__getWorkspaceStub()` method, which `getWorkspace()`
 from `@cloudflare/computer` calls over Durable Object RPC. Each chat replaces
-Think's default workspace with a client for the directory's, from
-`getWorkspace(await this.parentAgent(AssistantDirectory))`.
+Think's default workspace with a client for the directory's:
+
+```typescript
+import { getWorkspace } from "@cloudflare/computer";
+
+export class MyAssistant extends Think<Env> {
+  override workspace = getWorkspace(() => this.parentAgent(AssistantDirectory));
+}
+```
+
+The client reaches the directory on the first file call, so a chat that never
+touches a file never contacts it.
 
 Think's workspace tools, the fetch tool's saved responses, and skill script
 runners all go through it.
