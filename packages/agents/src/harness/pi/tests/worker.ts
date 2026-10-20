@@ -254,6 +254,10 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.abort();
   }
 
+  async retry(): Promise<boolean> {
+    return this.harness.retry();
+  }
+
   async createSession(): Promise<string> {
     return (await this.harness.sessions.create()).id;
   }
