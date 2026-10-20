@@ -138,6 +138,10 @@ In practice, model-generated code is naturally deterministic — it fetches data
 
 **Issue tool calls sequentially.** The replay cursor assigns each call its sequence number when the call reaches the host, so `await a(); await b();` is stable across runs but `await Promise.all([a(), b()])` is not — the two calls can arrive in either order. On a run that never pauses this is harmless, but if such a run later pauses and resumes, the reordered calls trip divergence detection. Await connector calls one at a time in any run that might pause for approval.
 
+## Unawaited tool calls
+
+A program can return before a tool call it started has finished, for example `async () => { github.ping(); return 1; }`. When `execute()` settles, the sandbox gets an error for each call still pending, so it can exit and free its Dynamic Worker concurrency slot. The host keeps running those calls to completion, so fire-and-forget calls still take effect, but the program never sees their results.
+
 ## The tool-call log
 
 ```ts

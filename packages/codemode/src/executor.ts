@@ -7,6 +7,7 @@
 
 import { RpcTarget } from "cloudflare:workers";
 import type {
+  ConnectorBinding,
   ExecuteResult,
   ExecuteOptions,
   Executor,
@@ -153,6 +154,75 @@ export interface ToolProvider {
 
   /** Type declarations for the LLM. Auto-generated from `tools` if omitted. */
   types?: string;
+}
+
+// ── ExecutionGate ─────────────────────────────────────────────────────
+
+const LATE_CALL_MESSAGE =
+  "The code execution finished before this tool call settled. " +
+  "Await every tool call before returning.";
+const LATE_CALL: unique symbol = Symbol("codemode.lateCall");
+
+/**
+ * Bounds every sandbox→host call to the lifetime of one `execute()`.
+ *
+ * A Dynamic Worker stays counted as in-flight while it has an outstanding
+ * RPC call to the host. If sandbox code returns without awaiting a tool call
+ * (`async () => { conn.ping(); return 1 }`), that call would otherwise keep
+ * the sandbox's request open until the host settles it — possibly never —
+ * and the Durable Object runs into the Dynamic Worker concurrency limit after
+ * a handful of executions.
+ *
+ * Once the execution settles the gate closes: calls still in flight — and
+ * calls that only reach the host afterwards — are answered immediately with a
+ * "late" value. The host-side work itself is not cancelled (a fire-and-forget
+ * call still runs, as before); the sandbox just no longer waits on it, and
+ * any sandbox continuation chained on the call sees the "late" error.
+ */
+class ExecutionGate {
+  #closed = false;
+  #resolveClosed!: () => void;
+  readonly #whenClosed = new Promise<void>((resolve) => {
+    this.#resolveClosed = resolve;
+  });
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#resolveClosed();
+  }
+
+  run<T>(work: () => Promise<T>, late: () => T): Promise<T> {
+    const pending = Promise.resolve().then(work);
+    // If the work loses the race and rejects later, don't report it as an
+    // unhandled rejection — the sandbox has already been answered.
+    pending.catch(() => {});
+    if (this.#closed) return Promise.resolve(late());
+    return Promise.race([pending, this.#whenClosed.then(late)]);
+  }
+}
+
+/**
+ * Host-side wrapper around a connector binding, passed to the sandbox in its
+ * place so pending calls can be released when the execution settles (see
+ * `ExecutionGate`). Forwards to the real binding — an RpcTarget or a service
+ * stub — while the execution is live.
+ */
+class GatedConnectorBinding extends RpcTarget {
+  #binding: ConnectorBinding["binding"];
+  #gate: ExecutionGate;
+  constructor(binding: ConnectorBinding["binding"], gate: ExecutionGate) {
+    super();
+    this.#binding = binding;
+    this.#gate = gate;
+  }
+
+  callTool(method: string, args: unknown): Promise<unknown> {
+    return this.#gate.run(
+      () => this.#binding.callTool(method, args),
+      () => ({ [CONNECTOR_CONTROL_KEY]: "error", message: LATE_CALL_MESSAGE })
+    );
+  }
 }
 
 // ── ToolDispatcher ────────────────────────────────────────────────────
@@ -448,6 +518,7 @@ export class DynamicWorkerExecutor implements Executor {
     // Build dispatcher map: { codemode: ToolDispatcher, state: ToolDispatcher, ... }
     // Sanitize fn keys so raw tool names (e.g. "github.list-issues") become
     // valid JS identifiers (e.g. "github_list_issues") on the proxy.
+    const gate = new ExecutionGate();
     const dispatchers: Record<string, ToolDispatcher> = {};
     for (const provider of providers) {
       const sanitizedFns: Record<
@@ -467,16 +538,30 @@ export class DynamicWorkerExecutor implements Executor {
           };
         }
         sanitizedNames.set(sanitizedName, name);
-        sanitizedFns[sanitizedName] = fn;
+        // Gated: a call still pending when the execution settles is answered
+        // with an error instead of holding the sandbox open (see ExecutionGate).
+        sanitizedFns[sanitizedName] = async (...args: unknown[]) => {
+          const result = await gate.run<unknown>(
+            () => fn(...args),
+            () => LATE_CALL
+          );
+          if (result === LATE_CALL) throw new Error(LATE_CALL_MESSAGE);
+          return result;
+        };
       }
       dispatchers[provider.name] = new ToolDispatcher(sanitizedFns);
     }
 
     // Connector bindings are passed as an evaluate() argument (RPC), not via
-    // env — live RPC references can only be serialized for RPC calls.
-    const connectorBindings: Record<string, unknown> = {};
+    // env — live RPC references can only be serialized for RPC calls. Each is
+    // wrapped so a call still pending when the execution settles is released
+    // rather than keeping the Dynamic Worker in flight (see ExecutionGate).
+    const connectorBindings: Record<string, GatedConnectorBinding> = {};
     for (const connector of connectors) {
-      connectorBindings[connector.name] = connector.binding;
+      connectorBindings[connector.name] = new GatedConnectorBinding(
+        connector.binding,
+        gate
+      );
     }
     const env = { ...this.#bindings };
     const hasEnv = Object.keys(env).length > 0;
@@ -531,6 +616,9 @@ export class DynamicWorkerExecutor implements Executor {
         disposeQuietly(entrypoint);
       }
     } finally {
+      // The execution is over: release any tool call the code left pending so
+      // it can't keep the Dynamic Worker counted as in-flight.
+      gate.close();
       disposeQuietly(worker);
     }
   }

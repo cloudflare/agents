@@ -54,6 +54,9 @@ interface Host {
   }>;
   passEnds(): Promise<Array<{ executionId: string; status: string }>>;
   enableShaping(): Promise<void>;
+  trackConnectorReleases(): Promise<void>;
+  untrackConnectorReleases(): Promise<void>;
+  connectorReleases(): Promise<number>;
   raceRejectDuringApprovedExecute(): Promise<{
     decisionKind: string;
     duringExecute?: string;
@@ -911,5 +914,45 @@ describe("codemode durable runtime (e2e)", () => {
     const execs = await h.executions();
     const rec = execs.find((e) => e.id === first.executionId);
     expect(rec?.result).toEqual({ id: 1, title: "z" });
+  });
+
+  // -------------------------------------------------------------------------
+  // Unawaited connector calls — the sandbox must not outlive the execution
+  // -------------------------------------------------------------------------
+
+  it("does not keep the sandbox in flight when a program returns with a connector call pending", async () => {
+    // A Dynamic Worker counts as in-flight while it has an outstanding call
+    // to the host. A program that returns without awaiting a connector call
+    // used to leave its sandbox in flight for the life of the Durable Object:
+    // after ten such programs the eleventh failed with "Dynamic worker
+    // concurrency limit exceeded".
+    const h = host();
+    await h.trackConnectorReleases();
+
+    const runs = 12;
+    try {
+      for (let i = 0; i < runs; i++) {
+        const out = (await h.run(
+          `async () => { items.hang({ x: "slow" }); return ${i}; }`
+        )) as ProxyToolOutput;
+        expect(out.status).toBe("completed");
+        if (out.status === "completed") expect(out.result).toBe(i);
+      }
+
+      // Every pass's connector target is released by its sandbox even though
+      // the host never settles the hanging calls.
+      const deadline = Date.now() + 3000;
+      while ((await h.connectorReleases()) < runs && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(await h.connectorReleases()).toBe(runs);
+    } finally {
+      await h.untrackConnectorReleases();
+    }
+
+    // The terminal runs were still disposed exactly once each.
+    const { disposed } = await h.lifecycle();
+    expect(disposed).toHaveLength(runs);
+    expect(disposed.every((d) => d.status === "completed")).toBe(true);
   });
 });
