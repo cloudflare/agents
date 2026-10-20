@@ -410,7 +410,7 @@ describe("pi-ai: vendor reasoning and tool calls on the chat-completions wire", 
 
     expect(events.at(-1)?.type).toBe("error");
     expect(message.stopReason).toBe("error");
-    expect(message.errorMessage).toContain("before the model finished");
+    expect(message.errorMessage).toContain("without the model finishing");
     // What arrived is kept on the failed message.
     expect(message.content[0]).toEqual({ text: "The answer is", type: "text" });
   });
