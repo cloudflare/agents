@@ -1,5 +1,33 @@
 # @cloudflare/agents
 
+## 0.29.0
+
+### Minor Changes
+
+- [#2560](https://github.com/cloudflare/agents/pull/2560) [`8c720d3`](https://github.com/cloudflare/agents/commit/8c720d3b0d7703741bf0f6e47b571d3e21c50742) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Agent Skills read and write a `@cloudflare/computer` Workspace, for both projection and `skills.runner()`. See [Upgrading to a Computer workspace](https://github.com/cloudflare/agents/blob/main/docs/think/index.md#upgrading-to-a-computer-workspace).
+
+### Patch Changes
+
+- [#2584](https://github.com/cloudflare/agents/pull/2584) [`3b3a88e`](https://github.com/cloudflare/agents/commit/3b3a88e487398f4120023f1c75830bc703b14216) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `Browser` creates and closes its Browser Run sessions with the binding's typed `acquire()` and `closeSession()`, falling back to the HTTP API in fully local dev. See [Browser](https://developers.cloudflare.com/agents/tools/browser/).
+
+- [#2615](https://github.com/cloudflare/agents/pull/2615) [`05843e4`](https://github.com/cloudflare/agents/commit/05843e428be0d8b43a5bf1923d8e40adce6f213d) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Chat recovery now seals a turn after `chatRecovery.maxInterruptedAttempts` interrupted attempts (default 5), so a turn that exceeds the Durable Object memory limit on every run no longer retries forever; `maxOomRetries` is deprecated. See [Stream Recovery](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md#stream-recovery).
+
+- [#2604](https://github.com/cloudflare/agents/pull/2604) [`5d6f5d6`](https://github.com/cloudflare/agents/commit/5d6f5d66c9095b4871e810b6f72dd0c3206c7087) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `createAI` takes `{ accountId, apiToken }` in place of `binding`, to use a gateway in another account or to run outside a Worker. See [the models docs](https://github.com/cloudflare/agents/blob/main/docs/agents/models.md#account-id-and-api-token).
+
+- [#2622](https://github.com/cloudflare/agents/pull/2622) [`2c68a71`](https://github.com/cloudflare/agents/commit/2c68a718334cb7bac102afc16a067f8ff19973ee) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `createAI` transcribes with `@cf/deepgram/nova-3`. See [the models docs](https://github.com/cloudflare/agents/blob/main/docs/agents/models.md#other-modalities).
+
+- [#2576](https://github.com/cloudflare/agents/pull/2576) [`b048873`](https://github.com/cloudflare/agents/commit/b04887397fa99fd785f8323076e61a2b76e6ca5f) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `createAI` no longer uses AI Gateway's deprecated Universal Endpoint. Model ids, now including catalog ids like `anthropic/claude-opus-4.8`, run on `env.AI.run`; model objects go to the provider-native path. Adds `byokAlias`, fixes pi-ai catalog models and dynamic routes, and lets `agents/models/opencode` take catalog ids. See [the models docs](https://github.com/cloudflare/agents/blob/main/docs/agents/models.md).
+
+- [#2589](https://github.com/cloudflare/agents/pull/2589) [`841cc18`](https://github.com/cloudflare/agents/commit/841cc1813b21de3ca3228a08185e4ce1568eb972) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `createAI` resumes a catalog or dynamic route stream that drops mid-answer, with nothing lost or repeated. See [the models docs](https://github.com/cloudflare/agents/blob/main/docs/agents/models.md#stream-resume).
+
+- [#2594](https://github.com/cloudflare/agents/pull/2594) [`cc34652`](https://github.com/cloudflare/agents/commit/cc34652df94ed583120cddc0412660dda3515e42) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `agents/models/pi-ai` resolves Claude ids from pi-ai 1.2's gateway catalog under AI Gateway's spelling, `anthropic/claude-opus-4.8`. See [Models for pi-ai](https://developers.cloudflare.com/agents/models/pi-ai/).
+
+- [#2594](https://github.com/cloudflare/agents/pull/2594) [`cc34652`](https://github.com/cloudflare/agents/commit/cc34652df94ed583120cddc0412660dda3515e42) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Support Pi 1.3: the Pi web search, web fetch, browser, and skills tools return `output`, and the Pi peer range is now `~1.3.0`. See [Pi harness](https://developers.cloudflare.com/agents/harnesses/pi/).
+
+- [#2621](https://github.com/cloudflare/agents/pull/2621) [`e80a201`](https://github.com/cloudflare/agents/commit/e80a2013af633d76439d7fd67b909dee5e80b62d) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `PiHarness` `submit()` and `steer()` now accept pi-durable's `entry` option, which labels an input with a transcript kind of your own (for example `app.approval`) instead of `pi.user`. Before, the harness had no way to pass it. See [Label input the user did not type](https://developers.cloudflare.com/agents/harnesses/pi/#label-input-the-user-did-not-type).
+
+- [#2616](https://github.com/cloudflare/agents/pull/2616) [`65ddec8`](https://github.com/cloudflare/agents/commit/65ddec801904f0150acbecbac81f910f06f79a97) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `openPiSessionStore` now uses pi-durable's own Durable Object SQLite adapter, so several Pi storages in one object share its operation queue. See [Pi harness](https://developers.cloudflare.com/agents/harnesses/pi/).
+
 ## 0.28.1
 
 ### Patch Changes

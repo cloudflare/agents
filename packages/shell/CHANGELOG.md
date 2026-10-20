@@ -1,5 +1,11 @@
 # @cloudflare/shell
 
+## 0.5.0
+
+### Minor Changes
+
+- [#2564](https://github.com/cloudflare/agents/pull/2564) [`34317af`](https://github.com/cloudflare/agents/commit/34317af4568a1636ed00d900f48a7a8f2ea4f5af) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `@cloudflare/shell` is deprecated in favour of `@cloudflare/computer`. See [Migrating to `@cloudflare/computer`](https://github.com/cloudflare/agents/blob/main/docs/shell/migrating-to-computer.md).
+
 ## 0.4.3
 
 ### Patch Changes
