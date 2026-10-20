@@ -349,20 +349,8 @@ export class AssistantDirectory extends Think<Env, DirectoryState> {
 
 Every Think agent has a `__getWorkspaceStub()` method, which `getWorkspace()`
 from `@cloudflare/computer` calls over Durable Object RPC. Each chat replaces
-Think's default workspace with a client for the directory's. `lazyWorkspace`
-defers `getWorkspace()` until a turn first touches a file, and assigning it as a
-class field means Think never creates a per-chat `Workspace`:
-
-```typescript
-import { getWorkspace } from "@cloudflare/computer";
-import { lazyWorkspace } from "@cloudflare/think";
-
-export class MyAssistant extends Think<Env> {
-  override workspace = lazyWorkspace(async () =>
-    getWorkspace(await this.parentAgent(AssistantDirectory))
-  );
-}
-```
+Think's default workspace with a client for the directory's, from
+`getWorkspace(await this.parentAgent(AssistantDirectory))`.
 
 Think's workspace tools, the fetch tool's saved responses, and skill script
 runners all go through it.

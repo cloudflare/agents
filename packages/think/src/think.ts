@@ -676,7 +676,6 @@ export type {
 } from "./session";
 export type { SessionMessage } from "agents/sessions";
 export type { FiberContext, FiberRecoveryContext } from "agents";
-export { lazyWorkspace } from "./workspace-files";
 export type {
   ThinkWorkspace,
   ThinkWorkspaceFilesystem

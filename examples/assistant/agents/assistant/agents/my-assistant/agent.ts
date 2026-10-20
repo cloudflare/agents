@@ -4,8 +4,7 @@ import {
   Think,
   Session,
   skills,
-  defaultContextOverflowClassifier,
-  lazyWorkspace
+  defaultContextOverflowClassifier
 } from "@cloudflare/think";
 import bundledSkills from "agents:skills";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
@@ -26,6 +25,7 @@ import { tool, generateText } from "ai";
 import type { ToolSet } from "ai";
 import { z } from "zod";
 import { AssistantDirectory } from "../../agent";
+import { lazyWorkspace } from "../../lazy-workspace";
 import { SharedMCPClient } from "../../shared-mcp-client";
 import type { AgentConfig } from "../../types";
 

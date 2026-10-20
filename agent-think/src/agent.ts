@@ -25,12 +25,13 @@ import type {
   ToolCallResultContext,
   TurnContext
 } from "@cloudflare/think";
-import { lazyWorkspace, skills, Think } from "@cloudflare/think";
+import { skills, Think } from "@cloudflare/think";
 import type { ContextConfig } from "agents/context";
 import type { WorkspaceAgent } from "./workspace-agent";
 import type { LanguageModel, ToolSet } from "ai";
 import { getAgentByName } from "agents";
 import type { CommandCenterAgent } from "./command-center";
+import { lazyWorkspace } from "./lazy-workspace";
 import { createAgentThinkModel } from "./model";
 import { createBashTool } from "./tools/bash";
 import {
