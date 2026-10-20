@@ -14,6 +14,7 @@ import {
   type AgentEvent,
   type EntryRecord,
   type Extension,
+  type InputEntry,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
 import { DurableObject } from "cloudflare:workers";
@@ -135,6 +136,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
       whenBusy?: PiWhenBusy;
       session?: string;
       operationId?: string;
+      entry?: InputEntry;
     } = {}
   ): Promise<PiReceipt> {
     return this.harness.submit(text, options);
@@ -150,6 +152,27 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   async pending() {
     return this.harness.pending();
+  }
+
+  /**
+   * Each transcript entry that carries a model message: its kind, its data
+   * as JSON, the message's role and text.
+   */
+  async entries(): Promise<
+    { kind: string; data: string; role: string; text: string }[]
+  > {
+    return (await this.harness.messages()).flatMap((entry) => {
+      const message = entry.model?.[0];
+      if (entry.kind === "pi.system" || message === undefined) return [];
+      return [
+        {
+          kind: entry.kind,
+          data: JSON.stringify(entry.data ?? null),
+          role: message.role,
+          text: textOf(message.content)
+        }
+      ];
+    });
   }
 
   async abort(): Promise<boolean> {

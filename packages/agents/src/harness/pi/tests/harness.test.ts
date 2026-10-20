@@ -38,6 +38,55 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.messages()).toEqual(["hello", "echo: hello"]);
   });
 
+  it("places an input as the entry the caller names, queued or not", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const scheduled = { kind: "app.scheduled", data: { job: "daily" } };
+    const first = await stub.submit("hello", {
+      operationId: "op-1",
+      entry: scheduled
+    });
+    expect((await stub.wait(first.operationId)).text).toBe("echo: hello");
+    const again = await stub.submit("hello", {
+      operationId: "op-1",
+      entry: scheduled
+    });
+    expect(again.accepted).toBe(false);
+
+    // Queued behind a run, and across a crash while it waits.
+    const gate = await stub.submit("gate");
+    await stub.gateStarted(1);
+    const approval = await stub.submit("approved: run the migration", {
+      entry: { kind: "app.approval", data: { approved: true } }
+    });
+    await abortAllDurableObjects();
+    stub = fresh(name);
+    await runDurableObjectAlarm(stub);
+    await stub.gateStarted(2);
+    await stub.release();
+    await stub.wait(gate.operationId);
+    expect((await stub.wait(approval.operationId)).text).toBe(
+      "echo: approved: run the migration"
+    );
+
+    const entries = await stub.entries();
+    expect(entries.filter((entry) => entry.role === "user")).toEqual([
+      {
+        kind: "app.scheduled",
+        data: '{"job":"daily"}',
+        role: "user",
+        text: "hello"
+      },
+      { kind: "pi.user", data: "null", role: "user", text: "gate" },
+      {
+        kind: "app.approval",
+        data: '{"approved":true}',
+        role: "user",
+        text: "approved: run the migration"
+      }
+    ]);
+  });
+
   it("answers follow-ups queued while a run is going, in order", async () => {
     const stub = fresh();
     const gate = await stub.submit("gate");

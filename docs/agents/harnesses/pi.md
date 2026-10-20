@@ -182,19 +182,29 @@ const receipt = await session.submit("Summarize the latest report", {
 const result = await session.wait(receipt.operationId);
 ```
 
-| Call                                       | What it does                                                                                                                                                                             |
-| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `prompt(input)`                            | Submits and waits: the answer, and the transcript after it.                                                                                                                              |
-| `submit(input, { operationId, whenBusy })` | Returns once Pi has durably accepted the input, before the model runs. A busy session queues it as a follow-up; `whenBusy: "steer"` joins the running work after its current tool round. |
-| `wait(operationId, signal?)`               | The operation's result once Pi settles it. Aborting `signal` stops only the wait, not the work.                                                                                          |
-| `steer(input)`                             | `submit` with `whenBusy: "steer"`.                                                                                                                                                       |
-| `abort(operationId?)`                      | Withdraws a queued operation, or with no id, stops everything running in the session.                                                                                                    |
-| `pending()`                                | Operations Pi has not settled yet: queued, or part of the running work.                                                                                                                  |
-| `messages()`                               | Pi's transcript entries since the newest reset.                                                                                                                                          |
-| `events()`                                 | Pi's agent events: a `snapshot`, then one batch per commit.                                                                                                                              |
-| `reset(handoff?)`                          | Starts a new context, optionally from a handoff note.                                                                                                                                    |
-| `setModel(model)`                          | Changes this session's model.                                                                                                                                                            |
-| `busy()`                                   | Whether a run is going.                                                                                                                                                                  |
+| Call                                              | What it does                                                                                                                                                                                                                                                |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prompt(input)`                                   | Submits and waits: the answer, and the transcript after it.                                                                                                                                                                                                 |
+| `submit(input, { operationId, whenBusy, entry })` | Returns once Pi has durably accepted the input, before the model runs. A busy session queues it as a follow-up; `whenBusy: "steer"` joins the running work after its current tool round. `entry` places the input as an entry of your own kind (see below). |
+| `wait(operationId, signal?)`                      | The operation's result once Pi settles it. Aborting `signal` stops only the wait, not the work.                                                                                                                                                             |
+| `steer(input)`                                    | `submit` with `whenBusy: "steer"`.                                                                                                                                                                                                                          |
+| `abort(operationId?)`                             | Withdraws a queued operation, or with no id, stops everything running in the session.                                                                                                                                                                       |
+| `pending()`                                       | Operations Pi has not settled yet: queued, or part of the running work.                                                                                                                                                                                     |
+| `messages()`                                      | Pi's transcript entries since the newest reset.                                                                                                                                                                                                             |
+| `events()`                                        | Pi's agent events: a `snapshot`, then one batch per commit.                                                                                                                                                                                                 |
+| `reset(handoff?)`                                 | Starts a new context, optionally from a handoff note.                                                                                                                                                                                                       |
+| `setModel(model)`                                 | Changes this session's model.                                                                                                                                                                                                                               |
+| `busy()`                                          | Whether a run is going.                                                                                                                                                                                                                                     |
+
+Input the user did not type, such as a scheduled prompt, a webhook, or the outcome of an approval, can say so with `entry`. The model still gets the input as a user message, but the transcript records it as an entry of your kind, with your data, instead of Pi's `pi.user`, so a UI can tell it apart. The kind must not start with `pi.`.
+
+```ts
+await session.submit("The deploy was approved. Run the migration.", {
+  entry: { kind: "app.approval", data: { approved: true, by: "ben" } }
+});
+```
+
+The kind is a label, not authorization: to the model the input is still a user message, so don't put text in it you wouldn't let the user send.
 
 `harness.prompt()`, `submit()`, `wait()`, `abort()`, `messages()` and `pending()` act on the root session, or on `{ session }`. `harness.sessions` has `create()`, `fork(from)`, `get(id)` and `list()`, which includes sessions subagents created. `ROOT_SESSION` is the root's id.
 
