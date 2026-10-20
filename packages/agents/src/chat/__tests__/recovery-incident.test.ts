@@ -16,7 +16,9 @@ import {
   DEFAULT_CHAT_RECOVERY_MAX_WORK,
   DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS,
   DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
+  admitChatRecoveryAttempt,
   evaluateChatRecoveryIncident,
+  finishChatRecoveryAttempt,
   KV_DELETE_MAX_KEYS,
   listActiveChatRecoveryIncidents,
   readChatRecoveryProgress,
@@ -59,6 +61,11 @@ const identity = {
   latestUserMessageId: "user-1",
   recoveryKind: "continue" as const
 };
+
+/** An `interrupted` trigger whose replay runs in `isolate`. */
+function interrupted(isolate: string, token = "attempt-1") {
+  return { kind: "interrupted" as const, attempt: { isolate, token } };
+}
 
 function evaluate(
   overrides: Partial<Parameters<typeof evaluateChatRecoveryIncident>[0]> = {}
@@ -812,62 +819,78 @@ describe("evaluateChatRecoveryIncident", () => {
   });
 
   it("seals a turn whose attempts keep dying, even when each streams output inside the debounce window (#2613)", async () => {
-    // Each death is followed by a replay of its run in a fresh isolate. Every
-    // attempt streamed a little before dying, which resets the attempt cap and
-    // the no-progress clock, and the deaths come faster than the debounce
-    // window. Only the interruption count still climbs.
+    // Each death leaves the attempt record of an isolate that is gone; the
+    // next isolate's replay counts it. Every attempt streamed a little before
+    // dying, which resets the attempt cap and the no-progress clock, and the
+    // deaths come faster than the debounce window. Only the interruption
+    // count still climbs.
     let existing: ChatRecoveryIncident | null = null;
     for (let death = 1; death <= 5; death++) {
       const { incident, exhausted } = await evaluate({
-        trigger: { kind: "interrupted", runId: `run-${death}` },
+        trigger: interrupted(`isolate-${death}`),
         existing,
         currentProgress: death * 3,
         now: T0 + death * 1000
       });
       expect(incident.interruptedAttempts).toBe(death);
-      expect(incident.lastInterruptedRunId).toBe(`run-${death}`);
       expect(incident.attempt).toBe(1);
       if (death < 5) {
         expect(exhausted).toBe(false);
+        expect(incident.attemptInFlight?.isolate).toBe(`isolate-${death}`);
       } else {
         expect(exhausted).toBe(true);
         expect(incident.status).toBe("exhausted");
         expect(incident.reason).toBe("interrupted_attempts_exceeded");
+        // A sealed incident runs nothing more.
+        expect(incident.attemptInFlight).toBeUndefined();
       }
       existing = incident;
     }
   });
 
-  it("counts a replayed run once", async () => {
-    const first = await evaluate({
-      trigger: { kind: "interrupted", runId: "run-1" }
-    });
-    const replay = await evaluate({
-      trigger: { kind: "interrupted", runId: "run-1" },
+  it("counts a second report of the same death once", async () => {
+    // Two recovery paths in one isolate (a legacy fiber row and a Task
+    // reclaim) can both report the original turn's death.
+    const first = await evaluate({ trigger: interrupted("isolate-b") });
+    const again = await evaluate({
+      trigger: interrupted("isolate-b", "attempt-2"),
       existing: first.incident,
       now: T0 + 1000
     });
-    expect(replay.incident.interruptedAttempts).toBe(1);
-    expect(replay.incident.lastInterruptedRunId).toBe("run-1");
+    expect(first.incident.interruptedAttempts).toBe(1);
+    expect(again.incident.interruptedAttempts).toBe(1);
   });
 
-  it("does not count a stall, and keeps the interruption count", async () => {
-    const interrupted = await evaluate({
-      trigger: { kind: "interrupted", runId: "run-1" }
+  it("does not count a replay when the previous attempt finished", async () => {
+    // The record was cleared: the attempt finished, so its turn was not lost
+    // to an isolate death.
+    const first = await evaluate({ trigger: interrupted("isolate-a") });
+    const { attemptInFlight: _cleared, ...finished } = first.incident;
+    const replay = await evaluate({
+      trigger: interrupted("isolate-b"),
+      existing: finished,
+      now: T0 + 1000
     });
+    expect(replay.incident.interruptedAttempts).toBe(1);
+  });
+
+  it("does not count a stall, and keeps the running attempt's record", async () => {
+    const opened = await evaluate({ trigger: interrupted("isolate-a") });
     const stalled = await evaluate({
       trigger: { kind: "stalled" },
-      existing: interrupted.incident,
+      existing: opened.incident,
       now: T0 + 1000
     });
     expect(stalled.incident.interruptedAttempts).toBe(1);
-    expect(stalled.incident.lastInterruptedRunId).toBe("run-1");
+    expect(stalled.incident.attemptInFlight).toEqual(
+      opened.incident.attemptInFlight
+    );
     expect(stalled.exhausted).toBe(false);
   });
 
   it("seals the first interruption when maxInterruptedAttempts is 1", async () => {
     const { exhausted, incident } = await evaluate({
-      trigger: { kind: "interrupted", runId: "run-1" },
+      trigger: interrupted("isolate-a"),
       config: config({ maxInterruptedAttempts: 1 })
     });
     expect(exhausted).toBe(true);
@@ -877,9 +900,13 @@ describe("evaluateChatRecoveryIncident", () => {
   it("never seals on interruptions when maxInterruptedAttempts is Infinity", async () => {
     const base = (await evaluate()).incident;
     const { exhausted } = await evaluate({
-      trigger: { kind: "interrupted", runId: "run-1001" },
+      trigger: interrupted("isolate-b"),
       config: config({ maxInterruptedAttempts: Number.POSITIVE_INFINITY }),
-      existing: { ...base, interruptedAttempts: 1000 },
+      existing: {
+        ...base,
+        interruptedAttempts: 1000,
+        attemptInFlight: { isolate: "isolate-a", token: "attempt-1" }
+      },
       now: T0 + CHAT_RECOVERY_ALARM_DEBOUNCE_MS + 1
     });
     expect(exhausted).toBe(false);
@@ -918,11 +945,12 @@ describe("evaluateChatRecoveryIncident", () => {
     // A parked HITL turn is budget-free, the interruption budget included.
     const base = (await evaluate()).incident;
     const { exhausted, incident } = await evaluate({
-      trigger: { kind: "interrupted", runId: "run-parked" },
+      trigger: interrupted("isolate-b"),
       existing: {
         ...base,
         attempt: 1,
         interruptedAttempts: DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS + 5,
+        attemptInFlight: { isolate: "isolate-a", token: "attempt-1" },
         lastProgressAt: T0
       },
       awaitingClientInteraction: true,
@@ -933,5 +961,92 @@ describe("evaluateChatRecoveryIncident", () => {
     expect(incident.interruptedAttempts).toBe(
       DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS + 6
     );
+  });
+});
+
+describe("admitChatRecoveryAttempt / finishChatRecoveryAttempt (#2613)", () => {
+  async function openedIncident() {
+    return (
+      await evaluateChatRecoveryIncident({
+        identity,
+        trigger: {
+          kind: "interrupted",
+          attempt: { isolate: "a", token: "t0" }
+        },
+        config: config(),
+        existing: null,
+        currentProgress: 0,
+        awaitingClientInteraction: false,
+        now: T0
+      })
+    ).incident;
+  }
+
+  it("counts an attempt left by another isolate and records the new one", async () => {
+    const existing = await openedIncident();
+    const { incident, exhausted } = admitChatRecoveryAttempt({
+      existing,
+      attempt: { isolate: "b", token: "t1" },
+      config: config(),
+      awaitingClientInteraction: false
+    });
+    expect(exhausted).toBe(false);
+    expect(incident.interruptedAttempts).toBe(2);
+    expect(incident.attemptInFlight).toEqual({ isolate: "b", token: "t1" });
+  });
+
+  it("does not count an attempt still running in this isolate", async () => {
+    // The replay that scheduled this callback in the same isolate.
+    const existing = await openedIncident();
+    const { incident } = admitChatRecoveryAttempt({
+      existing,
+      attempt: { isolate: "a", token: "t1" },
+      config: config(),
+      awaitingClientInteraction: false
+    });
+    expect(incident.interruptedAttempts).toBe(1);
+    expect(incident.attemptInFlight).toEqual({ isolate: "a", token: "t1" });
+  });
+
+  it("seals instead of recording when the death spends the budget", async () => {
+    const existing = {
+      ...(await openedIncident()),
+      interruptedAttempts: 4
+    };
+    const { incident, exhausted } = admitChatRecoveryAttempt({
+      existing,
+      attempt: { isolate: "b", token: "t1" },
+      config: config(),
+      awaitingClientInteraction: false
+    });
+    expect(exhausted).toBe(true);
+    expect(incident.interruptedAttempts).toBe(5);
+    expect(incident.attemptInFlight).toBeUndefined();
+  });
+
+  it("does not seal a parked turn", async () => {
+    const existing = {
+      ...(await openedIncident()),
+      interruptedAttempts: 4
+    };
+    const { exhausted } = admitChatRecoveryAttempt({
+      existing,
+      attempt: { isolate: "b", token: "t1" },
+      config: config(),
+      awaitingClientInteraction: true
+    });
+    expect(exhausted).toBe(false);
+  });
+
+  it("clears only the attempt that finished", async () => {
+    const existing = await openedIncident();
+    expect(
+      finishChatRecoveryAttempt(existing, { isolate: "a", token: "t0" })
+        ?.attemptInFlight
+    ).toBeUndefined();
+    // A newer attempt replaced the record: leave it alone.
+    expect(
+      finishChatRecoveryAttempt(existing, { isolate: "a", token: "older" })
+    ).toBeNull();
   });
 });

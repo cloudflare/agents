@@ -114,8 +114,7 @@ import {
   type DispatchRecoveredTurnInput,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryIncident,
-  type ChatRecoveryKind,
-  type ChatRecoveryTrigger
+  type ChatRecoveryKind
 } from "agents/chat";
 import type {
   ChatResponseResult,
@@ -802,7 +801,14 @@ export class AIChatAgent<
     detached: (onTurnStarted: () => void) => Promise<void>
   ): Promise<void> {
     return dispatchChatRecoveryToHandoff({
-      detached,
+      // Each run is one attempt under the interruption budget: it counts an
+      // earlier attempt that died and records itself before any heavy work.
+      detached: (onTurnStarted) =>
+        this._chatRecoveryEngine().runRecoveryAttempt({
+          callback,
+          data,
+          run: () => detached(onTurnStarted)
+        }),
       track: (turn) => this.lifecycle.trackAlarmWork(turn),
       redefer: (dedupeKey) =>
         this._enqueueChatRecovery(
@@ -5153,7 +5159,7 @@ export class AIChatAgent<
     recoveryRootRequestId?: string | null;
     latestUserMessageId?: string | null;
     recoveryKind: ChatRecoveryKind;
-    trigger: ChatRecoveryTrigger;
+    trigger: "interrupted" | "stalled";
     /** Test-only clock injection for deterministic debounce/window timing. */
     nowMs?: number;
   }): Promise<{
@@ -5731,7 +5737,7 @@ export class AIChatAgent<
         recoveryRootRequestId,
         latestUserMessageId,
         recoveryKind,
-        trigger: { kind: "stalled" }
+        trigger: "stalled"
       });
     const partialText = input.partialParts
       .filter(

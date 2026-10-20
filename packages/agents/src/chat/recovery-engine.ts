@@ -18,11 +18,14 @@ import type {
 import type { ChatFiberSnapshot } from "./recovery";
 import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+  admitChatRecoveryAttempt,
   chatRecoveryIncidentId,
   chatRecoveryIncidentKey,
-  evaluateChatRecoveryIncident
+  evaluateChatRecoveryIncident,
+  finishChatRecoveryAttempt
 } from "./recovery-incident";
 import type {
+  ChatRecoveryAttempt,
   ChatRecoveryIncident,
   ChatRecoveryIncidentEvent,
   ChatRecoveryKind,
@@ -88,10 +91,12 @@ export interface BeginChatRecoveryIncidentInput {
   latestUserMessageId?: string | null;
   recoveryKind: ChatRecoveryKind;
   /**
-   * Why the incident is being opened. Only an `interrupted` trigger counts
-   * against `maxInterruptedAttempts`.
+   * Why the incident is being opened: the replay of a turn run whose isolate
+   * died (`interrupted`), or a stall a live isolate caught (`stalled`). Only
+   * a replay can count against `maxInterruptedAttempts`, and only a replay
+   * records itself as the attempt in flight.
    */
-  trigger: ChatRecoveryTrigger;
+  trigger: "interrupted" | "stalled";
   /** Test-only clock injection for deterministic debounce/window timing. */
   nowMs?: number;
 }
@@ -100,6 +105,12 @@ export interface BeginChatRecoveryIncidentResult {
   incident: ChatRecoveryIncident;
   config: ResolvedChatRecoveryConfig;
   exhausted: boolean;
+  /**
+   * The attempt this opening recorded as in flight (an `interrupted` trigger
+   * on an incident that is not sealed), for the caller to finish. `null`
+   * when nothing was recorded.
+   */
+  attempt: ChatRecoveryAttempt | null;
 }
 
 /**
@@ -385,7 +396,100 @@ export interface ChatFiberWakeHooks<TClassify> {
  * this class owns the surrounding sequence and its ordering invariants.
  */
 export class ChatRecoveryEngine {
+  /**
+   * This object instance's identity in `attemptInFlight` records. A reset
+   * builds a new instance, so a record carrying a different value was left by
+   * an attempt whose isolate died (#2613).
+   */
+  readonly #isolate = crypto.randomUUID();
+
   constructor(private readonly adapter: ChatRecoveryAdapter) {}
+
+  #newAttempt(): ChatRecoveryAttempt {
+    return { isolate: this.#isolate, token: crypto.randomUUID() };
+  }
+
+  /**
+   * Clear a finished attempt's record. Best-effort: in a reset isolate this
+   * write fails too, and the record it leaves behind is exactly what tells
+   * the next isolate that this attempt died.
+   */
+  async #finishAttempt(
+    incidentId: string,
+    attempt: ChatRecoveryAttempt
+  ): Promise<void> {
+    const { adapter } = this;
+    const key = chatRecoveryIncidentKey(incidentId);
+    try {
+      const stored = await adapter.getIncident(key);
+      const next = stored ? finishChatRecoveryAttempt(stored, attempt) : null;
+      if (next) await adapter.putIncident(key, next);
+    } catch {
+      // A record left behind costs at most one extra counted interruption.
+    }
+  }
+
+  /**
+   * Run one recovery attempt under the interruption budget (#2613): a
+   * `_chatRecoveryContinue` / `_chatRecoveryRetry` callback and the turn it
+   * starts. Before `run` does anything heavy, the attempt counts any earlier
+   * attempt that died (one whose `attemptInFlight` record another isolate
+   * left) and records itself, confirmed with `syncStorage`. Once
+   * `maxInterruptedAttempts` attempts have died the turn is sealed with
+   * `interrupted_attempts_exceeded` and `run` is never called. The record is
+   * cleared when `run` settles, whatever its outcome.
+   *
+   * This catches deaths the replay of an interrupted turn run cannot see, such
+   * as a reset before the callback starts its turn, which leaves no turn run
+   * to replay. A payload without an incident, or an incident that is gone or
+   * already sealed, runs untracked.
+   *
+   * @param input - The callback being run, its payload, and the work.
+   */
+  async runRecoveryAttempt(input: {
+    callback: ChatRecoveryScheduleCallback;
+    data: Record<string, unknown> | undefined;
+    run: () => Promise<void>;
+  }): Promise<void> {
+    const { adapter } = this;
+    const incidentId =
+      typeof input.data?.incidentId === "string"
+        ? input.data.incidentId
+        : undefined;
+    const existing = incidentId
+      ? await adapter.getIncident(chatRecoveryIncidentKey(incidentId))
+      : null;
+    if (!incidentId || !existing || existing.status === "exhausted") {
+      await input.run();
+      return;
+    }
+
+    adapter.ensureInteractionStateLoaded?.();
+    const attempt = this.#newAttempt();
+    const { incident, exhausted } = admitChatRecoveryAttempt({
+      existing,
+      attempt,
+      config: adapter.resolveConfig(),
+      awaitingClientInteraction:
+        adapter.isAwaitingClientInteraction?.() ?? false
+    });
+    await adapter.putIncident(chatRecoveryIncidentKey(incidentId), incident);
+    await adapter.syncStorage();
+
+    if (exhausted) {
+      await this.exhaustRecoveryGiveUp({
+        callback: input.callback,
+        data: { incidentId },
+        reason: "interrupted_attempts_exceeded"
+      });
+      return;
+    }
+    try {
+      await input.run();
+    } finally {
+      await this.#finishAttempt(incidentId, attempt);
+    }
+  }
 
   /**
    * Open or re-evaluate the recovery incident for `input`, persist the result,
@@ -458,15 +562,76 @@ export class ChatRecoveryEngine {
     });
     const recoveryRootRequestId = snapshot?.recoveryRootRequestId ?? requestId;
 
-    // A recovered fiber is a run whose isolate died before it finished, so
-    // this opening counts one interrupted attempt for the turn (#2613).
-    const { incident, config, exhausted } = await this.beginIncident({
+    // A recovered fiber is a run whose isolate died before it finished. The
+    // replay is itself an attempt: it counts the death and records itself so
+    // that its own death, if it dies too, is counted by the next isolate
+    // (#2613).
+    const { incident, config, exhausted, attempt } = await this.beginIncident({
       requestId,
       recoveryRootRequestId,
       latestUserMessageId: snapshot?.latestUserMessageId,
       recoveryKind,
-      trigger: { kind: "interrupted", runId: ctx.id }
+      trigger: "interrupted"
     });
+    try {
+      return await this.#replayRecoveredTurn(wake, {
+        ctx,
+        incident,
+        config,
+        exhausted,
+        recoveryKind,
+        detail,
+        requestId,
+        recoveryRootRequestId,
+        snapshot,
+        recoveryData,
+        streamId,
+        streamStillActive,
+        streamStatus,
+        partial
+      });
+    } finally {
+      if (attempt) await this.#finishAttempt(incident.incidentId, attempt);
+    }
+  }
+
+  /** The part of {@link handleChatFiberRecovery} that runs after the incident opened. */
+  async #replayRecoveredTurn<TClassify>(
+    wake: ChatFiberWakeHooks<TClassify>,
+    input: {
+      ctx: FiberRecoveryContext;
+      incident: ChatRecoveryIncident;
+      config: ResolvedChatRecoveryConfig;
+      exhausted: boolean;
+      recoveryKind: ChatRecoveryKind;
+      detail: TClassify;
+      requestId: string;
+      recoveryRootRequestId: string;
+      snapshot: ChatFiberSnapshot | null;
+      recoveryData: unknown;
+      streamId: string;
+      streamStillActive: boolean;
+      streamStatus: ChatStreamStatus | undefined;
+      partial: RecoveryPartial;
+    }
+  ): Promise<boolean> {
+    const { adapter } = this;
+    const {
+      ctx,
+      incident,
+      config,
+      exhausted,
+      recoveryKind,
+      detail,
+      requestId,
+      recoveryRootRequestId,
+      snapshot,
+      recoveryData,
+      streamId,
+      streamStillActive,
+      streamStatus,
+      partial
+    } = input;
 
     if (exhausted) {
       // Preserve the settled partial before sealing. Exhaustion is decided BEFORE
@@ -603,9 +768,13 @@ export class ChatRecoveryEngine {
     adapter.ensureInteractionStateLoaded?.();
     const currentProgress = await adapter.readProgress();
 
+    const trigger: ChatRecoveryTrigger =
+      input.trigger === "interrupted"
+        ? { kind: "interrupted", attempt: this.#newAttempt() }
+        : { kind: "stalled" };
     const { incident, exhausted, events } = await evaluateChatRecoveryIncident({
       identity: input,
-      trigger: input.trigger,
+      trigger,
       config,
       existing,
       currentProgress,
@@ -624,7 +793,9 @@ export class ChatRecoveryEngine {
     for (const event of events) {
       adapter.emitRecoveryEvent(event);
     }
-    return { incident, config, exhausted };
+    const attempt =
+      trigger.kind === "interrupted" && !exhausted ? trigger.attempt : null;
+    return { incident, config, exhausted, attempt };
   }
 
   /**

@@ -292,10 +292,11 @@ export type ChatRecoveryConfig =
        * original turn counts, so the default of `5` runs the model at most five
        * times for a turn that dies every time.
        *
-       * The count is taken when the next isolate replays the interrupted turn,
-       * before it runs anything heavy, because the isolate that died cannot
-       * record anything. Streamed output never resets it: a turn that re-runs
-       * and dies again produces output too (#2613). A memory-limit reset and a
+       * Each attempt records itself before it runs anything heavy, and the
+       * next attempt counts a record left by an isolate that died, because
+       * the isolate that died cannot record anything. Streamed output never
+       * resets the count: a turn that re-runs and dies again produces output
+       * too (#2613). A memory-limit reset and a
        * deploy look the same from the next isolate, so a turn interrupted by
        * this many deploys in a row is also sealed. Values below `1` are read
        * as `1`; `Infinity` disables the bound.

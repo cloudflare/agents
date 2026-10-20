@@ -269,6 +269,7 @@ export {
   type ChatRecoveryIncident,
   type ChatRecoveryKind,
   type ChatRecoveryTrigger,
+  type ChatRecoveryAttempt,
   type ChatRecoveryIncidentEvent,
   type EvaluateChatRecoveryIncidentInput,
   type EvaluateChatRecoveryIncidentResult

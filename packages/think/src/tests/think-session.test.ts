@@ -3516,6 +3516,11 @@ describe("Think — onChatRecovery", () => {
     await agent.setRecoveryOverride({ continue: false });
 
     for (let death = 1; death <= 5; death++) {
+      // From the second death on, the recovery attempt that ran the turn
+      // died with it and left its record behind.
+      if (death > 1) {
+        await agent.simulateDeadAttemptForTest("req-crash-loop:");
+      }
       // Each attempt streamed a little before its isolate died, and the
       // replay comes inside the debounce window. Neither resets the count.
       await agent.bumpRecoveryProgressForTest();
@@ -3545,6 +3550,45 @@ describe("Think — onChatRecovery", () => {
     expect(exhausted[0].reason).toBe("interrupted_attempts_exceeded");
     // The first four replays reached onChatRecovery; the fifth sealed first.
     expect(await agent.getRecoveryContexts()).toHaveLength(4);
+  });
+
+  it("seals a recovery callback whose attempts die before starting a turn (#2613)", async () => {
+    const agent = await freshRecoveryAgent("recovery-pre-turn-deaths");
+    await agent.enableExhaustedCaptureForTest(100);
+    await agent.seedIncidentForTest({
+      incidentId: "req-pre-turn:",
+      requestId: "req-pre-turn",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 100,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now(),
+      interruptedAttempts: 4
+    });
+    // The last callback died while it was still checking stable state, so
+    // no turn run exists to replay; only its attempt record is left.
+    await agent.simulateDeadAttemptForTest("req-pre-turn:");
+
+    await agent.runChatRecoveryContinueForTestWith({
+      incidentId: "req-pre-turn:",
+      originalRequestId: "req-pre-turn"
+    });
+
+    const exhausted = (await agent.getExhaustedContextsForTest()) as Array<{
+      reason: string;
+    }>;
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0].reason).toBe("interrupted_attempts_exceeded");
+    expect(await agent.getTurnBodies()).toHaveLength(0);
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      interruptedAttempts?: number;
+      status: string;
+    }>;
+    expect(incidents[0]).toMatchObject({
+      interruptedAttempts: 5,
+      status: "exhausted"
+    });
   });
 
   it("continuation does not replay a trailing assistant message (assistant prefill)", async () => {

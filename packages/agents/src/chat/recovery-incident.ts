@@ -38,19 +38,30 @@ import type {
 export type ChatRecoveryKind = "retry" | "continue";
 
 /**
+ * One recovery attempt in flight, recorded on the incident before the attempt
+ * does anything heavy. `isolate` identifies the object instance that started
+ * it; `token` identifies the attempt. An isolate killed by a memory-limit
+ * reset cannot write anything, so it cannot clear this record: a later
+ * isolate that finds a record it did not write knows that attempt died
+ * (#2613).
+ */
+export type ChatRecoveryAttempt = {
+  readonly isolate: string;
+  readonly token: string;
+};
+
+/**
  * Why an incident evaluation is running.
  *
  * - `interrupted`: a later isolate is replaying a turn run whose isolate died
- *   before the run finished. `runId` names that run. This is the only point
- *   where the system durably learns that an attempt was interrupted: the
- *   isolate that died (for example after a memory-limit reset) cannot write
- *   anything, so the interruption budget is counted here (#2613).
+ *   before the run finished. The replay is itself an attempt, recorded as
+ *   `attempt`.
  * - `stalled`: a live isolate caught a stalled or failed stream. Nothing
- *   died, so it does not count as an interrupted attempt; transient retries
- *   are bounded by `transientRetries` instead.
+ *   died, so nothing is counted; transient retries are bounded by
+ *   `transientRetries` instead.
  */
 export type ChatRecoveryTrigger =
-  | { readonly kind: "interrupted"; readonly runId: string }
+  | { readonly kind: "interrupted"; readonly attempt: ChatRecoveryAttempt }
   | { readonly kind: "stalled" };
 
 /**
@@ -105,21 +116,22 @@ export type ChatRecoveryIncident = {
   workBaseline?: number;
   /**
    * How many of this turn's attempts were interrupted: their isolate died
-   * before they finished. Counted when a later isolate replays the interrupted
-   * run (an `interrupted` {@link ChatRecoveryTrigger}), never on the failure
+   * before they finished. The original turn's death is counted when its run
+   * is first replayed; every later death is found through the
+   * `attemptInFlight` record it left behind. Never counted on the failure
    * path, because an isolate killed by a memory-limit reset cannot write
-   * (#2613). Never reset by progress: a turn that re-runs and dies again
-   * streams output too. Reaching `maxInterruptedAttempts` seals the incident
-   * with `reason="interrupted_attempts_exceeded"`. Optional for
+   * (#2613), and never reset by progress, because a turn that re-runs and
+   * dies again streams output too. Reaching `maxInterruptedAttempts` seals the
+   * incident with `reason="interrupted_attempts_exceeded"`. Optional for
    * backward-compat.
    */
   interruptedAttempts?: number;
   /**
-   * The run whose interruption was counted last. A replay of the same run
-   * (a retried incident opening, or two recovery paths reporting one death)
-   * does not count again.
+   * The recovery attempt currently running for this turn, written and
+   * confirmed before it does any heavy work and cleared when it finishes. A
+   * record written by another isolate means that attempt died.
    */
-  lastInterruptedRunId?: string;
+  attemptInFlight?: ChatRecoveryAttempt;
   /**
    * Recoveries scheduled for this incident after a transient or rate-limited
    * stream error. Drives the retry backoff and is capped by `maxAttempts`.
@@ -713,9 +725,9 @@ export type EvaluateChatRecoveryIncidentResult = {
  *  - RUNAWAY — the work budget seals a loop that keeps emitting content but
  *    never converges. Keyed to WORK done, not wall-clock. Defaults to no cap.
  *  - CRASH-LOOP — the interruption budget counts attempts whose isolate died
- *    before they finished, once per interrupted run, and never resets on
- *    progress. It is counted here, by the isolate that replays the run,
- *    because the isolate that died cannot record anything (#2613).
+ *    before they finished, and never resets on progress. The death is
+ *    counted by whoever starts the next attempt, because the isolate that
+ *    died cannot record anything (#2613).
  *  - CALLER — `shouldKeepRecovering` lets the integrator express a
  *    token/cost/step budget the SDK should not hardcode. Consulted only when no
  *    hard bound has already sealed the incident, and never on first detection.
@@ -769,21 +781,19 @@ export async function evaluateChatRecoveryIncident(
     Number.isFinite(config.maxRecoveryWork) &&
     work > config.maxRecoveryWork;
 
-  // Interruption budget (#2613). This evaluation is the first durable point
-  // after an attempt's isolate died, so the count is taken here: the isolate
-  // that died (for example after a memory-limit reset) cannot write anything.
-  // A run counts once, however many times its replay re-enters. Neither
-  // progress nor debounce resets it: a turn that re-runs and dies again
-  // streams output, and can die faster than the debounce window.
+  // Interruption budget (#2613). The isolate that died cannot write, so the
+  // death is counted by whoever starts the next attempt. A replay with no
+  // incident yet is the original turn's death. Otherwise a death shows up as
+  // an `attemptInFlight` record left by another isolate. A second report of
+  // the same death finds this isolate's own record and counts nothing.
+  // Neither progress nor debounce resets the count: a turn that re-runs and
+  // dies again streams output, and can die faster than the debounce window.
   const countsInterruption =
     trigger.kind === "interrupted" &&
-    trigger.runId !== existing?.lastInterruptedRunId;
+    (existing == null ||
+      attemptDiedElsewhere(existing.attemptInFlight, trigger.attempt));
   const interruptedAttempts =
     (existing?.interruptedAttempts ?? 0) + (countsInterruption ? 1 : 0);
-  const lastInterruptedRunId =
-    trigger.kind === "interrupted"
-      ? trigger.runId
-      : existing?.lastInterruptedRunId;
   const interruptedBudgetExceeded =
     !awaitingClientInteraction &&
     interruptedAttempts >= config.maxInterruptedAttempts;
@@ -861,7 +871,7 @@ export async function evaluateChatRecoveryIncident(
     progress,
     workBaseline,
     ...(interruptedAttempts > 0 ? { interruptedAttempts } : {}),
-    ...(lastInterruptedRunId !== undefined ? { lastInterruptedRunId } : {}),
+    ...attemptInFlightAfter(trigger, existing, exhausted),
     ...(transientRetries > 0 ? { transientRetries } : {}),
     ...(exhausted
       ? {
@@ -899,4 +909,98 @@ export async function evaluateChatRecoveryIncident(
   });
 
   return { incident, exhausted, events };
+}
+
+/**
+ * Whether `recorded` is an attempt another isolate started and never
+ * finished. An attempt recorded by this isolate is still running here.
+ */
+function attemptDiedElsewhere(
+  recorded: ChatRecoveryAttempt | undefined,
+  current: ChatRecoveryAttempt
+): boolean {
+  return recorded !== undefined && recorded.isolate !== current.isolate;
+}
+
+/**
+ * The `attemptInFlight` an incident opening leaves behind. A replay records
+ * itself as the running attempt; a sealed incident runs nothing more; a stall
+ * leaves whatever attempt is running untouched.
+ */
+function attemptInFlightAfter(
+  trigger: ChatRecoveryTrigger,
+  existing: ChatRecoveryIncident | null,
+  exhausted: boolean
+): { attemptInFlight?: ChatRecoveryAttempt } {
+  if (trigger.kind === "interrupted") {
+    return exhausted ? {} : { attemptInFlight: trigger.attempt };
+  }
+  return existing?.attemptInFlight
+    ? { attemptInFlight: existing.attemptInFlight }
+    : {};
+}
+
+/** Input for {@link admitChatRecoveryAttempt}. */
+export type AdmitChatRecoveryAttemptInput = {
+  /** The persisted incident the attempt belongs to. */
+  existing: ChatRecoveryIncident;
+  /** The attempt about to start. */
+  attempt: ChatRecoveryAttempt;
+  /** Fully-resolved recovery config. */
+  config: ResolvedChatRecoveryConfig;
+  /** Whether the turn is parked on a pending client interaction. */
+  awaitingClientInteraction: boolean;
+};
+
+/**
+ * Admit one recovery attempt (a `_chatRecoveryContinue` / `_chatRecoveryRetry`
+ * callback and the turn it starts) before it does any heavy work (#2613).
+ *
+ * An `attemptInFlight` left by another isolate is a previous attempt that
+ * died, for example to a memory-limit reset before or during its turn, so it
+ * counts as one interrupted attempt. The returned incident records `attempt`
+ * as the one now running, unless the budget is spent, in which case the
+ * caller seals the incident instead of running anything. A parked turn is
+ * budget-free: it is counted but never sealed.
+ *
+ * @param input - The incident, the attempt about to start, and the budget.
+ * @returns The incident to persist, and whether the budget is spent.
+ */
+export function admitChatRecoveryAttempt(
+  input: AdmitChatRecoveryAttemptInput
+): { incident: ChatRecoveryIncident; exhausted: boolean } {
+  const { existing, attempt, config, awaitingClientInteraction } = input;
+  const died = attemptDiedElsewhere(existing.attemptInFlight, attempt);
+  const interruptedAttempts =
+    (existing.interruptedAttempts ?? 0) + (died ? 1 : 0);
+  const exhausted =
+    !awaitingClientInteraction &&
+    interruptedAttempts >= config.maxInterruptedAttempts;
+  const { attemptInFlight: _previous, ...rest } = existing;
+  return {
+    incident: {
+      ...rest,
+      ...(interruptedAttempts > 0 ? { interruptedAttempts } : {}),
+      ...(exhausted ? {} : { attemptInFlight: attempt })
+    },
+    exhausted
+  };
+}
+
+/**
+ * Clear `attempt` from the incident once it finished in this isolate. An
+ * incident that records a different attempt (a newer one started meanwhile)
+ * is left alone.
+ *
+ * @param existing - The persisted incident.
+ * @param attempt - The attempt that finished.
+ * @returns The incident to persist, or `null` when there is nothing to clear.
+ */
+export function finishChatRecoveryAttempt(
+  existing: ChatRecoveryIncident,
+  attempt: ChatRecoveryAttempt
+): ChatRecoveryIncident | null {
+  if (existing.attemptInFlight?.token !== attempt.token) return null;
+  const { attemptInFlight: _finished, ...rest } = existing;
+  return rest;
 }

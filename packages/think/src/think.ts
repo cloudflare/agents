@@ -257,8 +257,7 @@ import {
   type ChatRecoveryTaskReason,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryIncident,
-  type ChatRecoveryKind,
-  type ChatRecoveryTrigger
+  type ChatRecoveryKind
 } from "agents/chat";
 import type { Streams } from "agents/streams";
 import { CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS } from "agents/chat";
@@ -5854,7 +5853,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     detached: (onTurnStarted: () => void) => Promise<void>
   ): Promise<void> {
     return dispatchChatRecoveryToHandoff({
-      detached,
+      // Each run is one attempt under the interruption budget: it counts an
+      // earlier attempt that died and records itself before any heavy work.
+      detached: (onTurnStarted) =>
+        this._chatRecoveryEngine().runRecoveryAttempt({
+          callback,
+          data,
+          run: () => detached(onTurnStarted)
+        }),
       track: (turn) => this.lifecycle.trackAlarmWork(turn),
       redefer: (dedupeKey) =>
         this._enqueueChatRecovery(
@@ -17053,7 +17059,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     recoveryRootRequestId?: string | null;
     latestUserMessageId?: string | null;
     recoveryKind: ChatRecoveryKind;
-    trigger: ChatRecoveryTrigger;
+    trigger: "interrupted" | "stalled";
     /** Test-only clock injection for deterministic debounce/window timing. */
     nowMs?: number;
   }): Promise<{
@@ -17333,7 +17339,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         recoveryRootRequestId,
         latestUserMessageId,
         recoveryKind,
-        trigger: { kind: "stalled" }
+        trigger: "stalled"
       });
     const partialText = input.partialParts
       .filter(
@@ -18127,8 +18133,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * - A Durable Object memory-limit reset is re-thrown with no bookkeeping.
    *   The isolate is condemned: its storage calls reject and unconfirmed
    *   writes are discarded, so nothing written here would survive (#2613).
-   *   The interrupted turn run is left for the next isolate, whose replay
-   *   counts the attempt against `maxInterruptedAttempts` before running
+   *   The attempt's `attemptInFlight` record stays behind, and the next
+   *   attempt counts it against `maxInterruptedAttempts` before running
    *   anything heavy.
    * - A platform transient (`isPlatformTransientError` from `agents` — a
    *   deploy code-update reset / script supersede, a `retryable`-flagged

@@ -58,12 +58,7 @@ import {
   enforceRowSizeLimit,
   StreamAccumulator
 } from "agents/chat";
-import type {
-  ChatRecoveryTrigger,
-  ClientToolSchema,
-  ResumableStream,
-  TurnQueue
-} from "agents/chat";
+import type { ClientToolSchema, ResumableStream, TurnQueue } from "agents/chat";
 import type { Schedule } from "agents";
 import type { Session } from "../../think";
 import type { ContextConfig } from "agents/context";
@@ -9824,8 +9819,8 @@ export class ThinkRecoveryTestAgent extends Think {
     latestUserMessageId?: string | null;
     recoveryKind: "retry" | "continue";
     nowMs?: number;
-    /** Open the incident as the replay of this interrupted run. */
-    interruptedRunId?: string;
+    /** Why the incident opens. Defaults to a stall, which counts nothing. */
+    trigger?: "interrupted" | "stalled";
   }): Promise<{
     incidentId: string;
     attempt: number;
@@ -9833,14 +9828,10 @@ export class ThinkRecoveryTestAgent extends Think {
     reason?: string;
     interruptedAttempts?: number;
   }> {
-    const { interruptedRunId, ...identity } = input;
-    const trigger: ChatRecoveryTrigger =
-      interruptedRunId === undefined
-        ? { kind: "stalled" }
-        : { kind: "interrupted", runId: interruptedRunId };
+    const { trigger = "stalled", ...identity } = input;
     const self = this as unknown as {
       _beginChatRecoveryIncident(
-        i: typeof identity & { trigger: ChatRecoveryTrigger }
+        i: typeof identity & { trigger: "interrupted" | "stalled" }
       ): Promise<{
         incident: {
           incidentId: string;
@@ -9903,11 +9894,30 @@ export class ThinkRecoveryTestAgent extends Think {
     lastProgressAt?: number;
     progress?: number;
     workBaseline?: number;
+    interruptedAttempts?: number;
   }): Promise<void> {
     await this.ctx.storage.put(
       `cf:chat-recovery:incident:${encodeURIComponent(incident.incidentId)}`,
       incident
     );
+  }
+
+  /**
+   * Leave the record an attempt writes before its isolate dies: an
+   * `attemptInFlight` from an isolate that no longer exists (#2613). A test
+   * isolate never dies, so this is how a test reproduces a real reset.
+   */
+  async simulateDeadAttemptForTest(incidentId: string): Promise<void> {
+    const key = `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`;
+    const incident = await this.ctx.storage.get<Record<string, unknown>>(key);
+    if (!incident) throw new Error(`No recovery incident ${incidentId}`);
+    await this.ctx.storage.put(key, {
+      ...incident,
+      attemptInFlight: {
+        isolate: `dead-${crypto.randomUUID()}`,
+        token: crypto.randomUUID()
+      }
+    });
   }
 
   /**
