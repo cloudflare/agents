@@ -237,8 +237,6 @@ import {
   iterateWithStallWatchdog,
   sweepStaleChatRecoveryIncidents,
   listActiveChatRecoveryIncidents,
-  readChatRecoveryProgress,
-  CHAT_RECOVERY_PROGRESS_KEY,
   recordChatTerminal,
   clearChatTerminal,
   pendingChatTerminal,
@@ -1465,9 +1463,7 @@ type ThinkRecoveryClassification = { retryTargetUserId: string | null };
 // The monotonic forward-progress marker the recovery budget keys off is
 // derived from the stream log (`ResumableStream.progressMarker`): durably
 // flushed segments, folded into a retired total as their rows are deleted.
-// Nothing is written per chunk. The pre-derivation KV counter
-// (`CHAT_RECOVERY_PROGRESS_KEY`) is read once per isolate and seeded into the
-// marker, so it is never read lower than an in-flight incident recorded.
+// Nothing is written per chunk.
 // Recovery budget defaults (maxAttempts, maxRecoveryWork, stableTimeoutMs,
 // terminalMessage, noProgressTimeoutMs, alarm debounce) now live in the shared
 // incident engine (agents/chat) and are applied by `resolveChatRecoveryConfig`
@@ -3994,17 +3990,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         async () => {
           this._resumableStream = new ResumableStream(
             this.streams,
-            this.sql.bind(this),
-            {
-              // Rollback insurance: a build still on the KV counter reads a
-              // marker no lower than one recorded under the derived marker.
-              // One put per stream retired, none per chunk.
-              onProgress: (durable) => {
-                void this.ctx.storage
-                  .put(CHAT_RECOVERY_PROGRESS_KEY, durable)
-                  .catch(() => {});
-              }
-            }
+            this.sql.bind(this)
           );
           this._restoreClientTools();
           this._restoreBody();
@@ -17009,29 +16995,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * when new content lands durably, a reconnect replay or a recovery
    * re-persist reads it without appending (#1637), and compaction rewrites
    * the transcript, not the log. Nothing is written per chunk.
-   *
-   * The pre-derivation KV counter is folded in once per isolate, so a marker
-   * an in-flight incident already recorded is never read lower after the
-   * upgrade.
    */
   private async _chatRecoveryProgressMarker(): Promise<number> {
-    // Memoized as the promise, not a flag: two concurrent readers both wait
-    // for the seed to land, so neither can hand the engine an unseeded
-    // marker as an incident's work baseline. A failed read is not cached:
-    // the next evaluation retries it instead of failing for the isolate's
-    // life on a transient storage error.
-    this._progressSeed ??= readChatRecoveryProgress(this.ctx.storage).then(
-      (legacy) => this._resumableStream.seedProgress(legacy),
-      (error: unknown) => {
-        this._progressSeed = null;
-        throw error;
-      }
-    );
-    await this._progressSeed;
     return this._resumableStream.progressMarker();
   }
-
-  private _progressSeed: Promise<void> | null = null;
 
   /** Per-isolate N9 throttle gate (shared `agents/chat` helper); reset per
    *  isolate so the first forwarded chunk after a restart always credits. */
