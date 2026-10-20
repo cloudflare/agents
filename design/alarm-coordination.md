@@ -69,6 +69,15 @@ policy hooks. Strikes clear only when an alarm ends, or the last outstanding
 handoff settles, with no memory reset and nothing still running — a clean
 sibling cannot hide a slower handoff's reset.
 
+The strike counter is written after the reset, so it only advances while the
+isolate's storage still accepts writes, for example when the reset error came
+from another isolate such as D1. A Durable Object's own memory-limit reset
+makes every later storage call in that invocation reject, and the counter
+cannot move. Chat recovery therefore bounds its own crash loops: each attempt
+records itself on the incident before doing heavy work, and the next attempt
+counts any record another isolate left behind
+([rfc-chat-recovery-interrupted-attempts.md](./rfc-chat-recovery-interrupted-attempts.md)).
+
 Tasks uses that hook to update the struck run's authoritative row — claim
 stripped, deadline pushed, state kept so the reclaim still sees an interrupted
 attempt — preventing startup reconciliation from undoing queue backoff. At its

@@ -38,6 +38,33 @@ import type {
 export type ChatRecoveryKind = "retry" | "continue";
 
 /**
+ * One recovery attempt in flight, recorded on the incident before the attempt
+ * does anything heavy. `isolate` identifies the object instance that started
+ * it; `token` identifies the attempt. An isolate killed by a memory-limit
+ * reset cannot write anything, so it cannot clear this record: a later
+ * isolate that finds a record it did not write knows that attempt died
+ * (#2613).
+ */
+export type ChatRecoveryAttempt = {
+  readonly isolate: string;
+  readonly token: string;
+};
+
+/**
+ * Why an incident evaluation is running.
+ *
+ * - `interrupted`: a later isolate is replaying a turn run whose isolate died
+ *   before the run finished. The replay is itself an attempt, recorded as
+ *   `attempt`.
+ * - `stalled`: a live isolate caught a stalled or failed stream. Nothing
+ *   died, so nothing is counted; transient retries are bounded by
+ *   `transientRetries` instead.
+ */
+export type ChatRecoveryTrigger =
+  | { readonly kind: "interrupted"; readonly attempt: ChatRecoveryAttempt }
+  | { readonly kind: "stalled" };
+
+/**
  * Durable per-incident recovery record.
  *
  * PERSISTED CONTRACT — this shape round-trips across deploys (including the
@@ -88,17 +115,25 @@ export type ChatRecoveryIncident = {
    */
   workBaseline?: number;
   /**
-   * Count of recovery attempts for this incident that ended in a Durable Object
-   * memory-limit reset (the isolate exceeded its 128 MB limit — see
-   * `isDurableObjectMemoryLimitReset`). An OOM is a poison signal: re-running the
-   * same memory-heavy turn deterministically re-OOMs, so unlike a deploy/eviction
-   * it must NOT credit forward progress and must be bounded by a tight,
-   * OOM-specific budget (`maxOomRetries`) rather than the generic attempt cap
-   * (which resets on progress). Bumped by `ChatRecoveryEngine.recordOomAndDecide`
-   * when a recovery callback observes an OOM; exceeding `maxOomRetries` seals the
-   * incident with `reason="out_of_memory"` (#1825). Optional for backward-compat.
+   * How many of this turn's attempts were interrupted: their isolate died
+   * before they finished. The original turn's death is counted when its run
+   * is first replayed; every later death is found through the
+   * `attemptsInFlight` entries it left behind. Never counted on the failure
+   * path, because an isolate killed by a memory-limit reset cannot write
+   * (#2613), and never reset by progress, because a turn that re-runs and
+   * dies again streams output too. Reaching `maxInterruptedAttempts` seals the
+   * incident with `reason="interrupted_attempts_exceeded"`. Optional for
+   * backward-compat.
    */
-  oomAttempts?: number;
+  interruptedAttempts?: number;
+  /**
+   * The recovery attempts currently running for this turn. Each is written
+   * and confirmed before it does any heavy work and removed when it
+   * finishes, so a replay and a callback that overlap are tracked apart. An
+   * entry written by another isolate means that isolate died mid-attempt;
+   * however many entries it left, it counts as one interruption.
+   */
+  attemptsInFlight?: ChatRecoveryAttempt[];
   /**
    * Recoveries scheduled for this incident after a transient or rate-limited
    * stream error. Drives the retry backoff and is capped by `maxAttempts`.
@@ -179,18 +214,14 @@ export const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 10;
  */
 export const DEFAULT_CHAT_RECOVERY_MAX_WORK = 10_000;
 /**
- * Tight, OOM-specific retry budget (#1825). A Durable Object memory-limit reset
- * (`isDurableObjectMemoryLimitReset`) is usually deterministic — the turn's
- * working set no longer fits in the isolate's 128 MB — so re-running it re-OOMs.
- * But a single OOM CAN be a transient spike (the isolate's 128 MB is shared
- * across the global scope / noisy neighbors), so recovery retries a small number
- * of times before sealing with `reason="out_of_memory"` rather than abandoning a
- * turn that one more attempt might have completed. Far tighter than the generic
- * `maxRecoveryWork` backstop because an OOM is attributable and re-running it is
- * expensive (it re-runs the model). Counts attempts that ended in an OOM, not
- * total attempts, so a turn interrupted by deploys (no OOM) is unaffected.
+ * Default number of interrupted attempts a turn may accumulate before recovery
+ * seals it with `reason="interrupted_attempts_exceeded"` (#2613). The original
+ * turn counts, so a turn that dies every time runs the model at most five
+ * times. A deterministic memory-limit reset dies every time; a deploy rarely
+ * lands on the same turn five times in a row, so five tolerates churn while
+ * still bounding a crash loop.
  */
-export const DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES = 3;
+export const DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS = 5;
 export const DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS = 10_000;
 /**
  * Delay before retrying a recovery that timed out waiting for stable state.
@@ -261,15 +292,32 @@ export function resolveChatRecoveryConfig(
       typeof custom?.maxRecoveryWork === "number" && custom.maxRecoveryWork >= 0
         ? custom.maxRecoveryWork
         : DEFAULT_CHAT_RECOVERY_MAX_WORK,
-    maxOomRetries:
-      typeof custom?.maxOomRetries === "number" && custom.maxOomRetries >= 0
-        ? Math.floor(custom.maxOomRetries)
-        : DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES,
+    maxInterruptedAttempts: resolveMaxInterruptedAttempts(custom),
     ...(custom?.shouldKeepRecovering
       ? { shouldKeepRecovering: custom.shouldKeepRecovering }
       : {}),
     ...(custom?.onExhausted ? { onExhausted: custom.onExhausted } : {})
   };
+}
+
+/**
+ * Read the interruption budget, honoring the deprecated `maxOomRetries` alias
+ * as `maxOomRetries + 1` so an explicit retry count keeps its meaning. A
+ * negative or non-numeric value falls back to the default; `Infinity` is kept
+ * and disables the bound.
+ */
+function resolveMaxInterruptedAttempts(
+  custom: Exclude<ChatRecoveryConfig, true> | undefined
+): number {
+  const attempts = custom?.maxInterruptedAttempts;
+  if (typeof attempts === "number" && attempts >= 0) {
+    return Math.max(1, Math.floor(attempts));
+  }
+  const legacyRetries = custom?.maxOomRetries;
+  if (typeof legacyRetries === "number" && legacyRetries >= 0) {
+    return Math.floor(legacyRetries) + 1;
+  }
+  return DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS;
 }
 
 /**
@@ -630,6 +678,8 @@ export type EvaluateChatRecoveryIncidentInput = {
     latestUserMessageId?: string | null;
     recoveryKind: ChatRecoveryKind;
   };
+  /** Why this evaluation is running; decides whether it counts an interruption. */
+  trigger: ChatRecoveryTrigger;
   /** Fully-resolved recovery config. */
   config: ResolvedChatRecoveryConfig;
   /** The existing incident for this identity, or `null` if this is fresh. */
@@ -676,6 +726,10 @@ export type EvaluateChatRecoveryIncidentResult = {
  *    no-progress alarm loop.
  *  - RUNAWAY — the work budget seals a loop that keeps emitting content but
  *    never converges. Keyed to WORK done, not wall-clock. Defaults to no cap.
+ *  - CRASH-LOOP — the interruption budget counts attempts whose isolate died
+ *    before they finished, and never resets on progress. The death is
+ *    counted by whoever starts the next attempt, because the isolate that
+ *    died cannot record anything (#2613).
  *  - CALLER — `shouldKeepRecovering` lets the integrator express a
  *    token/cost/step budget the SDK should not hardcode. Consulted only when no
  *    hard bound has already sealed the incident, and never on first detection.
@@ -688,6 +742,7 @@ export async function evaluateChatRecoveryIncident(
 ): Promise<EvaluateChatRecoveryIncidentResult> {
   const {
     identity,
+    trigger,
     config,
     existing,
     currentProgress,
@@ -728,20 +783,24 @@ export async function evaluateChatRecoveryIncident(
     Number.isFinite(config.maxRecoveryWork) &&
     work > config.maxRecoveryWork;
 
-  // OOM budget (#1825). `oomAttempts` is bumped out-of-band by
-  // `recordOomAndDecide` when a recovery callback observes a memory-limit reset;
-  // it is carried forward across begins here so the count is not lost, and seals
-  // the incident once it crosses the tight OOM-specific budget. Unlike the
-  // attempt cap this never resets on progress — an OOM that streams a little
-  // before it dies must still count, since that "progress" is the very re-run
-  // that re-OOMs. The seal authority is shared with `recordOomAndDecide` (which
-  // seals on the catchable path); this begin-path check is the backstop for a
-  // fiber re-detection that reopens the incident after the count crossed.
-  const oomAttempts = existing?.oomAttempts ?? 0;
-  const oomBudgetExceeded =
-    existing != null &&
+  // Interruption budget (#2613). The isolate that died cannot write, so the
+  // death is counted by whoever starts the next attempt. A replay with no
+  // incident yet is the original turn's death. Otherwise a death shows up as
+  // `attemptsInFlight` entries left by another isolate. A second report of
+  // the same death finds only this isolate's entries and counts nothing.
+  // Neither progress nor debounce resets the count: a turn that re-runs and
+  // dies again streams output, and can die faster than the debounce window.
+  const newlyInterrupted =
+    trigger.kind !== "interrupted"
+      ? 0
+      : existing == null
+        ? 1
+        : deadIsolateCount(existing.attemptsInFlight, trigger.attempt);
+  const interruptedAttempts =
+    (existing?.interruptedAttempts ?? 0) + newlyInterrupted;
+  const interruptedBudgetExceeded =
     !awaitingClientInteraction &&
-    oomAttempts > config.maxOomRetries;
+    interruptedAttempts >= config.maxInterruptedAttempts;
 
   const transientRetries = existing?.transientRetries ?? 0;
   const transientBudgetExceeded =
@@ -771,7 +830,7 @@ export async function evaluateChatRecoveryIncident(
     config.shouldKeepRecovering &&
     !noProgressExceeded &&
     !workBudgetExceeded &&
-    !oomBudgetExceeded &&
+    !interruptedBudgetExceeded &&
     !transientBudgetExceeded &&
     attempt <= config.maxAttempts
   ) {
@@ -795,7 +854,7 @@ export async function evaluateChatRecoveryIncident(
 
   const exhausted =
     !awaitingClientInteraction &&
-    (oomBudgetExceeded ||
+    (interruptedBudgetExceeded ||
       noProgressExceeded ||
       workBudgetExceeded ||
       abortedByCaller ||
@@ -815,14 +874,13 @@ export async function evaluateChatRecoveryIncident(
     lastProgressAt,
     progress,
     workBaseline,
-    // Carry the OOM count forward so a begin-path re-evaluation never loses what
-    // `recordOomAndDecide` accrued between begins.
-    ...(oomAttempts > 0 ? { oomAttempts } : {}),
+    ...(interruptedAttempts > 0 ? { interruptedAttempts } : {}),
+    ...attemptsInFlightAfter(trigger, existing, exhausted),
     ...(transientRetries > 0 ? { transientRetries } : {}),
     ...(exhausted
       ? {
-          reason: oomBudgetExceeded
-            ? "out_of_memory"
+          reason: interruptedBudgetExceeded
+            ? "interrupted_attempts_exceeded"
             : workBudgetExceeded
               ? "work_budget_exceeded"
               : noProgressExceeded
@@ -855,4 +913,121 @@ export async function evaluateChatRecoveryIncident(
   });
 
   return { incident, exhausted, events };
+}
+
+/**
+ * How many other isolates left attempts in `recorded`. Each such isolate died
+ * mid-attempt once, however many attempts it was running.
+ */
+function deadIsolateCount(
+  recorded: ReadonlyArray<ChatRecoveryAttempt> | undefined,
+  current: ChatRecoveryAttempt
+): number {
+  const dead = new Set<string>();
+  for (const attempt of recorded ?? []) {
+    if (attempt.isolate !== current.isolate) dead.add(attempt.isolate);
+  }
+  return dead.size;
+}
+
+/** The attempts in `recorded` that are still running in `current`'s isolate. */
+function liveAttempts(
+  recorded: ReadonlyArray<ChatRecoveryAttempt> | undefined,
+  current: ChatRecoveryAttempt
+): ChatRecoveryAttempt[] {
+  return (recorded ?? []).filter(
+    (attempt) => attempt.isolate === current.isolate
+  );
+}
+
+/** Persist `attempts` only when there is at least one. */
+function withAttemptsInFlight(attempts: ChatRecoveryAttempt[]): {
+  attemptsInFlight?: ChatRecoveryAttempt[];
+} {
+  return attempts.length > 0 ? { attemptsInFlight: attempts } : {};
+}
+
+/**
+ * The `attemptsInFlight` an incident opening leaves behind. A replay drops
+ * the dead isolates' entries it just counted and adds itself, unless the
+ * incident is now sealed; a stall leaves the running attempts untouched.
+ */
+function attemptsInFlightAfter(
+  trigger: ChatRecoveryTrigger,
+  existing: ChatRecoveryIncident | null,
+  exhausted: boolean
+): { attemptsInFlight?: ChatRecoveryAttempt[] } {
+  if (trigger.kind === "interrupted") {
+    const live = liveAttempts(existing?.attemptsInFlight, trigger.attempt);
+    return withAttemptsInFlight(exhausted ? live : [...live, trigger.attempt]);
+  }
+  return withAttemptsInFlight([...(existing?.attemptsInFlight ?? [])]);
+}
+
+/** Input for {@link admitChatRecoveryAttempt}. */
+export type AdmitChatRecoveryAttemptInput = {
+  /** The persisted incident the attempt belongs to. */
+  existing: ChatRecoveryIncident;
+  /** The attempt about to start. */
+  attempt: ChatRecoveryAttempt;
+  /** Fully-resolved recovery config. */
+  config: ResolvedChatRecoveryConfig;
+  /** Whether the turn is parked on a pending client interaction. */
+  awaitingClientInteraction: boolean;
+};
+
+/**
+ * Admit one recovery attempt (a `_chatRecoveryContinue` / `_chatRecoveryRetry`
+ * callback and the turn it starts) before it does any heavy work (#2613).
+ *
+ * Entries in `attemptsInFlight` left by other isolates are attempts that
+ * died, for example to a memory-limit reset before or during their turn.
+ * Each such isolate counts as one interrupted attempt and its entries are
+ * dropped. The returned incident adds `attempt` to the running attempts,
+ * unless the budget is spent, in which case the caller seals the incident
+ * instead of running anything. A parked turn is budget-free: it is counted
+ * but never sealed.
+ *
+ * @param input - The incident, the attempt about to start, and the budget.
+ * @returns The incident to persist, and whether the budget is spent.
+ */
+export function admitChatRecoveryAttempt(
+  input: AdmitChatRecoveryAttemptInput
+): { incident: ChatRecoveryIncident; exhausted: boolean } {
+  const { existing, attempt, config, awaitingClientInteraction } = input;
+  const interruptedAttempts =
+    (existing.interruptedAttempts ?? 0) +
+    deadIsolateCount(existing.attemptsInFlight, attempt);
+  const exhausted =
+    !awaitingClientInteraction &&
+    interruptedAttempts >= config.maxInterruptedAttempts;
+  const live = liveAttempts(existing.attemptsInFlight, attempt);
+  const { attemptsInFlight: _previous, ...rest } = existing;
+  return {
+    incident: {
+      ...rest,
+      ...(interruptedAttempts > 0 ? { interruptedAttempts } : {}),
+      ...withAttemptsInFlight(exhausted ? live : [...live, attempt])
+    },
+    exhausted
+  };
+}
+
+/**
+ * Remove `attempt` from the running attempts once it finished in this
+ * isolate. Other running attempts stay recorded.
+ *
+ * @param existing - The persisted incident.
+ * @param attempt - The attempt that finished.
+ * @returns The incident to persist, or `null` when `attempt` is not recorded.
+ */
+export function finishChatRecoveryAttempt(
+  existing: ChatRecoveryIncident,
+  attempt: ChatRecoveryAttempt
+): ChatRecoveryIncident | null {
+  const recorded = existing.attemptsInFlight ?? [];
+  const remaining = recorded.filter((entry) => entry.token !== attempt.token);
+  if (remaining.length === recorded.length) return null;
+  const { attemptsInFlight: _finished, ...rest } = existing;
+  return { ...rest, ...withAttemptsInFlight(remaining) };
 }

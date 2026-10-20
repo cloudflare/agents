@@ -184,9 +184,11 @@ export type ChatRecoveryExhaustedContext = Pick<
    * - `work_budget_exceeded` — the turn kept producing content but exceeded the
    *   configured `maxRecoveryWork` runaway-loop budget.
    * - `recovery_aborted` — the caller's `shouldKeepRecovering` hook returned `false`.
-   * - `out_of_memory` — recovery attempts kept hitting a Durable Object
-   *   memory-limit reset (the isolate exceeded its 128 MB limit) until the
-   *   tight `maxOomRetries` budget drained (#1825).
+   * - `interrupted_attempts_exceeded` — the turn's attempts kept dying before
+   *   they finished (an isolate reset such as a memory-limit reset or a
+   *   deploy) until `maxInterruptedAttempts` of them had been interrupted.
+   * - `out_of_memory` — the alarm memory-limit circuit breaker sealed the
+   *   recovery after repeated Durable Object memory-limit resets (#1825).
    * - `stable_timeout` — a recovery attempt kept timing out waiting for the
    *   isolate to reach stable state until the budget drained (extreme churn).
    * - `max_recovery_window_exceeded` — DEPRECATED. The old absolute incident-age
@@ -230,7 +232,8 @@ export type ChatRecoveryProgressContext = {
  * Configuration for durable chat recovery, which is always enabled for chat
  * turns. `true` uses these defaults: `maxAttempts: 10`,
  * `stableTimeoutMs: 10_000`, `noProgressTimeoutMs: 300_000` (5 min),
- * `maxRecoveryWork: 10000`, and a generic terminal message. Assign an object to
+ * `maxRecoveryWork: 10000`, `maxInterruptedAttempts: 5`, and a generic
+ * terminal message. Assign an object to
  * tune recovery without disabling its durable bookkeeping.
  *
  * **Apply this as a class field or in the constructor — never assign it in
@@ -252,8 +255,10 @@ export type ChatRecoveryConfig =
        * How long an incident may go WITHOUT forward progress before it is
        * sealed with `reason="no_progress_timeout"`. This is the primary
        * stuck-turn bound. It **resets on every progress-bearing attempt**, so a
-       * turn that keeps producing content survives unbounded interruption while
-       * a genuinely idle turn is sealed within the window. Defaults to 5 min.
+       * turn that keeps producing content is never sealed by this bound, while
+       * a genuinely idle turn is sealed within the window. Repeated
+       * interruption is bounded separately by `maxInterruptedAttempts`.
+       * Defaults to 5 min.
        */
       noProgressTimeoutMs?: number;
       /**
@@ -280,16 +285,29 @@ export type ChatRecoveryConfig =
        */
       maxRecoveryWork?: number;
       /**
-       * Tight retry budget for the specific case of a Durable Object isolate
-       * exceeding its memory limit and being reset mid-turn. An OOM is usually
-       * deterministic (the turn's working set no longer fits in 128 MB), so
-       * re-running re-OOMs; but a single OOM can be a transient spike, so
-       * recovery retries this many times before sealing with
-       * `reason="out_of_memory"`. Counts only attempts that ended in an OOM (not
-       * total attempts), so a turn interrupted by deploys is unaffected.
-       * Defaults to `3`. Set `0` to seal on the first OOM. Much tighter than
-       * `maxRecoveryWork` because an OOM is attributable and each re-run is
-       * expensive (it re-runs the model).
+       * How many of one turn's attempts may be interrupted before recovery
+       * gives up with `reason="interrupted_attempts_exceeded"`. An attempt is
+       * interrupted when its isolate dies before the attempt finishes: a
+       * Durable Object memory-limit reset, a deploy, or any other reset. The
+       * original turn counts, so the default of `5` runs the model at most five
+       * times for a turn that dies every time.
+       *
+       * Each attempt records itself before it runs anything heavy, and the
+       * next attempt counts a record left by an isolate that died, because
+       * the isolate that died cannot record anything. Streamed output never
+       * resets the count: a turn that re-runs and dies again produces output
+       * too (#2613). A memory-limit reset and a
+       * deploy look the same from the next isolate, so a turn interrupted by
+       * this many deploys in a row is also sealed. Values below `1` are read
+       * as `1`; `Infinity` disables the bound.
+       */
+      maxInterruptedAttempts?: number;
+      /**
+       * @deprecated Use `maxInterruptedAttempts`. When that is unset, this is
+       * read as `maxInterruptedAttempts: maxOomRetries + 1`, which keeps the
+       * old number of retries. The budget now counts every interrupted
+       * attempt, not only the ones that ended in an observed memory-limit
+       * reset, because a reset isolate cannot record what killed it.
        */
       maxOomRetries?: number;
       /**
@@ -320,7 +338,7 @@ export type ResolvedChatRecoveryConfig = {
   terminalMessage: string;
   noProgressTimeoutMs: number;
   maxRecoveryWork: number;
-  maxOomRetries: number;
+  maxInterruptedAttempts: number;
   shouldKeepRecovering?: (
     ctx: ChatRecoveryProgressContext
   ) => boolean | Promise<boolean>;

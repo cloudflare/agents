@@ -182,7 +182,7 @@ Durable chat recovery is an invariant in both hosts: every chat entry path runs 
 (b) is the one legitimately per-package step: ai-chat reads the stored stream `message_id` (#1691) because a flat `UIMessage[]` can't express parent/child (`AIChatAgent._resolveOrphanTargetId`); Think resolves it structurally from its Session tree. (c) `reconcileOrphanPartial` keeps an existing in-place tool result that lives only in storage — ai-chat's early tool-approval persist — rather than letting a replayed chunk re-advance it; Think has no early persist, so its whole-message replace is already dedup-safe and it doesn't use the helper. (d) is recognizably the same shape on both: ai-chat does `findIndex` → map-replace / append over its flat array; `Think._upsertMessageInHistory` does `session.getMessage` → `updateMessage` / `appendMessage` over a Session tree.
 
 Root-agent continuation attempts run as chained `__cf_internal_chat_recovery`
-Task runs. Initial detection joins by incident identity; stable-state and OOM
+Task runs. Initial detection joins by incident identity; stable-state
 retries enqueue a separate run and express their delay with `step.sleep`. The
 Task calls the existing bounded `_chatRecoveryContinue` / `_chatRecoveryRetry`
 entry point; both hosts run it through the shared
@@ -194,6 +194,16 @@ failure before handoff propagates through the
 current Task or compatibility schedule; after handoff that execution has
 settled, so the detached continuation enqueues exactly one replacement attempt.
 The incident record remains the recovery state machine.
+
+Every attempt that can run heavy work (the replay of an interrupted turn run,
+and each `_chatRecoveryContinue` / `_chatRecoveryRetry` callback through
+`ChatRecoveryEngine.runRecoveryAttempt`) records itself on the incident as
+an `attemptsInFlight` entry, confirmed with `storage.sync()`, and removes it
+when it finishes. An isolate killed by a memory-limit reset cannot write anything,
+so the next attempt counts entries left by another isolate in
+`interruptedAttempts`, and `maxInterruptedAttempts` seals the turn. Nothing is
+counted on the failure path. See
+[rfc-chat-recovery-interrupted-attempts.md](./rfc-chat-recovery-interrupted-attempts.md).
 
 Facets do not yet have routed Task wakes. Dynamic-agent recovery therefore
 keeps the root-owned routed Scheduler transport as a compatibility path until

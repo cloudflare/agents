@@ -138,6 +138,7 @@ interface ChatRecoveryTestStub {
     lastProgressAt?: number;
     progress?: number;
     workBaseline?: number;
+    interruptedAttempts?: number;
   }): Promise<void>;
   setForceStableTimeoutForTest(value: boolean): Promise<void>;
   setRequestContextForTest(
@@ -208,6 +209,11 @@ interface ChatRecoveryTestStub {
   trackRecoveryTaskKeysForTest(): Promise<void>;
   getRecoveryTaskKeyedForTest(): Promise<boolean[]>;
   failNextIncidentBeginForTest(): Promise<void>;
+  simulateDeadAttemptForTest(incidentId: string): Promise<void>;
+  runRecoveryCallbackForTest(
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    data: Record<string, unknown>
+  ): Promise<void>;
 }
 
 async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
@@ -367,6 +373,89 @@ describe("onChatRecovery", () => {
       maxAttempts: 1,
       status: "exhausted",
       reason: "max_attempts_exceeded"
+    });
+  });
+
+  it("seals a turn whose replayed attempts keep dying, even when each streams output inside the debounce window (#2613)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    // A high attempt cap so only the interruption budget can seal; the
+    // default maxInterruptedAttempts (5) applies.
+    await agentStub.enableExhaustedCaptureForTest(100);
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    for (let death = 1; death <= 5; death++) {
+      // From the second death on, the recovery attempt that ran the turn
+      // died with it and left its record behind.
+      if (death > 1) {
+        await agentStub.simulateDeadAttemptForTest("req-crash-loop:");
+      }
+      // Each attempt streamed a little before its isolate died, and the
+      // replay comes inside the debounce window. Neither resets the count.
+      await agentStub.bumpRecoveryProgressForTest();
+      await agentStub.insertInterruptedFiber(
+        "__cf_internal_chat_turn:req-crash-loop"
+      );
+      await agentStub.triggerFiberRecovery();
+    }
+
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        attempt: number;
+        interruptedAttempts?: number;
+        status: string;
+        reason?: string;
+      }>;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0]).toMatchObject({
+      attempt: 1,
+      interruptedAttempts: 5,
+      status: "exhausted",
+      reason: "interrupted_attempts_exceeded"
+    });
+    const exhausted = await agentStub.getExhaustedContextsForTest();
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0].reason).toBe("interrupted_attempts_exceeded");
+    // The first four replays reached onChatRecovery; the fifth sealed first.
+    expect(await agentStub.getRecoveryContexts()).toHaveLength(4);
+  });
+
+  it("seals a recovery callback whose attempts die before starting a turn (#2613)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.enableExhaustedCaptureForTest(100);
+    await agentStub.seedIncidentForTest({
+      incidentId: "req-pre-turn:",
+      requestId: "req-pre-turn",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 100,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now(),
+      interruptedAttempts: 4
+    });
+    // The last callback died while it was still checking stable state, so
+    // no turn run exists to replay; only its attempt record is left.
+    await agentStub.simulateDeadAttemptForTest("req-pre-turn:");
+
+    await agentStub.runRecoveryCallbackForTest("_chatRecoveryContinue", {
+      incidentId: "req-pre-turn:",
+      originalRequestId: "req-pre-turn"
+    });
+
+    const exhausted = await agentStub.getExhaustedContextsForTest();
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0].reason).toBe("interrupted_attempts_exceeded");
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(0);
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        interruptedAttempts?: number;
+        status: string;
+      }>;
+    expect(incidents[0]).toMatchObject({
+      interruptedAttempts: 5,
+      status: "exhausted"
     });
   });
 

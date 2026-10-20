@@ -256,7 +256,7 @@ export {
   CHAT_LAST_TERMINAL_KEY,
   DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
   DEFAULT_CHAT_RECOVERY_MAX_WORK,
-  DEFAULT_CHAT_RECOVERY_MAX_OOM_RETRIES,
+  DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS,
   DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS,
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
@@ -268,6 +268,8 @@ export {
   type ChatTerminalRecord,
   type ChatRecoveryIncident,
   type ChatRecoveryKind,
+  type ChatRecoveryTrigger,
+  type ChatRecoveryAttempt,
   type ChatRecoveryIncidentEvent,
   type EvaluateChatRecoveryIncidentInput,
   type EvaluateChatRecoveryIncidentResult

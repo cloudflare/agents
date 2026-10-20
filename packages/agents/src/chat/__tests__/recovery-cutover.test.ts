@@ -87,6 +87,10 @@ describe("cutover: incident records", () => {
         latestUserMessageId: "user-old",
         recoveryKind: existing.recoveryKind
       },
+      trigger: {
+        kind: "interrupted",
+        attempt: { isolate: "isolate-new", token: "attempt-1" }
+      },
       config: resolveChatRecoveryConfig(true),
       existing,
       currentProgress: 0,

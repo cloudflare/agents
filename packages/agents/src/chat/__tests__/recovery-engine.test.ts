@@ -47,9 +47,20 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
   };
 
   function makeFakeAdapter(options: FakeAdapterOptions = {}) {
+    // Durable Object storage as the engine sees it: reads see unconfirmed
+    // writes, `syncStorage` confirms them, and a memory-limit reset makes
+    // every later call reject and discards whatever was not confirmed.
     const storage = new Map<string, ChatRecoveryIncident>();
+    const unconfirmed = new Map<string, ChatRecoveryIncident>();
+    let condemned = false;
+    const memoryLimitReset = () =>
+      new Error(
+        "Durable Object's isolate exceeded its memory limit and was reset."
+      );
+    let progress = options.progress ?? 0;
     const events: ChatRecoveryIncidentEvent[] = [];
     const calls: string[] = [];
+    const exhausted: ChatRecoveryIncident[] = [];
     const recovering: Array<{ active: boolean; requestId?: string }> = [];
     let nowCalls = 0;
 
@@ -65,11 +76,14 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
       },
       getIncident: (key) => {
         calls.push("get");
-        return Promise.resolve(storage.get(key) ?? null);
+        if (condemned) return Promise.reject(memoryLimitReset());
+        return Promise.resolve(
+          unconfirmed.get(key) ?? storage.get(key) ?? null
+        );
       },
       readProgress: () => {
         calls.push("readProgress");
-        return Promise.resolve(options.progress ?? 0);
+        return Promise.resolve(progress);
       },
       isAwaitingClientInteraction: () => {
         calls.push("isAwaiting");
@@ -77,11 +91,20 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
       },
       putIncident: (key, incident) => {
         calls.push("put");
-        storage.set(key, incident);
+        if (condemned) return Promise.reject(memoryLimitReset());
+        unconfirmed.set(key, incident);
+        return Promise.resolve();
+      },
+      syncStorage: () => {
+        calls.push("sync");
+        if (condemned) return Promise.reject(memoryLimitReset());
+        for (const [key, incident] of unconfirmed) storage.set(key, incident);
+        unconfirmed.clear();
         return Promise.resolve();
       },
       deleteIncident: (key) => {
         calls.push("delete");
+        unconfirmed.delete(key);
         storage.delete(key);
         return Promise.resolve();
       },
@@ -101,7 +124,11 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
       onShouldKeepRecoveringError: () => {
         calls.push("shouldKeepRecoveringError");
       },
-      exhaustChatRecovery: () => Promise.resolve(),
+      exhaustChatRecovery: (incident) => {
+        calls.push("exhaust");
+        exhausted.push(incident);
+        return Promise.resolve();
+      },
       resolveRecoveryStream: () => ({ streamId: "", streamStillActive: false }),
       getPartialStreamText: () => ({
         text: "",
@@ -123,8 +150,31 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
       storage,
       events,
       calls,
+      exhausted,
       recovering,
-      nowCalls: () => nowCalls
+      memoryLimitReset,
+      /** What a read sees now, unconfirmed writes included. */
+      read: (key: string) => unconfirmed.get(key) ?? storage.get(key),
+      /** The replay that opened the incident finished and cleared its record. */
+      finishReplay: (key: string) => {
+        const current = unconfirmed.get(key) ?? storage.get(key);
+        if (!current) return;
+        const { attemptsInFlight: _finished, ...rest } = current;
+        storage.set(key, rest);
+      },
+      nowCalls: () => nowCalls,
+      setProgress: (value: number) => {
+        progress = value;
+      },
+      /** The attempt hit a memory-limit reset: storage rejects from now on. */
+      condemn: () => {
+        condemned = true;
+      },
+      /** A fresh isolate: unconfirmed writes are gone, storage works again. */
+      restart: () => {
+        unconfirmed.clear();
+        condemned = false;
+      }
     };
   }
 
@@ -132,6 +182,7 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
     requestId: "req-1",
     recoveryRootRequestId: "req-1",
     recoveryKind: "continue" as const,
+    trigger: "stalled" as const,
     nowMs: 5_000
   };
 
@@ -204,6 +255,166 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
     const expectedKey = chatRecoveryIncidentKey(chatRecoveryIncidentId(input));
     expect(fake.storage.get(expectedKey)).toEqual(result.incident);
   });
+
+  it("confirms the incident write before returning", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+
+    await engine.beginIncident(input);
+
+    // The attempt that follows may run in this invocation, and a
+    // memory-limit reset discards writes that were not confirmed yet.
+    expect(fake.calls.indexOf("sync")).toBeGreaterThan(
+      fake.calls.indexOf("put")
+    );
+  });
+
+  it("seals a turn whose every attempt dies of a memory-limit reset, with no writes after the reset (#2613)", async () => {
+    const fake = makeFakeAdapter();
+    const key = chatRecoveryIncidentKey(chatRecoveryIncidentId(input));
+
+    for (let death = 1; death <= 5; death++) {
+      // A fresh isolate replays the run the previous one left interrupted.
+      fake.restart();
+      // Each attempt streamed a little before dying, and the next replay
+      // comes well inside the debounce window.
+      fake.setProgress(death * 3);
+      const engine = new ChatRecoveryEngine(fake.adapter);
+      const { incident, exhausted } = await engine.beginIncident({
+        ...input,
+        trigger: "interrupted",
+        nowMs: 5_000 + death * 1_000
+      });
+
+      expect(incident.interruptedAttempts).toBe(death);
+      expect(fake.storage.get(key)?.interruptedAttempts).toBe(death);
+      if (death === 5) {
+        expect(exhausted).toBe(true);
+        expect(incident.reason).toBe("interrupted_attempts_exceeded");
+        break;
+      }
+      expect(exhausted).toBe(false);
+      // The attempt runs and hits the reset. Nothing it tries to write lands,
+      // so the count must already be confirmed.
+      fake.condemn();
+    }
+  });
+
+  it("counts recovery callbacks that die before they start a turn, and seals at the budget (#2613)", async () => {
+    const fake = makeFakeAdapter();
+    const key = chatRecoveryIncidentKey(chatRecoveryIncidentId(input));
+    // The original turn died; its replay opened the incident (one death).
+    const opened = await new ChatRecoveryEngine(fake.adapter).beginIncident({
+      ...input,
+      trigger: "interrupted"
+    });
+    fake.finishReplay(key);
+    const data = { incidentId: opened.incident.incidentId };
+    let runs = 0;
+
+    for (let death = 2; death <= 5; death++) {
+      // A fresh isolate runs the recovery callback, which hits a reset while
+      // it is still checking stable state: no turn run exists to replay.
+      fake.restart();
+      const engine = new ChatRecoveryEngine(fake.adapter);
+      await expect(
+        engine.runRecoveryAttempt({
+          callback: "_chatRecoveryContinue",
+          data,
+          run: async () => {
+            runs += 1;
+            fake.condemn();
+            throw fake.memoryLimitReset();
+          }
+        })
+      ).rejects.toThrow(/memory limit/);
+      // The admission counted the previous death before the work started.
+      expect(fake.storage.get(key)?.interruptedAttempts).toBe(death - 1);
+    }
+
+    // The fifth death is found by the next admission, which seals instead of
+    // running the callback again.
+    fake.restart();
+    await new ChatRecoveryEngine(fake.adapter).runRecoveryAttempt({
+      callback: "_chatRecoveryContinue",
+      data,
+      run: async () => {
+        runs += 1;
+      }
+    });
+    expect(runs).toBe(4);
+    expect(fake.exhausted).toHaveLength(1);
+    expect(fake.read(key)).toMatchObject({
+      interruptedAttempts: 5,
+      status: "exhausted",
+      reason: "interrupted_attempts_exceeded"
+    });
+  });
+
+  it("clears its record when the attempt finishes, so a later attempt counts nothing", async () => {
+    const fake = makeFakeAdapter();
+    const key = chatRecoveryIncidentKey(chatRecoveryIncidentId(input));
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const opened = await engine.beginIncident({
+      ...input,
+      trigger: "interrupted"
+    });
+    fake.finishReplay(key);
+    const data = { incidentId: opened.incident.incidentId };
+
+    // The replay scheduled the callback in this isolate, and it finishes.
+    await engine.runRecoveryAttempt({
+      callback: "_chatRecoveryContinue",
+      data,
+      run: async () => {}
+    });
+    expect(fake.read(key)?.attemptsInFlight).toBeUndefined();
+    // The removal was confirmed, so a reset right now could not undo it.
+    expect(fake.storage.get(key)?.attemptsInFlight).toBeUndefined();
+
+    // A later attempt in another isolate (a stable-state retry) finds no
+    // record left behind.
+    await new ChatRecoveryEngine(fake.adapter).runRecoveryAttempt({
+      callback: "_chatRecoveryContinue",
+      data,
+      run: async () => {}
+    });
+    expect(fake.storage.get(key)?.interruptedAttempts).toBe(1);
+  });
+
+  it("does nothing for a callback whose incident is already sealed", async () => {
+    const fake = makeFakeAdapter();
+    const key = chatRecoveryIncidentKey(chatRecoveryIncidentId(input));
+    const opened = await new ChatRecoveryEngine(fake.adapter).beginIncident({
+      ...input,
+      trigger: "interrupted"
+    });
+    fake.storage.set(key, { ...opened.incident, status: "exhausted" });
+    let ran = false;
+    await new ChatRecoveryEngine(fake.adapter).runRecoveryAttempt({
+      callback: "_chatRecoveryContinue",
+      data: { incidentId: opened.incident.incidentId },
+      run: async () => {
+        ran = true;
+      }
+    });
+    expect(ran).toBe(false);
+    expect(fake.exhausted).toHaveLength(0);
+  });
+
+  it("runs an attempt with no incident untracked", async () => {
+    const fake = makeFakeAdapter();
+    let ran = false;
+    await new ChatRecoveryEngine(fake.adapter).runRecoveryAttempt({
+      callback: "_chatRecoveryRetry",
+      data: {},
+      run: async () => {
+        ran = true;
+      }
+    });
+    expect(ran).toBe(true);
+    expect(fake.calls).not.toContain("put");
+  });
 });
 
 /**
@@ -231,6 +442,7 @@ describe("ChatRecoveryEngine.updateIncident (fake adapter)", () => {
         storage.set(key, incident);
         return Promise.resolve();
       },
+      syncStorage: () => Promise.resolve(),
       deleteIncident: (key) => {
         storage.delete(key);
         return Promise.resolve();
@@ -403,6 +615,7 @@ describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
         storage.set(key, incident);
         return Promise.resolve();
       },
+      syncStorage: () => Promise.resolve(),
       deleteIncident: (key) => {
         storage.delete(key);
         return Promise.resolve();
@@ -589,6 +802,7 @@ describe("ChatRecoveryEngine.rescheduleAfterStableTimeout (fake adapter)", () =>
         storage.set(key, incident);
         return Promise.resolve();
       },
+      syncStorage: () => Promise.resolve(),
       deleteIncident: (key) => {
         storage.delete(key);
         return Promise.resolve();
@@ -745,191 +959,6 @@ describe("ChatRecoveryEngine.rescheduleAfterStableTimeout (fake adapter)", () =>
 });
 
 /**
- * Layer-2 seam test for `ChatRecoveryEngine.recordOomAndDecide` (#1825) — the
- * tight OOM-retry budget both packages call when a recovery callback observes a
- * Durable Object memory-limit reset. Pins: the durable `oomAttempts` bump, the
- * under-budget delayed non-idempotent reschedule (same machinery as the
- * stable-timeout reschedule), the over-budget "exhausted" verdict (caller
- * terminalizes), and the untrackable short-circuits (no id / record gone).
- */
-describe("ChatRecoveryEngine.recordOomAndDecide (fake adapter)", () => {
-  type ScheduleCall = {
-    callback: ChatRecoveryScheduleCallback;
-    data: Record<string, unknown>;
-    reason: ChatRecoveryScheduleReason;
-    delaySeconds: number;
-  };
-
-  function makeFakeAdapter() {
-    const storage = new Map<string, ChatRecoveryIncident>();
-    const events: ChatRecoveryIncidentEvent[] = [];
-    const recovering: Array<{ active: boolean; requestId?: string }> = [];
-    const schedules: ScheduleCall[] = [];
-
-    const adapter: ChatRecoveryAdapter = {
-      resolveConfig: () => resolveChatRecoveryConfig(undefined),
-      now: () => 4_242,
-      sweepStaleIncidents: () => Promise.resolve(),
-      getIncident: (key) => Promise.resolve(storage.get(key) ?? null),
-      readProgress: () => Promise.resolve(0),
-      isAwaitingClientInteraction: () => false,
-      putIncident: (key, incident) => {
-        storage.set(key, incident);
-        return Promise.resolve();
-      },
-      deleteIncident: (key) => {
-        storage.delete(key);
-        return Promise.resolve();
-      },
-      emitRecoveryEvent: (event) => {
-        events.push(event);
-      },
-      scheduleRecovery: (callback, data, reason, delaySeconds) => {
-        schedules.push({ callback, data, reason, delaySeconds });
-        return Promise.resolve();
-      },
-      setRecovering: (active, requestId) => {
-        recovering.push({ active, requestId });
-        return Promise.resolve();
-      },
-      onShouldKeepRecoveringError: () => {},
-      exhaustChatRecovery: () => Promise.resolve(),
-      resolveRecoveryStream: () => ({ streamId: "", streamStillActive: false }),
-      getPartialStreamText: () => ({
-        text: "",
-        parts: [],
-        hasSettledToolResults: false
-      }),
-      activeChatRecoveryRootRequestId: () => undefined,
-      onGiveUpBookkeepingError: () => {}
-    };
-
-    return { adapter, storage, events, recovering, schedules };
-  }
-
-  function seed(
-    storage: Map<string, ChatRecoveryIncident>,
-    overrides: Partial<ChatRecoveryIncident> = {}
-  ): ChatRecoveryIncident {
-    const incident: ChatRecoveryIncident = {
-      incidentId: "root-1:user-1",
-      requestId: "req-1",
-      recoveryRootRequestId: "root-1",
-      recoveryKind: "continue",
-      attempt: 1,
-      maxAttempts: 6,
-      status: "attempting",
-      firstSeenAt: 1_000,
-      lastAttemptAt: 1_000,
-      ...overrides
-    };
-    storage.set(chatRecoveryIncidentKey(incident.incidentId), incident);
-    return incident;
-  }
-
-  it("bumps oomAttempts and reschedules a delayed non-idempotent retry while under budget", async () => {
-    const fake = makeFakeAdapter();
-    const engine = new ChatRecoveryEngine(fake.adapter);
-    const incident = seed(fake.storage); // oomAttempts undefined → first OOM
-
-    const decision = await engine.recordOomAndDecide({
-      incidentId: incident.incidentId,
-      callback: "_chatRecoveryContinue",
-      data: { incidentId: incident.incidentId },
-      maxOomRetries: 3
-    });
-
-    expect(decision).toBe("rescheduled");
-    const stored = fake.storage.get(
-      chatRecoveryIncidentKey(incident.incidentId)
-    );
-    expect(stored).toMatchObject({
-      oomAttempts: 1,
-      status: "scheduled",
-      reason: "oom_retry",
-      lastAttemptAt: 4_242
-    });
-    // The attempt cap is deliberately NOT bumped — OOM has its own budget.
-    expect(stored?.attempt).toBe(1);
-    expect(fake.schedules).toHaveLength(1);
-    expect(fake.schedules[0]).toMatchObject({
-      callback: "_chatRecoveryContinue",
-      reason: "stable_timeout_retry",
-      delaySeconds: CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
-    });
-  });
-
-  it("returns exhausted (caller terminalizes) once the bump crosses the budget", async () => {
-    const fake = makeFakeAdapter();
-    const engine = new ChatRecoveryEngine(fake.adapter);
-    // Already at the budget: this OOM (→ 4) is one past maxOomRetries = 3.
-    const incident = seed(fake.storage, { oomAttempts: 3 });
-
-    const decision = await engine.recordOomAndDecide({
-      incidentId: incident.incidentId,
-      callback: "_chatRecoveryContinue",
-      data: {},
-      maxOomRetries: 3
-    });
-
-    expect(decision).toBe("exhausted");
-    // The crossed count is persisted so the begin-path backstop agrees, but NO
-    // reschedule is enqueued (the caller routes to the give-up path).
-    expect(
-      fake.storage.get(chatRecoveryIncidentKey(incident.incidentId))
-        ?.oomAttempts
-    ).toBe(4);
-    expect(fake.schedules).toHaveLength(0);
-  });
-
-  it("seals on the first OOM when maxOomRetries is 0", async () => {
-    const fake = makeFakeAdapter();
-    const engine = new ChatRecoveryEngine(fake.adapter);
-    const incident = seed(fake.storage);
-
-    const decision = await engine.recordOomAndDecide({
-      incidentId: incident.incidentId,
-      callback: "_chatRecoveryContinue",
-      data: {},
-      maxOomRetries: 0
-    });
-
-    expect(decision).toBe("exhausted");
-    expect(fake.schedules).toHaveLength(0);
-  });
-
-  it("returns exhausted without scheduling when the incident id is missing", async () => {
-    const fake = makeFakeAdapter();
-    const engine = new ChatRecoveryEngine(fake.adapter);
-
-    const decision = await engine.recordOomAndDecide({
-      incidentId: undefined,
-      callback: "_chatRecoveryContinue",
-      data: {},
-      maxOomRetries: 3
-    });
-
-    expect(decision).toBe("exhausted");
-    expect(fake.schedules).toHaveLength(0);
-  });
-
-  it("returns exhausted when no incident record exists", async () => {
-    const fake = makeFakeAdapter();
-    const engine = new ChatRecoveryEngine(fake.adapter);
-
-    const decision = await engine.recordOomAndDecide({
-      incidentId: "gone:incident",
-      callback: "_chatRecoveryRetry",
-      data: {},
-      maxOomRetries: 3
-    });
-
-    expect(decision).toBe("exhausted");
-    expect(fake.schedules).toHaveLength(0);
-  });
-});
-
-/**
  * Layer-2 seam test for `ChatRecoveryEngine.exhaustRecoveryGiveUp` (slice 4d-1)
  * — the give-up spine both packages ran verbatim to terminalize a turn whose
  * retry budget drained (#1645). Pins the sequence + its invariants: best-effort
@@ -980,6 +1009,7 @@ describe("ChatRecoveryEngine.exhaustRecoveryGiveUp (fake adapter)", () => {
         storage.set(key, incident);
         return Promise.resolve();
       },
+      syncStorage: () => Promise.resolve(),
       deleteIncident: (key) => {
         storage.delete(key);
         return Promise.resolve();
@@ -1668,6 +1698,7 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
         storage.set(key, incident);
         return Promise.resolve();
       },
+      syncStorage: () => Promise.resolve(),
       deleteIncident: (key) => {
         storage.delete(key);
         return Promise.resolve();

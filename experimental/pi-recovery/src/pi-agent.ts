@@ -628,6 +628,7 @@ export class PiAgent extends Agent<Env> {
       // `isAwaitingClientInteraction` is omitted: pi has no client tools / HITL,
       // so the engine's default (`false`, never parked on a human) applies (#6).
       putIncident: (key, incident) => this.ctx.storage.put(key, incident),
+      syncStorage: () => this.ctx.storage.sync(),
       deleteIncident: (key) => this.ctx.storage.delete(key).then(() => {}),
       emitRecoveryEvent: (event: ChatRecoveryIncidentEvent) =>
         this._emit(event.type, { ...event }),

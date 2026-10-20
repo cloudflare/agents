@@ -8,7 +8,6 @@ import type {
 } from "ai";
 import {
   Agent,
-  isDurableObjectMemoryLimitReset,
   isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
   __DO_NOT_USE_WILL_BREAK__withInvocationScope as withInvocationScope,
@@ -802,7 +801,14 @@ export class AIChatAgent<
     detached: (onTurnStarted: () => void) => Promise<void>
   ): Promise<void> {
     return dispatchChatRecoveryToHandoff({
-      detached,
+      // Each run is one attempt under the interruption budget: it counts an
+      // earlier attempt that died and records itself before any heavy work.
+      detached: (onTurnStarted) =>
+        this._chatRecoveryEngine().runRecoveryAttempt({
+          callback,
+          data,
+          run: () => detached(onTurnStarted)
+        }),
       track: (turn) => this.lifecycle.trackAlarmWork(turn),
       redefer: (dedupeKey) =>
         this._enqueueChatRecovery(
@@ -5095,6 +5101,7 @@ export class AIChatAgent<
       // not stuck, so the engine keeps it budget-free.
       isAwaitingClientInteraction: () => this.hasPendingClientInteraction(),
       putIncident: (key, incident) => this.ctx.storage.put(key, incident),
+      syncStorage: () => this.ctx.storage.sync(),
       deleteIncident: async (key) => {
         await this.ctx.storage.delete(key);
       },
@@ -5152,6 +5159,7 @@ export class AIChatAgent<
     recoveryRootRequestId?: string | null;
     latestUserMessageId?: string | null;
     recoveryKind: ChatRecoveryKind;
+    trigger: "interrupted" | "stalled";
     /** Test-only clock injection for deterministic debounce/window timing. */
     nowMs?: number;
   }): Promise<{
@@ -5663,17 +5671,6 @@ export class AIChatAgent<
             : "failed",
         result.error
       );
-    } catch (error) {
-      // AIChatAgent otherwise has no continuation `catch` (a thrown error
-      // propagates to the driving Task attempt, or the routed one-shot
-      // schedule row). The ONLY case we intercept is an OOM thrown out of
-      // the turn (#1825): route it through the
-      // tight OOM-retry budget, and rethrow everything else so the existing
-      // behavior is byte-identical for non-OOM errors.
-      if (await this._handleRecoveryOom("_chatRecoveryContinue", data, error)) {
-        return;
-      }
-      throw error;
     } finally {
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
       // If this facet is an agent-tool child, its recovered turn just settled
@@ -5739,7 +5736,8 @@ export class AIChatAgent<
         requestId: input.requestId,
         recoveryRootRequestId,
         latestUserMessageId,
-        recoveryKind
+        recoveryKind,
+        trigger: "stalled"
       });
     const partialText = input.partialParts
       .filter(
@@ -6049,61 +6047,6 @@ export class AIChatAgent<
     });
   }
 
-  /**
-   * Apply the tight OOM-retry budget to a recovery error (#1825). Symmetric with
-   * `@cloudflare/think`'s `_handleRecoveryOom`: invoked from the narrow OOM-only
-   * `catch` in `_chatRecoveryContinue` / `_chatRecoveryRetry`, i.e. for an OOM
-   * that is *thrown* out of a recovery turn (e.g. storage/SQL ops rejecting with
-   * the memory-limit-reset message after an isolate reset). An OOM caught inside
-   * `continueLastTurn` that surfaces as a returned `error` result is NOT routed
-   * here — that turn was already terminalized, so re-driving it would be wasteful
-   * and risk a second terminal signal.
-   *
-   * The reliable terminator is the begin-path (`evaluateChatRecoveryIncident`),
-   * which seals once `oomAttempts` exceeds the budget, running before the
-   * memory-heavy turn in the low-memory window where writes succeed. This method
-   * persists `oomAttempts` (small writes) for the begin path to act on, and
-   * schedules a delayed re-run while under budget.
-   *
-   * Returns `true` when the error was an OOM and this method owns the outcome
-   * (rescheduled a delayed re-run while under budget, or terminalized with
-   * `reason="out_of_memory"` once over budget / untrackable / bookkeeping
-   * failed), `false` for non-OOM errors so the caller proceeds normally.
-   */
-  private async _handleRecoveryOom(
-    callback: ChatRecoveryScheduleCallback,
-    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
-    error: unknown
-  ): Promise<boolean> {
-    if (!isDurableObjectMemoryLimitReset(error)) return false;
-    let decision: "rescheduled" | "exhausted" = "exhausted";
-    try {
-      decision = await this._chatRecoveryEngine().recordOomAndDecide({
-        incidentId: data?.incidentId,
-        callback,
-        data,
-        maxOomRetries: this._resolveChatRecoveryConfig().maxOomRetries
-      });
-    } catch (bookkeepingError) {
-      // The bump/reschedule writes can themselves reject in the degraded isolate
-      // that just OOMed. Fail closed (seal) rather than risk a silent wedge; the
-      // finite `maxRecoveryWork` backstop covers anything that slips past.
-      console.error(
-        "[AIChatAgent] failed to record OOM recovery attempt; terminalizing",
-        bookkeepingError
-      );
-      decision = "exhausted";
-    }
-    if (decision === "exhausted") {
-      await this._chatRecoveryEngine().exhaustRecoveryGiveUp({
-        callback,
-        data,
-        reason: "out_of_memory"
-      });
-    }
-    return true;
-  }
-
   private _shouldRetryRecoveredPreStreamTurn(
     snapshot: ChatFiberSnapshot | null,
     streamId: string,
@@ -6242,13 +6185,6 @@ export class AIChatAgent<
             : "failed",
         result.error
       );
-    } catch (error) {
-      // OOM-only intercept, rethrowing everything else (see
-      // `_chatRecoveryContinue`, #1825).
-      if (await this._handleRecoveryOom("_chatRecoveryRetry", data, error)) {
-        return;
-      }
-      throw error;
     } finally {
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
       // If this facet is an agent-tool child, its recovered turn just settled

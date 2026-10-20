@@ -837,6 +837,7 @@ export class TanStackAgent extends Agent<Env> {
           .then((value) => value ?? null),
       readProgress: () => readChatRecoveryProgress(this.ctx.storage),
       putIncident: (key, incident) => this.ctx.storage.put(key, incident),
+      syncStorage: () => this.ctx.storage.sync(),
       deleteIncident: (key) => this.ctx.storage.delete(key).then(() => {}),
       emitRecoveryEvent: (event: ChatRecoveryIncidentEvent) =>
         this._emit(event.type, { ...event }),

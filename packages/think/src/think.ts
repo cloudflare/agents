@@ -5853,7 +5853,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     detached: (onTurnStarted: () => void) => Promise<void>
   ): Promise<void> {
     return dispatchChatRecoveryToHandoff({
-      detached,
+      // Each run is one attempt under the interruption budget: it counts an
+      // earlier attempt that died and records itself before any heavy work.
+      detached: (onTurnStarted) =>
+        this._chatRecoveryEngine().runRecoveryAttempt({
+          callback,
+          data,
+          run: () => detached(onTurnStarted)
+        }),
       track: (turn) => this.lifecycle.trackAlarmWork(turn),
       redefer: (dedupeKey) =>
         this._enqueueChatRecovery(
@@ -17052,6 +17059,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     recoveryRootRequestId?: string | null;
     latestUserMessageId?: string | null;
     recoveryKind: ChatRecoveryKind;
+    trigger: "interrupted" | "stalled";
     /** Test-only clock injection for deterministic debounce/window timing. */
     nowMs?: number;
   }): Promise<{
@@ -17116,6 +17124,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           ({ incident }) => incident
         ),
       putIncident: (key, incident) => this.ctx.storage.put(key, incident),
+      syncStorage: () => this.ctx.storage.sync(),
       deleteIncident: async (key) => {
         await this.ctx.storage.delete(key);
       },
@@ -17329,7 +17338,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         requestId: input.requestId,
         recoveryRootRequestId,
         latestUserMessageId,
-        recoveryKind
+        recoveryKind,
+        trigger: "stalled"
       });
     const partialText = input.partialParts
       .filter(
@@ -18117,62 +18127,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Apply the tight OOM-retry budget to a recovery error (#1825). Invoked from
-   * `_handleRecoveryCallbackError`, i.e. for an OOM that is *thrown* out of a
-   * recovery turn (typically from recovery bookkeeping or storage/SQL ops that
-   * reject with the memory-limit-reset message after an isolate reset). An OOM
-   * that surfaces as a returned `error` result means `continueLastTurn` already
-   * terminalized the turn (client error frame + `onError`), so it is NOT routed
-   * here — re-driving a terminalized turn would be wasteful and risk a second
-   * terminal signal. `error` may be an Error or a wrapper with a `cause` chain.
-   *
-   * The reliable terminator is the begin-path (`evaluateChatRecoveryIncident`),
-   * which seals once `oomAttempts` exceeds the budget; that runs before the
-   * memory-heavy turn, in the low-memory window where writes succeed. This
-   * method's job is to persist `oomAttempts` (small writes) so the begin path
-   * can act on it, and to schedule a delayed re-run while under budget.
-   *
-   * Returns `true` when the error was an OOM and this method owns the outcome:
-   *  - under budget → a delayed re-run was scheduled (best-effort: a transient
-   *    spike may clear);
-   *  - over budget (or untrackable, or the bookkeeping itself OOMed) →
-   *    terminalized via the give-up path with `reason="out_of_memory"`.
-   * Returns `false` for non-OOM errors so the caller proceeds normally.
-   */
-  private async _handleRecoveryOom(
-    callback: ChatRecoveryScheduleCallback,
-    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
-    error: unknown
-  ): Promise<boolean> {
-    if (!isDurableObjectMemoryLimitReset(error)) return false;
-    let decision: "rescheduled" | "exhausted" = "exhausted";
-    try {
-      decision = await this._chatRecoveryEngine().recordOomAndDecide({
-        incidentId: data?.incidentId,
-        callback,
-        data,
-        maxOomRetries: this._resolveChatRecoveryConfig().maxOomRetries
-      });
-    } catch (bookkeepingError) {
-      // The bump/reschedule writes can themselves reject in the degraded isolate
-      // that just OOMed. Fail closed (seal) rather than risk a silent wedge; the
-      // finite `maxRecoveryWork` backstop covers anything that slips past.
-      console.error(
-        "[Think] failed to record OOM recovery attempt; terminalizing",
-        bookkeepingError
-      );
-      decision = "exhausted";
-    }
-    if (decision === "exhausted") {
-      await this._exhaustRecoveryGiveUp(callback, data, "out_of_memory");
-    }
-    return true;
-  }
-
-  /**
    * Handle an error thrown by `_chatRecoveryContinue` / `_chatRecoveryRetry`
    * after the incident was opened.
    *
+   * - A Durable Object memory-limit reset is re-thrown with no bookkeeping.
+   *   The isolate is condemned: its storage calls reject and unconfirmed
+   *   writes are discarded, so nothing written here would survive (#2613).
+   *   The attempt's `attemptsInFlight` entry stays behind, and the next
+   *   attempt counts it against `maxInterruptedAttempts` before running
+   *   anything heavy.
    * - A platform transient (`isPlatformTransientError` from `agents` — a
    *   deploy code-update reset / script supersede, a `retryable`-flagged
    *   platform error, or "Network connection lost.", looking through wrappers
@@ -18201,13 +18164,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
     error: unknown
   ): Promise<void> {
-    // A memory-limit reset is NOT a platform transient (re-running the same
-    // memory-heavy turn re-OOMs deterministically), so it must be classified
-    // BEFORE the transient check and routed through the tight OOM-retry budget
-    // instead of either deferring forever or terminalizing on the first hit
-    // (#1825). Returns true once it has owned the outcome (rescheduled or
-    // sealed); only fall through to the generic handling for non-OOM errors.
-    if (await this._handleRecoveryOom(callback, data, error)) return;
+    // Classified before the transient check: a memory-limit reset is not a
+    // transient, and the generic path below would try to terminalize through
+    // storage that is already gone.
+    if (isDurableObjectMemoryLimitReset(error)) throw error;
     if (isPlatformTransientError(error)) {
       const message = error instanceof Error ? error.message : String(error);
       const incidentId = data?.incidentId;
