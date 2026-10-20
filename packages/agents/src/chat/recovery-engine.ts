@@ -397,9 +397,9 @@ export interface ChatFiberWakeHooks<TClassify> {
  */
 export class ChatRecoveryEngine {
   /**
-   * This object instance's identity in `attemptInFlight` records. A reset
-   * builds a new instance, so a record carrying a different value was left by
-   * an attempt whose isolate died (#2613).
+   * This object instance's identity in `attemptsInFlight` entries. A reset
+   * builds a new instance, so an entry carrying a different value was left
+   * by an attempt whose isolate died (#2613).
    */
   readonly #isolate = crypto.randomUUID();
 
@@ -410,9 +410,10 @@ export class ChatRecoveryEngine {
   }
 
   /**
-   * Clear a finished attempt's record. Best-effort: in a reset isolate this
-   * write fails too, and the record it leaves behind is exactly what tells
-   * the next isolate that this attempt died.
+   * Remove a finished attempt's entry and confirm the write, so a reset right
+   * after a clean finish cannot make the attempt look interrupted.
+   * Best-effort: in a reset isolate this fails too, and the entry it leaves
+   * behind is exactly what tells the next isolate that this attempt died.
    */
   async #finishAttempt(
     incidentId: string,
@@ -423,9 +424,12 @@ export class ChatRecoveryEngine {
     try {
       const stored = await adapter.getIncident(key);
       const next = stored ? finishChatRecoveryAttempt(stored, attempt) : null;
-      if (next) await adapter.putIncident(key, next);
+      if (next) {
+        await adapter.putIncident(key, next);
+        await adapter.syncStorage();
+      }
     } catch {
-      // A record left behind costs at most one extra counted interruption.
+      // An entry left behind costs at most one extra counted interruption.
     }
   }
 
@@ -433,16 +437,17 @@ export class ChatRecoveryEngine {
    * Run one recovery attempt under the interruption budget (#2613): a
    * `_chatRecoveryContinue` / `_chatRecoveryRetry` callback and the turn it
    * starts. Before `run` does anything heavy, the attempt counts any earlier
-   * attempt that died (one whose `attemptInFlight` record another isolate
-   * left) and records itself, confirmed with `syncStorage`. Once
+   * attempt that died (entries another isolate left in `attemptsInFlight`)
+   * and records itself, confirmed with `syncStorage`. Once
    * `maxInterruptedAttempts` attempts have died the turn is sealed with
-   * `interrupted_attempts_exceeded` and `run` is never called. The record is
-   * cleared when `run` settles, whatever its outcome.
+   * `interrupted_attempts_exceeded` and `run` is never called. The entry is
+   * removed when `run` settles, whatever its outcome.
    *
    * This catches deaths the replay of an interrupted turn run cannot see, such
    * as a reset before the callback starts its turn, which leaves no turn run
-   * to replay. A payload without an incident, or an incident that is gone or
-   * already sealed, runs untracked.
+   * to replay. A callback for a sealed incident does nothing: the turn was
+   * already terminalized, and running it would re-run the model. A payload
+   * without an incident, or one whose incident is gone, runs untracked.
    *
    * @param input - The callback being run, its payload, and the work.
    */
@@ -459,7 +464,8 @@ export class ChatRecoveryEngine {
     const existing = incidentId
       ? await adapter.getIncident(chatRecoveryIncidentKey(incidentId))
       : null;
-    if (!incidentId || !existing || existing.status === "exhausted") {
+    if (existing?.status === "exhausted") return;
+    if (!incidentId || !existing) {
       await input.run();
       return;
     }

@@ -159,7 +159,7 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
       finishReplay: (key: string) => {
         const current = unconfirmed.get(key) ?? storage.get(key);
         if (!current) return;
-        const { attemptInFlight: _finished, ...rest } = current;
+        const { attemptsInFlight: _finished, ...rest } = current;
         storage.set(key, rest);
       },
       nowCalls: () => nowCalls,
@@ -359,6 +359,7 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
       ...input,
       trigger: "interrupted"
     });
+    fake.finishReplay(key);
     const data = { incidentId: opened.incident.incidentId };
 
     // The replay scheduled the callback in this isolate, and it finishes.
@@ -367,7 +368,9 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
       data,
       run: async () => {}
     });
-    expect(fake.read(key)?.attemptInFlight).toBeUndefined();
+    expect(fake.read(key)?.attemptsInFlight).toBeUndefined();
+    // The removal was confirmed, so a reset right now could not undo it.
+    expect(fake.storage.get(key)?.attemptsInFlight).toBeUndefined();
 
     // A later attempt in another isolate (a stable-state retry) finds no
     // record left behind.
@@ -377,6 +380,26 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
       run: async () => {}
     });
     expect(fake.storage.get(key)?.interruptedAttempts).toBe(1);
+  });
+
+  it("does nothing for a callback whose incident is already sealed", async () => {
+    const fake = makeFakeAdapter();
+    const key = chatRecoveryIncidentKey(chatRecoveryIncidentId(input));
+    const opened = await new ChatRecoveryEngine(fake.adapter).beginIncident({
+      ...input,
+      trigger: "interrupted"
+    });
+    fake.storage.set(key, { ...opened.incident, status: "exhausted" });
+    let ran = false;
+    await new ChatRecoveryEngine(fake.adapter).runRecoveryAttempt({
+      callback: "_chatRecoveryContinue",
+      data: { incidentId: opened.incident.incidentId },
+      run: async () => {
+        ran = true;
+      }
+    });
+    expect(ran).toBe(false);
+    expect(fake.exhausted).toHaveLength(0);
   });
 
   it("runs an attempt with no incident untracked", async () => {

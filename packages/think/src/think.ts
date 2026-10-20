@@ -18133,7 +18133,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * - A Durable Object memory-limit reset is re-thrown with no bookkeeping.
    *   The isolate is condemned: its storage calls reject and unconfirmed
    *   writes are discarded, so nothing written here would survive (#2613).
-   *   The attempt's `attemptInFlight` record stays behind, and the next
+   *   The attempt's `attemptsInFlight` entry stays behind, and the next
    *   attempt counts it against `maxInterruptedAttempts` before running
    *   anything heavy.
    * - A platform transient (`isPlatformTransientError` from `agents` — a

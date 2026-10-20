@@ -9903,9 +9903,9 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   /**
-   * Leave the record an attempt writes before its isolate dies: an
-   * `attemptInFlight` from an isolate that no longer exists (#2613). A test
-   * isolate never dies, so this is how a test reproduces a real reset.
+   * Leave the entry an attempt writes before its isolate dies: an
+   * `attemptsInFlight` entry from an isolate that no longer exists (#2613). A
+   * test isolate never dies, so this is how a test reproduces a real reset.
    */
   async simulateDeadAttemptForTest(incidentId: string): Promise<void> {
     const key = `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`;
@@ -9913,10 +9913,9 @@ export class ThinkRecoveryTestAgent extends Think {
     if (!incident) throw new Error(`No recovery incident ${incidentId}`);
     await this.ctx.storage.put(key, {
       ...incident,
-      attemptInFlight: {
-        isolate: `dead-${crypto.randomUUID()}`,
-        token: crypto.randomUUID()
-      }
+      attemptsInFlight: [
+        { isolate: `dead-${crypto.randomUUID()}`, token: crypto.randomUUID() }
+      ]
     });
   }
 

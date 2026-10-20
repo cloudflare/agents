@@ -198,9 +198,9 @@ The incident record remains the recovery state machine.
 Every attempt that can run heavy work (the replay of an interrupted turn run,
 and each `_chatRecoveryContinue` / `_chatRecoveryRetry` callback through
 `ChatRecoveryEngine.runRecoveryAttempt`) records itself on the incident as
-`attemptInFlight`, confirmed with `storage.sync()`, and clears the record when
-it finishes. An isolate killed by a memory-limit reset cannot write anything,
-so the next attempt counts any record left by another isolate in
+an `attemptsInFlight` entry, confirmed with `storage.sync()`, and removes it
+when it finishes. An isolate killed by a memory-limit reset cannot write anything,
+so the next attempt counts entries left by another isolate in
 `interruptedAttempts`, and `maxInterruptedAttempts` seals the turn. Nothing is
 counted on the failure path. See
 [rfc-chat-recovery-interrupted-attempts.md](./rfc-chat-recovery-interrupted-attempts.md).

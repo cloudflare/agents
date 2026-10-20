@@ -118,7 +118,7 @@ export type ChatRecoveryIncident = {
    * How many of this turn's attempts were interrupted: their isolate died
    * before they finished. The original turn's death is counted when its run
    * is first replayed; every later death is found through the
-   * `attemptInFlight` record it left behind. Never counted on the failure
+   * `attemptsInFlight` entries it left behind. Never counted on the failure
    * path, because an isolate killed by a memory-limit reset cannot write
    * (#2613), and never reset by progress, because a turn that re-runs and
    * dies again streams output too. Reaching `maxInterruptedAttempts` seals the
@@ -127,11 +127,13 @@ export type ChatRecoveryIncident = {
    */
   interruptedAttempts?: number;
   /**
-   * The recovery attempt currently running for this turn, written and
-   * confirmed before it does any heavy work and cleared when it finishes. A
-   * record written by another isolate means that attempt died.
+   * The recovery attempts currently running for this turn. Each is written
+   * and confirmed before it does any heavy work and removed when it
+   * finishes, so a replay and a callback that overlap are tracked apart. An
+   * entry written by another isolate means that isolate died mid-attempt;
+   * however many entries it left, it counts as one interruption.
    */
-  attemptInFlight?: ChatRecoveryAttempt;
+  attemptsInFlight?: ChatRecoveryAttempt[];
   /**
    * Recoveries scheduled for this incident after a transient or rate-limited
    * stream error. Drives the retry backoff and is capped by `maxAttempts`.
@@ -784,16 +786,18 @@ export async function evaluateChatRecoveryIncident(
   // Interruption budget (#2613). The isolate that died cannot write, so the
   // death is counted by whoever starts the next attempt. A replay with no
   // incident yet is the original turn's death. Otherwise a death shows up as
-  // an `attemptInFlight` record left by another isolate. A second report of
-  // the same death finds this isolate's own record and counts nothing.
+  // `attemptsInFlight` entries left by another isolate. A second report of
+  // the same death finds only this isolate's entries and counts nothing.
   // Neither progress nor debounce resets the count: a turn that re-runs and
   // dies again streams output, and can die faster than the debounce window.
-  const countsInterruption =
-    trigger.kind === "interrupted" &&
-    (existing == null ||
-      attemptDiedElsewhere(existing.attemptInFlight, trigger.attempt));
+  const newlyInterrupted =
+    trigger.kind !== "interrupted"
+      ? 0
+      : existing == null
+        ? 1
+        : deadIsolateCount(existing.attemptsInFlight, trigger.attempt);
   const interruptedAttempts =
-    (existing?.interruptedAttempts ?? 0) + (countsInterruption ? 1 : 0);
+    (existing?.interruptedAttempts ?? 0) + newlyInterrupted;
   const interruptedBudgetExceeded =
     !awaitingClientInteraction &&
     interruptedAttempts >= config.maxInterruptedAttempts;
@@ -871,7 +875,7 @@ export async function evaluateChatRecoveryIncident(
     progress,
     workBaseline,
     ...(interruptedAttempts > 0 ? { interruptedAttempts } : {}),
-    ...attemptInFlightAfter(trigger, existing, exhausted),
+    ...attemptsInFlightAfter(trigger, existing, exhausted),
     ...(transientRetries > 0 ? { transientRetries } : {}),
     ...(exhausted
       ? {
@@ -912,32 +916,52 @@ export async function evaluateChatRecoveryIncident(
 }
 
 /**
- * Whether `recorded` is an attempt another isolate started and never
- * finished. An attempt recorded by this isolate is still running here.
+ * How many other isolates left attempts in `recorded`. Each such isolate died
+ * mid-attempt once, however many attempts it was running.
  */
-function attemptDiedElsewhere(
-  recorded: ChatRecoveryAttempt | undefined,
+function deadIsolateCount(
+  recorded: ReadonlyArray<ChatRecoveryAttempt> | undefined,
   current: ChatRecoveryAttempt
-): boolean {
-  return recorded !== undefined && recorded.isolate !== current.isolate;
+): number {
+  const dead = new Set<string>();
+  for (const attempt of recorded ?? []) {
+    if (attempt.isolate !== current.isolate) dead.add(attempt.isolate);
+  }
+  return dead.size;
+}
+
+/** The attempts in `recorded` that are still running in `current`'s isolate. */
+function liveAttempts(
+  recorded: ReadonlyArray<ChatRecoveryAttempt> | undefined,
+  current: ChatRecoveryAttempt
+): ChatRecoveryAttempt[] {
+  return (recorded ?? []).filter(
+    (attempt) => attempt.isolate === current.isolate
+  );
+}
+
+/** Persist `attempts` only when there is at least one. */
+function withAttemptsInFlight(attempts: ChatRecoveryAttempt[]): {
+  attemptsInFlight?: ChatRecoveryAttempt[];
+} {
+  return attempts.length > 0 ? { attemptsInFlight: attempts } : {};
 }
 
 /**
- * The `attemptInFlight` an incident opening leaves behind. A replay records
- * itself as the running attempt; a sealed incident runs nothing more; a stall
- * leaves whatever attempt is running untouched.
+ * The `attemptsInFlight` an incident opening leaves behind. A replay drops
+ * the dead isolates' entries it just counted and adds itself, unless the
+ * incident is now sealed; a stall leaves the running attempts untouched.
  */
-function attemptInFlightAfter(
+function attemptsInFlightAfter(
   trigger: ChatRecoveryTrigger,
   existing: ChatRecoveryIncident | null,
   exhausted: boolean
-): { attemptInFlight?: ChatRecoveryAttempt } {
+): { attemptsInFlight?: ChatRecoveryAttempt[] } {
   if (trigger.kind === "interrupted") {
-    return exhausted ? {} : { attemptInFlight: trigger.attempt };
+    const live = liveAttempts(existing?.attemptsInFlight, trigger.attempt);
+    return withAttemptsInFlight(exhausted ? live : [...live, trigger.attempt]);
   }
-  return existing?.attemptInFlight
-    ? { attemptInFlight: existing.attemptInFlight }
-    : {};
+  return withAttemptsInFlight([...(existing?.attemptsInFlight ?? [])]);
 }
 
 /** Input for {@link admitChatRecoveryAttempt}. */
@@ -956,12 +980,13 @@ export type AdmitChatRecoveryAttemptInput = {
  * Admit one recovery attempt (a `_chatRecoveryContinue` / `_chatRecoveryRetry`
  * callback and the turn it starts) before it does any heavy work (#2613).
  *
- * An `attemptInFlight` left by another isolate is a previous attempt that
- * died, for example to a memory-limit reset before or during its turn, so it
- * counts as one interrupted attempt. The returned incident records `attempt`
- * as the one now running, unless the budget is spent, in which case the
- * caller seals the incident instead of running anything. A parked turn is
- * budget-free: it is counted but never sealed.
+ * Entries in `attemptsInFlight` left by other isolates are attempts that
+ * died, for example to a memory-limit reset before or during their turn.
+ * Each such isolate counts as one interrupted attempt and its entries are
+ * dropped. The returned incident adds `attempt` to the running attempts,
+ * unless the budget is spent, in which case the caller seals the incident
+ * instead of running anything. A parked turn is budget-free: it is counted
+ * but never sealed.
  *
  * @param input - The incident, the attempt about to start, and the budget.
  * @returns The incident to persist, and whether the budget is spent.
@@ -970,37 +995,39 @@ export function admitChatRecoveryAttempt(
   input: AdmitChatRecoveryAttemptInput
 ): { incident: ChatRecoveryIncident; exhausted: boolean } {
   const { existing, attempt, config, awaitingClientInteraction } = input;
-  const died = attemptDiedElsewhere(existing.attemptInFlight, attempt);
   const interruptedAttempts =
-    (existing.interruptedAttempts ?? 0) + (died ? 1 : 0);
+    (existing.interruptedAttempts ?? 0) +
+    deadIsolateCount(existing.attemptsInFlight, attempt);
   const exhausted =
     !awaitingClientInteraction &&
     interruptedAttempts >= config.maxInterruptedAttempts;
-  const { attemptInFlight: _previous, ...rest } = existing;
+  const live = liveAttempts(existing.attemptsInFlight, attempt);
+  const { attemptsInFlight: _previous, ...rest } = existing;
   return {
     incident: {
       ...rest,
       ...(interruptedAttempts > 0 ? { interruptedAttempts } : {}),
-      ...(exhausted ? {} : { attemptInFlight: attempt })
+      ...withAttemptsInFlight(exhausted ? live : [...live, attempt])
     },
     exhausted
   };
 }
 
 /**
- * Clear `attempt` from the incident once it finished in this isolate. An
- * incident that records a different attempt (a newer one started meanwhile)
- * is left alone.
+ * Remove `attempt` from the running attempts once it finished in this
+ * isolate. Other running attempts stay recorded.
  *
  * @param existing - The persisted incident.
  * @param attempt - The attempt that finished.
- * @returns The incident to persist, or `null` when there is nothing to clear.
+ * @returns The incident to persist, or `null` when `attempt` is not recorded.
  */
 export function finishChatRecoveryAttempt(
   existing: ChatRecoveryIncident,
   attempt: ChatRecoveryAttempt
 ): ChatRecoveryIncident | null {
-  if (existing.attemptInFlight?.token !== attempt.token) return null;
-  const { attemptInFlight: _finished, ...rest } = existing;
-  return rest;
+  const recorded = existing.attemptsInFlight ?? [];
+  const remaining = recorded.filter((entry) => entry.token !== attempt.token);
+  if (remaining.length === recorded.length) return null;
+  const { attemptsInFlight: _finished, ...rest } = existing;
+  return { ...rest, ...withAttemptsInFlight(remaining) };
 }

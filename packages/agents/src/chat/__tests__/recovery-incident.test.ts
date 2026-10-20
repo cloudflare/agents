@@ -836,13 +836,16 @@ describe("evaluateChatRecoveryIncident", () => {
       expect(incident.attempt).toBe(1);
       if (death < 5) {
         expect(exhausted).toBe(false);
-        expect(incident.attemptInFlight?.isolate).toBe(`isolate-${death}`);
+        // The dead isolate's entry was counted and dropped.
+        expect(incident.attemptsInFlight?.map((a) => a.isolate)).toEqual([
+          `isolate-${death}`
+        ]);
       } else {
         expect(exhausted).toBe(true);
         expect(incident.status).toBe("exhausted");
         expect(incident.reason).toBe("interrupted_attempts_exceeded");
         // A sealed incident runs nothing more.
-        expect(incident.attemptInFlight).toBeUndefined();
+        expect(incident.attemptsInFlight).toBeUndefined();
       }
       existing = incident;
     }
@@ -865,7 +868,7 @@ describe("evaluateChatRecoveryIncident", () => {
     // The record was cleared: the attempt finished, so its turn was not lost
     // to an isolate death.
     const first = await evaluate({ trigger: interrupted("isolate-a") });
-    const { attemptInFlight: _cleared, ...finished } = first.incident;
+    const { attemptsInFlight: _cleared, ...finished } = first.incident;
     const replay = await evaluate({
       trigger: interrupted("isolate-b"),
       existing: finished,
@@ -882,8 +885,8 @@ describe("evaluateChatRecoveryIncident", () => {
       now: T0 + 1000
     });
     expect(stalled.incident.interruptedAttempts).toBe(1);
-    expect(stalled.incident.attemptInFlight).toEqual(
-      opened.incident.attemptInFlight
+    expect(stalled.incident.attemptsInFlight).toEqual(
+      opened.incident.attemptsInFlight
     );
     expect(stalled.exhausted).toBe(false);
   });
@@ -905,7 +908,7 @@ describe("evaluateChatRecoveryIncident", () => {
       existing: {
         ...base,
         interruptedAttempts: 1000,
-        attemptInFlight: { isolate: "isolate-a", token: "attempt-1" }
+        attemptsInFlight: [{ isolate: "isolate-a", token: "attempt-1" }]
       },
       now: T0 + CHAT_RECOVERY_ALARM_DEBOUNCE_MS + 1
     });
@@ -950,7 +953,7 @@ describe("evaluateChatRecoveryIncident", () => {
         ...base,
         attempt: 1,
         interruptedAttempts: DEFAULT_CHAT_RECOVERY_MAX_INTERRUPTED_ATTEMPTS + 5,
-        attemptInFlight: { isolate: "isolate-a", token: "attempt-1" },
+        attemptsInFlight: [{ isolate: "isolate-a", token: "attempt-1" }],
         lastProgressAt: T0
       },
       awaitingClientInteraction: true,
@@ -992,7 +995,7 @@ describe("admitChatRecoveryAttempt / finishChatRecoveryAttempt (#2613)", () => {
     });
     expect(exhausted).toBe(false);
     expect(incident.interruptedAttempts).toBe(2);
-    expect(incident.attemptInFlight).toEqual({ isolate: "b", token: "t1" });
+    expect(incident.attemptsInFlight).toEqual([{ isolate: "b", token: "t1" }]);
   });
 
   it("does not count an attempt still running in this isolate", async () => {
@@ -1005,7 +1008,10 @@ describe("admitChatRecoveryAttempt / finishChatRecoveryAttempt (#2613)", () => {
       awaitingClientInteraction: false
     });
     expect(incident.interruptedAttempts).toBe(1);
-    expect(incident.attemptInFlight).toEqual({ isolate: "a", token: "t1" });
+    expect(incident.attemptsInFlight).toEqual([
+      { isolate: "a", token: "t0" },
+      { isolate: "a", token: "t1" }
+    ]);
   });
 
   it("seals instead of recording when the death spends the budget", async () => {
@@ -1021,7 +1027,7 @@ describe("admitChatRecoveryAttempt / finishChatRecoveryAttempt (#2613)", () => {
     });
     expect(exhausted).toBe(true);
     expect(incident.interruptedAttempts).toBe(5);
-    expect(incident.attemptInFlight).toBeUndefined();
+    expect(incident.attemptsInFlight).toBeUndefined();
   });
 
   it("does not seal a parked turn", async () => {
@@ -1038,15 +1044,60 @@ describe("admitChatRecoveryAttempt / finishChatRecoveryAttempt (#2613)", () => {
     expect(exhausted).toBe(false);
   });
 
-  it("clears only the attempt that finished", async () => {
+  it("removes only the attempt that finished", async () => {
     const existing = await openedIncident();
     expect(
       finishChatRecoveryAttempt(existing, { isolate: "a", token: "t0" })
-        ?.attemptInFlight
+        ?.attemptsInFlight
     ).toBeUndefined();
-    // A newer attempt replaced the record: leave it alone.
     expect(
-      finishChatRecoveryAttempt(existing, { isolate: "a", token: "older" })
+      finishChatRecoveryAttempt(existing, { isolate: "a", token: "unknown" })
     ).toBeNull();
+  });
+
+  it("tracks overlapping attempts apart, so a replay that dies after its callback finished still counts", () => {
+    return openedIncident().then((opened) => {
+      // The replay (t0) scheduled a callback that started in the same isolate.
+      const withCallback = admitChatRecoveryAttempt({
+        existing: opened,
+        attempt: { isolate: "a", token: "t1" },
+        config: config(),
+        awaitingClientInteraction: false
+      }).incident;
+      // The callback finishes first; the replay is still running.
+      const finished = finishChatRecoveryAttempt(withCallback, {
+        isolate: "a",
+        token: "t1"
+      });
+      expect(finished?.attemptsInFlight).toEqual([
+        { isolate: "a", token: "t0" }
+      ]);
+      // Then the replay's isolate dies, and the next isolate counts it.
+      const next = admitChatRecoveryAttempt({
+        existing: finished ?? opened,
+        attempt: { isolate: "b", token: "t2" },
+        config: config(),
+        awaitingClientInteraction: false
+      });
+      expect(next.incident.interruptedAttempts).toBe(2);
+    });
+  });
+
+  it("counts one interruption for an isolate that died running two attempts", async () => {
+    const existing = {
+      ...(await openedIncident()),
+      attemptsInFlight: [
+        { isolate: "x", token: "t1" },
+        { isolate: "x", token: "t2" }
+      ]
+    };
+    const { incident } = admitChatRecoveryAttempt({
+      existing,
+      attempt: { isolate: "y", token: "t3" },
+      config: config(),
+      awaitingClientInteraction: false
+    });
+    expect(incident.interruptedAttempts).toBe(2);
+    expect(incident.attemptsInFlight).toEqual([{ isolate: "y", token: "t3" }]);
   });
 });

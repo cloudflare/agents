@@ -41,12 +41,16 @@ written.
 Count a death when the next attempt is admitted, before it does anything
 heavy, from an isolate whose storage works.
 
-Every attempt records itself on the incident as `attemptInFlight`
-(`{ isolate, token }`), confirms the write with `storage.sync()`, and clears
-the record when it finishes. `isolate` is a random id held by the
+Every attempt adds itself to the incident's `attemptsInFlight` list
+(`{ isolate, token }`), confirms the write with `storage.sync()`, and removes
+its entry when it finishes, confirming that too so a reset right after a clean
+finish cannot make it look interrupted. `isolate` is a random id held by the
 `ChatRecoveryEngine`, which is built once per object instance, so a reset
-produces a new value. An attempt that finds a record with another `isolate`
-value knows that attempt died and adds one to `interruptedAttempts`.
+produces a new value. An attempt that finds entries from another isolate knows
+that isolate died mid-attempt, adds one to `interruptedAttempts` per dead
+isolate however many entries it left, and drops them. Entries from its own
+isolate are attempts still running, such as a replay that has just scheduled
+this callback, so overlapping attempts are tracked apart.
 
 Two kinds of attempt record themselves:
 
@@ -62,6 +66,8 @@ Once `interruptedAttempts` reaches `chatRecovery.maxInterruptedAttempts`
 (default 5, the original turn included), the incident is sealed with
 `reason="interrupted_attempts_exceeded"`. Progress and debounce never reset
 the count. A turn parked on a client interaction is counted but never sealed.
+A callback still queued for a sealed incident does nothing, since running it
+would re-run the model after the turn was terminalized.
 
 The failure path writes nothing. `recordOomAndDecide` and both hosts'
 `_handleRecoveryOom` are removed, Think re-throws a caught memory-limit reset,
@@ -77,6 +83,10 @@ explicit retry count keeps its meaning.
   first version of the fix. It misses a callback that dies before starting its
   turn, and a replay that dies after opening the incident replays the same run
   id, so it never counts again.
+- **A single in-flight record instead of a list.** A replay and the callback
+  it schedules can overlap in one isolate. With one record, the callback's
+  entry replaces the replay's, and if the callback finishes first the replay's
+  death goes uncounted.
 - **Make the alarm breaker count ahead of time** (mark before dispatch, count
   leftover marks on the next wake). It would cover every capability, but its
   identity is the job row or the whole object, while each chat cycle creates a
@@ -100,8 +110,6 @@ survives unbounded interruption.
   partial from the stream log) or during boot hydration. Neither re-runs the
   model, and counting it needs a terminal path that skips rebuilding the
   partial.
-- Two attempts for the same incident running at once in one isolate can lose
-  one count if the newer one finishes first.
 - The alarm breaker still counts strikes only while storage works, for example
   when a D1 memory-limit error surfaces in a healthy isolate. Its log now says
   when a strike could not be counted instead of printing `strike 1/3`.
