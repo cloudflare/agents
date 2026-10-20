@@ -1,5 +1,11 @@
 # @cloudflare/codemode
 
+## 0.5.5
+
+### Patch Changes
+
+- [#2614](https://github.com/cloudflare/agents/pull/2614) [`d6606fd`](https://github.com/cloudflare/agents/commit/d6606fd549d70e8b8c4abe8ec47476c90b17e8c7) Thanks [@aron-cf](https://github.com/aron-cf)! - Release tool calls left pending when an execution settles, so unawaited calls no longer leak Dynamic Worker concurrency slots. See [Unawaited tool calls](https://github.com/cloudflare/agents/blob/main/docs/codemode/runtime.md#unawaited-tool-calls).
+
 ## 0.5.4
 
 ### Patch Changes

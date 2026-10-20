@@ -1,5 +1,23 @@
 # @cloudflare/think
 
+## 0.21.0
+
+### Minor Changes
+
+- [#2561](https://github.com/cloudflare/agents/pull/2561) [`998ae40`](https://github.com/cloudflare/agents/commit/998ae40e999b5d5acc5bd0f64f538732457fc613) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Think's workspace tools are now `@cloudflare/computer`'s `createAITools`, and `exec` offers every backend the Workspace has; `createWorkspaceTools`, `workspaceBash`, and `@cloudflare/think/tools/workspace` are removed. See [Built-in workspace tools](https://github.com/cloudflare/agents/blob/main/docs/think/tools.md#built-in-workspace-tools).
+
+- [#2560](https://github.com/cloudflare/agents/pull/2560) [`8c720d3`](https://github.com/cloudflare/agents/commit/8c720d3b0d7703741bf0f6e47b571d3e21c50742) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Think's `workspace` is now a `Workspace` from `@cloudflare/computer`, a new peer dependency. See [Upgrading to a Computer workspace](https://github.com/cloudflare/agents/blob/main/docs/think/index.md#upgrading-to-a-computer-workspace).
+
+- [#2562](https://github.com/cloudflare/agents/pull/2562) [`db4303c`](https://github.com/cloudflare/agents/commit/db4303c924c8fe33f25afbc42c70f72d82f6dc28) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Think no longer depends on `@cloudflare/shell`, and the execute tool's `state` option is removed. See [Code Execution Tool](https://github.com/cloudflare/agents/blob/main/docs/think/tools.md#code-execution-tool).
+
+- [#2565](https://github.com/cloudflare/agents/pull/2565) [`f56cd20`](https://github.com/cloudflare/agents/commit/f56cd20dd58dc88f4b76a601bcd94b9eabcd6661) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `createExecuteTool` and `createExecuteRuntime` are deprecated in favour of `exec` with a `ws:tools` module. See [Calling the agent's tools from code](https://github.com/cloudflare/agents/blob/main/docs/think/tools.md#calling-the-agents-tools-from-code).
+
+### Patch Changes
+
+- [#2615](https://github.com/cloudflare/agents/pull/2615) [`05843e4`](https://github.com/cloudflare/agents/commit/05843e428be0d8b43a5bf1923d8e40adce6f213d) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Chat recovery now seals a turn after `chatRecovery.maxInterruptedAttempts` interrupted attempts (default 5), so a turn that exceeds the Durable Object memory limit on every run no longer retries forever; `maxOomRetries` is deprecated. See [Stream Recovery](https://github.com/cloudflare/agents/blob/main/docs/agents/chat-agents.md#stream-recovery).
+
+- [#2593](https://github.com/cloudflare/agents/pull/2593) [`b905483`](https://github.com/cloudflare/agents/commit/b905483d9cfd37e20f323d24bbc0344b289b4ea6) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Reuse one `Intl.DateTimeFormat` per timezone when computing wall-clock scheduled task occurrences, cutting the CPU cost of each occurrence substantially. See [#2583](https://github.com/cloudflare/agents/issues/2583); thanks @Bowiemb.
+
 ## 0.20.2
 
 ### Patch Changes
