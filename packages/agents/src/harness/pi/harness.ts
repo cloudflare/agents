@@ -11,7 +11,8 @@ import {
   type Harness,
   type ModelRef,
   type SettledSubmissionRecord,
-  type UserInput
+  type UserInput,
+  type Wake
 } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import {
@@ -43,16 +44,10 @@ const BG = BACKGROUND_CONTEXT;
 export const ROOT_SESSION: PiSessionId = String(ROOT_CONVERSATION_ID);
 
 /**
- * The three wake timings. They suit a real deployment; only tests change
- * them, with `setWakeTimingForTests`, so a suite does not sit on the real
+ * The wake timings. They suit a real deployment; only tests change them,
+ * with `setWakeTimingForTests`, so a suite does not sit on the real
  * heartbeat.
  *
- * A pi long wait further away than this is handed to the alarm, so the
- * alarm, not pi's in-memory timer, is what wakes the object.
- */
-const SLEEP_THRESHOLD_MS = 60_000;
-
-/**
  * Longest one wake waits on pi. It waits inside an alarm invocation, which
  * has a 15 minute wall-time limit, so a longer run is waited on across
  * several alarms.
@@ -65,6 +60,9 @@ const WAIT_BUDGET_MS = 10 * 60_000;
  * job is still due and its alarm restarts the object.
  */
 const HEARTBEAT_MS = 30_000;
+
+/** How often a wait on pi's running work re-reads `pi.wake()`. */
+const POLL_MS = 1_000;
 
 let setWakeTiming: (harness: PiHarness, timing: WakeTiming) => void;
 
@@ -81,18 +79,11 @@ export function setWakeTimingForTests(
 
 const WAKE_FN = "wake";
 
-function wakeJobId(session: PiSessionId): string {
-  return `pi-wake:${session}`;
-}
-
-function sessionOfJob(payload: unknown): PiSessionId | undefined {
-  return typeof payload === "object" &&
-    payload !== null &&
-    "session" in payload &&
-    typeof payload.session === "string"
-    ? payload.session
-    : undefined;
-}
+/**
+ * The one wake job. Before Pi 1.4 there was one per session, with ids
+ * `pi-wake:<session>`; a left-over one hands over to this one.
+ */
+const WAKE_JOB_ID = "pi-wake";
 
 /**
  * What the factory is handed: the two things only the harness can build.
@@ -146,14 +137,14 @@ export type PiSessionDefaults = {
   readonly thinkingLevel?: ModelThinkingLevel;
 };
 
-/** How long the wake waits, and when it hands a wait to the alarm. */
+/** How long the wake waits on pi, and how often it checks. */
 type WakeTiming = {
-  /** A pi wait further away than this goes to the alarm. Default 60_000. */
-  readonly sleepThresholdMs?: number;
   /** Longest one wake waits inside an alarm. Default 600_000. */
   readonly waitBudgetMs?: number;
-  /** Heartbeat while waiting, and the re-check for background work. Default 30_000. */
+  /** Heartbeat while waiting. Default 30_000. */
   readonly heartbeatMs?: number;
+  /** How often a wait re-reads `pi.wake()`. Default 1_000. */
+  readonly pollMs?: number;
 };
 
 /** `PiHarness`'s options. Only `harness`, which opens pi, is required. */
@@ -207,25 +198,27 @@ function signalContext(signal: AbortSignal | undefined): Context {
  *
  * What pi cannot do on a Durable Object is wake itself: its scheduler runs
  * in memory, and an evicted object has no memory. The harness is that wake,
- * with one Lifecycle job per session. Input goes to pi once, in `submit()`,
- * after the session's job is scheduled. The job waits while pi has live
- * tasks in the session, rescheduling itself as a heartbeat, and completes
- * when there are none. An eviction mid-run leaves the job due, so its alarm
- * restarts the object, pi reopens and resumes its own tasks, and the job
- * waits again.
+ * with one Lifecycle job driven by `pi.wake()`. Input goes to pi once, in
+ * `submit()`, after the job is scheduled. While pi has work running, the
+ * job waits on it, rescheduling itself as a heartbeat. While pi's tasks
+ * sleep, the job is due when the first one wakes, in case the object is
+ * evicted before pi's own timer fires. When pi has nothing to do, the job
+ * completes. An eviction mid-run leaves the job due,
+ * so its alarm restarts the object, pi reopens and resumes its own tasks,
+ * and the job waits again.
  *
  * @beta The API may change between releases.
  */
 export class PiHarness extends LifecycleCapability {
   readonly sessions: PiSessions;
   readonly #options: PiHarnessOptions;
-  /** In-memory waits on pi, per session, each inside an alarm's work. */
-  readonly #waits = new Map<PiSessionId, Promise<void>>();
-  /** Submissions between their wake and pi's admission, per session. */
-  readonly #admitting = new Map<PiSessionId, number>();
-  #sleepThresholdMs = SLEEP_THRESHOLD_MS;
+  /** The in-memory wait on pi's running work, inside an alarm's work. */
+  #waiting: Promise<void> | undefined;
+  /** Submissions between their wake and pi's admission. */
+  #admitting = 0;
   #waitBudgetMs = WAIT_BUDGET_MS;
   #heartbeatMs = HEARTBEAT_MS;
+  #pollMs = POLL_MS;
   #opening: Promise<Opened> | undefined;
 
   static {
@@ -244,30 +237,30 @@ export class PiHarness extends LifecycleCapability {
         throw new Error(`PiHarness timing.${name} must be a positive number`);
       }
     }
-    this.#sleepThresholdMs = timing.sleepThresholdMs ?? this.#sleepThresholdMs;
     this.#waitBudgetMs = timing.waitBudgetMs ?? this.#waitBudgetMs;
     this.#heartbeatMs = timing.heartbeatMs ?? this.#heartbeatMs;
+    this.#pollMs = timing.pollMs ?? this.#pollMs;
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
 
   override async onStart(_context: CapabilityStartContext): Promise<void> {
     const { pi } = await this.#open();
-    // Every session with live work gets a wake, including ones whose wake
-    // failed out or that a subagent created without going through submit().
-    const inspection = await pi.inspect(BG);
-    const sessions = new Set(
-      inspection.tasks.map((task) => String(task.record.conversationId))
-    );
-    for (const session of sessions) await this.#wake(session);
+    // Whatever the last isolate left gets a wake, including work whose wake
+    // failed out or that a subagent started without going through submit().
+    await this.#wakeFor(pi.wake());
   }
 
   async onJob(
     context: LifecycleJobContext
   ): Promise<LifecycleJobOutcome | void> {
     if (context.job.fn !== WAKE_FN) return;
-    const session = sessionOfJob(context.job.payload);
-    if (session !== undefined) return this.#wakeStep(session);
+    if (context.job.id !== WAKE_JOB_ID) {
+      // A per-session wake from before Pi 1.4: hand over to the one wake.
+      await this.#wake();
+      return;
+    }
+    return this.#wakeStep();
   }
 
   /** Close pi's in-memory resources. Durable state is untouched. */
@@ -366,13 +359,13 @@ export class PiHarness extends LifecycleCapability {
     const operationId = options.operationId ?? crypto.randomUUID();
     const { storage } = await this.#open();
     const conversation = await this.conversation(session);
-    this.#admitting.set(session, (this.#admitting.get(session) ?? 0) + 1);
+    this.#admitting++;
     let accepted: boolean;
     try {
       // 1. The wake first, so a job is scheduled before pi has the work.
       //    If the object dies after pi admits the input, that job restarts
       //    it. While this admission is in flight the step will not park.
-      await this.#wake(session);
+      await this.#wake();
       // 2. The one admission. pi deduplicates by request id.
       accepted =
         (await storage.submissionByRequest(
@@ -391,12 +384,10 @@ export class PiHarness extends LifecycleCapability {
         BG
       );
     } finally {
-      const left = (this.#admitting.get(session) ?? 1) - 1;
-      if (left === 0) this.#admitting.delete(session);
-      else this.#admitting.set(session, left);
+      this.#admitting--;
     }
     // 3. Step now, so the wake sees the work even if it just parked.
-    await this.#wake(session);
+    await this.#wake();
     return { operationId, session, accepted };
   }
 
@@ -446,72 +437,83 @@ export class PiHarness extends LifecycleCapability {
 
   // ── The wake ─────────────────────────────────────────────────────────────
 
-  /** Schedule the session's wake job now, or pull it forward. */
-  #wake(session: PiSessionId, time = Date.now()): Promise<unknown> {
+  /** Schedule the wake job now, or at `time`. */
+  #wake(time = Date.now()): Promise<unknown> {
     // A push made while the job is dispatching supersedes that dispatch's
     // outcome, so a submit is never lost to a wake that is completing.
     return this.lifecycle.jobs.push({
-      id: wakeJobId(session),
+      id: WAKE_JOB_ID,
       fn: WAKE_FN,
       time,
-      payload: { session },
       singleflight: true,
       recoveryLoop: true
     });
   }
 
-  /**
-   * One run of a session's wake job. It never admits or replays anything:
-   * it waits while pi has live tasks in the session and completes when it
-   * has none. pi does all the work in between.
-   */
-  async #wakeStep(session: PiSessionId): Promise<LifecycleJobOutcome> {
-    const heartbeat = { rescheduleAt: Date.now() + this.#heartbeatMs };
-    if (this.#waits.has(session)) return heartbeat;
-    const { pi } = await this.#open();
-    const conversation = await pi.conversation(conversationId(session), BG);
-    if (!conversation) return undefined;
-
-    const tasks = (await pi.inspect(BG)).tasks.filter(
-      (task) => task.record.conversationId === conversation.id
-    );
-    if (tasks.length === 0) {
-      // A submit between its wake and pi's admission: check again later.
-      return this.#admitting.has(session) ? heartbeat : undefined;
-    }
-    const wakeAt = await this.#longWait(pi, conversation.id, BG);
-    if (wakeAt !== undefined) return { rescheduleAt: wakeAt };
-    // Background tasks are outside the conversation's idle wait.
-    if (tasks.every((task) => task.record.background)) return heartbeat;
-
-    const wait = this.#waitForIdle(conversation).finally(() => {
-      this.#waits.delete(session);
-      // Re-check now: pi may have started more work, such as a follow-up.
-      void this.#wake(session);
-    });
-    this.#waits.set(session, wait);
-    // The wait runs past this dispatch, inside the alarm's work, so the
-    // object stays alive for it. The heartbeat covers an eviction.
-    this.lifecycle.trackAlarmWork(wait);
-    return heartbeat;
+  /** Schedule the wake job for what `pi.wake()` says, if pi needs one. */
+  async #wakeFor(wake: Wake): Promise<void> {
+    if (wake.active) await this.#wake();
+    else if (wake.at !== undefined) await this.#wake(wake.at);
   }
 
-  async #waitForIdle(conversation: Conversation): Promise<void> {
-    const budget = new AbortController();
-    const timer = setTimeout(() => budget.abort(), this.#waitBudgetMs);
-    try {
-      // Cancelling the wait never cancels pi's work.
-      await conversation.waitForIdle(withAbortSignal(budget.signal, BG));
-    } catch (error) {
-      if (!budget.signal.aborted) {
-        this.lifecycle.events.emit("pi:wake_error", {
-          session: String(conversation.id),
-          error: error instanceof Error ? error.message : String(error)
-        });
-      }
-    } finally {
-      clearTimeout(timer);
+  /**
+   * One run of the wake job. It never admits or replays anything: it reads
+   * `pi.wake()`, which is all of pi's sessions at once. Running work is
+   * waited on; a sleep reschedules the job for when it ends; no work
+   * completes the job. pi does all the work in between.
+   */
+  async #wakeStep(): Promise<LifecycleJobOutcome> {
+    const heartbeat = { rescheduleAt: Date.now() + this.#heartbeatMs };
+    if (this.#waiting) return heartbeat;
+    const { pi } = await this.#open();
+    // The alarm may be for a sleeping task: make due ones runnable.
+    pi.resume();
+    const wake = pi.wake();
+    if (wake.active) {
+      const wait = this.#waitWhileActive(pi).finally(() => {
+        this.#waiting = undefined;
+        // Step again now: pi may be sleeping, or have nothing left.
+        void this.#wake();
+      });
+      this.#waiting = wait;
+      // The wait runs past this dispatch, inside the alarm's work, so the
+      // object stays alive for it. The heartbeat covers an eviction.
+      this.lifecycle.trackAlarmWork(wait);
+      return heartbeat;
     }
+    // A submit between its wake and pi's admission: check again later.
+    if (this.#admitting > 0) return heartbeat;
+    // pi's own timer runs the sleeping task if the object is still in
+    // memory then; the alarm restarts it if it is not.
+    if (wake.at !== undefined) return { rescheduleAt: wake.at };
+    // Nothing to do. A task parked by pi's restart limit is not work: it
+    // waits for `pi.retryTask()`.
+    return undefined;
+  }
+
+  /**
+   * Wait while pi has work running, up to the wait budget, re-reading
+   * `pi.wake()` every `pollMs`. It is an in-memory read.
+   */
+  async #waitWhileActive(pi: Harness): Promise<void> {
+    const deadline = Date.now() + this.#waitBudgetMs;
+    try {
+      while (pi.wake().active) {
+        const left = deadline - Date.now();
+        if (left <= 0) return;
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(left, this.#pollMs))
+        );
+      }
+    } catch (error) {
+      this.#wakeError(error);
+    }
+  }
+
+  #wakeError(error: unknown): void {
+    this.lifecycle.events.emit("pi:wake_error", {
+      error: error instanceof Error ? error.message : String(error)
+    });
   }
 
   // ── pi ───────────────────────────────────────────────────────────────────
@@ -564,20 +566,6 @@ export class PiHarness extends LifecycleCapability {
     // Read from pi's storage: the Harness only reacquires submissions by id.
     const record = await storage.submissionByRequest(id, operationId, context);
     return record ? pi.submission(record.id, context) : undefined;
-  }
-
-  /** When pi's current wait is far enough away to hand to the alarm. */
-  async #longWait(
-    pi: Harness,
-    id: ConversationId,
-    context: Context
-  ): Promise<number | undefined> {
-    const live = await pi.snapshot(LiveDoc, id, context);
-    const at =
-      live?.generation?.deferred?.pollAt ?? live?.generation?.retry?.at;
-    return at !== undefined && at - Date.now() > this.#sleepThresholdMs
-      ? at
-      : undefined;
   }
 
   async #result(

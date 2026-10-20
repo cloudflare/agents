@@ -31,6 +31,22 @@ import {
 
 const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
+const FLAKY_KEY = "test:flaky:failed";
+
+/**
+ * Variants of `PiHarnessTestObject`, by the prefix of the object's name, so
+ * a variant survives a restart:
+ *
+ * - `retry:` retries a failed generation once, after two seconds.
+ * - `park:` parks a task after its first restart.
+ */
+function variantSettings(name: string) {
+  if (name.startsWith("retry:")) {
+    return { retry: { enabled: true, maxRetries: 1, baseDelayMs: 2_000 } };
+  }
+  if (name.startsWith("park:")) return { ...TEST_SETTINGS, restartLimit: 1 };
+  return TEST_SETTINGS;
+}
 
 function textOf(content: Message["content"] | undefined): string {
   if (content === undefined) return "";
@@ -47,10 +63,14 @@ function textOf(content: Message["content"] | undefined): string {
  * the same answer after an eviction as before it:
  *
  * - `multiply N` calls `multiply`, `gate` calls `gate`, `gate-unsafe` calls
- *   `gate_unsafe`; anything else is echoed back.
+ *   `gate_unsafe`; `flaky` fails once with a retryable error; anything else
+ *   is echoed back.
  * - After a tool result it answers `tool said: <result>`.
  */
-function script(context: TranscriptContext): AssistantMessage {
+function script(
+  context: TranscriptContext,
+  storage: DurableObjectStorage
+): AssistantMessage {
   // pi places system-prompt changes positionally, so a system message can
   // follow the user's input.
   const last = context.messages.filter((m) => m.role !== "system").at(-1);
@@ -62,6 +82,14 @@ function script(context: TranscriptContext): AssistantMessage {
     ]);
   }
   const prompt = last?.role === "user" ? textOf(last.content) : "";
+  // `flaky` fails once with a retryable error, then is echoed.
+  if (prompt === "flaky" && storage.kv.get(FLAKY_KEY) === undefined) {
+    storage.kv.put(FLAKY_KEY, true);
+    return fauxAssistantMessage([], {
+      stopReason: "error",
+      errorMessage: "overloaded"
+    });
+  }
   const multiply = /^multiply (\d+)$/.exec(prompt);
   if (multiply) {
     return fauxAssistantMessage(
@@ -106,7 +134,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         {
           models: fauxModels(this.#faux.provider),
           registry: this.registry,
-          settings: TEST_SETTINGS,
+          settings: variantSettings(this.ctx.id.name ?? ""),
           onReport: (error) => console.warn("pi report", error)
         },
         context
@@ -119,7 +147,42 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     setWakeTimingForTests(this.harness, TEST_TIMING);
-    this.#faux.setResponses(Array.from({ length: 200 }, () => script));
+    this.#faux.setResponses(
+      Array.from(
+        { length: 200 },
+        () => (context: TranscriptContext) => script(context, ctx.storage)
+      )
+    );
+  }
+
+  /** The harness's pending Lifecycle jobs: its wake, while it has one. */
+  wakeJobs(): string[] {
+    return this.ctx.storage.sql
+      .exec<{ id: string }>(
+        "SELECT id FROM cf_agents_jobs WHERE capability = 'pi-harness'"
+      )
+      .toArray()
+      .map((row) => row.id);
+  }
+
+  /**
+   * Leave a per-session wake job as a version before Pi 1.4 did, due now,
+   * with the alarm set for it.
+   */
+  async addLegacyWakeJob(): Promise<void> {
+    // A first prompt creates the jobs table.
+    await this.harness.prompt("hello");
+    this.ctx.storage.sql.exec(
+      `INSERT INTO cf_agents_jobs (id, capability, fn, time, payload, singleflight, recovery_loop)
+       VALUES ('pi-wake:1', 'pi-harness', 'wake', ?, '{"session":"1"}', 1, 1)`,
+      Date.now()
+    );
+    await this.ctx.storage.setAlarm(Date.now());
+  }
+
+  /** When pi next needs to run, as `pi.wake()` says. */
+  async piWake() {
+    return (await this.harness.pi()).wake();
   }
 
   async prompt(text: string, session?: string) {
@@ -317,7 +380,12 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     setWakeTimingForTests(this.harness, TEST_TIMING);
-    this.#faux.setResponses(Array.from({ length: 200 }, () => script));
+    this.#faux.setResponses(
+      Array.from(
+        { length: 200 },
+        () => (context: TranscriptContext) => script(context, ctx.storage)
+      )
+    );
   }
 
   async prompt(text: string) {

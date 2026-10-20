@@ -113,7 +113,7 @@ describe("PiHarness on pi-durable", () => {
     let stub = fresh(name);
     const receipt = await stub.submit("gate");
     await stub.gateStarted(1);
-    // The wake job keeps a heartbeat while it waits on pi.
+    // The wake job keeps a heartbeat while it waits on pi's running work.
     expect(await stub.alarmTime()).not.toBeNull();
 
     // Graceful eviction waits for the in-flight step, which is the point of
@@ -176,7 +176,7 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.snapshotTexts()).toEqual(await stub.messages());
   });
 
-  it("parks the session's wake once pi is idle, leaving no alarm", async () => {
+  it("completes the wake once pi is idle, leaving no alarm", async () => {
     const stub = fresh();
     const receipt = await stub.submit("hello");
     await stub.wait(receipt.operationId);
@@ -188,6 +188,48 @@ describe("PiHarness on pi-durable", () => {
     expect(alarm).toBeNull();
     // The next submit wakes it again.
     expect((await stub.prompt("again")).text).toBe("echo: again");
+  });
+
+  it("answers after pi sleeps for a retry", async () => {
+    const stub = fresh(`retry:${crypto.randomUUID()}`);
+    const result = await stub.prompt("flaky");
+    expect(result).toMatchObject({ status: "done", text: "echo: flaky" });
+  });
+
+  it("completes the wake, leaving no alarm, when pi's restart limit parks a task", async () => {
+    const name = `park:${crypto.randomUUID()}`;
+    let stub = fresh(name);
+    await stub.submit("gate");
+    await stub.gateStarted(1);
+    await abortAllDurableObjects();
+    stub = fresh(name);
+    // The alarm restarts the object. pi parks the cut-off task instead of
+    // running it again, so the wake has nothing to wait for.
+    await runDurableObjectAlarm(stub);
+    let jobs = await stub.wakeJobs();
+    for (let i = 0; i < 100 && jobs.length > 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      jobs = await stub.wakeJobs();
+    }
+    expect(jobs).toEqual([]);
+    expect(await stub.alarmTime()).toBeNull();
+    expect(await stub.piWake()).toEqual({ active: false });
+    expect(await stub.gateRuns()).toBe(1);
+  });
+
+  it("hands a per-session wake job from before Pi 1.4 over to the one wake", async () => {
+    const stub = fresh();
+    await stub.addLegacyWakeJob();
+    expect(await stub.wakeJobs()).toContain("pi-wake:1");
+    await runDurableObjectAlarm(stub);
+    let jobs = await stub.wakeJobs();
+    for (let i = 0; i < 100 && jobs.length > 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      jobs = await stub.wakeJobs();
+    }
+    // pi has nothing to do, so the one wake completed too.
+    expect(jobs).toEqual([]);
+    expect((await stub.prompt("hello")).text).toBe("echo: hello");
   });
 
   it("answers every one of many submissions made to one session at once", async () => {

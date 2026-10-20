@@ -209,7 +209,7 @@ The example app folds the transcript into chat messages, ignores `kind` and `dat
 
 ## How recovery works
 
-The harness schedules one lifecycle job per session with work. The job waits on Pi's tasks, refreshes itself as a heartbeat while they run, and completes when they settle. If the object is evicted or crashes, the job is still due, so its alarm restarts the object. Pi reopens its stored state and resumes the session's work: a replay-safe tool call runs again, and an unsafe one is reported to the model as interrupted.
+The harness schedules one lifecycle job, driven by Pi's `wake()`. While Pi has work running, the job waits on it and refreshes itself as a heartbeat. While Pi's tasks sleep, such as a retry backoff, the job is due when the first one wakes. When Pi has nothing to do, including when Pi's restart limit has parked a task, the job completes. If the object is evicted or crashes, the job is still due, so its alarm restarts the object. Pi reopens its stored state and resumes the session's work: a replay-safe tool call runs again, and an unsafe one is reported to the model as interrupted.
 
 Every operation waits for the object's startup, which runs the factory. A call over RPC that arrives first waits for it rather than opening Pi on its own.
 
