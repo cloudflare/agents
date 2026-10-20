@@ -11,17 +11,9 @@ import {
   sseEventResponse,
   userContext
 } from "./helpers";
+import { headersOf, stubFetch } from "../fetch-stub";
 
 const ACCOUNT = { accountId: "acct-1", apiToken: "token-1" } as const;
-
-function stubFetch(response: () => Response) {
-  const calls: { url: string; init: RequestInit }[] = [];
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-    calls.push({ init: init ?? {}, url: String(input) });
-    return response();
-  });
-  return calls;
-}
 
 describe("pi-ai createAI over HTTP", () => {
   afterEach(() => {
@@ -37,7 +29,7 @@ describe("pi-ai createAI over HTTP", () => {
     expect(calls[0]?.url).toBe(
       "https://api.cloudflare.com/client/v4/accounts/acct-1/ai/v1/messages"
     );
-    const headers = Object.fromEntries(new Headers(calls[0]?.init.headers));
+    const headers = headersOf(calls[0]);
     expect(headers.authorization).toBe("Bearer token-1");
     expect(headers["cf-aig-gateway-id"]).toBe("project-gateway");
     expect(JSON.parse(String(calls[0]?.init.body))).toMatchObject({
@@ -55,7 +47,7 @@ describe("pi-ai createAI over HTTP", () => {
     expect(calls[0]?.url).toBe(
       "https://gateway.ai.cloudflare.com/v1/acct-1/default/anthropic/v1/messages"
     );
-    const headers = Object.fromEntries(new Headers(calls[0]?.init.headers));
+    const headers = headersOf(calls[0]);
     expect(headers["cf-aig-authorization"]).toBe("Bearer token-1");
     expect(message.content).toEqual([{ text: "Hi there!", type: "text" }]);
   });

@@ -298,15 +298,16 @@ function gatewayHeaders(gateway: ResolvedGateway): Record<string, string> {
 }
 
 /**
- * The binding's options for the Workers AI run path: the gateway options its
- * `GatewayOptions` type defines, and the headers for the ones it does not.
+ * The run path's gateway options, and the headers for the ones the binding's
+ * `GatewayOptions` type does not define. Both transports use it: the binding
+ * takes `gateway` as an options object, HTTP as `cf-aig-*` headers.
  *
- * `byokAlias` reaches `/run` as `cf-aig-byok-alias`, which aig-entry forwards
- * and `/run` reads for a catalog model's stored key. `zdr` is left off: `/run`
- * does not read it, so it applies to provider-native requests only.
+ * `byokAlias` reaches `/run` as `cf-aig-byok-alias`, which `/run` reads for a
+ * catalog model's stored key. `zdr` is left off: `/run` does not read it, so it
+ * applies to provider-native requests only.
  */
 function runOptions(request: TransportRequest): {
-  gateway: GatewayOptions;
+  gateway: Omit<ResolvedGateway, "byokAlias" | "zdr">;
   headers: Record<string, string>;
 } {
   const { byokAlias, zdr: _zdr, ...gateway } = request.gateway;
@@ -558,23 +559,6 @@ function bindingTransport(binding: Ai): Transport {
 }
 
 /**
- * The run path's headers over HTTP: the gateway options the binding takes as
- * an options object travel as the `cf-aig-*` headers the REST API forwards to
- * `/run`. As on the binding, `zdr` is left off and `byokAlias` only goes with
- * a catalog model.
- */
-function restRunHeaders(request: TransportRequest): Record<string, string> {
-  const { byokAlias, zdr: _zdr, ...gateway } = request.gateway;
-  return {
-    ...gatewayHeaders(gateway),
-    ...(byokAlias !== undefined && isCatalogModelId(request.model)
-      ? { "cf-aig-byok-alias": byokAlias }
-      : {}),
-    "cf-aig-gateway-id": request.gateway.id
-  };
-}
-
-/**
  * Request headers with the credential set last. `Headers` matches names
  * case-insensitively, so a caller's `Authorization` is replaced rather than
  * sent alongside the token.
@@ -641,6 +625,7 @@ function httpTransport({ accountId, apiToken }: AccountAccess): Transport {
     },
     async run(request) {
       const workersAI = isWorkersAIId(request.model);
+      const run = runOptions(request);
       const url = workersAI
         ? `${runBase}/run/${request.model}`
         : `${runBase}${OPENAI_ENDPOINTS[request.format ?? "chat-completions"]}`;
@@ -654,8 +639,9 @@ function httpTransport({ accountId, apiToken }: AccountAccess): Transport {
           headers: withCredential(
             {
               "content-type": "application/json",
-              ...restRunHeaders(request),
-              ...request.headers
+              ...gatewayHeaders(run.gateway),
+              "cf-aig-gateway-id": run.gateway.id,
+              ...run.headers
             },
             "authorization",
             apiToken

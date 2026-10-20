@@ -7,17 +7,9 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAI } from "../../../models/ai-sdk";
 import { callOptions, collect, jsonResponse, sseResponse } from "./helpers";
+import { headersOf, stubFetch } from "../fetch-stub";
 
 const ACCOUNT = { accountId: "acct-1", apiToken: "token-1" } as const;
-
-function stubFetch(response: () => Response) {
-  const calls: { url: string; init: RequestInit }[] = [];
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-    calls.push({ init: init ?? {}, url: String(input) });
-    return response();
-  });
-  return calls;
-}
 
 function chatBody(text: string) {
   return {
@@ -49,7 +41,7 @@ describe("ai-sdk createAI over HTTP", () => {
     expect(calls[0]?.url).toBe(
       "https://api.cloudflare.com/client/v4/accounts/acct-1/ai/v1/chat/completions"
     );
-    const headers = Object.fromEntries(new Headers(calls[0]?.init.headers));
+    const headers = headersOf(calls[0]);
     expect(headers.authorization).toBe("Bearer token-1");
     expect(headers["cf-aig-gateway-id"]).toBe("default");
     expect(JSON.parse(String(calls[0]?.init.body))).toMatchObject({
@@ -101,7 +93,7 @@ describe("ai-sdk createAI over HTTP", () => {
     expect(calls[0]?.url).toBe(
       "https://gateway.ai.cloudflare.com/v1/acct-1/project-gateway/anthropic/v1/messages"
     );
-    const headers = Object.fromEntries(new Headers(calls[0]?.init.headers));
+    const headers = headersOf(calls[0]);
     expect(headers["cf-aig-authorization"]).toBe("Bearer token-1");
     expect(headers).not.toHaveProperty("x-api-key");
     expect(result.content).toEqual([{ text: "Hi", type: "text" }]);

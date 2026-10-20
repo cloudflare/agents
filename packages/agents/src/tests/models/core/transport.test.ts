@@ -13,6 +13,7 @@ import {
   type NativeRequest,
   unwrapEnvelope
 } from "../../../models/core/transport";
+import { headersOf, stubFetch } from "../fetch-stub";
 
 interface FetchCall {
   url: string;
@@ -207,20 +208,6 @@ describe("core transport - settings", () => {
 
 const ACCOUNT = { accountId: "acct-1", apiToken: "token-1" };
 
-/** Stubs the global `fetch`, recording each call. */
-function stubFetch(response: () => Response) {
-  const calls: { url: string; init: RequestInit }[] = [];
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-    calls.push({ init: init ?? {}, url: String(input) });
-    return response();
-  });
-  return calls;
-}
-
-function headersOf(init: RequestInit): Record<string, string> {
-  return Object.fromEntries(new Headers(init.headers));
-}
-
 describe("core transport - the run path over HTTP", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -269,7 +256,7 @@ describe("core transport - the run path over HTTP", () => {
       input: {},
       model: "anthropic/claude-opus-4.8"
     });
-    expect(headersOf(calls[0]!.init)).toEqual({
+    expect(headersOf(calls[0])).toEqual({
       authorization: "Bearer token-1",
       "cf-aig-byok-alias": "team-a",
       "cf-aig-cache-ttl": "60",
@@ -288,7 +275,7 @@ describe("core transport - the run path over HTTP", () => {
       input: {},
       model: "anthropic/claude-opus-4.8"
     });
-    expect(headersOf(calls[0]!.init).authorization).toBe("Bearer token-1");
+    expect(headersOf(calls[0]).authorization).toBe("Bearer token-1");
   });
 
   it("sends a Workers AI model to its own run route with its input, and unwraps the envelope", async () => {
@@ -316,8 +303,8 @@ describe("core transport - the run path over HTTP", () => {
     expect(JSON.parse(String(calls[0]?.init.body))).toEqual({
       messages: [{ content: "hi", role: "user" }]
     });
-    expect(headersOf(calls[0]!.init)).not.toHaveProperty("cf-aig-byok-alias");
-    expect(headersOf(calls[0]!.init)["cf-aig-gateway-id"]).toBe("prod");
+    expect(headersOf(calls[0])).not.toHaveProperty("cf-aig-byok-alias");
+    expect(headersOf(calls[0])["cf-aig-gateway-id"]).toBe("prod");
     expect(await response.json()).toEqual({ response: "hi" });
   });
 
@@ -375,7 +362,7 @@ describe("core transport - provider-native requests over HTTP", () => {
       "https://gateway.ai.cloudflare.com/v1/acct-1/prod/anthropic/v1/messages"
     );
     expect(calls[0]?.init.method).toBe("POST");
-    expect(headersOf(calls[0]!.init)).toEqual({
+    expect(headersOf(calls[0])).toEqual({
       "anthropic-version": "2023-06-01",
       "cf-aig-authorization": "Bearer token-1",
       "cf-aig-byok-alias": "team-a",
@@ -391,9 +378,7 @@ describe("core transport - provider-native requests over HTTP", () => {
         headers: { "CF-AIG-Authorization": "Bearer other" }
       })
     );
-    expect(headersOf(calls[0]!.init)["cf-aig-authorization"]).toBe(
-      "Bearer token-1"
-    );
+    expect(headersOf(calls[0])["cf-aig-authorization"]).toBe("Bearer token-1");
   });
 
   it("streams a stream body, half-duplex as Node's fetch requires", async () => {
