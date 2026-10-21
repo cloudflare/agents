@@ -63,6 +63,8 @@ export class Assistant extends Agent<Env> {
 | `harness`  | Required. Receives `{ storage, context, onWake }` and returns Pi's `Harness`, usually from `Harness.open`. Pass `onWake` to `Harness.open`, so the object can hibernate while Pi's tasks sleep (see [How recovery works](#how-recovery-works)). Models, the registry, `settings`, `env` and `onReport` are all yours to build here. |
 | `defaults` | What a new session starts with: `model`, a pi-ai `Model` such as `ai("@cf/…")`, and `thinkingLevel`. Without a model, a session's prompts end unanswered (`no_model`) until one is set.                                                                                                                                             |
 
+Create the registry per object, as the `registry` field above does, not at module scope: Pi keeps every `Harness` subscribed to its registry until the `Harness` closes, and an evicted object never closes it.
+
 The factory runs once per open: at startup, and again after a storage error (see [How recovery works](#how-recovery-works)), so keep it safe to run more than once. If it throws the operation that triggered it fails and the next operation tries again.
 
 A model in `defaults` or `session.setModel()` is stored by its provider and id only. Pi resolves it at each request against the `Models` the factory opened Pi with, so it must be a model those `Models` list. Options passed to `ai(id, options)` there, such as `fallback`, are not applied.
@@ -93,14 +95,18 @@ const wordCount: ToolRegistration<typeof WordCount> = {
   }
 };
 
-const registry = createRegistry();
-registry.install({
-  name: "writing",
-  sections: [
-    { key: "preamble", render: () => "You are an editor.", tag: false }
-  ],
-  tools: [wordCount]
-});
+// One per object, as a field: `registry = createWritingRegistry();`
+function createWritingRegistry() {
+  const registry = createRegistry();
+  registry.install({
+    name: "writing",
+    sections: [
+      { key: "preamble", render: () => "You are an editor.", tag: false }
+    ],
+    tools: [wordCount]
+  });
+  return registry;
+}
 ```
 
 - **Tool arguments are typed from the schema.** Type a tool as `ToolRegistration<typeof Parameters>`; a bare `ToolRegistration` types its arguments as `unknown`.

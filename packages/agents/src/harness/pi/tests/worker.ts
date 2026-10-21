@@ -22,6 +22,7 @@ import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
+import { LiveInstances } from "../../../tests/shared/live-instances";
 import { setWakeTimingForTests } from "../harness";
 import { TEST_TIMING } from "./timing";
 import { fauxModels, TEST_SETTINGS } from "./faux";
@@ -198,6 +199,9 @@ function withCommitFault(
   });
 }
 
+/** Every {@link PiHarnessTestObject} harness, by object name. */
+const piHarnessInstances = new LiveInstances();
+
 /** Real Durable Object fixture: a harness over pi-ai's faux provider. */
 export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   readonly #faux = fauxProvider({
@@ -237,6 +241,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         () => (context: TranscriptContext) => script(context, ctx.storage)
       )
     );
+    piHarnessInstances.track(ctx.id.name ?? "", this.harness);
   }
 
   /** The harness's pending Lifecycle jobs: its wake, while it has one. */
@@ -321,6 +326,11 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   /** When pi next needs to run, as `pi.wake()` says. */
   async piWake() {
     return (await this.harness.pi()).wake();
+  }
+
+  /** Count this object's harnesses still alive after a forced GC. */
+  countLiveHarnesses(): Promise<number> {
+    return piHarnessInstances.countAfterGC(this.ctx.id.name ?? "");
   }
 
   async prompt(text: string, session?: string) {

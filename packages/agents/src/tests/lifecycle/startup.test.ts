@@ -1,3 +1,4 @@
+import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 
 import { describe, expect, it } from "vitest";
@@ -62,6 +63,19 @@ describe("Lifecycle startup", () => {
       "capability:start:rpc",
       "host:start:rpc"
     ]);
+  });
+
+  it("lets an evicted object be collected when a capability started pending work", async () => {
+    const name = crypto.randomUUID();
+    for (let i = 0; i < 5; i++) {
+      const stub = env.EvictableStartObject.getByName(name);
+      await stub.startLifecycle();
+      await evictDurableObject(stub);
+    }
+
+    const stub = env.EvictableStartObject.getByName(name);
+    await stub.startLifecycle();
+    expect(await stub.countLiveInstances()).toBe(1);
   });
 
   it("retries startup after a capability start failure without running the host", async () => {
