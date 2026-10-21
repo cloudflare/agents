@@ -10,6 +10,7 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   createRegistry,
+  defineTask,
   Harness,
   type AgentEvent,
   type EntryRecord,
@@ -18,6 +19,7 @@ import {
   type ToolRegistration
 } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
 import { setWakeTimingForTests } from "../harness";
@@ -34,6 +36,42 @@ const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
 const HOLD_RUNS_KEY = "test:hold:runs";
 const FLAKY_KEY = "test:flaky:failed";
+/** Where Lifecycle's alarm breaker counts memory-limit strikes. */
+const STRIKES_KEY = "cf_agents:oom_alarm_strikes";
+
+/**
+ * A background task that sleeps until `until` with pi's `sleepUntil`, as a
+ * reminder due days out would, then completes.
+ */
+const Reminder = defineTask<
+  { until: number },
+  { phase: "sleep" } | { phase: "due" },
+  null
+>({
+  name: "test.reminder",
+  version: 1,
+  initial: () => ({ phase: "sleep" }),
+  phases: {
+    sleep: async (task, runtime, context) => {
+      await runtime.sleepUntil(task.input.until, { phase: "due" }, context);
+    },
+    due: async (_task, runtime, context) => {
+      await runtime.commit(
+        () => ({
+          status: "terminal",
+          outcome: { status: "completed", result: null }
+        }),
+        context
+      );
+    }
+  },
+  abort: async (_task, runtime, context) => {
+    await runtime.commit(
+      () => ({ status: "terminal", outcome: { status: "aborted" } }),
+      context
+    );
+  }
+});
 
 /**
  * Variants of `PiHarnessTestObject`, by the prefix of the object's name, so
@@ -217,6 +255,60 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     await this.ctx.storage.setAlarm(Date.now());
   }
 
+  /** When the harness's wake job is due, while it has one. */
+  wakeJobTime(): number | null {
+    return (
+      this.ctx.storage.sql
+        .exec<{ time: number }>(
+          "SELECT time FROM cf_agents_jobs WHERE id = 'pi-wake'"
+        )
+        .toArray()[0]?.time ?? null
+    );
+  }
+
+  /**
+   * Make the wake job due now, creating it if it is gone, with the alarm
+   * set for it.
+   */
+  async wakeJobDueNow(): Promise<void> {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO cf_agents_jobs (id, capability, fn, time, singleflight, recovery_loop)
+       VALUES ('pi-wake', 'pi-harness', 'wake', ?, 1, 1)
+       ON CONFLICT(id) DO UPDATE SET time = excluded.time, running = 0`,
+      Date.now()
+    );
+    await this.ctx.storage.setAlarm(Date.now());
+  }
+
+  /** Make every wake step fail, or stop, as a broken pi would. */
+  failWakeSteps(fail: boolean): void {
+    this.#failWakeSteps = fail;
+  }
+
+  /** The alarm memory-limit breaker's strike count. */
+  async memoryLimitStrikes(): Promise<number> {
+    return (await this.ctx.storage.get<number>(STRIKES_KEY)) ?? 0;
+  }
+
+  /**
+   * Start a background reminder in the root session that sleeps until
+   * `until`, as pi's own retries and polls sleep.
+   */
+  async remindAt(until: number): Promise<void> {
+    const pi = await this.harness.pi();
+    const root = await pi.root(BACKGROUND_CONTEXT);
+    await root.commit(
+      (tx) =>
+        tx.createTask(
+          Reminder,
+          { until },
+          { ownership: { kind: "conversation" }, background: true }
+        ),
+      BACKGROUND_CONTEXT
+    );
+    pi.resume();
+  }
+
   /** When pi next needs to run, as `pi.wake()` says. */
   async piWake() {
     return (await this.harness.pi()).wake();
@@ -276,11 +368,14 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Submit with pi's next storage commit failing, which fails pi's Session.
-   * Returns the error the submit rejected with.
+   * Submit with pi's next storage commit failing with `message`, which fails
+   * pi's Session. Returns the error the submit rejected with.
    */
-  async submitThroughStorageError(text: string): Promise<string> {
-    this.#faults.commit = new Error("disk gone");
+  async submitThroughStorageError(
+    text: string,
+    message = "disk gone"
+  ): Promise<string> {
+    this.#faults.commit = new Error(message);
     try {
       await this.harness.submit(text);
       return "submitted";
@@ -354,6 +449,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   readonly #instance = crypto.randomUUID();
   #releaseHold: (() => void) | undefined;
   #wakeSteps = 0;
+  #failWakeSteps = false;
 
   instance(): string {
     return this.#instance;
@@ -410,6 +506,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   #observe(pi: Harness): Harness {
     const resume = pi.resume.bind(pi);
     pi.resume = (...args) => {
+      if (this.#failWakeSteps) throw new Error("pi is unavailable");
       this.#wakeSteps++;
       return resume(...args);
     };
@@ -466,6 +563,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
           tag: false
         }
       ],
+      tasks: [Reminder],
       tools: [
         holdTool(),
         multiplyTool(),
