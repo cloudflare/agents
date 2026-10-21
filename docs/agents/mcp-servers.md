@@ -177,15 +177,23 @@ function createServer() {
   return server;
 }
 
+const mcpHandler = createMcpHandler(createServer);
+
 export default new OAuthProvider({
   authorizeEndpoint: "/authorize",
   tokenEndpoint: "/oauth/token",
   clientRegistrationEndpoint: "/oauth/register",
   apiRoute: "/mcp",
-  apiHandler: createMcpHandler(createServer),
+  apiHandler: {
+    fetch(request: Request, env: Env, ctx: ExecutionContext) {
+      return mcpHandler(request, env, ctx);
+    }
+  },
   defaultHandler: AuthHandler // your consent and login flow
 });
 ```
+
+`OAuthProvider` needs an object with a `fetch` method, so wrap the handler as shown. Passing the handler function directly throws at startup.
 
 `getMcpAuthContext().props` returns the `props` you passed to `completeAuthorization()` in your auth flow. Tool callbacks also receive the standard SDK v2 `AuthInfo` at `context.http.authInfo`. Do not log or return `context.http.authInfo.token` or `authInfo.extra.props`.
 
