@@ -13,6 +13,39 @@ function fresh(
   return env.PI_HARNESS_TEST.getByName(name);
 }
 
+/**
+ * Evict the object the way the runtime evicts an idle one: once nothing is
+ * in flight. The pool never evicts an idle object by itself, so without
+ * this a test cannot see work that only lives in memory being lost.
+ *
+ * `evictDurableObject` drains in-flight work first. Resolves "kept" if the
+ * object is still holding work after `ms`; `evicted` then settles once
+ * that work drains.
+ */
+async function evictWhenIdle(
+  stub: DurableObjectStub<PiHarnessTestObject>,
+  ms = 2_000
+): Promise<{ result: "evicted" | "kept"; evicted: Promise<void> }> {
+  const evicted = evictDurableObject(stub);
+  const result = await Promise.race([
+    evicted.then(() => "evicted" as const),
+    new Promise<"kept">((resolve) => setTimeout(() => resolve("kept"), ms))
+  ]);
+  return { result, evicted };
+}
+
+/** Whether the alarm clears within a second, as a completed wake leaves it. */
+async function alarmCleared(
+  stub: DurableObjectStub<PiHarnessTestObject>
+): Promise<boolean> {
+  let alarm = await stub.alarmTime();
+  for (let i = 0; i < 50 && alarm !== null; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    alarm = await stub.alarmTime();
+  }
+  return alarm === null;
+}
+
 describe("PiHarness on pi-durable", () => {
   it("answers a prompt with a tool call and keeps the transcript across eviction", async () => {
     const stub = fresh();
@@ -26,6 +59,41 @@ describe("PiHarness on pi-durable", () => {
 
     const second = await stub.prompt("hello");
     expect(second).toMatchObject({ status: "done", text: "echo: hello" });
+  });
+
+  it("evicts an object with nothing in flight once its wake has completed", async () => {
+    const stub = fresh();
+    expect((await stub.prompt("hello")).text).toBe("echo: hello");
+    expect(await alarmCleared(stub)).toBe(true);
+    const before = await stub.instance();
+
+    expect((await evictWhenIdle(stub)).result).toBe("evicted");
+    expect(await stub.instance()).not.toBe(before);
+  });
+
+  it("holds the object while a tool waits without I/O, so the tool runs once", async () => {
+    const stub = fresh();
+    const receipt = await stub.submit("hold");
+    await stub.holdStarted(1);
+    const instance = await stub.instance();
+
+    // Nothing but the wake's wait keeps the object alive while the tool
+    // waits.
+    const eviction = await evictWhenIdle(stub);
+    expect(eviction.result).toBe("kept");
+    // The alarm firing does not move the work to a new instance.
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    expect(await stub.instance()).toBe(instance);
+
+    expect(await stub.releaseHold()).toBe(true);
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done",
+      text: "tool said: held after 1 runs"
+    });
+    expect(await stub.holdRuns()).toBe(1);
+    // With pi idle, the object drains and the eviction completes.
+    await eviction.evicted;
   });
 
   it("dedupes a submission by operation id", async () => {
@@ -148,6 +216,31 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.gateRuns()).toBe(1);
   });
 
+  it("waits on a run longer than the wait budget across several wakes", async () => {
+    const stub = fresh();
+    // pi's work runs inside the alarm that started it, and alarms have a
+    // 15 minute wall-time limit, so one wake never waits longer than this.
+    await stub.setWaitBudget(100);
+    const receipt = await stub.submit("gate");
+    await stub.gateStarted(1);
+
+    // Each wait ends at the budget and steps the wake again, which starts
+    // the next wait. Without the budget, one wait lasts the whole run.
+    const start = await stub.wakeSteps();
+    let steps = start;
+    for (let i = 0; i < 100 && steps < start + 3; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      steps = await stub.wakeSteps();
+    }
+    expect(steps - start).toBeGreaterThanOrEqual(3);
+
+    await stub.release();
+    expect((await stub.wait(receipt.operationId)).text).toBe(
+      "tool said: released after 1 runs"
+    );
+    expect(await stub.gateRuns()).toBe(1);
+  });
+
   it("aborts the running work", async () => {
     const stub = fresh();
     const receipt = await stub.submit("gate");
@@ -180,12 +273,7 @@ describe("PiHarness on pi-durable", () => {
     const stub = fresh();
     const receipt = await stub.submit("hello");
     await stub.wait(receipt.operationId);
-    let alarm = await stub.alarmTime();
-    for (let i = 0; i < 50 && alarm !== null; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      alarm = await stub.alarmTime();
-    }
-    expect(alarm).toBeNull();
+    expect(await alarmCleared(stub)).toBe(true);
     // The next submit wakes it again.
     expect((await stub.prompt("again")).text).toBe("echo: again");
   });

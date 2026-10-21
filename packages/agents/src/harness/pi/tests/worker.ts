@@ -31,6 +31,7 @@ import {
 
 const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
+const HOLD_RUNS_KEY = "test:hold:runs";
 const FLAKY_KEY = "test:flaky:failed";
 
 /**
@@ -63,8 +64,8 @@ function textOf(content: Message["content"] | undefined): string {
  * the same answer after an eviction as before it:
  *
  * - `multiply N` calls `multiply`, `gate` calls `gate`, `gate-unsafe` calls
- *   `gate_unsafe`; `flaky` fails once with a retryable error; anything else
- *   is echoed back.
+ *   `gate_unsafe`, `hold` calls `hold`; `flaky` fails once with a retryable
+ *   error; anything else is echoed back.
  * - After a tool result it answers `tool said: <result>`.
  */
 function script(
@@ -96,6 +97,11 @@ function script(
       [fauxToolCall("multiply", { value: Number(multiply[1]) })],
       { stopReason: "toolUse" }
     );
+  }
+  if (prompt === "hold") {
+    return fauxAssistantMessage([fauxToolCall("hold", {})], {
+      stopReason: "toolUse"
+    });
   }
   if (prompt === "gate" || prompt === "gate-unsafe") {
     return fauxAssistantMessage(
@@ -129,15 +135,17 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   readonly harness = new PiHarness({
     harness: async ({ storage, context }) => {
       this.registry.install(this.#testTools());
-      return Harness.open(
-        storage,
-        {
-          models: fauxModels(this.#faux.provider),
-          registry: this.registry,
-          settings: variantSettings(this.ctx.id.name ?? ""),
-          onReport: (error) => console.warn("pi report", error)
-        },
-        context
+      return this.#observe(
+        await Harness.open(
+          storage,
+          {
+            models: fauxModels(this.#faux.provider),
+            registry: this.registry,
+            settings: variantSettings(this.ctx.id.name ?? ""),
+            onReport: (error) => console.warn("pi report", error)
+          },
+          context
+        )
       );
     },
     defaults: { model: this.#faux.getModel() }
@@ -252,12 +260,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   /** Resolve once the gate tool has started `runs` times. */
   async gateStarted(runs: number): Promise<number> {
-    for (let i = 0; i < 200; i++) {
-      const count = (await this.ctx.storage.get<number>(GATE_RUNS_KEY)) ?? 0;
-      if (count >= runs) return count;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    throw new Error("The gate tool never started");
+    return this.#toolStarted("gate", GATE_RUNS_KEY, runs);
   }
 
   async release(): Promise<void> {
@@ -293,9 +296,92 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.getAlarm();
   }
 
+  /** Random per instance, so a test can tell the object was evicted. */
+  readonly #instance = crypto.randomUUID();
+  #releaseHold: (() => void) | undefined;
+  #wakeSteps = 0;
+
+  instance(): string {
+    return this.#instance;
+  }
+
+  async holdRuns(): Promise<number> {
+    return (await this.ctx.storage.get<number>(HOLD_RUNS_KEY)) ?? 0;
+  }
+
+  /** Resolve once the hold tool has started `runs` times. */
+  async holdStarted(runs: number): Promise<number> {
+    return this.#toolStarted("hold", HOLD_RUNS_KEY, runs);
+  }
+
+  /** Poll a tool's stored run count until it reaches `runs`. */
+  async #toolStarted(
+    tool: string,
+    runsKey: string,
+    runs: number
+  ): Promise<number> {
+    for (let i = 0; i < 200; i++) {
+      const count = (await this.ctx.storage.get<number>(runsKey)) ?? 0;
+      if (count >= runs) return count;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`The ${tool} tool never started`);
+  }
+
+  /** Release this instance's hold tool, if it is running here. */
+  releaseHold(): boolean {
+    const release = this.#releaseHold;
+    release?.();
+    return release !== undefined;
+  }
+
+  /**
+   * How many times the wake job has stepped past a running wait, in this
+   * instance. While pi is active, each such step starts a new wait.
+   */
+  wakeSteps(): number {
+    return this.#wakeSteps;
+  }
+
+  setWaitBudget(waitBudgetMs: number): void {
+    setWakeTimingForTests(this.harness, { waitBudgetMs });
+  }
+
+  /**
+   * pi, with the wake's steps counted. A wake step that finds no wait
+   * running calls `pi.resume()` before it reads `pi.wake()`; a heartbeat
+   * during a wait returns first. The method is replaced on the instance:
+   * pi checks its own objects' brands, so a proxy would not pass for it.
+   */
+  #observe(pi: Harness): Harness {
+    const resume = pi.resume.bind(pi);
+    pi.resume = (...args) => {
+      this.#wakeSteps++;
+      return resume(...args);
+    };
+    return pi;
+  }
+
   /** The fixture's tools and preamble, as one pi extension. */
   #testTools(): Extension {
     const storage = this.ctx.storage;
+    // Waits on an in-memory promise and does no I/O, like a tool waiting
+    // for an approval. Only something else in flight keeps the object
+    // alive while it waits.
+    const holdTool = (): ToolRegistration<typeof NoParameters> => ({
+      name: "hold",
+      description: "Wait in memory until the test releases it.",
+      parameters: NoParameters,
+      replay: "safe",
+      execute: async () => {
+        const runs = ((await storage.get<number>(HOLD_RUNS_KEY)) ?? 0) + 1;
+        await storage.put(HOLD_RUNS_KEY, runs);
+        await new Promise<void>((resolve) => {
+          this.#releaseHold = resolve;
+        });
+        return { output: [{ type: "text", text: `held after ${runs} runs` }] };
+      }
+    });
     const gate = (
       name: string,
       replay: "safe" | "unsafe"
@@ -327,6 +413,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         }
       ],
       tools: [
+        holdTool(),
         multiplyTool(),
         gate("gate", "safe"),
         gate("gate_unsafe", "unsafe")
