@@ -74,7 +74,7 @@ function createServer() {
   return server;
 }
 
-const apiHandler = createMcpHandler(createServer);
+const mcpHandler = createMcpHandler(createServer);
 
 export default new OAuthProvider({
   authorizeEndpoint: "/authorize",
@@ -82,7 +82,12 @@ export default new OAuthProvider({
   clientRegistrationEndpoint: "/oauth/register",
 
   apiRoute: "/mcp",
-  apiHandler: apiHandler,
+  // OAuthProvider needs an object with a fetch method, not a function.
+  apiHandler: {
+    fetch(request: Request, env: unknown, ctx: ExecutionContext) {
+      return mcpHandler(request, env, ctx);
+    }
+  },
 
   defaultHandler: {
     async fetch(request: Request, env: unknown, ctx: ExecutionContext) {
