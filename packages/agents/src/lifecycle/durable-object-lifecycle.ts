@@ -724,8 +724,17 @@ export class Lifecycle<
     // Re-throw outside blockConcurrencyWhile so the input gate is not
     // permanently broken and a later invocation can retry startup.
     if (error) {
+      const rearmRequested = this.#rearmRequestedDuringStart;
       this.#rearmRequestedDuringStart = false;
       this.#pendingEvents.length = 0;
+      if (rearmRequested) {
+        // Jobs pushed or re-timed during the failed startup deferred their
+        // re-arm to here. Arm the startup fallback from the current queue so
+        // they keep a wake. Best-effort: the startup error is what surfaces.
+        await this.#serializeAlarmWrite(() =>
+          this.#jobDriver.armStartupFallback()
+        ).catch(() => {});
+      }
       throw error;
     }
     this.#deliverPendingEvents();
@@ -801,20 +810,25 @@ export class Lifecycle<
       return;
     }
 
-    const prior = this.#alarmRearmQueue;
-    const next = prior
-      .catch(() => {})
-      .then(async () => {
-        if (this.#alarmsDisabled) return;
-        const alarm = this.#jobQueue.nextAlarmTime(Date.now());
-        if (alarm === null) {
-          await this.#ctx.storage.deleteAlarm();
-        } else {
-          await this.#ctx.storage.setAlarm(alarm);
-        }
-      });
+    await this.#serializeAlarmWrite(async () => {
+      if (this.#alarmsDisabled) return;
+      const alarm = this.#jobQueue.nextAlarmTime(Date.now());
+      if (alarm === null) {
+        await this.#ctx.storage.deleteAlarm();
+      } else {
+        await this.#ctx.storage.setAlarm(alarm);
+      }
+    });
+  }
+
+  /**
+   * Run an alarm write after every earlier one settles, so a later
+   * calculation from fresher queue state always lands last.
+   */
+  #serializeAlarmWrite(write: () => Promise<void>): Promise<void> {
+    const next = this.#alarmRearmQueue.catch(() => {}).then(write);
     this.#alarmRearmQueue = next;
-    await next;
+    return next;
   }
 
   /**
