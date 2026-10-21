@@ -182,7 +182,7 @@ export class JobDriver {
     let clean = false;
     try {
       try {
-        await this.#armStartupFallback();
+        await this.armStartupFallback();
         await initialize();
         await this.#driveDueJobs();
         await this.#alarmScope.run({ executing: undefined }, runHostAlarm);
@@ -282,19 +282,21 @@ export class JobDriver {
   }
 
   /**
-   * Arm a fallback alarm before startup runs, while the queue holds jobs.
-   * The platform clears the alarm when it fires, so a startup that throws
-   * (or an isolate that dies mid-startup) would otherwise leave the queue
-   * with no wake but the platform's own few, short retries. The fallback
-   * keeps the object woken whether or not those retries run: a failed
-   * startup is retried at the fallback time. A clean alarm's final re-arm
-   * replaces it.
+   * Arm a startup fallback alarm while the queue holds jobs. An alarm arms
+   * one before startup runs: the platform clears the alarm when it fires, so
+   * a startup that throws (or an isolate that dies mid-startup) would
+   * otherwise leave the queue with no wake but the platform's own few, short
+   * retries. Lifecycle arms one again after a failed startup that pushed or
+   * re-timed jobs, whose deferred re-arm never ran. The fallback keeps the
+   * object woken whether or not the platform's retries run: a failed startup
+   * is retried at the fallback time. A clean alarm's final re-arm, or any
+   * later queue mutation's, replaces it.
    *
    * The fallback is the queue's own next wake, but never sooner than the
    * deadman delay: an overdue job would otherwise make a failing startup
    * retry in a tight loop.
    */
-  async #armStartupFallback(): Promise<void> {
+  async armStartupFallback(): Promise<void> {
     if (this.#options.disabled()) return;
     const nowMs = Date.now();
     const next = this.#options.queue.nextAlarmTime(nowMs);
