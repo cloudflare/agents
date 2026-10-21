@@ -1,314 +1,55 @@
 # MCP Transports
 
-This guide explains the different transport options for connecting to MCP servers with the Agents SDK.
+This page covers the transport your MCP server uses and the transports an Agent can use to connect to other MCP servers.
 
-For a primer on MCP servers, see [Creating MCP Servers](./mcp-servers.md).
+## Server: Streamable HTTP
 
-## Streamable HTTP Transport (Recommended)
-
-The Agents SDK has two server paths:
-
-- Current SDK v2 servers use `createMcpHandler`, a per-request stateless Worker handler with no Durable Object or WebSocket bridge.
-- Retained SDK v1 servers use the deprecated, feature-frozen `McpAgent`, which provides sessionful transports through a Durable Object and internal WebSocket bridge.
-
-The current stateless handler also accepts stateless 2025-era Streamable HTTP requests by default. It does not expose standalone legacy SSE.
-
-### Legacy `McpAgent` architecture
-
-When a client connects to your MCP server:
-
-1. The client makes an HTTP request to your Worker with a JSON-RPC message in the body
-2. Your Worker upgrades the connection to a WebSocket
-3. The WebSocket connects to your `McpAgent` Durable Object which manages connection state
-4. JSON-RPC messages flow bidirectionally over the WebSocket
-5. Your Worker streams responses back to the client using Server-Sent Events (SSE)
-
-This is all handled automatically by the `McpAgent.serve()` method:
+[`createMcpHandler`](./mcp-servers.md) serves Streamable HTTP. Each request is handled on its own, with a fresh `McpServer` from your factory, so there are no sessions, Durable Objects, or WebSockets behind the endpoint.
 
 ```typescript
-import { McpAgent } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createMcpHandler } from "agents/mcp/server";
 
-export class MyMCP extends McpAgent {
-  server = new McpServer({ name: "Demo", version: "1.0.0" });
+const handler = createMcpHandler(createServer, { route: "/mcp" });
+```
 
-  async init() {
-    // Define your tools, resources, prompts
+The same endpoint serves:
+
+- Stateless clients on draft MCP `2026-07-28`
+- 2025-era Streamable HTTP clients, for tools, resources, and prompts (the default `legacy: "stateless"` lane)
+
+It does not serve the standalone SSE transport. Set `legacy: "reject"` to accept only Stateless clients. See [2025-era clients](./mcp-servers.md#2025-era-clients) for what that lane does not support.
+
+## Client: connecting to MCP servers
+
+An Agent connects to remote MCP servers with `addMcpServer()`. The `transport.type` option picks the transport:
+
+```typescript
+// Default: try Streamable HTTP, fall back to SSE
+await this.addMcpServer("my-server", "https://example.com/mcp");
+
+// Force a transport
+await this.addMcpServer("my-server", "https://example.com/mcp", {
+  transport: { type: "streamable-http" }
+});
+
+// Send extra headers, for example an API key
+await this.addMcpServer("my-server", "https://example.com/mcp", {
+  transport: {
+    type: "streamable-http",
+    headers: { Authorization: `Bearer ${this.env.API_KEY}` }
   }
-}
-
-// Serve with Streamable HTTP transport
-export default MyMCP.serve("/mcp");
-```
-
-The `serve()` method returns a Worker with a `fetch` handler that:
-
-- Handles CORS preflight requests
-- Manages WebSocket upgrades
-- Routes messages to your Durable Object
-
-### Connection from clients
-
-The Agents MCP client uses `"auto"` by default. It tries Streamable HTTP first and falls back to legacy SSE only when the endpoint reports that Streamable HTTP is unsupported:
-
-```typescript
-await agent.addMcpServer("my-server", "https://your-worker.workers.dev/mcp");
-```
-
-## Legacy `McpAgent` Server Auto Transport
-
-The **auto** transport serves both Streamable HTTP and legacy SSE on the same endpoint. Capable clients use Streamable HTTP automatically, while older SSE-only clients continue to work.
-
-```typescript
-export default MyMCP.serve("/mcp", { transport: "auto" });
-```
-
-The handler distinguishes between the two protocols based on the request shape — no configuration or content negotiation is required from clients. This is useful when migrating from SSE to Streamable HTTP without breaking existing clients.
-
-## Legacy `McpAgent` SSE Transport (Deprecated)
-
-We also support the legacy **SSE (Server-Sent Events)** transport, but it is deprecated in favor of Streamable HTTP.
-
-If you need SSE transport for compatibility:
-
-```typescript
-// Server
-export default MyMCP.serveSSE("/sse");
-
-// Client
-await agent.addMcpServer("my-server", url);
-```
-
-## RPC Transport (Experimental)
-
-The **RPC transport** is a custom transport designed for internal applications where your MCP server and agent are both running on Cloudflare. They can even run in the same Worker! It sends JSON-RPC messages directly over Cloudflare's RPC bindings without going over the public internet.
-
-### Why use RPC transport?
-
-- **Faster**: No network overhead - direct function calls
-- **Simpler**: No HTTP endpoints, no connection management
-- **Internal only**: Perfect for agents calling MCP servers within the same Worker
-
-**Note**: RPC transport does not support authentication. Use HTTP/SSE for external connections that require OAuth.
-
-### Connecting an Agent to an McpAgent via RPC
-
-The RPC transport uses Durable Object bindings to connect your `Agent` (MCP client) directly to your `McpAgent` (MCP server).
-
-#### Step 1: Define your MCP server
-
-Create your `McpAgent` with the tools you want to expose:
-
-```typescript
-import { McpAgent } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
-
-type State = { counter: number };
-
-export class MyMCP extends McpAgent<Env, State> {
-  server = new McpServer({ name: "MyMCP", version: "1.0.0" });
-  initialState: State = { counter: 0 };
-
-  async init() {
-    this.server.tool(
-      "add",
-      "Add to the counter",
-      { amount: z.number() },
-      async ({ amount }) => {
-        this.setState({ counter: this.state.counter + amount });
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Added ${amount}, total is now ${this.state.counter}`
-            }
-          ]
-        };
-      }
-    );
-  }
-}
-```
-
-#### Step 2: Connect your Agent to the MCP server
-
-In your `Agent`, call `addMcpServer()` with the Durable Object binding in `onStart()`:
-
-```typescript
-import { AIChatAgent } from "agents/ai-chat-agent";
-
-export class Chat extends AIChatAgent<Env> {
-  async onStart(): Promise<void> {
-    // Pass the DO namespace binding directly
-    await this.addMcpServer("my-mcp", this.env.MyMCP);
-  }
-
-  async onChatMessage(onFinish) {
-    const allTools = this.mcp.getAITools();
-
-    const result = streamText({
-      model,
-      tools: allTools
-      // ...
-    });
-
-    return createUIMessageStreamResponse({ stream: result });
-  }
-}
-```
-
-RPC connections are automatically restored after Durable Object hibernation, just like HTTP connections. The binding name and props are persisted to storage so the connection can be re-established without any extra code.
-
-**Deduplication:** For RPC transport, if `addMcpServer` is called with a name that already has an active connection, the existing connection is returned instead of creating a duplicate. For HTTP transport, deduplication matches on both server name and URL (see [MCP Client API](./mcp-client.md) for details). This makes it safe to call `addMcpServer` in `onStart()` without worrying about creating multiple connections on restart.
-
-#### Step 3: Configure Durable Object bindings
-
-In your `wrangler.jsonc`, define bindings for both Durable Objects:
-
-```jsonc
-{
-  "durable_objects": {
-    "bindings": [
-      { "name": "Chat", "class_name": "Chat" },
-      { "name": "MyMCP", "class_name": "MyMCP" }
-    ]
-  },
-  "migrations": [
-    {
-      "new_sqlite_classes": ["MyMCP", "Chat"],
-      "tag": "v1"
-    }
-  ]
-}
-```
-
-#### Step 4: Set up your Worker fetch handler
-
-Route requests to your Chat agent:
-
-```typescript
-import { routeAgentRequest } from "agents";
-
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const url = new URL(request.url);
-
-    // Optionally expose the MCP server via HTTP as well
-    if (url.pathname.startsWith("/mcp")) {
-      return MyMCP.serve("/mcp").fetch(request, env, ctx);
-    }
-
-    const response = await routeAgentRequest(request, env);
-    if (response) return response;
-
-    return new Response("Not found", { status: 404 });
-  }
-};
-```
-
-### Passing props from client to server
-
-Since RPC transport does not have an OAuth flow, you can pass user context (like userId, role, etc.) directly as props:
-
-```typescript
-await this.addMcpServer("my-mcp", this.env.MyMCP, {
-  props: { userId: "user-123", role: "admin" }
 });
 ```
 
-Your `McpAgent` can then access these props:
+| `transport.type`    | Use when                                          |
+| ------------------- | ------------------------------------------------- |
+| `"auto"` (default)  | You do not know which transport the server speaks |
+| `"streamable-http"` | The server supports Streamable HTTP               |
+| `"sse"`             | The server only supports the older SSE transport  |
 
-```typescript
-export class MyMCP extends McpAgent<
-  Env,
-  State,
-  { userId?: string; role?: string }
-> {
-  async init() {
-    this.server.tool("whoami", "Get current user info", {}, async () => {
-      const userId = this.props?.userId || "anonymous";
-      const role = this.props?.role || "guest";
-
-      return {
-        content: [{ type: "text", text: `User ID: ${userId}, Role: ${role}` }]
-      };
-    });
-  }
-}
-```
-
-The props are:
-
-- **Type-safe**: TypeScript extracts the Props type from your McpAgent generic
-- **Persistent**: Stored in Durable Object storage via `updateProps()`
-- **Available immediately**: Set before any tool calls are made
-
-This is useful for:
-
-- User authentication context
-- Tenant/organization IDs
-- Feature flags or permissions
-- Any per-connection configuration
-
-### How RPC transport works under the hood
-
-When you call `addMcpServer()` with a Durable Object binding, the SDK:
-
-1. Creates an `RPCClientTransport` that wraps the DO stub
-2. Calls `handleMcpMessage()` on the `McpAgent` for each JSON-RPC message
-3. The `McpAgent` routes messages through its `RPCServerTransport` to the MCP server
-4. Responses flow back synchronously through the RPC call
-
-This happens entirely within your Worker's execution context using Cloudflare's RPC mechanism - no HTTP, no WebSockets, no public internet.
-
-The RPC transport fully supports:
-
-- JSON-RPC 2.0 validation (via the MCP SDK's schema)
-- Batch requests
-- Notifications (messages without `id` field)
-- Automatic reconnection after Durable Object hibernation (when called from `onStart()`)
-
-### Configuring RPC Transport Server Timeout
-
-The RPC transport has a configurable timeout for waiting for tool responses. By default, the server will wait **60 seconds** for a tool handler to respond. You can customize this by overriding `getRpcTransportOptions()` in your `McpAgent`:
-
-```typescript
-export class MyMCP extends McpAgent<Env, State> {
-  server = new McpServer({ name: "MyMCP", version: "1.0.0" });
-
-  protected getRpcTransportOptions() {
-    return { timeout: 120000 }; // 2 minutes
-  }
-
-  async init() {
-    this.server.tool(
-      "long-running-task",
-      "A tool that takes a while",
-      { input: z.string() },
-      async ({ input }) => {
-        await longRunningOperation(input);
-        return {
-          content: [{ type: "text", text: "Task completed" }]
-        };
-      }
-    );
-  }
-}
-```
-
-## Choosing a transport
-
-| Transport                         | Use when                                            | Pros                                       | Cons                                   |
-| --------------------------------- | --------------------------------------------------- | ------------------------------------------ | -------------------------------------- |
-| **Streamable HTTP**               | New servers and external MCP connections            | Current standard transport; supports OAuth | Slight network overhead                |
-| **Client `auto`**                 | The remote server's HTTP transport is not known     | Tries Streamable HTTP, then legacy SSE     | May make a fallback connection attempt |
-| **Legacy `McpAgent` server auto** | An existing server must accept both HTTP transports | Serves both protocols on one endpoint      | Uses the deprecated server path        |
-| **RPC**                           | Internal agents                                     | Fastest, simplest setup                    | No auth, Service Bindings only         |
-| **SSE**                           | Legacy compatibility                                | Backwards compatible                       | Deprecated, use Streamable HTTP        |
+`"auto"` tries Streamable HTTP first and falls back to SSE only when the server reports that Streamable HTTP is unsupported. The client negotiates the protocol version on every connection, so it works with both Stateless and 2025-era servers. See [Connecting to MCP Servers](./mcp-client.md) for OAuth, retries, and the rest of the client API.
 
 ## Examples
 
-- **Streamable HTTP**: See [`examples/mcp`](https://github.com/cloudflare/agents/tree/main/examples/mcp)
-- **RPC Transport**: See [`examples/mcp-rpc-transport`](https://github.com/cloudflare/agents/tree/main/examples/mcp-rpc-transport)
-- **MCP Client**: See [`examples/mcp-client`](https://github.com/cloudflare/agents/tree/main/examples/mcp-client)
+- [`examples/mcp-worker`](https://github.com/cloudflare/agents/tree/main/examples/mcp-worker): a server built with `createMcpHandler`
+- [`examples/mcp-client`](https://github.com/cloudflare/agents/tree/main/examples/mcp-client): an Agent that connects to MCP servers

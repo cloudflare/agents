@@ -51,19 +51,6 @@ callback URL to `registerServer()` and route that request to the same named
 Durable Object. The manager persists the URL and only intercepts a callback
 whose origin and pathname match it.
 
-An HTTP-only manager does not need `env`. Pass the Durable Object environment
-when the catalog can contain RPC servers so persisted binding names can be
-resolved after a wake:
-
-```ts
-readonly mcp = new MCPClientManager("my-object", "1.0.0", {
-  env: this.env
-});
-```
-
-If an RPC row exists without `env`, startup logs a warning identifying the
-server and does not recreate that connection.
-
 `Agent` installs this same capability object directly. Existing `this.mcp`,
 `addMcpServer()`, `removeMcpServer()`, and `getMcpServers()` APIs remain
 available.
@@ -188,7 +175,7 @@ These options are persisted and used when reconnecting after hibernation or afte
 
 ### Protocol negotiation and elicitation
 
-Agents uses the MCP v2 client and automatically negotiates the protocol version for every connection. It uses `server/discover` with Stateless servers and falls back to the `initialize` handshake on the same connection for Legacy Streamable HTTP, SSE, and RPC servers.
+Agents uses the MCP v2 client and automatically negotiates the protocol version for every connection. It uses `server/discover` with Stateless servers and falls back to the `initialize` handshake on the same connection for Legacy Streamable HTTP and SSE servers.
 
 MCP servers can request input from the client during `callTool`, `getPrompt`, or `readResource`. Stateless Elicitation returns an `input_required` result and completes through MRTR: the MCP SDK invokes the configured `elicitation/create` handler, sends its response, and continues the original request. Agents does not expose an intermediate continuation; the original call stays pending while human input is collected and eventually resolves to the ordinary tool, prompt, or resource result. Legacy Elicitation on Legacy servers continues to use pushed `elicitation/create` requests. Both generations share the same handlers.
 
@@ -242,8 +229,6 @@ MCP server URLs are validated before connection to prevent Server-Side Request F
 - IPv6 unique-local addresses (`fc00::/7`)
 
 Loopback development URLs such as `localhost`, `127.0.0.1`, and `::1` are allowed.
-
-If you need to connect to another internal MCP server, use the [RPC transport](./mcp-transports.md) with a Durable Object binding instead of HTTP.
 
 ### Return Value
 
@@ -666,17 +651,6 @@ async addMcpServer(
   | { id: string; state: "authenticating"; authUrl: string }
 >
 
-// RPC transport (Durable Object binding — no HTTP overhead)
-async addMcpServer(
-  name: string,
-  binding: DurableObjectNamespace,
-  options?: {
-    props?: Record<string, unknown>; // passed to the McpAgent's onStart(props)
-    client?: ClientOptions;
-    retry?: RetryOptions;
-  }
-): Promise<{ id: string; state: "ready" }>
-
 // Legacy signature (still supported)
 async addMcpServer(
   name: string,
@@ -689,7 +663,7 @@ async addMcpServer(
 
 Add and connect to an MCP server. Throws if connection or discovery fails.
 
-`callbackHost` is automatically derived from the incoming HTTP request or WebSocket connection URI — you almost never need to set it explicitly. It is only needed when the auto-detected host does not match your desired OAuth callback origin (for example, behind a reverse proxy). For RPC transport, pass a `DurableObjectNamespace` binding instead of a URL. See [MCP Transports](./mcp-transports.md) for details.
+`callbackHost` is automatically derived from the incoming HTTP request or WebSocket connection URI — you almost never need to set it explicitly. It is only needed when the auto-detected host does not match your desired OAuth callback origin (for example, behind a reverse proxy). See [MCP Transports](./mcp-transports.md) for the transport options.
 
 Calling `addMcpServer` is idempotent when both the server name **and** URL match an existing active connection — the existing connection is returned without creating a duplicate. This makes it safe to call in `onStart()` without worrying about duplicate connections on restart.
 

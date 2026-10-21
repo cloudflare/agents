@@ -32,7 +32,6 @@ Agents SDK supports multiple human-in-the-loop patterns. Choose based on your us
 | OpenAI Agents SDK      | `needsApproval`       | Using OpenAI's agent SDK with conditional approval | [openai-sdk/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/openai-sdk/human-in-the-loop)   |
 | Client-side tools      | `onToolCall`          | Tools that need browser APIs or user interaction   | Pattern below                                                                                                  |
 | Stateless servers      | Stateless Elicitation | Current MCP tools requesting structured input      | [examples/mcp-elicitation-mrtr/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation-mrtr) |
-| Legacy servers         | Legacy Elicitation    | Existing sessionful MCP deployments                | [examples/mcp-elicitation/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation)           |
 
 ### Decision Guide
 
@@ -40,7 +39,7 @@ Agents SDK supports multiple human-in-the-loop patterns. Choose based on your us
 Is this part of a multi-step workflow?
 ├── Yes → Use Workflow Approval (waitForApproval)
 └── No → Are you building an MCP server?
-         ├── Yes → Use MCP Elicitation (elicitInput)
+         ├── Yes → Use MCP Elicitation (inputRequired)
          └── No → Is this an AI chat interaction?
                   ├── Yes → Does the tool need browser APIs?
                   │        ├── Yes → Use onToolCall (client-side execution)
@@ -460,7 +459,7 @@ See the complete example: [openai-sdk/human-in-the-loop/](https://github.com/clo
 
 ### MCP Elicitation
 
-**Stateless Elicitation** uses multi-round-trip requests (MRTR). A handler returns `inputRequired(...)`; the client gathers the requested input and retries with SDK-managed state. No Worker remains suspended while the user responds.
+MCP servers built with `createMcpHandler` use multi-round-trip requests (MRTR) for elicitation. A handler returns `inputRequired(...)`; the client gathers the requested input and retries with SDK-managed state. No Worker remains suspended while the user responds.
 
 ```typescript
 import {
@@ -516,8 +515,6 @@ export default {
 The MCP client renders the JSON Schema form and the original operation remains pending from the application's perspective while the SDK completes the rounds.
 
 See the [Stateless Elicitation example](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation-mrtr).
-
-**Legacy Elicitation** in existing Legacy deployments uses pushed `elicitation/create` requests over a stateful transport. See the explicitly legacy [examples/mcp-elicitation/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation) example when retaining `McpAgent` or `createLegacyMcpHandler` with `WorkerTransport`.
 
 ## State Patterns for Approvals
 
@@ -640,10 +637,9 @@ async submitForApproval(request: ApprovalRequest): Promise<string> {
 | AIChatAgent tools     | [guides/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/guides/human-in-the-loop)           | Chat tool approval with needsApproval + onToolCall |
 | OpenAI Agents SDK     | [openai-sdk/human-in-the-loop/](https://github.com/cloudflare/agents/tree/main/openai-sdk/human-in-the-loop)   | Conditional tool approval with modal               |
 | Stateless Elicitation | [examples/mcp-elicitation-mrtr/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation-mrtr) | Stateless multi-round input                        |
-| Legacy Elicitation    | [examples/mcp-elicitation/](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation)           | Stateful pushed input requests                     |
 
 For detailed API documentation, see:
 
 - [Workflows](./workflows.md) - `waitForApproval()`, `approveWorkflow()`, `rejectWorkflow()`
-- [MCP Servers](./mcp-servers.md) - `inputRequired()` and legacy `elicitInput()`
+- [MCP Servers](./mcp-servers.md) - `inputRequired()` elicitation
 - [Callable Methods](./callable-methods.md) - `@callable()` decorator for approval endpoints

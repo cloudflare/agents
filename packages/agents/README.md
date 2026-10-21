@@ -509,8 +509,9 @@ export default {
 } satisfies ExportedHandler;
 ```
 
-Use `McpAgent`, `createLegacyMcpHandler`, and `WorkerTransport` from
-`agents/mcp` only when retaining Legacy session behavior.
+Install `@modelcontextprotocol/server` alongside `agents`. See
+[Creating MCP Servers](../../docs/agents/mcp-servers.md) for authentication,
+elicitation, and keeping state in bindings.
 
 ### Using MCP Tools
 
