@@ -12,7 +12,7 @@
   "durable_objects": {
     "bindings": [{ "name": "LogSession", "class_name": "LogSession" }]
   },
-  "migrations": [{ "tag": "v1", "new_classes": ["LogSession"] }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LogSession"] }],
   "observability": {
     "enabled": true
   }
