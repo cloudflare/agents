@@ -166,6 +166,10 @@ A session stores its model as `{ provider, modelId }`, not as a model object, so
 `@cf/…` and `<provider>/<id>` forms there. Options given to `ai(model, options)` do not reach a
 session; set them on `createAI` instead.
 
+A model stream that is cut off, or that sends nothing for `streamIdleTimeoutMs`, ends in an error
+pi-ai's `isRetryableAssistantError()` treats as transient, so the harness retries the turn under
+its retry settings rather than failing it.
+
 `ai.streamFn` is `streamSimple`, bound, for frameworks that take a stream function, such as
 pi-agent-core's `Agent({ streamFn })`.
 
