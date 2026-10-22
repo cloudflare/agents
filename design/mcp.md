@@ -85,6 +85,19 @@ supporting modules live in `src/mcp/client/`; `types.ts`, `rpc.ts`, and
 
 The SDK v2 client negotiates Stateless first and falls back to Legacy on the same connection. Agents persists the selected protocol and discovery result alongside resumable HTTP state. An in-flight elicitation handler and continuation remain memory-only; isolate restart rejects the operation and the caller retries it.
 
+`MCPClientManager` (`src/mcp/client/index.ts`) is the capability facade. It keeps one `MCPClientConnection` per server and delegates to:
+
+| Module              | Owns                                                                                 |
+| ------------------- | ------------------------------------------------------------------------------------ |
+| `server-store.ts`   | Every SQL statement over `cf_agents_mcp_servers`                                     |
+| `server-lanes.ts`   | One queue of connection work per server; re-entrant for nested calls                 |
+| `oauth-callback.ts` | Callback recognition and parsing, state checks, code exchange, response rendering    |
+| `ai-tools.ts`       | AI SDK tool conversion and its per-connection schema cache                           |
+| `url-policy.ts`     | Stable server ids and the SSRF policy                                                |
+| `connection.ts`     | Transport selection, the SDK client, catalogs and the connection-level state machine |
+
+Connect, discovery, establish, OAuth callback completion and restore for one server run through its lane, so they never interleave on one connection. A server is `authenticating` exactly when the manager has persisted the `auth_url` its provider produced; connect, discovery and request-time re-authorization (scope step-up, failed refresh) all enter that state through one transition. Restore trusts a persisted `auth_url` only while its OAuth `state` can still be redeemed, and otherwise reconnects. Work that outlives `removeServer` (a connect, discovery or code exchange) checks it still owns the connection before writing anything back.
+
 ## Verification matrix
 
 | Surface                    | Evidence                                                                                                                                                       |
