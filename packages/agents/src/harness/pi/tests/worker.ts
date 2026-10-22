@@ -31,6 +31,23 @@ import {
 
 const RELEASE_KEY = "test:gate:release";
 const GATE_RUNS_KEY = "test:gate:runs";
+const HOLD_RUNS_KEY = "test:hold:runs";
+const FLAKY_KEY = "test:flaky:failed";
+
+/**
+ * Variants of `PiHarnessTestObject`, by the prefix of the object's name, so
+ * a variant survives a restart:
+ *
+ * - `retry:` retries a failed generation once, after two seconds.
+ * - `park:` parks a task after its first restart.
+ */
+function variantSettings(name: string) {
+  if (name.startsWith("retry:")) {
+    return { retry: { enabled: true, maxRetries: 1, baseDelayMs: 2_000 } };
+  }
+  if (name.startsWith("park:")) return { ...TEST_SETTINGS, restartLimit: 1 };
+  return TEST_SETTINGS;
+}
 
 function textOf(content: Message["content"] | undefined): string {
   if (content === undefined) return "";
@@ -47,10 +64,14 @@ function textOf(content: Message["content"] | undefined): string {
  * the same answer after an eviction as before it:
  *
  * - `multiply N` calls `multiply`, `gate` calls `gate`, `gate-unsafe` calls
- *   `gate_unsafe`; anything else is echoed back.
+ *   `gate_unsafe`, `hold` calls `hold`; `flaky` fails once with a retryable
+ *   error; anything else is echoed back.
  * - After a tool result it answers `tool said: <result>`.
  */
-function script(context: TranscriptContext): AssistantMessage {
+function script(
+  context: TranscriptContext,
+  storage: DurableObjectStorage
+): AssistantMessage {
   // pi places system-prompt changes positionally, so a system message can
   // follow the user's input.
   const last = context.messages.filter((m) => m.role !== "system").at(-1);
@@ -62,12 +83,25 @@ function script(context: TranscriptContext): AssistantMessage {
     ]);
   }
   const prompt = last?.role === "user" ? textOf(last.content) : "";
+  // `flaky` fails once with a retryable error, then is echoed.
+  if (prompt === "flaky" && storage.kv.get(FLAKY_KEY) === undefined) {
+    storage.kv.put(FLAKY_KEY, true);
+    return fauxAssistantMessage([], {
+      stopReason: "error",
+      errorMessage: "overloaded"
+    });
+  }
   const multiply = /^multiply (\d+)$/.exec(prompt);
   if (multiply) {
     return fauxAssistantMessage(
       [fauxToolCall("multiply", { value: Number(multiply[1]) })],
       { stopReason: "toolUse" }
     );
+  }
+  if (prompt === "hold") {
+    return fauxAssistantMessage([fauxToolCall("hold", {})], {
+      stopReason: "toolUse"
+    });
   }
   if (prompt === "gate" || prompt === "gate-unsafe") {
     return fauxAssistantMessage(
@@ -101,15 +135,17 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   readonly harness = new PiHarness({
     harness: async ({ storage, context }) => {
       this.registry.install(this.#testTools());
-      return Harness.open(
-        storage,
-        {
-          models: fauxModels(this.#faux.provider),
-          registry: this.registry,
-          settings: TEST_SETTINGS,
-          onReport: (error) => console.warn("pi report", error)
-        },
-        context
+      return this.#observe(
+        await Harness.open(
+          storage,
+          {
+            models: fauxModels(this.#faux.provider),
+            registry: this.registry,
+            settings: variantSettings(this.ctx.id.name ?? ""),
+            onReport: (error) => console.warn("pi report", error)
+          },
+          context
+        )
       );
     },
     defaults: { model: this.#faux.getModel() }
@@ -119,7 +155,42 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     setWakeTimingForTests(this.harness, TEST_TIMING);
-    this.#faux.setResponses(Array.from({ length: 200 }, () => script));
+    this.#faux.setResponses(
+      Array.from(
+        { length: 200 },
+        () => (context: TranscriptContext) => script(context, ctx.storage)
+      )
+    );
+  }
+
+  /** The harness's pending Lifecycle jobs: its wake, while it has one. */
+  wakeJobs(): string[] {
+    return this.ctx.storage.sql
+      .exec<{ id: string }>(
+        "SELECT id FROM cf_agents_jobs WHERE capability = 'pi-harness'"
+      )
+      .toArray()
+      .map((row) => row.id);
+  }
+
+  /**
+   * Leave a per-session wake job as a version before Pi 1.4 did, due now,
+   * with the alarm set for it.
+   */
+  async addLegacyWakeJob(): Promise<void> {
+    // A first prompt creates the jobs table.
+    await this.harness.prompt("hello");
+    this.ctx.storage.sql.exec(
+      `INSERT INTO cf_agents_jobs (id, capability, fn, time, payload, singleflight, recovery_loop)
+       VALUES ('pi-wake:1', 'pi-harness', 'wake', ?, '{"session":"1"}', 1, 1)`,
+      Date.now()
+    );
+    await this.ctx.storage.setAlarm(Date.now());
+  }
+
+  /** When pi next needs to run, as `pi.wake()` says. */
+  async piWake() {
+    return (await this.harness.pi()).wake();
   }
 
   async prompt(text: string, session?: string) {
@@ -189,12 +260,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   /** Resolve once the gate tool has started `runs` times. */
   async gateStarted(runs: number): Promise<number> {
-    for (let i = 0; i < 200; i++) {
-      const count = (await this.ctx.storage.get<number>(GATE_RUNS_KEY)) ?? 0;
-      if (count >= runs) return count;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    throw new Error("The gate tool never started");
+    return this.#toolStarted("gate", GATE_RUNS_KEY, runs);
   }
 
   async release(): Promise<void> {
@@ -230,9 +296,92 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.getAlarm();
   }
 
+  /** Random per instance, so a test can tell the object was evicted. */
+  readonly #instance = crypto.randomUUID();
+  #releaseHold: (() => void) | undefined;
+  #wakeSteps = 0;
+
+  instance(): string {
+    return this.#instance;
+  }
+
+  async holdRuns(): Promise<number> {
+    return (await this.ctx.storage.get<number>(HOLD_RUNS_KEY)) ?? 0;
+  }
+
+  /** Resolve once the hold tool has started `runs` times. */
+  async holdStarted(runs: number): Promise<number> {
+    return this.#toolStarted("hold", HOLD_RUNS_KEY, runs);
+  }
+
+  /** Poll a tool's stored run count until it reaches `runs`. */
+  async #toolStarted(
+    tool: string,
+    runsKey: string,
+    runs: number
+  ): Promise<number> {
+    for (let i = 0; i < 200; i++) {
+      const count = (await this.ctx.storage.get<number>(runsKey)) ?? 0;
+      if (count >= runs) return count;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`The ${tool} tool never started`);
+  }
+
+  /** Release this instance's hold tool, if it is running here. */
+  releaseHold(): boolean {
+    const release = this.#releaseHold;
+    release?.();
+    return release !== undefined;
+  }
+
+  /**
+   * How many times the wake job has stepped past a running wait, in this
+   * instance. While pi is active, each such step starts a new wait.
+   */
+  wakeSteps(): number {
+    return this.#wakeSteps;
+  }
+
+  setWaitBudget(waitBudgetMs: number): void {
+    setWakeTimingForTests(this.harness, { waitBudgetMs });
+  }
+
+  /**
+   * pi, with the wake's steps counted. A wake step that finds no wait
+   * running calls `pi.resume()` before it reads `pi.wake()`; a heartbeat
+   * during a wait returns first. The method is replaced on the instance:
+   * pi checks its own objects' brands, so a proxy would not pass for it.
+   */
+  #observe(pi: Harness): Harness {
+    const resume = pi.resume.bind(pi);
+    pi.resume = (...args) => {
+      this.#wakeSteps++;
+      return resume(...args);
+    };
+    return pi;
+  }
+
   /** The fixture's tools and preamble, as one pi extension. */
   #testTools(): Extension {
     const storage = this.ctx.storage;
+    // Waits on an in-memory promise and does no I/O, like a tool waiting
+    // for an approval. Only something else in flight keeps the object
+    // alive while it waits.
+    const holdTool = (): ToolRegistration<typeof NoParameters> => ({
+      name: "hold",
+      description: "Wait in memory until the test releases it.",
+      parameters: NoParameters,
+      replay: "safe",
+      execute: async () => {
+        const runs = ((await storage.get<number>(HOLD_RUNS_KEY)) ?? 0) + 1;
+        await storage.put(HOLD_RUNS_KEY, runs);
+        await new Promise<void>((resolve) => {
+          this.#releaseHold = resolve;
+        });
+        return { output: [{ type: "text", text: `held after ${runs} runs` }] };
+      }
+    });
     const gate = (
       name: string,
       replay: "safe" | "unsafe"
@@ -264,6 +413,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         }
       ],
       tools: [
+        holdTool(),
         multiplyTool(),
         gate("gate", "safe"),
         gate("gate_unsafe", "unsafe")
@@ -317,7 +467,12 @@ export class PiNoDefaultsTestObject extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     setWakeTimingForTests(this.harness, TEST_TIMING);
-    this.#faux.setResponses(Array.from({ length: 200 }, () => script));
+    this.#faux.setResponses(
+      Array.from(
+        { length: 200 },
+        () => (context: TranscriptContext) => script(context, ctx.storage)
+      )
+    );
   }
 
   async prompt(text: string) {

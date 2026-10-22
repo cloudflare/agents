@@ -10,7 +10,7 @@ here is in `agents`.
 | Before (#2210)                               | Now                                                             |
 | -------------------------------------------- | --------------------------------------------------------------- |
 | pi-agent-core `AgentHarness`                 | pi-durable `Harness`                                            |
-| `Tasks` run per lane, replay-driving pi      | one Lifecycle wake job per session                              |
+| `Tasks` run per lane, replay-driving pi      | one Lifecycle wake job, driven by `pi.wake()`                   |
 | intake table for queued submissions          | pi's own inbox                                                  |
 | `Streams` log per operation, cursors, replay | pi's `watchEvents`: snapshot, then one batch per commit         |
 | pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (session store) |
@@ -28,8 +28,9 @@ pi-durable already is a durable execution engine. It has checkpointed tasks,
 ownership trees, abort, replay-safe and unsafe tools, retries, and an inbox,
 and its `submit()` is durable before it resolves. Around it, the SDK only has
 to do one thing: wake the object when pi has work but no memory. That is one
-Lifecycle job per session, owned by `PiHarness` (`#wake`, `#wakeStep`,
-`#waitForIdle` in `pi-harness.ts`, about 90 lines).
+Lifecycle job, owned by `PiHarness` (`#wake`, `#wakeStep`,
+`#waitWhileActive` in `harness.ts`). Before Pi 1.4 it was one job per
+session; Pi 1.4's `Harness.wake()` made one job for the whole object enough.
 
 - **Tasks.** This was the old design. Tasks journals steps for replay, and pi
   is already the replay authority, so every Tasks step was a no-op wrapper
@@ -47,36 +48,44 @@ Lifecycle job per session, owned by `PiHarness` (`#wake`, `#wakeStep`,
   leaves nothing to drive in passes, and child machines (#2333) overlap with
   pi's own task ownership.
 
-### One admission, one wake job per session
+### One admission, one wake job
 
 `submit()` does three things, in this order:
 
-1. `#wake(session)`: push the session's wake job (`pi-wake:<session>`, due
-   now). From here on, if the object dies, that job's alarm restarts it.
+1. `#wake()`: push the wake job (`pi-wake`, due now). From here on, if the
+   object dies, that job's alarm restarts it.
 2. `conversation.submit({ requestId })`: the one admission. pi's inbox
    places steers and follow-ups while a run is going, and deduplicates by
    request id.
-3. `#wake(session)` again: re-check now, so a wake that ran before the
+3. `#wake()` again: re-check now, so a wake that ran before the
    admission and was about to complete sees the new work.
 
-A run of the job (`#wakeStep`) never admits or replays anything:
+A run of the job (`#wakeStep`) never admits or replays anything. It calls
+`pi.resume()`, so sleeping tasks that are due run, then reads `pi.wake()`,
+which covers every conversation, background tasks included:
 
-- **No live pi tasks in the session:** complete the job, so there is no alarm.
-  If a submit is between steps 1 and 2 (an in-memory counter), reschedule
-  instead.
-- **A pi wait more than 60 s away:** reschedule to that deadline.
-- **Only background tasks:** reschedule in 30 s.
-- **Otherwise:** start `conversation.waitForIdle()` in the background,
-  inside the alarm's work (`trackAlarmWork`), and reschedule the job 30 s out
-  as a heartbeat. When the wait ends, push the job due now to re-check.
+- **`active`:** pi has work running or ready. Start a wait in the
+  background, inside the alarm's work (`trackAlarmWork`), that re-reads
+  `pi.wake()` every second until it is no longer active, for at most 10
+  minutes. Reschedule the job 30 s out as a heartbeat. When the wait ends,
+  push the job due now to re-check.
+- **`at`:** pi's tasks are asleep until then. Reschedule the job to `at`.
+- **Neither:** complete the job, so there is no alarm. If a submit is
+  between steps 1 and 2 (an in-memory counter), reschedule instead. A task
+  that pi's restart limit parked does not count: it waits for
+  `pi.retryTask()`, and waiting on it would keep the object awake forever.
+
+The step used to wait on `conversation.waitForIdle()`, which does count a
+parked task, so a crash-looping task held the object awake indefinitely.
 
 The whole thing relies on one Lifecycle rule: a same-id `push()` made while
 the job is dispatching supersedes that dispatch's outcome. So a submit
 cannot be lost to a wake that is completing.
 
-`onStart` pushes a wake for every session with live pi tasks. That covers
+`onStart` pushes the wake if `pi.wake()` says pi has work. That covers
 restarts and conversations a subagent created without going through
-`submit()`. `wait()`, `pending()`, and `abort(operationId)` read or change
+`submit()`. A per-session job left by an older version hands over to the
+one wake when it runs. `wait()`, `pending()`, and `abort(operationId)` read or change
 pi's submissions directly. The wake holds no per-submission state.
 
 ## The harness interface
@@ -109,15 +118,6 @@ against it:
 
 ## Hard or unresolved
 
-### Background work is polled
-
-The wake waits with `conversation.waitForIdle()`, which ignores background
-tasks, such as a background subagent's anchor (pi-durable example 23). When
-only background tasks are left, the wake sleeps 30 s and checks again. The
-alarm keeps the object alive, but a background task that finishes is only
-noticed at the next check. A background task in another conversation shows
-up under that conversation's wake, which `onStart` creates.
-
 ### pi's timers are in memory
 
 pi sleeps with `setTimeout`: `runtime.sleep(until)` in the scheduler, which
@@ -128,13 +128,13 @@ correctly. But a pending timer does not keep a Durable Object alive. If
 nothing else is in flight, the object is evicted, the timer is gone, and
 nothing wakes it until the next request.
 
-While a wake step is waiting, it keeps the object alive through its alarm
-invocation, so pi's timer fires. `#longWait` turns a wait more than 60 s
-away into a reschedule of the wake job at the deadline. It finds the deadline by
-reading pi's `LiveDoc` (`generation.retry.at`, `generation.deferred.pollAt`).
-That is a presentation document used as a control signal, and it only
-covers the generation task. A custom task's `runtime.sleep` is invisible,
-and a wait under 60 s holds the alarm invocation open (billed wall time).
+Pi 1.4 records sleeps as scheduler state, and `pi.wake()` returns the
+earliest one as `at`. The wake job reschedules itself to `at`, so an
+evicted object is restarted when the sleep ends. Until then, pi's own timer
+keeps the object in memory, billed, for up to the platform's limit on
+pending timers. Before Pi 1.4 the job read the deadline from pi's `LiveDoc`
+(`generation.retry.at`, `generation.deferred.pollAt`), a presentation
+document that only covered the generation task.
 
 **Ask Mario** (either would do):
 
@@ -152,21 +152,30 @@ Objects.
 
 ### Alarm wall time
 
-The wake's wait runs inside an alarm invocation (`trackAlarmWork`), and
-alarm handlers have a 15 minute wall-time limit. Outbound model streams keep
-an object alive for at most 15 minutes too. A wait therefore lasts at most 10
-minutes and then pushes the job due now, which starts a new alarm
-invocation. A single model request that streams for more than 15 minutes
-is still at the platform's mercy.
+The wake's wait runs inside an alarm invocation (`trackAlarmWork`), and so
+does pi's own work that the alarm starts or resumes: a 12 s model run
+started from an alarm shows up as a 12 s alarm. Alarm handlers have a 15
+minute wall-time limit, and outbound model streams keep an object alive for
+at most 15 minutes too. The wait budget keeps a long run under the limit: a
+wait lasts at most 10 minutes, then ends and pushes the job due now, so a
+new alarm takes over. A single model request that streams for more than 15
+minutes is still at the platform's mercy.
 
 ### Graceful eviction waits for the wake
 
 `evictDurableObject` waits for in-flight work to drain. The wake's purpose
 is to keep a wait in flight, so the tests crash the object with
-`abortAllDurableObjects()` instead. A deploy behaves the same way: the
-runtime gives in-flight work 30 s and then kills it. The recovery path is the
-same either way, but it is worth knowing that a running pi turn never lets
-the object drain.
+`abortAllDurableObjects()` to test recovery. A deploy behaves the same way:
+the runtime gives in-flight work 30 s and then kills it. The recovery path is
+the same either way, but it is worth knowing that a running pi turn never
+lets the object drain.
+
+The test pool never evicts an idle object by itself, because
+vitest-pool-workers sets `unsafePreventEviction`, so a test cannot see work
+that only lives in memory being lost when nothing holds the object. The
+tests' `evictWhenIdle` asks for a graceful eviction and reports whether the
+object was kept, which is how they check that the wake still holds the
+object while a pi tool waits without I/O.
 
 ### Reads the Harness does not offer
 
