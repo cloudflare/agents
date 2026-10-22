@@ -322,6 +322,7 @@ export class MCPClientManager extends LifecycleCapability {
     const result = await this.handleCallbackRequest(request);
     if (result.authSuccess) {
       void this.establishConnection(result.serverId).catch((error) => {
+        if (error instanceof ServerLaneCancelledError) return;
         console.error(
           "[MCPClientManager] Connection establishment after OAuth failed:",
           error
@@ -754,6 +755,10 @@ export class MCPClientManager extends LifecycleCapability {
    * one unit of lane work.
    */
   connectAndDiscover(id: string): Promise<MCPServerSettlement> {
+    return this.removedIfCancelled(this._connectAndDiscover(id));
+  }
+
+  private _connectAndDiscover(id: string): Promise<MCPServerSettlement> {
     return this._lanes.run(id, async () => {
       const connected = await this.connectToServer(id);
       switch (connected.state) {
@@ -782,6 +787,23 @@ export class MCPClientManager extends LifecycleCapability {
    * retried.
    */
   settleServer(id: string): Promise<MCPServerSettlement> {
+    return this.removedIfCancelled(this._settleServer(id));
+  }
+
+  /** Report queued work cancelled by removal as a removed server. */
+  private async removedIfCancelled(
+    work: Promise<MCPServerSettlement>
+  ): Promise<MCPServerSettlement> {
+    try {
+      return await work;
+    } catch (error) {
+      if (error instanceof ServerLaneCancelledError)
+        return { state: "removed" };
+      throw error;
+    }
+  }
+
+  private _settleServer(id: string): Promise<MCPServerSettlement> {
     return this._lanes.run(id, async (): Promise<MCPServerSettlement> => {
       const conn = this.mcpConnections[id];
       if (!conn) return { state: "removed" };
@@ -1354,7 +1376,15 @@ export class MCPClientManager extends LifecycleCapability {
       new URL(req.url).searchParams.get("state")
     );
     if (!serverId) return this._handleCallbackRequest(req);
-    return this._lanes.run(serverId, () => this._handleCallbackRequest(req));
+    return this._lanes
+      .run(serverId, () => this._handleCallbackRequest(req))
+      .catch((error) => {
+        // Removed while this callback waited for earlier work.
+        if (error instanceof ServerLaneCancelledError) {
+          return removedDuringAuthorization(serverId);
+        }
+        throw error;
+      });
   }
 
   private async _handleCallbackRequest(
