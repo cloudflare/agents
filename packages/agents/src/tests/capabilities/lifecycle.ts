@@ -13,6 +13,7 @@ import {
 } from "../../lifecycle";
 import { State } from "../../state";
 import { WebSockets } from "../../websockets";
+import { LiveInstances } from "../shared/live-instances";
 
 type StartupProps = { label: string };
 
@@ -724,6 +725,28 @@ class StoredStartFailureProbe extends LifecycleCapability {
   }
 }
 
+/** Every {@link EvictableStartObject} instance, by object name. */
+const evictableStartInstances = new LiveInstances();
+
+/**
+ * Starts by storing a promise that never settles but has a reaction, as
+ * pi's Harness does. Every promise reaction keeps the async context it was
+ * created in, so the capability is reachable from its startup context.
+ */
+class PendingReactionProbe extends LifecycleCapability {
+  pending: Promise<void> | undefined;
+
+  constructor() {
+    super("pending-reaction-probe");
+  }
+
+  onStart(): void {
+    const pending = new Promise<void>(() => {});
+    void pending.then(() => {});
+    this.pending = pending;
+  }
+}
+
 /**
  * Holds a queued job whose alarm runs into a failing startup, so a test can
  * check the queue still has a wake after that alarm fails.
@@ -763,6 +786,29 @@ export class AlarmStartFailureObject extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
     }
+  }
+}
+
+/**
+ * Proves an evicted object can be garbage collected after a capability
+ * started work that never settles. Tests evict it repeatedly, then count
+ * the instances still alive after a forced GC.
+ */
+export class EvictableStartObject extends DurableObject<Cloudflare.Env> {
+  readonly lifecycle = Lifecycle.install(this).use(new PendingReactionProbe());
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    evictableStartInstances.track(ctx.id.name ?? "", this);
+  }
+
+  async startLifecycle(): Promise<void> {
+    await this.lifecycle.start();
+  }
+
+  /** Count this object's instances still alive after a forced GC. */
+  countLiveInstances(): Promise<number> {
+    return evictableStartInstances.countAfterGC(this.ctx.id.name ?? "");
   }
 }
 

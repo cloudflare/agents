@@ -77,14 +77,18 @@ export type WebSearchToolDetails =
  *
  * @example
  * ```ts
- * import { createRegistry } from "@earendil-works/pi-durable";
+ * import { createRegistry, Harness } from "@earendil-works/pi-durable";
  * import { webSearchTool } from "agents/websearch/pi";
  *
- * const registry = createRegistry();
- * registry.install({
- *   name: "tools",
- *   tools: [webSearchTool({ binding: env.AI, provider: "exa" })]
- * });
+ * // In PiHarness's factory, so each object gets its own registry.
+ * harness: ({ storage, context, onWake }) => {
+ *   const registry = createRegistry();
+ *   registry.install({
+ *     name: "tools",
+ *     tools: [webSearchTool({ binding: this.env.AI, provider: "exa" })]
+ *   });
+ *   return Harness.open(storage, { models, registry, onWake }, context);
+ * }
  * ```
  */
 export function webSearchTool(

@@ -12,8 +12,9 @@ per capability, all registered in the shared workers project
   wiring.
 - `lifecycle.ts` — fixtures for the Lifecycle core itself:
   `PlainLifecycleObject` (probe capabilities for phases, alarms, context,
-  routing, events, WebSockets) and `RetryableStartObject` (startup-failure
-  retry).
+  routing, events, WebSockets), `RetryableStartObject` (startup-failure
+  retry) and `EvictableStartObject` (evicted instances are garbage
+  collected; counted with `../shared/live-instances.ts`).
 - `scheduler.ts` — `SchedulerHarnessObject` (Scheduler with registered
   callbacks, driven through real platform alarms), `SchedulerStartupWarnObject`,
   `ScheduledLifecycleObject` (Scheduler through full Lifecycle + eviction),

@@ -116,6 +116,19 @@ describe("PiHarness on pi-durable", () => {
     await eviction.evicted;
   });
 
+  it("lets evicted objects' harnesses be collected", async () => {
+    const name = crypto.randomUUID();
+    for (let i = 0; i < 5; i++) {
+      const stub = fresh(name);
+      expect(await stub.prompt("hello")).toMatchObject({ status: "done" });
+      await evictDurableObject(stub);
+    }
+
+    const stub = fresh(name);
+    expect(await stub.messages()).toHaveLength(10);
+    expect(await stub.countLiveHarnesses()).toBe(1);
+  });
+
   it("dedupes a submission by operation id", async () => {
     const stub = fresh();
     const receipt = await stub.submit("hello", { operationId: "op-1" });
