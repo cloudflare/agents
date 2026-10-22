@@ -100,8 +100,8 @@ Connect, discovery, establish, OAuth callback completion and restore for one ser
 
 Background work that must happen even if the isolate dies lives in the Lifecycle job queue (`reconnect-policy.ts`), not in memory:
 
-- `connect:<serverId>`: after a failed connect or discovery, the next attempt on a 30s → 30m backoff. Each run is one bounded attempt. Ready or `authenticating` cancels it; 24h without success records a `reconnect-exhausted` failure.
-- `auth-expiry:<serverId>`: armed with every persisted `auth_url`. If the link's `state` can no longer be redeemed when it fires, the server records an `authorization-expired` failure instead of minting a new link.
+- `connect:<serverId>`: after a failed connect or discovery, the next attempt on a 30s → 30m backoff. Each run is one bounded attempt. Restore leaves a server with a pending job `failed` (showing the job's last error) instead of connecting early. Ready or `authenticating` cancels it; 24h without success records a `reconnect-exhausted` failure. `migrateServerId` moves both jobs to the new id.
+- `auth-expiry:<serverId>`: armed with every persisted `auth_url`. If the link's `state` can no longer be redeemed when it fires, the server records an `authorization-expired` failure instead of minting a new link. The OAuth callback clears `auth_url` before it redeems the state, so a dead link found on wake was never completed and is recorded the same way.
 
 A recorded failure (`failure` column, added on first use) is terminal: restore shows it without connecting, and only an explicit reconnect (`addMcpServer`, `connectToServer`, `establishConnection`) clears it. A server is `authenticating` exactly when the manager has persisted the `auth_url` its provider produced; connect, discovery and request-time re-authorization (scope step-up, failed refresh) all enter that state through one transition. Restore trusts a persisted `auth_url` only while its OAuth `state` can still be redeemed, and otherwise reconnects. Work that outlives `removeServer` (a connect, discovery or code exchange) checks it still owns the connection before writing anything back.
 

@@ -85,6 +85,8 @@ export type ConnectJobPayload = {
   readonly attempt: number;
   /** When the first attempt of this run of failures failed, in epoch ms. */
   readonly firstFailureAt: number;
+  /** The latest attempt's error, shown while the next attempt waits. */
+  readonly error: string;
 };
 
 /** Payload of an authorization link expiry job. */
@@ -113,7 +115,8 @@ export function parseConnectJobPayload(
   return {
     serverId: value.serverId,
     attempt: value.attempt,
-    firstFailureAt: value.firstFailureAt
+    firstFailureAt: value.firstFailureAt,
+    error: typeof value.error === "string" ? value.error : "Connection failed"
   };
 }
 
@@ -146,6 +149,7 @@ export type ReconnectDecision =
  * @param policy - Backoff and give-up limits.
  * @param previous - The pending reconnect job's payload, when one exists.
  * @param serverId - The server that failed to connect.
+ * @param error - The failed attempt's error.
  * @param now - The current time in epoch milliseconds.
  * @returns When to try again, or that the policy gives up.
  */
@@ -153,6 +157,7 @@ export function nextReconnect(
   policy: ReconnectPolicy,
   previous: ConnectJobPayload | undefined,
   serverId: string,
+  error: string,
   now: number
 ): ReconnectDecision {
   const attempt = (previous?.attempt ?? 0) + 1;
@@ -165,6 +170,6 @@ export function nextReconnect(
   return {
     _tag: "retry",
     time: now + delay,
-    payload: { serverId, attempt, firstFailureAt }
+    payload: { serverId, attempt, firstFailureAt, error }
   };
 }

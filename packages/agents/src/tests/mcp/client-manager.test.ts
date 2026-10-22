@@ -2218,22 +2218,8 @@ describe("MCPClientManager OAuth Integration", () => {
         })
       );
 
-      async function seedTokens(storage: DurableObjectStorage) {
-        const provider = new DurableObjectOAuthClientProvider(
-          storage,
-          "test-agent",
-          "http://localhost:3000/callback"
-        );
-        provider.serverId = serverId;
-        provider.clientId = "stored-client-id";
-        await provider.saveTokens({
-          access_token: "saved-token",
-          token_type: "Bearer"
-        });
-      }
-
       it(
-        "records an expired link with no saved tokens as failed instead of minting a new one",
+        "records an expired link as failed instead of minting a new one",
         managerTest(async ({ harness, manager, saveServer, getServer }) => {
           saveAuthenticatingServer(saveServer);
           await seedState(harness.storage, 11 * 60 * 1000);
@@ -2251,21 +2237,47 @@ describe("MCPClientManager OAuth Integration", () => {
       );
 
       it(
-        "reconnects with saved tokens when a callback redeemed the link before the isolate died",
-        managerTest(async ({ harness, manager, saveServer, getServer }) => {
-          // The callback consumed the state and saved tokens, then the
-          // isolate died before auth_url was cleared.
-          saveAuthenticatingServer(saveServer);
-          await seedTokens(harness.storage);
-          const connectSpy = vi
-            .spyOn(manager, "connectToServer")
-            .mockResolvedValue({ state: "connected" });
+        "forgets the link before a callback redeems it",
+        managerTest(async ({ manager, saveServer, getServer }) => {
+          const stateStorage = createMockStateStorage();
+          saveServer({
+            id: serverId,
+            name: "OAuth Server",
+            server_url: "http://oauth-server.com",
+            callback_url: "http://localhost:3000/callback",
+            client_id: "stored-client-id",
+            auth_url: "https://auth.example.com/authorize",
+            server_options: null
+          });
+          const connection = new MCPClientConnection(
+            new URL("http://oauth-server.com"),
+            { name: "test-client", version: "1.0.0" },
+            {
+              transport: {
+                type: "auto",
+                authProvider: createMockAuthProvider(stateStorage)
+              },
+              client: {}
+            }
+          );
+          connection.connectionState = "authenticating";
+          let authUrlDuringExchange: string | null | undefined;
+          connection.completeAuthorization = vi
+            .fn()
+            .mockImplementation(async () => {
+              authUrlDuringExchange = getServer(serverId)?.auth_url;
+            });
+          manager.mcpConnections[serverId] = connection;
+          const state = stateStorage.createState(serverId);
 
-          await manager.restoreConnectionsFromStorage("test-agent");
-          await manager.waitForConnections();
+          await manager.handleCallbackRequest(
+            new Request(
+              `http://localhost:3000/callback?code=code&state=${state}`
+            )
+          );
 
-          expect(connectSpy).toHaveBeenCalledWith(serverId);
-          expect(getServer(serverId)?.auth_url ?? null).toBeNull();
+          // A death mid-exchange can no longer leave a spent link behind.
+          expect(authUrlDuringExchange ?? null).toBeNull();
         })
       );
     });
@@ -6439,6 +6451,7 @@ describe("MCPClientManager OAuth Integration", () => {
           return { success: true };
         });
         expect(await woken.settleServer("down")).toEqual({ state: "ready" });
+        expect(conn.connectionError).toBeNull();
 
         const afterReconnect = createTestManager(harness);
         vi.spyOn(afterReconnect, "connectToServer").mockResolvedValue({
@@ -6450,6 +6463,63 @@ describe("MCPClientManager OAuth Integration", () => {
         );
       });
     });
+
+    it("waits for a scheduled reconnect on wake instead of connecting early", async () => {
+      await withMcpHarness(async (harness) => {
+        saveServerRow(harness.storage, {
+          id: "down",
+          name: "Down Server",
+          server_url: "http://example.com/mcp",
+          callback_url: "",
+          client_id: null,
+          auth_url: null,
+          server_options: JSON.stringify({ retry: { maxAttempts: 1 } })
+        });
+        const first = createTestManager(harness);
+        vi.spyOn(first, "connectToServer").mockResolvedValue({
+          state: "failed",
+          error: "offline"
+        });
+        await first.restoreConnectionsFromStorage("test-agent");
+        await first.waitForConnections();
+        expect(jobs(harness)).toHaveLength(1);
+
+        const woken = createTestManager(harness);
+        const connect = vi.spyOn(woken, "connectToServer");
+        await woken.restoreConnectionsFromStorage("test-agent");
+        await woken.waitForConnections();
+
+        expect(connect).not.toHaveBeenCalled();
+        expect(woken.mcpConnections.down.connectionState).toBe("failed");
+        expect(woken.mcpConnections.down.connectionError).toBe("offline");
+        expect(jobs(harness)).toMatchObject([
+          { id: "connect:down", payload: { attempt: 1 } }
+        ]);
+      });
+    });
+
+    it(
+      "moves pending jobs when a server id is migrated",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        saveRestorable(saveServer);
+        vi.spyOn(manager, "connectToServer").mockResolvedValue({
+          state: "failed",
+          error: "offline"
+        });
+        await manager.restoreConnectionsFromStorage("test-agent");
+        await manager.waitForConnections();
+
+        await manager.migrateServerId("down", "stable", "test-agent");
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(jobs(harness)).toMatchObject([
+          {
+            id: "connect:stable",
+            payload: { serverId: "stable", attempt: 1, error: "offline" }
+          }
+        ]);
+      })
+    );
 
     it(
       "cancels a pending reconnect once the server is ready",

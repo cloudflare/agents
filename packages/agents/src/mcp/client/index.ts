@@ -401,18 +401,23 @@ export class MCPClientManager extends LifecycleCapability {
     const current = this.lifecycle.jobs.get(job.id);
     if (current && current.time > Date.now()) return;
     const { serverId } = payload;
-    await this._lanes.run(serverId, async () => {
-      const conn = this.mcpConnections[serverId];
-      if (!conn || !this._servers.get(serverId)) return;
-      if (this._servers.failure(serverId)) return;
-      if (
-        conn.connectionState === MCPConnectionState.READY ||
-        conn.connectionState === MCPConnectionState.AUTHENTICATING
-      ) {
-        return;
-      }
-      await this._bringUp(serverId, "single");
-    });
+    await this._lanes
+      .run(serverId, async () => {
+        const conn = this.mcpConnections[serverId];
+        if (!conn || !this._servers.get(serverId)) return;
+        if (this._servers.failure(serverId)) return;
+        if (
+          conn.connectionState === MCPConnectionState.READY ||
+          conn.connectionState === MCPConnectionState.AUTHENTICATING
+        ) {
+          return;
+        }
+        await this._bringUp(serverId, "single");
+      })
+      .catch((error) => {
+        // Removed while this attempt was queued: nothing left to reconnect.
+        if (!(error instanceof ServerLaneCancelledError)) throw error;
+      });
   }
 
   /**
@@ -524,6 +529,7 @@ export class MCPClientManager extends LifecycleCapability {
         this.lifecycle.jobs.get(connectJobId(serverId))?.payload
       ),
       serverId,
+      error,
       now
     );
     if (decision._tag === "give-up") {
@@ -548,7 +554,56 @@ export class MCPClientManager extends LifecycleCapability {
   /** A server reached ready: forget its failures and pending reconnect. */
   private onServerReady(serverId: string): void {
     this._servers.clearFailure(serverId);
+    const conn = this.mcpConnections[serverId];
+    if (conn) conn.connectionError = null;
     this.cancelJob(connectJobId(serverId));
+  }
+
+  /**
+   * A server with a reconnect already scheduled waits for it instead of
+   * connecting on every wake, so the backoff holds. Shows the last error
+   * meanwhile. Returns whether one was pending.
+   */
+  private awaitScheduledReconnect(
+    serverId: string,
+    conn: MCPClientConnection
+  ): boolean {
+    const pending = parseConnectJobPayload(
+      this.lifecycle.jobs.get(connectJobId(serverId))?.payload
+    );
+    if (!pending) return false;
+    conn.connectionState = MCPConnectionState.FAILED;
+    conn.connectionError = pending.error;
+    return true;
+  }
+
+  /** Carry a server's pending jobs over to its new id. */
+  private moveJobs(oldId: string, newId: string): void {
+    const connect = this.lifecycle.jobs.get(connectJobId(oldId));
+    const connectPayload = parseConnectJobPayload(connect?.payload);
+    if (connect && connectPayload) {
+      this.pushJob({
+        id: connectJobId(newId),
+        fn: CONNECT_JOB,
+        time: connect.time,
+        payload: { ...connectPayload, serverId: newId },
+        retry: { maxAttempts: 1 },
+        hungTimeoutSeconds: 120
+      });
+    }
+    const expiry = this.lifecycle.jobs.get(authExpiryJobId(oldId));
+    const expiryPayload = parseAuthExpiryJobPayload(expiry?.payload);
+    if (expiry && expiryPayload) {
+      this.pushJob({
+        id: authExpiryJobId(newId),
+        fn: AUTH_EXPIRY_JOB,
+        time: expiry.time,
+        payload: { ...expiryPayload, serverId: newId },
+        retry: { maxAttempts: 1 }
+      });
+    }
+    this.cancelJob(connectJobId(oldId));
+    this.cancelJob(authExpiryJobId(oldId));
   }
 
   /**
@@ -655,6 +710,9 @@ export class MCPClientManager extends LifecycleCapability {
 
     // 3. In-memory connection + disposables + authProvider.
     this._renameInMemoryConnection(oldId, newId);
+
+    // 4. Pending reconnect and link-expiry jobs.
+    this.moveJobs(oldId, newId);
 
     this.fireServerStateChanged();
   }
@@ -957,20 +1015,18 @@ export class MCPClientManager extends LifecycleCapability {
           }
           continue;
         }
-        // Otherwise the link is dead. With saved tokens (a callback redeemed
-        // it and the isolate died before clearing auth_url) reconnect
-        // directly. Without them the flow simply expired unused: record
-        // that instead of minting a link nobody asked for.
-        if (!(await authProvider?.tokens())) {
-          this.recordFailure(
-            server.id,
-            "authorization-expired",
-            AUTHORIZATION_EXPIRED_MESSAGE
-          );
-          continue;
-        }
-        this._servers.clearAuthUrl(server.id);
+        // Otherwise the link expired unused: a callback clears auth_url
+        // before it redeems the state, so a dead link here was never
+        // completed. Record that instead of minting a link nobody asked for.
+        this.recordFailure(
+          server.id,
+          "authorization-expired",
+          AUTHORIZATION_EXPIRED_MESSAGE
+        );
+        continue;
       }
+
+      if (this.awaitScheduledReconnect(server.id, conn)) continue;
 
       // Connect in the background so startup does not wait on the network;
       // waitForConnections() observes the queued work.
@@ -1012,6 +1068,7 @@ export class MCPClientManager extends LifecycleCapability {
         conn.connectionError = failure.message;
         continue;
       }
+      if (this.awaitScheduledReconnect(server.id, conn)) continue;
       this.restoreInBackground(server.id);
     }
   }
@@ -1763,6 +1820,11 @@ export class MCPClientManager extends LifecycleCapability {
 
       // A genuine callback can recover a flow that previously entered FAILED.
       conn.connectionState = MCPConnectionState.CONNECTING;
+      // Forget the link before redeeming it. If the isolate dies during the
+      // exchange, a later wake reconnects (with the saved tokens, or into a
+      // fresh flow) instead of restoring a link whose state is spent.
+      this._servers.clearAuthUrl(serverId);
+      this.cancelJob(authExpiryJobId(serverId));
       await authProvider.consumeState(state);
       await exchangeAuthorizationCode(
         serverId,
