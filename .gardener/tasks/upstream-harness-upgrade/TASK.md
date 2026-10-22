@@ -83,8 +83,10 @@ classify each drifted upstream:
 Search for existing work: `GET /search/issues?q=repo:cloudflare/agents+is:pr+is:open+<"Pi X.Y"|"pi-durable X.Y"|"opencode X.Y.Z">`
 (version quoted and URL-encoded), and
 `GET /repos/cloudflare/agents/pulls?state=all&per_page=50&head=cloudflare:gardener/upstream/<pi|opencode>-<version>`.
-Also note every open pull request that touches the upstream's surface (the files from step 3) or
-names it in its title; step 3 checks each against the upstream changes.
+Also read the dependency changes in every open pull request that touches
+`packages/agents/package.json`: a maintainer's bump can have a generic title. And note every open
+pull request that touches the upstream's surface (the files from step 3) or names it in its title;
+step 3 checks each against the upstream changes.
 
 Skip an upstream when a maintainer has an open pull request moving to this version or a newer one,
 or a Gardener pull request for this exact version exists, open or closed (closed means a maintainer
@@ -107,8 +109,9 @@ Read every non-test file in the upstream's directories, not a sample:
   `pi.ts` tool adapters under `src/browser`, `src/web` and `src/harness/pi/skills.ts`, and
   `src/experimental/channels/web/tui` (`pi-tui`).
 - opencode: `packages/agents/src/harness/opencode` and `src/models/opencode`.
-- both: every doc, example and design note that mentions the upstream
-  (`git grep -il '<pi|opencode>' -- docs design examples`), including `docs/agents/harnesses/pi.md`,
+- both: every doc, example and design note that mentions the upstream (pi:
+  `git grep -ilE 'earendil-works|pi-(ai|durable|tui)|pi harness' -- docs design examples`;
+  opencode: `git grep -il opencode -- docs design examples`), including `docs/agents/harnesses/pi.md`,
   `docs/agents/models-pi-ai.md`, `design/rfc-pi-harness-example.md`, `examples/next/harnesses/<u>`
   and `examples/next/channels/src/pi`.
 
