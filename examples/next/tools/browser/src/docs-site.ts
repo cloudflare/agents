@@ -153,13 +153,13 @@ ${NAV}`
     title: "Previewing your work",
     body: `<p>Your browser can't reach <code>localhost</code> or the container.
 It opens your work on internal hostnames instead. Point one somewhere with
-<code>hosts.assign</code> in your browser code, then navigate to the URL it
+<code>browser.assignHost</code> in your browser code, then navigate to the URL it
 returns. An assignment sticks until you change it.</p>
 
 <h2>The dev server: ${PREVIEW_HOST}</h2>
 <pre><code>async () =&gt; {
-  const { url } = await hosts.assign({ host: "${PREVIEW_HOST}", target: { port: 5173 } });
-  await cdp.send({ method: "Page.navigate", params: { url }, sessionId: "active" });
+  const { url } = await browser.assignHost({ host: "${PREVIEW_HOST}", target: { port: 5173 } });
+  await browser.cdp({ method: "Page.navigate", params: { url }, sessionId: "active" });
 }</code></pre>
 <p>Wait for the page to load before you read it. After you change files,
 reload the page (<code>Page.reload</code>); there's no hot reload. A 502
@@ -171,8 +171,8 @@ check <code>/tmp/dev-server.log</code> and start it again.</p>
 server process. Build, then point it at <code>dist</code>:</p>
 <pre><code>cd /workspace/launch &amp;&amp; npm run build</code></pre>
 <pre><code>async () =&gt; {
-  const { url } = await hosts.assign({ host: "${FILES_HOST}", target: { folder: "/workspace/launch/dist" } });
-  await cdp.send({ method: "Page.navigate", params: { url }, sessionId: "active" });
+  const { url } = await browser.assignHost({ host: "${FILES_HOST}", target: { folder: "/workspace/launch/dist" } });
+  await browser.cdp({ method: "Page.navigate", params: { url }, sessionId: "active" });
 }</code></pre>
 
 <h2>Checking the site</h2>

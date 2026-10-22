@@ -2815,9 +2815,6 @@ importers:
 
   examples/next/tools/browser:
     dependencies:
-      '@cloudflare/codemode':
-        specifier: '*'
-        version: link:../../../../packages/codemode
       '@cloudflare/computer':
         specifier: ^0.5.1
         version: 0.5.1(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.5.4))(supports-color@10.2.2)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.5.4)
@@ -2826,16 +2823,16 @@ importers:
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.5.4)
       '@earendil-works/chord':
         specifier: ^1.0.0
-        version: 1.0.0
+        version: 1.4.0
       '@earendil-works/pi-ai':
         specifier: ^1.0.0
-        version: 1.0.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@8.10.2)(ws@8.21.3)(zod@4.5.4)
+        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@8.10.2)(ws@8.21.3)(zod@4.5.4)
       '@earendil-works/pi-durable':
         specifier: ^1.0.0
-        version: 1.0.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@8.10.2)(ws@8.21.3)(zod@4.5.4)
+        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@8.10.2)(ws@8.21.3)(zod@4.5.4)
       '@earendil-works/pi-telemetry':
         specifier: ^1.0.0
-        version: 1.0.0
+        version: 1.4.0
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

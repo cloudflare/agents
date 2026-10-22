@@ -103,7 +103,7 @@ function Mono({ children }: { children: string }) {
 function browserLabel(code: string, running: boolean, screenshot: boolean) {
   if (screenshot) return "Took a screenshot";
   const url = code.match(/https?:\/\/[^\s'"`)]+/)?.[0];
-  if (code.includes("hosts.assign")) {
+  if (code.includes("browser.assignHost")) {
     return running ? "Pointing an internal host…" : "Pointed an internal host";
   }
   if (url) {

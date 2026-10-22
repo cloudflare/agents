@@ -63,7 +63,7 @@ import { z } from "zod"; //+
 import { serveWorkspaceFolder } from "./files-host"; //+
 
 // Browser Run calls back into this Worker through the router. //+
-export { CodemodeRuntime, InternalHostRouter } from "agents/browser"; //+
+export { InternalHostRouter } from "agents/browser"; //+
 export { DocsSite } from "./docs-site"; // a WorkerEntrypoint //+
 
 class Base extends DurableObject<Env> {}
@@ -115,8 +115,11 @@ export class BrowserAgent extends withWorkspaceContainer(Base) {
 }`;
 
 const MODEL_CODE = `async () => {
-  const { url } = await hosts.assign("preview.internal", { port: 5173 });
-  await cdp.send({
+  const { url } = await browser.assignHost({
+    host: "preview.internal",
+    target: { port: 5173 }
+  });
+  await browser.cdp({
     method: "Page.navigate",
     params: { url },
     sessionId: "active"
@@ -131,7 +134,7 @@ import { Browser, browserRun, type InternalHostMessage } from "agents/browser"; 
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 
-export { CodemodeRuntime, InternalHostRouter } from "agents/browser";
+export { InternalHostRouter } from "agents/browser";
 export { DocsSite } from "./docs-site";
 
 class Base extends DurableObject<Env> {}
@@ -192,7 +195,7 @@ export const CODE_STEPS: readonly CodeStep[] = [
     label: "Model writes",
     title: "What the model writes",
     caption:
-      "Inside the browser tool. A host nobody has assigned answers 502 and says to call hosts.assign.",
+      "Inside the browser tool. A host nobody has assigned answers 502 and says to call browser.assignHost.",
     language: "js",
     code: MODEL_CODE,
     added: []
