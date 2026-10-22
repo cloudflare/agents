@@ -6115,6 +6115,105 @@ describe("MCPClientManager OAuth Integration", () => {
     );
 
     it(
+      "cancels connection work still queued when the server is removed",
+      managerTest(async ({ manager }) => {
+        await manager.registerServer("queued", {
+          url: "http://example.com/mcp",
+          name: "Queued Server"
+        });
+        const connection = manager.mcpConnections.queued;
+        const releaseInit = createDeferred<void>();
+        connection.init = vi.fn().mockImplementation(async () => {
+          await releaseInit.promise;
+          connection.connectionState = "failed";
+          return "offline";
+        });
+        connection.close = vi.fn().mockResolvedValue(undefined);
+
+        const running = manager.connectToServer("queued");
+        const queued = manager
+          .connect("http://example.com/mcp", { reconnect: { id: "queued" } })
+          .then(
+            () => undefined,
+            (error: unknown) => error
+          );
+        await manager.removeServer("queued");
+        releaseInit.resolve();
+        await running;
+
+        expect(await queued).toMatchObject({
+          _tag: "ServerLaneCancelledError"
+        });
+        expect(manager.mcpConnections.queued).toBeUndefined();
+      })
+    );
+
+    it(
+      "leaves a re-registered server alone when an old callback's exchange fails",
+      managerTest(async ({ manager, saveServer, getServer }) => {
+        const serverId = "replaced-mid-exchange";
+        const callbackUrl = "http://localhost:3000/callback";
+        const stateStorage = createMockStateStorage();
+        saveServer({
+          id: serverId,
+          name: "Replaced Server",
+          server_url: "http://test.com",
+          callback_url: callbackUrl,
+          client_id: "test-client-id",
+          auth_url: null,
+          server_options: null
+        });
+        const connection = new MCPClientConnection(
+          new URL("http://test.com"),
+          { name: "test-client", version: "1.0.0" },
+          {
+            transport: {
+              type: "auto",
+              authProvider: createMockAuthProvider(stateStorage)
+            },
+            client: {}
+          }
+        );
+        connection.connectionState = "authenticating";
+        const exchangeStarted = createDeferred<void>();
+        const releaseExchange = createDeferred<void>();
+        connection.completeAuthorization = vi
+          .fn()
+          .mockImplementation(async () => {
+            exchangeStarted.resolve();
+            await releaseExchange.promise;
+            throw new Error("invalid_grant");
+          });
+        connection.close = vi.fn().mockResolvedValue(undefined);
+        manager.mcpConnections[serverId] = connection;
+        const state = stateStorage.createState(serverId);
+
+        const callback = manager.handleCallbackRequest(
+          new Request(`${callbackUrl}?code=code&state=${state}`)
+        );
+        await exchangeStarted.promise;
+        await manager.removeServer(serverId);
+        await manager.registerServer(serverId, {
+          url: "http://test.com",
+          name: "Replaced Server",
+          callbackUrl,
+          authUrl: "https://auth.example.com/replacement"
+        });
+        const replacement = manager.mcpConnections[serverId];
+        replacement.connectionState = "authenticating";
+
+        releaseExchange.resolve();
+        const result = await callback;
+
+        expect(result.authSuccess).toBe(false);
+        expect(replacement.connectionState).toBe("authenticating");
+        expect(getServer(serverId)?.auth_url).toBe(
+          "https://auth.example.com/replacement"
+        );
+      })
+    );
+
+    it(
       "clears tokens saved by a callback that finished after removeServer",
       managerTest(async ({ manager, saveServer }) => {
         const serverId = "removed-mid-exchange";

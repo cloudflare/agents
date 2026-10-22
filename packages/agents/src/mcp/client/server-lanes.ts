@@ -13,6 +13,25 @@ function invoke<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
+ * Rejection for lane work that was still queued when its server's lane was
+ * forgotten (the server was removed or its connections closed).
+ */
+export class ServerLaneCancelledError extends Error {
+  /** Stable discriminant for this error. */
+  readonly _tag = "ServerLaneCancelledError" as const;
+
+  /**
+   * @param serverId - The server whose queued work was cancelled.
+   */
+  constructor(readonly serverId: string) {
+    super(
+      `Connection work for MCP server "${serverId}" was cancelled because the server was removed or closed`
+    );
+    this.name = "ServerLaneCancelledError";
+  }
+}
+
+/**
  * One queue of connection work per MCP server. Work for the same server runs
  * one item at a time in submission order, so connect, discovery, OAuth
  * callback completion and restore never interleave on one connection; work
@@ -25,6 +44,8 @@ function invoke<T>(fn: () => Promise<T>): Promise<T> {
  */
 export class ServerLanes {
   readonly #tails = new Map<string, Promise<void>>();
+  /** Bumped by `forget()`; queued work from an older generation is cancelled. */
+  readonly #generations = new Map<string, number>();
   readonly #held = new AsyncLocalStorage<ReadonlySet<string>>();
 
   /**
@@ -39,7 +60,11 @@ export class ServerLanes {
 
     const lane = new Set(held);
     lane.add(serverId);
-    const start = () => this.#held.run(lane, work);
+    const generation = this.#generation(serverId);
+    const start = () =>
+      this.#generation(serverId) === generation
+        ? this.#held.run(lane, work)
+        : Promise.reject(new ServerLaneCancelledError(serverId));
     const previous = this.#tails.get(serverId);
     // Claim the lane before starting, so work queued while this work runs
     // synchronously still waits for it.
@@ -77,16 +102,22 @@ export class ServerLanes {
   }
 
   /**
-   * Stop waiting for a server's queued work. Work already running keeps
-   * running; later work for the server no longer queues behind it.
+   * Drop a server's queue: work still waiting rejects with
+   * {@link ServerLaneCancelledError}, work already running keeps running,
+   * and later work no longer queues behind either.
    */
   forget(serverId: string): void {
+    this.#generations.set(serverId, this.#generation(serverId) + 1);
     this.#tails.delete(serverId);
   }
 
-  /** Stop waiting for every server's queued work. */
+  /** Drop every server's queue, as {@link ServerLanes.forget} does for one. */
   forgetAll(): void {
-    this.#tails.clear();
+    for (const serverId of [...this.#tails.keys()]) this.forget(serverId);
+  }
+
+  #generation(serverId: string): number {
+    return this.#generations.get(serverId) ?? 0;
   }
 
   /** Run `fn` without the current work's re-entrant lane permission. */
