@@ -209,7 +209,9 @@ describe("waitForConnections E2E", () => {
     });
 
     it("should show race condition without waiting after onStart", async () => {
-      const name = "hibernation-race";
+      // A fresh object per attempt: a retried attempt would otherwise wake
+      // with the previous attempt's reconnect scheduled and stay failed.
+      const name = `hibernation-race-${crypto.randomUUID()}`;
       let stub = await getAgentByName(env.TestWaitConnectionsAgent, name);
 
       await stub.insertMcpServer(
