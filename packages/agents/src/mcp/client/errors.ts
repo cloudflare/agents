@@ -15,10 +15,20 @@ import { UnauthorizedError } from "@modelcontextprotocol/client";
  * `instanceof MCPAuthorizationRequiredError` to read `authUrl`.
  */
 export class MCPAuthorizationRequiredError extends UnauthorizedError {
+  /** Stable discriminant for this error. */
+  readonly _tag = "MCPAuthorizationRequiredError" as const;
+  /** The MCP server that needs authorization. */
   readonly serverId: string;
+  /** The authorization URL to send the user to; also persisted as `auth_url`. */
   readonly authUrl: string;
+  /** The OAuth client id used for the authorization request, when known. */
   readonly clientId?: string;
 
+  /**
+   * @param serverId - The MCP server that needs authorization.
+   * @param authUrl - The authorization URL the SDK built for the new flow.
+   * @param options - The OAuth client id and the original unauthorized error.
+   */
   constructor(
     serverId: string,
     authUrl: string,
@@ -34,6 +44,27 @@ export class MCPAuthorizationRequiredError extends UnauthorizedError {
   }
 }
 
+/**
+ * Thrown by `MCPClientManager.callTool()`, `readResource()` and `getPrompt()`
+ * when no connection exists for `serverId`: the id was never registered, the
+ * server was removed, or a restore has not created the connection yet.
+ */
+export class MCPConnectionNotFoundError extends Error {
+  /** Stable discriminant for this error. */
+  readonly _tag = "MCPConnectionNotFoundError" as const;
+
+  /**
+   * @param serverId - The server id that has no connection.
+   */
+  constructor(readonly serverId: string) {
+    super(
+      `No MCP connection for server "${serverId}". It may not be registered yet, may have been removed, or may still be restoring.`
+    );
+    this.name = "MCPConnectionNotFoundError";
+  }
+}
+
+/** Message of an unknown thrown value. */
 export function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

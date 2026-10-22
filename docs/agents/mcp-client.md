@@ -256,7 +256,9 @@ type AddMcpServerResult =
 ```
 
 - **`ready`** - Server connected and tools discovered
-- **`authenticating`** - Server requires OAuth; redirect user to `authUrl`
+- **`authenticating`** - Server requires OAuth; redirect user to `authUrl`. This includes servers that accept the MCP handshake without a token but require one to list tools, prompts or resources.
+
+Calling `addMcpServer()` again for a server that is already registered returns its current state. If the server is still connecting (for example while it is restored after the agent wakes), the call waits for that attempt and returns its result.
 
 ## OAuth Authentication
 
@@ -313,9 +315,13 @@ For example: `https://my-worker.workers.dev/agents/my-agent/default/callback`
 
 OAuth tokens are securely stored in SQLite and persist across agent restarts.
 
+An authorization link stays valid for 10 minutes. When the agent wakes and a saved link can no longer complete (it expired, or its callback already ran), the agent reconnects instead of showing the dead link: saved tokens connect directly, and otherwise the server's next `401` produces a fresh `auth_url`.
+
 ### Re-authorization during a session
 
-A request can need authorization again after the server is `ready`: a tool call that needs a scope the grant lacks (`403 insufficient_scope`), or a `401` whose token refresh fails. `callTool()`, `readResource()` and `getPrompt()` then throw `MCPAuthorizationRequiredError`. The server moves to `authenticating` and its `auth_url` is saved, so clients see the new link through `getMcpServers()` like at connect time. Send the user to `error.authUrl`; the normal OAuth callback completes the flow and reconnects. Retry the request when the server is `ready` again. Tools from `getAITools()` call `callTool()`, so their `execute` throws the same error. If no usable link was produced (for example, a custom OAuth provider that does not put a fresh `state` in each authorization URL, or a callback for this server is already being processed), the call throws the SDK's plain `UnauthorizedError` as before.
+A request can need authorization again after the server is `ready`: a tool call that needs a scope the grant lacks (`403 insufficient_scope`), or a `401` whose token refresh fails. `callTool()`, `readResource()` and `getPrompt()` then throw `MCPAuthorizationRequiredError`. The server moves to `authenticating` and its `auth_url` is saved, so clients see the new link through `getMcpServers()` like at connect time. Send the user to `error.authUrl`; the normal OAuth callback completes the flow and reconnects. Retry the request when the server is `ready` again. Tools from `getAITools()` call `callTool()`, so their `execute` throws the same error. If no usable link was produced (for example, a custom OAuth provider that does not put a fresh `state` in each authorization URL, or a callback for this server is already being processed), the call throws the SDK's plain `UnauthorizedError` as before. `MCPAuthorizationRequiredError` extends `UnauthorizedError`, so existing `instanceof UnauthorizedError` checks keep matching.
+
+Calls for a `serverId` with no connection (never registered, removed, or still being restored) throw `MCPConnectionNotFoundError`.
 
 ```typescript
 import { MCPAuthorizationRequiredError } from "agents/mcp/client";

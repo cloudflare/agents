@@ -2,6 +2,7 @@ import { UnauthorizedError } from "@modelcontextprotocol/client";
 import { describe, expect, it, vi } from "vitest";
 import {
   MCPAuthorizationRequiredError,
+  MCPConnectionNotFoundError,
   type MCPClientManager
 } from "../../mcp/client";
 import { isUnauthorized } from "../../mcp/client/errors";
@@ -26,7 +27,7 @@ function createFakeOAuthMcpServer() {
   const tokens = new Map<string, string>(); // access token -> scope
   const codes = new Map<string, string>(); // authorization code -> scope
   const tokenRequests: URLSearchParams[] = [];
-  const options = { failRefresh: false };
+  const options = { failRefresh: false, openInitialize: false };
 
   const json = (body: unknown, headers: Record<string, string> = {}) =>
     new Response(JSON.stringify(body), {
@@ -106,14 +107,22 @@ function createFakeOAuthMcpServer() {
       const scope = tokens.get(
         (request.headers.get("authorization") ?? "").replace(/^Bearer /, "")
       );
-      if (!scope) return challenge(401, BASE_SCOPE);
       if (request.method === "GET" || request.method === "DELETE") {
-        return new Response(null, { status: 405 });
+        return scope
+          ? new Response(null, { status: 405 })
+          : challenge(401, BASE_SCOPE);
       }
       const message = (await request.json()) as {
         id?: number;
         method?: string;
       };
+      // Servers may leave initialize open and protect only the catalogs.
+      const open =
+        options.openInitialize &&
+        (message.method === "initialize" ||
+          message.method === "server/discover" ||
+          message.id === undefined);
+      if (!scope && !open) return challenge(401, BASE_SCOPE);
       if (message.id === undefined) return new Response(null, { status: 202 });
       const ok = (result: unknown) =>
         json(
@@ -137,7 +146,7 @@ function createFakeOAuthMcpServer() {
             ]
           });
         case "tools/call":
-          if (!scope.split(" ").includes(WRITE_SCOPE)) {
+          if (!scope?.split(" ").includes(WRITE_SCOPE)) {
             return challenge(
               403,
               `${BASE_SCOPE} ${WRITE_SCOPE}`,
@@ -501,6 +510,63 @@ describe("MCPClientManager mid-session re-authorization", () => {
         harness.serverRows().find((row) => row.id === serverId)?.auth_url ??
           null
       ).toBeNull();
+    });
+  });
+
+  it("surfaces authorization required during discovery", async () => {
+    await withMcpHarness(async (harness) => {
+      const manager = harness.createManager();
+      const server = createFakeOAuthMcpServer();
+      server.options.openInitialize = true;
+      const serverId = "discovery-auth-server";
+
+      await manager.registerServer(serverId, {
+        url: MCP_URL,
+        name: "Discovery auth server",
+        callbackUrl: CALLBACK_URL,
+        client: {},
+        transport: { type: "streamable-http", fetch: server.fetch }
+      });
+      expect((await manager.connectToServer(serverId)).state).toBe("connected");
+
+      const discovered = await manager.discoverIfConnected(serverId);
+      expect(discovered?.success).toBe(false);
+      expect(discovered?.state).toBe("authenticating");
+      const authUrl = discovered?.authUrl;
+      if (!authUrl) throw new Error("expected an authorization URL");
+      expect(
+        harness.serverRows().find((row) => row.id === serverId)?.auth_url
+      ).toBe(authUrl);
+
+      server.codes.set("code-discovery", BASE_SCOPE);
+      const result = await manager.handleCallbackRequest(
+        callbackRequest(authUrl, "code-discovery")
+      );
+      expect(result.authSuccess).toBe(true);
+      await manager.establishConnection(serverId);
+      expect(manager.mcpConnections[serverId].connectionState).toBe("ready");
+    });
+  });
+
+  it("rejects requests for a server with no connection", async () => {
+    await withMcpHarness(async (harness) => {
+      const manager = harness.createManager();
+      const settle = (p: Promise<unknown>) =>
+        p.then(
+          () => undefined,
+          (e: unknown) => e
+        );
+      const errors = await Promise.all([
+        settle(
+          manager.callTool({ serverId: "ghost", name: "x", arguments: {} })
+        ),
+        settle(manager.readResource({ serverId: "ghost", uri: "test://x" })),
+        settle(manager.getPrompt({ serverId: "ghost", name: "x" }))
+      ]);
+      for (const error of errors) {
+        expect(error).toBeInstanceOf(MCPConnectionNotFoundError);
+        expect((error as MCPConnectionNotFoundError).serverId).toBe("ghost");
+      }
     });
   });
 });
