@@ -11,7 +11,7 @@ This release adds support for [Pi 1.4](https://github.com/earendil-works/pi/blob
 - **One wake job per object:** `PiHarness` wakes from Pi's `wake()`, so a task stopped by Pi's restart limit no longer keeps the object awake.
 - **Parked tasks:** tasks stopped by Pi's restart limit show as `parked` in `pending()`, and `retry()` runs them again.
 - **Recovery:** Pi reopens after a storage error instead of failing every call until the object restarts, and the wake job survives failed steps with backoff.
-- **Fixes:** Lifecycle no longer keeps evicted Durable Objects in memory (#2646), and it arms a fallback alarm when startup fails. pi-ai now reports cut-off model streams with wording Pi treats as transient, so Pi retries them.
+- **Fixes:** Lifecycle no longer keeps evicted Durable Objects in memory, and it arms a fallback alarm when startup fails. pi-ai now reports cut-off model streams with wording Pi treats as transient, so Pi retries them.
 
 ### Upgrading
 
