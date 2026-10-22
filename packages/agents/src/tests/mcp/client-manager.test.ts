@@ -6149,6 +6149,41 @@ describe("MCPClientManager OAuth Integration", () => {
     );
 
     it(
+      "answers a callback queued behind work for a server that is then removed",
+      managerTest(async ({ manager }) => {
+        await manager.registerServer("removed-callback", {
+          url: "http://example.com/mcp",
+          name: "Removed Callback Server",
+          callbackUrl: "http://localhost:3000/callback"
+        });
+        const connection = manager.mcpConnections["removed-callback"];
+        const releaseInit = createDeferred<void>();
+        connection.init = vi.fn().mockImplementation(async () => {
+          await releaseInit.promise;
+          connection.connectionState = "failed";
+          return "offline";
+        });
+        connection.close = vi.fn().mockResolvedValue(undefined);
+
+        const running = manager.connectToServer("removed-callback");
+        const callback = manager.handleCallbackRequest(
+          new Request(
+            "http://localhost:3000/callback?code=code&state=nonce.removed-callback"
+          )
+        );
+        await manager.removeServer("removed-callback");
+        releaseInit.resolve();
+        await running;
+
+        expect(await callback).toEqual({
+          serverId: "removed-callback",
+          authSuccess: false,
+          authError: "Server removed-callback was removed during authorization"
+        });
+      })
+    );
+
+    it(
       "leaves a re-registered server alone when an old callback's exchange fails",
       managerTest(async ({ manager, saveServer, getServer }) => {
         const serverId = "replaced-mid-exchange";
