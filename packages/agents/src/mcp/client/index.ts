@@ -1727,8 +1727,13 @@ export class MCPClientManager extends LifecycleCapability {
       );
     }
     // Automatic paths never reach a server with a recorded failure, so this
-    // is an explicit reconnect: forget why it stopped.
-    this._servers.clearFailure(id);
+    // is an explicit reconnect: forget why it stopped, including an
+    // exhausted authorization budget. Ordinary OAuth round trips (no failure
+    // recorded) keep their round count.
+    if (this._servers.failure(id)) {
+      this._servers.clearFailure(id);
+      this._servers.setAuthorizationRounds(id, undefined);
+    }
 
     const error = await conn.init();
     if (this.mcpConnections[id] !== conn) {
