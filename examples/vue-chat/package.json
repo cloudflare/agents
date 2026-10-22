@@ -24,7 +24,7 @@
     "@cloudflare/workers-types": "^5.20261014.1",
     "@vitejs/plugin-vue": "^6.0.0",
     "typescript": "^6.0.3",
-    "vite": "^8.1.0",
+    "vite": "^8.1.6",
     "vue-tsc": "^3.3.0",
     "wrangler": "^4.145.0"
   }
