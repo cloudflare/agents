@@ -246,7 +246,7 @@ export class MyAgent extends Think<Env> {
 - Set `keepAliveMs`, `recording`, and `guardrails` on `browserRun(binding, options)`. `keepAliveMs` is how long an idle browser stays alive: 10 minutes by default, up to 20. Browser Run bills the idle time, so a longer value keeps tabs and logins across longer gaps between turns but costs more when a conversation is abandoned. Use a different `name` for each extra browser on the same agent.
 - Each run times out after `timeoutMs` (default 60 seconds).
 - The tool's description covers the `cdp` API, the CDP mistakes models commonly make, and this time limit, so the model doesn't need a discovery pass first.
-- A single `cdp.send` result can be at most 1 MB, so a full-page screenshot of a long page fails. The model is told to capture the viewport or use JPEG instead.
+- A screenshot can be at most 1 MB, so a full-page screenshot of a long page fails. The model is told to capture the viewport or use JPEG instead.
 
 Only Chromium on a Browser Run binding is supported. It needs the same `LOADER` binding as `createBrowserTools`, but no `CodemodeRuntime` export.
 

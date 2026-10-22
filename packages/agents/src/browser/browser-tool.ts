@@ -104,7 +104,7 @@ const BROWSER_RULES = [
   "Tabs a page opens itself (popups, target=_blank links) don't become active; the result lists them as newTabs.",
   "Runtime.evaluate: pass returnByValue: true, or objects come back as a remote reference with no value, and awaitPromise: true for async expressions. The value is at result.value. A thrown error doesn't reject: check exceptionDetails.",
   "Page.navigate returns before the page loads and doesn't throw when it fails: check errorText, then poll document.readyState with Runtime.evaluate until it is 'complete'.",
-  "Pick out what you need inside Runtime.evaluate and return only that. Results over about 24,000 characters are cut short, and a single cdp.send result over 1 MB (a full-page screenshot, say) fails the run."
+  "Pick out what you need inside Runtime.evaluate and return only that. Results over about 24,000 characters are cut short, and a screenshot over 1 MB fails the run."
 ];
 
 const RESTARTED_NOTICE =
@@ -277,7 +277,8 @@ export function createBrowserToolCore(
               status: "completed",
               executionId,
               result: transformBrowserResult(ran.result),
-              ...logs
+              ...logs,
+              ...(ran.notice ? { notice: ran.notice } : {})
             };
     } catch (error) {
       output = {
@@ -286,7 +287,9 @@ export function createBrowserToolCore(
         error: error instanceof Error ? error.message : String(error)
       };
     }
-    return { ...output, ...reportFields(await session.close()) };
+    const report = reportFields(await session.close());
+    const notice = [output.notice, report.notice].filter(Boolean).join(" ");
+    return { ...output, ...report, ...(notice ? { notice } : {}) };
   }
 
   return {
