@@ -67,8 +67,12 @@ export type PiPromptResponse = PiOperationResult & {
 export type PiPendingOperation = {
   readonly operationId: string;
   readonly session: PiSessionId;
-  /** `queued` in pi's inbox, or `running` as part of the current run. */
-  readonly status: "queued" | "running";
+  /**
+   * `queued` in pi's inbox, or `running` as part of the current run.
+   * `parked`: running, but pi's crash-loop guard (`settings.restartLimit`)
+   * stopped a task of the session; `retry()` runs it again.
+   */
+  readonly status: "queued" | "running" | "parked";
 };
 
 export type PiSessionInfo = {

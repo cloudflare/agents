@@ -9,8 +9,10 @@ import {
   type AgentChange,
   type EntryRecord,
   type Harness,
+  type HarnessInspection,
   type ModelRef,
   type SettledSubmissionRecord,
+  type TaskId,
   type UserInput,
   type Wake
 } from "@earendil-works/pi-durable";
@@ -318,6 +320,14 @@ export class PiHarness extends LifecycleCapability {
     return this.session(options.session).abort(options.operationId);
   }
 
+  /**
+   * Run again the tasks pi's crash-loop guard parked in a session's work.
+   * False when nothing was parked.
+   */
+  retry(options: PiSessionOptions = {}): Promise<boolean> {
+    return this.session(options.session).retry();
+  }
+
   wait(
     operationId: string,
     options: PiSessionOptions & { readonly signal?: AbortSignal } = {}
@@ -337,7 +347,9 @@ export class PiHarness extends LifecycleCapability {
       options.session === undefined
         ? undefined
         : conversationId(options.session);
-    return (await pi.inspect(BG)).submissions
+    const inspection = await pi.inspect(BG);
+    const parked = await this.#parked(inspection);
+    return inspection.submissions
       .filter(
         (record) =>
           record.requestId !== undefined &&
@@ -346,7 +358,12 @@ export class PiHarness extends LifecycleCapability {
       .map((record) => ({
         operationId: record.requestId as string,
         session: String(record.conversationId),
-        status: record.status === "queued" ? "queued" : "running"
+        status:
+          record.status === "queued"
+            ? "queued"
+            : parked.some((task) => task.sessions.has(record.conversationId))
+              ? "parked"
+              : "running"
       }));
   }
 
@@ -379,15 +396,9 @@ export class PiHarness extends LifecycleCapability {
     const operationId = options.operationId ?? crypto.randomUUID();
     const { storage } = await this.#open();
     const conversation = await this.conversation(session);
-    this.#admitting++;
-    let accepted: boolean;
-    try {
-      // 1. The wake first, so a job is scheduled before pi has the work.
-      //    If the object dies after pi admits the input, that job restarts
-      //    it. While this admission is in flight the step will not park.
-      await this.#wake();
-      // 2. The one admission. pi deduplicates by request id.
-      accepted =
+    const accepted = await this.#admit(async () => {
+      // The one admission. pi deduplicates by request id.
+      const accepted =
         (await storage.submissionByRequest(
           conversation.id,
           operationId,
@@ -403,12 +414,23 @@ export class PiHarness extends LifecycleCapability {
         },
         BG
       );
-    } finally {
-      this.#admitting--;
-    }
-    // 3. Step now, so the wake sees the work even if it just parked.
-    await this.#wake();
+      return accepted;
+    });
     return { operationId, session, accepted };
+  }
+
+  /** @internal Run again the tasks pi's restart limit parked in a session. */
+  async retryParked(session: PiSessionId): Promise<boolean> {
+    const { pi } = await this.#open();
+    const id = conversationId(session);
+    const parked = (await this.#parked(await pi.inspect(BG))).filter((task) =>
+      task.sessions.has(id)
+    );
+    if (parked.length === 0) return false;
+    await this.#admit(async () => {
+      for (const task of parked) await pi.retryTask(task.id, BG);
+    });
+    return true;
   }
 
   /** @internal Withdraw a queued input, or abort the run it joined. */
@@ -456,6 +478,25 @@ export class PiHarness extends LifecycleCapability {
   }
 
   // ── The wake ─────────────────────────────────────────────────────────────
+
+  /**
+   * Hand pi work inside the wake. The wake is scheduled first, so if the
+   * object dies after pi has the work, that job restarts it; while `hand`
+   * is in flight the step will not complete. The wake steps again after, so
+   * it sees the work even if it just completed.
+   */
+  async #admit<T>(hand: () => Promise<T>): Promise<T> {
+    this.#admitting++;
+    let result: T;
+    try {
+      await this.#wake();
+      result = await hand();
+    } finally {
+      this.#admitting--;
+    }
+    await this.#wake();
+    return result;
+  }
 
   /** Schedule the wake job now, or at `time`. */
   #wake(time = Date.now()): Promise<unknown> {
@@ -518,7 +559,7 @@ export class PiHarness extends LifecycleCapability {
     if (this.#admitting > 0) return heartbeat;
     if (wake.at !== undefined) return { rescheduleAt: wake.at };
     // Nothing to do. A task parked by pi's restart limit is not work: it
-    // waits for `pi.retryTask()`.
+    // waits for `retry()`.
     return undefined;
   }
 
@@ -608,6 +649,31 @@ export class PiHarness extends LifecycleCapability {
         ? {}
         : { thinkingLevel: defaults.thinkingLevel })
     };
+  }
+
+  /**
+   * Tasks pi's restart limit parked, each with the sessions whose work it
+   * is: its own, and every session that owns that one, such as the session
+   * of a tool that started a subagent.
+   */
+  async #parked(
+    inspection: HarnessInspection
+  ): Promise<{ id: TaskId; sessions: Set<ConversationId> }[]> {
+    const { storage } = await this.#open();
+    const parked: { id: TaskId; sessions: Set<ConversationId> }[] = [];
+    for (const { record, state } of inspection.tasks) {
+      if (state.kind !== "blocked" || state.reason !== "restart_limit") {
+        continue;
+      }
+      const sessions = new Set<ConversationId>();
+      let id: ConversationId | undefined = record.conversationId;
+      while (id !== undefined && !sessions.has(id)) {
+        sessions.add(id);
+        id = (await storage.conversation(id, BG))?.owner?.conversationId;
+      }
+      parked.push({ id: record.id, sessions });
+    }
+    return parked;
   }
 
   async #findSubmission(
@@ -700,6 +766,15 @@ export class PiSession {
     const conversation = await this.#harness.conversation(this.id);
     await conversation.abort(BG);
     return true;
+  }
+
+  /**
+   * Run again the tasks pi's crash-loop guard (`settings.restartLimit`)
+   * parked in this session's work, including subagent sessions it owns.
+   * False when nothing was parked.
+   */
+  retry(): Promise<boolean> {
+    return this.#harness.retryParked(this.id);
   }
 
   /** Start a new context, optionally from a handoff note. */
