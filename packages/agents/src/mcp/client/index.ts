@@ -32,7 +32,6 @@ export {
   MCPConnectionNotFoundError
 } from "./errors";
 import { type RetryOptions, tryN } from "../../retries";
-import { z } from "zod";
 import { nanoid } from "nanoid";
 import { Emitter, type Event, DisposableStore } from "../../core/events";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
@@ -62,229 +61,18 @@ import {
   decodeMcpServerOptions,
   encodeMcpServerOptions,
   ensureMcpServerTable,
-  withMcpSession,
   type MCPServerRow,
   type PersistedMcpServerOptions
 } from "./storage";
+import { MCPAIToolConverter, type MCPAIToolSet } from "./ai-tools";
+export type { MCPAITool, MCPAIToolSet } from "./ai-tools";
+import { isBlockedUrl } from "./url-policy";
+import { McpServerStore } from "./server-store";
+export { MCP_SERVER_ID_MAX_LENGTH, normalizeServerId } from "./url-policy";
 import { LifecycleCapability } from "../../lifecycle/capability";
 import type { CapabilityRequestContext } from "../../lifecycle/capability-runner";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
-
-export type MCPAITool = {
-  description?: string;
-  title?: string;
-  execute: (
-    args: Record<string, unknown>,
-    options?: unknown
-  ) => Promise<unknown>;
-  inputSchema: z.ZodType;
-  outputSchema?: z.ZodType;
-};
-
-/**
- * Structural tool set returned by {@link MCPClientManager.getAITools}.
- * Compatible with the AI SDK without importing its types into the core
- * `agents` declaration graph.
- */
-export type MCPAIToolSet = Record<string, MCPAITool>;
-
-type MCPAIConvertedSchemas = {
-  inputSchema: z.ZodType;
-  outputSchema?: z.ZodType;
-};
-
-type MCPAISchemaSource = {
-  tool: Tool;
-  inputSchema: Tool["inputSchema"] | undefined;
-  outputSchema: Tool["outputSchema"] | undefined;
-};
-
-type MCPAISchemaCacheSlot = MCPAISchemaSource &
-  (
-    | { status: "converted"; converted: MCPAIConvertedSchemas }
-    | { status: "failed"; error: string }
-  );
-
-type MCPAISchemaCacheEntry = {
-  catalog: Tool[];
-  converted: Array<MCPAISchemaCacheSlot | undefined>;
-};
-
-/** Maximum length of a normalized MCP server id. */
-export const MCP_SERVER_ID_MAX_LENGTH = 64;
-
-/**
- * Normalize a caller-supplied MCP server id into a stable, storage- and
- * tool-name-safe form.
- *
- * The id is surfaced in several places where the character set matters:
- *  - as the primary key in the `cf_agents_mcp_servers` SQLite table
- *  - embedded in AI SDK tool names as `` `tool_${id.replace(/-/g, "")}_${tool}` ``
- *    (tool names must match `/^[A-Za-z0-9_]+$/`)
- *  - as a key on the `mcpConnections` map and OAuth provider storage
- *
- * Rules:
- *  1. Lowercase.
- *  2. Replace any run of disallowed characters with a single `-`.
- *  3. Collapse repeated `-` and trim leading/trailing `-`/`_`.
- *  4. Prefix with `id-` if the result is empty or doesn't start with a letter.
- *  5. Truncate to {@link MCP_SERVER_ID_MAX_LENGTH} characters.
- *
- * @example
- * normalizeServerId("my-supplied-id");  // "my-supplied-id"
- * normalizeServerId("GitHub MCP!");     // "github-mcp"
- * normalizeServerId("42-things");       // "id-42-things"
- */
-export function normalizeServerId(input: string): string {
-  if (typeof input !== "string") {
-    throw new TypeError(
-      `normalizeServerId: expected string, got ${typeof input}`
-    );
-  }
-
-  let id = input
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^[-_]+|[-_]+$/g, "");
-
-  if (id.length === 0 || !/^[a-z]/.test(id)) {
-    id = `id-${id}`.replace(/-+$/g, "");
-  }
-
-  if (id.length > MCP_SERVER_ID_MAX_LENGTH) {
-    id = id.slice(0, MCP_SERVER_ID_MAX_LENGTH).replace(/-+$/g, "");
-  }
-
-  return id;
-}
-
-/**
- * Blocked hostname patterns for SSRF protection.
- * Prevents MCP client from connecting to internal/private network addresses
- * while allowing loopback hosts for local development.
- */
-const BLOCKED_HOSTNAMES = new Set([
-  "0.0.0.0",
-  "[::]",
-  "metadata.google.internal"
-]);
-
-/**
- * Check whether four IPv4 octets belong to a private/reserved range.
- * Blocks RFC 1918, link-local, cloud metadata, and unspecified addresses.
- */
-function isPrivateIPv4(octets: number[]): boolean {
-  const [a, b] = octets;
-  // 10.0.0.0/8
-  if (a === 10) return true;
-  // 172.16.0.0/12
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  // 192.168.0.0/16
-  if (a === 192 && b === 168) return true;
-  // 169.254.0.0/16 (link-local / cloud metadata)
-  if (a === 169 && b === 254) return true;
-  // 0.0.0.0/8
-  if (a === 0) return true;
-  return false;
-}
-
-/**
- * fe80::/10 — IPv6 link-local (RFC 4291 §2.5.6).
- *
- * The /10 boundary fixes the first 10 bits (1111111010), which means valid
- * first hextets range from fe80 through febf. Only hex digits 8, 9, a, b
- * have high two bits "10" — anything else (e.g. fe7f, fec0) is out of range.
- * The fourth hex digit is unconstrained by the /10 boundary.
- *
- * Historical bug: `startsWith("fe80")` only matched the narrower fe80::/16
- * prefix and let fe81::/feab::/febf:: slip through. See issue #1325.
- */
-const IPV6_LINK_LOCAL = /^fe[89ab][0-9a-f]/;
-
-/**
- * Check whether a bracket-stripped, lowercased IPv6 address belongs to a
- * private/reserved range. Also unwraps IPv4-mapped IPv6 (::ffff:...) and
- * delegates to isPrivateIPv4 for those.
- *
- * Loopback (::1) and unspecified (::) are NOT blocked here:
- *   - ::1 is intentionally allowed (parallel to 127.x.x.x for local dev)
- *   - :: (== [::]) is blocked via BLOCKED_HOSTNAMES at the hostname level
- */
-function isPrivateIPv6(addr: string): boolean {
-  // fc00::/7 — unique local addresses (fc00:: through fdff::).
-  // /7 fixes first 7 bits "1111110", so the 8-bit prefix is either
-  // fc (11111100) or fd (11111101). No other first hextets qualify.
-  if (addr.startsWith("fc") || addr.startsWith("fd")) return true;
-
-  // fe80::/10 — link-local addresses (fe80:: through febf:...).
-  if (IPV6_LINK_LOCAL.test(addr)) return true;
-
-  // IPv4-mapped IPv6 (::ffff:x.x.x.x or ::ffff:XXYY:ZZWW).
-  // The WHATWG URL parser does NOT canonicalize hex-form tails to dotted
-  // form — [::ffff:a00:1] stays as "::ffff:a00:1" and will only be caught
-  // by the hex branch. Both forms must therefore be handled here.
-  if (addr.startsWith("::ffff:")) {
-    const mapped = addr.slice(7);
-    const dotParts = mapped.split(".");
-    if (dotParts.length === 4 && dotParts.every((p) => /^\d{1,3}$/.test(p))) {
-      if (isPrivateIPv4(dotParts.map(Number))) return true;
-    } else {
-      const hexParts = mapped.split(":");
-      if (hexParts.length === 2) {
-        const hi = parseInt(hexParts[0], 16);
-        const lo = parseInt(hexParts[1], 16);
-        if (
-          isPrivateIPv4([
-            (hi >> 8) & 0xff,
-            hi & 0xff,
-            (lo >> 8) & 0xff,
-            lo & 0xff
-          ])
-        )
-          return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-/**
- * Check whether a hostname looks like a private/internal IP address.
- * Blocks RFC 1918, link-local, unique-local, unspecified,
- * and cloud metadata endpoints. Also detects IPv4-mapped IPv6 addresses.
- */
-function isBlockedUrl(url: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return true; // Malformed URLs are blocked
-  }
-
-  const hostname = parsed.hostname;
-
-  if (BLOCKED_HOSTNAMES.has(hostname)) return true;
-
-  // IPv4 checks
-  const ipv4Parts = hostname.split(".");
-  if (ipv4Parts.length === 4 && ipv4Parts.every((p) => /^\d{1,3}$/.test(p))) {
-    if (isPrivateIPv4(ipv4Parts.map(Number))) return true;
-  }
-
-  // IPv6 private range checks.
-  // URL parser keeps brackets: hostname for [fc00::1] is "[fc00::1]".
-  // The parser also lowercases/canonicalizes the address, but we
-  // lowercase again defensively in case this helper is ever called with
-  // a non-parser-produced hostname.
-  if (hostname.startsWith("[") && hostname.endsWith("]")) {
-    if (isPrivateIPv6(hostname.slice(1, -1).toLowerCase())) return true;
-  }
-
-  return false;
-}
 
 export type MCPServerOptions = PersistedMcpServerOptions;
 
@@ -414,11 +202,7 @@ export type MCPServerFilter = {
  */
 export class MCPClientManager extends LifecycleCapability {
   public mcpConnections: Record<string, MCPClientConnection> = {};
-  /** Cache only the current catalog so old schema graphs are not retained. */
-  private readonly _aiToolSchemas = new WeakMap<
-    MCPClientConnection,
-    MCPAISchemaCacheEntry
-  >();
+  private readonly _aiTools = new MCPAIToolConverter();
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
@@ -426,6 +210,7 @@ export class MCPClientManager extends LifecycleCapability {
   private readonly _createAuthProviderFn:
     | ((callbackUrl: string) => AgentMcpOAuthProvider)
     | undefined;
+  #servers: McpServerStore | undefined;
   private _isRestored = false;
   private _pendingConnections = new Map<string, Promise<void>>();
   private _elicitationHandlers?: MCPClientElicitationHandlers;
@@ -551,32 +336,10 @@ export class MCPClientManager extends LifecycleCapability {
     };
   }
 
-  // SQL helper - runs a query and returns results as array
-  private sql<T extends Record<string, SqlStorageValue>>(
-    query: string,
-    ...bindings: SqlStorageValue[]
-  ): T[] {
-    return [...this.lifecycle.storage.sql.exec<T>(query, ...bindings)];
-  }
-
-  // Storage operations
-  private saveServerToStorage(server: MCPServerRow): void {
-    this.sql(
-      `INSERT OR REPLACE INTO cf_agents_mcp_servers (
-        id, name, server_url, client_id, auth_url, callback_url, server_options
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      server.id,
-      server.name,
-      server.server_url,
-      server.client_id ?? null,
-      server.auth_url ?? null,
-      server.callback_url,
-      server.server_options ?? null
-    );
-  }
-
-  private removeServerFromStorage(serverId: string): void {
-    this.sql("DELETE FROM cf_agents_mcp_servers WHERE id = ?", serverId);
+  /** The durable server catalog in this object's storage. */
+  private get _servers(): McpServerStore {
+    this.#servers ??= new McpServerStore(this.lifecycle.storage);
+    return this.#servers;
   }
 
   /**
@@ -609,32 +372,18 @@ export class MCPClientManager extends LifecycleCapability {
     // replacement work registered while an earlier task settles.
     await this.waitForServer(oldId);
 
-    const existing = this.sql<MCPServerRow>(
-      "SELECT id FROM cf_agents_mcp_servers WHERE id = ?",
-      oldId
-    );
-    if (existing.length === 0) {
+    // 1. Storage: rename the SQL row.
+    const renamed = this._servers.rename(oldId, newId);
+    if (renamed === "missing") {
       // Nothing in storage to rename; just rename the in-memory connection if any.
       this._renameInMemoryConnection(oldId, newId);
       return;
     }
-
-    const collision = this.sql<MCPServerRow>(
-      "SELECT id FROM cf_agents_mcp_servers WHERE id = ?",
-      newId
-    );
-    if (collision.length > 0) {
+    if (renamed === "collision") {
       throw new Error(
         `Cannot migrate MCP server id "${oldId}" → "${newId}": new id is already in use.`
       );
     }
-
-    // 1. Storage: rename the SQL row.
-    this.sql(
-      "UPDATE cf_agents_mcp_servers SET id = ? WHERE id = ?",
-      newId,
-      oldId
-    );
 
     // 2. OAuth-related storage keys. The DurableObjectOAuthClientProvider
     //    keys everything under `/{clientName}/{serverId}/...`. Other servers
@@ -698,12 +447,6 @@ export class MCPClientManager extends LifecycleCapability {
     }
   }
 
-  private getServersFromStorage(): MCPServerRow[] {
-    return this.sql<MCPServerRow>(
-      "SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers"
-    );
-  }
-
   private filterConnections(
     filter?: MCPServerFilter
   ): Record<string, MCPClientConnection> {
@@ -729,7 +472,7 @@ export class MCPClientManager extends LifecycleCapability {
 
     let nameMatchedIds: Set<string> | undefined;
     if (serverNames) {
-      const servers = this.getServersFromStorage();
+      const servers = this._servers.list();
       nameMatchedIds = new Set(
         servers.filter((s) => serverNames.includes(s.name)).map((s) => s.id)
       );
@@ -745,90 +488,22 @@ export class MCPClientManager extends LifecycleCapability {
     );
   }
 
-  /**
-   * Get the parsed server_options for a stored server, if any.
-   */
-  private getStoredServerOptions(
-    serverId: string
-  ): MCPServerOptions | undefined {
-    const rows = this.sql<MCPServerRow>(
-      "SELECT server_options FROM cf_agents_mcp_servers WHERE id = ?",
-      serverId
-    );
-    if (!rows.length || !rows[0].server_options) return undefined;
-    return decodeMcpServerOptions(rows[0].server_options);
-  }
-
-  /**
-   * Clear the capabilities persisted on a stored server row. Called once a
-   * seeded connection's handshake completes (see `createConnection`): the
-   * stamp is valid for one successful restore — sessions that configure
-   * handlers re-stamp every row, so a deploy that stops configuring them
-   * stops advertising stale modes after its first connected wake instead of
-   * forever, while wakes that never handshake don't burn the stamp.
-   */
-  private clearStoredCapabilities(serverId: string): void {
-    const rows = this.sql<MCPServerRow>(
-      "SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers WHERE id = ?",
-      serverId
-    );
-    const row = rows[0];
-    if (!row?.server_options) return;
-    const options = decodeMcpServerOptions(row.server_options);
-    if (!options.capabilities) return;
-    options.capabilities = undefined;
-    this.saveServerToStorage({
-      ...row,
-      server_options: encodeMcpServerOptions(options)
-    });
-  }
-
-  /**
-   * Get the retry options for a server from stored server_options
-   */
-  private getServerRetryOptions(serverId: string): RetryOptions | undefined {
-    return this.getStoredServerOptions(serverId)?.retry;
-  }
-
-  private clearServerAuthUrl(serverId: string): void {
-    this.sql(
-      "UPDATE cf_agents_mcp_servers SET auth_url = NULL WHERE id = ?",
-      serverId
-    );
-  }
-
-  private updateStoredSession(
-    id: string,
-    sessionId?: string,
-    protocolVersion?: string,
-    discoverResult?: DiscoverResult
-  ): void {
-    const servers = this.getServersFromStorage();
-    const serverRow = servers.find((server) => server.id === id);
-    if (!serverRow) {
-      return;
-    }
-
-    const options = decodeMcpServerOptions(serverRow.server_options);
-    const next =
+  /** Persist the connection's resumable session, or clear a stale one. */
+  private persistSession(id: string, conn: MCPClientConnection): void {
+    const { sessionId, protocolVersion, discoverResult } = conn;
+    this._servers.setSession(
+      id,
       sessionId && protocolVersion
-        ? withMcpSession(options, {
-            id: sessionId,
-            protocolVersion,
-            discoverResult
-          })
-        : withMcpSession(options);
-    this.saveServerToStorage({
-      ...serverRow,
-      server_options: encodeMcpServerOptions(next)
-    });
+        ? { id: sessionId, protocolVersion, discoverResult }
+        : undefined
+    );
   }
 
   private failConnection(
     serverId: string,
     error: string
   ): MCPOAuthCallbackResult {
-    this.clearServerAuthUrl(serverId);
+    this._servers.clearAuthUrl(serverId);
     if (this.mcpConnections[serverId]) {
       this.mcpConnections[serverId].connectionState = MCPConnectionState.FAILED;
       this.mcpConnections[serverId].connectionError = error;
@@ -850,7 +525,7 @@ export class MCPClientManager extends LifecycleCapability {
     serverId: string,
     conn: MCPClientConnection
   ): MCPOAuthCallbackResult {
-    this.clearServerAuthUrl(serverId);
+    this._servers.clearAuthUrl(serverId);
     conn.connectionError = null;
     return { serverId, authSuccess: true };
   }
@@ -1005,9 +680,7 @@ export class MCPClientManager extends LifecycleCapability {
 
   /** Get saved RPC servers from storage (servers with `rpc://` URLs). */
   getRpcServersFromStorage(): MCPServerRow[] {
-    return this.getServersFromStorage().filter((s) =>
-      s.server_url.startsWith(RPC_DO_PREFIX)
-    );
+    return this._servers.listRpc();
   }
 
   /**
@@ -1022,7 +695,7 @@ export class MCPClientManager extends LifecycleCapability {
     bindingName: string,
     props?: Record<string, unknown>
   ): void {
-    this.saveServerToStorage({
+    this._servers.save({
       id,
       name,
       server_url: `${RPC_DO_PREFIX}${normalizedName}`,
@@ -1047,7 +720,7 @@ export class MCPClientManager extends LifecycleCapability {
       return;
     }
 
-    const servers = this.getServersFromStorage();
+    const servers = this._servers.list();
 
     if (!servers || servers.length === 0) {
       this._isRestored = true;
@@ -1138,7 +811,7 @@ export class MCPClientManager extends LifecycleCapability {
         // before clearing auth_url. Reconnect instead of showing a link that
         // cannot work: saved tokens connect directly, and without them the
         // server answers 401 and a fresh link is persisted.
-        this.clearServerAuthUrl(server.id);
+        this._servers.clearAuthUrl(server.id);
       }
 
       // Start connection in background (don't await) to avoid blocking the DO
@@ -1334,7 +1007,7 @@ export class MCPClientManager extends LifecycleCapability {
         delete this.mcpConnections[id];
         // Once removed from the map, nothing else can close this transport.
         await replaced.close().catch(() => {});
-        this.updateStoredSession(id, undefined);
+        this._servers.setSession(id);
       }
       this.createConnection(id, url, {
         client: options.client,
@@ -1448,7 +1121,7 @@ export class MCPClientManager extends LifecycleCapability {
     // clearing so a wake that never handshakes (OAuth still pending, isolate
     // death before connect) doesn't burn it — it is consumed at first use,
     // once a seeded handshake completes.
-    const capabilitySeed = this.getStoredServerOptions(id)?.capabilities;
+    const capabilitySeed = this._servers.options(id)?.capabilities;
 
     this.mcpConnections[id] = new MCPClientConnection(
       new URL(url),
@@ -1505,7 +1178,7 @@ export class MCPClientManager extends LifecycleCapability {
           (key) => this.mcpConnections[key] === conn
         );
         if (currentId) {
-          this.clearStoredCapabilities(currentId);
+          this._servers.clearCapabilities(currentId);
         }
       });
       store.add(seedClear);
@@ -1558,7 +1231,7 @@ export class MCPClientManager extends LifecycleCapability {
       }
     });
 
-    this.saveServerToStorage({
+    this._servers.save({
       id,
       name: options.name,
       server_url: options.url,
@@ -1610,14 +1283,7 @@ export class MCPClientManager extends LifecycleCapability {
     if (!authUrl || !authProvider.redirectUrl) return undefined;
 
     const clientId = authProvider.clientId;
-    const serverRow = this.getServersFromStorage().find((s) => s.id === id);
-    if (serverRow) {
-      this.saveServerToStorage({
-        ...serverRow,
-        auth_url: authUrl,
-        client_id: clientId ?? null
-      });
-    }
+    this._servers.setAuthContinuation(id, authUrl, clientId);
 
     this._onObservabilityEvent.fire({
       type: "mcp:client:authorize",
@@ -1650,12 +1316,7 @@ export class MCPClientManager extends LifecycleCapability {
     }
 
     const error = await conn.init();
-    this.updateStoredSession(
-      id,
-      conn.sessionId,
-      conn.protocolVersion,
-      conn.discoverResult
-    );
+    this.persistSession(id, conn);
     this._onServerStateChanged.fire();
 
     switch (conn.connectionState) {
@@ -1711,7 +1372,7 @@ export class MCPClientManager extends LifecycleCapability {
 
     // Match by server ID AND verify the request origin + pathname matches the registered callback URL.
     // This prevents unrelated GET requests with a `state` param from being intercepted.
-    const servers = this.getServersFromStorage();
+    const servers = this._servers.list();
     return servers.some((server) => {
       if (server.id !== serverId) return false;
       try {
@@ -1764,7 +1425,7 @@ export class MCPClientManager extends LifecycleCapability {
       };
     }
 
-    const servers = this.getServersFromStorage();
+    const servers = this._servers.list();
     const serverExists = servers.some((server) => server.id === serverId);
     if (!serverExists) {
       return {
@@ -1896,12 +1557,7 @@ export class MCPClientManager extends LifecycleCapability {
         state,
         callbackParams
       );
-      this.updateStoredSession(
-        serverId,
-        conn.sessionId,
-        conn.protocolVersion,
-        conn.discoverResult
-      );
+      this.persistSession(serverId, conn);
       const result = this.oauthCallbackSuccess(serverId, conn);
       this._onServerStateChanged.fire();
 
@@ -1975,7 +1631,7 @@ export class MCPClientManager extends LifecycleCapability {
     options: { timeoutMs?: number }
   ): Promise<MCPDiscoverResult> {
     conn.clearResumedSession();
-    this.updateStoredSession(serverId, undefined);
+    this._servers.setSession(serverId);
 
     let connectResult: MCPConnectionResult;
     try {
@@ -2046,7 +1702,7 @@ export class MCPClientManager extends LifecycleCapability {
       return;
     }
 
-    const retry = this.getServerRetryOptions(serverId);
+    const retry = this._servers.options(serverId)?.retry;
     const connectResult = await this._connectWithRetry(serverId, retry);
     this._onServerStateChanged.fire();
 
@@ -2116,20 +1772,7 @@ export class MCPClientManager extends LifecycleCapability {
    * themselves are reconfigured.
    */
   private persistAdvertisedCapabilities(): void {
-    const capabilities = this.advertisedHandlerCapabilities();
-    for (const server of this.getServersFromStorage()) {
-      const options = decodeMcpServerOptions(server.server_options);
-      if (
-        JSON.stringify(options.capabilities) === JSON.stringify(capabilities)
-      ) {
-        continue;
-      }
-      options.capabilities = capabilities;
-      this.saveServerToStorage({
-        ...server,
-        server_options: encodeMcpServerOptions(options)
-      });
-    }
+    this._servers.stampCapabilities(this.advertisedHandlerCapabilities());
   }
 
   /**
@@ -2157,123 +1800,9 @@ export class MCPClientManager extends LifecycleCapability {
    * @returns a set of tools that you can use with the AI SDK
    */
   getAITools(filter?: MCPServerFilter): MCPAIToolSet {
-    const connections = this.filterConnections(filter);
-    const entries: [string, MCPAITool][] = [];
-
-    for (const [serverId, conn] of Object.entries(connections)) {
-      if (
-        conn.connectionState !== MCPConnectionState.READY &&
-        conn.connectionState !== MCPConnectionState.AUTHENTICATING
-      ) {
-        console.warn(
-          `[getAITools] WARNING: Reading tools from connection ${serverId} in state "${conn.connectionState}". Tools may not be loaded yet.`
-        );
-      }
-
-      const catalog = conn.tools;
-      let cache = this._aiToolSchemas.get(conn);
-      if (!cache || cache.catalog !== catalog) {
-        cache = { catalog, converted: [] };
-        this._aiToolSchemas.set(conn, cache);
-      }
-
-      for (const [index, tool] of catalog.entries()) {
-        const toolName = tool.name;
-        try {
-          const sourceInputSchema = tool.inputSchema;
-          const sourceOutputSchema = tool.outputSchema;
-          let slot = cache.converted[index];
-          if (
-            !slot ||
-            slot.tool !== tool ||
-            slot.inputSchema !== sourceInputSchema ||
-            slot.outputSchema !== sourceOutputSchema
-          ) {
-            try {
-              slot = {
-                status: "converted",
-                tool,
-                inputSchema: sourceInputSchema,
-                outputSchema: sourceOutputSchema,
-                converted: {
-                  inputSchema: sourceInputSchema
-                    ? z.fromJSONSchema(
-                        sourceInputSchema as Parameters<
-                          typeof z.fromJSONSchema
-                        >[0]
-                      )
-                    : z.fromJSONSchema({ type: "object" }),
-                  outputSchema: sourceOutputSchema
-                    ? z.fromJSONSchema(
-                        sourceOutputSchema as Parameters<
-                          typeof z.fromJSONSchema
-                        >[0]
-                      )
-                    : undefined
-                }
-              };
-            } catch (error) {
-              const errorText = String(error);
-              cache.converted[index] = {
-                status: "failed",
-                tool,
-                inputSchema: sourceInputSchema,
-                outputSchema: sourceOutputSchema,
-                error: errorText
-              };
-              console.warn(
-                `[getAITools] Skipping tool "${toolName}" from "${serverId}": ${errorText}`
-              );
-              continue;
-            }
-            cache.converted[index] = slot;
-          }
-
-          if (slot.status === "failed") continue;
-
-          const toolKey = `tool_${serverId.replace(/-/g, "")}_${toolName}`;
-          const title = tool.title ?? tool.annotations?.title;
-          const description = tool.description;
-          entries.push([
-            toolKey,
-            {
-              description,
-              title,
-              execute: async (args) => {
-                const result = await this.callTool({
-                  arguments: args,
-                  name: toolName,
-                  serverId
-                });
-                if (result.isError) {
-                  const content = result.content as
-                    | Array<{ type: string; text?: string }>
-                    | undefined;
-                  const textContent = content?.[0];
-                  const message =
-                    textContent?.type === "text" && textContent.text
-                      ? textContent.text
-                      : "Tool call failed";
-                  throw new Error(message);
-                }
-                return result;
-              },
-              inputSchema: slot.converted.inputSchema,
-              outputSchema: slot.converted.outputSchema
-            }
-          ]);
-        } catch (error) {
-          console.warn(
-            `[getAITools] Skipping tool "${toolName}" from "${serverId}": ${error}`
-          );
-        }
-      }
-
-      // Release removed slots when a public catalog array is spliced in place.
-      cache.converted.length = catalog.length;
-    }
-
-    return Object.fromEntries(entries);
+    return this._aiTools.convert(this.filterConnections(filter), (params) =>
+      this.callTool(params)
+    );
   }
 
   /**
@@ -2302,7 +1831,7 @@ export class MCPClientManager extends LifecycleCapability {
    * (closes connection AND removes from storage).
    */
   private cleanupClosedConnection(id: string): void {
-    this.updateStoredSession(id, undefined);
+    this._servers.setSession(id);
 
     const store = this._connectionDisposables.get(id);
     if (store) store.dispose();
@@ -2410,7 +1939,7 @@ export class MCPClientManager extends LifecycleCapability {
         error
       );
     }
-    this.removeServerFromStorage(serverId);
+    this._servers.remove(serverId);
     this._onServerStateChanged.fire();
   }
 
@@ -2421,7 +1950,7 @@ export class MCPClientManager extends LifecycleCapability {
   private authProviderFromStorage(
     serverId: string
   ): AgentMcpOAuthProvider | undefined {
-    const server = this.getServersFromStorage().find((s) => s.id === serverId);
+    const server = this._servers.get(serverId);
     if (!server?.callback_url) return undefined;
     const authProvider = this._createAuthProviderFn
       ? this._createAuthProviderFn(server.callback_url)
@@ -2442,7 +1971,7 @@ export class MCPClientManager extends LifecycleCapability {
    * List all MCP servers from storage
    */
   listServers(): MCPServerRow[] {
-    return this.getServersFromStorage();
+    return this._servers.list();
   }
 
   /**
