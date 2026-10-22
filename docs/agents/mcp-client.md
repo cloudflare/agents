@@ -36,8 +36,9 @@ export class MyObject extends DurableObject<Env> {
 
 The lifecycle calls the manager automatically:
 
-- `onStart()` initializes its schema and restores persisted connections before
-  the host handles work.
+- `onStart()` initializes its schema and starts restoring persisted HTTP and
+  RPC connections in the background, so startup never waits on an MCP server.
+  Use `waitForConnections()` when you need restored tools.
 - `onRequest()` intercepts registered OAuth callback URLs before the host's
   request handler.
 
@@ -580,6 +581,8 @@ if (connectResult.state === "connected") {
 }
 ```
 
+Connection work for one server runs one operation at a time: `connectToServer()`, `discoverIfConnected()`, `establishConnection()`, OAuth callback handling and restore for the same server wait for each other instead of interleaving. Work for different servers runs in parallel.
+
 ### Event Subscription
 
 ```typescript
@@ -595,7 +598,7 @@ const disposable = this.mcp.onServerStateChanged(() => {
 
 ### Waiting for Connections
 
-After hibernation or when connections are being restored in the background, MCP tools may not be immediately available. Use `waitForConnections()` to wait until all in-flight connection and discovery operations have settled:
+After hibernation or when connections are being restored in the background, MCP tools may not be immediately available. This applies to HTTP and RPC servers alike. Use `waitForConnections()` to wait until all in-flight connection and discovery operations have settled:
 
 ```typescript
 // Wait indefinitely for all connections to be ready
