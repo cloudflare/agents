@@ -57,7 +57,7 @@ configuration, and change nothing unrelated to the upgrade.
 | Upstream | Packages | Pin policy | Where changes are announced |
 | --- | --- | --- | --- |
 | pi | `@earendil-works/pi-ai`, `@earendil-works/pi-durable`, `@earendil-works/chord`, `@earendil-works/pi-tui`; in examples and experimental also `@earendil-works/pi-telemetry` and `@earendil-works/pi-agent-core` (`examples/next/models`, `experimental/pi-recovery`) | Released together with one version. pi minors break, so we support **one minor**: peer and dev ranges are `~X.Y.0`, `pi-tui` is pinned exactly to `X.Y.Z`, and the `pnpm-workspace.yaml` override matches the range. Every direct pi dependency moves together; the workspace never mixes pi minors. | GitHub releases of `earendil-works/pi` (`GET /repos/earendil-works/pi/releases?per_page=20`). Notes cover the whole monorepo; only sections about our packages matter. |
-| opencode v2 | `@opencode/sdk` (incl. `@opencode/sdk/workerd`), `@opencode/plugin` | Dev and example pins are exact (`2.x.y`). The peer range is a caret range whose floor moves only when our code needs the newer release (it uses a new API, or a break forced a code change). | **No release notes.** Tags `v2.*` on `anomalyco/opencode` (`GET /repos/anomalyco/opencode/git/matching-refs/tags/v2.`; sort numerically yourself). Read the commits between our tag and the new one for `packages/sdk` and `packages/plugin`: `GET /repos/anomalyco/opencode/commits?sha=<new tag>&path=packages/sdk&since=<committer date of our tag>&per_page=100`, paging while a page returns 100. Ignore opencode's v1 GitHub releases and `opencode_version` in `.github/workflows/bonk.yml`. |
+| opencode v2 | `@opencode/sdk` (incl. `@opencode/sdk/workerd`), `@opencode/plugin` | Dev and example pins are exact (`2.x.y`). The peer range is a caret range whose floor moves only when our code needs the newer release (it uses a new API, or a break forced a code change). | **No release notes.** Tags `v2.*` on `anomalyco/opencode` (`GET /repos/anomalyco/opencode/git/matching-refs/tags/v2.`; sort numerically yourself). The changes are the commits between our tag and the new one to `packages/sdk` and `packages/plugin`. Ignore opencode's v1 GitHub releases and `opencode_version` in `.github/workflows/bonk.yml`. |
 
 ## 1. Find drift
 
@@ -80,36 +80,24 @@ classify each drifted upstream:
 
 ## 2. Check nobody is already on it
 
-Use targeted searches (they cover open and closed pull requests):
-
-- `GET /search/issues?q=repo:cloudflare/agents+is:pr+is:open+<"Pi X.Y"|"pi-durable X.Y"|"opencode X.Y.Z">`
-  with the version quoted and URL-encoded. Also list open pull requests that change
-  `packages/agents/package.json` and read the titles of any that mention the upstream.
-- `GET /repos/cloudflare/agents/pulls?state=all&per_page=50&head=cloudflare:gardener/upstream/<pi|opencode>-<version>`
-  for an earlier Gardener pull request for this exact version.
-
-Skip an upstream when:
-
-- a maintainer has an open pull request moving to this version or a newer one (maintainers often
-  prepare a pi minor before it is released);
-- a Gardener pull request for this exact version exists, open or closed. Closed means a maintainer
-  dealt with it or declined it.
-
+Search for existing work: `GET /search/issues?q=repo:cloudflare/agents+is:pr+is:open+<"Pi X.Y"|"pi-durable X.Y"|"opencode X.Y.Z">`
+(version quoted and URL-encoded), and
+`GET /repos/cloudflare/agents/pulls?state=all&per_page=50&head=cloudflare:gardener/upstream/<pi|opencode>-<version>`.
 Also note every open pull request that touches the upstream's surface (the files from step 3) or
-names the upstream in its title; step 3 checks each against the upstream changes.
+names it in its title; step 3 checks each against the upstream changes.
 
-If an open Gardener pull request (author `github-actions[bot]`, head `gardener/upstream/<upstream>-*`)
-targets an **older** version of the same upstream, read its commits:
+Skip an upstream when a maintainer has an open pull request moving to this version or a newer one,
+or a Gardener pull request for this exact version exists, open or closed (closed means a maintainer
+dealt with it).
 
-- only `github-actions[bot]` commits: you will supersede it (step 7);
-- anyone else has pushed to it: a maintainer is working on it. Do not open a new pull request for
-  this upstream; propose one `pull_request.comment.create` on it saying the newer version is out,
-  with the notes that matter, and move on.
+An open Gardener pull request (head `gardener/upstream/<upstream>-*`) for an **older** version is
+superseded in step 7 if only `github-actions[bot]` has committed to it. If anyone else has, a
+maintainer is working on it: don't open a new pull request for this upstream; propose one
+`pull_request.comment.create` there saying the newer version is out, with the notes that matter.
 
-**Pick one upstream for this run.** Gardener commits the whole working tree as one change, so a
-run can only carry one upstream. Of the upstreams still left, take the one with a range change;
-if both or neither have one, take pi. The other is picked up by the next run, because step 2 then
-skips the one you opened a pull request for. If none are left, finish with nothing proposed.
+**Pick one upstream per run**, since Gardener commits the whole working tree as one change: of
+those left, the one with a range change, otherwise pi. The next run picks up the other. If none are
+left, finish with nothing proposed.
 
 ## 3. Learn what we use
 
@@ -131,13 +119,13 @@ to write).
 Then review **every** upstream change from our version up to latest, one at a time: each
 release-note bullet about our packages (pi), or each commit to `packages/sdk` and `packages/plugin`
 (opencode). Don't judge a release as a whole; going item by item is what catches what a skim
-misses. For each item:
+misses. Get the code behind them in one go: a blobless clone of the upstream
+(`git clone --filter=blob:none`), then `git log -p v<ours>..v<latest> -- <its package paths>`. For
+each item:
 
-- Read what actually changed. For pi, find the commit behind any bullet that could touch our surface
-  (list them with `GET /repos/earendil-works/pi/commits?sha=v<latest>&path=packages/<package>&since=<date
-  of v<ours>>`, then `GET /repos/earendil-works/pi/commits/<sha>`) and look at the changed
-  declarations. For opencode,
-  read each commit's diff, not just its message.
+- Read what actually changed in the code, not just the note or commit message, for any item that
+  could touch our surface. An item that clearly can't (a package we don't use) needs only its
+  one-line verdict.
 - Check it against our code, tests, docs and examples, and classify it:
   - **breaking**: stops our code compiling, makes it throw, or changes its behaviour, whatever
     upstream filed it under ("Fixed" can rename IDs or change a default);
@@ -169,16 +157,11 @@ failure the upgrade caused from one that was already there. Install Playwright's
 
 ## 5. Upgrade
 
-1. Move every pin for the upstream to the new version. Find them with
-   `git grep -nE '"@(earendil-works|opencode)/'` outside `pnpm-lock.yaml`; today they are in
-   `packages/agents/package.json` (devDependencies and peerDependencies), `pnpm-workspace.yaml`
-   (overrides), `examples/next/channels`, `examples/next/harnesses/pi`,
-   `examples/next/harnesses/opencode`, `examples/next/models` and `experimental/pi-recovery`. Move
-   every `@earendil-works/*` (or `@opencode/*`) package the search finds, including ones the table
-   doesn't name, such as `pi-agent-core`. For a
-   pi range change also update prose that names the range: `docs/agents/harnesses/pi.md`,
-   `docs/agents/models-pi-ai.md` and `examples/next/harnesses/pi/README.md`. `sherif` (part of
-   `pnpm run check`) fails if workspace versions disagree.
+1. Move every pin for the upstream to the new version: every `@earendil-works/*` (or `@opencode/*`)
+   package that `git grep -nE '"@(earendil-works|opencode)/'` finds outside `pnpm-lock.yaml`,
+   including peer ranges, `pnpm-workspace.yaml` overrides, examples, `experimental/`, and packages
+   the table doesn't name. For a pi range change, also update prose in `docs` and `examples` that
+   names the old range. `sherif` (part of `pnpm run check`) fails if workspace versions disagree.
 2. `pnpm install` to update `pnpm-lock.yaml`. Never edit the lockfile by hand. Afterwards, every
    `@earendil-works/` (or `@opencode/`) package in the lockfile must resolve the new version; if an
    old one remains, find the pin or override that holds it and move it too.
@@ -249,20 +232,13 @@ Conventional commit, scope `agents`, same text for the commit and the pull reque
 **The body is the review.** A maintainer should be able to approve this pull request by reading
 the body alone, and trust that the diff does exactly what the body says and nothing else. So:
 
-- **Account for every change.** Every file `git status --porcelain --untracked-files=all` lists is
-  what Gardener will commit, new files such as the changeset included, and each must be covered by
-  the body, either
-  on its own or in a group ("the four `package.json` files under `examples/`"). A change the body
-  doesn't explain must not be in the diff; revert it instead.
+- **Account for every change.** Every file `git status --porcelain --untracked-files=all` lists
+  (new files such as the changeset included) is covered by the body, on its own or in a group ("the
+  four `package.json` files under `examples/`"). A change the body doesn't explain must not be in the
+  diff; revert it instead.
 - **Claim nothing the diff doesn't do.** No "also tidied", no planned follow-ups described as done.
-- **Say what is being upgraded and why.** Each package with its old and new version, and why now:
-  which releases came out since ours, and whether they fall inside or outside our published peer
-  range (users can already install them, or can't until we release).
-- **Record every technical decision.** Wherever the upgrade left you a choice, state the choice,
-  the alternatives you rejected and why, in a sentence or two each. Typical ones: how to adapt to a
-  break (adapt our code, use a new upstream API, or keep a shim), whether to raise a peer floor,
-  which changeset bump, whether to drop a workaround upstream made unnecessary, why a test's
-  expectation changed. If you made no decisions beyond moving pins, say so.
+- **Record every technical decision**: how you adapted to a break, whether to raise a peer floor,
+  which changeset bump, why a test's expectation changed, and so on.
 - **Give every upstream change a verdict.** Every item you reviewed in step 3 appears in the body:
   in full when it affects us, as one line under "no effect" otherwise.
 - **Be plain and specific.** Quote upstream, cite `path:line`, show real code changes as short
