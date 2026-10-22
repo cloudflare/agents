@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { ServerLanes } from "../../mcp/client/server-lanes";
+import {
+  ServerLaneCancelledError,
+  ServerLanes
+} from "../../mcp/client/server-lanes";
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -111,6 +114,22 @@ describe("ServerLanes", () => {
     await waiting;
     expect(idle).toBe(true);
     expect(lanes.pending()).toHaveLength(0);
+  });
+
+  it("forget() cancels work still queued behind running work", async () => {
+    const lanes = new ServerLanes();
+    const gate = deferred();
+    const running = lanes.run("a", () => gate.promise);
+    let queuedRan = false;
+    const queued = lanes.run("a", async () => {
+      queuedRan = true;
+    });
+
+    lanes.forget("a");
+    gate.resolve();
+    await running;
+    await expect(queued).rejects.toBeInstanceOf(ServerLaneCancelledError);
+    expect(queuedRan).toBe(false);
   });
 
   it("forget() stops later work from waiting for running work", async () => {

@@ -57,7 +57,7 @@ import { MCPAIToolConverter, type MCPAIToolSet } from "./ai-tools";
 export type { MCPAITool, MCPAIToolSet } from "./ai-tools";
 import { isBlockedUrl } from "./url-policy";
 import { McpServerStore } from "./server-store";
-import { ServerLanes } from "./server-lanes";
+import { ServerLaneCancelledError, ServerLanes } from "./server-lanes";
 import {
   consumeStaleState,
   exchangeAuthorizationCode,
@@ -152,6 +152,15 @@ type LegacyConnectOptions = {
   /** MCP SDK client options. */
   client?: McpClientOptions;
 };
+
+/** Result for a callback whose server was removed while it was handled. */
+function removedDuringAuthorization(serverId: string): MCPOAuthCallbackResult {
+  return {
+    serverId,
+    authSuccess: false,
+    authError: `Server ${serverId} was removed during authorization`
+  };
+}
 
 /** Converts a resolved connection failure into a retry signal. */
 class ConnectRetryError extends Error {
@@ -293,9 +302,12 @@ export class MCPClientManager extends LifecycleCapability {
     // RPC servers reconnect in the background like HTTP ones: startup has a
     // 30s budget, and a slow McpAgent must not hold it.
     for (const server of this._servers.listRpc()) {
-      void this._lanes.run(server.id, () =>
-        restoreRpcConnection(this, this._env, server)
-      );
+      void this._lanes
+        .run(server.id, () => restoreRpcConnection(this, this._env, server))
+        .catch((error) => {
+          if (error instanceof ServerLaneCancelledError) return;
+          console.error(`Error restoring ${server.id}:`, error);
+        });
     }
     this.fireServerStateChanged();
   }
@@ -533,6 +545,20 @@ export class MCPClientManager extends LifecycleCapability {
     );
   }
 
+  /**
+   * Success for a callback whose flow was already accepted, unless the
+   * server was removed while its state was cleaned up.
+   */
+  private staleCallbackSuccess(
+    serverId: string,
+    conn: MCPClientConnection
+  ): MCPOAuthCallbackResult {
+    if (this.mcpConnections[serverId] !== conn) {
+      return removedDuringAuthorization(serverId);
+    }
+    return this.oauthCallbackSuccess(serverId, conn);
+  }
+
   private oauthCallbackSuccess(
     serverId: string,
     conn: MCPClientConnection
@@ -715,6 +741,7 @@ export class MCPClientManager extends LifecycleCapability {
           this._restoreServer(server.id, parsedOptions?.retry)
         )
         .catch((error) => {
+          if (error instanceof ServerLaneCancelledError) return;
           console.error(`Error restoring ${server.id}:`, error);
         });
     }
@@ -1358,7 +1385,7 @@ export class MCPClientManager extends LifecycleCapability {
             callback.state
           );
         }
-        return this.oauthCallbackSuccess(callback.serverId, conn);
+        return this.staleCallbackSuccess(callback.serverId, conn);
       }
       // Only a callback carrying a genuine state nonce may fail the
       // connection; a stray or invalid callback must not alter the
@@ -1373,6 +1400,9 @@ export class MCPClientManager extends LifecycleCapability {
         ))
       ) {
         return this.ignoreUnverifiedCallback(callback.serverId, callback.error);
+      }
+      if (this.mcpConnections[callback.serverId] !== conn) {
+        return removedDuringAuthorization(callback.serverId);
       }
       return this.failConnection(callback.serverId, callback.error);
     }
@@ -1397,7 +1427,7 @@ export class MCPClientManager extends LifecycleCapability {
       if (!stateValidation.valid) {
         if (this.isAuthAcceptedConnection(conn)) {
           await consumeStaleState(serverId, authProvider, state);
-          return this.oauthCallbackSuccess(serverId, conn);
+          return this.staleCallbackSuccess(serverId, conn);
         }
         // Same rule as the invalid branch above: a callback whose nonce
         // cannot be verified must not alter the connection state machine.
@@ -1415,7 +1445,7 @@ export class MCPClientManager extends LifecycleCapability {
       // replayed.
       if (this.isAuthAcceptedConnection(conn)) {
         await consumeStaleState(serverId, authProvider, state);
-        return this.oauthCallbackSuccess(serverId, conn);
+        return this.staleCallbackSuccess(serverId, conn);
       }
 
       if (
@@ -1441,17 +1471,18 @@ export class MCPClientManager extends LifecycleCapability {
         // Removed while the code was exchanged: the tokens just saved
         // outlived removeServer's cleanup, so clear them again.
         await this.clearOAuthStorage(serverId, authProvider);
-        return {
-          serverId,
-          authSuccess: false,
-          authError: `Server ${serverId} was removed during authorization`
-        };
+        return removedDuringAuthorization(serverId);
       }
       this.persistSession(serverId, conn);
       const result = this.oauthCallbackSuccess(serverId, conn);
       this.fireServerStateChanged();
       return result;
     } catch (err) {
+      // A server removed (and maybe re-registered) meanwhile is not ours to
+      // fail: the replacement keeps its own state and pending link.
+      if (this.mcpConnections[serverId] !== conn) {
+        return removedDuringAuthorization(serverId);
+      }
       return this.failConnection(serverId, toErrorMessage(err));
     }
   }
