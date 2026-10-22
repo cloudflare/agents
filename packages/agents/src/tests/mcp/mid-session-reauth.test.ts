@@ -548,6 +548,67 @@ describe("MCPClientManager mid-session re-authorization", () => {
     });
   });
 
+  it("stops after three completed step-ups that still leave the scope insufficient", async () => {
+    await withMcpHarness(async (harness) => {
+      const manager = harness.createManager();
+      const server = createFakeOAuthMcpServer();
+      const serverId = "stepup-never-satisfied";
+      await connectWithGrant(manager, server, serverId, BASE_SCOPE);
+
+      const settle = (p: Promise<unknown>) =>
+        p.then(
+          () => undefined,
+          (e: unknown) => e
+        );
+      const call = () =>
+        settle(manager.callTool({ serverId, name: "write", arguments: {} }));
+
+      // Three rounds: each link is shown and completed, but the
+      // authorization server only ever grants the base scope, so the server
+      // keeps asking for the write scope.
+      for (let round = 1; round <= 3; round++) {
+        const error = await call();
+        expect(error).toBeInstanceOf(MCPAuthorizationRequiredError);
+        const code = `code-round-${round}`;
+        server.codes.set(code, BASE_SCOPE);
+        const result = await manager.handleCallbackRequest(
+          callbackRequest(
+            (error as MCPAuthorizationRequiredError).authUrl,
+            code
+          )
+        );
+        expect(result.authSuccess).toBe(true);
+        await manager.establishConnection(serverId);
+        expect(manager.mcpConnections[serverId].connectionState).toBe("ready");
+      }
+
+      // A fourth link is not shown: the challenge is a permanent failure.
+      const final = await call();
+      expect(final).not.toBeInstanceOf(MCPAuthorizationRequiredError);
+      expect(isUnauthorized(final)).toBe(true);
+      const conn = manager.mcpConnections[serverId];
+      expect(conn.connectionState).toBe("failed");
+      expect(conn.connectionError).toContain(
+        "after 3 completed authorizations"
+      );
+      expect(
+        harness.serverRows().find((row) => row.id === serverId)?.auth_url ??
+          null
+      ).toBeNull();
+
+      // It stays failed on the next wake.
+      const woken = harness.createManager();
+      await woken.restoreConnectionsFromStorage("test-client");
+      expect(woken.mcpConnections[serverId].connectionState).toBe("failed");
+
+      // An explicit reconnect restarts the budget: the next step-up shows a
+      // link again.
+      expect((await manager.connectToServer(serverId)).state).toBe("connected");
+      await manager.discoverIfConnected(serverId);
+      expect(await call()).toBeInstanceOf(MCPAuthorizationRequiredError);
+    });
+  });
+
   it("rejects requests for a server with no connection", async () => {
     await withMcpHarness(async (harness) => {
       const manager = harness.createManager();

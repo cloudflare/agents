@@ -25,8 +25,8 @@ the current protocol lane.
 
 | Command                              | Server protocol/referee selection | Scenarios | Current result                 |
 | ------------------------------------ | --------------------------------- | --------- | ------------------------------ |
-| `test:conformance:client:stateless`  | `2026-07-28`                      | 33        | 30 clean / 3 expected failures |
-| `test:conformance:client:2025-11-25` | `2025-11-25`                      | 19        | 17 clean / 2 expected failures |
+| `test:conformance:client:stateless`  | `2026-07-28`                      | 33        | 31 clean / 2 expected failures |
+| `test:conformance:client:2025-11-25` | `2025-11-25`                      | 19        | 18 clean / 1 expected failure  |
 | `test:conformance:client:2025-06-18` | `2025-06-18`                      | 5         | 5 clean                        |
 | `test:conformance:client:2025-03-26` | `2025-03-26` OAuth/backcompat     | 2         | 2 clean                        |
 
