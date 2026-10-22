@@ -337,6 +337,32 @@ describe("PiHarness on pi-durable", () => {
     expect(result).toMatchObject({ status: "done", text: "echo: flaky" });
   });
 
+  it.each(["", "nowake:"])(
+    "resumes a due sleep while other work keeps pi active (%s)",
+    async (variant) => {
+      const stub = fresh(`${variant}${crypto.randomUUID()}`);
+      // A foreground run stays active: its tool waits in memory, committing
+      // nothing, so nothing else kicks pi's scheduler.
+      const receipt = await stub.submit("hold");
+      await stub.holdStarted(1);
+      // A background task sleeps briefly, as a retry backoff does.
+      await stub.remindAt(Date.now() + 500);
+      expect(await stub.reminderLive()).toBe(true);
+
+      let live = true;
+      for (let i = 0; i < 150 && live; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        live = await stub.reminderLive();
+      }
+      expect(live).toBe(false);
+
+      expect(await stub.releaseHold()).toBe(true);
+      expect((await stub.wait(receipt.operationId)).text).toBe(
+        "tool said: held after 1 runs"
+      );
+    }
+  );
+
   it("answers after a sleeping retry without onWake, on pi's own timer", async () => {
     const stub = fresh(`nowake:retry:${crypto.randomUUID()}`);
     const result = await stub.prompt("flaky");

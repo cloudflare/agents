@@ -323,6 +323,15 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     pi.resume();
   }
 
+  /** Whether a reminder task is still live (not yet completed). */
+  async reminderLive(): Promise<boolean> {
+    const pi = await this.harness.pi();
+    const inspection = await pi.inspect(BACKGROUND_CONTEXT);
+    return inspection.tasks.some(
+      ({ record }) => record.kind === Reminder.definition.name
+    );
+  }
+
   /** When pi next needs to run, as `pi.wake()` says. */
   async piWake() {
     return (await this.harness.pi()).wake();
