@@ -7,20 +7,23 @@ import {
   parseAuthorizationRounds,
   requestedScope,
   startRound,
-  type AuthorizationRounds
+  type AuthorizationRounds,
+  type RoundDecision
 } from "../../mcp/client/authorization-rounds";
 
 const NOW = 1_000_000_000_000;
 
-/** Start and complete rounds for one scope set until the limit stops it. */
-function completedRounds(scope: string, count: number) {
-  let rounds: AuthorizationRounds | undefined;
-  for (let i = 0; i < count; i++) {
-    const decision = startRound(rounds, scope, NOW + i);
-    if (decision._tag !== "start") return decision;
-    rounds = completeRound(decision.rounds);
-  }
-  return rounds;
+/** Start a round for `scope` and, when shown, complete it. */
+function round(
+  rounds: AuthorizationRounds | undefined,
+  scope: string,
+  at: number
+): { decision: RoundDecision; rounds: AuthorizationRounds | undefined } {
+  const decision = startRound(rounds, scope, at);
+  return {
+    decision,
+    rounds: decision._tag === "start" ? completeRound(decision.rounds) : rounds
+  };
 }
 
 describe("authorization rounds", () => {
@@ -33,43 +36,74 @@ describe("authorization rounds", () => {
   });
 
   it("allows the limit of completed rounds for one scope set, then stops", () => {
-    const rounds = completedRounds("files:write", MAX_AUTHORIZATION_ROUNDS);
-    expect(rounds).toMatchObject({ rounds: MAX_AUTHORIZATION_ROUNDS });
-    expect(
-      startRound(
-        rounds as AuthorizationRounds,
-        "files:write",
-        NOW + MAX_AUTHORIZATION_ROUNDS
-      )
-    ).toEqual({
+    let rounds: AuthorizationRounds | undefined;
+    for (let i = 0; i < MAX_AUTHORIZATION_ROUNDS; i++) {
+      const next = round(rounds, "files:write", NOW + i);
+      expect(next.decision._tag).toBe("start");
+      rounds = next.rounds;
+    }
+    expect(startRound(rounds, "files:write", NOW + 10)).toEqual({
       _tag: "exhausted",
       rounds: MAX_AUTHORIZATION_ROUNDS,
       scope: "files:write"
     });
   });
 
+  it("keeps each scope set's budget when challenges alternate", () => {
+    let rounds: AuthorizationRounds | undefined;
+    let at = NOW;
+    for (let i = 0; i < MAX_AUTHORIZATION_ROUNDS; i++) {
+      for (const scope of ["deploy:write", "billing:write"]) {
+        const next = round(rounds, scope, at++);
+        expect(next.decision._tag).toBe("start");
+        rounds = next.rounds;
+      }
+    }
+    expect(startRound(rounds, "deploy:write", at)).toMatchObject({
+      _tag: "exhausted",
+      scope: "deploy:write"
+    });
+    expect(startRound(rounds, "billing:write", at)).toMatchObject({
+      _tag: "exhausted",
+      scope: "billing:write"
+    });
+  });
+
   it("counts more links for a round still waiting on the user as that round", () => {
     const first = startRound(undefined, "s", NOW);
     if (first._tag !== "start") throw new Error("expected a round");
-    const again = startRound(first.rounds, "s", NOW + 1);
-    expect(again).toMatchObject({ _tag: "start", rounds: { rounds: 1 } });
+    expect(startRound(first.rounds, "s", NOW + 1)).toMatchObject({
+      _tag: "start",
+      rounds: { byScope: { s: { rounds: 1, completed: false } } }
+    });
   });
 
-  it("starts over for a different scope set or after the window", () => {
-    const rounds = completedRounds("s", MAX_AUTHORIZATION_ROUNDS);
-    if (!rounds || "_tag" in rounds) throw new Error("expected rounds");
-    expect(startRound(rounds, "other", NOW + 10)).toMatchObject({
-      _tag: "start",
-      rounds: { scope: "other", rounds: 1 }
-    });
+  it("forgets a scope set's rounds after the window", () => {
+    let rounds: AuthorizationRounds | undefined;
+    for (let i = 0; i < MAX_AUTHORIZATION_ROUNDS; i++) {
+      rounds = round(rounds, "s", NOW + i).rounds;
+    }
     expect(
-      startRound(rounds, "s", rounds.at + AUTHORIZATION_ROUNDS_WINDOW_MS + 1)
-    ).toMatchObject({ _tag: "start", rounds: { rounds: 1 } });
+      startRound(
+        rounds,
+        "s",
+        NOW + MAX_AUTHORIZATION_ROUNDS + AUTHORIZATION_ROUNDS_WINDOW_MS
+      )
+    ).toMatchObject({
+      _tag: "start",
+      rounds: { byScope: { s: { rounds: 1 } } }
+    });
   });
 
   it("parses only well-formed records", () => {
-    const record = { scope: "s", rounds: 2, completed: true, at: NOW };
+    const record = {
+      latest: "s",
+      byScope: { s: { rounds: 2, completed: true, at: NOW } }
+    };
     expect(parseAuthorizationRounds(record)).toEqual(record);
+    expect(
+      parseAuthorizationRounds({ latest: "s", byScope: { s: { rounds: 1 } } })
+    ).toEqual({ latest: "s", byScope: {} });
     expect(parseAuthorizationRounds({ scope: "s" })).toBeUndefined();
     expect(parseAuthorizationRounds("x")).toBeUndefined();
   });

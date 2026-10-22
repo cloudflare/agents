@@ -600,6 +600,12 @@ describe("MCPClientManager mid-session re-authorization", () => {
       const woken = harness.createManager();
       await woken.restoreConnectionsFromStorage("test-client");
       expect(woken.mcpConnections[serverId].connectionState).toBe("failed");
+
+      // An explicit reconnect restarts the budget: the next step-up shows a
+      // link again.
+      expect((await manager.connectToServer(serverId)).state).toBe("connected");
+      await manager.discoverIfConnected(serverId);
+      expect(await call()).toBeInstanceOf(MCPAuthorizationRequiredError);
     });
   });
 

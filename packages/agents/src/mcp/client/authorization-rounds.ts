@@ -6,28 +6,36 @@
  * so it does not loop on the same request.
  *
  * A round is one authorization URL the user is sent to. Rounds are counted
- * per requested scope set, and a new round only counts once the previous
- * one completed (its callback exchanged a code) and the server still asked
- * for the same scopes. Several links issued for the same pending ask (for
- * example two tool calls hitting the same step-up at once) are one round.
+ * separately for each requested scope set, so challenges that alternate
+ * between scope sets each use up their own budget. A new round for a scope
+ * set only counts once its previous round completed (its callback exchanged
+ * a code) and the server asked for the same scopes again. Several links
+ * issued for one pending ask (for example two tool calls hitting the same
+ * step-up at once) are one round.
  */
 
 /** Completed authorization rounds allowed for one scope set. */
 export const MAX_AUTHORIZATION_ROUNDS = 3;
 
-/** Rounds further apart than this start counting again. */
+/** A scope set's rounds are forgotten this long after its latest round. */
 export const AUTHORIZATION_ROUNDS_WINDOW_MS = 60 * 60 * 1000;
+
+/** Rounds recorded for one requested scope set. */
+export type ScopeRounds = {
+  /** Rounds started for this scope set within the window. */
+  readonly rounds: number;
+  /** Whether this scope set's latest round's callback exchanged a code. */
+  readonly completed: boolean;
+  /** When this scope set's latest round started, in epoch milliseconds. */
+  readonly at: number;
+};
 
 /** Authorization rounds recorded for one server. */
 export type AuthorizationRounds = {
-  /** The requested scope set, normalized; empty when no scope was requested. */
-  readonly scope: string;
-  /** Rounds started for `scope` in the current run. */
-  readonly rounds: number;
-  /** Whether the latest round's callback exchanged a code. */
-  readonly completed: boolean;
-  /** When the latest round started, in epoch milliseconds. */
-  readonly at: number;
+  /** The scope set of the round started most recently. */
+  readonly latest: string;
+  /** Rounds per normalized scope set; `""` when no scope was requested. */
+  readonly byScope: Readonly<Record<string, ScopeRounds>>;
 };
 
 /** Whether the next authorization link may be shown. */
@@ -67,27 +75,22 @@ export function startRound(
   scope: string,
   now: number
 ): RoundDecision {
-  if (
-    !previous ||
-    previous.scope !== scope ||
-    now - previous.at > AUTHORIZATION_ROUNDS_WINDOW_MS
-  ) {
-    return {
-      _tag: "start",
-      rounds: { scope, rounds: 1, completed: false, at: now }
-    };
-  }
-  if (!previous.completed) {
+  const byScope = live(previous?.byScope ?? {}, now);
+  const current = byScope[scope];
+  let next: ScopeRounds;
+  if (!current) {
+    next = { rounds: 1, completed: false, at: now };
+  } else if (!current.completed) {
     // Another link for the round still waiting on the user.
-    return { _tag: "start", rounds: { ...previous, at: now } };
-  }
-  const rounds = previous.rounds + 1;
-  if (rounds > MAX_AUTHORIZATION_ROUNDS) {
-    return { _tag: "exhausted", rounds: previous.rounds, scope };
+    next = { ...current, at: now };
+  } else if (current.rounds + 1 > MAX_AUTHORIZATION_ROUNDS) {
+    return { _tag: "exhausted", rounds: current.rounds, scope };
+  } else {
+    next = { rounds: current.rounds + 1, completed: false, at: now };
   }
   return {
     _tag: "start",
-    rounds: { scope, rounds, completed: false, at: now }
+    rounds: { latest: scope, byScope: { ...byScope, [scope]: next } }
   };
 }
 
@@ -95,7 +98,15 @@ export function startRound(
 export function completeRound(
   previous: AuthorizationRounds | undefined
 ): AuthorizationRounds | undefined {
-  return previous ? { ...previous, completed: true } : undefined;
+  const current = previous?.byScope[previous.latest];
+  if (!previous || !current) return previous;
+  return {
+    latest: previous.latest,
+    byScope: {
+      ...previous.byScope,
+      [previous.latest]: { ...current, completed: true }
+    }
+  };
 }
 
 /** Parse recorded rounds read back from storage. */
@@ -104,23 +115,27 @@ export function parseAuthorizationRounds(
 ): AuthorizationRounds | undefined {
   if (
     !isRecord(value) ||
-    typeof value.scope !== "string" ||
-    typeof value.rounds !== "number" ||
-    typeof value.completed !== "boolean" ||
-    typeof value.at !== "number"
+    typeof value.latest !== "string" ||
+    !isRecord(value.byScope)
   ) {
     return undefined;
   }
-  return {
-    scope: value.scope,
-    rounds: value.rounds,
-    completed: value.completed,
-    at: value.at
-  };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  const byScope: Record<string, ScopeRounds> = {};
+  for (const [scope, entry] of Object.entries(value.byScope)) {
+    if (
+      isRecord(entry) &&
+      typeof entry.rounds === "number" &&
+      typeof entry.completed === "boolean" &&
+      typeof entry.at === "number"
+    ) {
+      byScope[scope] = {
+        rounds: entry.rounds,
+        completed: entry.completed,
+        at: entry.at
+      };
+    }
+  }
+  return { latest: value.latest, byScope };
 }
 
 /** Message for a server that hit the limit. */
@@ -130,4 +145,20 @@ export function authorizationExhaustedMessage(
 ): string {
   const scopes = scope ? ` for scope "${scope}"` : "";
   return `The server still requires authorization${scopes} after ${rounds} completed authorizations. Stopped to avoid an authorization loop; reconnect the server to try again.`;
+}
+
+/** Scope sets whose latest round is still inside the window. */
+function live(
+  byScope: Readonly<Record<string, ScopeRounds>>,
+  now: number
+): Record<string, ScopeRounds> {
+  return Object.fromEntries(
+    Object.entries(byScope).filter(
+      ([, entry]) => now - entry.at <= AUTHORIZATION_ROUNDS_WINDOW_MS
+    )
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
