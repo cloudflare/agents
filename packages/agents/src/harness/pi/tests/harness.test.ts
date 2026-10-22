@@ -626,3 +626,53 @@ describe("PiHarness on pi-durable", () => {
     ]);
   });
 });
+
+describe("PiHarness after a failed run (settings.afterFailedRun)", () => {
+  /** Fail a run with a follow-up queued behind it; return the follow-up's id. */
+  async function failWithFollowUp(
+    stub: DurableObjectStub<PiHarnessTestObject>
+  ) {
+    const failing = await stub.submit("gate-fail");
+    await stub.gateStarted(1);
+    const followUp = await stub.submit("one");
+    await stub.release();
+    expect(await stub.wait(failing.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "model_error"
+    });
+    return followUp.operationId;
+  }
+
+  it("keeps the follow-up queued, with no wake, until the next submit", async () => {
+    const stub = fresh();
+    const followUp = await failWithFollowUp(stub);
+    expect(await stub.waitWithin(followUp, 300)).toBe("waiting");
+    expect(await stub.pending()).toEqual([
+      { operationId: followUp, session: "1", status: "queued" }
+    ]);
+    expect(await alarmCleared(stub)).toBe(true);
+
+    // The next input runs a boundary: the kept follow-up goes first.
+    const next = await stub.submit("two");
+    expect(await stub.wait(followUp)).toMatchObject({
+      status: "done",
+      text: "echo: one"
+    });
+    expect(await stub.wait(next.operationId)).toMatchObject({
+      status: "done",
+      text: "echo: two"
+    });
+    expect(await stub.pending()).toEqual([]);
+  });
+
+  it("withdraws a kept follow-up on abort", async () => {
+    const stub = fresh();
+    const followUp = await failWithFollowUp(stub);
+    expect(await stub.abort(followUp)).toBe(true);
+    expect(await stub.wait(followUp)).toMatchObject({
+      status: "unanswered",
+      reason: "aborted"
+    });
+    expect(await stub.pending()).toEqual([]);
+  });
+});

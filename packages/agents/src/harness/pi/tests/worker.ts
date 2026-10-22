@@ -107,6 +107,7 @@ function textOf(content: Message["content"] | undefined): string {
  * - `multiply N` calls `multiply`, `gate` calls `gate`, `gate-unsafe` calls
  *   `gate_unsafe`, `hold` calls `hold`; `flaky` fails once with a retryable
  *   error; anything else is echoed back.
+ * - `gate-fail` calls `gate`, then fails with a model error.
  * - After a tool result it answers `tool said: <result>`.
  */
 function script(
@@ -115,8 +116,16 @@ function script(
 ): AssistantMessage {
   // pi places system-prompt changes positionally, so a system message can
   // follow the user's input.
-  const last = context.messages.filter((m) => m.role !== "system").at(-1);
+  const messages = context.messages.filter((m) => m.role !== "system");
+  const last = messages.at(-1);
   if (last?.role === "toolResult") {
+    const asked = messages.filter((m) => m.role === "user").at(-1);
+    if (asked && textOf(asked.content) === "gate-fail") {
+      return fauxAssistantMessage([], {
+        stopReason: "error",
+        errorMessage: "model failed after the gate"
+      });
+    }
     return fauxAssistantMessage([
       fauxText(
         `${last.isError ? "tool failed" : "tool said"}: ${textOf(last.content)}`
@@ -144,9 +153,9 @@ function script(
       stopReason: "toolUse"
     });
   }
-  if (prompt === "gate" || prompt === "gate-unsafe") {
+  if (prompt === "gate" || prompt === "gate-fail" || prompt === "gate-unsafe") {
     return fauxAssistantMessage(
-      [fauxToolCall(prompt === "gate" ? "gate" : "gate_unsafe", {})],
+      [fauxToolCall(prompt === "gate-unsafe" ? "gate_unsafe" : "gate", {})],
       { stopReason: "toolUse" }
     );
   }
@@ -338,6 +347,20 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.wait(operationId, session ? { session } : {});
   }
 
+  /** `wait()`, given up after `ms`: `"waiting"` if it had not settled. */
+  async waitWithin(
+    operationId: string,
+    ms: number
+  ): Promise<PiOperationResult | "waiting"> {
+    const signal = AbortSignal.timeout(ms);
+    try {
+      return await this.harness.wait(operationId, { signal });
+    } catch (error) {
+      if (signal.aborted) return "waiting";
+      throw error;
+    }
+  }
+
   async messages(session?: string): Promise<string[]> {
     return entryTexts(await this.harness.messages(session ? { session } : {}));
   }
@@ -391,8 +414,8 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     await this.harness.dispose();
   }
 
-  async abort(): Promise<boolean> {
-    return this.harness.abort();
+  async abort(operationId?: string): Promise<boolean> {
+    return this.harness.abort({ operationId });
   }
 
   async retry(): Promise<boolean> {
