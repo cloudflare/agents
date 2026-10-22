@@ -95,6 +95,9 @@ Skip an upstream when:
 - a Gardener pull request for this exact version exists, open or closed. Closed means a maintainer
   dealt with it or declined it.
 
+Also note every open pull request that touches the upstream's surface (the files from step 3) or
+names the upstream in its title; step 3 checks each against the upstream changes.
+
 If an open Gardener pull request (author `github-actions[bot]`, head `gardener/upstream/<upstream>-*`)
 targets an **older** version of the same upstream, read its commits:
 
@@ -116,14 +119,38 @@ Read every non-test file in the upstream's directories, not a sample:
   `pi.ts` tool adapters under `src/browser`, `src/web` and `src/harness/pi/skills.ts`, and
   `src/experimental/channels/web/tui` (`pi-tui`).
 - opencode: `packages/agents/src/harness/opencode` and `src/models/opencode`.
+- both: every doc, example and design note that mentions the upstream
+  (`git grep -il '<pi|opencode>' -- docs design examples`), including `docs/agents/harnesses/pi.md`,
+  `docs/agents/models-pi-ai.md`, `design/rfc-pi-harness-example.md`, `examples/next/harnesses/<u>`
+  and `examples/next/channels/src/pi`.
 
 Note every imported symbol, subpath, type, option, event name, message shape, storage format,
 default, and imported data such as catalogs and model ID tables (and which IDs our docs tell users
-to write). Then read the notes or commits from our version up to latest and list each change that
-touches that surface. A change matters when it would stop our code compiling, make it throw, or
-change its behaviour, whatever upstream filed it under ("Fixed" can rename IDs or change a
-default). Note changes that make one of our workarounds unnecessary only when upstream says so
-explicitly.
+to write).
+
+Then review **every** upstream change from our version up to latest, one at a time: each
+release-note bullet about our packages (pi), or each commit to `packages/sdk` and `packages/plugin`
+(opencode). Don't judge a release as a whole; going item by item is what catches what a skim
+misses. For each item:
+
+- Read what actually changed. For pi, find the commit behind any bullet that could touch our surface
+  (list them with `GET /repos/earendil-works/pi/commits?sha=v<latest>&path=packages/<package>&since=<date
+  of v<ours>>`, then `GET /repos/earendil-works/pi/commits/<sha>`) and look at the changed
+  declarations. For opencode,
+  read each commit's diff, not just its message.
+- Check it against our code, tests, docs and examples, and classify it:
+  - **breaking**: stops our code compiling, makes it throw, or changes its behaviour, whatever
+    upstream filed it under ("Fixed" can rename IDs or change a default);
+  - **docs**: makes our docs or examples wrong or incomplete;
+  - **workaround**: lets us delete code of ours (only when upstream says so explicitly);
+  - **new feature**: something we could support, but nothing forces on us;
+  - **no effect**: with a one-line reason.
+- For anything but **no effect**, record the upstream line or commit, the exact `path:line` it
+  affects on our side, and a severity: **high** (breaks the build or users), **medium** (wrong
+  behaviour or docs users will hit), **low** (internal or cosmetic).
+
+Then check each open pull request you noted in step 2: does an upstream change conflict with it,
+make it obsolete, or need it updated, or does it already handle it?
 
 ## 4. Get a baseline
 
@@ -155,9 +182,10 @@ failure the upgrade caused from one that was already there. Install Playwright's
 2. `pnpm install` to update `pnpm-lock.yaml`. Never edit the lockfile by hand. Afterwards, every
    `@earendil-works/` (or `@opencode/`) package in the lockfile must resolve the new version; if an
    old one remains, find the pin or override that holds it and move it too.
-3. Fix every break from step 3 and every new failure in the source, tests, examples and docs. Take
-   the smallest correct change. Prefer the API upstream now provides over keeping our own copy. Do
-   not adopt new upstream features that nothing forces on us. Note each choice you make, with the
+3. Fix every **breaking**, **docs** and **workaround** item from step 3 and every new failure in
+   the source, tests, examples and docs. Take the smallest correct change. Prefer the API upstream
+   now provides over keeping our own copy. Don't implement **new feature** items: the body lists
+   them as not adopted. Note each choice you make, with the
    alternatives you rejected: they go in the pull request's Decisions section.
 4. Run, and make pass:
    - `pnpm run build` and `pnpm run check` (sherif, exports check, format, lint, typecheck);
@@ -235,6 +263,8 @@ the body alone, and trust that the diff does exactly what the body says and noth
   break (adapt our code, use a new upstream API, or keep a shim), whether to raise a peer floor,
   which changeset bump, whether to drop a workaround upstream made unnecessary, why a test's
   expectation changed. If you made no decisions beyond moving pins, say so.
+- **Give every upstream change a verdict.** Every item you reviewed in step 3 appears in the body:
+  in full when it affects us, as one line under "no effect" otherwise.
 - **Be plain and specific.** Quote upstream, cite `path:line`, show real code changes as short
   ```diff blocks. As short as it can be while complete; no filler.
 
@@ -253,15 +283,32 @@ Use this shape:
 
 ## What changed upstream that affects us
 
-<For each upstream change that touched us: quote the line and link it (release URL or commit URL),
-then say what it broke or made unnecessary in our code, citing `path:line`, and show our change as a
-short ```diff block. If nothing in the release touched our surface, say so in one sentence, and say
-what you read to conclude that.>
+<One entry per item that isn't "no effect", most severe first:>
+
+- **<high | medium | low> · <breaking | docs | workaround | new feature>:** "<quoted line>"
+  ([link](<release or commit URL>)). <What it does to us, citing `path:line`.> <Our change as a
+  short ```diff block, or for a new feature: "Not adopted: <why>; possible follow-up.">
+
+<details><summary>No effect on us (<count>)</summary>
+
+- "<quoted line or commit title>" ([link](<URL>)): <why it doesn't touch us>
+
+</details>
 
 ## Decisions
 
 - **<the choice>.** <what you chose, the alternatives, and why this one.>
 <Or: "None: only versions and the lockfile moved.">
+
+## Needs a maintainer
+
+- **<the open question>.** Options: <…>. Recommendation: <…>, because <…>.
+<Or: "None.">
+
+## Affected open PRs
+
+- #<n> <title>: <conflicts | made obsolete | needs updating | already handles it>, because <…>.
+<Or: "None.">
 
 ## Other changes
 
@@ -293,8 +340,8 @@ Gardener's `pr-review-fix` task.
 
 Before proposing, check the body against what will be committed: every path from
 `git status --porcelain --untracked-files=all`, `git diff` for changed files, and the contents of
-new files (`git diff` doesn't show untracked files). Every file accounted for, every claim true of
-the code. Fix whichever side is wrong.
+new files (`git diff` doesn't show untracked files). Every file accounted for, every upstream item
+given a verdict, every claim true of the code. Fix whichever side is wrong.
 
 Do not @mention anyone. When you are done, whether you proposed something or nothing, call
 `finish_task`. Then finish.
