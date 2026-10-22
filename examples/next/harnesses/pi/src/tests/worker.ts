@@ -121,11 +121,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
           models,
           registry: this.registry,
           settings: {
-            retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 },
-            // No idle caches: their timers keep the object from being evicted,
-            // so evictDurableObject would wait on them.
-            contextRetentionMs: 0,
-            documentRetentionMs: 0
+            retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
           },
           onReport: (error) => console.warn("pi report", error)
         },

@@ -135,6 +135,7 @@ async function main() {
         "@earendil-works/pi-tui",
         "highlight.js",
         "marked",
+        "marked-cjk-friendly",
         "get-east-asian-width"
       ]
     },
