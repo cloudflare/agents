@@ -142,9 +142,10 @@ context:
 
 ```typescript
 import { RpcTarget } from "cloudflare:workers";
+import { Agent, getCurrentAgent } from "agents";
 
 class HostCallbackBridge extends RpcTarget {
-  constructor(private agent: MyMcpAgent) {
+  constructor(private agent: MyAgent) {
     super();
   }
 
@@ -155,9 +156,9 @@ class HostCallbackBridge extends RpcTarget {
   }
 }
 
-export class MyMcpAgent extends McpAgent {
+export class MyAgent extends Agent {
   async handleSandboxCallback() {
-    const { agent } = getCurrentAgent<MyMcpAgent>();
+    const { agent } = getCurrentAgent<MyAgent>();
     // `agent` is available again.
   }
 }
@@ -165,10 +166,6 @@ export class MyMcpAgent extends McpAgent {
 
 Context restored this way has `connection`, `request`, and `email` unset. It
 is not tied to live client I/O.
-
-Server-initiated MCP requests (`elicitInput`, `createMessage`, and `listRoots`)
-on `McpAgent` do not require this indirection because the MCP transport retains
-its owning agent.
 
 ## API reference
 

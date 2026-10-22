@@ -300,8 +300,6 @@ export default {
 
 For agent-specific initialization, use `getAgentByName` instead where you control exactly which agent receives the props.
 
-> **Note:** For `McpAgent`, props are automatically stored and accessible via `this.props`. See [MCP Servers](/mcp-servers) for details.
-
 ### Hooks
 
 `routeAgentRequest` supports hooks for intercepting requests before they reach agents:
