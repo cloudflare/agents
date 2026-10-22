@@ -2219,40 +2219,65 @@ describe("MCPClientManager OAuth Integration", () => {
       );
 
       it(
-        "reconnects instead of restoring a link whose state expired",
+        "records an expired link as failed instead of minting a new one",
         managerTest(async ({ harness, manager, saveServer, getServer }) => {
           saveAuthenticatingServer(saveServer);
           await seedState(harness.storage, 11 * 60 * 1000);
-          const connectSpy = vi
-            .spyOn(manager, "connectToServer")
-            .mockResolvedValue({ state: "connected" });
+          const connectSpy = vi.spyOn(manager, "connectToServer");
 
           await manager.restoreConnectionsFromStorage("test-agent");
           await manager.waitForConnections();
 
-          expect(connectSpy).toHaveBeenCalledWith(serverId);
-          expect(manager.mcpConnections[serverId].connectionState).not.toBe(
-            "authenticating"
-          );
+          expect(connectSpy).not.toHaveBeenCalled();
+          const conn = manager.mcpConnections[serverId];
+          expect(conn.connectionState).toBe("failed");
+          expect(conn.connectionError).toContain("Authorization expired");
           expect(getServer(serverId)?.auth_url ?? null).toBeNull();
         })
       );
 
       it(
-        "reconnects instead of restoring a link a callback already redeemed",
+        "forgets the link before a callback redeems it",
         managerTest(async ({ manager, saveServer, getServer }) => {
-          // The callback consumed the state and saved tokens, then the
-          // isolate died before auth_url was cleared.
-          saveAuthenticatingServer(saveServer);
-          const connectSpy = vi
-            .spyOn(manager, "connectToServer")
-            .mockResolvedValue({ state: "connected" });
+          const stateStorage = createMockStateStorage();
+          saveServer({
+            id: serverId,
+            name: "OAuth Server",
+            server_url: "http://oauth-server.com",
+            callback_url: "http://localhost:3000/callback",
+            client_id: "stored-client-id",
+            auth_url: "https://auth.example.com/authorize",
+            server_options: null
+          });
+          const connection = new MCPClientConnection(
+            new URL("http://oauth-server.com"),
+            { name: "test-client", version: "1.0.0" },
+            {
+              transport: {
+                type: "auto",
+                authProvider: createMockAuthProvider(stateStorage)
+              },
+              client: {}
+            }
+          );
+          connection.connectionState = "authenticating";
+          let authUrlDuringExchange: string | null | undefined;
+          connection.completeAuthorization = vi
+            .fn()
+            .mockImplementation(async () => {
+              authUrlDuringExchange = getServer(serverId)?.auth_url;
+            });
+          manager.mcpConnections[serverId] = connection;
+          const state = stateStorage.createState(serverId);
 
-          await manager.restoreConnectionsFromStorage("test-agent");
-          await manager.waitForConnections();
+          await manager.handleCallbackRequest(
+            new Request(
+              `http://localhost:3000/callback?code=code&state=${state}`
+            )
+          );
 
-          expect(connectSpy).toHaveBeenCalledWith(serverId);
-          expect(getServer(serverId)?.auth_url ?? null).toBeNull();
+          // A death mid-exchange can no longer leave a spent link behind.
+          expect(authUrlDuringExchange ?? null).toBeNull();
         })
       );
     });
@@ -6308,7 +6333,7 @@ describe("MCPClientManager OAuth Integration", () => {
         saveServer({
           id: "slow-rpc",
           name: "Slow RPC Server",
-          server_url: "rpc://slow-rpc",
+          server_url: "rpc:slow-rpc",
           client_id: null,
           auth_url: null,
           callback_url: "",
@@ -6316,10 +6341,10 @@ describe("MCPClientManager OAuth Integration", () => {
         });
         const connectStarted = createDeferred<void>();
         const releaseConnect = createDeferred<void>();
-        vi.spyOn(manager, "connect").mockImplementation(async () => {
+        vi.spyOn(manager, "connectToServer").mockImplementation(async () => {
           connectStarted.resolve();
           await releaseConnect.promise;
-          return { id: "slow-rpc" };
+          return { state: "failed", error: "still starting" };
         });
 
         await manager.onStart();
@@ -6335,6 +6360,193 @@ describe("MCPClientManager OAuth Integration", () => {
         releaseConnect.resolve();
         await waiting;
         expect(settled).toBe(true);
+      })
+    );
+  });
+
+  describe("durable reconnects", () => {
+    function jobs(harness: McpHarness) {
+      return [
+        ...harness.storage.sql.exec<{ id: string; payload: string }>(
+          "SELECT id, payload FROM cf_agents_jobs WHERE capability = 'mcp'"
+        )
+      ].map((row) => ({ id: row.id, payload: JSON.parse(row.payload) }));
+    }
+
+    function saveRestorable(saveServer: (server: MCPServerRow) => void) {
+      saveServer({
+        id: "down",
+        name: "Down Server",
+        server_url: "http://example.com/mcp",
+        callback_url: "",
+        client_id: null,
+        auth_url: null,
+        server_options: JSON.stringify({ retry: { maxAttempts: 1 } })
+      });
+    }
+
+    it(
+      "schedules a durable reconnect when a restored server cannot connect",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        saveRestorable(saveServer);
+        vi.spyOn(manager, "connectToServer").mockResolvedValue({
+          state: "failed",
+          error: "offline"
+        });
+
+        await manager.restoreConnectionsFromStorage("test-agent");
+        await manager.waitForConnections();
+
+        expect(jobs(harness)).toMatchObject([
+          { id: "connect:down", payload: { serverId: "down", attempt: 1 } }
+        ]);
+      })
+    );
+
+    it("records a failure after the reconnect window and keeps it across wakes until an explicit reconnect", async () => {
+      await withMcpHarness(async (harness) => {
+        saveServerRow(harness.storage, {
+          id: "down",
+          name: "Down Server",
+          server_url: "http://example.com/mcp",
+          callback_url: "",
+          client_id: null,
+          auth_url: null,
+          server_options: JSON.stringify({ retry: { maxAttempts: 1 } })
+        });
+        const first = harness.installManager(
+          new TestMCPClientManager("test-client", "1.0.0", {
+            reconnect: { giveUpAfterMs: 0 }
+          })
+        );
+        vi.spyOn(first, "connectToServer").mockResolvedValue({
+          state: "failed",
+          error: "offline"
+        });
+        await first.restoreConnectionsFromStorage("test-agent");
+        await first.waitForConnections();
+
+        expect(first.mcpConnections.down.connectionState).toBe("failed");
+        expect(first.mcpConnections.down.connectionError).toContain(
+          "Stopped reconnecting after 1 attempts: offline"
+        );
+        expect(jobs(harness)).toEqual([]);
+
+        // A later wake shows the same failure without trying again.
+        const woken = createTestManager(harness);
+        const connect = vi.spyOn(woken, "connectToServer");
+        await woken.restoreConnectionsFromStorage("test-agent");
+        await woken.waitForConnections();
+        expect(connect).not.toHaveBeenCalled();
+        expect(woken.mcpConnections.down.connectionState).toBe("failed");
+
+        // An explicit reconnect clears the failure and tries now.
+        const conn = woken.mcpConnections.down;
+        connect.mockImplementation(async () => {
+          conn.connectionState = "connected";
+          return { state: "connected" };
+        });
+        conn.discover = vi.fn().mockImplementation(async () => {
+          conn.connectionState = "ready";
+          return { success: true };
+        });
+        expect(await woken.settleServer("down")).toEqual({ state: "ready" });
+        expect(conn.connectionError).toBeNull();
+
+        const afterReconnect = createTestManager(harness);
+        vi.spyOn(afterReconnect, "connectToServer").mockResolvedValue({
+          state: "connected"
+        });
+        await afterReconnect.restoreConnectionsFromStorage("test-agent");
+        expect(afterReconnect.mcpConnections.down.connectionState).not.toBe(
+          "failed"
+        );
+      });
+    });
+
+    it("waits for a scheduled reconnect on wake instead of connecting early", async () => {
+      await withMcpHarness(async (harness) => {
+        saveServerRow(harness.storage, {
+          id: "down",
+          name: "Down Server",
+          server_url: "http://example.com/mcp",
+          callback_url: "",
+          client_id: null,
+          auth_url: null,
+          server_options: JSON.stringify({ retry: { maxAttempts: 1 } })
+        });
+        const first = createTestManager(harness);
+        vi.spyOn(first, "connectToServer").mockResolvedValue({
+          state: "failed",
+          error: "offline"
+        });
+        await first.restoreConnectionsFromStorage("test-agent");
+        await first.waitForConnections();
+        expect(jobs(harness)).toHaveLength(1);
+
+        const woken = createTestManager(harness);
+        const connect = vi.spyOn(woken, "connectToServer");
+        await woken.restoreConnectionsFromStorage("test-agent");
+        await woken.waitForConnections();
+
+        expect(connect).not.toHaveBeenCalled();
+        expect(woken.mcpConnections.down.connectionState).toBe("failed");
+        expect(woken.mcpConnections.down.connectionError).toBe("offline");
+        expect(jobs(harness)).toMatchObject([
+          { id: "connect:down", payload: { attempt: 1 } }
+        ]);
+      });
+    });
+
+    it(
+      "moves pending jobs when a server id is migrated",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        saveRestorable(saveServer);
+        vi.spyOn(manager, "connectToServer").mockResolvedValue({
+          state: "failed",
+          error: "offline"
+        });
+        await manager.restoreConnectionsFromStorage("test-agent");
+        await manager.waitForConnections();
+
+        await manager.migrateServerId("down", "stable", "test-agent");
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(jobs(harness)).toMatchObject([
+          {
+            id: "connect:stable",
+            payload: { serverId: "stable", attempt: 1, error: "offline" }
+          }
+        ]);
+      })
+    );
+
+    it(
+      "cancels a pending reconnect once the server is ready",
+      managerTest(async ({ harness, manager, saveServer }) => {
+        saveRestorable(saveServer);
+        const connect = vi.spyOn(manager, "connectToServer").mockResolvedValue({
+          state: "failed",
+          error: "offline"
+        });
+        await manager.restoreConnectionsFromStorage("test-agent");
+        await manager.waitForConnections();
+        expect(jobs(harness)).toHaveLength(1);
+
+        const conn = manager.mcpConnections.down;
+        connect.mockImplementation(async () => {
+          conn.connectionState = "connected";
+          return { state: "connected" };
+        });
+        conn.discover = vi.fn().mockImplementation(async () => {
+          conn.connectionState = "ready";
+          return { success: true };
+        });
+        await manager.establishConnection("down");
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(conn.connectionState).toBe("ready");
+        expect(jobs(harness)).toEqual([]);
       })
     );
   });

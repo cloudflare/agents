@@ -17,6 +17,23 @@ const SERVER_COLUMNS =
 /** Outcome of renaming a stored server. */
 export type ServerRenameResult = "renamed" | "missing" | "collision";
 
+/**
+ * Why a server stopped trying to connect on its own. Stored with the server
+ * so a later wake shows the same failure instead of trying again; only an
+ * explicit reconnect clears it.
+ */
+export type StoredServerFailure = {
+  /**
+   * `authorization-expired`: the authorization link expired before the user
+   * completed it. `reconnect-exhausted`: automatic reconnects gave up.
+   */
+  readonly reason: "authorization-expired" | "reconnect-exhausted";
+  /** Human-readable message, shown as the connection error. */
+  readonly message: string;
+  /** When the failure was recorded, in epoch milliseconds. */
+  readonly at: number;
+};
+
 /** A resumable MCP session persisted with its server. */
 export type StoredMcpSession = {
   readonly id: string;
@@ -35,6 +52,8 @@ export class McpServerStore {
    * @param storage - The Durable Object storage holding the catalog table.
    */
   constructor(private readonly storage: DurableObjectStorage) {}
+
+  #failureColumnReady = false;
 
   #exec<T extends Record<string, SqlStorageValue>>(
     query: string,
@@ -65,11 +84,21 @@ export class McpServerStore {
     )[0];
   }
 
-  /** Insert or replace one server row. */
+  /**
+   * Insert one server row, or update every catalog column of an existing
+   * one. A recorded failure is kept; registration clears it explicitly.
+   */
   save(server: MCPServerRow): void {
     this.#exec(
-      `INSERT OR REPLACE INTO cf_agents_mcp_servers (${SERVER_COLUMNS})
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO cf_agents_mcp_servers (${SERVER_COLUMNS})
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         server_url = excluded.server_url,
+         client_id = excluded.client_id,
+         auth_url = excluded.auth_url,
+         callback_url = excluded.callback_url,
+         server_options = excluded.server_options`,
       server.id,
       server.name,
       server.server_url,
@@ -147,6 +176,57 @@ export class McpServerStore {
     if (!options.capabilities) return;
     options.capabilities = undefined;
     this.save({ ...row, server_options: encodeMcpServerOptions(options) });
+  }
+
+  /** The failure recorded for one server, if it stopped trying. */
+  failure(id: string): StoredServerFailure | undefined {
+    this.#ensureFailureColumn();
+    const value = this.#exec<{ failure: string | null }>(
+      "SELECT failure FROM cf_agents_mcp_servers WHERE id = ?",
+      id
+    )[0]?.failure;
+    if (!value) return undefined;
+    try {
+      return JSON.parse(value) as StoredServerFailure;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Record that one server stopped trying, and why. */
+  setFailure(id: string, failure: StoredServerFailure): void {
+    this.#ensureFailureColumn();
+    this.#exec(
+      "UPDATE cf_agents_mcp_servers SET failure = ? WHERE id = ?",
+      JSON.stringify(failure),
+      id
+    );
+  }
+
+  /** Forget a recorded failure, so the server may connect again. */
+  clearFailure(id: string): void {
+    this.#ensureFailureColumn();
+    this.#exec(
+      "UPDATE cf_agents_mcp_servers SET failure = NULL WHERE id = ? AND failure IS NOT NULL",
+      id
+    );
+  }
+
+  /**
+   * Add the `failure` column on first use. The column is owned here rather
+   * than in `ensureMcpServerTable`, so the catalog's base DDL (and the
+   * Agent schema snapshot built from it) stays unchanged and objects that
+   * never record a failure never alter the table.
+   */
+  #ensureFailureColumn(): void {
+    if (this.#failureColumnReady) return;
+    const present = this.#exec<{ name: string }>(
+      "SELECT name FROM pragma_table_info('cf_agents_mcp_servers') WHERE name = 'failure'"
+    );
+    if (present.length === 0) {
+      this.#exec("ALTER TABLE cf_agents_mcp_servers ADD COLUMN failure TEXT");
+    }
+    this.#failureColumnReady = true;
   }
 
   /** Stamp the handler-derived capabilities on every stored server. */
