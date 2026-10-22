@@ -1,3 +1,39 @@
+import { UnauthorizedError } from "@modelcontextprotocol/client";
+
+/**
+ * Thrown by `MCPClientManager.callTool()` (and `readResource()` /
+ * `getPrompt()`) when a request on a ready connection needs the user to
+ * authorize again: a `403 insufficient_scope` step-up, or a `401` whose token
+ * refresh failed. The MCP SDK has already built a new authorization URL; the
+ * manager has moved the connection to `authenticating` and persisted
+ * `authUrl`, so sending the user to `authUrl` completes through the normal
+ * OAuth callback. Retry the request once the connection is `ready` again.
+ *
+ * Extends the SDK's `UnauthorizedError`, which these calls threw before, and
+ * keeps its `name`, so existing `instanceof UnauthorizedError` and
+ * `name === "UnauthorizedError"` checks keep matching. Use
+ * `instanceof MCPAuthorizationRequiredError` to read `authUrl`.
+ */
+export class MCPAuthorizationRequiredError extends UnauthorizedError {
+  readonly serverId: string;
+  readonly authUrl: string;
+  readonly clientId?: string;
+
+  constructor(
+    serverId: string,
+    authUrl: string,
+    options: { clientId?: string; cause?: unknown } = {}
+  ) {
+    super(
+      `MCP server "${serverId}" requires authorization: ${toErrorMessage(options.cause ?? "Unauthorized")}`
+    );
+    this.cause = options.cause;
+    this.serverId = serverId;
+    this.authUrl = authUrl;
+    this.clientId = options.clientId;
+  }
+}
+
 export function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

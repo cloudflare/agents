@@ -313,6 +313,23 @@ For example: `https://my-worker.workers.dev/agents/my-agent/default/callback`
 
 OAuth tokens are securely stored in SQLite and persist across agent restarts.
 
+### Re-authorization during a session
+
+A request can need authorization again after the server is `ready`: a tool call that needs a scope the grant lacks (`403 insufficient_scope`), or a `401` whose token refresh fails. `callTool()`, `readResource()` and `getPrompt()` then throw `MCPAuthorizationRequiredError`. The server moves to `authenticating` and its `auth_url` is saved, so clients see the new link through `getMcpServers()` like at connect time. Send the user to `error.authUrl`; the normal OAuth callback completes the flow and reconnects. Retry the request when the server is `ready` again. Tools from `getAITools()` call `callTool()`, so their `execute` throws the same error. If no usable link was produced (for example, a custom OAuth provider that does not put a fresh `state` in each authorization URL, or a callback for this server is already being processed), the call throws the SDK's plain `UnauthorizedError` as before.
+
+```typescript
+import { MCPAuthorizationRequiredError } from "agents/mcp/client";
+
+try {
+  return await this.mcp.callTool({ serverId, name: "deploy", arguments: {} });
+} catch (error) {
+  if (error instanceof MCPAuthorizationRequiredError) {
+    return { needsAuthorization: true, authUrl: error.authUrl };
+  }
+  throw error;
+}
+```
+
 ### Custom Callback Handling
 
 For custom OAuth completion behavior:

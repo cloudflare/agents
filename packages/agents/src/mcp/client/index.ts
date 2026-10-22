@@ -16,6 +16,7 @@ import type {
   Tool
 } from "@modelcontextprotocol/client";
 export type { ElicitRequest, ElicitResult } from "@modelcontextprotocol/client";
+export { MCPAuthorizationRequiredError } from "./errors";
 import { type RetryOptions, tryN } from "../../retries";
 import { z } from "zod";
 import { nanoid } from "nanoid";
@@ -34,7 +35,11 @@ import {
   type CallToolSchemaOrOptions,
   type LegacyCallToolResultSchema
 } from "./invoker";
-import { toErrorMessage } from "./errors";
+import {
+  isUnauthorized,
+  MCPAuthorizationRequiredError,
+  toErrorMessage
+} from "./errors";
 import { restoreRpcConnections } from "./rpc";
 import { RPC_DO_PREFIX } from "../rpc";
 import type { McpClientOptions, TransportType } from "../types";
@@ -2393,11 +2398,13 @@ export class MCPClientManager extends LifecycleCapability {
   ): ReturnType<Client["callTool"]> {
     const { serverId, ...mcpParams } = params;
     const unqualifiedName = mcpParams.name.replace(`${serverId}.`, "");
-    return callV2Tool(
-      this.mcpConnections[serverId].client,
-      { ...mcpParams, name: unqualifiedName },
-      schemaOrOptions,
-      options
+    return this.withAuthorizationRecovery(serverId, () =>
+      callV2Tool(
+        this.mcpConnections[serverId].client,
+        { ...mcpParams, name: unqualifiedName },
+        schemaOrOptions,
+        options
+      )
     );
   }
 
@@ -2409,9 +2416,8 @@ export class MCPClientManager extends LifecycleCapability {
     options?: CacheableRequestOptions
   ) {
     const { serverId, ...mcpParams } = params;
-    return this.mcpConnections[serverId].client.readResource(
-      mcpParams,
-      options
+    return this.withAuthorizationRecovery(serverId, () =>
+      this.mcpConnections[serverId].client.readResource(mcpParams, options)
     );
   }
 
@@ -2423,7 +2429,105 @@ export class MCPClientManager extends LifecycleCapability {
     options?: RequestOptions
   ) {
     const { serverId, ...mcpParams } = params;
-    return this.mcpConnections[serverId].client.getPrompt(mcpParams, options);
+    return this.withAuthorizationRecovery(serverId, () =>
+      this.mcpConnections[serverId].client.getPrompt(mcpParams, options)
+    );
+  }
+
+  /**
+   * Run a request on an established connection and surface mid-session
+   * re-authorization.
+   *
+   * A request can fail after connect with `403 insufficient_scope` (scope
+   * step-up) or a `401` whose refresh fails. The SDK transport then runs
+   * `auth()`, which hands a new authorization URL to the provider and throws
+   * `UnauthorizedError`. Left as is, nobody sees that URL, and a callback for
+   * it is ignored as stale because the connection is still `ready`. Move the
+   * connection to `authenticating` and persist the URL, as the connect path
+   * does, so the normal OAuth callback exchanges the code and reconnects.
+   */
+  private async withAuthorizationRecovery<T>(
+    serverId: string,
+    request: () => Promise<T>
+  ): Promise<T> {
+    const conn = this.mcpConnections[serverId];
+    const authUrlBefore = conn?.options?.transport?.authProvider?.authUrl;
+    try {
+      return await request();
+    } catch (error) {
+      throw (
+        (await this.requireReauthorization(
+          serverId,
+          conn,
+          error,
+          authUrlBefore
+        )) ?? error
+      );
+    }
+  }
+
+  private async requireReauthorization(
+    serverId: string,
+    conn: MCPClientConnection | undefined,
+    error: unknown,
+    authUrlBefore: string | undefined
+  ): Promise<MCPAuthorizationRequiredError | undefined> {
+    // Only take over an established connection. While a callback is being
+    // processed (`connecting`, `discovering`) or after a failure, leave the
+    // state machine alone and rethrow.
+    const canTakeOver = () => {
+      if (!conn || this.mcpConnections[serverId] !== conn) return false;
+      const state = conn.connectionState;
+      return (
+        state === MCPConnectionState.READY ||
+        state === MCPConnectionState.CONNECTED ||
+        state === MCPConnectionState.AUTHENTICATING
+      );
+    };
+    if (!conn || !canTakeOver() || !isUnauthorized(error)) return undefined;
+
+    // Only a URL set while this request ran counts; an unchanged one is left
+    // over from an earlier flow. A changed one may still belong to a flow
+    // that another request started and the user already completed, so also
+    // require its state nonce to be redeemable: a link the callback would
+    // reject is no use. A custom provider that reuses the same URL gets the
+    // original error, as before.
+    const authProvider = conn.options?.transport?.authProvider;
+    const authUrl = authProvider?.authUrl;
+    if (!authProvider || !authUrl || authUrl === authUrlBefore) {
+      return undefined;
+    }
+    let nonce: string | null = null;
+    try {
+      nonce = new URL(authUrl).searchParams.get("state");
+    } catch {
+      return undefined;
+    }
+    const stateBefore = conn.connectionState;
+    if (
+      !nonce ||
+      !(await this.hasRedeemableOAuthState(serverId, authProvider, nonce))
+    ) {
+      return undefined;
+    }
+    // Nothing may have moved while the check ran: not the connection (a
+    // callback may have completed) and not the URL that gets saved.
+    if (
+      !canTakeOver() ||
+      conn.connectionState !== stateBefore ||
+      authProvider.authUrl !== authUrl
+    ) {
+      return undefined;
+    }
+
+    const auth = this.persistAuthContinuation(serverId, conn);
+    if (!auth) return undefined;
+    conn.connectionState = MCPConnectionState.AUTHENTICATING;
+    this._onServerStateChanged.fire();
+    return new MCPAuthorizationRequiredError(serverId, auth.authUrl, {
+      clientId: auth.clientId,
+      cause: error
+    });
   }
 }
 
