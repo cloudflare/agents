@@ -1,10 +1,12 @@
 # Pi harness
 
-An experimental example that runs [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable),
+An example that runs [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable),
 pi's durable agent harness, inside a Durable Object. `PiHarness` and the
 session store come from `agents/harness/pi`, and the model provider from
-`agents/models/pi-ai`. Both entry points are experimental. This example adds
-the app around them.
+`agents/models/pi-ai`. This example adds the app around them.
+
+New to `PiHarness`? Start with the
+[Pi harness docs](https://developers.cloudflare.com/agents/harnesses/pi/).
 
 The example composes:
 

@@ -12,7 +12,7 @@
  *
  * const ai = createAI({ binding: env.AI, id: "prod" });
  *
- * ai("@cf/zai-org/glm-4.7-flash");                     // Workers AI: ours
+ * ai("@cf/zai-org/glm-5.3-flash");                     // Workers AI: ours
  * ai(getBuiltinModel("anthropic", "claude-opus-4-8")); // theirs, our transport
  * ai("anthropic/claude-opus-4-8");                     // same, via pi's catalog
  * ```
@@ -24,9 +24,6 @@
  * provider key, and no vendor wire format, lives in your Worker. The model's
  * metadata (`api`, `compat`, `thinkingLevelMap`, cost, limits) is whatever its
  * own registry says, and pi-ai's converters and stream processors do the rest.
- *
- * @beta Everything exported here is in beta: the surface may
- * change in a minor release while the design settles.
  *
  * @module
  */
@@ -112,8 +109,6 @@ export { CLOUDFLARE_DIAGNOSTIC } from "./wires/shared";
 
 /**
  * pi-agent-core's `streamFn` shape: what `Agent` calls to run a turn.
- *
- * @beta This surface is in beta and may change.
  */
 export type StreamFn = (
   model: Model<string>,
@@ -126,8 +121,6 @@ export type StreamFn = (
  * pi-ai model to get a model this instance routes; use `stream`/`complete` to
  * run it, `streamFn` with pi-agent-core's `Agent`, and `provider` with a pi-ai
  * `Models` registry.
- *
- * @beta This surface is in beta and may change.
  */
 export interface AI {
   /** A Workers AI model: Cloudflare's own catalog, on the run path. */
@@ -251,12 +244,10 @@ function buildModel(
  *
  * ```ts
  * const ai = createAI({ binding: env.AI, id: "prod" });
- * ai("@cf/zai-org/glm-4.7-flash");
- * ai(anthropicModel, { fallback: ["@cf/zai-org/glm-4.7-flash"] });
+ * ai("@cf/zai-org/glm-5.3-flash");
+ * ai(anthropicModel, { fallback: ["@cf/zai-org/glm-5.3-flash"] });
  * new Agent({ streamFn: ai.streamFn, initialState: { model: ai(openaiModel) } });
  * ```
- *
- * @beta This surface is in beta and may change.
  */
 export function createAI(settings: AISettings): AI {
   const transport = createTransport(settings);

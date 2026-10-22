@@ -33,7 +33,7 @@ import { usePiSession } from "./use-pi-session";
 import "./styles.css";
 
 const SESSION_KEY = "pi-harness-session";
-const MODEL = "@cf/moonshotai/kimi-k2.7-code";
+const MODEL = "@cf/zai-org/glm-5.3-flash";
 
 const SUGGESTIONS = [
   {
