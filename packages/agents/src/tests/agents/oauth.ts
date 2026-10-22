@@ -293,6 +293,7 @@ export class TestOAuthAgent extends Agent {
     outcome:
       | "authenticating"
       | "connected"
+      | "discovery-authenticating"
       | "failed"
       | "incomplete-authenticating",
     authUrl?: string
@@ -326,6 +327,9 @@ export class TestOAuthAgent extends Agent {
           }
           connection.connectionState = MCPConnectionState.CONNECTED;
           return undefined;
+        case "discovery-authenticating":
+          connection.connectionState = MCPConnectionState.CONNECTED;
+          return undefined;
         case "failed":
           connection.connectionState = MCPConnectionState.FAILED;
           return "test connection failure";
@@ -333,9 +337,50 @@ export class TestOAuthAgent extends Agent {
     };
 
     connection.discover = async () => {
+      if (outcome === "discovery-authenticating") {
+        // Initialize was open; the catalog request answered 401 and the SDK
+        // handed a new authorization URL to the provider.
+        if (authUrl) {
+          await connection.options.transport.authProvider?.redirectToAuthorization(
+            new URL(authUrl)
+          );
+        }
+        connection.connectionState = MCPConnectionState.AUTHENTICATING;
+        return { success: false, reason: "error", error: "Unauthorized" };
+      }
       connection.connectionState = MCPConnectionState.READY;
       return { success: true };
     };
+  }
+
+  /**
+   * Start tracked connection work that ends waiting for authorization, the
+   * way a restore or post-callback reconnect would, without awaiting it.
+   */
+  startTrackedAuthentication(serverId: string, authUrl: string): void {
+    const connection = this.mcp.mcpConnections[serverId];
+    if (!connection) {
+      throw new Error(`Test error: MCP connection ${serverId} not found`);
+    }
+    connection.connectionState = MCPConnectionState.CONNECTING;
+    void this.mcp.trackConnectionWork(serverId, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await connection.options.transport.authProvider?.redirectToAuthorization(
+        new URL(authUrl)
+      );
+      connection.connectionState = MCPConnectionState.AUTHENTICATING;
+    });
+  }
+
+  setMcpConnectionState(
+    serverId: string,
+    state: MCPClientConnection["connectionState"]
+  ): void {
+    const connection = this.mcp.mcpConnections[serverId];
+    if (!connection) {
+      throw new Error(`Test error: MCP connection ${serverId} not found`);
+    }
+    connection.connectionState = state;
   }
 
   getMcpServerFromDb(serverId: string) {

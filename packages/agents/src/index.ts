@@ -166,7 +166,7 @@ import {
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
 import { RPC_DO_PREFIX, type McpRpcAgent } from "./mcp/rpc";
-import { ensureMcpServerTable } from "./mcp/client/storage";
+import { ensureMcpServerTable, type MCPServerRow } from "./mcp/client/storage";
 import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
 import { Queue, setQueueCallbackResolver } from "./queue/queue";
 import type { QueueItem } from "./queue/types";
@@ -632,6 +632,27 @@ export type AddRpcMcpServerOptions = {
   id?: string;
   /** Props to pass to the McpAgent instance */
   props?: Record<string, unknown>;
+};
+
+/** What `addMcpServer` resolves with for an HTTP or RPC server. */
+type AddMcpServerResult =
+  | {
+      id: string;
+      state: typeof MCPConnectionState.AUTHENTICATING;
+      authUrl: string;
+    }
+  | {
+      id: string;
+      state: typeof MCPConnectionState.READY;
+      authUrl?: undefined;
+    };
+
+/** How `addMcpServer` reports connect and discovery outcomes for one server. */
+type McpConnectContext = {
+  /** Server URL used in error messages. */
+  readonly url: string;
+  /** Whether an OAuth callback URL is configured for the server. */
+  readonly oauth: "available" | "unavailable";
 };
 
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
@@ -9699,18 +9720,7 @@ export class Agent<
       | AddRpcMcpServerOptions,
     agentsPrefix?: string,
     options?: Pick<AddMcpServerOptions, "client" | "transport">
-  ): Promise<
-    | {
-        id: string;
-        state: typeof MCPConnectionState.AUTHENTICATING;
-        authUrl: string;
-      }
-    | {
-        id: string;
-        state: typeof MCPConnectionState.READY;
-        authUrl?: undefined;
-      }
-  > {
+  ): Promise<AddMcpServerResult> {
     const isHttpTransport = typeof urlOrBinding === "string";
     const normalizedUrl = isHttpTransport
       ? new URL(urlOrBinding).href
@@ -9773,65 +9783,7 @@ export class Agent<
     }
 
     if (existingServer && this.mcp.mcpConnections[existingServer.id]) {
-      const conn = this.mcp.mcpConnections[existingServer.id];
-      if (conn.connectionState === MCPConnectionState.AUTHENTICATING) {
-        const authProvider = conn.options.transport.authProvider;
-        const authUrl =
-          (await this._redeemableAuthUrl(
-            existingServer.id,
-            authProvider?.authUrl,
-            authProvider
-          )) ??
-          (await this._redeemableAuthUrl(
-            existingServer.id,
-            existingServer.auth_url,
-            authProvider
-          ));
-        if (authUrl) {
-          return {
-            id: existingServer.id,
-            state: MCPConnectionState.AUTHENTICATING,
-            authUrl
-          };
-        }
-
-        const reconnectResult = await this.mcp.connectToServer(
-          existingServer.id
-        );
-        if (reconnectResult.state === MCPConnectionState.AUTHENTICATING) {
-          if (!reconnectResult.authUrl) {
-            throw new Error("OAuth configuration incomplete: missing authUrl");
-          }
-          return {
-            id: existingServer.id,
-            state: reconnectResult.state,
-            authUrl: reconnectResult.authUrl
-          };
-        }
-        if (reconnectResult.state === MCPConnectionState.CONNECTED) {
-          const discoverResult = await this.mcp.discoverIfConnected(
-            existingServer.id
-          );
-          if (!discoverResult?.success) {
-            throw new Error(
-              `Failed to discover MCP server capabilities: ${discoverResult?.error ?? "connection not found"}`
-            );
-          }
-          return {
-            id: existingServer.id,
-            state: MCPConnectionState.READY
-          };
-        }
-        throw new Error(
-          `Failed to connect to MCP server at ${normalizedUrl}: ${reconnectResult.error}`
-        );
-      }
-      if (conn.connectionState === MCPConnectionState.FAILED) {
-        throw new Error(
-          `MCP server "${serverName}" is in failed state: ${conn.connectionError}`
-        );
-      }
-      return { id: existingServer.id, state: MCPConnectionState.READY };
+      return this._resumeMcpServer(existingServer, serverName);
     }
 
     // RPC transport path: second argument is a DurableObjectNamespace
@@ -10001,65 +9953,130 @@ export class Agent<
       retry: resolvedOptions?.retry
     });
 
-    const result = await this.mcp.connectToServer(id);
+    // The server stays in storage on failure so the caller can retry.
+    return this._connectAndDiscoverMcpServer(id, {
+      url: normalizedUrl!,
+      oauth: callbackUrl ? "available" : "unavailable"
+    });
+  }
 
-    if (result.state === MCPConnectionState.FAILED) {
-      // Server stays in storage so user can retry via connectToServer(id)
+  /**
+   * Bring an already-registered server to a result for `addMcpServer`. Restore,
+   * an OAuth callback or a concurrent `addMcpServer` may still be connecting
+   * it, so wait for that work before reading its state instead of reporting a
+   * half-connected server as ready.
+   */
+  private async _resumeMcpServer(
+    server: MCPServerRow,
+    serverName: string
+  ): Promise<AddMcpServerResult> {
+    await this.mcp.waitForServer(server.id);
+    const conn = this.mcp.mcpConnections[server.id];
+    if (!conn) {
       throw new Error(
-        `Failed to connect to MCP server at ${normalizedUrl}: ${result.error}`
+        `MCP server "${serverName}" was removed while it was connecting`
       );
     }
+    const context = {
+      url: server.server_url,
+      oauth: server.callback_url ? "available" : "unavailable"
+    } as const;
 
-    if (result.state === MCPConnectionState.AUTHENTICATING) {
-      if (!callbackUrl) {
+    switch (conn.connectionState) {
+      case MCPConnectionState.READY:
+        return { id: server.id, state: MCPConnectionState.READY };
+      case MCPConnectionState.FAILED:
         throw new Error(
-          "This MCP server requires OAuth authentication. " +
-            "Provide callbackHost in addMcpServer options to enable the OAuth flow."
+          `MCP server "${serverName}" is in failed state: ${conn.connectionError}`
+        );
+      case MCPConnectionState.CONNECTED:
+        // Connected, but discovery never ran or failed: retry it.
+        return this.mcp.trackConnectionWork(server.id, () =>
+          this._discoverMcpServer(server.id, context)
+        );
+      case MCPConnectionState.AUTHENTICATING: {
+        const authProvider = conn.options.transport.authProvider;
+        const authUrl =
+          (await this.mcp.redeemableAuthUrl(
+            server.id,
+            authProvider?.authUrl,
+            authProvider
+          )) ??
+          (await this.mcp.redeemableAuthUrl(
+            server.id,
+            this.mcp.listServers().find((s) => s.id === server.id)?.auth_url,
+            authProvider
+          ));
+        if (authUrl) {
+          return {
+            id: server.id,
+            state: MCPConnectionState.AUTHENTICATING,
+            authUrl
+          };
+        }
+        // The pending link can no longer complete; start a fresh flow.
+        return this._connectAndDiscoverMcpServer(server.id, context);
+      }
+      case MCPConnectionState.CONNECTING:
+      case MCPConnectionState.DISCOVERING:
+        // No tracked work is driving it (it settled above), so drive it.
+        return this._connectAndDiscoverMcpServer(server.id, context);
+    }
+  }
+
+  /** Connect a registered server and discover its capabilities. */
+  private _connectAndDiscoverMcpServer(
+    id: string,
+    context: McpConnectContext
+  ): Promise<AddMcpServerResult> {
+    return this.mcp.trackConnectionWork(id, async () => {
+      const result = await this.mcp.connectToServer(id);
+      if (result.state === MCPConnectionState.FAILED) {
+        throw new Error(
+          `Failed to connect to MCP server at ${context.url}: ${result.error}`
         );
       }
-      return { id, state: result.state, authUrl: result.authUrl };
-    }
+      if (result.state === MCPConnectionState.AUTHENTICATING) {
+        return this._authenticatingMcpServer(id, result.authUrl, context);
+      }
+      return this._discoverMcpServer(id, context);
+    });
+  }
 
-    // State is CONNECTED - discover capabilities
+  /** Discover a connected server's capabilities. */
+  private async _discoverMcpServer(
+    id: string,
+    context: McpConnectContext
+  ): Promise<AddMcpServerResult> {
     const discoverResult = await this.mcp.discoverIfConnected(id);
-
-    if (discoverResult && !discoverResult.success) {
-      // Server stays in storage - connection is still valid, user can retry discovery
+    if (discoverResult?.state === MCPConnectionState.AUTHENTICATING) {
+      // Initialize was open but the catalogs need OAuth.
+      return this._authenticatingMcpServer(id, discoverResult.authUrl, context);
+    }
+    if (!discoverResult?.success) {
+      // The server stays in storage; the caller can retry discovery.
       throw new Error(
-        `Failed to discover MCP server capabilities: ${discoverResult.error}`
+        `Failed to discover MCP server capabilities: ${discoverResult?.error ?? "connection not found"}`
       );
     }
-
     return { id, state: MCPConnectionState.READY };
   }
 
-  private async _redeemableAuthUrl(
-    serverId: string,
-    authUrl: string | null | undefined,
-    authProvider: AgentMcpOAuthProvider | undefined
-  ): Promise<string | undefined> {
-    if (!this._isAbsoluteHttpUrl(authUrl) || !authProvider) return;
-    const state = new URL(authUrl).searchParams.get("state");
-    if (!state) return authUrl;
-
-    authProvider.serverId = serverId;
-    try {
-      return (await authProvider.checkState(state)).valid ? authUrl : undefined;
-    } catch {
-      return undefined;
+  private _authenticatingMcpServer(
+    id: string,
+    authUrl: string | undefined,
+    context: McpConnectContext
+  ): AddMcpServerResult {
+    if (context.oauth === "unavailable") {
+      throw new Error(
+        "This MCP server requires OAuth authentication. " +
+          "Provide callbackHost in addMcpServer options to enable the OAuth flow."
+      );
     }
-  }
-
-  private _isAbsoluteHttpUrl(
-    value: string | null | undefined
-  ): value is string {
-    if (!value) return false;
-    try {
-      const url = new URL(value);
-      return url.protocol === "http:" || url.protocol === "https:";
-    } catch {
-      return false;
+    if (!authUrl) {
+      throw new Error("OAuth configuration incomplete: missing authUrl");
     }
+    return { id, state: MCPConnectionState.AUTHENTICATING, authUrl };
   }
 
   async removeMcpServer(id: string) {

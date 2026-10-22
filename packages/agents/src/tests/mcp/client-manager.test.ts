@@ -9,6 +9,7 @@ import {
   type MCPConnectionState
 } from "../../mcp/client/connection";
 import type { MCPServerRow } from "../../mcp/client/storage";
+import { DurableObjectOAuthClientProvider } from "../../mcp/client/do-oauth-client-provider";
 import type { ToolExecutionOptions } from "ai";
 import type { Tool } from "@modelcontextprotocol/client";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
@@ -2139,6 +2140,95 @@ describe("MCPClientManager OAuth Integration", () => {
         );
       })
     );
+
+    describe("persisted authorization links", () => {
+      const serverId = "restored-oauth";
+      const nonce = "restored-nonce";
+      const authUrl = `https://auth.example.com/authorize?state=${nonce}.${serverId}`;
+
+      async function seedState(storage: DurableObjectStorage, ageMs: number) {
+        const provider = new DurableObjectOAuthClientProvider(
+          storage,
+          "test-agent",
+          "http://localhost:3000/callback"
+        );
+        provider.serverId = serverId;
+        await storage.put(provider.stateKey(nonce), {
+          nonce,
+          serverId,
+          createdAt: Date.now() - ageMs
+        });
+      }
+
+      function saveAuthenticatingServer(
+        saveServer: (server: MCPServerRow) => void
+      ) {
+        saveServer({
+          id: serverId,
+          name: "OAuth Server",
+          server_url: "http://oauth-server.com",
+          callback_url: "http://localhost:3000/callback",
+          client_id: "stored-client-id",
+          auth_url: authUrl,
+          server_options: null
+        });
+      }
+
+      it(
+        "keeps waiting for the callback while the link's state can be redeemed",
+        managerTest(async ({ harness, manager, saveServer, getServer }) => {
+          saveAuthenticatingServer(saveServer);
+          await seedState(harness.storage, 0);
+          const connectSpy = vi.spyOn(manager, "connectToServer");
+
+          await manager.restoreConnectionsFromStorage("test-agent");
+
+          expect(manager.mcpConnections[serverId].connectionState).toBe(
+            "authenticating"
+          );
+          expect(connectSpy).not.toHaveBeenCalled();
+          expect(getServer(serverId)?.auth_url).toBe(authUrl);
+        })
+      );
+
+      it(
+        "reconnects instead of restoring a link whose state expired",
+        managerTest(async ({ harness, manager, saveServer, getServer }) => {
+          saveAuthenticatingServer(saveServer);
+          await seedState(harness.storage, 11 * 60 * 1000);
+          const connectSpy = vi
+            .spyOn(manager, "connectToServer")
+            .mockResolvedValue({ state: "connected" });
+
+          await manager.restoreConnectionsFromStorage("test-agent");
+          await manager.waitForConnections();
+
+          expect(connectSpy).toHaveBeenCalledWith(serverId);
+          expect(manager.mcpConnections[serverId].connectionState).not.toBe(
+            "authenticating"
+          );
+          expect(getServer(serverId)?.auth_url ?? null).toBeNull();
+        })
+      );
+
+      it(
+        "reconnects instead of restoring a link a callback already redeemed",
+        managerTest(async ({ manager, saveServer, getServer }) => {
+          // The callback consumed the state and saved tokens, then the
+          // isolate died before auth_url was cleared.
+          saveAuthenticatingServer(saveServer);
+          const connectSpy = vi
+            .spyOn(manager, "connectToServer")
+            .mockResolvedValue({ state: "connected" });
+
+          await manager.restoreConnectionsFromStorage("test-agent");
+          await manager.waitForConnections();
+
+          expect(connectSpy).toHaveBeenCalledWith(serverId);
+          expect(getServer(serverId)?.auth_url ?? null).toBeNull();
+        })
+      );
+    });
 
     it(
       "should restore non-OAuth connections from storage",
