@@ -25,9 +25,14 @@ export type ServerRenameResult = "renamed" | "missing" | "collision";
 export type StoredServerFailure = {
   /**
    * `authorization-expired`: the authorization link expired before the user
-   * completed it. `reconnect-exhausted`: automatic reconnects gave up.
+   * completed it. `authorization-exhausted`: the server kept asking for the
+   * same authorization after the retry limit. `reconnect-exhausted`:
+   * automatic reconnects gave up.
    */
-  readonly reason: "authorization-expired" | "reconnect-exhausted";
+  readonly reason:
+    | "authorization-expired"
+    | "authorization-exhausted"
+    | "reconnect-exhausted";
   /** Human-readable message, shown as the connection error. */
   readonly message: string;
   /** When the failure was recorded, in epoch milliseconds. */
@@ -53,7 +58,7 @@ export class McpServerStore {
    */
   constructor(private readonly storage: DurableObjectStorage) {}
 
-  #failureColumnReady = false;
+  #statusColumnsReady = false;
 
   #exec<T extends Record<string, SqlStorageValue>>(
     query: string,
@@ -180,7 +185,7 @@ export class McpServerStore {
 
   /** The failure recorded for one server, if it stopped trying. */
   failure(id: string): StoredServerFailure | undefined {
-    this.#ensureFailureColumn();
+    this.#ensureStatusColumns();
     const value = this.#exec<{ failure: string | null }>(
       "SELECT failure FROM cf_agents_mcp_servers WHERE id = ?",
       id
@@ -195,7 +200,7 @@ export class McpServerStore {
 
   /** Record that one server stopped trying, and why. */
   setFailure(id: string, failure: StoredServerFailure): void {
-    this.#ensureFailureColumn();
+    this.#ensureStatusColumns();
     this.#exec(
       "UPDATE cf_agents_mcp_servers SET failure = ? WHERE id = ?",
       JSON.stringify(failure),
@@ -205,28 +210,59 @@ export class McpServerStore {
 
   /** Forget a recorded failure, so the server may connect again. */
   clearFailure(id: string): void {
-    this.#ensureFailureColumn();
+    this.#ensureStatusColumns();
     this.#exec(
       "UPDATE cf_agents_mcp_servers SET failure = NULL WHERE id = ? AND failure IS NOT NULL",
       id
     );
   }
 
-  /**
-   * Add the `failure` column on first use. The column is owned here rather
-   * than in `ensureMcpServerTable`, so the catalog's base DDL (and the
-   * Agent schema snapshot built from it) stays unchanged and objects that
-   * never record a failure never alter the table.
-   */
-  #ensureFailureColumn(): void {
-    if (this.#failureColumnReady) return;
-    const present = this.#exec<{ name: string }>(
-      "SELECT name FROM pragma_table_info('cf_agents_mcp_servers') WHERE name = 'failure'"
-    );
-    if (present.length === 0) {
-      this.#exec("ALTER TABLE cf_agents_mcp_servers ADD COLUMN failure TEXT");
+  /** Authorization rounds recorded for one server, as stored JSON. */
+  authorizationRounds(id: string): unknown {
+    this.#ensureStatusColumns();
+    const value = this.#exec<{ authorization_rounds: string | null }>(
+      "SELECT authorization_rounds FROM cf_agents_mcp_servers WHERE id = ?",
+      id
+    )[0]?.authorization_rounds;
+    if (!value) return undefined;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return undefined;
     }
-    this.#failureColumnReady = true;
+  }
+
+  /** Record, or with no value forget, the authorization rounds of a server. */
+  setAuthorizationRounds(id: string, rounds: object | undefined): void {
+    this.#ensureStatusColumns();
+    this.#exec(
+      "UPDATE cf_agents_mcp_servers SET authorization_rounds = ? WHERE id = ?",
+      rounds === undefined ? null : JSON.stringify(rounds),
+      id
+    );
+  }
+
+  /**
+   * Add the status columns (`failure`, `authorization_rounds`) on first use.
+   * They are owned here rather than in `ensureMcpServerTable`, so the
+   * catalog's base DDL (and the Agent schema snapshot built from it) stays
+   * unchanged and objects that never use them never alter the table.
+   */
+  #ensureStatusColumns(): void {
+    if (this.#statusColumnsReady) return;
+    const present = new Set(
+      this.#exec<{ name: string }>(
+        "SELECT name FROM pragma_table_info('cf_agents_mcp_servers')"
+      ).map((column) => column.name)
+    );
+    for (const column of ["failure", "authorization_rounds"]) {
+      if (!present.has(column)) {
+        this.#exec(
+          `ALTER TABLE cf_agents_mcp_servers ADD COLUMN ${column} TEXT`
+        );
+      }
+    }
+    this.#statusColumnsReady = true;
   }
 
   /** Stamp the handler-derived capabilities on every stored server. */

@@ -58,6 +58,13 @@ export type { MCPAITool, MCPAIToolSet } from "./ai-tools";
 import { isBlockedUrl } from "./url-policy";
 import { McpServerStore } from "./server-store";
 import { ServerLaneCancelledError, ServerLanes } from "./server-lanes";
+import {
+  authorizationExhaustedMessage,
+  completeRound,
+  parseAuthorizationRounds,
+  requestedScope,
+  startRound
+} from "./authorization-rounds";
 import type { StoredServerFailure } from "./server-store";
 import {
   AUTH_EXPIRY_JOB,
@@ -162,6 +169,16 @@ export type MCPServerSettlement =
       readonly error: string;
     }
   | { readonly state: "removed" };
+
+/** What entering `authenticating` produced. */
+type AuthContinuation =
+  | {
+      readonly _tag: "authenticating";
+      readonly authUrl: string;
+      readonly clientId?: string;
+    }
+  | { readonly _tag: "unavailable" }
+  | { readonly _tag: "exhausted"; readonly error: string };
 
 /** Options for the deprecated {@link MCPClientManager.connect}. */
 type LegacyConnectOptions = {
@@ -511,6 +528,8 @@ export class MCPClientManager extends LifecycleCapability {
   private scheduleReconnect(serverId: string, error: string): void {
     const conn = this.mcpConnections[serverId];
     if (!conn || !this._servers.get(serverId)) return;
+    // A recorded failure is terminal until an explicit reconnect.
+    if (this._servers.failure(serverId)) return;
     const now = Date.now();
     const decision = nextReconnect(
       this._reconnect,
@@ -1147,6 +1166,7 @@ export class MCPClientManager extends LifecycleCapability {
         case MCPConnectionState.FAILED:
           // An explicit reconnect: forget why it stopped and try now.
           this._servers.clearFailure(id);
+          this._servers.setAuthorizationRounds(id, undefined);
           this.cancelJob(connectJobId(id));
           return this.connectAndDiscover(id);
         case MCPConnectionState.CONNECTED: {
@@ -1553,6 +1573,7 @@ export class MCPClientManager extends LifecycleCapability {
     });
     // Registering again is a fresh start for the server.
     this._servers.clearFailure(id);
+    this._servers.setAuthorizationRounds(id, undefined);
 
     this.fireServerStateChanged();
 
@@ -1567,22 +1588,39 @@ export class MCPClientManager extends LifecycleCapability {
    * the broadcast always agree, and the OAuth callback finds the connection
    * in the state it completes from.
    *
-   * Returns undefined, leaving the connection untouched, when the provider
-   * holds no usable authorization URL.
+   * Leaves the connection untouched when the provider holds no usable
+   * authorization URL. When the server keeps asking for the same
+   * authorization past the retry limit, records a permanent failure
+   * instead of showing another link.
    */
   private enterAuthenticating(
     id: string,
     conn: MCPClientConnection
-  ): { authUrl: string; clientId?: string } | undefined {
-    if (this.mcpConnections[id] !== conn) return undefined;
+  ): AuthContinuation {
+    if (this.mcpConnections[id] !== conn) return { _tag: "unavailable" };
+    const authUrl = conn.options.transport.authProvider?.authUrl;
+    if (!authUrl || !conn.options.transport.authProvider?.redirectUrl) {
+      return { _tag: "unavailable" };
+    }
+    const round = startRound(
+      parseAuthorizationRounds(this._servers.authorizationRounds(id)),
+      requestedScope(authUrl),
+      Date.now()
+    );
+    if (round._tag === "exhausted") {
+      const error = authorizationExhaustedMessage(round.rounds, round.scope);
+      this.recordFailure(id, "authorization-exhausted", error);
+      return { _tag: "exhausted", error };
+    }
     const auth = this.persistAuthContinuation(id, conn);
-    if (!auth) return undefined;
+    if (!auth) return { _tag: "unavailable" };
+    this._servers.setAuthorizationRounds(id, round.rounds);
     conn.connectionState = MCPConnectionState.AUTHENTICATING;
     this._servers.clearFailure(id);
     this.cancelJob(connectJobId(id));
     this.armAuthExpiry(id, auth.authUrl);
     this.fireServerStateChanged();
-    return auth;
+    return { _tag: "authenticating", ...auth };
   }
 
   /** Persist and emit an OAuth continuation produced by connect or discovery. */
@@ -1657,16 +1695,25 @@ export class MCPClientManager extends LifecycleCapability {
       case MCPConnectionState.AUTHENTICATING: {
         // Broadcasts again once auth_url is durable so clients can serve it.
         const auth = this.enterAuthenticating(id, conn);
-        if (!auth) {
-          const provider = conn.options.transport.authProvider;
-          return {
-            state: MCPConnectionState.FAILED,
-            error: `OAuth configuration incomplete: missing ${
-              !provider?.authUrl ? "authUrl" : "redirectUrl"
-            }`
-          };
+        switch (auth._tag) {
+          case "authenticating":
+            return {
+              state: MCPConnectionState.AUTHENTICATING,
+              authUrl: auth.authUrl,
+              clientId: auth.clientId
+            };
+          case "exhausted":
+            return { state: MCPConnectionState.FAILED, error: auth.error };
+          case "unavailable": {
+            const provider = conn.options.transport.authProvider;
+            return {
+              state: MCPConnectionState.FAILED,
+              error: `OAuth configuration incomplete: missing ${
+                !provider?.authUrl ? "authUrl" : "redirectUrl"
+              }`
+            };
+          }
         }
-        return { state: MCPConnectionState.AUTHENTICATING, ...auth };
       }
 
       case MCPConnectionState.CONNECTED:
@@ -1829,6 +1876,12 @@ export class MCPClientManager extends LifecycleCapability {
         return removedDuringAuthorization(serverId);
       }
       this.persistSession(serverId, conn);
+      this._servers.setAuthorizationRounds(
+        serverId,
+        completeRound(
+          parseAuthorizationRounds(this._servers.authorizationRounds(serverId))
+        )
+      );
       const result = this.oauthCallbackSuccess(serverId, conn);
       this.fireServerStateChanged();
       return result;
@@ -1902,14 +1955,17 @@ export class MCPClientManager extends LifecycleCapability {
   private _toDiscoverResult(
     conn: MCPClientConnection,
     result: MCPDiscoveryResult,
-    auth?: { authUrl: string; clientId?: string }
+    auth?: AuthContinuation
   ): MCPDiscoverResult {
     if (result.success) return { success: true, state: conn.connectionState };
     return {
       success: false,
-      error: result.error,
+      error: auth?._tag === "exhausted" ? auth.error : result.error,
       state: conn.connectionState,
-      ...(auth && { authUrl: auth.authUrl, clientId: auth.clientId })
+      ...(auth?._tag === "authenticating" && {
+        authUrl: auth.authUrl,
+        clientId: auth.clientId
+      })
     };
   }
 
@@ -2454,7 +2510,8 @@ export class MCPClientManager extends LifecycleCapability {
     }
 
     const auth = this.enterAuthenticating(serverId, conn);
-    if (!auth) return undefined;
+    // An exhausted server is now failed; the caller gets the original error.
+    if (auth._tag !== "authenticating") return undefined;
     return new MCPAuthorizationRequiredError(serverId, auth.authUrl, {
       clientId: auth.clientId,
       cause: error
