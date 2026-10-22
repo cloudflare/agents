@@ -17,6 +17,7 @@ import {
   type InputEntry,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
+import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
 import { setWakeTimingForTests } from "../harness";
@@ -127,12 +128,36 @@ function entryTexts(entries: readonly EntryRecord[]): string[] {
   });
 }
 
+/**
+ * pi's storage, failing the next commit with `faults.commit` when one is
+ * set, as a lost disk would. Any error a Storage commit throws fails pi's
+ * Session for good.
+ */
+function withCommitFault(
+  storage: SqliteStorage,
+  faults: { commit?: Error }
+): SqliteStorage {
+  return new Proxy(storage, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (typeof value !== "function") return value;
+      if (key !== "commit") return value.bind(target);
+      return (...args: Parameters<SqliteStorage["commit"]>) => {
+        const error = faults.commit;
+        faults.commit = undefined;
+        return error ? Promise.reject(error) : target.commit(...args);
+      };
+    }
+  });
+}
+
 /** Real Durable Object fixture: a harness over pi-ai's faux provider. */
 export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   readonly #faux = fauxProvider({
     tokensPerSecond: 200,
     tokenSize: { min: 2, max: 4 }
   });
+  readonly #faults: { commit?: Error } = {};
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
     harness: async ({ storage, context, onWake }) => {
@@ -140,7 +165,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
       const name = this.ctx.id.name ?? "";
       return this.#observe(
         await Harness.open(
-          storage,
+          withCommitFault(storage, this.#faults),
           {
             models: fauxModels(this.#faux.provider),
             registry: this.registry,
@@ -248,6 +273,27 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
         }
       ];
     });
+  }
+
+  /**
+   * Submit with pi's next storage commit failing, which fails pi's Session.
+   * Returns the error the submit rejected with.
+   */
+  async submitThroughStorageError(text: string): Promise<string> {
+    this.#faults.commit = new Error("disk gone");
+    try {
+      await this.harness.submit(text);
+      return "submitted";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      this.#faults.commit = undefined;
+    }
+  }
+
+  /** Close pi's in-memory resources, as the host does on shutdown. */
+  async dispose(): Promise<void> {
+    await this.harness.dispose();
   }
 
   async abort(): Promise<boolean> {

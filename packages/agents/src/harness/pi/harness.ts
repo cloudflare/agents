@@ -241,6 +241,10 @@ export class PiHarness extends LifecycleCapability {
   #heartbeatMs = HEARTBEAT_MS;
   #pollMs = POLL_MS;
   #opening: Promise<Opened> | undefined;
+  /** Settles once the last pi that closed on its own has closed. */
+  #lastClose: Promise<unknown> = Promise.resolve();
+  /** Every pi that has begun closing, on its own or by `dispose()`. */
+  readonly #closing = new WeakSet<Harness>();
 
   static {
     setWakeTiming = (harness, timing) => harness.#setWakeTiming(timing);
@@ -266,11 +270,7 @@ export class PiHarness extends LifecycleCapability {
   // ── Lifecycle ────────────────────────────────────────────────────────────
 
   override async onStart(_context: CapabilityStartContext): Promise<void> {
-    const { pi } = await this.#open();
-    // Whatever the last isolate left gets a wake, including work whose wake
-    // failed out. With `onWake`, pi has already said so; this covers a
-    // factory without it.
-    await this.#wakeFor(pi.wake());
+    await this.#open();
   }
 
   async onJob(
@@ -290,6 +290,7 @@ export class PiHarness extends LifecycleCapability {
     const opening = this.#opening;
     this.#opening = undefined;
     const opened = await opening?.catch(() => undefined);
+    // Closing calls #piClosing, which also ends a wait sleeping on this pi.
     await opened?.pi.close(BG);
   }
 
@@ -544,10 +545,13 @@ export class PiHarness extends LifecycleCapability {
     pi.resume();
     const wake = pi.wake();
     if (wake.active) {
-      const wait = this.#waitWhileActive(pi).finally(() => {
+      const wait = this.#waitWhileActive(pi).then((ended) => {
         this.#waiting = undefined;
-        // Step again now: pi may be sleeping, or have nothing left.
-        void this.#wake();
+        // Step again now: pi may be sleeping, or have nothing left. After a
+        // failed wait, as when pi's Session fails, the heartbeat that is
+        // already due steps instead, so a pi that keeps failing is not
+        // reopened in a loop.
+        if (ended) void this.#wake();
       });
       this.#waiting = wait;
       // The wait runs past this dispatch, inside the alarm's work, so the
@@ -565,14 +569,20 @@ export class PiHarness extends LifecycleCapability {
 
   /**
    * Wait while pi has work running, up to the wait budget. With `onWake`, a
-   * change ends each sleep early; without it, the sleep is `pollMs`.
+   * change ends each sleep early, and so does pi closing; without it, the
+   * sleep is `pollMs`. Whether the wait ended, with pi idle or at the
+   * budget, rather than failing.
    */
-  async #waitWhileActive(pi: Harness): Promise<void> {
+  async #waitWhileActive(pi: Harness): Promise<boolean> {
     const deadline = Date.now() + this.#waitBudgetMs;
     try {
+      // Once pi begins closing, pi.wake() throws (SessionFailed after a
+      // storage error), which is what ends this loop: a closed pi's wake does
+      // not go inactive. Closing kicks `#changed` only so the loop reads it
+      // again now rather than at the end of its sleep.
       while (pi.wake().active) {
         const left = deadline - Date.now();
-        if (left <= 0) return;
+        if (left <= 0) return true;
         await new Promise<void>((resolve) => {
           const timer = setTimeout(
             resolve,
@@ -585,8 +595,12 @@ export class PiHarness extends LifecycleCapability {
         });
         this.#changed = undefined;
       }
+      return true;
     } catch (error) {
-      this.#wakeError(error);
+      // A pi that began closing is expected to throw; it is no longer the
+      // harness's pi, and Pi reports a failure itself (`session_failed`).
+      if (!this.#closing.has(pi)) this.#wakeError(error);
+      return false;
     }
   }
 
@@ -604,38 +618,92 @@ export class PiHarness extends LifecycleCapability {
    * and awaits the open in `onStart`, so an open begun before startup would
    * be awaited behind a closed gate, with its timers and I/O held back, and
    * never finish.
+   *
+   * pi stays open until `dispose()`, or until it closes on its own: any
+   * storage error fails pi's Session for good. Then the next call, or the
+   * wake job's next step, opens pi again once the failed pi has closed, and
+   * pi recovers from what it had committed. Closing waits for running task
+   * code to return, so code that ignores its abort signal delays the reopen.
+   * An open that fails is not kept either, so the next call tries again.
    */
   async #open(): Promise<Opened> {
     await this.lifecycle.ready();
-    this.#opening ??= this.#doOpen().catch((error: unknown) => {
-      this.#opening = undefined;
-      throw error;
-    });
+    if (this.#opening === undefined) {
+      const opening: Promise<Opened> = this.#doOpen((pi, closed) =>
+        this.#piClosing(opening, pi, closed)
+      ).catch((error: unknown) => {
+        if (this.#opening === opening) this.#opening = undefined;
+        throw error;
+      });
+      this.#opening = opening;
+    }
     return this.#opening;
   }
 
-  async #doOpen(): Promise<Opened> {
+  async #doOpen(
+    onClose: (pi: Harness, closed: Promise<unknown>) => void
+  ): Promise<Opened> {
+    // A pi that closed on its own closes its storage last, after its tasks
+    // have returned; let it finish before another opens over the same
+    // database.
+    await this.#lastClose;
     const storage = await openPiSessionStore(this.lifecycle.storage);
     const pi = await this.#options.harness({
       storage,
       context: BG,
       onWake: this.#onWake
     });
-    await pi.root(BG, { agent: this.agentDefaults() });
-    // Continue whatever the last isolate left: pi reconciles tasks that were
-    // running to pending and schedules them again.
-    pi.resume();
-    // pi calls onWake right after open, from a microtask.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    if (!this.#onWakeWired) {
-      console.warn(
-        "PiHarness: the harness factory did not pass onWake to Harness.open, " +
-          "so pi's timers keep this Durable Object in memory while a task " +
-          "sleeps. Pass it: harness: ({ storage, context, onWake }) => " +
-          "Harness.open(storage, { ...options, onWake }, context)"
-      );
+    try {
+      const closed = pi.closed;
+      // Called synchronously when pi begins closing, unlike `closed`, so a
+      // closed pi is never handed out. It must not call pi.
+      pi.subscribeClose(() => onClose(pi, closed));
+      await pi.root(BG, { agent: this.agentDefaults() });
+      // Continue whatever the last pi left, in this isolate or the last one:
+      // pi reconciles tasks that were running to pending and schedules them
+      // again.
+      pi.resume();
+      // pi calls onWake right after open, from a microtask.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (!this.#onWakeWired) {
+        console.warn(
+          "PiHarness: the harness factory did not pass onWake to Harness.open, " +
+            "so pi's timers keep this Durable Object in memory while a task " +
+            "sleeps. Pass it: harness: ({ storage, context, onWake }) => " +
+            "Harness.open(storage, { ...options, onWake }, context)"
+        );
+      }
+      // Whatever the last pi left gets a wake, including work whose wake
+      // failed out. With `onWake`, pi has already said so; this covers a
+      // factory without it. The job id is fixed, so this is idempotent.
+      await this.#wakeFor(pi.wake());
+    } catch (error) {
+      // pi is open and running its tasks: close it, so the next open does
+      // not start a second pi over the same database beside it.
+      pi.close(BG).catch(() => {});
+      throw error;
     }
     return { pi, storage };
+  }
+
+  /**
+   * pi began closing: on its own, as a storage error makes it, or by
+   * `dispose()`.
+   */
+  #piClosing(
+    opening: Promise<Opened>,
+    pi: Harness,
+    closed: Promise<unknown>
+  ): void {
+    this.#closing.add(pi);
+    // End a wait sleeping on this pi now: pi will not call onWake again.
+    this.#changed?.();
+    // `dispose()` took its pi out of `#opening` already, and an open begun
+    // since must stay.
+    if (this.#opening !== opening) return;
+    // Drop it, so the next call opens pi again once this one has closed.
+    this.#opening = undefined;
+    this.#lastClose = closed;
   }
 
   /** @internal The per-conversation defaults supported by pi-durable. */

@@ -443,6 +443,60 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.pending()).toEqual([]);
   });
 
+  it("reopens pi from what it committed after a storage error fails its Session", async () => {
+    const stub = fresh();
+    const first = await stub.prompt("hello");
+    expect(first.text).toBe("echo: hello");
+
+    // A commit hits the error, which fails pi's Session: the submit rejects,
+    // with the error or with SessionFailed.
+    expect(await stub.submitThroughStorageError("lost")).not.toBe("submitted");
+
+    // The next call opens pi again, over what it had committed.
+    const again = await stub.prompt("again");
+    expect(again).toMatchObject({ status: "done", text: "echo: again" });
+    expect(again.messages).toEqual([
+      "hello",
+      "echo: hello",
+      "again",
+      "echo: again"
+    ]);
+  });
+
+  it("resumes a run a storage error interrupted, woken by the wake job", async () => {
+    const stub = fresh();
+    const receipt = await stub.submit("gate");
+    await stub.gateStarted(1);
+
+    // Fails pi's Session mid-run, which aborts the gate tool.
+    expect(await stub.submitThroughStorageError("one")).not.toBe("submitted");
+
+    // Nothing calls pi from here until the gate reruns: the wake job reopens
+    // pi, which resumes the replay-safe tool. With onWake wired, the wake
+    // job was sleeping on the failed pi until the wait budget, which pi no
+    // longer ends by calling onWake; pi closing must end that sleep.
+    await stub.gateStarted(2);
+    await stub.release();
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done",
+      text: "tool said: released after 2 runs"
+    });
+  });
+
+  it("opens pi again on the next call after dispose()", async () => {
+    const stub = fresh();
+    expect((await stub.prompt("hello")).text).toBe("echo: hello");
+    await stub.dispose();
+    const again = await stub.prompt("again");
+    expect(again).toMatchObject({ status: "done", text: "echo: again" });
+    expect(again.messages).toEqual([
+      "hello",
+      "echo: hello",
+      "again",
+      "echo: again"
+    ]);
+  });
+
   it("keeps sessions separate", async () => {
     const stub = fresh();
     const other = await stub.createSession();
