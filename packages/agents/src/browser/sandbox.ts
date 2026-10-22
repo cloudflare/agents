@@ -18,11 +18,13 @@ export type BrowserCodeRun =
   | { error: string; logs: string[] };
 
 /**
- * Statements with no `return` produce nothing. Tell the model, rather than
- * parse the code to return its last expression.
+ * Code run as a function body returns nothing unless it says `return`. Tell
+ * the model, rather than parse the code to return its last expression. A text
+ * search for `return` can't tell a real one from one inside a string, so any
+ * body run that comes back empty gets the notice.
  */
 const STATEMENTS_NOTICE =
-  "Your code ran as statements and returned nothing. `return` the value you want, or write an async arrow function.";
+  "Your code ran as statements and returned nothing. If you wanted a value, `return` it, or write an async arrow function.";
 
 export interface RunBrowserCodeOptions {
   loader: WorkerLoader;
@@ -213,7 +215,7 @@ export async function runBrowserCode(
       logs: []
     };
   }
-  return "result" in ran && ran.result === undefined && !/\breturn\b/.test(code)
+  return "result" in ran && ran.result === undefined
     ? { ...ran, notice: STATEMENTS_NOTICE }
     : ran;
 }

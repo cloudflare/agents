@@ -468,6 +468,12 @@ describe("browserTool over a Browser", () => {
         statements.status === "completed" && statements.result
       ).toBeUndefined();
       expect(statements.notice).toMatch(/returned nothing/);
+
+      // A `return` inside a string isn't an outer return.
+      const quoted = await run(
+        `const label = "return value";\nconst value = await ${send};\nvalue`
+      );
+      expect(quoted.notice).toMatch(/returned nothing/);
     });
   });
 
