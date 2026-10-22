@@ -1,7 +1,7 @@
 import type { Workspace } from "@cloudflare/computer";
 import { z } from "zod";
 
-/** What the model passes to `hosts.assign()` for files.internal. */
+/** What the model passes to `browser.assignHost()` for files.internal. */
 export const filesTarget = z.object({
   folder: z
     .string()

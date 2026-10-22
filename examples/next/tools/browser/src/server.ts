@@ -33,17 +33,16 @@ import { createWorkspaceTools } from "./workspace";
 // Classes the runtime has to find in the Worker's main module:
 // - InternalHostRouter: Browser Run calls back into this Worker through it
 //   when the browser requests preview.internal or files.internal.
-// - CodemodeRuntime: runs the browser tool's sandboxed code.
 // - WorkspaceProxy: carries computerd's connection from the container back
 //   to the agent that owns the workspace.
 // - DocsSite: serves docs.internal.
-export { CodemodeRuntime, InternalHostRouter } from "agents/browser";
+export { InternalHostRouter } from "agents/browser";
 export { WorkspaceProxy };
 export { DocsSite } from "./docs-site";
 
 const PREAMBLE = `You have a workspace with a Linux container (use exec for shell commands) and a browser that stays open between turns. Your instructions for building things are a website at http://${DOCS_HOST}/, not a file: open it in your browser with the browser tool before you start. Keep replies short.`;
 
-/** What the model passes to `hosts.assign()` for preview.internal. */
+/** What the model passes to `browser.assignHost()` for preview.internal. */
 const previewTarget = z.object({
   port: z
     .number()
@@ -132,7 +131,6 @@ export class BrowserAgent extends withWorkspaceContainer(BrowserAgentBase) {
         tools: [
           ...createWorkspaceTools(this.workspace),
           browserTool({
-            ctx: this.ctx,
             browser: this.browser,
             loader: this.env.LOADER
           })

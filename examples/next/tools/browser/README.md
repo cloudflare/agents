@@ -23,7 +23,7 @@ The example composes:
 - a `Browser` from `agents/browser` on Browser Run, with
   `guardrails: { allowedDomains: [] }` and the three internal hosts;
 - `browserTool` from `agents/browser/pi`: the model writes CDP code and
-  calls `hosts.assign()` to point a host somewhere;
+  calls `browser.assignHost()` to point a host somewhere;
 - a Browser panel in the UI: Live View of the browser's tabs and each
   host's current target.
 
@@ -65,7 +65,7 @@ takes show up in the chat.
 
 ```ts
 // Browser Run calls back into this Worker through InternalHostRouter.
-export { CodemodeRuntime, InternalHostRouter } from "agents/browser";
+export { InternalHostRouter } from "agents/browser";
 export { DocsSite } from "./docs-site";
 
 export class BrowserAgent extends withWorkspaceContainer(BrowserAgentBase) {
@@ -108,7 +108,7 @@ export class BrowserAgent extends withWorkspaceContainer(BrowserAgentBase) {
 }
 ```
 
-The model points a host with `hosts.assign()` in its browser code, then
+The model points a host with `browser.assignHost()` in its browser code, then
 navigates to the URL it returns. Targets are checked against the schema and
 persist across turns, browser restarts, and redeploys.
 
