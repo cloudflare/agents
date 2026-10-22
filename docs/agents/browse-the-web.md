@@ -117,13 +117,11 @@ To show a screenshot, the model returns it from its code. The full result, image
 
 ### How the tool behaves
 
-- The model writes an async arrow function that sends CDP commands with `cdp.send`. `sessionId: "active"` points at the tab it is working in, and that tab is remembered across turns.
-- The code runs in a fresh Dynamic Worker for each call, with no network access: `cdp` is its only way out.
-- The tool's description covers the `cdp` API and the CDP mistakes models commonly make, so the model does not need a discovery pass first.
+- The model writes an async arrow function against a `browser` global: `browser.cdp({ method, params, sessionId })` sends a command, `browser.attachToTarget({ targetId })` switches tabs, `browser.spec()` lists the protocol's domains and `browser.spec({ domain })` returns one, and `browser.getDebugLog()` shows recent traffic. `sessionId: "active"` points at the tab it is working in, and that tab is remembered across turns.
+- The code runs in a fresh Dynamic Worker for each call, with no network access: `browser` is its only way out.
+- The tool's description covers the `browser` API and the CDP mistakes models commonly make, so the model does not need a discovery pass first.
 - If several chats or users share one `Browser` (for example, many threads on one agent), pass each one's id as `scope`: `browserTool({ browser, loader, scope: threadId })`. Each scope keeps its own active tab, so one chat never drives another's page, while cookies and logins stay shared. Tools that leave `scope` out share one tab. Calls in the same scope wait for each other; calls in different scopes run in parallel.
-- When another chat closes the model's tab, or works in it too, the result's `notice` says so.
-- Tabs the page opens itself come back as `newTabs` in the result.
-- If the browser was lost (idle past `keepAliveMs`, closed, or crashed), the code still runs in a new browser and the result includes `restarted: true`.
+- The result's `notice` tells the model what happened to its browser: it was lost (idle past `keepAliveMs`, closed, or crashed) and the code ran in a new one, another chat closed its tab or works in it too, or the page opened new tabs.
 - Each call times out after `timeoutMs` (default 60 seconds).
 - Results are cut to about 24,000 characters. A screenshot can be at most 1 MB, so a full-page screenshot of a long page fails; the model is told to capture the viewport or use JPEG instead.
 
@@ -145,7 +143,7 @@ Call `this.browser.close()` to shut the browser down. The next call starts a new
 
 ### Driving the browser from your own code
 
-`browser.session()` gives you what the tool's `cdp` object is built on: one connection to the browser, with the same `sessionId: "active"` handling and error hints. Close it when you are done to save the scope's active tab and get a report of what happened to the browser:
+`browser.session()` gives you what the tool's `browser` global is built on: one connection to the browser, with the same `sessionId: "active"` handling and error hints. Close it when you are done to save the scope's active tab and get a report of what happened to the browser:
 
 ```ts
 const session = this.browser.session({ scope: threadId });
@@ -218,7 +216,7 @@ Recent Wrangler releases support Browser Run in local development. `npx wrangler
 
 ## Security considerations
 
-- The model's code runs in a fresh Dynamic Worker for every call, with no network access (`fetch` and `connect` are blocked). `cdp` is its only way out.
+- The model's code runs in a fresh Dynamic Worker for every call, with no network access (`fetch` and `connect` are blocked). `browser` is its only way out.
 - CDP commands go to your agent over Workers RPC. The WebSocket and the browser stay in your agent, not the sandbox.
 - The model cannot close or crash the browser; `Browser.close` and `Browser.crash*` are refused.
 - The model cannot get a Live View link: `Cloudflare.getLiveView` and `Cloudflare.handoff` are refused, and so are `Target.sendMessageToTarget` and `Target.exposeDevToolsProtocol`, which could carry those commands inside them.
@@ -251,17 +249,17 @@ const tools = createBrowserTools({
 });
 ```
 
-| Option       | Type                             | Default       | Description                                                |
-| ------------ | -------------------------------- | ------------- | ---------------------------------------------------------- |
+| Option       | Type                             | Default    | Description                                                |
+| ------------ | -------------------------------- | ---------- | ---------------------------------------------------------- |
 | `ctx`        | `DurableObjectState`             | current Agent | The DO hosting the runtime facet and session store         |
-| `browser`    | `BrowserBinding`                 | —             | Browser Run binding                                        |
-| `cdpUrl`     | `string`                         | —             | A custom CDP endpoint; takes priority over `browser`       |
-| `cdpHeaders` | `Record<string, string>`         | —             | Headers for CDP URL discovery (e.g. Cloudflare Access)     |
-| `loader`     | `WorkerLoader`                   | required      | Worker Loader binding for sandboxed execution              |
-| `session`    | `BrowserConnectorSessionOptions` | `one-shot`    | Session lifecycle mode                                     |
-| `store`      | `BrowserSessionStore`            | DO storage    | Durable store for session ids                              |
-| `timeout`    | `number`                         | `30000`       | Execution timeout (also the per-CDP-command timeout)       |
-| `name`       | `string`                         | `browser`     | Runtime name — the durable identity of executions/snippets |
+| `browser`    | `BrowserBinding`                 | —          | Browser Run binding                                        |
+| `cdpUrl`     | `string`                         | —          | A custom CDP endpoint; takes priority over `browser`       |
+| `cdpHeaders` | `Record<string, string>`         | —          | Headers for CDP URL discovery (e.g. Cloudflare Access)     |
+| `loader`     | `WorkerLoader`                   | required   | Worker Loader binding for sandboxed execution              |
+| `session`    | `BrowserConnectorSessionOptions` | `one-shot` | Session lifecycle mode                                     |
+| `store`      | `BrowserSessionStore`            | DO storage | Durable store for session ids                              |
+| `timeout`    | `number`                         | `30000`    | Execution timeout (also the per-CDP-command timeout)       |
+| `name`       | `string`                         | `browser`  | Runtime name — the durable identity of executions/snippets |
 
 Session modes:
 

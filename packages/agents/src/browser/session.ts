@@ -78,6 +78,22 @@ export interface BrowserDebugLogInput {
   limit?: number;
 }
 
+/** `spec`'s input. */
+export interface BrowserSpecInput {
+  /** A CDP domain, e.g. `"Page"`. Omit for the list of domains. */
+  domain?: string;
+}
+
+/** What `spec()` returns without a domain: every domain, in a sentence. */
+export interface BrowserSpecOverview {
+  domains: Array<{ name: string; description?: string }>;
+  /** How to get one domain's commands, events and types. */
+  hint: string;
+}
+
+/** One domain of the protocol: its commands, events and types. */
+export type CdpDomainSpec = SearchableCdpSpec["domains"][number];
+
 /** A tab a page opened on its own during a session. */
 export interface BrowserNewTab {
   targetId: string;
@@ -134,7 +150,7 @@ const MANAGED_BROWSER =
   "tab, send Target.closeTarget with its targetId.";
 const HOST_ONLY = "it is for the host, not your code.";
 const NO_TUNNELING =
-  "send each command with cdp.send instead, passing sessionId to reach a tab.";
+  "send each command with browser.cdp instead, passing sessionId to reach a tab.";
 
 /**
  * Commands model code can't send, and why.
@@ -214,6 +230,11 @@ const ATTACH_SCHEMA = {
   required: ["targetId"]
 } as const;
 
+const SPEC_SCHEMA = {
+  type: "object",
+  properties: { domain: { type: "string", minLength: 1 } }
+} as const;
+
 const DEBUG_LOG_SCHEMA = {
   type: "object",
   properties: { limit: { type: "number", minimum: 1 } }
@@ -252,7 +273,7 @@ export class BrowserSession {
    */
   async send(input: BrowserSendInput): Promise<unknown> {
     const { method, params, sessionId, timeoutMs } = validate(
-      "send",
+      "browser.cdp",
       SEND_SCHEMA,
       input
     ) as BrowserSendInput;
@@ -284,7 +305,7 @@ export class BrowserSession {
     input: BrowserAttachInput
   ): Promise<{ sessionId: string }> {
     const { targetId, timeoutMs } = validate(
-      "attachToTarget",
+      "browser.attachToTarget",
       ATTACH_SCHEMA,
       input
     ) as BrowserAttachInput;
@@ -296,15 +317,50 @@ export class BrowserSession {
     return { sessionId: attachHandle(target) };
   }
 
-  /** The Chrome DevTools Protocol description the browser serves. */
-  async spec(): Promise<SearchableCdpSpec> {
-    return (await this.#connect()).connected.spec();
+  /**
+   * The Chrome DevTools Protocol the browser serves. Without a domain,
+   * resolves with every domain's name and first sentence, which is small;
+   * with one, with that domain's commands, events and types. The whole
+   * protocol is about 650 KB, too much for one result.
+   */
+  spec(input?: { domain?: undefined }): Promise<BrowserSpecOverview>;
+  spec(input: { domain: string }): Promise<CdpDomainSpec>;
+  spec(input?: BrowserSpecInput): Promise<BrowserSpecOverview | CdpDomainSpec>;
+  async spec(
+    input?: BrowserSpecInput
+  ): Promise<BrowserSpecOverview | CdpDomainSpec> {
+    const { domain } = validate(
+      "browser.spec",
+      SPEC_SCHEMA,
+      input
+    ) as BrowserSpecInput;
+    const { domains } = await (await this.#connect()).connected.spec();
+    if (domain === undefined) {
+      return {
+        domains: domains.map(({ name, description }) => ({
+          name,
+          ...(description ? { description: firstSentence(description) } : {})
+        })),
+        hint: 'browser.spec({ domain: "Page" }) returns one domain\'s commands, events and types.'
+      };
+    }
+    const found = domains.find((d) => d.name === domain);
+    if (found) return found;
+    const near = domains.find(
+      (d) => d.name.toLowerCase() === domain.toLowerCase()
+    );
+    throw new Error(
+      `No CDP domain named '${domain}'.` +
+        (near
+          ? ` Did you mean '${near.name}'?`
+          : " browser.spec() lists the domains.")
+    );
   }
 
   /** Recent CDP traffic on this session's connection, newest last. */
   async getDebugLog(input?: BrowserDebugLogInput): Promise<unknown[]> {
     const { limit } = validate(
-      "getDebugLog",
+      "browser.getDebugLog",
       DEBUG_LOG_SCHEMA,
       input
     ) as BrowserDebugLogInput;
@@ -652,7 +708,7 @@ export class BrowserSession {
       return new Error(
         `${error.message}. CDP session ids don't carry over between runs. ` +
           `Use sessionId: "active" for the current tab, or the handle from ` +
-          `attachToTarget({ targetId }) for another tab.`
+          `browser.attachToTarget({ targetId }) for another tab.`
       );
     }
     if (error.code !== CDP_METHOD_NOT_FOUND) return error;
@@ -667,7 +723,7 @@ export class BrowserSession {
       return new Error(
         `${error.message}. '${method}' is page-scoped: pass sessionId: ` +
           `"active" to run it in the current tab: ` +
-          `send({ method: "${method}", params, sessionId: "active" }).`
+          `browser.cdp({ method: "${method}", params, sessionId: "active" }).`
       );
     }
     return error;
@@ -698,6 +754,11 @@ function isAttachHandle(
 
 function targetOfHandle(handle: AttachHandle): TargetId {
   return handle.slice(ATTACH_HANDLE_PREFIX.length) as TargetId;
+}
+
+/** A CDP description's first sentence, for the list of domains. */
+function firstSentence(text: string): string {
+  return text.match(/^[\s\S]*?\.(?=\s|$)/)?.[0] ?? text;
 }
 
 const validators = new WeakMap<object, Validator>();

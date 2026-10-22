@@ -9,6 +9,7 @@ import {
   type ProxyToolOutput
 } from "@cloudflare/codemode";
 import { BrowserConnector } from "../browser/connector";
+import { browserFunctions } from "../browser/module";
 import { runBrowserCode } from "../browser/sandbox";
 import type { BrowserSessionReport } from "../browser/session";
 import { Browser, namedBrowserSessionKey } from "../browser/browser";
@@ -127,7 +128,7 @@ export class BrowserTestAgent extends Agent<Env> {
       const ran = await runBrowserCode({
         loader: this.env.LOADER,
         code,
-        session,
+        functions: browserFunctions(session),
         timeoutMs: 60_000
       });
       const report = (await session.close()) ?? null;
