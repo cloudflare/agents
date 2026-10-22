@@ -59,7 +59,7 @@ Install each capability with `lifecycle.use()`. Capabilities marked experimental
 
 | Capability         | Import              | Status       | Docs                                                            |
 | ------------------ | ------------------- | ------------ | --------------------------------------------------------------- |
-| `PiHarness`        | `agents/harness/pi` | —            | [Pi harness](./harnesses/pi.md)                                 |
+| `PiHarness`        | `agents/harness/pi` | Beta         | [Pi harness](./harnesses/pi.md)                                 |
 | `MCPClientManager` | `agents/mcp/client` | Stable       | [MCP client](./mcp-client.md)                                   |
 | `Scheduler`        | `agents/schedules`  | Stable       | [Scheduling](./scheduling.md)                                   |
 | `State`            | `agents/state`      | Stable       | [Lifecycle](./lifecycle.md#websockets-are-an-opt-in-capability) |
