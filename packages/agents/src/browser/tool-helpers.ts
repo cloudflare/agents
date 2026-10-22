@@ -3,7 +3,7 @@
  * the `browserTool` adapters in `tools/`. Internal — not an entry point.
  */
 import type { JSONValue } from "ai";
-import { truncateResult } from "@cloudflare/codemode";
+import { truncateResult } from "./truncate";
 import { redactBase64Payloads } from "../core/base64-redaction";
 import { __DO_NOT_USE_WILL_BREAK__agentContext as agentContext } from "../internal_context";
 
@@ -68,9 +68,9 @@ export function browserExecuteModelOutput(
     };
   }
 
-  // `calls` is the durable audit log; like the codemode tool's own projection,
-  // it stays on the persisted part and never enters the model's context, and
-  // the sandbox `logs` are bounded like a result.
+  // `calls`, the durable audit log `createBrowserTools` adds, stays on the
+  // persisted part and never enters the model's context, and the sandbox
+  // `logs` are bounded like a result.
   const modelFacing =
     typeof output === "object" && output !== null && !Array.isArray(output)
       ? (({ calls: _calls, ...rest }: { calls?: unknown; logs?: unknown }) => ({

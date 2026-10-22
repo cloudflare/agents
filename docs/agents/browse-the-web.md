@@ -47,7 +47,7 @@ Add the Browser Rendering and Worker Loader bindings to your `wrangler.jsonc`:
 
 ### 2. Export the runtime class
 
-The durable runtime behind the tool lives in a Durable Object facet, so your worker entry must export it (the `@cloudflare/codemode/vite` plugin does this automatically):
+The durable runtime behind `createBrowserTools` lives in a Durable Object facet, so your worker entry must export it (the `@cloudflare/codemode/vite` plugin does this automatically):
 
 ```ts
 export { CodemodeRuntime } from "agents/browser";
@@ -237,6 +237,7 @@ export class MyAgent extends Think<Env> {
 ```
 
 - The model writes CDP code as with `createBrowserTools`. `sessionId: "active"` points at the tab it's working in, and that tab is remembered across turns.
+- The code runs in a fresh Dynamic Worker from `loader`, with no network access: `cdp` is its only way out. The tool doesn't run on codemode, so it needs no `CodemodeRuntime` export.
 - If several chats or users share one `Browser` (for example, many threads on one agent), pass each one's id as `scope`: `browserTool({ browser, loader, scope: threadId })`. Each scope keeps its own active tab, so one chat never drives another's page, while cookies and logins stay shared. Tools that leave `scope` out share one tab. Runs in the same scope wait for each other; runs in different scopes run in parallel.
 - When another chat closes the model's tab, or works in it too, the result's `notice` says so.
 - Tabs the page opens itself come back as `newTabs` in the result.
@@ -247,7 +248,7 @@ export class MyAgent extends Think<Env> {
 - The tool's description covers the `cdp` API, the CDP mistakes models commonly make, and this time limit, so the model doesn't need a discovery pass first.
 - A single `cdp.send` result can be at most 1 MB, so a full-page screenshot of a long page fails. The model is told to capture the viewport or use JPEG instead.
 
-Only Chromium on a Browser Run binding is supported. It needs the same `LOADER` binding and `CodemodeRuntime` export as `createBrowserTools`.
+Only Chromium on a Browser Run binding is supported. It needs the same `LOADER` binding as `createBrowserTools`, but no `CodemodeRuntime` export.
 
 For TanStack AI, import `browserTool` from `agents/browser/tanstack-ai` instead. It takes the same options plus an optional `name` (default `"browser"`) and returns a `ServerTool`:
 
@@ -263,7 +264,7 @@ const stream = chat({
 
 The TanStack AI tool doesn't support screenshots yet. TanStack AI gives the host and the model the same output, so if the model returns a screenshot, the tool replaces it with a note saying it was left out, and the tool's instructions tell the model to read the page with `Runtime.evaluate` instead.
 
-For [pi-durable](./harnesses/pi.md), import `browserTool` from `agents/browser/pi` and install it in an extension. It takes the same options plus an optional `name` (default `"browser"`). Outside an `Agent`, pass `ctx`:
+For [pi-durable](./harnesses/pi.md), import `browserTool` from `agents/browser/pi` and install it in an extension. It takes the same options plus an optional `name` (default `"browser"`):
 
 ```ts
 import { browserTool } from "agents/browser/pi";
@@ -272,7 +273,6 @@ this.registry.install({
   name: "browser",
   tools: [
     browserTool({
-      ctx: this.ctx,
       browser: this.browser,
       loader: this.env.LOADER
     })
@@ -285,6 +285,24 @@ this.registry.install({
 - A conversation's calls run one at a time, since they share its tab.
 - pi doesn't rerun a browser call cut off by an eviction, because the code may have clicked or submitted something. The model gets an interrupted result and can try again; the browser itself is still there.
 - Stopping a conversation doesn't stop a browser call already running. It finishes or times out (`timeoutMs`, default 60 seconds).
+
+### Driving the browser from your own code
+
+`browser.session()` gives you what the tool's `cdp` object is built on: one run's connection to the browser, with the same `sessionId: "active"` handling and error hints. Close it when the run ends to save the scope's active tab and get a report of what happened to the browser:
+
+```ts
+const session = this.browser.session({ scope: threadId });
+try {
+  await session.send({
+    method: "Page.navigate",
+    params: { url: "https://example.com" },
+    sessionId: "active"
+  });
+} finally {
+  const report = await session.close();
+  // { restarted, newTabs, tabClosed, tabShared }, or undefined if unused
+}
+```
 
 ## Quick Actions (stateless browsing)
 

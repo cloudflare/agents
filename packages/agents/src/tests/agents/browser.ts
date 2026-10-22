@@ -33,7 +33,6 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
   /** The host wiring the docs show: one `Browser`, a tool built per turn. */
   browserTool(scope?: string): BrowserTool {
     return browserTool({
-      ctx: this.ctx,
       browser: this.browser,
       loader: this.env.LOADER,
       scope
@@ -43,7 +42,6 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
   /** The same browser, as a TanStack AI tool. */
   tanStackBrowserTool(name?: string) {
     return tanStackBrowserTool({
-      ctx: this.ctx,
       browser: this.browser,
       loader: this.env.LOADER,
       name
@@ -53,7 +51,6 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
   /** The same browser, as a pi-durable tool. */
   piBrowserTool(name?: string) {
     return piBrowserTool({
-      ctx: this.ctx,
       browser: this.browser,
       loader: this.env.LOADER,
       name
