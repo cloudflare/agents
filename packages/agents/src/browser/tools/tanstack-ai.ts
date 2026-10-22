@@ -21,7 +21,7 @@ export type {
   BrowserToolOptions,
   BrowserToolOutput
 } from "../browser-tool";
-export type { BrowserNewTab, BrowserSource } from "../session-connector";
+export type { BrowserNewTab, BrowserSource } from "../session";
 
 export interface TanStackBrowserToolOptions<
   TName extends string = "browser"
