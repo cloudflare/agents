@@ -11,9 +11,9 @@ The example composes:
 - `PiHarness extends LifecycleCapability`, the harness interface:
   `harness.prompt()`, `harness.submit()`, `harness.sessions`,
   `harness.session(id)`, and `session.events()` for pi's live events;
-- one Lifecycle job as the wake, driven by `pi.wake()`: it keeps the object
-  alive while pi has work running, is due when pi's next sleep ends, and
-  completes when pi has nothing to do;
+- one Lifecycle job as the wake, driven by pi's `onWake`: it keeps the
+  object alive while pi has work running, is due when pi's next sleep ends,
+  and completes when pi has nothing to do;
 - a pi session store on the object's SQLite database;
 - app glue that is not part of the harness: `sockets.ts` puts one session
   per socket on `WebSockets`, and `view.ts` and `transcript.ts` fold pi's
@@ -94,7 +94,7 @@ export class PiAgent extends DurableObject<Env> {
   // pi's own registry: the system prompt and the workspace tools.
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    harness: ({ storage, context }) => {
+    harness: ({ storage, context, onWake }) => {
       this.registry.install({
         name: "playground",
         sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
@@ -102,7 +102,7 @@ export class PiAgent extends DurableObject<Env> {
       });
       return Harness.open(
         storage,
-        { models: this.#models(), registry: this.registry },
+        { models: this.#models(), registry: this.registry, onWake },
         context
       );
     },
@@ -130,8 +130,9 @@ await side.submit("Summarise the repo", { whenBusy: "steer" });
 
 The factory builds everything pi's `Harness.open` takes: models, the
 registry, and `settings` (this app retries model requests there). The
-harness hands it pi's storage over the object's SQLite database and a
-background context. The system prompt and tools are a pi extension on the
+harness hands it pi's storage over the object's SQLite database, a
+background context, and `onWake`, which the factory passes on so pi's
+sleeping tasks wake from the object's alarm. The system prompt and tools are a pi extension on the
 app's registry; tools are pi-durable `ToolRegistration`s. `replay: "safe"`
 lets pi run a call again after an eviction interrupted it; otherwise the
 model gets an interrupted result. For `agents/skills` sources,

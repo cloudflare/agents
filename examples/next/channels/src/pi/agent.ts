@@ -43,7 +43,7 @@ export class PiAgent extends DurableObject<Env> {
   readonly ai = createAI({ binding: this.env.AI });
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    harness: async ({ storage, context }) => {
+    harness: async ({ storage, context, onWake }) => {
       this.registry.install({
         name: "channels-example",
         sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
@@ -56,6 +56,7 @@ export class PiAgent extends DurableObject<Env> {
         {
           models,
           registry: this.registry,
+          onWake,
           onReport: (error) => console.warn("pi report", error)
         },
         context
