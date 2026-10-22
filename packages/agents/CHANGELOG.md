@@ -2,6 +2,41 @@
 
 ## 0.30.0
 
+This release adds support for [Pi 1.4](https://github.com/earendil-works/pi/blob/v1.4.0/packages/durable/CHANGELOG.md#140---2026-10-21) and makes `PiHarness` recover more reliably from evictions, crashes and storage errors.
+
+### Highlights
+
+- **Pi 1.4 support:** `agents/harness/pi` now runs on Pi 1.4.
+- **Hibernation while Pi's tasks sleep:** `PiHarness` passes Pi's `onWake` through your harness factory, so a Durable Object sleeps until Pi's next task is due instead of staying in memory.
+- **One wake job per object:** `PiHarness` wakes from Pi's `wake()`, so a task stopped by Pi's restart limit no longer keeps the object awake.
+- **Parked tasks:** tasks stopped by Pi's restart limit show as `parked` in `pending()`, and `retry()` runs them again.
+- **Recovery:** Pi reopens after a storage error instead of failing every call until the object restarts, and the wake job survives failed steps with backoff.
+- **Fixes:** Lifecycle no longer keeps evicted Durable Objects in memory (#2646), and it arms a fallback alarm when startup fails. pi-ai now reports cut-off model streams with wording Pi treats as transient, so Pi retries them.
+
+### Upgrading
+
+1. **Update Pi to `~1.4.0`** (`@earendil-works/pi-durable`, `pi-ai`, `pi-agent-core`) and install `@earendil-works/chord` alongside them. Pi 1.4 migrates session storage to a schema Pi 1.3 cannot open, so a deployment cannot roll back past this release.
+2. **Check [pi-durable's 1.4.0 changelog](https://github.com/earendil-works/pi/blob/v1.4.0/packages/durable/CHANGELOG.md#140---2026-10-21)** for its breaking changes, such as the removal of `TaskRuntime.sleep()`, the new `sleeping` task status, and the restart limit that parks a crash-looping task after 5 restarts.
+3. **Pass `onWake` to `Harness.open`**, as in the diff below. Without it, the harness still works but logs a warning, and the object stays in memory while Pi's tasks sleep.
+4. **If you create Pi's registry at module scope, move it into your class**, as a field or in the factory. Our tool examples showed module scope before this release. Pi keeps every `Harness` subscribed to its registry until it closes, and an evicted object never closes it, so a module-level registry keeps every evicted object's harness in memory.
+
+   ```diff
+   - const registry = createRegistry();
+     export class Assistant extends Agent<Env> {
+   +   registry = createRegistry();
+       harness = new PiHarness({
+         harness: ({ storage, context, onWake }) =>
+   -       Harness.open(storage, { models, registry }, context)
+   +       Harness.open(storage, { models, registry: this.registry, onWake }, context)
+       });
+     }
+   ```
+
+5. **Keep the harness factory safe to run more than once.** It now runs again when Pi reopens after a storage error.
+6. **Handle the new `parked` status** if you switch on `PiPendingOperation.status`.
+
+Existing objects need no migration step. Wake jobs left by earlier releases are handed over to the new wake job on first start.
+
 ### Minor Changes
 
 - [#2617](https://github.com/cloudflare/agents/pull/2617) [`cfe9d0f`](https://github.com/cloudflare/agents/commit/cfe9d0f3d5de5e07fc77e5edc320d423e6634295) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Support Pi 1.4: the Pi peer range is now `~1.4.0`. Pi 1.4 migrates SQLite session storage to a schema that Pi 1.3 cannot open, so a deployment cannot roll back past this release. See [Pi harness](https://developers.cloudflare.com/agents/harnesses/pi/).
