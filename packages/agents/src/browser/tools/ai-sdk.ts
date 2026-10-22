@@ -5,7 +5,6 @@
  */
 import type { FlexibleSchema } from "ai";
 import {
-  browserReportNotes,
   createBrowserToolCore,
   type BrowserToolInput,
   type BrowserToolOptions,
@@ -52,7 +51,7 @@ export interface BrowserTool {
  * model never starts, closes, or resets it, and `sessionId: "active"`
  * addresses the tab it last worked in. If the browser had to be replaced
  * (it expired or was closed), the code still runs in the new browser and the
- * result says `restarted: true`.
+ * result's `notice` says so.
  *
  * Browser Run only (Chromium). Guardrails, `keepAliveMs`, and recording are
  * set on the `Browser`'s provider.
@@ -89,6 +88,6 @@ export function browserTool(options: BrowserToolOptions): BrowserTool {
     inputSchema: core.inputSchema,
     execute: (input) => core.execute(input),
     toModelOutput: ({ output }) =>
-      browserExecuteModelOutput(output, browserReportNotes(output))
+      browserExecuteModelOutput(output, output.notice ? [output.notice] : [])
   };
 }

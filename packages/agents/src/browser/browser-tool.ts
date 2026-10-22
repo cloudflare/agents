@@ -4,10 +4,14 @@
  * `agents/browser/pi`). Internal — not an entry point.
  */
 import { DEFAULT_BROWSER_SCOPE } from "./browser";
+import {
+  BROWSER_FUNCTION_DOCS,
+  BROWSER_RULES,
+  browserFunctions
+} from "./module";
 import { runBrowserCode } from "./sandbox";
 import {
   BrowserSession,
-  type BrowserNewTab,
   type BrowserSessionReport,
   type BrowserSource
 } from "./session";
@@ -53,16 +57,12 @@ export interface BrowserToolInput {
 
 /** What happened to the browser during a run, added to its result. */
 interface BrowserReportFields {
-  /** The browser was replaced before this run; earlier tabs are gone. */
-  restarted?: true;
   /**
    * Sentences telling the model what happened to its browser: it was
-   * restarted, its tab was closed by someone else, or another scope is
-   * working in its tab too.
+   * restarted, its tab was closed by someone else, another scope is working
+   * in its tab too, or the page opened new tabs.
    */
   notice?: string;
-  /** Tabs the page opened itself (popups, `target=_blank` links). */
-  newTabs?: BrowserNewTab[];
 }
 
 /**
@@ -90,23 +90,6 @@ export type BrowserToolOutput = (
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 
-/**
- * How to use `cdp`, one rule per line. Each rule fixes a mistake models make
- * with CDP, or states something about this browser they can't know; leave
- * out what a model knows already.
- */
-const BROWSER_RULES = [
-  "The browser persists between runs: tabs, cookies, and logins are still there next time. You never start or close it.",
-  "If the browser was replaced (idle timeout, crash), the result says restarted: true and earlier tabs and logins are gone. Before an action that matters (submitting a form, a purchase), check you're on the page you expect.",
-  'Page-scoped commands (Page.*, Runtime.*, DOM.*, Input.*, Network.*, Emulation.*) need sessionId: "active", your tab, which is remembered between runs. Browser.* and Target.* commands take no sessionId.',
-  "Other open tabs (Target.getTargets) may belong to other conversations using this browser: don't close, navigate, or attach to a tab you didn't open unless the user asks.",
-  "Target.createTarget opens a tab and makes it active. To switch to another open tab, call cdp.attachToTarget({ targetId }); the sessionId it returns keeps working in later runs, while one from a raw Target.attachToTarget only works in the current run.",
-  "Tabs a page opens itself (popups, target=_blank links) don't become active; the result lists them as newTabs.",
-  "Runtime.evaluate: pass returnByValue: true, or objects come back as a remote reference with no value, and awaitPromise: true for async expressions. The value is at result.value. A thrown error doesn't reject: check exceptionDetails.",
-  "Page.navigate returns before the page loads and doesn't throw when it fails: check errorText, then poll document.readyState with Runtime.evaluate until it is 'complete'.",
-  "Pick out what you need inside Runtime.evaluate and return only that. Results over about 24,000 characters are cut short, and a screenshot over 1 MB fails the run."
-];
-
 const RESTARTED_NOTICE =
   "The browser was restarted before this run (it expired or was closed): earlier tabs, logins, and page state are gone. Your code ran in a fresh browser — navigate again before relying on page state.";
 
@@ -125,7 +108,8 @@ const inputJsonSchema = {
   properties: {
     code: {
       type: "string",
-      description: "An async arrow function that drives the browser with `cdp`"
+      description:
+        "An async arrow function that drives the browser with `browser`"
     }
   },
   required: ["code"],
@@ -185,7 +169,7 @@ function queued<T>(
   return next;
 }
 
-/** The report as fields on the result, with notices the model reads. */
+/** The report as a notice on the result, in sentences the model reads. */
 function reportFields(
   report: BrowserSessionReport | undefined
 ): BrowserReportFields {
@@ -193,32 +177,18 @@ function reportFields(
   const notices = [
     report.restarted && RESTARTED_NOTICE,
     report.tabClosed && !report.restarted && TAB_CLOSED_NOTICE,
-    report.tabShared && TAB_SHARED_NOTICE
+    report.tabShared && TAB_SHARED_NOTICE,
+    report.newTabs.length > 0 &&
+      `New tabs opened by the page: ${JSON.stringify(report.newTabs)}`
   ].filter((notice) => typeof notice === "string");
-  return {
-    ...(report.restarted ? { restarted: true as const } : {}),
-    ...(notices.length > 0 ? { notice: notices.join(" ") } : {}),
-    ...(report.newTabs.length > 0 ? { newTabs: report.newTabs } : {})
-  };
-}
-
-/** Report sentences that must survive a screenshot's text summary. */
-export function browserReportNotes(output: BrowserToolOutput): string[] {
-  const notes: string[] = [];
-  if (output.notice) notes.push(output.notice);
-  if (output.newTabs?.length) {
-    notes.push(
-      `New tabs opened by the page: ${JSON.stringify(output.newTabs)}`
-    );
-  }
-  return notes;
+  return notices.length > 0 ? { notice: notices.join(" ") } : {};
 }
 
 /**
  * Build the description and `execute` for one `browserTool`.
  *
  * Each run opens a session on the browser in its scope, runs the model's
- * code in a fresh Dynamic Worker with `cdp` bound to that session, closes
+ * code in a fresh Dynamic Worker with `browser` bound to that session, closes
  * the session, and adds its report to the result. Runs in one scope wait
  * for each other, since they drive one tab; runs in different scopes go in
  * parallel.
@@ -233,6 +203,7 @@ export function createBrowserToolCore(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const rules = [
     ...BROWSER_RULES,
+    "Results over about 24,000 characters are cut short.",
     `Each run times out after ${Math.round(timeoutMs / 1000)}s, so split long jobs (crawling a site, say) across runs.`,
     adapter.screenshotHint,
     "If your code doesn't parse, the line number in the error counts from wrapper code, not yours. Check regex literals and escapes."
@@ -242,14 +213,11 @@ export function createBrowserToolCore(
   const description = [
     "Run JavaScript that drives a persistent Chrome browser over the Chrome DevTools Protocol (CDP).",
     "",
-    "Write an async arrow function, `async () => { ... }`, and return a small JSON value. Use the `cdp` global to reach the browser. `fetch` is blocked and there is no file system or Node.js API.",
+    "Write an async arrow function, `async () => { ... }`, and return a small JSON value. Use the `browser` global to reach the browser. `fetch` is blocked and there is no file system or Node.js API.",
     "",
-    "## cdp",
+    "## browser",
     "",
-    "- `cdp.send({ method, params?, sessionId?, timeoutMs? })` sends a CDP command and returns its result without the JSON-RPC envelope: `Page.navigate` returns `{ frameId, errorText? }`, `Runtime.evaluate` returns `{ result: { value }, exceptionDetails? }`.",
-    "- `cdp.attachToTarget({ targetId })` makes an open tab active and returns `{ sessionId }`.",
-    '- `cdp.spec()` returns the whole protocol (about 650 KB) as `{ domains: [{ name, commands, events, types }] }`. Filter it in code, for example `spec.domains.find((d) => d.name === "Page").commands.find((c) => c.name === "navigate")`.',
-    "- `cdp.getDebugLog()` returns recent protocol traffic, for when a command fails or times out.",
+    ...BROWSER_FUNCTION_DOCS.map((doc) => `- ${doc}`),
     "",
     "## Rules",
     "",
@@ -266,7 +234,7 @@ export function createBrowserToolCore(
       const ran = await runBrowserCode({
         loader: options.loader,
         code: input.code,
-        session,
+        functions: browserFunctions(session),
         timeoutMs
       });
       const logs = ran.logs.length > 0 ? { logs: ran.logs } : {};

@@ -302,7 +302,7 @@ describe("Browser on an Agent subclass", () => {
 });
 
 describe("browserTool over a Browser", () => {
-  const code = `async () => cdp.send({
+  const code = `async () => browser.cdp({
     method: "Runtime.evaluate",
     params: { expression: "document.title" },
     sessionId: "active"
@@ -319,7 +319,7 @@ describe("browserTool over a Browser", () => {
         expect(first.status === "completed" && first.result).toEqual({
           result: { value: "evaluated in target-session-1-2" }
         });
-        expect(first.restarted).toBeUndefined();
+        expect(first.notice).toBeUndefined();
 
         // The active tab is saved on the default scope's record.
         const stored = await state.storage.get<StoredBrowserSession>(
@@ -360,7 +360,7 @@ describe("browserTool over a Browser", () => {
 
   it("runs one scope's calls one at a time, and different scopes together", async () => {
     const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
-    const waitCode = (ms: number) => `async () => cdp.send({
+    const waitCode = (ms: number) => `async () => browser.cdp({
       method: "Runtime.evaluate",
       params: { expression: "wait:${ms}" },
       sessionId: "active"
@@ -406,26 +406,36 @@ describe("browserTool over a Browser", () => {
       expect(output.status === "completed" && output.result).toEqual({
         result: { value: "evaluated in target-session-2-2" }
       });
-      expect(output.restarted).toBe(true);
       expect(output.notice).toMatch(/restarted/);
+      expect(output).not.toHaveProperty("restarted");
 
       const modelOutput = tool.toModelOutput({ output });
       expect(modelOutput.type).toBe("json");
       expect(modelOutput.value).toMatchObject({
-        restarted: true,
         notice: expect.stringMatching(/navigate again/)
       });
       expect(modelOutput.value).not.toHaveProperty("calls");
     });
   });
 
-  it("describes cdp and its rules without codemode's generic text", async () => {
+  it("describes browser and its rules without codemode's generic text", async () => {
     const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
 
     await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
       const { description } = instance.browserTool();
       // No discovery pass needed: the rules are right there.
-      expect(description).toContain('sessionId: "active"');
+      expect(description).toContain(
+        'browser.cdp({ method: "Page.navigate", params: { url }, sessionId: "active" })'
+      );
+      for (const name of [
+        "cdp",
+        "attachToTarget",
+        "spec",
+        "getDebugLog",
+        "clearDebugLog"
+      ]) {
+        expect(description).toContain(`\`browser.${name}(`);
+      }
       expect(description).toContain("returnByValue: true");
       expect(description).toContain("document.readyState");
       expect(description).toContain("times out after 60s");
@@ -444,7 +454,7 @@ describe("browserTool over a Browser", () => {
       const run = (source: string) =>
         instance.browserTool().execute({ code: source }, {});
       const expected = { result: { value: "evaluated in target-session-1-2" } };
-      const send = `cdp.send({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" })`;
+      const send = `browser.cdp({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" })`;
 
       for (const source of [
         `async () => ${send}`,
@@ -506,7 +516,7 @@ describe("browserTool over a Browser", () => {
       // A CDP failure is an error the code can catch.
       const caught = await run(`async () => {
         try {
-          await cdp.send({ method: "Browser.close" });
+          await browser.cdp({ method: "Browser.close" });
         } catch (error) {
           return error.message;
         }
@@ -515,7 +525,7 @@ describe("browserTool over a Browser", () => {
         /managed for you/
       );
 
-      const unknown = await run("async () => cdp.reset()");
+      const unknown = await run("async () => browser.reset()");
       expect(unknown.status === "error" && unknown.error).toMatch(
         /not a function/
       );
@@ -541,7 +551,7 @@ describe("browserTool over a Browser", () => {
       const capture = (bytes: number) =>
         instance.browserTool().execute(
           {
-            code: `async () => (await cdp.send({ method: "Page.captureScreenshot", params: { fakeBytes: ${bytes} }, sessionId: "active" })).data.length`
+            code: `async () => (await browser.cdp({ method: "Page.captureScreenshot", params: { fakeBytes: ${bytes} }, sessionId: "active" })).data.length`
           },
           {}
         );
@@ -565,7 +575,7 @@ describe("browserTool over a Browser", () => {
 });
 
 describe("TanStack AI browserTool over a Browser", () => {
-  const code = `async () => cdp.send({
+  const code = `async () => browser.cdp({
     method: "Runtime.evaluate",
     params: { expression: "document.title" },
     sessionId: "active"
@@ -577,7 +587,7 @@ describe("TanStack AI browserTool over a Browser", () => {
     await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
       expect(instance.tanStackBrowserTool().name).toBe("browser");
       expect(instance.tanStackBrowserTool("web").name).toBe("web");
-      expect(instance.tanStackBrowserTool().description).toContain("`cdp`");
+      expect(instance.tanStackBrowserTool().description).toContain("`browser`");
       // The model is told screenshots can't come back, not that the user sees them.
       expect(instance.tanStackBrowserTool().description).toContain(
         "can't return images"
@@ -605,7 +615,6 @@ describe("TanStack AI browserTool over a Browser", () => {
       expect(second).toMatchObject({
         status: "completed",
         result: { result: { value: "evaluated in target-session-2-2" } },
-        restarted: true,
         notice: expect.stringMatching(/navigate again/)
       });
     });
@@ -621,14 +630,14 @@ describe("TanStack AI browserTool over a Browser", () => {
 
       const output = await tool.execute?.({
         code: `async () => {
-          await cdp.send({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" });
+          await browser.cdp({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" });
           return { type: "browser_screenshot", mediaType: "image/png", data: "aGVsbG8=" };
         }`
       });
       expect(output).toMatchObject({
         status: "completed",
         result: expect.stringMatching(/neither you nor the user can see it/),
-        restarted: true
+        notice: expect.stringMatching(/restarted/)
       });
       expect(JSON.stringify(output)).not.toContain("aGVsbG8=");
     });
@@ -636,13 +645,13 @@ describe("TanStack AI browserTool over a Browser", () => {
 });
 
 describe("pi browserTool over a Browser", () => {
-  const code = `async () => cdp.send({
+  const code = `async () => browser.cdp({
     method: "Runtime.evaluate",
     params: { expression: "document.title" },
     sessionId: "active"
   })`;
   const screenshotCode = (data: string) => `async () => {
-    await cdp.send({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" });
+    await browser.cdp({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" });
     return { type: "browser_screenshot", mediaType: "image/png", data: ${JSON.stringify(data)} };
   }`;
 
@@ -669,7 +678,7 @@ describe("pi browserTool over a Browser", () => {
       expect(instance.piBrowserTool("web").name).toBe("web");
       expect(tool.executionMode).toBe("sequential");
       expect(tool.replay).toBe("unsafe");
-      expect(tool.description).toContain("`cdp`");
+      expect(tool.description).toContain("`browser`");
       expect(tool.description).toContain("attached to the result");
     });
   });
@@ -697,10 +706,12 @@ describe("pi browserTool over a Browser", () => {
       expect(textOf(second)).toMatchObject({
         status: "completed",
         result: { result: { value: "evaluated in target-session-2-2" } },
-        restarted: true,
         notice: expect.stringMatching(/navigate again/)
       });
-      expect(second.details).toMatchObject({ restarted: true });
+      expect(second.details).toEqual({
+        executionId: expect.any(String),
+        status: "completed"
+      });
     });
   });
 
@@ -745,7 +756,7 @@ describe("pi browserTool over a Browser", () => {
       expect(textOf(result)).toMatchObject({
         status: "completed",
         result: expect.stringMatching(/^Screenshot attached as an image/),
-        restarted: true
+        notice: expect.stringMatching(/restarted/)
       });
       expect(result.output?.[0]).not.toMatchObject({
         text: expect.stringContaining("aGVsbG8=")

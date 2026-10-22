@@ -231,9 +231,12 @@ function createFakeBrowser() {
           domains: [
             {
               domain: "Page",
+              description:
+                "Actions and events related to the inspected page. More detail.",
               commands: [{ name: "navigate" }],
               events: [{ name: "loadEventFired" }]
-            }
+            },
+            { domain: "Target" }
           ]
         });
       }
@@ -707,7 +710,7 @@ describe("BrowserSession", () => {
   it("validates arguments before touching the browser", async () => {
     const t = setup();
     const { error } = await t.run([["send", { sessionId: "active" }]]);
-    expect(String(error)).toContain("Invalid arguments for send");
+    expect(String(error)).toContain("Invalid arguments for browser.cdp");
     expect(t.sockets).toHaveLength(0);
   });
 
@@ -720,11 +723,35 @@ describe("BrowserSession", () => {
     await expect(call(session, evaluateActive)).rejects.toThrow("closed");
   });
 
-  it("reads the protocol spec from the session's own browser", async () => {
+  it("lists the protocol's domains, then returns one domain", async () => {
     const t = setup();
-    const { results } = await t.run([["spec", {}]]);
-    const spec = results[0] as { domains: Array<{ name: string }> };
-    expect(spec.domains.map((domain) => domain.name)).toEqual(["Page"]);
+    const { results } = await t.run([
+      ["spec", {}],
+      ["spec", { domain: "Page" }]
+    ]);
+    expect(results[0]).toEqual({
+      domains: [
+        {
+          name: "Page",
+          description: "Actions and events related to the inspected page."
+        },
+        { name: "Target" }
+      ],
+      hint: expect.stringContaining('browser.spec({ domain: "Page" })')
+    });
+    expect(results[1]).toMatchObject({
+      name: "Page",
+      commands: [{ method: "Page.navigate" }],
+      events: [{ event: "Page.loadEventFired" }]
+    });
+  });
+
+  it("says when a spec domain doesn't exist", async () => {
+    const t = setup();
+    const near = await t.run([["spec", { domain: "page" }]]);
+    expect(String(near.error)).toContain("Did you mean 'Page'?");
+    const none = await t.run([["spec", { domain: "Nope" }]]);
+    expect(String(none.error)).toContain("browser.spec() lists the domains");
   });
 });
 
