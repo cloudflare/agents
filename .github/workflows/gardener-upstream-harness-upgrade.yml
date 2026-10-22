@@ -2,7 +2,7 @@
 #
 # Source: .gardener/tasks/upstream-harness-upgrade/TASK.md
 # Task: upstream-harness-upgrade
-# Bundle: sha256:3e502787f5455e2d81737e377bcfb4760dc5ff8161c4807c595394d5c840f178
+# Bundle: sha256:b6be3b6b9feef33d50caa8d01c73e7c2886ef8e7cc563ad1f2faa7b7c0cf32f9
 # Regenerate: gardener generate
 # Do not edit this workflow directly.
 name: "Gardener · Upstream harness upgrade (pi, opencode)"
@@ -43,6 +43,6 @@ jobs:
       task-id: "upstream-harness-upgrade"
       task-name: "Upstream harness upgrade (pi, opencode)"
       task-source: ".gardener/tasks/upstream-harness-upgrade/TASK.md"
-      task-bundle-hash: 3e502787f5455e2d81737e377bcfb4760dc5ff8161c4807c595394d5c840f178
+      task-bundle-hash: b6be3b6b9feef33d50caa8d01c73e7c2886ef8e7cc563ad1f2faa7b7c0cf32f9
       plan-timeout-minutes: 100
       pull-request-head: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || github.event.inputs.pull_request || '' }}

@@ -56,7 +56,7 @@ configuration, and change nothing unrelated to the upgrade.
 
 | Upstream | Packages | Pin policy | Where changes are announced |
 | --- | --- | --- | --- |
-| pi | `@earendil-works/pi-ai`, `@earendil-works/pi-durable`, `@earendil-works/chord`, `@earendil-works/pi-tui`, and `@earendil-works/pi-telemetry` in examples | Released together with one version. pi minors break, so we support **one minor**: peer and dev ranges are `~X.Y.0`, `pi-tui` is pinned exactly to `X.Y.Z`, and the `pnpm-workspace.yaml` override matches the range. | GitHub releases of `earendil-works/pi` (`GET /repos/earendil-works/pi/releases?per_page=20`). Notes cover the whole monorepo; only sections about our packages matter. |
+| pi | `@earendil-works/pi-ai`, `@earendil-works/pi-durable`, `@earendil-works/chord`, `@earendil-works/pi-tui`; in examples and experimental also `@earendil-works/pi-telemetry` and `@earendil-works/pi-agent-core` (`examples/next/models`, `experimental/pi-recovery`) | Released together with one version. pi minors break, so we support **one minor**: peer and dev ranges are `~X.Y.0`, `pi-tui` is pinned exactly to `X.Y.Z`, and the `pnpm-workspace.yaml` override matches the range. Every direct pi dependency moves together; the workspace never mixes pi minors. | GitHub releases of `earendil-works/pi` (`GET /repos/earendil-works/pi/releases?per_page=20`). Notes cover the whole monorepo; only sections about our packages matter. |
 | opencode v2 | `@opencode/sdk` (incl. `@opencode/sdk/workerd`), `@opencode/plugin` | Dev and example pins are exact (`2.x.y`). The peer range is a caret range whose floor moves only when our code needs the newer release (it uses a new API, or a break forced a code change). | **No release notes.** Tags `v2.*` on `anomalyco/opencode` (`GET /repos/anomalyco/opencode/git/matching-refs/tags/v2.`; sort numerically yourself). Read the commits between our tag and the new one for `packages/sdk` and `packages/plugin`: `GET /repos/anomalyco/opencode/commits?sha=<new tag>&path=packages/sdk&since=<committer date of our tag>&per_page=100`, paging while a page returns 100. Ignore opencode's v1 GitHub releases and `opencode_version` in `.github/workflows/bonk.yml`. |
 
 ## 1. Find drift
@@ -127,10 +127,13 @@ explicitly.
 
 ## 4. Get a baseline
 
+This runner ships Node 22 without pnpm, and the repository needs Node 24 (CI uses it). Each
+command runs in a fresh shell, so run every Node and pnpm command, here and in step 5, through
+`npx -y -p node@24 -p pnpm@11.19.0 -- <command>`. For example:
+
 ```sh
-corepack enable
-pnpm install --frozen-lockfile
-pnpm run build
+npx -y -p node@24 -p pnpm@11.19.0 -- pnpm install --frozen-lockfile
+npx -y -p node@24 -p pnpm@11.19.0 -- pnpm run build
 ```
 
 Run the tests you will use as evidence (step 5) once on the unchanged checkout, so you can tell a
@@ -143,11 +146,15 @@ failure the upgrade caused from one that was already there. Install Playwright's
    `git grep -nE '"@(earendil-works|opencode)/'` outside `pnpm-lock.yaml`; today they are in
    `packages/agents/package.json` (devDependencies and peerDependencies), `pnpm-workspace.yaml`
    (overrides), `examples/next/channels`, `examples/next/harnesses/pi`,
-   `examples/next/harnesses/opencode`, `examples/next/models` and `experimental/pi-recovery`. For a
+   `examples/next/harnesses/opencode`, `examples/next/models` and `experimental/pi-recovery`. Move
+   every `@earendil-works/*` (or `@opencode/*`) package the search finds, including ones the table
+   doesn't name, such as `pi-agent-core`. For a
    pi range change also update prose that names the range: `docs/agents/harnesses/pi.md`,
    `docs/agents/models-pi-ai.md` and `examples/next/harnesses/pi/README.md`. `sherif` (part of
    `pnpm run check`) fails if workspace versions disagree.
-2. `pnpm install` to update `pnpm-lock.yaml`. Never edit the lockfile by hand.
+2. `pnpm install` to update `pnpm-lock.yaml`. Never edit the lockfile by hand. Afterwards, every
+   `@earendil-works/` (or `@opencode/`) package in the lockfile must resolve the new version; if an
+   old one remains, find the pin or override that holds it and move it too.
 3. Fix every break from step 3 and every new failure in the source, tests, examples and docs. Take
    the smallest correct change. Prefer the API upstream now provides over keeping our own copy. Do
    not adopt new upstream features that nothing forces on us. Note each choice you make, with the
@@ -157,8 +164,10 @@ failure the upgrade caused from one that was already there. Install Playwright's
    - the upstream's test projects in `packages/agents`: `pnpm --filter agents exec vitest --run
      --project harness-pi` or `--project harness-opencode`, plus every other vitest project or test
      file that imports the upstream (for pi: the web, browser and models tests);
-   - the tests of every example and experimental package that depends on the upstream
-     (`pnpm --filter <name> test`).
+   - every example and experimental package that depends on the upstream: `pnpm --filter <name>
+     test` if its `package.json` has a `test` script. A package without one is covered by the root
+     `pnpm run check`, which typechecks every `tsconfig.json`; don't count a missing script as a
+     failure.
    Record pass counts for each, as `harness-pi 51/51`.
 5. Add a changeset when the published `agents` package changes, following `AGENTS.md`: one line
    that links to the docs, nothing more.
@@ -181,8 +190,10 @@ build for reasons unrelated to the upgrade, propose nothing; tomorrow's run trie
 
 ## 7. Propose
 
-Before you finish, `git status` must show only this upgrade's changes: revert anything else you
-touched (gitignored build output is fine). In this order and with these step names (`<u>` is `pi`
+Gardener commits every changed and every untracked, non-ignored file in the checkout, and fails the
+run if the git index changed, so never `git add` anything (not even `git add -N`). Before you
+finish, `git status --porcelain --untracked-files=all` must list only this upgrade's changes:
+revert or delete anything else (gitignored build output is fine). In this order and with these step names (`<u>` is `pi`
 or `opencode`):
 
 1. `branch-<u>`: `branch.create` of `gardener/upstream/<u>-<version>` (for example
@@ -210,7 +221,9 @@ Conventional commit, scope `agents`, same text for the commit and the pull reque
 **The body is the review.** A maintainer should be able to approve this pull request by reading
 the body alone, and trust that the diff does exactly what the body says and nothing else. So:
 
-- **Account for every change.** Every file in `git diff --stat` must be covered by the body, either
+- **Account for every change.** Every file `git status --porcelain --untracked-files=all` lists is
+  what Gardener will commit, new files such as the changeset included, and each must be covered by
+  the body, either
   on its own or in a group ("the four `package.json` files under `examples/`"). A change the body
   doesn't explain must not be in the diff; revert it instead.
 - **Claim nothing the diff doesn't do.** No "also tidied", no planned follow-ups described as done.
@@ -278,8 +291,10 @@ close and reopen this pull request, or push to it, to run it. Review comments ar
 Gardener's `pr-review-fix` task.
 ```
 
-Before proposing, check the body against the final diff (`git diff --stat` and `git diff`): every
-file accounted for, every claim true of the code. Fix whichever side is wrong.
+Before proposing, check the body against what will be committed: every path from
+`git status --porcelain --untracked-files=all`, `git diff` for changed files, and the contents of
+new files (`git diff` doesn't show untracked files). Every file accounted for, every claim true of
+the code. Fix whichever side is wrong.
 
 Do not @mention anyone. When you are done, whether you proposed something or nothing, call
 `finish_task`. Then finish.
