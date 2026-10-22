@@ -123,6 +123,9 @@ export type PiHarnessContext = {
    * alarm. Without it the harness still works, but pi's timer keeps the
    * object in memory, and billed, while a task sleeps, and the harness logs
    * a warning when it opens pi.
+   *
+   * The harness reads pi's wake times against `Date.now()`, so do not pass
+   * `now` to `Harness.open`.
    */
   readonly onWake: (wake: Wake) => void;
 };
@@ -646,7 +649,9 @@ export class PiHarness extends LifecycleCapability {
         const left = deadline - now;
         if (left <= 0) return true;
         let sleep = this.#onWakeWired ? left : Math.min(left, this.#pollMs);
-        // `at` is a sleep not yet due, so this is positive.
+        // `at` is a sleep not yet due on pi's clock, so this is positive.
+        // That holds because pi keeps its default clock, `Date.now`; see
+        // `PiHarnessContext`.
         if (wake.at !== undefined) sleep = Math.min(sleep, wake.at - now);
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, sleep);

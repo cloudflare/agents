@@ -323,13 +323,13 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     pi.resume();
   }
 
-  /** Whether a reminder task is still live (not yet completed). */
-  async reminderLive(): Promise<boolean> {
+  /** How many reminder tasks are still live, not yet completed. */
+  async liveReminders(): Promise<number> {
     const pi = await this.harness.pi();
     const inspection = await pi.inspect(BACKGROUND_CONTEXT);
-    return inspection.tasks.some(
+    return inspection.tasks.filter(
       ({ record }) => record.kind === Reminder.definition.name
-    );
+    ).length;
   }
 
   /** When pi next needs to run, as `pi.wake()` says. */
@@ -369,11 +369,15 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   /** `wait()`, given up after `ms`: `"waiting"` if it had not settled. */
   async waitWithin(
     operationId: string,
-    ms: number
+    ms: number,
+    session?: string
   ): Promise<PiOperationResult | "waiting"> {
     const signal = AbortSignal.timeout(ms);
     try {
-      return await this.harness.wait(operationId, { signal });
+      return await this.harness.wait(operationId, {
+        signal,
+        ...(session ? { session } : {})
+      });
     } catch (error) {
       if (signal.aborted) return "waiting";
       throw error;
@@ -528,8 +532,9 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * How many times the wake job has stepped past a running wait, in this
-   * instance. While pi is active, each such step starts a new wait.
+   * How many times `pi.resume()` has been called in this instance: each wake
+   * step past a running wait, which starts a new wait while pi is active,
+   * and each sleep a running wait resumes when it is due.
    */
   wakeSteps(): number {
     return this.#wakeSteps;
@@ -542,7 +547,8 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   /**
    * pi, with the wake's steps counted. A wake step that finds no wait
    * running calls `pi.resume()` before it reads `pi.wake()`; a heartbeat
-   * during a wait returns first. The method is replaced on the instance:
+   * during a wait returns first. A wait calls it too when a sleep beside the
+   * running work is due. The method is replaced on the instance:
    * pi checks its own objects' brands, so a proxy would not pass for it.
    */
   #observe(pi: Harness): Harness {
