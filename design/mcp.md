@@ -96,7 +96,14 @@ The SDK v2 client negotiates Stateless first and falls back to Legacy on the sam
 | `url-policy.ts`     | Stable server ids and the SSRF policy                                                |
 | `connection.ts`     | Transport selection, the SDK client, catalogs and the connection-level state machine |
 
-Connect, discovery, establish, OAuth callback completion and restore for one server run through its lane, so they never interleave on one connection. A server is `authenticating` exactly when the manager has persisted the `auth_url` its provider produced; connect, discovery and request-time re-authorization (scope step-up, failed refresh) all enter that state through one transition. Restore trusts a persisted `auth_url` only while its OAuth `state` can still be redeemed, and otherwise reconnects. Work that outlives `removeServer` (a connect, discovery or code exchange) checks it still owns the connection before writing anything back.
+Connect, discovery, establish, OAuth callback completion and restore for one server run through its lane, so they never interleave on one connection.
+
+Background work that must happen even if the isolate dies lives in the Lifecycle job queue (`reconnect-policy.ts`), not in memory:
+
+- `connect:<serverId>`: after a failed connect or discovery, the next attempt on a 30s → 30m backoff. Each run is one bounded attempt. Ready or `authenticating` cancels it; 24h without success records a `reconnect-exhausted` failure.
+- `auth-expiry:<serverId>`: armed with every persisted `auth_url`. If the link's `state` can no longer be redeemed when it fires, the server records an `authorization-expired` failure instead of minting a new link.
+
+A recorded failure (`failure` column, added on first use) is terminal: restore shows it without connecting, and only an explicit reconnect (`addMcpServer`, `connectToServer`, `establishConnection`) clears it. A server is `authenticating` exactly when the manager has persisted the `auth_url` its provider produced; connect, discovery and request-time re-authorization (scope step-up, failed refresh) all enter that state through one transition. Restore trusts a persisted `auth_url` only while its OAuth `state` can still be redeemed, and otherwise reconnects. Work that outlives `removeServer` (a connect, discovery or code exchange) checks it still owns the connection before writing anything back.
 
 ## Verification matrix
 

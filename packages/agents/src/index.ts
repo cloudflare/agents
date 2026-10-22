@@ -10025,13 +10025,12 @@ export class Agent<
           authUrl: settlement.authUrl
         };
       case MCPConnectionState.FAILED:
-        // The server stays in storage so the caller can retry.
+        // The server stays in storage and keeps reconnecting in the
+        // background; the caller can also retry.
         throw new Error(
           settlement.phase === "connect"
             ? `Failed to connect to MCP server at ${context.url}: ${settlement.error}`
-            : settlement.phase === "discover"
-              ? `Failed to discover MCP server capabilities: ${settlement.error}`
-              : `MCP server "${context.name}" is in failed state: ${settlement.error}`
+            : `Failed to discover MCP server capabilities: ${settlement.error}`
         );
       case "removed":
         throw new Error(
