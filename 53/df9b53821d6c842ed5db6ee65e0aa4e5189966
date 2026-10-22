@@ -1,0 +1,23 @@
+.gardener/gardener.lock.json
+  s_5321f067d75c3c::t_1d7078621df7c1 682-685,688-691,704,708-714,716-737,739,744-750,752,757,768,770,775,778-779,795,800
+.gardener/tasks/upstream-harness-upgrade/TASK.md
+  s_5321f067d75c3c::t_72276b3fbab684 3-4,6-11,18,21-31,33,37-43,46-53,57-235,237-284
+.github/workflows/gardener-upstream-harness-upgrade.yml
+  s_5321f067d75c3c::t_d77177bb1067cf 3-5,8,29-31,34,37-38,43-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "53df9b53821d6c842ed5db6ee65e0aa4e5189966",
+  "prompts": {},
+  "sessions": {
+    "s_5321f067d75c3c": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a16437-28b9-75ac-8837-b5b414946d4e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}
