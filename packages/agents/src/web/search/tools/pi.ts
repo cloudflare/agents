@@ -81,13 +81,13 @@ export type WebSearchToolDetails =
  * import { webSearchTool } from "agents/websearch/pi";
  *
  * // In PiHarness's factory, so each object gets its own registry.
- * harness: ({ storage, context }) => {
+ * harness: ({ storage, context, onWake }) => {
  *   const registry = createRegistry();
  *   registry.install({
  *     name: "tools",
  *     tools: [webSearchTool({ binding: this.env.AI, provider: "exa" })]
  *   });
- *   return Harness.open(storage, { models, registry }, context);
+ *   return Harness.open(storage, { models, registry, onWake }, context);
  * }
  * ```
  */

@@ -84,13 +84,13 @@ export type WebFetchToolDetails =
  * import { webFetchTool } from "agents/webfetch/pi";
  *
  * // In PiHarness's factory, so each object gets its own registry.
- * harness: ({ storage, context }) => {
+ * harness: ({ storage, context, onWake }) => {
  *   const registry = createRegistry();
  *   registry.install({
  *     name: "tools",
  *     tools: [webFetchTool({ binding: this.env.AI })]
  *   });
- *   return Harness.open(storage, { models, registry }, context);
+ *   return Harness.open(storage, { models, registry, onWake }, context);
  * }
  * ```
  */
