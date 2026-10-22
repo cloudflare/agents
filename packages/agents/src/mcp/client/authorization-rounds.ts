@@ -76,7 +76,7 @@ export function startRound(
   now: number
 ): RoundDecision {
   const byScope = live(previous?.byScope ?? {}, now);
-  const current = byScope[scope];
+  const current = entryFor(byScope, scope);
   let next: ScopeRounds;
   if (!current) {
     next = { rounds: 1, completed: false, at: now };
@@ -98,8 +98,9 @@ export function startRound(
 export function completeRound(
   previous: AuthorizationRounds | undefined
 ): AuthorizationRounds | undefined {
-  const current = previous?.byScope[previous.latest];
-  if (!previous || !current) return previous;
+  if (!previous) return undefined;
+  const current = entryFor(previous.byScope, previous.latest);
+  if (!current) return previous;
   return {
     latest: previous.latest,
     byScope: {
@@ -120,21 +121,27 @@ export function parseAuthorizationRounds(
   ) {
     return undefined;
   }
-  const byScope: Record<string, ScopeRounds> = {};
-  for (const [scope, entry] of Object.entries(value.byScope)) {
-    if (
+  // Object.fromEntries defines own properties, so scope names such as
+  // `__proto__` or `constructor` are stored like any other.
+  const byScope = Object.fromEntries(
+    Object.entries(value.byScope).flatMap(([scope, entry]) =>
       isRecord(entry) &&
       typeof entry.rounds === "number" &&
       typeof entry.completed === "boolean" &&
       typeof entry.at === "number"
-    ) {
-      byScope[scope] = {
-        rounds: entry.rounds,
-        completed: entry.completed,
-        at: entry.at
-      };
-    }
-  }
+        ? [
+            [
+              scope,
+              {
+                rounds: entry.rounds,
+                completed: entry.completed,
+                at: entry.at
+              }
+            ] as const
+          ]
+        : []
+    )
+  );
   return { latest: value.latest, byScope };
 }
 
@@ -145,6 +152,14 @@ export function authorizationExhaustedMessage(
 ): string {
   const scopes = scope ? ` for scope "${scope}"` : "";
   return `The server still requires authorization${scopes} after ${rounds} completed authorizations. Stopped to avoid an authorization loop; reconnect the server to try again.`;
+}
+
+/** A scope set's own entry; never an inherited `Object` member. */
+function entryFor(
+  byScope: Readonly<Record<string, ScopeRounds>>,
+  scope: string
+): ScopeRounds | undefined {
+  return Object.hasOwn(byScope, scope) ? byScope[scope] : undefined;
 }
 
 /** Scope sets whose latest round is still inside the window. */

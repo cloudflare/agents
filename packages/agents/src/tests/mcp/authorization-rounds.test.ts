@@ -95,6 +95,24 @@ describe("authorization rounds", () => {
     });
   });
 
+  it("counts scope sets named like Object members", () => {
+    for (const scope of ["constructor", "toString", "__proto__"]) {
+      let rounds: AuthorizationRounds | undefined;
+      for (let i = 0; i < MAX_AUTHORIZATION_ROUNDS; i++) {
+        const next = round(rounds, scope, NOW + i);
+        expect(next.decision._tag).toBe("start");
+        // Round-trip through storage like the manager does.
+        rounds = parseAuthorizationRounds(
+          JSON.parse(JSON.stringify(next.rounds))
+        );
+      }
+      expect(startRound(rounds, scope, NOW + 10)).toMatchObject({
+        _tag: "exhausted",
+        scope
+      });
+    }
+  });
+
   it("parses only well-formed records", () => {
     const record = {
       latest: "s",
