@@ -336,6 +336,8 @@ A request can need authorization again after the server is `ready`: a tool call 
 
 Calls for a `serverId` with no connection (never registered, removed, or still being restored) throw `MCPConnectionNotFoundError`.
 
+Re-authorization is limited, as the MCP authorization spec asks. If the user completes three authorizations for the same scopes within an hour and the server still asks for them (for example because the authorization server never grants a scope), the next challenge does not produce a link. The server moves to `failed` with an error naming the scopes, the request throws the SDK's `UnauthorizedError`, and the server stays failed until you call `addMcpServer()` for it again.
+
 ```typescript
 import { MCPAuthorizationRequiredError } from "agents/mcp/client";
 
