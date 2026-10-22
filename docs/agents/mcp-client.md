@@ -187,6 +187,23 @@ await this.addMcpServer("github", "https://mcp.github.com/mcp", {
 
 These options are persisted and used when reconnecting after hibernation or after OAuth completion. Default: 3 attempts, 500ms base delay, 5s max delay. See [Retries](./retries.md) for more details.
 
+### Automatic reconnects
+
+When a connection or discovery attempt fails (the server is down, times out, or returns an error), the manager keeps trying in the background on a schedule stored in the Durable Object's job queue, so it survives hibernation and eviction: after 30 seconds, 1, 2, 5 and 10 minutes, then every 30 minutes. The server shows `failed` with the last error in between. Once it connects, the schedule is dropped.
+
+After 24 hours without a successful connection, the manager stops and records the failure with the server. Later wakes show the same `failed` state without trying again. Calling `addMcpServer()` for the server again, or `connectToServer()` / `establishConnection()`, clears the failure and connects immediately. `removeMcpServer()` cancels any pending reconnect.
+
+A standalone `MCPClientManager` can change the schedule:
+
+```typescript
+new MCPClientManager("my-client", "1.0.0", {
+  reconnect: {
+    delaysMs: [10_000, 60_000, 600_000], // the last delay repeats
+    giveUpAfterMs: 6 * 60 * 60 * 1000
+  }
+});
+```
+
 ### Protocol negotiation and elicitation
 
 Agents uses the MCP v2 client and automatically negotiates the protocol version for every connection. It uses `server/discover` with Stateless servers and falls back to the `initialize` handshake on the same connection for Legacy Streamable HTTP, SSE, and RPC servers.
@@ -316,7 +333,7 @@ For example: `https://my-worker.workers.dev/agents/my-agent/default/callback`
 
 OAuth tokens are securely stored in SQLite and persist across agent restarts.
 
-An authorization link stays valid for 10 minutes. When the agent wakes and a saved link can no longer complete (it expired, or its callback already ran), the agent reconnects instead of showing the dead link: saved tokens connect directly, and otherwise the server's next `401` produces a fresh `auth_url`.
+An authorization link stays valid for 10 minutes. If the user does not complete it in time, the server moves to `failed` with the error "Authorization expired before it was completed", its `auth_url` is cleared, and it stays failed across wakes. Call `addMcpServer()` again to get a fresh link. If a callback already redeemed the link and the agent restarted before it finished, the agent reconnects with the saved tokens instead.
 
 ### Re-authorization during a session
 

@@ -1,64 +1,47 @@
-import type { MCPClientManager } from "./index";
-import { MCPConnectionState } from "./connection";
+import type { RPCClientTransportOptions } from "../rpc";
 import { decodeMcpServerOptions, type MCPServerRow } from "./storage";
 import { isDurableObjectNamespace, RPC_DO_PREFIX } from "../rpc";
 
-type RpcRestorationManager = Pick<
-  MCPClientManager,
-  "connect" | "discoverIfConnected" | "mcpConnections"
->;
+/** The transport for a stored RPC server, or why it cannot be built. */
+export type RpcTransportResolution =
+  | {
+      readonly _tag: "resolved";
+      readonly transport: RPCClientTransportOptions & { type: "rpc" };
+    }
+  | { readonly _tag: "unresolved"; readonly reason: string };
 
 /**
- * Restore one persisted RPC connection through a manager's public transport
- * API: resolve its Durable Object binding from `env` by the stored binding
- * name, reconnect, and discover. Failures are logged, not thrown.
+ * Build the RPC transport for a stored server by resolving its Durable
+ * Object binding from `env` by the binding name persisted with the server.
  */
-export async function restoreRpcConnection(
-  manager: RpcRestorationManager,
+export function resolveRpcTransport(
   env: Cloudflare.Env | undefined,
   server: MCPServerRow
-): Promise<void> {
+): RpcTransportResolution {
   if (!env) {
-    console.warn(
-      `[MCPClientManager] Cannot restore RPC MCP server "${server.name}": ` +
+    return {
+      _tag: "unresolved",
+      reason:
         "no env was provided; pass { env } when constructing MCPClientManager"
-    );
-    return;
+    };
   }
-  if (manager.mcpConnections[server.id]) return;
-
   const options = decodeMcpServerOptions(server.server_options);
   const binding = options.bindingName
     ? Object.entries(env).find(([name]) => name === options.bindingName)?.[1]
     : undefined;
   if (!isDurableObjectNamespace(binding)) {
-    console.warn(
-      `[MCPClientManager] Cannot restore RPC MCP server "${server.name}": binding ` +
-        `"${options.bindingName ?? "<missing>"}" not found in env`
-    );
-    return;
+    return {
+      _tag: "unresolved",
+      reason: `binding "${options.bindingName ?? "<missing>"}" not found in env`
+    };
   }
-
-  const normalizedName = server.server_url.replace(RPC_DO_PREFIX, "");
-  try {
-    await manager.connect(`${RPC_DO_PREFIX}${normalizedName}`, {
-      reconnect: { id: server.id },
-      transport: {
-        type: "rpc",
-        namespace: binding,
-        name: normalizedName,
-        props: options.props
-      }
-    });
-
-    const connection = manager.mcpConnections[server.id];
-    if (connection?.connectionState === MCPConnectionState.CONNECTED) {
-      await manager.discoverIfConnected(server.id);
+  return {
+    _tag: "resolved",
+    transport: {
+      type: "rpc",
+      namespace: binding,
+      name: server.server_url.replace(RPC_DO_PREFIX, ""),
+      props: options.props
     }
-  } catch (error) {
-    console.error(
-      `[MCPClientManager] Error restoring RPC MCP server "${server.name}":`,
-      error
-    );
-  }
+  };
 }
