@@ -56,6 +56,12 @@ before a tool was added never sees it; start a new session instead.
 Reload the page mid-turn: the client gets a snapshot of the current state,
 including the partial answer, and continues from there.
 
+A submit whose answer the socket never delivered is sent again on
+reconnect. The client (`src/outbox.ts`) names every submit with an
+`operationId` and keeps it in memory until its `result` or `error` arrives.
+The harness deduplicates by operation id, so the submit runs once: one it
+already admitted answers `accepted: false`.
+
 ## Test
 
 ```sh
@@ -66,6 +72,8 @@ pnpm test
   socket, a client joining mid-run, and a socket that outlives an eviction.
 - `view.test.ts` checks that a client following a run and one joining after
   it fold pi's events into the same view.
+- `outbox.test.ts` checks the client's command outbox, and that a submit
+  sent again on reconnect runs once.
 
 The harness's own tests live with it in `packages/agents`
 (`pnpm run test:harness:pi` there): pi's storage conformance suite on a
