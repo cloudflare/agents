@@ -10,6 +10,8 @@ pnpm add agents @modelcontextprotocol/server@2.3.1 zod
 
 `@modelcontextprotocol/server` is an optional peer dependency of `agents`, so your package manager does not install it for you. Use the exact version required by your installed Agents release.
 
+Upgrading a server that uses `McpAgent`? See [Upgrading an existing `McpAgent` server](#upgrading-an-existing-mcpagent-server).
+
 ## Create a server
 
 ```typescript
@@ -269,9 +271,21 @@ The handler does not serve the standalone SSE transport.
 
 If the handler lifecycle does not fit, use the SDK's `WebStandardStreamableHTTPServerTransport` from `@modelcontextprotocol/server` directly in your Worker.
 
-## Migrating from `McpAgent`
+## Upgrading an existing `McpAgent` server
 
-`McpAgent` is deprecated. To move an existing server to `createMcpHandler`, follow [Migrate to MCP SDK v2](https://developers.cloudflare.com/agents/model-context-protocol/guides/migrate-to-mcp-sdk-v2/).
+`McpAgent` is deprecated, but existing servers keep working. It is built on MCP SDK v1, which is an optional peer dependency of `agents`, so your package manager no longer installs it for you. Add the exact version your Agents release expects before you upgrade:
+
+```sh
+pnpm add agents @modelcontextprotocol/sdk@1.32.1 zod
+```
+
+Keep importing `McpServer` from `@modelcontextprotocol/sdk/server/mcp.js` in an `McpAgent`. An SDK v2 server from `@modelcontextprotocol/server` cannot run inside `McpAgent`. The same applies to `WorkerTransport` and `createLegacyMcpHandler` from `agents/mcp`.
+
+If your server imported `@modelcontextprotocol/sdk` without listing it in `package.json`, it only worked because `agents` installed the package. After you upgrade, the build fails with an unresolved `@modelcontextprotocol/sdk` import until you add it.
+
+Client code does not need the v1 SDK. If you import client helpers such as `RPCClientTransport` or `normalizeServerId` from `agents/mcp`, import them from `agents/mcp/client` instead.
+
+To move the server itself to `createMcpHandler`, follow [Migrate to MCP SDK v2](https://developers.cloudflare.com/agents/model-context-protocol/guides/migrate-to-mcp-sdk-v2/).
 
 ## Examples
 
