@@ -14,6 +14,26 @@ function fresh(
 }
 
 /**
+ * Make the wake job due now, with its dispatch failing, and return how far
+ * out the failure reschedules it, from just before it was due.
+ */
+async function failOnce(
+  stub: DurableObjectStub<PiHarnessTestObject>
+): Promise<number> {
+  const before = Date.now();
+  await stub.wakeJobDueNow();
+  // The alarm may already be running by itself.
+  await runDurableObjectAlarm(stub);
+  let time = await stub.wakeJobTime();
+  for (let i = 0; i < 200 && (time === null || time <= Date.now()); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    time = await stub.wakeJobTime();
+  }
+  expect(time).not.toBeNull();
+  return time! - before;
+}
+
+/**
  * Evict the object the way the runtime evicts an idle one: once nothing is
  * in flight. The pool never evicts an idle object by itself, so without
  * this a test cannot see work that only lives in memory being lost.
@@ -481,6 +501,102 @@ describe("PiHarness on pi-durable", () => {
       status: "done",
       text: "tool said: released after 2 runs"
     });
+  });
+
+  it("keeps the wake job when its dispatch keeps failing, backing off to 10 minutes", async () => {
+    const stub = fresh();
+    expect((await stub.prompt("hello")).text).toBe("echo: hello");
+    // Let the prompt's wake complete first.
+    let jobs = await stub.wakeJobs();
+    for (let i = 0; i < 100 && jobs.length > 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      jobs = await stub.wakeJobs();
+    }
+    expect(jobs).toEqual([]);
+    await stub.failWakeSteps(true);
+
+    // Each alarm dispatches the job three times before it gives up. The
+    // delay starts at the 1s test heartbeat and doubles up to 10 minutes.
+    const delays: number[] = [];
+    for (let i = 0; i < 12; i++) {
+      delays.push(await failOnce(stub));
+    }
+    const expected = [
+      1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000,
+      512_000, 600_000, 600_000
+    ];
+    for (const [i, delay] of delays.entries()) {
+      expect(delay).toBeGreaterThanOrEqual(expected[i]);
+      // Plus the dispatch's own retries, under a second.
+      expect(delay).toBeLessThan(expected[i] + 1_000);
+    }
+
+    // A dispatch that gets through resets the backoff. pi is idle, so the
+    // job completes.
+    await stub.failWakeSteps(false);
+    await stub.wakeJobDueNow();
+    await runDurableObjectAlarm(stub);
+    let time = await stub.wakeJobTime();
+    for (let i = 0; i < 200 && time !== null; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      time = await stub.wakeJobTime();
+    }
+    expect(time).toBeNull();
+
+    await stub.failWakeSteps(true);
+    const delay = await failOnce(stub);
+    expect(delay).toBeGreaterThanOrEqual(1_000);
+    expect(delay).toBeLessThan(2_000);
+  });
+
+  it("counts a memory-limit reset that fails pi during the wake's wait against the alarm breaker", async () => {
+    const name = crypto.randomUUID();
+    const stub = fresh(name);
+    await stub.submit("gate");
+    // The wake's alarm is waiting on the running gate tool.
+    await stub.gateStarted(1);
+
+    // The storage error that fails pi's Session is a memory-limit reset.
+    expect(
+      await stub.submitThroughStorageError(
+        "one",
+        "Durable Object's isolate exceeded its memory limit and was reset."
+      )
+    ).not.toBe("submitted");
+
+    // The breaker resets the object once it records the strike. The reopened
+    // pi reruns the gate tool, which keeps the alarm's work outstanding, so
+    // nothing clears the strike while the test reads it.
+    let strikes = 0;
+    for (let i = 0; i < 100 && strikes === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      strikes = await fresh(name)
+        .memoryLimitStrikes()
+        .catch(() => 0);
+    }
+    expect(strikes).toBe(1);
+  });
+
+  it("leaves one alarm, at the deadline, for a background task sleeping days out", async () => {
+    const stub = fresh();
+    expect((await stub.prompt("hello")).text).toBe("echo: hello");
+    const until = Date.now() + 3 * 24 * 60 * 60_000;
+    await stub.remindAt(until);
+
+    let alarm = await stub.alarmTime();
+    for (let i = 0; i < 100 && alarm !== until; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      alarm = await stub.alarmTime();
+    }
+    expect(await stub.piWake()).toEqual({ active: false, at: until });
+    expect(alarm).toBe(until);
+    expect(await stub.wakeJobs()).toEqual(["pi-wake"]);
+    expect(await stub.wakeJobTime()).toBe(until);
+
+    // No heartbeat: past two of them, the alarm is still the deadline.
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(await stub.alarmTime()).toBe(until);
+    expect(await stub.wakeJobTime()).toBe(until);
   });
 
   it("opens pi again on the next call after dispose()", async () => {

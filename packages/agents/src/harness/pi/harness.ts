@@ -23,6 +23,7 @@ import {
   type LifecycleJobContext,
   type LifecycleJobOutcome
 } from "../../lifecycle";
+import { isDurableObjectMemoryLimitReset } from "../../retries";
 import {
   BACKGROUND_CONTEXT,
   withAbortSignal,
@@ -68,6 +69,19 @@ const HEARTBEAT_MS = 30_000;
  * `onWake`, so nothing tells the harness when it changes.
  */
 const POLL_MS = 1_000;
+
+/**
+ * The longest a wake job whose dispatch keeps failing waits before it tries
+ * again. Its delay starts at the heartbeat and doubles up to this.
+ */
+const MAX_WAKE_BACKOFF_MS = 10 * 60_000;
+
+/**
+ * Wake dispatches that failed in a row. Stored, so the backoff holds across
+ * restarts, and outside the job: a push that saved it in the job's payload
+ * could overwrite a submit's due-now push.
+ */
+const WAKE_ERRORS_KEY = "pi-harness:wake-errors";
 
 let setWakeTiming: (harness: PiHarness, timing: WakeTiming) => void;
 
@@ -277,12 +291,45 @@ export class PiHarness extends LifecycleCapability {
     context: LifecycleJobContext
   ): Promise<LifecycleJobOutcome | void> {
     if (context.job.fn !== WAKE_FN) return;
+    let outcome: LifecycleJobOutcome;
     if (context.job.id !== WAKE_JOB_ID) {
       // A per-session wake from before Pi 1.4: hand over to the one wake.
       await this.#wake();
-      return;
+      outcome = undefined;
+    } else {
+      outcome = await this.#wakeStep();
     }
-    return this.#wakeStep();
+    // It got through, so a failing wake's backoff starts over.
+    const kv = this.lifecycle.storage.kv;
+    if (kv.get(WAKE_ERRORS_KEY) !== undefined) kv.delete(WAKE_ERRORS_KEY);
+    return outcome;
+  }
+
+  /**
+   * A wake dispatch that failed through Lifecycle's retries, as when pi
+   * cannot be opened. Lifecycle would complete the job, and pi's work would
+   * never be woken again, so try again later: at the heartbeat, doubling
+   * while the failures continue, up to 10 minutes.
+   */
+  onJobError(
+    context: LifecycleJobContext,
+    error: unknown
+  ): LifecycleJobOutcome | void {
+    if (context.job.fn !== WAKE_FN) return;
+    console.error(
+      `pi wake job "${context.job.id}" failed after ${context.attempt} ` +
+        "attempts; retrying with backoff",
+      error
+    );
+    this.#wakeError(error);
+    const kv = this.lifecycle.storage.kv;
+    const errors = (kv.get<number>(WAKE_ERRORS_KEY) ?? 0) + 1;
+    kv.put(WAKE_ERRORS_KEY, errors);
+    const delay = Math.min(
+      this.#heartbeatMs * 2 ** (errors - 1),
+      MAX_WAKE_BACKOFF_MS
+    );
+    return { rescheduleAt: Date.now() + delay };
   }
 
   /** Close pi's in-memory resources. Durable state is untouched. */
@@ -545,18 +592,27 @@ export class PiHarness extends LifecycleCapability {
     pi.resume();
     const wake = pi.wake();
     if (wake.active) {
-      const wait = this.#waitWhileActive(pi).then((ended) => {
-        this.#waiting = undefined;
-        // Step again now: pi may be sleeping, or have nothing left. After a
-        // failed wait, as when pi's Session fails, the heartbeat that is
-        // already due steps instead, so a pi that keeps failing is not
-        // reopened in a loop.
-        if (ended) void this.#wake();
-      });
+      const wait = this.#waitWhileActive(pi).then(
+        (ended) => {
+          this.#waiting = undefined;
+          // Step again now: pi may be sleeping, or have nothing left. After
+          // a failed wait, as when pi's Session fails, the heartbeat that is
+          // already due steps instead, so a pi that keeps failing is not
+          // reopened in a loop.
+          if (ended) void this.#wake();
+        },
+        (error: unknown) => {
+          // A memory-limit reset: the alarm's breaker backs the job off.
+          this.#waiting = undefined;
+          throw error;
+        }
+      );
       this.#waiting = wait;
       // The wait runs past this dispatch, inside the alarm's work, so the
-      // object stays alive for it. The heartbeat covers an eviction.
-      this.lifecycle.trackAlarmWork(wait);
+      // object stays alive for it, and a memory-limit reset it ends with
+      // counts against the alarm's breaker. The heartbeat covers an
+      // eviction.
+      if (!this.lifecycle.trackAlarmWork(wait)) wait.catch(() => {});
       return heartbeat;
     }
     // A submit between its wake and pi's admission: check again later.
@@ -571,7 +627,7 @@ export class PiHarness extends LifecycleCapability {
    * Wait while pi has work running, up to the wait budget. With `onWake`, a
    * change ends each sleep early, and so does pi closing; without it, the
    * sleep is `pollMs`. Whether the wait ended, with pi idle or at the
-   * budget, rather than failing.
+   * budget, rather than failing. Rejects with a memory-limit reset.
    */
   async #waitWhileActive(pi: Harness): Promise<boolean> {
     const deadline = Date.now() + this.#waitBudgetMs;
@@ -600,6 +656,9 @@ export class PiHarness extends LifecycleCapability {
       // A pi that began closing is expected to throw; it is no longer the
       // harness's pi, and Pi reports a failure itself (`session_failed`).
       if (!this.#closing.has(pi)) this.#wakeError(error);
+      // Only Lifecycle's alarm breaker can act on a memory-limit reset,
+      // including one that failed pi's Session (SessionFailed's cause).
+      if (isDurableObjectMemoryLimitReset(error)) throw error;
       return false;
     }
   }

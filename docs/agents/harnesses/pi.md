@@ -220,6 +220,8 @@ A task that keeps crashing the object would restart it forever, so Pi parks a ta
 
 A storage error closes Pi for good: the call that hit it rejects with the error, and calls and `events()` streams already underway end with Pi's `SessionFailed`, so retry them. If your factory passes `onReport` to `Harness.open`, Pi reports the failure there as `session_failed`. Once the failed Pi has closed, the harness opens Pi again, which runs the factory again, on the next call or the job's next step. Closing waits for running task code, such as a tool call, to return, so code that ignores its abort signal delays the reopen. Pi recovers from what it committed and resumes its work the same way.
 
+If a step of the job fails, such as when the factory throws, the job is not dropped. It tries again after 30 seconds, doubling the delay with each failure in a row up to 10 minutes, and goes back to its usual schedule once a step succeeds. A Durable Object memory-limit reset that fails Pi while the job waits on it counts against the alarm's memory-limit circuit breaker. Lifecycle backs the job off and drops it after repeated resets. The next call opens Pi again and pushes the job again, so Pi's restart limit is what eventually parks a task that keeps causing resets.
+
 Every operation waits for the object's startup, which runs the factory. A call over RPC that arrives first waits for it rather than opening Pi on its own.
 
 ## Run the example
