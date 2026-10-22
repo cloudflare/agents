@@ -9,10 +9,20 @@
 import { RpcTarget } from "cloudflare:workers";
 import type { BrowserSession } from "./session";
 
-/** What a run returns: the code's result or error, and its console output. */
+/**
+ * What a run returns: the code's result or error, its console output, and a
+ * `notice` for the model when the code likely didn't do what it meant.
+ */
 export type BrowserCodeRun =
-  | { result: unknown; logs: string[] }
+  | { result: unknown; logs: string[]; notice?: string }
   | { error: string; logs: string[] };
+
+/**
+ * Statements with no `return` produce nothing. Tell the model, rather than
+ * parse the code to return its last expression.
+ */
+const STATEMENTS_NOTICE =
+  "Your code ran as statements and returned nothing. `return` the value you want, or write an async arrow function.";
 
 export interface RunBrowserCodeOptions {
   loader: WorkerLoader;
@@ -177,7 +187,8 @@ function isSyntaxError(error: unknown): boolean {
  *
  * The code is first loaded as an expression (an async arrow function, as
  * the tool asks for). If that doesn't parse, it's loaded once more as a
- * function body, so statements ending in `return` work too. Errors thrown
+ * function body, so statements ending in `return` work too; statements
+ * with no `return` at all get a `notice`. Errors thrown
  * by the code, including timeouts, come back as `{ error }`; this only
  * rejects when the Worker can't run at all.
  */
@@ -192,8 +203,9 @@ export async function runBrowserCode(
   } catch (error) {
     if (!isSyntaxError(error)) throw error;
   }
+  let ran: BrowserCodeRun;
   try {
-    return await evaluate(options, bodyModule(code), binding);
+    ran = await evaluate(options, bodyModule(code), binding);
   } catch (error) {
     if (!isSyntaxError(error)) throw error;
     return {
@@ -201,6 +213,9 @@ export async function runBrowserCode(
       logs: []
     };
   }
+  return "result" in ran && ran.result === undefined && !/\breturn\b/.test(code)
+    ? { ...ran, notice: STATEMENTS_NOTICE }
+    : ran;
 }
 
 async function evaluate(

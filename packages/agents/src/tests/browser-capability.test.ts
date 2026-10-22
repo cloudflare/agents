@@ -457,7 +457,17 @@ describe("browserTool over a Browser", () => {
         expect(output.status === "completed" && output.result).toEqual(
           expected
         );
+        expect(output.notice).toBeUndefined();
       }
+
+      // Statements with no `return` don't return their last expression;
+      // the model is told so.
+      const statements = await run(`const value = await ${send};\nvalue`);
+      expect(statements.status).toBe("completed");
+      expect(
+        statements.status === "completed" && statements.result
+      ).toBeUndefined();
+      expect(statements.notice).toMatch(/returned nothing/);
     });
   });
 

@@ -116,6 +116,12 @@ const ATTACH_HANDLE_PREFIX = "target:";
 /** Chrome's JSON-RPC code for a CDP session id it doesn't know. */
 const CDP_SESSION_NOT_FOUND = -32001;
 
+/**
+ * Screenshots are kept whole in the chat message for the UI, and a stored
+ * message must fit SQLite's 2 MB row (see `ROW_MAX_BYTES` in chat/sanitize.ts),
+ * or the image is compacted away. Failing early lets the model retake it
+ * smaller. Other results are cut to a preview before they're stored.
+ */
 const DEFAULT_MAX_RESULT_BYTES = 1_000_000;
 
 /** `#liveParams`: nothing to detach. */
