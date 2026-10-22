@@ -5,8 +5,8 @@
  */
 import { DEFAULT_BROWSER_SCOPE } from "./browser";
 import {
-  BROWSER_FUNCTION_DOCS,
   BROWSER_RULES,
+  browserFunctionDocs,
   browserFunctions
 } from "./browser-functions";
 import { runBrowserCode } from "./sandbox";
@@ -218,7 +218,7 @@ export function createBrowserToolCore(
     "",
     "## browser",
     "",
-    ...BROWSER_FUNCTION_DOCS.map((doc) => `- ${doc}`),
+    browserFunctionDocs(options.browser.internalHosts),
     "",
     "## Rules",
     "",
@@ -235,7 +235,7 @@ export function createBrowserToolCore(
       const ran = await runBrowserCode({
         loader: options.loader,
         code: input.code,
-        functions: browserFunctions(session),
+        functions: browserFunctions(session, options.browser.internalHosts),
         timeoutMs
       });
       const logs = ran.logs.length > 0 ? { logs: ran.logs } : {};

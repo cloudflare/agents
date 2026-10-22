@@ -144,6 +144,14 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
     return { sessionId, restarted };
   }
 
+  /** The internal browser's tool. */
+  internalBrowserTool(): BrowserTool {
+    return browserTool({
+      browser: this.internalBrowser,
+      loader: this.env.LOADER
+    });
+  }
+
   /** The host wiring the docs show: one `Browser`, a tool built per turn. */
   browserTool(scope?: string): BrowserTool {
     return browserTool({
