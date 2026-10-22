@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MCPClientManager } from "../../mcp/client";
-import { restoreRpcConnections } from "../../mcp/client/rpc";
+import { restoreRpcConnection } from "../../mcp/client/rpc";
 import type { MCPServerRow } from "../../mcp/client/storage";
 
 const server: MCPServerRow = {
@@ -29,7 +29,7 @@ describe("RPC MCP connection restoration", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     try {
-      await restoreRpcConnections(manager(), undefined, [server]);
+      await restoreRpcConnection(manager(), undefined, server);
 
       expect(warn).toHaveBeenCalledWith(
         '[MCPClientManager] Cannot restore RPC MCP server "RPC server": ' +

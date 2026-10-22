@@ -354,8 +354,8 @@ export class TestOAuthAgent extends Agent {
   }
 
   /**
-   * Start tracked connection work that ends waiting for authorization, the
-   * way a restore or post-callback reconnect would, without awaiting it.
+   * Start a connection attempt that ends waiting for authorization, the way
+   * a restore or post-callback reconnect would, without awaiting it.
    */
   startTrackedAuthentication(serverId: string, authUrl: string): void {
     const connection = this.mcp.mcpConnections[serverId];
@@ -363,13 +363,15 @@ export class TestOAuthAgent extends Agent {
       throw new Error(`Test error: MCP connection ${serverId} not found`);
     }
     connection.connectionState = MCPConnectionState.CONNECTING;
-    void this.mcp.trackConnectionWork(serverId, async () => {
+    connection.init = async () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
       await connection.options.transport.authProvider?.redirectToAuthorization(
         new URL(authUrl)
       );
       connection.connectionState = MCPConnectionState.AUTHENTICATING;
-    });
+      return undefined;
+    };
+    void this.mcp.connectToServer(serverId);
   }
 
   setMcpConnectionState(
