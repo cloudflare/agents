@@ -189,7 +189,7 @@ These options are persisted and used when reconnecting after hibernation or afte
 
 ### Automatic reconnects
 
-When a connection or discovery attempt fails (the server is down, times out, or returns an error), the manager keeps trying in the background on a schedule stored in the Durable Object's job queue, so it survives hibernation and eviction: after 30 seconds, 1, 2, 5 and 10 minutes, then every 30 minutes. The server shows `failed` with the last error in between. Once it connects, the schedule is dropped.
+When a connection or discovery attempt fails (the server is down, times out, or returns an error), the manager keeps trying in the background on a schedule stored in the Durable Object's job queue, so it survives hibernation and eviction: after 30 seconds, 1, 2, 5 and 10 minutes, then every 30 minutes. The server shows `failed` with the last error in between, including after a wake for some other reason: the agent waits for the scheduled attempt rather than connecting early. Once it connects, the schedule is dropped.
 
 After 24 hours without a successful connection, the manager stops and records the failure with the server. Later wakes show the same `failed` state without trying again. Calling `addMcpServer()` for the server again, or `connectToServer()` / `establishConnection()`, clears the failure and connects immediately. `removeMcpServer()` cancels any pending reconnect.
 

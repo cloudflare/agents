@@ -15,7 +15,7 @@ describe("reconnect policy", () => {
     let previous = undefined;
     const delays: number[] = [];
     for (let i = 0; i < 5; i++) {
-      const decision = nextReconnect(policy, previous, "s", NOW);
+      const decision = nextReconnect(policy, previous, "s", "offline", NOW);
       if (decision._tag !== "retry") throw new Error("expected a retry");
       delays.push(decision.time - NOW);
       previous = decision.payload;
@@ -24,21 +24,30 @@ describe("reconnect policy", () => {
     expect(previous).toEqual({
       serverId: "s",
       attempt: 5,
-      firstFailureAt: NOW
+      firstFailureAt: NOW,
+      error: "offline"
     });
   });
 
   it("keeps the first failure time across attempts and gives up after the window", () => {
     const policy = makeReconnectPolicy({ giveUpAfterMs: 1000 });
-    const first = nextReconnect(policy, undefined, "s", NOW);
+    const first = nextReconnect(policy, undefined, "s", "offline", NOW);
     if (first._tag !== "retry") throw new Error("expected a retry");
 
-    const later = nextReconnect(policy, first.payload, "s", NOW + 999);
+    const later = nextReconnect(
+      policy,
+      first.payload,
+      "s",
+      "offline",
+      NOW + 999
+    );
     expect(later).toMatchObject({
       _tag: "retry",
       payload: { attempt: 2, firstFailureAt: NOW }
     });
-    expect(nextReconnect(policy, first.payload, "s", NOW + 1000)).toEqual({
+    expect(
+      nextReconnect(policy, first.payload, "s", "offline", NOW + 1000)
+    ).toEqual({
       _tag: "give-up",
       attempts: 2
     });
@@ -57,8 +66,18 @@ describe("reconnect policy", () => {
 
   it("parses only well-formed job payloads", () => {
     expect(
-      parseConnectJobPayload({ serverId: "s", attempt: 2, firstFailureAt: 1 })
-    ).toEqual({ serverId: "s", attempt: 2, firstFailureAt: 1 });
+      parseConnectJobPayload({
+        serverId: "s",
+        attempt: 2,
+        firstFailureAt: 1,
+        error: "offline"
+      })
+    ).toEqual({
+      serverId: "s",
+      attempt: 2,
+      firstFailureAt: 1,
+      error: "offline"
+    });
     expect(parseConnectJobPayload({ serverId: "s" })).toBeUndefined();
     expect(parseConnectJobPayload(null)).toBeUndefined();
 
