@@ -11,7 +11,7 @@
 
 ## Quick start
 
-This agent runs [Pi](https://github.com/earendil-works/pi/tree/main/packages/durable) on a Workers AI model. Install the Agents SDK and Pi:
+This agent runs [Pi](https://github.com/earendil-works/pi/tree/main/packages/durable) on a Workers AI model, with one tool: it can read web pages. Install the Agents SDK and Pi:
 
 ```sh
 npm install agents @earendil-works/pi-durable @earendil-works/pi-ai @earendil-works/chord
@@ -26,6 +26,7 @@ import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { PiHarness } from "agents/harness/pi";
 import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
+import { webFetchTool } from "agents/webfetch/pi";
 
 export class Assistant extends DurableObject<Env> {
   readonly ai = createAI({ binding: this.env.AI });
@@ -33,6 +34,10 @@ export class Assistant extends DurableObject<Env> {
 
   readonly harness = new PiHarness({
     harness: ({ storage, context, onWake }) => {
+      this.registry.install({
+        name: "assistant",
+        tools: [webFetchTool({ binding: this.env.AI })]
+      });
       const models = createModels();
       models.setProvider(this.ai.provider);
       return Harness.open(
@@ -81,7 +86,7 @@ Generate the `Env` type, start the agent and ask it something:
 ```sh
 npx wrangler types
 npx wrangler dev
-curl -d "What is 47 × 19?" http://localhost:8787
+curl -d "Summarize https://developers.cloudflare.com/agents/" http://localhost:8787
 ```
 
 Workers AI runs on your Cloudflare account, so `wrangler dev` asks you to log in. Run `npx wrangler deploy` to deploy it.
@@ -108,7 +113,9 @@ export class Assistant extends DurableObject<Env> {
 
   onStart() {
     // Runs each time the object starts, before it handles anything.
-    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS notes (text TEXT)");
+    this.ctx.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS sent_emails (id TEXT, recipient TEXT, subject TEXT)"
+    );
   }
 }
 ```
@@ -150,16 +157,26 @@ Tools are part of Pi extensions, which you install in the registry. An extension
 ```ts
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
-import { webFetchTool } from "agents/webfetch/pi";
 
 export class Assistant extends DurableObject<Env> {
-  readonly saveNote = defineTool({
-    name: "save_note",
-    description: "Save a note for later.",
-    parameters: Type.Object({ text: Type.String() }),
-    execute: async ({ text }) => {
-      this.ctx.storage.sql.exec("INSERT INTO notes (text) VALUES (?)", text);
-      return { output: [{ type: "text", text: "Saved." }] };
+  readonly sendEmail = defineTool({
+    name: "send_email",
+    description: "Send an email.",
+    parameters: Type.Object({
+      to: Type.String(),
+      subject: Type.String(),
+      text: Type.String()
+    }),
+    execute: async ({ to, subject, text }) => {
+      const email = { from: "assistant@example.com", to, subject, text };
+      const { messageId } = await this.env.EMAIL.send(email);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO sent_emails VALUES (?, ?, ?)",
+        messageId,
+        to,
+        subject
+      );
+      return { output: [{ type: "text", text: `Sent to ${to}.` }] };
     }
   });
 
@@ -174,7 +191,7 @@ export class Assistant extends DurableObject<Env> {
             tag: false
           }
         ],
-        tools: [this.saveNote, webFetchTool({ binding: this.env.AI })]
+        tools: [this.sendEmail, webFetchTool({ binding: this.env.AI })]
       });
       // ...then open Pi as in the quick start.
     }
@@ -182,7 +199,9 @@ export class Assistant extends DurableObject<Env> {
 }
 ```
 
-Pi validates the arguments against `parameters` before it calls `execute`. Each call runs as its own durable task. If the object leaves memory during a call, Pi runs it again only if the tool sets `replay: "safe"`; otherwise the model gets an interrupted result, so a tool with side effects never runs twice by surprise.
+The tool sends with [Email Service](https://developers.cloudflare.com/email-service/), through a `send_email` binding, `"send_email": [{ "name": "EMAIL" }]`, in `wrangler.jsonc`. The sender must be an address on a domain you have set up for Email Service. Each email it sends goes in the `sent_emails` table from step 1.
+
+Pi validates the arguments against `parameters` before it calls `execute`. Each call runs as its own durable task. If the object leaves memory during a call, Pi runs it again only if the tool sets `replay: "safe"`. `send_email` leaves it unset, so after a restart the model gets an interrupted result instead, and an email is never sent twice.
 
 Tools that come with `agents`:
 
@@ -213,30 +232,32 @@ export class Assistant extends DurableObject<Env> {
     backends: [new WorkerJavaScriptBackend({ loader: this.env.LOADER })]
   });
 
-  readonly runJavaScript = defineTool({
-    name: "run_javascript",
-    description:
-      "Run JavaScript in a sandbox. `code` is an ES module that default-exports " +
-      "an async function; its return value comes back. The module can read " +
-      "and write the workspace files with node:fs/promises.",
-    parameters: Type.Object({ code: Type.String() }),
-    execute: async ({ code }) => {
-      const run = await this.workspace.runtime.exec(code, { encoding: "utf8" });
-      const { value, stdout, stderr, exitCode } = await run.result();
-      const text = [stdout, stderr, JSON.stringify(value)].join("\n");
-      return { output: [{ type: "text", text }], isError: exitCode !== 0 };
+  readonly saveNote = defineTool({
+    name: "save_note",
+    description: "Add a line to the notes file.",
+    parameters: Type.Object({ text: Type.String() }),
+    execute: async ({ text }) => {
+      const notes = await this.notes();
+      await this.workspace.fs.writeFile("/notes.md", `${notes}- ${text}\n`);
+      return { output: [{ type: "text", text: "Saved." }] };
     }
   });
+
+  // The notes, for a page or an API to show. Call it from your Worker with
+  // await env.Assistant.getByName("default").notes()
+  async notes() {
+    return this.workspace.fs.readFile("/notes.md", "utf8").catch(() => "");
+  }
 }
 ```
 
-Install `this.runJavaScript` in the registry next to `this.saveNote`. The model can now work out answers in code, and keep files from one turn to the next: a CSV it was given, a script it wrote, a report it is building. The backend needs a Worker Loader binding, `"worker_loaders": [{ "binding": "LOADER" }]`, in `wrangler.jsonc`.
+Install `this.saveNote` in the registry. The model writes to `/notes.md`, and your code reads the same file: the model and your app share one filesystem. The backend needs a Worker Loader binding, `"worker_loaders": [{ "binding": "LOADER" }]`, in `wrangler.jsonc`.
 
-To give the model the whole workspace, `createPiTools()` from `@cloudflare/computer/tools/pi-ai` describes it as `read`, `write`, `edit`, `delete`, `ls`, `find`, `grep` and `exec` tools. The [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi) installs them in the registry.
+To give the model the whole workspace, `createPiTools()` from `@cloudflare/computer/tools/pi-ai` describes it as `read`, `write`, `edit`, `delete`, `ls`, `find`, `grep` and `exec` tools, where `exec` runs JavaScript on the backend. The [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi) installs them in the registry.
 
 ### 5. Let it act on its own
 
-An agent does not have to wait for a request. `Scheduler` from `agents/schedules` keeps schedules in SQLite and wakes the object with the Lifecycle's alarm, so this agent writes a digest every weekday morning:
+An agent does not have to wait for a request. `Scheduler` from `agents/schedules` keeps schedules in SQLite and wakes the object with the Lifecycle's alarm, so this agent summarizes its notes every weekday morning:
 
 ```ts
 import { Scheduler } from "agents/schedules";
@@ -245,7 +266,9 @@ export class Assistant extends DurableObject<Env> {
   readonly scheduler = new Scheduler({
     callbacks: {
       morningDigest: async () => {
-        await this.harness.submit("Summarize yesterday's notes.");
+        const notes = await this.notes();
+        if (notes)
+          await this.harness.submit(`Summarize these notes:\n${notes}`);
       }
     }
   });
