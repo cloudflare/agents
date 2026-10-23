@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { RPCClientTransport, RPCServerTransport } from "../../../mcp/rpc";
+import { RPCClientTransport } from "../../../mcp/rpc";
+import { RPCServerTransport } from "../../../mcp/rpc-server";
 import type {
   JSONRPCMessage,
   JSONRPCRequest
