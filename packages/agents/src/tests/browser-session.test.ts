@@ -4,6 +4,7 @@ import {
   MAX_BROWSER_SCOPES,
   namedBrowserSessionKey
 } from "../browser/browser";
+import { browserFunctions } from "../browser/browser-functions";
 import { browserRun } from "../browser/providers/browser-run";
 import type { BrowserSession } from "../browser/session";
 import type {
@@ -723,13 +724,31 @@ describe("BrowserSession", () => {
     await expect(call(session, evaluateActive)).rejects.toThrow("closed");
   });
 
-  it("lists the protocol's domains, then returns one domain", async () => {
+  it("returns the full protocol to host code", async () => {
     const t = setup();
-    const { results } = await t.run([
-      ["spec", {}],
-      ["spec", { domain: "Page" }]
-    ]);
-    expect(results[0]).toEqual({
+    const { results } = await t.run([["spec", {}]]);
+    expect(results[0]).toMatchObject({
+      domains: [
+        { name: "Page", commands: [{ method: "Page.navigate" }] },
+        { name: "Target" }
+      ]
+    });
+  });
+});
+
+describe("browser.spec", () => {
+  async function spec(input: unknown) {
+    const t = setup();
+    const session = t.browser.session();
+    try {
+      return await browserFunctions(session).spec(input);
+    } finally {
+      await session.close();
+    }
+  }
+
+  it("lists the protocol's domains, then returns one domain", async () => {
+    expect(await spec(undefined)).toEqual({
       domains: [
         {
           name: "Page",
@@ -739,19 +758,23 @@ describe("BrowserSession", () => {
       ],
       hint: expect.stringContaining('browser.spec({ domain: "Page" })')
     });
-    expect(results[1]).toMatchObject({
+    expect(await spec({ domain: "Page" })).toMatchObject({
       name: "Page",
       commands: [{ method: "Page.navigate" }],
       events: [{ event: "Page.loadEventFired" }]
     });
   });
 
-  it("says when a spec domain doesn't exist", async () => {
-    const t = setup();
-    const near = await t.run([["spec", { domain: "page" }]]);
-    expect(String(near.error)).toContain("Did you mean 'Page'?");
-    const none = await t.run([["spec", { domain: "Nope" }]]);
-    expect(String(none.error)).toContain("browser.spec() lists the domains");
+  it("says when a domain doesn't exist", async () => {
+    await expect(spec({ domain: "page" })).rejects.toThrow(
+      "Did you mean 'Page'?"
+    );
+    await expect(spec({ domain: "Nope" })).rejects.toThrow(
+      "browser.spec() lists the domains"
+    );
+    await expect(spec({ domain: 3 })).rejects.toThrow(
+      "Invalid arguments for browser.spec"
+    );
   });
 });
 

@@ -78,22 +78,6 @@ export interface BrowserDebugLogInput {
   limit?: number;
 }
 
-/** `spec`'s input. */
-export interface BrowserSpecInput {
-  /** A CDP domain, e.g. `"Page"`. Omit for the list of domains. */
-  domain?: string;
-}
-
-/** What `spec()` returns without a domain: every domain, in a sentence. */
-export interface BrowserSpecOverview {
-  domains: Array<{ name: string; description?: string }>;
-  /** How to get one domain's commands, events and types. */
-  hint: string;
-}
-
-/** One domain of the protocol: its commands, events and types. */
-export type CdpDomainSpec = SearchableCdpSpec["domains"][number];
-
 /** A tab a page opened on its own during a session. */
 export interface BrowserNewTab {
   targetId: string;
@@ -212,11 +196,6 @@ const ATTACH_SCHEMA = {
   required: ["targetId"]
 } as const;
 
-const SPEC_SCHEMA = {
-  type: "object",
-  properties: { domain: { type: "string", minLength: 1 } }
-} as const;
-
 const DEBUG_LOG_SCHEMA = {
   type: "object",
   properties: { limit: { type: "number", minimum: 1 } }
@@ -304,44 +283,9 @@ export class BrowserSession {
     return { sessionId: attachHandle(target) };
   }
 
-  /**
-   * The Chrome DevTools Protocol the browser serves. Without a domain,
-   * resolves with every domain's name and first sentence, which is small;
-   * with one, with that domain's commands, events and types. The whole
-   * protocol is about 650 KB, too much for one result.
-   */
-  spec(input?: { domain?: undefined }): Promise<BrowserSpecOverview>;
-  spec(input: { domain: string }): Promise<CdpDomainSpec>;
-  spec(input?: BrowserSpecInput): Promise<BrowserSpecOverview | CdpDomainSpec>;
-  async spec(
-    input?: BrowserSpecInput
-  ): Promise<BrowserSpecOverview | CdpDomainSpec> {
-    const { domain } = validate(
-      "browser.spec",
-      SPEC_SCHEMA,
-      input
-    ) as BrowserSpecInput;
-    const { domains } = await (await this.#connect()).connected.spec();
-    if (domain === undefined) {
-      return {
-        domains: domains.map(({ name, description }) => ({
-          name,
-          ...(description ? { description: firstSentence(description) } : {})
-        })),
-        hint: 'browser.spec({ domain: "Page" }) returns one domain\'s commands, events and types.'
-      };
-    }
-    const found = domains.find((d) => d.name === domain);
-    if (found) return found;
-    const near = domains.find(
-      (d) => d.name.toLowerCase() === domain.toLowerCase()
-    );
-    throw new Error(
-      `No CDP domain named '${domain}'.` +
-        (near
-          ? ` Did you mean '${near.name}'?`
-          : " browser.spec() lists the domains.")
-    );
+  /** The Chrome DevTools Protocol description the browser serves. */
+  async spec(): Promise<SearchableCdpSpec> {
+    return (await this.#connect()).connected.spec();
   }
 
   /** Recent CDP traffic on this session's connection, newest last. */
@@ -744,18 +688,19 @@ function targetOfHandle(handle: AttachHandle): TargetId {
   return handle.slice(ATTACH_HANDLE_PREFIX.length) as TargetId;
 }
 
-/** A CDP description's first sentence, for the list of domains. */
-function firstSentence(text: string): string {
-  return text.match(/^[\s\S]*?\.(?=\s|$)/)?.[0] ?? text;
-}
-
 const validators = new WeakMap<object, Validator>();
 
 /**
  * Check a method's input against its schema before it touches the browser,
  * so the model gets a precise error. An omitted input counts as `{}`.
+ *
+ * @internal Also used by `browser-functions.ts`.
  */
-function validate(name: string, schema: object, input: unknown): unknown {
+export function validate(
+  name: string,
+  schema: object,
+  input: unknown
+): unknown {
   let validator = validators.get(schema);
   if (!validator) {
     // SAFETY: The schemas above are draft-7 objects; @cfworker's `Schema`

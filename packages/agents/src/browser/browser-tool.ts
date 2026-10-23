@@ -8,7 +8,7 @@ import {
   BROWSER_FUNCTION_DOCS,
   BROWSER_RULES,
   browserFunctions
-} from "./module";
+} from "./browser-functions";
 import { runBrowserCode } from "./sandbox";
 import {
   BrowserSession,

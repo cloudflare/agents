@@ -7,7 +7,7 @@
  * the only way out is `browser`, whose calls go back to the host over RPC.
  */
 import { RpcTarget } from "cloudflare:workers";
-import type { BrowserFunction } from "./module";
+import type { BrowserFunction } from "./browser-functions";
 
 /**
  * What a run returns: the code's result or error, its console output, and a
