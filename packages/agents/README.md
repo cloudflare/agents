@@ -16,8 +16,6 @@ Or add to an existing project:
 npm install agents
 ```
 
-> **Building an AI agent?** Use the Pi harness. It runs a model loop with tools inside a Durable Object and recovers from evictions mid-run. See [Build an AI agent with the Pi harness](#build-an-ai-agent-with-the-pi-harness) below.
-
 The examples below use `@callable()` decorators. Vite projects must extend
 `agents/tsconfig` and add the `agents/vite` plugin; other bundlers must support
 TC39 decorators (`2023-11`). See
@@ -99,65 +97,6 @@ State changes sync to all connected clients automatically. Call methods like the
 
 ---
 
-## Build an AI agent with the Pi harness
-
-If your agent runs a model loop with tools, use [`PiHarness`](https://developers.cloudflare.com/agents/harnesses/pi/) from `agents/harness/pi`. It runs [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable) inside a Durable Object. Pi keeps the transcript, tool calls, retries and recovery in the object's SQLite database, and the Agents SDK wakes it after an eviction, so a run continues where it stopped.
-
-```sh
-npm install agents @earendil-works/pi-durable @earendil-works/pi-ai @earendil-works/chord
-```
-
-```typescript
-// server.ts
-import { DurableObject } from "cloudflare:workers";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, Harness } from "@earendil-works/pi-durable";
-import { PiHarness } from "agents/harness/pi";
-import { Lifecycle } from "agents/lifecycle";
-import { createAI } from "agents/models/pi-ai";
-
-export class Assistant extends DurableObject<Env> {
-  ai = createAI({ binding: this.env.AI });
-  registry = createRegistry();
-
-  harness = new PiHarness({
-    harness: ({ storage, context, onWake }) => {
-      const models = createModels();
-      models.setProvider(this.ai.provider);
-      return Harness.open(
-        storage,
-        { models, registry: this.registry, onWake },
-        context
-      );
-    },
-    defaults: { model: this.ai("@cf/zai-org/glm-5.3-flash") }
-  });
-
-  lifecycle = Lifecycle.install(this).use(this.harness);
-
-  async ask(prompt: string) {
-    return (await this.harness.prompt(prompt)).text;
-  }
-}
-
-export default {
-  async fetch(request: Request, env: Env) {
-    const assistant = env.Assistant.getByName("default");
-    return new Response(await assistant.ask(await request.text()));
-  }
-} satisfies ExportedHandler<Env>;
-```
-
-The object needs an `AI` binding, a Durable Object binding, and a SQLite migration in `wrangler.jsonc` (see [Configuration](#configuration)).
-
-Next steps:
-
-- [Pi harness docs](https://developers.cloudflare.com/agents/harnesses/pi/) — sessions, steering, recovery, and skills
-- [Extensions](https://developers.cloudflare.com/agents/harnesses/pi/extensions/) — give the model tools and system prompt sections
-- [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi) — a complete app that streams sessions over WebSockets, with a filesystem and code execution from [`@cloudflare/computer`](https://github.com/cloudflare/computer)
-
----
-
 ## What You Can Build
 
 | Use Case               | Why Agents                                            |
@@ -178,7 +117,7 @@ Core         State sync · Routing · HTTP & WebSockets · @callable RPC · Sub-
 Clients      React hook · Vanilla JS · Real-time state sync
 Channels     WebSocket · HTTP · Email · Voice · Slack · Telegram
 Background   Queue · Scheduling · Managed fibers · Workflows · Human-in-the-loop
-AI           Pi harness · Chat agents · Agent tools · Tool calling · MCP servers & clients
+AI           Chat agents · Agent tools · Tool calling · MCP servers & clients
 Platform     Observability · Cross-domain auth · Resumable streams
 ```
 
@@ -268,23 +207,23 @@ await this.queue("processUpload", { fileId: "abc" });
 // Returns immediately, task runs in background
 ```
 
-### Dynamic agents (sub-agents)
+### Sub-agents
 
-Spawn child Durable Objects (facets) from a parent agent with
-`this.dynamicAgents`. Each child has its own SQLite storage and runs in
-parallel, but is addressed under the parent's URL:
+Spawn child Durable Objects (facets) from a parent agent. Each child has
+its own SQLite storage and runs in parallel, but is addressed under the
+parent's URL:
 
 ```typescript
 export class Inbox extends Agent {
   @callable()
   async createChat() {
     const id = crypto.randomUUID();
-    await this.dynamicAgents.get(Chat, id);
+    await this.subAgent(Chat, id);
     return id;
   }
 
   override async onBeforeSubAgent(_req, { className, name }) {
-    if (!this.dynamicAgents.has(className, name)) {
+    if (!this.hasSubAgent(className, name)) {
       return new Response("Not found", { status: 404 });
     }
   }
@@ -625,13 +564,20 @@ export default {
 
 ---
 
+## Coming Soon
+
+- **Browse the Web** — Headless browser for web scraping and automation
+- **Cloudflare Sandboxes** — Isolated environments for code execution
+- **SMS, Voice, Messengers** — Multi-channel communication
+
+---
+
 ## Learn More
 
 The published package includes the complete documentation tree at
 `docs/index.md`.
 
 [Getting Started](../../docs/agents/getting-started.md) ·
-[Pi Harness](../../docs/agents/harnesses/pi.md) ·
 [State Management](../../docs/agents/state.md) ·
 [Scheduling](../../docs/agents/scheduling.md) ·
 [Callable Methods](../../docs/agents/callable-methods.md) ·
