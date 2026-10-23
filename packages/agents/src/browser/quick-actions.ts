@@ -120,22 +120,45 @@ export interface QuickActionSnapshot {
  * against the action when it is a string literal (e.g. `"json"` requires a
  * {@link QuickActionExtractInput}); any {@link QuickActionInput} is accepted
  * otherwise.
+ *
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
  */
 export function runQuickAction(
   browser: QuickActionBinding,
   action: "json",
   params: QuickActionExtractInput
 ): Promise<Response>;
+/**
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
+ */
 export function runQuickAction(
   browser: QuickActionBinding,
   action: "scrape",
   params: QuickActionScrapeInput
 ): Promise<Response>;
+/**
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
+ */
 export function runQuickAction(
   browser: QuickActionBinding,
   action: "screenshot",
   params: QuickActionScreenshotInput
 ): Promise<Response>;
+/**
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
+ */
 export function runQuickAction(
   browser: QuickActionBinding,
   action: QuickAction,
@@ -219,7 +242,14 @@ async function quickActionBinary(
   };
 }
 
-/** Fetch a page's fully rendered HTML via `/content`. */
+/**
+ * Fetch a page's fully rendered HTML via `/content`.
+ *
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
+ */
 export function browserContent(
   browser: QuickActionBinding,
   input: QuickActionPage
@@ -227,7 +257,14 @@ export function browserContent(
   return quickActionJson<string>(browser, "content", input);
 }
 
-/** Convert a page (or raw HTML) to Markdown via `/markdown`. */
+/**
+ * Convert a page (or raw HTML) to Markdown via `/markdown`.
+ *
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
+ */
 export function browserMarkdown(
   browser: QuickActionBinding,
   input: QuickActionPage
@@ -238,6 +275,11 @@ export function browserMarkdown(
 /**
  * Extract structured data from a page with AI via `/json`. Provide a `prompt`,
  * a `response_format` JSON Schema, or both.
+ *
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
  */
 export function browserExtract<T = unknown>(
   browser: QuickActionBinding,
@@ -246,7 +288,14 @@ export function browserExtract<T = unknown>(
   return quickActionJson<T>(browser, "json", input);
 }
 
-/** Retrieve every link on a page via `/links`. */
+/**
+ * Retrieve every link on a page via `/links`.
+ *
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
+ */
 export function browserLinks(
   browser: QuickActionBinding,
   input: QuickActionPage
@@ -254,7 +303,14 @@ export function browserLinks(
   return quickActionJson<string[]>(browser, "links", input);
 }
 
-/** Scrape specific elements (by CSS selector) via `/scrape`. */
+/**
+ * Scrape specific elements (by CSS selector) via `/scrape`.
+ *
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
+ */
 export function browserScrape(
   browser: QuickActionBinding,
   input: QuickActionScrapeInput
@@ -262,7 +318,14 @@ export function browserScrape(
   return quickActionJson<QuickActionScrapeResult[]>(browser, "scrape", input);
 }
 
-/** Capture rendered HTML plus a base64 screenshot in one request via `/snapshot`. */
+/**
+ * Capture rendered HTML plus a base64 screenshot in one request via `/snapshot`.
+ *
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
+ */
 export function browserSnapshot(
   browser: QuickActionBinding,
   input: QuickActionPage
@@ -275,6 +338,11 @@ export function browserSnapshot(
  * content type — by default a PNG (`image/png`). Note that passing
  * `screenshotOptions.encoding: "base64"` makes the service return a `text/plain`
  * data-URI string instead of binary, which this helper hands back verbatim.
+ *
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
  */
 export function browserScreenshot(
   browser: QuickActionBinding,
@@ -283,7 +351,14 @@ export function browserScreenshot(
   return quickActionBinary(browser, "screenshot", input);
 }
 
-/** Render a PDF via `/pdf`. Returns the PDF bytes. */
+/**
+ * Render a PDF via `/pdf`. Returns the PDF bytes.
+ *
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
+ */
 export function browserPdf(
   browser: QuickActionBinding,
   input: QuickActionPage
