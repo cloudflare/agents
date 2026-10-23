@@ -1,0 +1,27 @@
+.gardener/gardener.lock.json
+  s_de0b486c128948::t_0aed8241b3891b 475,482,597,604
+.gardener/tasks/opencode-upgrade/TASK.md
+  s_de0b486c128948::t_8786a6fd64ba72 127-129
+.gardener/tasks/pi-upgrade/TASK.md
+  s_de0b486c128948::t_862ac4f2739e8f 127-129
+.github/workflows/gardener-opencode-upgrade.yml
+  s_de0b486c128948::t_5d19c318125d60 5,46
+.github/workflows/gardener-pi-upgrade.yml
+  s_de0b486c128948::t_b86535c344e051 5,46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "601579b8cdbd67de1e7604a28290aa3cb0b18d9f",
+  "prompts": {},
+  "sessions": {
+    "s_de0b486c128948": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0a54b-7029-705c-8802-df38dfe75e1f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}
