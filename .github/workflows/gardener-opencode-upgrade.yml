@@ -2,7 +2,7 @@
 #
 # Source: .gardener/tasks/opencode-upgrade/TASK.md
 # Task: opencode-upgrade
-# Bundle: sha256:e5073624e3f3d69d89fd96d9ce17864a387b33155f09f6c40ab03add14c3c1b3
+# Bundle: sha256:a6d0d99195b018fb26c2f6e72830e0ededf387a016b3c1549e5b748a4dcaf97c
 # Regenerate: gardener generate
 # Do not edit this workflow directly.
 name: "Gardener · OpenCode upgrade"
@@ -43,6 +43,6 @@ jobs:
       task-id: "opencode-upgrade"
       task-name: "OpenCode upgrade"
       task-source: ".gardener/tasks/opencode-upgrade/TASK.md"
-      task-bundle-hash: e5073624e3f3d69d89fd96d9ce17864a387b33155f09f6c40ab03add14c3c1b3
+      task-bundle-hash: a6d0d99195b018fb26c2f6e72830e0ededf387a016b3c1549e5b748a4dcaf97c
       plan-timeout-minutes: 100
       pull-request-head: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || github.event.inputs.pull_request || '' }}
