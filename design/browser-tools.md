@@ -10,7 +10,7 @@ Agents need full Chrome DevTools Protocol access — navigation, DOM reads, scre
 
 `browserTool` gives the model one browser that stays open between runs, so tabs, cookies, and logins carry over. The host owns the browser: it creates one `Browser` ([browser-sessions.md](./browser-sessions.md)), installs it on its Lifecycle, and passes it in with a Worker Loader binding: `browserTool({ browser, loader })`. A tool rebuilt every turn still reaches the same browser. The model can't start, close, or reset it.
 
-There are three `browserTool`s, one per harness: `agents/browser/ai-sdk`, `agents/browser/tanstack-ai`, and `agents/browser/pi`. All three wrap `createBrowserToolCore` (`browser/browser-tool.ts`), which builds the description and runs the code. The adapters differ only in what they hand the model and the host (see [Adapters](#adapters)).
+There are three `browserTool`s, one per harness: `agents/browser/pi`, `agents/browser/tanstack-ai`, and `agents/browser/ai-sdk`. All three wrap `createBrowserToolCore` (`browser/browser-tool.ts`), which builds the description and runs the code. The adapters differ only in what they hand the model and the host (see [Adapters](#adapters)).
 
 ### A run
 
@@ -50,9 +50,9 @@ The tool asks for an async arrow function. The sandbox loads the code as an expr
 
 ### Adapters
 
-- **AI SDK** returns a tool object; the host picks its name, e.g. `tools: { browser: browserTool(...) }`. Its `toModelOutput` turns a screenshot into a short text summary for the model, plus any `notice` and `newTabs`; the full output, image included, stays on the message for the UI.
-- **TanStack AI** returns a `ServerTool` named `browser` unless `name` is passed. TanStack AI gives the host and the model the same output, so a screenshot is replaced by a note, and the description tells the model to read the page with `Runtime.evaluate` instead.
 - **pi** returns a pi tool named `browser` unless `name` is passed. A screenshot comes back as an image part the model can see. `scope` defaults to the calling conversation, so sessions, forks, and subagents don't drive each other's tab. The tool is marked `replay: "unsafe"`, so a call cut off by an eviction isn't rerun; the model gets an interrupted result.
+- **TanStack AI** returns a `ServerTool` named `browser` unless `name` is passed. TanStack AI gives the host and the model the same output, so a screenshot is replaced by a note, and the description tells the model to read the page with `Runtime.evaluate` instead.
+- **AI SDK** returns a tool object; the host picks its name, e.g. `tools: { browser: browserTool(...) }`. Its `toModelOutput` turns a screenshot into a short text summary for the model, plus any `notice` and `newTabs`; the full output, image included, stays on the message for the UI.
 
 ### Live View
 
