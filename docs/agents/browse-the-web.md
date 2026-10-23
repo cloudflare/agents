@@ -8,6 +8,8 @@ One durable tool is provided:
 
 > **Experimental** — this feature may have breaking changes in future releases.
 
+> **`createBrowserTools` and `createBrowserRuntime` are deprecated.** Use [`browserTool`](#persistent-browser). Pausing a run with its session kept while a person works in Live View has no replacement yet, so keep using `createBrowserTools` if you rely on it.
+
 ## When to use browser tools
 
 Browser tools are useful when your agent needs to:
@@ -285,6 +287,8 @@ this.registry.install({
 - Stopping a conversation doesn't stop a browser call already running. It finishes or times out (`timeoutMs`, default 60 seconds).
 
 ## Quick Actions (stateless browsing)
+
+> **Quick Actions are deprecated** and will not change: `createQuickActionTools`, `runQuickAction` and the `browserMarkdown`-style helpers keep working until they are removed. Use [`browserTool`](#persistent-browser) to drive a browser, the [`web_fetch` tool](./fetch-the-web.md) from `agents/webfetch` to read a page, or call the binding's `quickAction()` directly.
 
 `browser_execute` drives a full, stateful CDP session — the right tool for interactive, multi-step automation. But a lot of agent browsing is really one-shot: _read this page as Markdown_, _extract these fields_, _list the links_. For those, [Quick Actions](https://developers.cloudflare.com/browser-run/quick-actions/) are simpler, faster, and cheaper. They need only the `browser` binding — no Durable Object, Worker Loader, or sandbox — so they work from any Worker.
 

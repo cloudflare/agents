@@ -1,5 +1,7 @@
 # Browser Quick Actions
 
+> **Deprecated:** the Quick Action helpers in `agents/browser` are deprecated and will not change. See [Quick Actions](../../docs/agents/browse-the-web.md#quick-actions-stateless-browsing) for what to use instead.
+
 Read the web with Browser Run [Quick Actions](https://developers.cloudflare.com/browser-run/quick-actions/) — stateless, one-shot browser tasks that need only the `BROWSER` binding (no Durable Object, Worker Loader, sandbox, or CDP session).
 
 Enter a URL and pick an action: render the page to **Markdown**, list its **Links**, **Extract** structured data with AI, capture a **Screenshot**, or **Ask AI** — which hands the same Quick Actions to a model (via Workers AI) as tools and lets it browse to answer your question.

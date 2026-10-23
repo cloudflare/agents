@@ -193,6 +193,10 @@ function connectorOptions(
  *   }
  * }
  * ```
+ *
+ * @deprecated Use `browserTool` from `agents/browser/ai-sdk`,
+ * `agents/browser/tanstack-ai` or `agents/browser/pi`. See
+ * https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser
  */
 export function createBrowserRuntime(
   options: CreateBrowserToolsOptions
@@ -312,6 +316,10 @@ export function createBrowserRuntime(
  *   messages,
  * });
  * ```
+ *
+ * @deprecated Use `browserTool` from `agents/browser/ai-sdk`,
+ * `agents/browser/tanstack-ai` or `agents/browser/pi`. See
+ * https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser
  */
 export function createBrowserTools(
   options: CreateBrowserToolsOptions
@@ -319,7 +327,14 @@ export function createBrowserTools(
   return createBrowserRuntime(options).tools;
 }
 
-/** A Quick Action exposed as an AI SDK tool. */
+/**
+ * A Quick Action exposed as an AI SDK tool.
+ *
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
+ */
 export type QuickActionToolName =
   | "markdown"
   | "extract"
@@ -327,6 +342,12 @@ export type QuickActionToolName =
   | "scrape"
   | "content";
 
+/**
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
+ */
 export interface CreateQuickActionToolsOptions {
   /**
    * Browser Run binding with Quick Actions support (`env.BROWSER`). Requires a
@@ -461,6 +482,11 @@ function boundArray(value: unknown[], maxChars: number): unknown[] {
  * const tools = createQuickActionTools({ browser: this.env.BROWSER });
  * const result = await generateText({ model, tools, messages });
  * ```
+ *
+ * @deprecated Quick Actions are deprecated and won't change. Use
+ * `browserTool` to drive a browser, the `web_fetch` tool from
+ * `agents/webfetch` to read a page, or call the binding's
+ * `quickAction()` directly.
  */
 export function createQuickActionTools(
   options: CreateQuickActionToolsOptions

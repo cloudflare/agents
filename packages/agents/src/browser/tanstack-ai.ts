@@ -40,6 +40,10 @@ export type { CreateBrowserToolsOptions } from "./ai";
  *   messages,
  * });
  * ```
+ *
+ * @deprecated Use `browserTool` from `agents/browser/ai-sdk`,
+ * `agents/browser/tanstack-ai` or `agents/browser/pi`. See
+ * https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser
  */
 export function createBrowserTools(
   options: CreateBrowserToolsOptions
