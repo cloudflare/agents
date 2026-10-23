@@ -1,6 +1,6 @@
 # Browser Quick Actions
 
-> **Deprecated:** the Quick Action helpers in `agents/browser` are deprecated and won't change. See [Quick Actions](../../docs/agents/browse-the-web.md#quick-actions-stateless-browsing) for what to use instead.
+> **Deprecated:** the Quick Action helpers in `agents/browser` are deprecated and will not change. See [Quick Actions](../../docs/agents/browse-the-web.md#quick-actions-stateless-browsing) for what to use instead.
 
 Read the web with Browser Run [Quick Actions](https://developers.cloudflare.com/browser-run/quick-actions/) — stateless, one-shot browser tasks that need only the `BROWSER` binding (no Durable Object, Worker Loader, sandbox, or CDP session).
 

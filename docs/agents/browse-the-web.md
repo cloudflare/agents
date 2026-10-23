@@ -288,7 +288,7 @@ this.registry.install({
 
 ## Quick Actions (stateless browsing)
 
-> **Quick Actions are deprecated** and won't change: `createQuickActionTools`, `runQuickAction` and the `browserMarkdown`-style helpers keep working until they're removed. Use [`browserTool`](#persistent-browser) to drive a browser, the [`web_fetch` tool](./fetch-the-web.md) from `agents/webfetch` to read a page, or call the binding's `quickAction()` directly.
+> **Quick Actions are deprecated** and will not change: `createQuickActionTools`, `runQuickAction` and the `browserMarkdown`-style helpers keep working until they are removed. Use [`browserTool`](#persistent-browser) to drive a browser, the [`web_fetch` tool](./fetch-the-web.md) from `agents/webfetch` to read a page, or call the binding's `quickAction()` directly.
 
 `browser_execute` drives a full, stateful CDP session — the right tool for interactive, multi-step automation. But a lot of agent browsing is really one-shot: _read this page as Markdown_, _extract these fields_, _list the links_. For those, [Quick Actions](https://developers.cloudflare.com/browser-run/quick-actions/) are simpler, faster, and cheaper. They need only the `browser` binding — no Durable Object, Worker Loader, or sandbox — so they work from any Worker.
 
