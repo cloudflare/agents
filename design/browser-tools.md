@@ -8,21 +8,55 @@ Agents need full Chrome DevTools Protocol access — navigation, DOM reads, scre
 
 ## How It Works
 
-`browserTool({ browser, loader })` gives the model one browser that stays open between runs. Tabs, cookies, and logins carry over. The host owns the browser: it creates one `Browser` ([browser-sessions.md](./browser-sessions.md)) and passes it in, so a tool rebuilt every turn still reaches the same browser. It returns a single AI SDK tool; the host picks its name, e.g. `tools: { browser: browserTool(...) }`. It doesn't use codemode: each run's code runs in a fresh Dynamic Worker from `loader` (`browser/sandbox.ts`), with no network access and a `cdp` object backed by a `BrowserSession`.
+`browserTool` gives the model one browser that stays open between runs, so tabs, cookies, and logins carry over. The host owns the browser: it creates one `Browser` ([browser-sessions.md](./browser-sessions.md)), installs it on its Lifecycle, and passes it in with a Worker Loader binding: `browserTool({ browser, loader })`. A tool rebuilt every turn still reaches the same browser. The model can't start, close, or reset it.
 
-The model gets a `cdp` global (`send`, `attachToTarget`, `spec`, `getDebugLog`, `clearDebugLog`), minus anything for starting, closing, or resetting browsers.
+There are three `browserTool`s, one per harness: `agents/browser/ai-sdk`, `agents/browser/tanstack-ai`, and `agents/browser/pi`. All three wrap `createBrowserToolCore` (`browser/browser-tool.ts`), which builds the description and runs the code. The adapters differ only in what they hand the model and the host (see [Adapters](#adapters)).
 
-- **`sessionId: "active"`** points at the tab the agent is working in, and it stays the same across runs. Opening a tab with `Target.createTarget` or switching with `attachToTarget` changes it. A scope with no open tab of its own gets a new blank tab, never one already open (even a blank one could be another scope's, or a popup), so Browser Run's initial blank tab goes unused. When someone else closed the scope's tab, the next run says so.
-- **One active tab per scope.** `browserTool({ scope })` keeps conversations sharing one `Browser` in their own tabs; cookies and logins stay shared. Each run opens its own session in its scope. Runs in one scope are queued (per `Browser` object, so tools rebuilt each turn share the queue); different scopes run in parallel over their own CDP connections, which Browser Run allows. The result's `notice` says when another scope is working in the model's tab too.
-- **Popups don't take over.** Tabs the page opens itself come back as `newTabs` in the result, and the model decides whether to switch.
-- **A lost browser doesn't stop the run.** If the browser had to be replaced, the code still runs in the new one, and the result includes `restarted: true` and a `notice` that earlier tabs and logins are gone.
-- **The model can't close the browser.** `Browser.close` and `Browser.crash*` are refused; the host decides when the browser ends.
-- **Helpful errors.** A page command sent without `sessionId` explains how to fix it.
-- **Live View is for the host.** The host calls `browser.liveView()` to give a person a link into the same browser. The agent can end its turn and pick up after they're done.
+### A run
 
-`BrowserSession` (`browser/session.ts`, from `browser.session({ scope })`) holds all of this: it opens a CDP connection on its first call, and `close()` saves the scope's active tab, closes the connection and returns the report (`restarted`, `newTabs`, `tabClosed`, `tabShared`). `browserTool` opens one per run.
+1. `execute(input, scope)` queues the run behind earlier runs in the same scope on the same `Browser`. The queue lives in the isolate and is keyed by the `Browser` object, so separately built tools share it. Runs in different scopes run in parallel over their own CDP connections, which Browser Run allows.
+2. The run opens a `BrowserSession` on the browser for its scope.
+3. `runBrowserCode` (`browser/sandbox.ts`) loads the model's code into a fresh Dynamic Worker from `loader`, with no bindings and `globalOutbound: null`. Its only way out is a `cdp` global whose calls go over RPC to the session. The run times out after `timeoutMs` (60 seconds by default).
+4. A screenshot result is kept whole. Any other result has base64 payloads redacted and is cut to about 24,000 characters.
+5. `session.close()` saves the scope's active tab, closes the CDP connection, and returns a report of what happened to the browser.
+6. The tool returns `{ status, executionId, result | error, logs?, notice?, restarted?, newTabs? }`. Errors are returned, not thrown, so the model can read them and try again.
 
-The sandbox loads the model's code as an expression first (the tool asks for an async arrow function), and if that doesn't parse, once more as a function body. Codemode's `acorn`-based normalizer also returned a snippet's last expression; the sandbox doesn't parse the code, so statements with no `return` come back with a `notice` telling the model to return the value.
+### The `cdp` global
+
+- `cdp.send({ method, params?, sessionId?, timeoutMs? })` sends a CDP command and returns its result.
+- `cdp.attachToTarget({ targetId })` makes an open tab active and returns a `sessionId` that keeps working in later runs.
+- `cdp.spec()` returns the whole protocol (about 650 KB), fetched from the live browser, normalized, and cached per binding in the isolate.
+- `cdp.getDebugLog()` and `cdp.clearDebugLog()` read and clear recent CDP traffic.
+
+There is nothing for starting, closing, or resetting browsers. The tool's description documents these functions and lists rules for the CDP mistakes models commonly make, so the model needs no discovery pass.
+
+### `BrowserSession`
+
+`BrowserSession` (`browser/session.ts`, also available as `browser.session({ scope })`) is one run's connection to the browser. It connects on its first call and holds the rules that make CDP usable from model code:
+
+- **`sessionId: "active"`** points at the tab the scope is working in. The `Browser` stores each scope's active tab, so it carries over between runs. Opening a tab with `Target.createTarget` or switching with `cdp.attachToTarget` changes it. A scope with no open tab of its own gets a new blank tab, never one already open (even a blank one could be another scope's, or a popup), so Browser Run's initial blank tab goes unused.
+- **One active tab per scope.** Conversations sharing one `Browser` pass different `scope`s and stay in their own tabs; cookies and logins are shared. The report says when another scope closed the scope's tab (`tabClosed`) or is working in it too (`tabShared`).
+- **Popups don't take over.** Tabs the page opens itself are reported as `newTabs`, and the model decides whether to switch.
+- **A lost browser doesn't stop the run.** If the browser expired, was closed, or crashed, connecting replaces it and the code runs in the new one. The report says `restarted`.
+- **The model can't close the browser.** `Browser.close` and `Browser.crash*` are refused.
+- **Helpful errors.** Each function checks its arguments, and common CDP errors come back with a fix: a page command sent without `sessionId`, a CDP session id from an earlier run, an event sent as a command.
+- **Screenshots over 1 MB fail** with a hint to capture the viewport or use JPEG (see [Key Decisions](#key-decisions)).
+
+The tool turns the report into fields on the result: `restarted: true`, `newTabs`, and a `notice` with a sentence for each of restarted, tab closed, and tab shared.
+
+### Code shapes
+
+The tool asks for an async arrow function. The sandbox loads the code as an expression first, and if that doesn't parse, once more as a function body. Codemode's `acorn`-based normalizer also returned a snippet's last expression. The sandbox doesn't parse the code, so a function body that comes back `undefined` gets a `notice` telling the model to `return` the value.
+
+### Adapters
+
+- **AI SDK** returns a tool object; the host picks its name, e.g. `tools: { browser: browserTool(...) }`. Its `toModelOutput` turns a screenshot into a short text summary for the model, plus any `notice` and `newTabs`; the full output, image included, stays on the message for the UI.
+- **TanStack AI** returns a `ServerTool` named `browser` unless `name` is passed. TanStack AI gives the host and the model the same output, so a screenshot is replaced by a note, and the description tells the model to read the page with `Runtime.evaluate` instead.
+- **pi** returns a pi tool named `browser` unless `name` is passed. A screenshot comes back as an image part the model can see. `scope` defaults to the calling conversation, so sessions, forks, and subagents don't drive each other's tab. The tool is marked `replay: "unsafe"`, so a call cut off by an eviction isn't rerun; the model gets an interrupted result.
+
+### Live View
+
+Live View is for the host. It calls `browser.liveView()` to give a person a link into the same browser. The agent can end its turn and pick up after the person is done.
 
 ## Key Decisions
 
@@ -31,7 +65,7 @@ The sandbox loads the model's code as an expression first (the tool asks for an 
 - Do not bundle the CDP spec; fetch it from the live browser and normalize it.
 - Keep browser state host-side. The sandbox gets RPC functions only.
 - **One active tab per scope**, with runs in a scope queued, so conversations sharing a browser don't fight over a tab.
-- **Screenshots over 1 MB fail with a hint.** They're kept whole in the chat message for the UI, and a stored message must fit SQLite's 2 MB row, or the image is compacted away. Other results are cut to a preview before they're stored, so they have no limit.
+- **Screenshots over 1 MB fail with a hint.** They're kept whole in the chat message for the UI, and a stored message must fit SQLite's 2 MB row, or the image is compacted away. Failing early lets the model take a smaller one. Other results are cut to about 24,000 characters before they're stored, so they need no limit.
 
 ## Tradeoffs
 
