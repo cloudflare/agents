@@ -77,7 +77,9 @@ export type InternalHostRouterLoopback = (init: {
  *
  * Fixed when a browser starts. Adding or removing a hostname replaces the
  * browser (the model sees `restarted`); changing a host's `fetch` or
- * `description` doesn't.
+ * `description` doesn't. Nor does pointing a `worker` host at a different
+ * Worker: the running browser keeps the old one until it is replaced, so
+ * call `browser.close()` after such a change.
  */
 export interface InternalHostsOptions {
   /**
@@ -279,6 +281,11 @@ function isMissingMethod(error: unknown): boolean {
  * ```ts
  * export { InternalHostRouter } from "agents/browser";
  * ```
+ *
+ * It trusts its props: Browser Run sets them from your routes, but another
+ * Worker in your account with a service binding to this entrypoint could
+ * set its own and reach any agent's hosts. That Worker could already call
+ * your agents directly, so this grants nothing new.
  *
  * It holds no logic of its own: it calls the agent's `fetchInternalHost()`
  * with an {@link InternalHostMessage}, and the agent's `Browser` runs the
