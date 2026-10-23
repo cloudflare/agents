@@ -2,7 +2,7 @@
 #
 # Source: .gardener/tasks/mention-reply/TASK.md
 # Task: mention-reply
-# Bundle: sha256:0ab0a775e4d18c6cb1c35c4e8cb1626eccbebb214edee3737f5685006b345fb4
+# Bundle: sha256:41b7598784f2d78e1f286e840d9b771348b26499464ecb022ae3b30663926bf9
 # Regenerate: gardener generate
 # Do not edit this workflow directly.
 name: "Gardener · Mention reply"
@@ -33,9 +33,9 @@ jobs:
   gardener:
     if: >-
       ${{
-        (github.event_name == 'issue_comment' && github.event.action == 'created' && contains(github.event.comment.body, '@gardener-cf'))
+        (github.event_name == 'issue_comment' && github.event.action == 'created' && (contains(github.event.comment.body, '@ask-gardener') || contains(github.event.comment.body, '@gnome-bot')))
         || github.event_name == 'workflow_dispatch'
-        || (github.event_name == 'discussion_comment' && github.event.action == 'created' && contains(github.event.comment.body, '@gardener-cf'))
+        || (github.event_name == 'discussion_comment' && github.event.action == 'created' && (contains(github.event.comment.body, '@ask-gardener') || contains(github.event.comment.body, '@gnome-bot')))
       }}
     concurrency:
       group: gardener-mention-reply-${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || github.event.inputs.pull_request || github.run_id }}
@@ -54,7 +54,7 @@ jobs:
       task-id: "mention-reply"
       task-name: "Mention reply"
       task-source: ".gardener/tasks/mention-reply/TASK.md"
-      task-bundle-hash: 0ab0a775e4d18c6cb1c35c4e8cb1626eccbebb214edee3737f5685006b345fb4
+      task-bundle-hash: 41b7598784f2d78e1f286e840d9b771348b26499464ecb022ae3b30663926bf9
       plan-timeout-minutes: 40
       pull-request-head: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || github.event.inputs.pull_request || '' }}
       merge-base: true

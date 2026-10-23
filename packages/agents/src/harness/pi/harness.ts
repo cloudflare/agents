@@ -123,6 +123,9 @@ export type PiHarnessContext = {
    * alarm. Without it the harness still works, but pi's timer keeps the
    * object in memory, and billed, while a task sleeps, and the harness logs
    * a warning when it opens pi.
+   *
+   * The harness reads pi's wake times against `Date.now()`, so do not pass
+   * `now` to `Harness.open`.
    */
   readonly onWake: (wake: Wake) => void;
 };
@@ -626,8 +629,12 @@ export class PiHarness extends LifecycleCapability {
   /**
    * Wait while pi has work running, up to the wait budget. With `onWake`, a
    * change ends each sleep early, and so does pi closing; without it, the
-   * sleep is `pollMs`. Whether the wait ended, with pi idle or at the
-   * budget, rather than failing. Rejects with a memory-limit reset.
+   * sleep is `pollMs`. A task sleeping beside the running work, such as a
+   * retry backoff, also ends the sleep when it is due, and the wait calls
+   * `pi.resume()` to run it: with `onWake`, pi arms no timer for it, and
+   * the wake job's alarm is not set for it while the job waits. Whether the
+   * wait ended, with pi idle or at the budget, rather than failing. Rejects
+   * with a memory-limit reset.
    */
   async #waitWhileActive(pi: Harness): Promise<boolean> {
     const deadline = Date.now() + this.#waitBudgetMs;
@@ -636,20 +643,27 @@ export class PiHarness extends LifecycleCapability {
       // storage error), which is what ends this loop: a closed pi's wake does
       // not go inactive. Closing kicks `#changed` only so the loop reads it
       // again now rather than at the end of its sleep.
-      while (pi.wake().active) {
-        const left = deadline - Date.now();
+      let wake = pi.wake();
+      while (wake.active) {
+        const now = Date.now();
+        const left = deadline - now;
         if (left <= 0) return true;
+        let sleep = this.#onWakeWired ? left : Math.min(left, this.#pollMs);
+        // `at` is a sleep not yet due on pi's clock, so this is positive.
+        // That holds because pi keeps its default clock, `Date.now`; see
+        // `PiHarnessContext`.
+        if (wake.at !== undefined) sleep = Math.min(sleep, wake.at - now);
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(
-            resolve,
-            this.#onWakeWired ? left : Math.min(left, this.#pollMs)
-          );
+          const timer = setTimeout(resolve, sleep);
           this.#changed = () => {
             clearTimeout(timer);
             resolve();
           };
         });
         this.#changed = undefined;
+        // A sleep beside the running work came due: make it runnable.
+        if (wake.at !== undefined && Date.now() >= wake.at) pi.resume();
+        wake = pi.wake();
       }
       return true;
     } catch (error) {
