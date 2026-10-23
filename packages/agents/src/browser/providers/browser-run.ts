@@ -46,7 +46,7 @@ export const BROWSER_SESSION_KEEP_ALIVE_MAX_MS = 1_200_000;
  * when a lost browser is replaced — so options like guardrails survive a
  * restart.
  */
-export interface BrowserRunOptions {
+export interface BrowserRunOptions<S = Record<string, unknown>> {
   /**
    * Platform `keep_alive` in milliseconds: how long an idle browser lives.
    * Defaults to {@link BROWSER_SESSION_KEEP_ALIVE_DEFAULT_MS} (10 minutes).
@@ -78,15 +78,16 @@ export interface BrowserRunOptions {
    *     router: this.ctx.exports.InternalHostRouter,
    *     hosts: {
    *       "preview.internal": {
-   *         description: "The dev server in your sandbox",
-   *         fetch: (request) => this.sandbox.fetchPort(5173, request)
+   *         description: "A dev server in your sandbox",
+   *         target: z.object({ port: z.number().int() }),
+   *         fetch: (request, { port }) => this.sandboxPort(port, request)
    *       }
    *     }
    *   }
    * });
    * ```
    */
-  internalHosts?: InternalHostsOptions;
+  internalHosts?: InternalHostsOptions<S>;
 }
 
 /** A {@link Browser} provider backed by Cloudflare Browser Run. */
@@ -104,12 +105,13 @@ export interface BrowserRunProvider {
  * new Browser({ provider: browserRun(env.BROWSER, { recording: true }) });
  * ```
  */
-export function browserRun(
+export function browserRun<const S extends Record<string, unknown> = {}>(
   binding: BrowserBinding,
-  options: BrowserRunOptions = {}
+  options: BrowserRunOptions<S> = {}
 ): BrowserRunProvider {
-  if (options.internalHosts) validateInternalHosts(options.internalHosts);
-  return { kind: "browser-run", binding, options };
+  const erased = options as BrowserRunOptions;
+  if (erased.internalHosts) validateInternalHosts(erased.internalHosts);
+  return { kind: "browser-run", binding, options: erased };
 }
 
 function isDataCloneError(error: unknown): boolean {

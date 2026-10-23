@@ -21,7 +21,10 @@ import type { CdpConnection } from "./cdp-connection";
 import {
   internalHostError,
   isInternalHostMessage,
+  targetJsonSchema,
+  validateTarget,
   type AnyInternalHost,
+  type InternalHostInfo,
   type InternalHostMessage
 } from "./internal-hosts";
 import type { BrowserLiveView, LiveViewMode } from "./live-view";
@@ -90,6 +93,16 @@ function retiredBrowserSessionKey(name: string): string {
  */
 function browserScopeKeyPrefix(name: string): string {
   return `browser:scope:${name.length}:${name}:`;
+}
+
+/**
+ * Where a browser's internal-host targets live: one key per host, under a
+ * prefix per browser (length-prefixed like scope records, so one browser's
+ * prefix never matches another's). Kept apart from the session record, so
+ * targets survive the browser being replaced.
+ */
+function internalHostTargetsPrefix(name: string): string {
+  return `browser:hosts:${name.length}:${name}:`;
 }
 
 /** Where a {@link Browser} gets its browser from. */
@@ -189,6 +202,26 @@ export interface BrowserConnection {
    * the browser itself (cached).
    */
   spec(): Promise<SearchableCdpSpec>;
+}
+
+/**
+ * A browser's internal hostnames (`browserRun({ internalHosts })`), for the
+ * host and the browser tool. Assignments are stored with the agent, so they
+ * survive the browser being replaced, eviction, and redeploys.
+ */
+export interface BrowserInternalHosts {
+  /** Every hostname with its description, schema, and current target. */
+  list(): Promise<InternalHostInfo[]>;
+  /**
+   * Point an assignable host somewhere: `target` is checked against the
+   * host's `target` schema and stored. The browser's next request to the
+   * host uses it. Throws with what's wrong when the target doesn't match.
+   */
+  assign(host: string, target: unknown): Promise<{ url: string }>;
+  /** Forget a host's target; its requests answer 502 until assigned again. */
+  clear(host: string): Promise<boolean>;
+  /** The hostnames with their descriptions and schemas, without reading storage. */
+  describe(): InternalHostInfo[];
 }
 
 /**
@@ -441,6 +474,71 @@ export class Browser extends LifecycleCapability {
   // ── Internal hostnames ───────────────────────────────────────────────────
 
   /**
+   * The browser's internal hostnames, or `undefined` when its provider has
+   * none. See {@link BrowserInternalHosts}.
+   */
+  get internalHosts(): BrowserInternalHosts | undefined {
+    const config = this.#adapter.internalHosts;
+    if (!config) return undefined;
+    const hosts = config.hosts as Record<string, AnyInternalHost>;
+    const describe = (): InternalHostInfo[] =>
+      Object.entries(hosts).map(([host, entry]) => ({
+        host,
+        url: `http://${host}/`,
+        ...(entry.description ? { description: entry.description } : {}),
+        assignable: entry.target !== undefined,
+        ...(entry.target !== undefined
+          ? { targetSchema: targetJsonSchema(host, entry.target) }
+          : {})
+      }));
+    const assignable = (host: string) => {
+      const entry = hosts[host];
+      if (!entry || !Object.hasOwn(hosts, host)) {
+        throw new Error(
+          `"${host}" isn't an internal hostname. The hostnames are: ${Object.keys(hosts).join(", ")}`
+        );
+      }
+      if (entry.target === undefined) {
+        throw new Error(
+          `"${host}" always serves the same thing; it has no target to assign`
+        );
+      }
+      return entry.target;
+    };
+    return {
+      describe,
+      list: async () => {
+        const prefix = internalHostTargetsPrefix(this.name);
+        const stored = await this.lifecycle.storage.list({ prefix });
+        return describe().map((info) => {
+          const key = prefix + info.host;
+          return stored.has(key) ? { ...info, target: stored.get(key) } : info;
+        });
+      },
+      assign: async (host, target) => {
+        const schema = assignable(host);
+        if (target === undefined) {
+          throw new Error(
+            `browser.assignHost needs a target for ${host}; use browser.clearHost to unassign it`
+          );
+        }
+        // Stored as JSON, so check what will be stored.
+        const json: unknown = JSON.parse(JSON.stringify(target));
+        const checked = await validateTarget(schema, json);
+        if (!checked.ok) {
+          throw new Error(`Invalid target for ${host}: ${checked.error}`);
+        }
+        await this.lifecycle.storage.put(this.#targetKey(host), json);
+        return { url: `http://${host}/` };
+      },
+      clear: async (host) => {
+        assignable(host);
+        return this.lifecycle.storage.delete(this.#targetKey(host));
+      }
+    };
+  }
+
+  /**
    * Serve one browser request to an internal hostname. `InternalHostRouter`
    * calls the agent's `fetchInternalHost()` with the message; `Agent` passes
    * it here on its own. A plain Durable Object passes it on itself:
@@ -488,10 +586,29 @@ export class Browser extends LifecycleCapability {
         `${host} is no longer an internal hostname of browser "${this.name}"`
       );
     }
+    let target: unknown;
+    if (entry.target !== undefined) {
+      const assigned = await this.lifecycle.storage.get(this.#targetKey(host));
+      if (assigned === undefined) {
+        return internalHostError(
+          502,
+          `${host} isn't pointed anywhere yet. Call browser.assignHost({ host: "${host}", target }) first.`
+        );
+      }
+      // Validate again: the schema may have changed since the assignment.
+      const checked = await validateTarget(entry.target, assigned);
+      if (!checked.ok) {
+        return internalHostError(
+          502,
+          `${host}'s target no longer matches its schema (${checked.error}). Call browser.assignHost again.`
+        );
+      }
+      target = checked.value;
+    }
     const fetch = entry.fetch;
     try {
       const response = await this.lifecycle.runInHostContext(
-        () => fetch(request),
+        () => fetch(request, target),
         { request }
       );
       if (response instanceof Response) return response;
@@ -528,6 +645,11 @@ export class Browser extends LifecycleCapability {
       name: services.name,
       browser: this.name
     };
+  }
+
+  /** The storage key of one host's target. */
+  #targetKey(host: string): string {
+    return internalHostTargetsPrefix(this.name) + host;
   }
 
   async #closeQuietly(sessionId: string): Promise<void> {
