@@ -1,19 +1,21 @@
 /**
- * The browser module: the `browser` object model-written code drives a
- * browser with, defined once. `browserTool`'s sandbox exposes it as the
+ * The `browser` object model-written code drives a browser with, defined
+ * once. `browserTool`'s sandbox exposes it as the
  * `browser` global, and the same functions, docs and rules are what a
  * Workspace module would expose later. Internal — not an entry point.
  *
  * Every function takes one options object and is backed by a
- * `BrowserSession`, which validates the input.
+ * `BrowserSession`, which validates the input. `spec` shapes the session's
+ * full protocol into pieces small enough for a result.
  */
-import type {
-  BrowserAttachInput,
-  BrowserDebugLogInput,
-  BrowserSendInput,
-  BrowserSession,
-  BrowserSpecInput
+import {
+  validate,
+  type BrowserAttachInput,
+  type BrowserDebugLogInput,
+  type BrowserSendInput,
+  type BrowserSession
 } from "./session";
+import type { SearchableCdpSpec } from "./spec";
 
 /** One function on the `browser` object, as the host runs it. */
 export type BrowserFunction = (input: unknown) => Promise<unknown>;
@@ -28,27 +30,78 @@ interface BrowserFunctionDefinition {
 // casts below only tell TypeScript what the session checks at runtime.
 const BROWSER_FUNCTIONS = {
   cdp: {
-    doc: '`browser.cdp({ method, params?, sessionId?, timeoutMs? })` sends a CDP command and returns its result without the JSON-RPC envelope. Page-scoped commands take `sessionId: "active"`: `await browser.cdp({ method: "Page.navigate", params: { url }, sessionId: "active" })` returns `{ frameId, errorText? }`.',
+    doc: '`browser.cdp({ method, params?, sessionId?, timeoutMs? })` sends a CDP command and returns its result without the JSON-RPC envelope. Page-scoped commands take `sessionId: "active"`: `await browser.cdp({ method: "Page.navigate", params: { url }, sessionId: "active" })` returns `{ frameId, errorText? }`. `timeoutMs` limits this one command. A failed command throws, and the error often says how to fix the call.',
     call: (session, input) => session.send(input as BrowserSendInput)
   },
   attachToTarget: {
-    doc: "`browser.attachToTarget({ targetId })` makes an open tab active and returns `{ sessionId }`.",
+    doc: '`browser.attachToTarget({ targetId })` switches to an open tab, with `targetId` from `Target.getTargets`, and makes it active: `sessionId: "active"` points at it from then on. Returns `{ sessionId }` for that tab.',
     call: (session, input) =>
       session.attachToTarget(input as BrowserAttachInput)
   },
   spec: {
-    doc: '`browser.spec()` lists the protocol\'s domains; `browser.spec({ domain: "Page" })` returns one domain\'s `{ commands, events, types }`. Big domains get cut short in your result, so filter in code: `(await browser.spec({ domain: "Network" })).commands.find((c) => c.name === "enable")`.',
-    call: (session, input) => session.spec(input as BrowserSpecInput)
+    doc: '`browser.spec()` lists the protocol\'s domains as `{ domains: [{ name, description }] }`; `browser.spec({ domain: "Page" })` returns one domain\'s `{ commands, events, types }`, each command a `{ method, description, parameters, returns }`. Big domains get cut short in your result, so filter in code: `(await browser.spec({ domain: "Network" })).commands.find((c) => c.name === "enable")`.',
+    call: async (session, input) =>
+      specResult(await session.spec(), input as BrowserSpecInput)
   },
   getDebugLog: {
-    doc: "`browser.getDebugLog()` returns recent protocol traffic, for when a command fails or times out.",
+    doc: "`browser.getDebugLog({ limit? })` returns recent protocol traffic, newest last (50 entries unless `limit` says otherwise), each `{ at, type, ... }`. Use it when a command fails or times out.",
     call: (session, input) => session.getDebugLog(input as BrowserDebugLogInput)
   },
   clearDebugLog: {
-    doc: "`browser.clearDebugLog()` forgets the traffic recorded so far.",
+    doc: "`browser.clearDebugLog()` forgets the traffic recorded so far, so the next `getDebugLog` shows only what follows.",
     call: (session) => session.clearDebugLog()
   }
 } satisfies Record<string, BrowserFunctionDefinition>;
+
+/** `browser.spec`'s input. */
+interface BrowserSpecInput {
+  /** A CDP domain, e.g. `"Page"`. Omit for the list of domains. */
+  domain?: string;
+}
+
+const SPEC_SCHEMA = {
+  type: "object",
+  properties: { domain: { type: "string", minLength: 1 } }
+} as const;
+
+/**
+ * Without a domain, every domain's name and first sentence, which is small;
+ * with one, that domain's commands, events and types. The whole protocol is
+ * about 650 KB, too much for one result.
+ */
+function specResult(spec: SearchableCdpSpec, input: BrowserSpecInput) {
+  const { domain } = validate(
+    "browser.spec",
+    SPEC_SCHEMA,
+    input
+  ) as BrowserSpecInput;
+  const { domains } = spec;
+  if (domain === undefined) {
+    return {
+      domains: domains.map(({ name, description }) => ({
+        name,
+        ...(description ? { description: firstSentence(description) } : {})
+      })),
+      hint: 'browser.spec({ domain: "Page" }) returns one domain\'s commands, events and types.'
+    };
+  }
+  const found = domains.find((d) => d.name === domain);
+  if (found) return found;
+  const near = domains.find(
+    (d) => d.name.toLowerCase() === domain.toLowerCase()
+  );
+  throw new Error(
+    `No CDP domain named '${domain}'.` +
+      (near
+        ? ` Did you mean '${near.name}'?`
+        : " browser.spec() lists the domains.")
+  );
+}
+
+/** A CDP description's first sentence, for the list of domains. */
+function firstSentence(text: string): string {
+  return text.match(/^[\s\S]*?\.(?=\s|$)/)?.[0] ?? text;
+}
 
 /** The `browser` object's functions, bound to one run's session. */
 export function browserFunctions(

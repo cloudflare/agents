@@ -28,7 +28,7 @@ There are three `browserTool`s, one per harness: `agents/browser/pi`, `agents/br
 - `browser.spec()` lists the protocol's domains with a one-line description each, and `browser.spec({ domain })` returns one domain's commands, events, and types. The whole protocol is about 650 KB, so it's never returned at once. It's fetched from the live browser, normalized, and cached per binding in the isolate.
 - `browser.getDebugLog()` and `browser.clearDebugLog()` read and clear recent CDP traffic.
 
-There is nothing for starting, closing, or resetting browsers. `browser/module.ts` defines these functions, their one-line docs, and the rules for the CDP mistakes models commonly make, all in one table. The sandbox builds the global from the table and the tool builds its description from it, so the model needs no discovery pass, and another runner (a Workspace module, say) can offer the same API.
+There is nothing for starting, closing, or resetting browsers. `browser/browser-functions.ts` defines these functions, their one-line docs, and the rules for the CDP mistakes models commonly make, all in one table. The sandbox builds the global from the table and the tool builds its description from it, so the model needs no discovery pass, and another runner (a Workspace module, say) can offer the same API.
 
 ### `BrowserSession`
 

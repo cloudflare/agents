@@ -9,7 +9,7 @@ import {
   type ProxyToolOutput
 } from "@cloudflare/codemode";
 import { BrowserConnector } from "../browser/connector";
-import { browserFunctions } from "../browser/module";
+import { browserFunctions } from "../browser/browser-functions";
 import { runBrowserCode } from "../browser/sandbox";
 import type { BrowserSessionReport } from "../browser/session";
 import { Browser, namedBrowserSessionKey } from "../browser/browser";
