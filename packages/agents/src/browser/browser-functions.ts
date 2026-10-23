@@ -26,6 +26,17 @@ interface BrowserFunctionDefinition {
   call(session: BrowserSession, input: unknown): Promise<unknown>;
 }
 
+/** `browser.spec`'s input. */
+interface BrowserSpecInput {
+  /** A CDP domain, e.g. `"Page"`. Omit for the list of domains. */
+  domain?: string;
+}
+
+const SPEC_SCHEMA = {
+  type: "object",
+  properties: { domain: { type: "string", minLength: 1 } }
+} as const;
+
 // SAFETY: Each session method validates its input before using it, so the
 // casts below only tell TypeScript what the session checks at runtime.
 const BROWSER_FUNCTIONS = {
@@ -40,8 +51,15 @@ const BROWSER_FUNCTIONS = {
   },
   spec: {
     doc: '`browser.spec()` lists the protocol\'s domains as `{ domains: [{ name, description }] }`; `browser.spec({ domain: "Page" })` returns one domain\'s `{ commands, events, types }`, each command a `{ method, description, parameters, returns }`. Big domains get cut short in your result, so filter in code: `(await browser.spec({ domain: "Network" })).commands.find((c) => c.name === "enable")`.',
-    call: async (session, input) =>
-      specResult(await session.spec(), input as BrowserSpecInput)
+    call: async (session, input) => {
+      // Check the input before connecting, like the session's own methods.
+      const { domain } = validate(
+        "browser.spec",
+        SPEC_SCHEMA,
+        input
+      ) as BrowserSpecInput;
+      return specResult(await session.spec(), domain);
+    }
   },
   getDebugLog: {
     doc: "`browser.getDebugLog({ limit? })` returns recent protocol traffic, newest last (50 entries unless `limit` says otherwise), each `{ at, type, ... }`. Use it when a command fails or times out.",
@@ -53,28 +71,12 @@ const BROWSER_FUNCTIONS = {
   }
 } satisfies Record<string, BrowserFunctionDefinition>;
 
-/** `browser.spec`'s input. */
-interface BrowserSpecInput {
-  /** A CDP domain, e.g. `"Page"`. Omit for the list of domains. */
-  domain?: string;
-}
-
-const SPEC_SCHEMA = {
-  type: "object",
-  properties: { domain: { type: "string", minLength: 1 } }
-} as const;
-
 /**
  * Without a domain, every domain's name and first sentence, which is small;
  * with one, that domain's commands, events and types. The whole protocol is
  * about 650 KB, too much for one result.
  */
-function specResult(spec: SearchableCdpSpec, input: BrowserSpecInput) {
-  const { domain } = validate(
-    "browser.spec",
-    SPEC_SCHEMA,
-    input
-  ) as BrowserSpecInput;
+function specResult(spec: SearchableCdpSpec, domain: string | undefined) {
   const { domains } = spec;
   if (domain === undefined) {
     return {
