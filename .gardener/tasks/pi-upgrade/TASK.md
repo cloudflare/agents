@@ -130,7 +130,8 @@ When a peer range moves, also update every doc and example that names the old ra
 
 If `pnpm install` refuses the new version because a package is younger than `minimumReleaseAge`
 (`ERR_PNPM_NO_MATURE_MATCHING_VERSION`), step down to the newest older release that installs, and
-upgrade to that. Never change `minimumReleaseAge` or `minimumReleaseAgeExclude` yourself: under
+upgrade to that. From then on it is the target: repeat step 2's checks for it, and drop items from
+later releases from your review and fixes (the next run picks them up). Never change `minimumReleaseAge` or `minimumReleaseAgeExclude` yourself: under
 "Needs a maintainer", name the version held back, the young dependency that blocked it and when it
 clears, so a maintainer can exclude it by hand. If no newer release installs, propose nothing.
 
