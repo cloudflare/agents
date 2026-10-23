@@ -162,6 +162,7 @@ export class Assistant extends DurableObject<Env> {
   readonly sendEmail = defineTool({
     name: "send_email",
     description: "Send an email.",
+    replay: "unsafe",
     parameters: Type.Object({
       to: Type.String(),
       subject: Type.String(),
@@ -201,7 +202,7 @@ export class Assistant extends DurableObject<Env> {
 
 The tool sends with [Email Service](https://developers.cloudflare.com/email-service/), through a `send_email` binding, `"send_email": [{ "name": "EMAIL" }]`, in `wrangler.jsonc`. The sender must be an address on a domain you have set up for Email Service. Each email it sends goes in the `sent_emails` table from step 1.
 
-Pi validates the arguments against `parameters` before it calls `execute`. Each call runs as its own durable task. If the object leaves memory during a call, Pi runs it again only if the tool sets `replay: "safe"`. `send_email` leaves it unset, so after a restart the model gets an interrupted result instead, and an email is never sent twice.
+Pi validates the arguments against `parameters` before it calls `execute`. Each call runs as its own durable task. If the object leaves memory during a call, Pi runs it again only if the tool sets `replay: "safe"`. `send_email` sets `replay: "unsafe"`, which is also the default, so after a restart the model gets an interrupted result instead, and an email is never sent twice.
 
 Tools that come with `agents`:
 
