@@ -17,6 +17,7 @@ export interface BrowserBinding {
     keepAlive?: number;
     recording?: boolean;
     guardrails?: BrowserSessionGuardrails;
+    outboundByHost?: Record<string, Fetcher>;
   }): Promise<{ sessionId: string }>;
   closeSession?(sessionId: string): Promise<unknown>;
 }
@@ -274,22 +275,43 @@ export async function acquireBrowserSession(
     keepAliveMs?: number;
     recording?: boolean;
     guardrails?: BrowserSessionGuardrails;
+    /**
+     * Hostnames whose requests go to these Fetchers instead of the internet.
+     * Only the typed `acquire()` can carry them: on the HTTP fallback (local
+     * dev) the session starts without them, with a warning.
+     */
+    outboundByHost?: Record<string, Fetcher>;
   } = {}
 ): Promise<{ sessionId: string }> {
+  const { outboundByHost, ...httpOptions } = options;
   if (browser.acquire) {
     try {
       const { sessionId } = await browser.acquire({
         keepAlive: options.keepAliveMs,
         recording: options.recording,
-        guardrails: options.guardrails
+        guardrails: options.guardrails,
+        ...(outboundByHost ? { outboundByHost } : {})
       });
       return { sessionId };
     } catch (error) {
       if (!isUnimplementedBindingMethod(error, "acquire")) throw error;
     }
   }
-  const { sessionId } = await createBrowserSession(browser, options);
+  if (outboundByHost) warnInternalHostsUnavailable(Object.keys(outboundByHost));
+  const { sessionId } = await createBrowserSession(browser, httpOptions);
   return { sessionId };
+}
+
+let warnedInternalHostsUnavailable = false;
+
+/** Say once per isolate that internal hostnames need a deployed Worker. */
+function warnInternalHostsUnavailable(hosts: string[]): void {
+  if (warnedInternalHostsUnavailable) return;
+  warnedInternalHostsUnavailable = true;
+  console.warn(
+    `[agents/browser] Internal hostnames (${hosts.join(", ")}) only work once deployed: ` +
+      "this Browser Run binding has no acquire(), as in local dev, so the browser starts without them."
+  );
 }
 
 /**

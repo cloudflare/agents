@@ -75,11 +75,22 @@ import type {
 } from "./capabilities/tasks.ts";
 export { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
 import type { PlainMcpClientObject } from "./capabilities/mcp-client.ts";
-export { BrowserHarnessObject } from "./capabilities/browser.ts";
-import type { BrowserHarnessObject } from "./capabilities/browser.ts";
+export {
+  BrowserHarnessObject,
+  InternalHostsDocsSite,
+  InternalHostsNoMethodObject,
+  InternalHostsPlainObject
+} from "./capabilities/browser.ts";
+import type {
+  BrowserHarnessObject,
+  InternalHostsNoMethodObject,
+  InternalHostsPlainObject
+} from "./capabilities/browser.ts";
 export { TestBrowserAgent } from "./agents/browser.ts";
 // The browser tool's codemode runtime runs as a facet of the host agent.
 export { CodemodeRuntime } from "@cloudflare/codemode";
+// Carries the browser's internal-hostname requests back to the agent.
+export { InternalHostRouter } from "../browser/internal-hosts";
 import type { TestBrowserAgent } from "./agents/browser.ts";
 
 // Re-export all test agents so existing imports (e.g. `import { type Env } from "./worker"`)
@@ -257,6 +268,8 @@ export type Env = {
   SessionBenchObject: DurableObjectNamespace<SessionBenchObject>;
   PlainMcpClientObject: DurableObjectNamespace<PlainMcpClientObject>;
   BrowserHarnessObject: DurableObjectNamespace<BrowserHarnessObject>;
+  InternalHostsPlainObject: DurableObjectNamespace<InternalHostsPlainObject>;
+  InternalHostsNoMethodObject: DurableObjectNamespace<InternalHostsNoMethodObject>;
   TestBrowserAgent: DurableObjectNamespace<TestBrowserAgent>;
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   TestCodemodeMcpAgent: DurableObjectNamespace<TestCodemodeMcpAgent>;
