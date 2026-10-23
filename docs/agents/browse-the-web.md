@@ -242,17 +242,17 @@ const tools = createBrowserTools({
 });
 ```
 
-| Option       | Type                             | Default    | Description                                                |
-| ------------ | -------------------------------- | ---------- | ---------------------------------------------------------- |
+| Option       | Type                             | Default       | Description                                                |
+| ------------ | -------------------------------- | ------------- | ---------------------------------------------------------- |
 | `ctx`        | `DurableObjectState`             | current Agent | The DO hosting the runtime facet and session store         |
-| `browser`    | `BrowserBinding`                 | —          | Browser Run binding                                        |
-| `cdpUrl`     | `string`                         | —          | A custom CDP endpoint; takes priority over `browser`       |
-| `cdpHeaders` | `Record<string, string>`         | —          | Headers for CDP URL discovery (e.g. Cloudflare Access)     |
-| `loader`     | `WorkerLoader`                   | required   | Worker Loader binding for sandboxed execution              |
-| `session`    | `BrowserConnectorSessionOptions` | `one-shot` | Session lifecycle mode                                     |
-| `store`      | `BrowserSessionStore`            | DO storage | Durable store for session ids                              |
-| `timeout`    | `number`                         | `30000`    | Execution timeout (also the per-CDP-command timeout)       |
-| `name`       | `string`                         | `browser`  | Runtime name — the durable identity of executions/snippets |
+| `browser`    | `BrowserBinding`                 | —             | Browser Run binding                                        |
+| `cdpUrl`     | `string`                         | —             | A custom CDP endpoint; takes priority over `browser`       |
+| `cdpHeaders` | `Record<string, string>`         | —             | Headers for CDP URL discovery (e.g. Cloudflare Access)     |
+| `loader`     | `WorkerLoader`                   | required      | Worker Loader binding for sandboxed execution              |
+| `session`    | `BrowserConnectorSessionOptions` | `one-shot`    | Session lifecycle mode                                     |
+| `store`      | `BrowserSessionStore`            | DO storage    | Durable store for session ids                              |
+| `timeout`    | `number`                         | `30000`       | Execution timeout (also the per-CDP-command timeout)       |
+| `name`       | `string`                         | `browser`     | Runtime name — the durable identity of executions/snippets |
 
 Session modes:
 
