@@ -1,0 +1,13 @@
+---
+"agents": patch
+---
+
+Tasks: expose the attempt-wide abort signal to handler bodies, retry interrupted attempts on a durable backoff, and bound a run by wall-clock time.
+
+- `step.signal` aborts for the whole attempt — on `cancel()` and when the run's `deadline` passes — so work awaited outside `step.do()` (a long model turn, a drain loop) can unwind. Inside a step the per-attempt signal already covered it.
+- `run(name, input, { interruptions })` gives a run its own `{ limit, delay, backoff }` policy for INTERRUPTED attempts — an attempt whose isolate died mid-execution. Each interruption parks the run `waiting` with the new `interrupted` reason for its backoff before replaying, and the interruption that reaches `limit` fails the run with `TaskInterruptionsExhaustedError` instead of replaying it again. `limit` is total attempts including the first, exactly as a step's is, and counts consecutive interruptions: an attempt that reaches a durable boundary under its own power clears the count. Wakes from a sleep or a step retry park are not attempts. Omitted, an interruption replays immediately and without bound, as before.
+- `step.attempt` is the run's claim number for this execution (1 on the first attempt), alongside the existing per-step `attempt`. The `{ limit, delay, backoff }` shape is now one exported `TaskRetryConfig` type shared by `step.do()` configs and run `interruptions`.
+- `run(name, input, { deadline })` fails the run with `TaskDeadlineExceededError` when the wall-clock deadline passes: a parked run is woken at the deadline; a live attempt is settled over, its signal aborted, and its later writes fenced out.
+- `onError(error, run)` now receives `{ runId, definition }`, and fires for every terminal failure including the ones Tasks records without running a handler (missing definition, spent interruption retry budget, passed deadline). A failure whose settlement lost the generation fence is no longer reported, since the run was already settled and observed from elsewhere.
+- Schema version 2 adds `deadline_at`, `interruptions`, and `retry_policy` to `cf_agents_task_runs`; existing objects migrate on their next start. `TaskWaitReason` gains `interrupted` for a run parked between an interruption and its replay.
+- A handler that catches the cancellation on `step.signal`, cleans up, and returns normally now settles the run `cancelled` rather than `completed`; the alarm memory-limit breaker's sealed failure now reaches `onError` like every other terminal failure; and a `deadline` at or before the epoch is refused at acceptance instead of stranding an accepted run behind a wake the queue rejects.
