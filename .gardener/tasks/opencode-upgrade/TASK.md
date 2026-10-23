@@ -126,9 +126,16 @@ upgrade caused from one that was already there.
 
 Move every direct `@opencode/*` dependency in the workspace to the new version, and
 update the lockfile with `pnpm install` (never by hand) until it resolves only the new version.
-When a peer range moves, also update every doc and example that names the old range. Fix every
-**breaking**, **docs** and **workaround** item and every new failure, preferring the API upstream
-now provides over keeping our own copy. Don't implement **new feature** items. Make build, `check`
+When a peer range moves, also update every doc and example that names the old range.
+
+If `pnpm install` refuses the new version because a package is younger than `minimumReleaseAge`
+(`ERR_PNPM_NO_MATURE_MATCHING_VERSION`), step down to the newest older release that installs, and
+upgrade to that. Never change `minimumReleaseAge` or `minimumReleaseAgeExclude` yourself: under
+"Needs a maintainer", name the version held back, the young dependency that blocked it and when it
+clears, so a maintainer can exclude it by hand. If no newer release installs, propose nothing.
+
+Fix every **breaking**, **docs** and **workaround** item and every new failure, preferring the API
+upstream now provides over keeping our own copy. Don't implement **new feature** items. Make build, `check`
 and every test that covers opencode pass, and record pass counts (as `harness-opencode 40/40`). Add a
 changeset when the published `agents` package changes, following `AGENTS.md`: `minor` when a peer
 range moves, `patch` when only source changes, or the peer floor moves within its major.
