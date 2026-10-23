@@ -336,6 +336,12 @@ describe("MCPClientManager mid-session re-authorization", () => {
       expect(error).toBeInstanceOf(MCPAuthorizationRequiredError);
       const reauth = error as MCPAuthorizationRequiredError;
       expect(reauth.authUrl).not.toBe(connectUrl);
+      // The server challenged with its base scope, but the new link must keep
+      // the write scope the user already granted, or the write tools fail
+      // again and the user is sent back through step-up.
+      expect(
+        new URL(reauth.authUrl).searchParams.get("scope")?.split(" ").sort()
+      ).toEqual(`${BASE_SCOPE} ${WRITE_SCOPE}`.split(" ").sort());
       expect(manager.mcpConnections[serverId].connectionState).toBe(
         "authenticating"
       );
