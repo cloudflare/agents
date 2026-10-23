@@ -193,7 +193,8 @@ src/
     quick-actions.ts    # Stateless Quick Action primitives (browserMarkdown, …)
     ai.ts               # deprecated createBrowserTools (codemode) + createQuickActionTools (deprecated)
     session.ts          # BrowserSession — one run's CDP session: active tab, handles, error hints, report
-    sandbox.ts          # runs browserTool's code in a Dynamic Worker with `cdp` bound to a session
+    browser-functions.ts # the `browser` API model code calls: functions, docs, CDP rules
+    sandbox.ts          # runs browserTool's code in a Dynamic Worker with a `browser` global
     browser-tool.ts     # harness-neutral browserTool core shared by the tools/ adapters
     truncate.ts         # truncateResult, copied from codemode
     tool-helpers.ts     # model-output + ctx helpers shared by ai.ts and the tools/ adapters

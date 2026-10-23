@@ -234,7 +234,7 @@ export class BrowserSession {
    */
   async send(input: BrowserSendInput): Promise<unknown> {
     const { method, params, sessionId, timeoutMs } = validate(
-      "send",
+      "browser.cdp",
       SEND_SCHEMA,
       input
     ) as BrowserSendInput;
@@ -271,7 +271,7 @@ export class BrowserSession {
     input: BrowserAttachInput
   ): Promise<{ sessionId: string }> {
     const { targetId, timeoutMs } = validate(
-      "attachToTarget",
+      "browser.attachToTarget",
       ATTACH_SCHEMA,
       input
     ) as BrowserAttachInput;
@@ -291,7 +291,7 @@ export class BrowserSession {
   /** Recent CDP traffic on this session's connection, newest last. */
   async getDebugLog(input?: BrowserDebugLogInput): Promise<unknown[]> {
     const { limit } = validate(
-      "getDebugLog",
+      "browser.getDebugLog",
       DEBUG_LOG_SCHEMA,
       input
     ) as BrowserDebugLogInput;
@@ -640,7 +640,7 @@ export class BrowserSession {
       return new Error(
         `${error.message}. CDP session ids don't carry over between runs. ` +
           `Use sessionId: "active" for the current tab, or the handle from ` +
-          `attachToTarget({ targetId }) for another tab.`
+          `browser.attachToTarget({ targetId }) for another tab.`
       );
     }
     if (error.code !== CDP_METHOD_NOT_FOUND) return error;
@@ -655,7 +655,7 @@ export class BrowserSession {
       return new Error(
         `${error.message}. '${method}' is page-scoped: pass sessionId: ` +
           `"active" to run it in the current tab: ` +
-          `send({ method: "${method}", params, sessionId: "active" }).`
+          `browser.cdp({ method: "${method}", params, sessionId: "active" }).`
       );
     }
     return error;
@@ -693,8 +693,14 @@ const validators = new WeakMap<object, Validator>();
 /**
  * Check a method's input against its schema before it touches the browser,
  * so the model gets a precise error. An omitted input counts as `{}`.
+ *
+ * @internal Also used by `browser-functions.ts`.
  */
-function validate(name: string, schema: object, input: unknown): unknown {
+export function validate(
+  name: string,
+  schema: object,
+  input: unknown
+): unknown {
   let validator = validators.get(schema);
   if (!validator) {
     // SAFETY: The schemas above are draft-7 objects; @cfworker's `Schema`

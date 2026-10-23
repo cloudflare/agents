@@ -1,13 +1,13 @@
 /**
- * Runs model-written JavaScript against a browser in a Dynamic Worker, with
- * a `cdp` object backed by a `BrowserSession`. Used by
- * `browserTool`. Internal — not an entry point.
+ * Runs model-written JavaScript in a Dynamic Worker, with a `browser`
+ * object whose functions run on the host. Used by `browserTool`.
+ * Internal — not an entry point.
  *
  * The Worker has no network access (`globalOutbound: null`) and no bindings:
- * the only way out is `cdp`, whose calls go back to the host over RPC.
+ * the only way out is `browser`, whose calls go back to the host over RPC.
  */
 import { RpcTarget } from "cloudflare:workers";
-import type { BrowserSession } from "./session";
+import type { BrowserFunction } from "./browser-functions";
 
 /**
  * What a run returns: the code's result or error, its console output, and a
@@ -30,80 +30,46 @@ export interface RunBrowserCodeOptions {
   loader: WorkerLoader;
   /** The model's code: an async arrow function, or a function body. */
   code: string;
-  /** The session `cdp` calls go to. */
-  session: BrowserSession;
+  /** The functions on the `browser` global, run on the host. */
+  functions: Record<string, BrowserFunction>;
   /** How long the code may run before it fails. */
   timeoutMs: number;
 }
 
-/** The `cdp` methods code can call, each taking one options object. */
-const CDP_METHODS = [
-  "send",
-  "attachToTarget",
-  "spec",
-  "getDebugLog",
-  "clearDebugLog"
-] as const;
-type CdpMethod = (typeof CDP_METHODS)[number];
-
 /**
- * The host side of `cdp`. A failed call resolves with `{ error }` instead of
- * rejecting across RPC; the sandbox rethrows it as a local error the code
- * can catch.
+ * The host side of `browser`. A failed call resolves with `{ error }`
+ * instead of rejecting across RPC; the sandbox rethrows it as a local error
+ * the code can catch.
  */
-class CdpBinding extends RpcTarget {
-  readonly #session: BrowserSession;
+class HostFunctions extends RpcTarget {
+  readonly #functions: Record<string, BrowserFunction>;
 
-  constructor(session: BrowserSession) {
+  constructor(functions: Record<string, BrowserFunction>) {
     super();
-    this.#session = session;
+    this.#functions = functions;
   }
 
   async call(
-    method: string,
+    name: string,
     input: unknown
   ): Promise<{ value: unknown } | { error: string }> {
-    if (!isCdpMethod(method)) {
-      return { error: `cdp.${method} is not a function.` };
-    }
+    const fn = Object.hasOwn(this.#functions, name)
+      ? this.#functions[name]
+      : undefined;
+    if (!fn) return { error: `browser.${name} is not a function.` };
     try {
-      return { value: await this.#invoke(method, input) };
+      return { value: await fn(input) };
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) };
     }
   }
-
-  #invoke(method: CdpMethod, input: unknown): Promise<unknown> {
-    const session = this.#session;
-    switch (method) {
-      // SAFETY: The session validates every input before using it.
-      case "send":
-        return session.send(input as Parameters<BrowserSession["send"]>[0]);
-      case "attachToTarget":
-        return session.attachToTarget(
-          input as Parameters<BrowserSession["attachToTarget"]>[0]
-        );
-      case "spec":
-        return session.spec();
-      case "getDebugLog":
-        return session.getDebugLog(
-          input as Parameters<BrowserSession["getDebugLog"]>[0]
-        );
-      case "clearDebugLog":
-        return session.clearDebugLog();
-    }
-  }
-}
-
-function isCdpMethod(method: string): method is CdpMethod {
-  return (CDP_METHODS as readonly string[]).includes(method);
 }
 
 /**
  * The entry module. `code.js` holds the model's code; keeping it in its own
  * module keeps the harness's names out of its scope.
  */
-function mainModule(timeoutMs: number): string {
+function mainModule(timeoutMs: number, names: string[]): string {
   return `import { WorkerEntrypoint } from "cloudflare:workers";
 import run from "./code.js";
 
@@ -122,8 +88,8 @@ export default class BrowserCode extends WorkerEntrypoint {
       if ("error" in reply) throw new Error(reply.error);
       return reply.value;
     };
-    const cdp = Object.freeze({
-${CDP_METHODS.map((method) => `      ${method}: (input) => call(${JSON.stringify(method)}, input),`).join("\n")}
+    const browser = Object.freeze({
+${names.map((name) => `      ${JSON.stringify(name)}: (input) => call(${JSON.stringify(name)}, input),`).join("\n")}
     });
     let timer;
     const timeout = new Promise((_, reject) => {
@@ -133,7 +99,7 @@ ${CDP_METHODS.map((method) => `      ${method}: (input) => call(${JSON.stringify
       );
     });
     try {
-      return { result: await Promise.race([run(cdp), timeout]), logs };
+      return { result: await Promise.race([run(browser), timeout]), logs };
     } catch (error) {
       return {
         error: error instanceof Error ? error.message : String(error),
@@ -162,7 +128,7 @@ function expressionModule(code: string): string {
   const expression = code
     .replace(/^export\s+default\s+/, "")
     .replace(/;\s*$/, "");
-  return `export default async function (cdp) {
+  return `export default async function (browser) {
   const value = (
 ${expression}
   );
@@ -173,7 +139,7 @@ ${expression}
 
 /** The model's code as a function body, for statements with a `return`. */
 function bodyModule(code: string): string {
-  return `export default async function (cdp) {
+  return `export default async function (browser) {
 ${code}
 }
 `;
@@ -185,7 +151,8 @@ function isSyntaxError(error: unknown): boolean {
 }
 
 /**
- * Run the model's code against `session` in a fresh Dynamic Worker.
+ * Run the model's code in a fresh Dynamic Worker, with `browser` bound to
+ * `functions`.
  *
  * The code is first loaded as an expression (an async arrow function, as
  * the tool asks for). If that doesn't parse, it's loaded once more as a
@@ -199,7 +166,7 @@ export async function runBrowserCode(
 ): Promise<BrowserCodeRun> {
   const code = stripFences(options.code);
   if (code === "") return { result: undefined, logs: [] };
-  const binding = new CdpBinding(options.session);
+  const binding = new HostFunctions(options.functions);
   try {
     return await evaluate(options, expressionModule(code), binding);
   } catch (error) {
@@ -223,7 +190,7 @@ export async function runBrowserCode(
 async function evaluate(
   options: RunBrowserCodeOptions,
   codeModule: string,
-  binding: CdpBinding
+  binding: HostFunctions
 ): Promise<BrowserCodeRun> {
   // `load()`, not `get(id, ...)`: every run's code is different, so there
   // is nothing to cache by id.
@@ -231,7 +198,7 @@ async function evaluate(
     compatibilityDate: "2025-06-01",
     mainModule: "main.js",
     modules: {
-      "main.js": mainModule(options.timeoutMs),
+      "main.js": mainModule(options.timeoutMs, Object.keys(options.functions)),
       "code.js": codeModule
     },
     globalOutbound: null
@@ -241,7 +208,7 @@ async function evaluate(
   // finalize them during isolate shutdown and crash workerd.
   try {
     const entrypoint = worker.getEntrypoint() as unknown as {
-      evaluate(binding: CdpBinding): Promise<BrowserCodeRun>;
+      evaluate(binding: HostFunctions): Promise<BrowserCodeRun>;
     };
     try {
       return await entrypoint.evaluate(binding);
