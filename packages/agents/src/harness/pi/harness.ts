@@ -240,8 +240,6 @@ function signalContext(signal: AbortSignal | undefined): Context {
  * nothing to do, the job completes. An eviction mid-run leaves the job due,
  * so its alarm restarts the object, pi reopens and resumes its own tasks,
  * and the job waits again.
- *
- * @beta The API may change between releases.
  */
 export class PiHarness extends LifecycleCapability {
   readonly sessions: PiSessions;

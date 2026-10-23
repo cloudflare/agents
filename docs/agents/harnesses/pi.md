@@ -1,10 +1,10 @@
 ---
-title: Pi harness (Beta)
+title: Pi harness
 pcx_content_type: get-started
-description: Host pi-durable sessions in a Durable Object with the beta PiHarness lifecycle capability. Connect a pi-ai model, add tools and skills, and keep sessions running across eviction.
+description: Host pi-durable sessions in a Durable Object with the PiHarness lifecycle capability. Connect a pi-ai model, add tools and skills, and keep sessions running across eviction.
 ---
 
-`PiHarness` hosts [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable) in a Durable Object. It opens Pi over the object's SQLite database and connects Pi's sessions to the Agents SDK lifecycle, which wakes sessions with work after eviction. The API is in beta and may change.
+`PiHarness` hosts [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable) in a Durable Object. It opens Pi over the object's SQLite database and connects Pi's sessions to the Agents SDK lifecycle, which wakes sessions with work after eviction.
 
 Pi owns everything about a run: the transcript, the inbox of steers and follow-ups, generation, tool calls, retries, and crash recovery. `PiHarness` supplies the storage and the wake. It does not provide a chat protocol or user interface. Your application chooses how clients reach sessions, such as WebSockets, HTTP, or RPC.
 
@@ -21,13 +21,14 @@ The three Pi packages are optional peer dependencies of `agents`, at `~1.4.0`. p
 `PiHarness` uses a factory function to construct Pi's `Harness` so it can be instantiated lazily:
 
 ```ts
+import { DurableObject } from "cloudflare:workers";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
-import { Agent } from "agents";
 import { PiHarness } from "agents/harness/pi";
+import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 
-export class Assistant extends Agent<Env> {
+export class Assistant extends DurableObject<Env> {
   ai = createAI({ binding: this.env.AI });
   registry = createRegistry();
 
@@ -42,21 +43,20 @@ export class Assistant extends Agent<Env> {
       );
     },
     defaults: {
-      model: this.ai("@cf/zai-org/glm-4.7-flash"),
+      model: this.ai("@cf/zai-org/glm-5.3-flash"),
       thinkingLevel: "low"
     }
   });
 
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    this.lifecycle.use(this.harness);
-  }
+  lifecycle = Lifecycle.install(this).use(this.harness);
 
   async ask(prompt: string) {
     return (await this.harness.prompt(prompt)).text;
   }
 }
 ```
+
+`PiHarness` is a Lifecycle capability, so it runs on a plain Durable Object. `Lifecycle.install(this)` gives the object its startup, alarms and job queue, and `.use(this.harness)` installs the harness on it. The object needs a SQLite migration in your Wrangler configuration, like any Durable Object that uses SQLite storage. To use it from an `Agent`, which already has a lifecycle, call `this.lifecycle.use(this.harness)` in the constructor instead.
 
 | Option     | What it is                                                                                                                                                                                                                                                                                                                          |
 | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -174,7 +174,7 @@ const { text } = await this.harness.prompt("What is 47 × 19?");
 
 // Another session, on a cheaper model.
 const session = await this.harness.sessions.create();
-await session.setModel(this.ai("@cf/zai-org/glm-4.7-flash"));
+await session.setModel(this.ai("@cf/zai-org/glm-5.3-flash"));
 
 // Durable once it returns; the same operation id twice is one submission.
 const receipt = await session.submit("Summarize the latest report", {

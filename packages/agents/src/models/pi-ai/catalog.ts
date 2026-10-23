@@ -18,8 +18,6 @@
  * options do not, so a model stored in Agent state and read back comes home
  * with this provider's defaults. Re-apply them with `ai(model, options)`
  * after loading if the model carried any.
- *
- * @beta This surface is in beta and may change.
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -32,38 +30,28 @@ import type { ModelOptions } from "../core/settings";
  * The `api` marker Workers AI models from this provider carry. It is not a
  * wire format: Workers AI runs on `env.AI.run`, and the compat layer maps that
  * onto strict OpenAI chat completions.
- *
- * @beta This surface is in beta and may change.
  */
 export const CLOUDFLARE_AI_API = "cloudflare-ai";
 
-/** @beta This surface is in beta and may change. */
 export type CloudflareAIApi = typeof CLOUDFLARE_AI_API;
 
 /**
  * The pi-ai provider id. A `Models` registry resolves specifiers as
  * `cloudflare/<id>`, e.g. `cloudflare/anthropic/claude-opus-4.8`.
- *
- * @beta This surface is in beta and may change.
  */
 export const CLOUDFLARE_PROVIDER_ID = "cloudflare";
 
 /**
  * A Workers AI model produced by this provider. `id` is the `@cf/` id exactly
  * as given; `api` is {@link CLOUDFLARE_AI_API}.
- *
- * @beta This surface is in beta and may change.
  */
 export type CloudflareModel = Model<CloudflareAIApi>;
 
-/** @beta This surface is in beta and may change. */
 export type ModelCost = Model<Api>["cost"];
 
 /**
  * A model this provider routes: a Workers AI model or any pi-ai model the
  * caller handed to `ai(model)`.
- *
- * @beta This surface is in beta and may change.
  */
 export type RoutedModel = Model<Api>;
 
@@ -72,8 +60,6 @@ export type RoutedModel = Model<Api>;
  * session affinity, plus pi-ai model metadata overrides and the stream idle
  * deadline. Metadata overrides only apply to the `@cf/` form — a model object
  * brings its own metadata, and this module never second-guesses it.
- *
- * @beta This surface is in beta and may change.
  */
 /**
  * A fallback leg: a Workers AI id, a `<slug>/<id>` pi-ai's gateway registry

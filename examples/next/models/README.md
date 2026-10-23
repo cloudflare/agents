@@ -136,5 +136,4 @@ it. On `/stream` the response status is already 200 by the time the model is
 reached, so a failure before the first token shows up as an empty body with the
 error in the `wrangler dev` log.
 
-`agents/models/ai-sdk` and `agents/models/pi-ai` are experimental and their
-surfaces may change.
+`agents/models/ai-sdk` is experimental and its surface may change.
