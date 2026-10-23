@@ -1,8 +1,8 @@
-# Browse the Web (Experimental)
+# Browse the Web
 
 Browser tools give your agents the full Chrome DevTools Protocol (CDP). Instead of a fixed set of actions (click, screenshot, navigate), the model writes code that sends CDP commands to a live browser, so it can use every domain, command, and event in the protocol.
 
-`browserTool` gives the model one browser that stays open between turns, so tabs, cookies, and logins carry over. There is a version for the AI SDK, TanStack AI, and pi.
+`browserTool` gives the model one browser that stays open between turns, so tabs, cookies, and logins carry over. There is a version for pi, TanStack AI, and the AI SDK.
 
 > `createBrowserTools`, `createBrowserRuntime`, and Quick Actions are deprecated. They are documented under [Deprecated](#deprecated).
 
@@ -35,7 +35,7 @@ Add a [Browser Run](https://developers.cloudflare.com/browser-run/) binding and 
 }
 ```
 
-Install `agents`, plus the package for your harness: `ai` for the AI SDK, `@tanstack/ai` for TanStack AI, or the pi packages for [pi-durable](./harnesses/pi.md).
+Install `agents`, plus the package for your harness: the pi packages for [pi-durable](./harnesses/pi.md), `@tanstack/ai` for TanStack AI, or `ai` for the AI SDK.
 
 Create a `Browser` on your agent and install it on the agent's [Lifecycle](./lifecycle.md), which stores the browser's record and keeps it across hibernation:
 
@@ -55,24 +55,23 @@ export class MyAgent extends Agent<Env> {
 
 Only Chromium on Browser Run is supported.
 
-### AI SDK
+### pi
 
-Import `browserTool` from `agents/browser/ai-sdk` and pass it wherever you pass AI SDK tools, under any name:
+Import `browserTool` from `agents/browser/pi` and install it in an extension. It takes an optional `name` (default `"browser"`):
 
 ```ts
-import { streamText } from "ai";
-import { browserTool } from "agents/browser/ai-sdk";
+import { browserTool } from "agents/browser/pi";
 
-const result = streamText({
-  model,
-  messages,
-  tools: {
-    browser: browserTool({ browser: this.browser, loader: this.env.LOADER })
-  }
+this.registry.install({
+  name: "browser",
+  tools: [browserTool({ browser: this.browser, loader: this.env.LOADER })]
 });
 ```
 
-To show a screenshot, the model returns it from its code. The full result, image included, stays on the message for your UI, and the model gets a short text summary.
+- A returned screenshot comes back as an image in the tool result, so the model can see the page and a UI can show it from the transcript. pi-ai only sends the image to models that accept images; other models get the text alone.
+- Each pi conversation gets its own active tab: `scope` defaults to the calling conversation, so sessions, forks, and subagents on one object do not drive each other's page. Pass `scope` as a string to share one tab, or as a function of the call (`(api) => string`) to choose.
+- pi does not rerun a browser call cut off by an eviction, because the code may have clicked or submitted something. The model gets an interrupted result and can try again; the browser itself is still there.
+- Stopping a conversation does not stop a browser call already running. It finishes or times out.
 
 ### TanStack AI
 
@@ -91,23 +90,24 @@ const stream = chat({
 
 The TanStack AI tool does not support screenshots yet. TanStack AI gives the host and the model the same output, so a returned screenshot is replaced with a note, and the tool tells the model to read the page with `Runtime.evaluate` instead.
 
-### pi
+### AI SDK
 
-Import `browserTool` from `agents/browser/pi` and install it in an extension. It takes an optional `name` (default `"browser"`):
+Import `browserTool` from `agents/browser/ai-sdk` and pass it wherever you pass AI SDK tools, under any name:
 
 ```ts
-import { browserTool } from "agents/browser/pi";
+import { streamText } from "ai";
+import { browserTool } from "agents/browser/ai-sdk";
 
-this.registry.install({
-  name: "browser",
-  tools: [browserTool({ browser: this.browser, loader: this.env.LOADER })]
+const result = streamText({
+  model,
+  messages,
+  tools: {
+    browser: browserTool({ browser: this.browser, loader: this.env.LOADER })
+  }
 });
 ```
 
-- A returned screenshot comes back as an image in the tool result, so the model can see the page and a UI can show it from the transcript. pi-ai only sends the image to models that accept images; other models get the text alone.
-- Each pi conversation gets its own active tab: `scope` defaults to the calling conversation, so sessions, forks, and subagents on one object do not drive each other's page. Pass `scope` as a string to share one tab, or as a function of the call (`(api) => string`) to choose.
-- pi does not rerun a browser call cut off by an eviction, because the code may have clicked or submitted something. The model gets an interrupted result and can try again; the browser itself is still there.
-- Stopping a conversation does not stop a browser call already running. It finishes or times out.
+To show a screenshot, the model returns it from its code. The full result, image included, stays on the message for your UI, and the model gets a short text summary.
 
 ### How the tool behaves
 
