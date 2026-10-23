@@ -167,8 +167,10 @@ revert or delete anything else (gitignored build output is fine). Then propose, 
    `{"/body": {"placeholders": {"pr": {"step": "pr", "output": "pullUrl"}}}}`), then
    `pull_request.update` closing it.
 
-Title the commit and pull request alike: a conventional commit with scope `agents`, in the style of
-#2594 and #2617.
+Title the commit and pull request alike, as a conventional commit in the style of #2594 and #2617.
+Pick whichever type and wording fit, for example `chore(deps): upgrade opencode to <version>` or
+`fix(agents): support opencode <version>`, as long as the title says plainly that we move to the new
+version, not something else such as testing against it.
 
 ### Body
 
