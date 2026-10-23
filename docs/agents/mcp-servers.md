@@ -1,32 +1,16 @@
 # Creating MCP Servers
 
-This guide covers the different ways to create MCP servers with the Agents SDK and helps you choose the right approach.
+Build an MCP server on Workers with `createMcpHandler` from `agents/mcp/server` and an MCP SDK v2 `McpServer`. The handler is stateless: every request gets a fresh server from your factory, so there is no Durable Object, session, or WebSocket to manage. It serves draft MCP `2026-07-28` and stateless 2025-era clients from the same endpoint.
 
-## Choosing an Approach
-
-| Approach                                       | Stateful? | Requires Durable Objects? | Best for                                          |
-| ---------------------------------------------- | --------- | ------------------------- | ------------------------------------------------- |
-| `createMcpHandler()`                           | No        | No                        | New servers and the draft MCP protocol            |
-| `McpAgent` (deprecated legacy path)            | Yes       | Yes                       | Existing stateful SDK v1 deployments              |
-| Raw `WebStandardStreamableHTTPServerTransport` | No        | No                        | Low-level control without the Agents HTTP wrapper |
-
-- **`createMcpHandler()`** is the current server-development path. It serves draft MCP `2026-07-28` and supports stateless published 2025 clients by default.
-- **`McpAgent`** is a retained, feature-frozen SDK v1 path for existing stateful deployments. New servers should use `createMcpHandler()`.
-- **Raw transport** gives you low-level control if the standard handler lifecycle is not suitable.
-
-`McpAgent` and the other retained SDK v1 registration APIs use the upstream
-Zod-based schema contract. Define their tool input and output schemas as Zod
-shapes; AI SDK flexible-schema adapters are not accepted. For a new MCP server
-that needs Standard Schema support, use `@modelcontextprotocol/server` v2 with
-`createMcpHandler()`.
-
-## Stateless MCP Server with `createMcpHandler()`
-
-The simplest way to create an MCP server. Install the exact SDK v2 server peer, then use the isolated server entry point so legacy Agents transports and MCP clients stay out of your Worker bundle:
+## Install
 
 ```sh
 pnpm add agents @modelcontextprotocol/server@2.3.1 zod
 ```
+
+Use the exact `@modelcontextprotocol/server` version required by your installed Agents release.
+
+## Create a server
 
 ```typescript
 import { McpServer } from "@modelcontextprotocol/server";
@@ -53,16 +37,83 @@ function createServer() {
   return server;
 }
 
+const handler = createMcpHandler(createServer);
+
 export default {
   fetch(request, env, ctx) {
-    return createMcpHandler(createServer)(request, env, ctx);
+    return handler(request, env, ctx);
   }
 } satisfies ExportedHandler;
 ```
 
-`createMcpHandler` requires a factory so concurrent Worker requests receive isolated server instances. A function input is always treated as an SDK v2 factory.
+The server is served at `/mcp` by default. `agents/mcp/server` uses `AsyncLocalStorage`, so enable `nodejs_compat`:
 
-### `createMcpHandler` options
+```jsonc
+{
+  "name": "hello-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"]
+}
+```
+
+`createMcpHandler` takes a factory, not a server instance, so concurrent requests never share one `McpServer`. Create the handler once at module scope and call it for each request.
+
+Deploy the Worker and connect any MCP client to `https://<your-worker>.workers.dev/mcp`, or run `wrangler dev` and point the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) at `http://localhost:8787/mcp`.
+
+## Keep state in bindings
+
+Nothing survives between requests inside the handler. Keep data in bindings and read them from your tools with `env` from `cloudflare:workers`:
+
+```typescript
+import { env } from "cloudflare:workers";
+
+server.registerTool(
+  "readFile",
+  {
+    description: "Read a file from the shared bucket",
+    inputSchema: { path: z.string() }
+  },
+  async ({ path }) => {
+    const object = await env.BUCKET.get(path);
+    return {
+      content: [
+        { type: "text", text: object ? await object.text() : "Not found" }
+      ]
+    };
+  }
+);
+```
+
+For per-user state, call an Agent from the tool. The Agent owns the data, and the MCP server stays stateless:
+
+```typescript
+import { Agent, getAgentByName } from "agents";
+
+export class Notes extends Agent<Env, { notes: string[] }> {
+  initialState = { notes: [] };
+
+  add(note: string) {
+    this.setState({ notes: [...this.state.notes, note] });
+    return this.state.notes.length;
+  }
+}
+
+server.registerTool(
+  "addNote",
+  { inputSchema: { note: z.string() } },
+  async ({ note }) => {
+    const userId = String(getMcpAuthContext()?.props.userId ?? "anonymous");
+    const notes = await getAgentByName(env.Notes, userId);
+    const count = await notes.add(note);
+    return { content: [{ type: "text", text: `You have ${count} notes` }] };
+  }
+);
+```
+
+Bind `Notes` as a Durable Object in `wrangler.jsonc` and export the class from your Worker. `getMcpAuthContext()` is covered in [Authentication](#authentication).
+
+## Handler options
 
 ```typescript
 createMcpHandler(() => createServer(), {
@@ -73,412 +124,84 @@ createMcpHandler(() => createServer(), {
   allowedHostnames: ["mcp.example.com"], // custom-domain Host policy
   allowedOriginHostnames: ["app.example.com"], // browser Origin policy
   authContext: { props: {} }, // optional application props override
-  legacy: "stateless", // upstream default; use "reject" for Stateless-only
+  legacy: "stateless", // default; use "reject" to serve only Stateless clients
   responseMode: "auto" // upstream SDK response shaping
 });
 ```
 
-`createMcpHandler` supports upstream SDK v2 handler options except `bus`, which is not exposed by the Agents SDK. Supplying `bus` throws a `TypeError`.
+`createMcpHandler` supports the upstream SDK v2 handler options except `bus`, which the Agents SDK does not expose. Supplying `bus` throws a `TypeError`.
 
-To publish change events, use the returned handler's `notify` methods, such as `handler.notify.toolsChanged()`. Create the handler once at module scope and reuse it for requests and notifications. Notifications are isolate-local: they do not reach subscriptions in other Worker isolates. See the [handler notification API](https://developers.cloudflare.com/agents/model-context-protocol/apis/handler-api/#publish-list-and-resource-changes) for the available methods.
-
-Use `createLegacyMcpHandler` for SDK v1 WorkerTransport, storage, session, and event-store options. The SDK v2 `bus` option is not available on that handler either.
+### Origin and Host validation
 
 The handler validates every present `Origin` header before serving the request. It rejects malformed, opaque, and non-HTTP origins. Requests without `Origin` remain valid for non-browser MCP clients.
 
 Its default allowlist includes localhost-class origins and the endpoint's `workers.dev` hostname. A concrete `corsOptions.origin` adds that hostname automatically. The handler also applies matching Host checks to localhost and `workers.dev` endpoints. For a custom domain with wildcard CORS, configure `allowedHostnames` and `allowedOriginHostnames` explicitly. Values are hostnames without a scheme or port, and matching ignores the Origin's scheme and port.
 
-Pass `allowedOriginHostnames: "*"` only when equivalent Origin validation runs in trusted middleware before the handler. This explicitly disables the handler's Origin check, including malformed and opaque Origin rejection. MCP HTTP servers are required to validate browser Origins, so do not use this as an unauthenticated public-server shortcut.
+Pass `allowedOriginHostnames: "*"` only when equivalent Origin validation runs in trusted middleware before the handler. This disables the handler's Origin check, including malformed and opaque Origin rejection. MCP HTTP servers are required to validate browser Origins, so do not use this as an unauthenticated public-server shortcut.
 
-### 2025 compatibility and elicitation
+### Notify clients of changes
 
-The default `legacy: "stateless"` lane supports ordinary 2025 tools, resources, and prompts. It has no session return path for push-style server-to-client requests; attempts to sample, elicit, or list roots fail immediately with guidance to use a sessionful transport.
+Use the returned handler's `notify` methods, such as `handler.notify.toolsChanged()`, to publish list and resource changes. Notifications are isolate-local: they do not reach subscriptions in other Worker isolates. See the [handler notification API](https://developers.cloudflare.com/agents/model-context-protocol/apis/handler-api/#publish-list-and-resource-changes) for the available methods.
 
-Applications that must serve both generations can route before `createMcpHandler`: send Stateless requests to a strict handler and Legacy requests to an existing session-addressed Agent or transport. See [`examples/mcp-elicitation-mrtr`](../../examples/mcp-elicitation-mrtr/) for Stateless Elicitation and [`examples/mcp-elicitation`](../../examples/mcp-elicitation/) for Legacy Elicitation.
+## Authentication
 
-For an explicit Legacy handler, use the retained Legacy API:
-
-```typescript
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createLegacyMcpHandler } from "agents/mcp";
-
-const server = new McpServer({ name: "legacy", version: "1.0.0" });
-export default createLegacyMcpHandler(server);
-```
-
-Passing an SDK v1 server directly to `createMcpHandler` still forwards to this API for compatibility, but that overload is deprecated, emits a migration warning, and is removed in the next major release. `createLegacyMcpHandler` and `WorkerTransport` themselves are not deprecated.
-
-### Accessing Authenticated User Context
-
-When your MCP server is wrapped with `OAuthProvider` from `@cloudflare/workers-oauth-provider`, provider-issued tokens are available through standard SDK v2 `AuthInfo`. The existing `getMcpAuthContext()` application-props helper remains supported:
+Wrap the handler with `OAuthProvider` from `@cloudflare/workers-oauth-provider` to require OAuth 2.1. The provider serves the authorization, token, and registration endpoints and validates Bearer tokens on `/mcp`:
 
 ```typescript
+import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
 
-server.registerTool(
-  "whoami",
-  { description: "Returns the authenticated user" },
-  async (context) => {
-    const auth = getMcpAuthContext();
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({
-            clientId: context.http?.authInfo?.clientId,
-            scopes: context.http?.authInfo?.scopes,
-            props: auth?.props
-          })
-        }
-      ]
-    };
-  }
-);
-```
+function createServer() {
+  const server = new McpServer({ name: "Authenticated", version: "1.0.0" });
 
-Do not log or return `context.http.authInfo.token`. External-token resolvers continue providing `getMcpAuthContext().props` but do not synthesize incomplete standard metadata.
-
-## Stateful MCP Server with `McpAgent` (legacy)
-
-`McpAgent` gives each client session its own Durable Object with persistent state. It remains available for existing SDK v1 deployments but is deprecated and feature-frozen; new servers should use the stateless handler or explicitly compose a separate legacy route where a session is required.
-
-### Writing TinyMCP
-
-Prototyping is very easy! If you want to quickly deploy an MCP, it only takes ~20 lines of code:
-
-```typescript
-import { McpAgent } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
-
-// Our MCP server!
-export class TinyMcp extends McpAgent {
-  server = new McpServer({ name: "", version: "v1.0.0" });
-
-  async init() {
-    this.server.registerTool(
-      "square",
-      {
-        description: "Squares a number",
-        inputSchema: { number: z.number() }
-      },
-      async ({ number }) => ({
-        content: [{ type: "text", text: String(number ** 2) }]
-      })
-    );
-  }
-}
-
-// This is literally all there is to our Worker
-export default TinyMcp.serve("/");
-```
-
-Your `wrangler.jsonc` would look something like:
-
-```jsonc
-{
-  "name": "tinymcp",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-01-28",
-  "compatibility_flags": ["nodejs_compat"],
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "MCP_OBJECT",
-        "class_name": "TinyMcp"
-      }
-    ]
-  },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["TinyMcp"]
+  server.registerTool(
+    "whoami",
+    { description: "Returns the authenticated user" },
+    async (context) => {
+      const auth = getMcpAuthContext();
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              userId: auth?.props.userId,
+              clientId: context.http?.authInfo?.clientId,
+              scopes: context.http?.authInfo?.scopes
+            })
+          }
+        ]
+      };
     }
-  ]
-}
-```
-
-### What is going on here?
-
-`McpAgent` requires us to define 2 bits, `server` and `init()`.
-
-`init()` is the initialization logic that runs every time our MCP server is started (each client session goes to a different Agent instance).  
-In there you'll normally setup all your tools/resources and anything else you might need. In this case, we're only setting the tool `square`.
-
-That was just the `McpAgent`, but we still need a Worker to route requests to our MCP server. `McpAgent` exports a static method that deals with that for you. That's what `TinyMcp.serve(...)` is for.  
-It returns an object with a `fetch` handler that can act as our Worker entrypoint and deal with the Streamable HTTP transport for us, so we can deploy our MCP directly!
-
-### Putting it to the test
-
-It's a very simple MCP indeed, but you can get a feel of how fast you can get a server up and running. You can deploy this worker and test your MCP with any client. I'll try with https://playground.ai.cloudflare.com:
-![model calls the square tool after connecting to our mcp](https://github.com/user-attachments/assets/1e979a82-ed3e-49e9-b9d5-a3fc9b0363a7)
-
-## Password-protected StorageMcp with OAuth!
-
-To get a feel of what a more realistic MCP might look like, let's deploy an MCP that lets anyone that knows our secret password access a shared R2 bucket. (This is an example of a custom authorization flow, please do **not** use this in production)
-
-```typescript
-import { McpAgent } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import {
-  OAuthProvider,
-  type OAuthHelpers
-} from "@cloudflare/workers-oauth-provider";
-import { z } from "zod";
-import { env } from "cloudflare:workers";
-
-export class StorageMcp extends McpAgent {
-  server = new McpServer({ name: "", version: "v1.0.0" });
-
-  async init() {
-    // Helper to return text responses from our tools
-    const textRes = (text: string) => ({
-      content: [{ type: "text" as const, text }]
-    });
-
-    this.server.registerTool(
-      "writeFile",
-      {
-        description: "Store text as a file with the given path",
-        inputSchema: {
-          path: z.string().describe("Absolute path of the file"),
-          content: z.string().describe("The content to store")
-        }
-      },
-      async ({ path, content }) => {
-        try {
-          await env.BUCKET.put(path, content);
-          return textRes(`Successfully stored contents to ${path}`);
-        } catch (e: unknown) {
-          return textRes(`Couldn't save to file. Found error ${e}`);
-        }
-      }
-    );
-
-    this.server.registerTool(
-      "readFile",
-      {
-        description: "Read the contents of a file",
-        inputSchema: {
-          path: z.string().describe("Absolute path of the file to read")
-        }
-      },
-      async ({ path }) => {
-        const obj = await env.BUCKET.get(path);
-        if (!obj || !obj.body)
-          return textRes(`Error reading file at ${path}: not found`);
-        try {
-          return textRes(await obj.text());
-        } catch (e: unknown) {
-          return textRes(`Error reading file at ${path}: ${e}`);
-        }
-      }
-    );
-
-    this.server.registerTool(
-      "whoami",
-      {
-        description: "Check who the user is"
-      },
-      async () => {
-        return textRes(`${this.props?.userId}`);
-      }
-    );
-  }
-}
-
-// HTML form page for users to write our password
-function passwordPage(opts: { query: string; error?: string }) {
-  const err = opts.error
-    ? `<p class="text-red-600 mb-2">${opts.error}</p>`
-    : "";
-  return new Response(
-    `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ENTER THE MAGIC WORD</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="font-sans grid place-items-center min-h-screen bg-gray-100">
-  <form method="POST" action="/authorize?${opts.query}" 
-        class="bg-white p-6 rounded-lg shadow-md w-full max-w-xs">
-    <h1 class="text-lg font-semibold mb-3">ENTER THE MAGIC WORD</h1>
-    ${err}
-    <label class="block text-sm mb-1">Password</label>
-    <input name="password" type="password" required autocomplete="current-password"
-           class="w-full border rounded px-3 py-2 mb-3" />
-    <button type="submit"
-            class="w-full py-2 bg-black text-white rounded font-medium hover:bg-gray-800">
-      Continue
-    </button>
-  </form>
-</body>
-</html>`,
-    { headers: { "content-type": "text/html; charset=utf-8" } }
   );
+
+  return server;
 }
 
-// This is the default handler of our worker BEFORE requests are authenticated.
-interface StorageEnv {
-  OAUTH_PROVIDER: OAuthHelpers;
-  SHARED_PASSWORD: string;
-}
+const mcpHandler = createMcpHandler(createServer);
 
-const defaultHandler = {
-  async fetch(request: Request, env: StorageEnv) {
-    const provider = env.OAUTH_PROVIDER;
-    const url = new URL(request.url);
-
-    // Only handle our auth UI/flow here
-    if (url.pathname !== "/authorize") {
-      return new Response("NOT FOUND", { status: 404 });
-    }
-
-    // Parse the OAuth request
-    const oauthReq = await provider.parseAuthRequest(request);
-
-    // We render the password page for GET requests
-    if (request.method === "GET") {
-      return passwordPage({ query: url.searchParams.toString() });
-    }
-
-    // We validate the password in POST requests
-    if (request.method === "POST") {
-      const form = await request.formData();
-      const password = String(form.get("password") || "");
-
-      const SHARED_PASSWORD = env.SHARED_PASSWORD; // Store this as a secret
-      if (!SHARED_PASSWORD) {
-        return new Response("Server misconfigured: missing SHARED_PASSWORD", {
-          status: 500
-        });
-      }
-      if (password !== SHARED_PASSWORD) {
-        return passwordPage({
-          query: url.searchParams.toString(),
-          error: "Wrong password."
-        });
-      }
-
-      // We give everyone the same userId
-      const userId = "friend";
-
-      const { redirectTo } = await provider.completeAuthorization({
-        request: oauthReq,
-        userId,
-        scope: [], // We don't care about scopes
-
-        // We could add anything we wanted here so we could access it
-        // within the MCP with `this.props`
-        props: { userId },
-        metadata: undefined
-      });
-
-      return Response.redirect(redirectTo, 302);
-    }
-
-    return new Response("Method Not Allowed", {
-      status: 405,
-      headers: { allow: "GET, POST" }
-    });
-  }
-};
-
-// OAuthProvider creates our worker handler
 export default new OAuthProvider({
   authorizeEndpoint: "/authorize",
-  tokenEndpoint: "/token",
-  clientRegistrationEndpoint: "/register",
-  apiHandlers: { "/mcp": StorageMcp.serve("/mcp") },
-  defaultHandler
-});
-```
-
-You would also add these to your `wrangler.jsonc`:
-
-```jsonc
-{
-  // rest of your config...
-  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "your-bucket-name" }],
-  "kv_namespaces": [
-    {
-      "binding": "OAUTH_KV", // required by OAuthProvider
-      "id": "your-kv-id"
+  tokenEndpoint: "/oauth/token",
+  clientRegistrationEndpoint: "/oauth/register",
+  apiRoute: "/mcp",
+  apiHandler: {
+    fetch(request: Request, env: Env, ctx: ExecutionContext) {
+      return mcpHandler(request, env, ctx);
     }
-  ]
-}
-```
-
-### What's going on?
-
-In ~160 lines we were able to write our custom OAuth authorization flow so anyone that knows our secret password can use the MCP server.
-
-Just like before, in `init()` we set a few tools to access files in our R2 bucket. We also have the `whoami` tool to show users what `userId` we authenticated them with. It's just an example of how to access `props` from within the `McpAgent`.
-
-Most of the code here is either the HTML page to type in the password or the OAuth `/authorize` logic.
-The important part is to notice how in the `OAuthProvider` we expose the `StorageMcp` through the `apiHandlers` key and use the same `serve` method we were using before.
-
-### Let's see how this looks like
-
-Once again, using https://playground.ai.cloudflare.com:
-![password page](https://github.com/user-attachments/assets/8e469110-fffa-45d2-84c1-ae16a651ae41)
-The auth flow prompts us for the password.
-
-![model calls all 3 tools after authorization](https://github.com/user-attachments/assets/07e22fef-93de-47c2-af7e-9c361e460186)
-Once we've authenticated ourselves we can use all the tools!
-
-## Data Jurisdiction for Compliance
-
-`McpAgent` supports specifying a data jurisdiction for your MCP server, which is particularly useful for satisfying GDPR and other data residency regulations. By setting the `jurisdiction` option, you can ensure that your Durable Object instances (and their data) are created in a specific geographic region.
-
-### Using the EU Jurisdiction for GDPR
-
-To comply with GDPR requirements, you can specify the `"eu"` jurisdiction to ensure that all data processed by your MCP server remains within the European Union:
-
-```typescript
-export default TinyMcp.serve("/", {
-  jurisdiction: "eu"
-});
-```
-
-Or with the OAuth-protected example:
-
-```typescript
-export default new OAuthProvider({
-  authorizeEndpoint: "/authorize",
-  tokenEndpoint: "/token",
-  clientRegistrationEndpoint: "/register",
-  apiHandlers: {
-    "/mcp": StorageMcp.serve("/mcp", { jurisdiction: "eu" })
   },
-  defaultHandler
+  defaultHandler: AuthHandler // your consent and login flow
 });
 ```
 
-When you specify `jurisdiction: "eu"`, Cloudflare will create the Durable Object instances in EU data centers, ensuring that:
+`OAuthProvider` needs an object with a `fetch` method, so wrap the handler as shown. Passing the handler function directly throws at startup.
 
-- All MCP session data stays within the EU
-- User data processed by your tools remains in the EU
-- State stored in the Durable Object's storage API stays in the EU
+`getMcpAuthContext().props` returns the `props` you passed to `completeAuthorization()` in your auth flow. Tool callbacks also receive the standard SDK v2 `AuthInfo` at `context.http.authInfo`. Do not log or return `context.http.authInfo.token` or `authInfo.extra.props`.
 
-This helps you comply with GDPR's data localization requirements without any additional configuration.
+The OAuth flow needs a KV namespace bound as `OAUTH_KV`. For a complete server with a login page, see [`examples/mcp-worker-authenticated`](https://github.com/cloudflare/agents/tree/main/examples/mcp-worker-authenticated). For consent dialogs, CSRF, and proxying to a third-party identity provider, see [Securing MCP Servers](./securing-mcp-servers.md).
 
-### Available Jurisdictions
+## Elicitation
 
-The `jurisdiction` option accepts any value supported by [Cloudflare's Durable Objects jurisdiction API](https://developers.cloudflare.com/durable-objects/reference/data-location/), including:
-
-- `"eu"` - European Union
-- `"fedramp"` - FedRAMP compliant locations
-
-## Elicitation (Human-in-the-Loop)
-
-MCP servers can request additional input during a tool call. The implementation differs by protocol generation.
-
-### Stateless Elicitation
-
-For Stateless Elicitation, return `inputRequired(...)`. The client gathers the input and retries the request with SDK-managed `requestState` and `inputResponses`; the Worker does not suspend while a person responds.
+A tool can ask the user for input by returning `inputRequired(...)`. The client collects the input and retries the request with SDK-managed `requestState` and `inputResponses`. The Worker does not wait while a person responds.
 
 ```typescript
 import {
@@ -491,7 +214,7 @@ import { z } from "zod";
 
 function createServer() {
   const server = new McpServer({
-    name: "Stateless Elicitation Demo",
+    name: "Elicitation Demo",
     version: "1.0.0"
   });
   server.registerTool(
@@ -534,40 +257,24 @@ export default {
 } satisfies ExportedHandler;
 ```
 
-See [`examples/mcp-elicitation-mrtr`](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation-mrtr) for a two-round Stateless Elicitation example.
+See [`examples/mcp-elicitation-mrtr`](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation-mrtr) for a two-round example.
 
-### Legacy Elicitation
+## 2025-era clients
 
-Existing Legacy deployments send pushed `elicitation/create` requests over a session-addressed response stream. Use `McpAgent` or `createLegacyMcpHandler` with `WorkerTransport` when that behavior must be retained.
+With the default `legacy: "stateless"`, the same endpoint also answers 2025-era Streamable HTTP clients for tools, resources, and prompts. Those clients have no session to receive server-to-client requests, so sampling, pushed elicitation, and roots requests fail immediately. Set `legacy: "reject"` to serve only Stateless clients.
 
-See [`examples/mcp-elicitation`](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation) for form- and URL-mode Legacy Elicitation with Durable Object state and SSE replay.
+The handler does not serve the standalone SSE transport.
 
-## WorkerTransport
+## Lower-level control
 
-`WorkerTransport` is the retained Agents transport for stateful Legacy deployments. Use it with `createLegacyMcpHandler` for persistent sessions, storage, event replay, and other explicit legacy configurations. The Stateless handler's Legacy compatibility lane uses the SDK v2 web-standard transport instead and does not import `WorkerTransport`.
+If the handler lifecycle does not fit, use the SDK's `WebStandardStreamableHTTPServerTransport` from `@modelcontextprotocol/server` directly in your Worker.
 
-```typescript
-import { WorkerTransport, type TransportState } from "agents/mcp";
+## Migrating from `McpAgent`
 
-const transport = new WorkerTransport({
-  sessionIdGenerator: () => crypto.randomUUID(),
-  enableJsonResponse: false,
-  storage: {
-    get: () => kv.get<TransportState>("mcp_state"),
-    set: (state: TransportState) => kv.put<TransportState>("mcp_state", state)
-  }
-});
-```
+`McpAgent` is deprecated. To move an existing server to `createMcpHandler`, follow [Migrate to MCP SDK v2](https://developers.cloudflare.com/agents/model-context-protocol/guides/migrate-to-mcp-sdk-v2/).
 
-Key options:
+## Examples
 
-| Option               | Description                                                                    |
-| -------------------- | ------------------------------------------------------------------------------ |
-| `sessionIdGenerator` | Function that returns a session ID for new sessions                            |
-| `enableJsonResponse` | Return JSON instead of SSE streams (default: `false`)                          |
-| `storage`            | Optional `{ get, set }` adapter for persisting transport state across requests |
-| `corsOptions`        | CORS configuration                                                             |
-
-### Read more
-
-For more complex examples including authentication with third-party providers, see the [examples directory](https://github.com/cloudflare/agents/tree/main/examples).
+- [`examples/mcp-worker`](https://github.com/cloudflare/agents/tree/main/examples/mcp-worker): a minimal server with a browser tool tester
+- [`examples/mcp-worker-authenticated`](https://github.com/cloudflare/agents/tree/main/examples/mcp-worker-authenticated): OAuth with `OAuthProvider`
+- [`examples/mcp-elicitation-mrtr`](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation-mrtr): Stateless Elicitation

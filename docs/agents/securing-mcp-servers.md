@@ -14,7 +14,7 @@ function createServer() {
   return new McpServer({ name: "authenticated-server", version: "1.0.0" });
 }
 
-const apiHandler = createMcpHandler(createServer);
+const mcpHandler = createMcpHandler(createServer);
 
 // Wrap with OAuth protection
 export default new OAuthProvider({
@@ -23,7 +23,12 @@ export default new OAuthProvider({
   clientRegistrationEndpoint: "/oauth/register",
 
   apiRoute: "/mcp", // Protected MCP endpoint
-  apiHandler: apiHandler, // Your MCP server
+  apiHandler: {
+    // OAuthProvider needs an object with a fetch method
+    fetch(request: Request, env: Env, ctx: ExecutionContext) {
+      return mcpHandler(request, env, ctx);
+    }
+  },
 
   defaultHandler: AuthHandler // Handles consent flow
 });

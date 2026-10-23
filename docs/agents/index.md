@@ -149,10 +149,10 @@ Building your own harness? Sessions stores the conversation, Streams holds durab
 
 ## MCP (Model Context Protocol)
 
-- [Creating MCP Servers](./mcp-servers.md) - Build MCP servers with `McpAgent`
+- [Creating MCP Servers](./mcp-servers.md) - Build stateless MCP servers with `createMcpHandler`
 - [Securing MCP Servers](./securing-mcp-servers.md) - OAuth and authentication for MCP
 - [Connecting to MCP Servers](./mcp-client.md) - `MCPClientManager` on a Durable Object, or `addMcpServer()` on an Agent
-- [MCP Transports](./mcp-transports.md) - Transport options: Streamable HTTP, SSE, and RPC
+- [MCP Transports](./mcp-transports.md) - Streamable HTTP on the server, and the transports an Agent can connect with
 
 ## Operations
 
