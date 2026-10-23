@@ -21,7 +21,7 @@ export type {
   BrowserToolOptions,
   BrowserToolOutput
 } from "../browser-tool";
-export type { BrowserNewTab, BrowserSource } from "../session-connector";
+export type { BrowserNewTab, BrowserSource } from "../session";
 
 // Stateless Quick Action tools, so one import covers both.
 export {

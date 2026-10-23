@@ -13,7 +13,7 @@ import {
   type BrowserToolOptions,
   type BrowserToolOutput
 } from "../browser-tool";
-import type { BrowserNewTab } from "../session-connector";
+import type { BrowserNewTab } from "../session";
 import {
   browserExecuteModelOutput,
   browserScreenshotOutput
@@ -24,7 +24,7 @@ export type {
   BrowserToolOptions,
   BrowserToolOutput
 } from "../browser-tool";
-export type { BrowserNewTab, BrowserSource } from "../session-connector";
+export type { BrowserNewTab, BrowserSource } from "../session";
 
 export interface PiBrowserToolOptions<
   TName extends string = "browser"
@@ -108,7 +108,7 @@ function browserToolResult(
   }
 
   // No size check: a screenshot comes from one cdp.send result, which
-  // codemode caps at 1 MB, well under what model providers accept.
+  // the session caps at 1 MB, well under what model providers accept.
   const bytes = Math.floor((screenshot.data.length * 3) / 4).toLocaleString();
   // Keep the rest of the result (status, restarted, notice, newTabs) around
   // the sentence that replaces the screenshot.
@@ -146,7 +146,6 @@ function conversationScope(api: ToolExecutionApi): string {
  * time, since they share its tab, and the tool doesn't rerun after an
  * eviction (its code may have clicked or
  * submitted something): pi gives the model an interrupted result instead.
- * Pass `ctx` unless the tool is built inside an Agent.
  *
  * @example
  * ```ts
@@ -162,7 +161,6 @@ function conversationScope(api: ToolExecutionApi): string {
  *         name: "browser",
  *         tools: [
  *           browserTool({
- *             ctx: this.ctx,
  *             browser: this.browser,
  *             loader: this.env.LOADER
  *           })

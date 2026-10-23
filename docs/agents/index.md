@@ -141,7 +141,7 @@ Building your own harness? Sessions stores the conversation, Streams holds durab
 - [Context (Experimental)](./context.md) - System-prompt blocks, frozen prompts, writable/searchable/loadable providers, and their tools
 - [Workspace (Experimental)](https://github.com/cloudflare/agents/blob/main/docs/shell/index.md) - Durable virtual filesystem backed by SQLite + R2
 - [Codemode (Experimental)](./codemode.md) - LLM-generated executable code for tool orchestration
-- [Browse the Web (Experimental)](./browse-the-web.md) - Full CDP access for web inspection, scraping, and debugging
+- [Browse the Web](./browse-the-web.md) - Full CDP access for web inspection, scraping, and debugging
 - [Search the Web (Beta)](./search-the-web.md) - A `websearch` tool over Cloudflare's Web Search API for the pi harness, the AI SDK, and TanStack AI
 - [Fetch the Web (Beta)](./fetch-the-web.md) - A `web_fetch` tool that reads a URL as Markdown, JSON, or text, with a host-controlled URL policy, for the pi harness, the AI SDK, TanStack AI, and Think
 - TODO: [Cloudflare Sandboxes](./sandboxes.md) - Isolated environments for coding agents, ffmpeg, and heavy compute

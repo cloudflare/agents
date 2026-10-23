@@ -84,19 +84,39 @@ export {
 } from "./spec";
 
 export {
+  ACTIVE_PAGE_SESSION,
+  BrowserSession,
+  type BrowserAttachInput,
+  type BrowserDebugLogInput,
+  type BrowserNewTab,
+  type BrowserSendInput,
+  type BrowserSessionOptions,
+  type BrowserSessionReport,
+  type BrowserSource
+} from "./session";
+
+export type {
+  BrowserLiveView,
+  BrowserLiveViewTarget,
+  BrowserLiveViewUrl,
+  LiveViewMode
+} from "./live-view";
+
+export {
   BrowserConnector,
   DEFAULT_EXEC_SWEEP_IDLE_MS,
   type BrowserConnectorOptions,
   type BrowserConnectorSessionOptions,
   type BrowserConnectorSweepOptions,
-  type BrowserConnectorSweepResult,
-  type BrowserLiveView,
-  type BrowserLiveViewTarget,
-  type BrowserLiveViewUrl,
-  type LiveViewMode
+  type BrowserConnectorSweepResult
 } from "./connector";
 
-// Re-exported so browser-tool consumers can satisfy the facet wiring with
-// `export { CodemodeRuntime } from "agents/browser";` in their worker entry
-// without adding a direct @cloudflare/codemode dependency.
+/**
+ * The facet class `createBrowserTools` runs on, re-exported so a Worker entry
+ * can `export { CodemodeRuntime } from "agents/browser"` without a direct
+ * `@cloudflare/codemode` dependency.
+ *
+ * @deprecated Only the deprecated `createBrowserTools` needs it;
+ * `browserTool` doesn't.
+ */
 export { CodemodeRuntime } from "@cloudflare/codemode";

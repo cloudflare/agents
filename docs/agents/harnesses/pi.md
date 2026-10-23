@@ -149,7 +149,7 @@ harness: async ({ storage, context, onWake }) => {
   this.registry.install({
     name: "browser",
     tools: [
-      browserTool({ ctx: this.ctx, browser: this.browser, loader: this.env.LOADER })
+      browserTool({ browser: this.browser, loader: this.env.LOADER })
     ]
   });
   return Harness.open(
@@ -162,7 +162,7 @@ harness: async ({ storage, context, onWake }) => {
 readonly lifecycle = Lifecycle.install(this).use(this.browser).use(this.harness);
 ```
 
-It needs a `browser` binding, a `LOADER` Worker Loader binding, and `export { CodemodeRuntime } from "@cloudflare/codemode"` from the Worker entry. Screenshots come back as images, and each conversation works in its own tab. Refer to [Persistent browser](../browse-the-web.md#persistent-browser) for how it behaves.
+It needs a `browser` binding and a `LOADER` Worker Loader binding. Screenshots come back as images, and each conversation works in its own tab. Refer to [Persistent browser](../browse-the-web.md#persistent-browser) for how it behaves.
 
 ## Work with sessions
 

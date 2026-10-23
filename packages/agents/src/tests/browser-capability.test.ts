@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { TestBrowserAgent } from "./agents/browser";
+import { browserTool } from "../browser/tools/ai-sdk";
 import {
   type BrowserHarnessObject,
   createFakeBrowserBinding
@@ -433,6 +434,103 @@ describe("browserTool over a Browser", () => {
       expect(description).not.toContain("paused");
       expect(description).not.toContain("Snippets");
       expect(description).not.toContain("file or workspace");
+    });
+  });
+
+  it("runs code shaped as an arrow function, an expression, or a function body", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const run = (source: string) =>
+        instance.browserTool().execute({ code: source }, {});
+      const expected = { result: { value: "evaluated in target-session-1-2" } };
+      const send = `cdp.send({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" })`;
+
+      for (const source of [
+        `async () => ${send}`,
+        "```js\nasync () => " + send + ";\n```",
+        `export default async () => ${send}`,
+        send,
+        `const value = await ${send};\nreturn value;`
+      ]) {
+        const output = await run(source);
+        expect(output.status === "completed" && output.result).toEqual(
+          expected
+        );
+        expect(output.notice).toBeUndefined();
+      }
+
+      // Statements with no `return` don't return their last expression;
+      // the model is told so.
+      const statements = await run(`const value = await ${send};\nvalue`);
+      expect(statements.status).toBe("completed");
+      expect(
+        statements.status === "completed" && statements.result
+      ).toBeUndefined();
+      expect(statements.notice).toMatch(/returned nothing/);
+
+      // A `return` inside a string isn't an outer return.
+      const quoted = await run(
+        `const label = "return value";\nconst value = await ${send};\nvalue`
+      );
+      expect(quoted.notice).toMatch(/returned nothing/);
+    });
+  });
+
+  it("returns errors, console output and timeouts as results", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const run = (source: string, timeoutMs?: number) =>
+        browserTool({
+          browser: instance.browser,
+          loader: env.LOADER,
+          timeoutMs
+        }).execute({ code: source }, {});
+
+      const parse = await run("async () => { return (; }");
+      expect(parse.status === "error" && parse.error).toMatch(
+        /didn't parse.*async arrow function/s
+      );
+
+      const thrown = await run(`async () => {
+        console.log("before", 1);
+        throw new Error("boom");
+      }`);
+      expect(thrown).toMatchObject({
+        status: "error",
+        error: "boom",
+        logs: ["before 1"]
+      });
+
+      // A CDP failure is an error the code can catch.
+      const caught = await run(`async () => {
+        try {
+          await cdp.send({ method: "Browser.close" });
+        } catch (error) {
+          return error.message;
+        }
+      }`);
+      expect(caught.status === "completed" && caught.result).toMatch(
+        /managed for you/
+      );
+
+      const unknown = await run("async () => cdp.reset()");
+      expect(unknown.status === "error" && unknown.error).toMatch(
+        /not a function/
+      );
+
+      const slow = await run(
+        "async () => new Promise((resolve) => setTimeout(resolve, 5000))",
+        50
+      );
+      expect(slow.status === "error" && slow.error).toMatch(/timed out/);
+
+      // No network: fetch is blocked in the sandbox.
+      const fetched = await run(
+        'async () => (await fetch("https://example.com")).status'
+      );
+      expect(fetched.status).toBe("error");
     });
   });
 
