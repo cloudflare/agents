@@ -1,0 +1,89 @@
+/* Tailwind ignores node_modules, so source Kumo and Streamdown for class extraction. */
+@source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+@source "../node_modules/streamdown/dist/*.js";
+@source "../node_modules/@streamdown/code/dist/*.js";
+@import "tailwindcss";
+@import "@cloudflare/kumo/styles/tailwind";
+
+/* Kumo switches theme with data-mode on <html>; make `dark:` follow it too. */
+@custom-variant dark (&:where([data-mode="dark"], [data-mode="dark"] *));
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+}
+
+/*
+ * Streamdown styles itself with shadcn-style utilities (border-border,
+ * bg-muted, …). Registering those tokens lets Tailwind generate them, mapped
+ * onto Kumo's palette so markdown follows light/dark mode.
+ */
+@theme inline {
+  --color-border: var(--color-kumo-line);
+  --color-background: var(--color-kumo-base);
+  --color-foreground: var(--text-color-kumo-default);
+  --color-muted: var(--color-kumo-recessed);
+  --color-muted-foreground: var(--text-color-kumo-subtle);
+  --color-primary: var(--color-kumo-brand);
+  --color-primary-foreground: #fff;
+  --color-sidebar: var(--color-kumo-elevated);
+}
+
+.sd-theme {
+  overflow-wrap: anywhere;
+}
+/* Chat replies read better with headings closer to body size. */
+.sd-theme :is(h1, h2) {
+  font-size: 1.125rem;
+}
+.sd-theme :is(h3, h4, h5, h6) {
+  font-size: 1rem;
+}
+.sd-theme pre {
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+
+/* One frame per code block and table, not Streamdown's card-in-a-card. */
+.sd-theme [data-streamdown="code-block"] {
+  gap: 0;
+  padding: 0;
+  border-radius: 0.5rem;
+  background: var(--color-kumo-recessed);
+  overflow: hidden;
+}
+.sd-theme [data-streamdown="code-block-header"] {
+  height: auto;
+  padding: 0.375rem 0.75rem;
+  font-size: 0.75rem;
+  border-bottom: 1px solid var(--color-kumo-line);
+}
+.sd-theme [data-streamdown="code-block-body"] {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.75rem;
+}
+.sd-theme [data-streamdown="code-block-body"] pre {
+  background: transparent;
+}
+.sd-theme [data-streamdown="table-wrapper"] {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+/* Inline code outside Streamdown (sidebar copy). */
+:where(p, span) > code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.85em;
+  padding: 0.1em 0.3em;
+  border-radius: 0.25rem;
+  background: var(--color-kumo-recessed);
+}

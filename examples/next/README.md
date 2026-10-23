@@ -23,6 +23,7 @@ lands.
 | [`harnesses/think`](./harnesses/think)                   | This PR   | Experimental: Think's agent loop on a plain `DurableObject` with `agents/harness/think`, served to `useAgentChat` by `ThinkChat`                    |
 | [`harnesses/container`](./harnesses/container)           | This PR   | Experimental: Claude Code or Codex in a Cloudflare Container, driven from a Durable Object by `agents/harness/container`, resumed across containers |
 | [`harnesses/self-modifying`](./harnesses/self-modifying) | This PR   | A Lifecycle capability runs editable harness revisions in fresh Dynamic Workers with trusted System tools and auto-discovered Custom tools          |
+| [`tools/browser`](./tools/browser)                       | This PR   | Experimental: a pi agent with a container workspace and a persistent browser that opens its dev server, build, and docs on internal hostnames       |
 | [`models`](./models)                                     | This PR   | One `createAI` per framework (AI SDK and pi-ai): `@cf/` ids for Workers AI, vendor models routed through AI Gateway                                 |
 | [`channels`](./channels)                                 | This PR   | Agents on different harnesses served through `Channels.forHarness` and one `ChannelGateway`, to a browser client and terminal clients               |
 
