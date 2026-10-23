@@ -1,611 +1,349 @@
-# agents
+# Cloudflare Agents
 
-![npm install agents](../../assets/npm-install-agents.svg)
+[![npm version](https://img.shields.io/npm/v/agents)](https://www.npmjs.com/package/agents)
+[![npm downloads](https://img.shields.io/npm/dw/agents)](https://www.npmjs.com/package/agents)
 
-**Build software that thinks and does.**
+![npm install agents](https://raw.githubusercontent.com/cloudflare/agents/main/assets/npm-install-agents.svg)
 
-Persistent AI agents on Cloudflare's global network. They remember context, reason through problems, schedule their own work, and take action—all without you managing servers.
+**Build AI agents on Cloudflare.** Each agent is a [Durable Object](https://developers.cloudflare.com/durable-objects/) with its own SQLite database. It runs a model loop with tools that survives restarts, and it hibernates when idle. You can run millions of them, one per user, task or conversation, and an idle agent costs nothing.
+
+[Read the docs](https://developers.cloudflare.com/agents/) · [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi)
+
+## Quick start
+
+This agent runs [Pi](https://github.com/earendil-works/pi/tree/main/packages/durable) on a Workers AI model, with one tool: it can read web pages. Install the Agents SDK and Pi:
 
 ```sh
-npm create cloudflare@latest -- --template cloudflare/agents-starter
+npm install agents @earendil-works/pi-durable @earendil-works/pi-ai @earendil-works/chord
 ```
 
-Or add to an existing project:
+Create `src/server.ts`:
 
-```sh
-npm install agents
-```
+```ts
+import { DurableObject } from "cloudflare:workers";
+import { createModels } from "@earendil-works/pi-ai/models";
+import { createRegistry, Harness } from "@earendil-works/pi-durable";
+import { PiHarness } from "agents/harness/pi";
+import { Lifecycle } from "agents/lifecycle";
+import { createAI } from "agents/models/pi-ai";
+import { webFetchTool } from "agents/webfetch/pi";
 
-The examples below use `@callable()` decorators. Vite projects must extend
-`agents/tsconfig` and add the `agents/vite` plugin; other bundlers must support
-TC39 decorators (`2023-11`). See
-[Adding Agents to an Existing Project](../../docs/agents/adding-to-existing-project.md#4-configure-typescript-and-vite).
+export class Assistant extends DurableObject<Env> {
+  readonly ai = createAI({ binding: this.env.AI });
+  readonly registry = createRegistry();
 
----
-
-## Why Agents, Why Now
-
-LLMs can reason, plan, and use tools—but they need infrastructure that matches their capabilities. Traditional serverless is stateless and ephemeral. Agents are persistent and purposeful.
-
-```
-From request handlers    →  to autonomous entities
-From stateless functions →  to persistent intelligence
-
-Traditional serverless:  Request → Response → Gone
-Agents:                  Thinking, remembering, acting — continuously
-```
-
-**Pay only when active.** Agents hibernate between requests. You can have millions of agents—one per user, per session, per game room—each costs nothing when idle.
-
-Built on Cloudflare Durable Objects, agents run globally, close to your users, with persistent state that survives restarts.
-
----
-
-## Quick Example
-
-A counter agent with real-time state sync and callable methods:
-
-```typescript
-// server.ts
-import { Agent, callable } from "agents";
-
-export type State = { count: number };
-
-export class CounterAgent extends Agent<Env, State> {
-  initialState: State = { count: 0 };
-
-  @callable()
-  increment() {
-    this.setState({ count: this.state.count + 1 });
-    return this.state.count;
-  }
-
-  @callable()
-  decrement() {
-    this.setState({ count: this.state.count - 1 });
-    return this.state.count;
-  }
-}
-```
-
-```tsx
-// client.tsx
-import { useAgent } from "agents/react";
-import { useState } from "react";
-import type { CounterAgent, State } from "./server";
-
-function Counter() {
-  const [count, setCount] = useState(0);
-
-  const agent = useAgent<CounterAgent, State>({
-    agent: "counter-agent",
-    name: "my-counter",
-    onStateUpdate: (state) => setCount(state.count)
+  readonly harness = new PiHarness({
+    harness: ({ storage, context, onWake }) => {
+      this.registry.install({
+        name: "assistant",
+        tools: [webFetchTool({ binding: this.env.AI })]
+      });
+      const models = createModels();
+      models.setProvider(this.ai.provider);
+      return Harness.open(
+        storage,
+        { models, registry: this.registry, onWake },
+        context
+      );
+    },
+    defaults: { model: this.ai("@cf/zai-org/glm-5.3-flash") }
   });
 
-  return (
-    <div>
-      <span>{count}</span>
-      <button onClick={() => agent.stub.increment()}>+</button>
-      <button onClick={() => agent.stub.decrement()}>-</button>
-    </div>
-  );
-}
-```
+  readonly lifecycle = Lifecycle.install(this).use(this.harness);
 
-State changes sync to all connected clients automatically. Call methods like they're local functions.
-
----
-
-## What You Can Build
-
-| Use Case               | Why Agents                                            |
-| ---------------------- | ----------------------------------------------------- |
-| Multiplayer game rooms | Per-room state, real-time sync, hibernates when empty |
-| Customer support bots  | Remembers conversation history, escalates to humans   |
-| Collaborative editors  | Presence, cursors, document state                     |
-| Approval workflows     | Long-running, pauses for human input, durable         |
-| Personal AI assistants | Per-user memory, tool access via MCP                  |
-| Notification systems   | Scheduled delivery, user preferences, retry logic     |
-
----
-
-## Features
-
-```
-Core         State sync · Routing · HTTP & WebSockets · @callable RPC · Sub-agents (facets)
-Clients      React hook · Vanilla JS · Real-time state sync
-Channels     WebSocket · HTTP · Email · Voice · Slack · Telegram
-Background   Queue · Scheduling · Managed fibers · Workflows · Human-in-the-loop
-AI           Chat agents · Agent tools · Tool calling · MCP servers & clients
-Platform     Observability · Cross-domain auth · Resumable streams
-```
-
-### Voice and Channels
-
-Voice and Channels use separate entry points so applications only load the
-integrations they import:
-
-```typescript
-import { withVoice } from "agents/voice";
-import { VoiceClient } from "agents/voice/client";
-import { useVoiceAgent } from "agents/voice/react";
-
-import { ChannelGateway, Channels } from "agents/experimental/channels";
-import { email } from "agents/experimental/channels/email";
-import { slack } from "agents/experimental/channels/slack";
-import { telegram } from "agents/experimental/channels/telegram";
-```
-
-See the [Voice](../../docs/agents/voice.md) reference.
-
-### State Management
-
-State persists across requests and syncs to all connected clients:
-
-```typescript
-import { Agent, callable, type Connection } from "agents";
-
-type State = { items: string[] };
-
-export class MyAgent extends Agent<Env, State> {
-  initialState: State = { items: [] };
-
-  @callable()
-  addItem(item: string) {
-    this.setState({ items: [...this.state.items, item] });
+  async ask(prompt: string) {
+    return (await this.harness.prompt(prompt)).text;
   }
-
-  onStateChanged(state: State, source: Connection | "server") {
-    // Called after state is persisted and broadcast
-  }
-}
-```
-
-### Callable Methods
-
-Expose methods to clients with the `@callable()` decorator:
-
-```typescript
-@callable()
-async processOrder(orderId: string, items: Item[]) {
-  // Full type safety - clients call this like a local function
-  const result = await this.validateAndProcess(orderId, items);
-  return result;
-}
-```
-
-```typescript
-// Client
-const result = await agent.stub.processOrder("order-123", items);
-```
-
-### Scheduling
-
-Run tasks later, on intervals, or with cron expressions:
-
-```typescript
-// In 60 seconds
-this.schedule(60, "sendReminder", { userId: "123" });
-
-// Every hour
-this.scheduleEvery(3600, "syncData");
-
-// Daily at 9am UTC
-this.schedule("0 9 * * *", "dailyReport");
-
-// At a specific date
-this.schedule(new Date("2025-12-31"), "yearEndTask");
-```
-
-### Background Tasks
-
-Queue immediate background work:
-
-```typescript
-await this.queue("processUpload", { fileId: "abc" });
-// Returns immediately, task runs in background
-```
-
-### Sub-agents
-
-Spawn child Durable Objects (facets) from a parent agent. Each child has
-its own SQLite storage and runs in parallel, but is addressed under the
-parent's URL:
-
-```typescript
-export class Inbox extends Agent {
-  @callable()
-  async createChat() {
-    const id = crypto.randomUUID();
-    await this.subAgent(Chat, id);
-    return id;
-  }
-
-  override async onBeforeSubAgent(_req, { className, name }) {
-    if (!this.hasSubAgent(className, name)) {
-      return new Response("Not found", { status: 404 });
-    }
-  }
-}
-
-export class Chat extends Agent {
-  async writePreview(text: string) {
-    const inbox = await this.parentAgent(Inbox);
-    await inbox.savePreview(this.name, text);
-  }
-}
-```
-
-Client-side, connect to a child with `useAgent({ sub: [...] })`:
-
-```tsx
-const inbox = useAgent({ agent: "Inbox", name: userId });
-const chat = useAgent({
-  agent: "Inbox",
-  name: userId,
-  sub: [{ agent: "Chat", name: chatId }]
-});
-```
-
-The routed URL becomes `/agents/inbox/{userId}/sub/chat/{chatId}`.
-
-Child WebSocket clients can use the same URL shape. The parent remains the
-public address, while child agents still receive `onConnect`, `onMessage`,
-`onClose`, `broadcast()`, and `getConnections()` calls scoped to their own
-clients. Parent broadcasts do not leak to child-targeted sockets, and child
-connection tags, readonly state, and protocol-message settings are preserved
-when a connection is resumed from hibernation.
-
-Nested sub-agent URLs are supported using repeated `/sub/{agent}/{name}`
-segments, subject to the platform's current facet nesting limits.
-
-### Agent Tools
-
-Run chat-capable sub-agents as tools from a parent chat agent. Think agents and
-`AIChatAgent` subclasses are supported. The child keeps its own messages, tools,
-SQLite storage, and resumable stream, while the parent broadcasts
-`agent-tool-event` frames so the UI can render the child timeline inline.
-
-```typescript
-import { Think } from "@cloudflare/think";
-import { agentTool } from "agents/agent-tools";
-import { z } from "zod";
-
-export class Researcher extends Think<Env> {
-  getSystemPrompt() {
-    return "Research the requested topic and end with a concise summary.";
-  }
-}
-
-export class Assistant extends Think<Env> {
-  getTools() {
-    return {
-      research: agentTool(Researcher, {
-        description: "Research one topic in depth.",
-        inputSchema: z.object({ query: z.string().min(3) })
-      })
-    };
-  }
-}
-```
-
-`inputSchema` accepts schemas supported by the AI SDK, including Zod, Standard
-JSON Schema-compatible schemas, raw JSON Schema through `jsonSchema()`, and
-schemas exposed through AI SDK adapters. For example, use `@ai-sdk/valibot` v2
-with AI SDK 6 or v3 with AI SDK 7:
-
-```typescript
-import { valibotSchema } from "@ai-sdk/valibot";
-import * as v from "valibot";
-
-const researchInput = valibotSchema(
-  v.object({ query: v.pipe(v.string(), v.minLength(3)) })
-);
-
-agentTool(Researcher, {
-  description: "Research one topic in depth.",
-  inputSchema: researchInput
-});
-```
-
-Tool inputs need model-facing JSON Schema in addition to runtime validation. A
-validation-only Standard Schema is therefore insufficient; use its Standard
-JSON Schema extension or an AI SDK adapter.
-
-For deterministic fan-out, call `this.runAgentTool(Researcher, { input })`
-directly. Parent recovery reconciles stale child rows after restarts and marks
-unrecoverable runs `interrupted` instead of hanging. In React, use
-`useAgentToolEvents({ agent })` to render retained and replayed child timelines.
-AIChatAgent children run headlessly, so browser client tools require a separate
-bridge; server-side tools work normally. See the full
-[Agent Tools guide](../../docs/agents/agent-tools.md).
-
-### WebSocket Connections
-
-Handle real-time communication:
-
-```typescript
-async onConnect(connection: Connection) {
-  console.log(`Client ${connection.id} connected`);
-}
-
-async onMessage(connection: Connection, message: unknown) {
-  // Handle incoming messages
-  connection.send(JSON.stringify({ received: true }));
-}
-
-async onClose(connection: Connection) {
-  console.log(`Client ${connection.id} disconnected`);
-}
-```
-
-### Email
-
-Agents can receive and respond to emails:
-
-```typescript
-import type { AgentEmail } from "agents/email";
-
-async onEmail(email: AgentEmail) {
-  const from = email.from;
-  const subject = email.headers.get("subject");
-  // Process incoming email
-}
-```
-
----
-
-## Client SDK
-
-### React
-
-```tsx
-import { useAgent } from "agents/react";
-import { useState } from "react";
-
-function App() {
-  const [state, setState] = useState<MyState | null>(null);
-
-  const agent = useAgent<MyState>({
-    agent: "my-agent",
-    name: "instance-name",
-    onStateUpdate: (newState) => setState(newState)
-  });
-
-  return (
-    <div>
-      <pre>{JSON.stringify(state, null, 2)}</pre>
-      <button onClick={() => agent.stub.doSomething()}>Call Agent</button>
-    </div>
-  );
-}
-```
-
-### Vanilla JavaScript
-
-```typescript
-import { AgentClient } from "agents/client";
-
-const client = new AgentClient({
-  agent: "my-agent",
-  name: "instance-name",
-  onStateUpdate: (state) => console.log("State:", state)
-});
-
-// Call methods
-const result = await client.call("processData", [payload]);
-
-// Or use the stub
-const result = await client.stub.processData(payload);
-```
-
----
-
-## Workflows Integration
-
-For durable, multi-step tasks that survive failures and can pause for human approval, integrate with [Cloudflare Workflows](https://developers.cloudflare.com/workflows/):
-
-```typescript
-import { AgentWorkflow } from "agents";
-
-export class OrderWorkflow extends AgentWorkflow<OrderAgent, OrderParams> {
-  async run(event, step) {
-    // Step 1: Validate (retries automatically on failure)
-    const validated = await step.do("validate", async () => {
-      return validateOrder(event.payload);
-    });
-
-    // Step 2: Wait for human approval
-    await this.reportProgress({ step: "approval", status: "pending" });
-    const approval = await this.waitForApproval(step, { timeout: "7 days" });
-
-    // Step 3: Process the approved order
-    await step.do("process", async () => {
-      return processOrder(validated, approval);
-    });
-  }
-}
-```
-
-Workflows provide:
-
-- **Durable execution** — steps retry automatically, state persists across failures
-- **Human-in-the-loop** — pause for approval with `waitForApproval()`
-- **Long-running tasks** — run for days or weeks
-- **Progress tracking** — report status back to the agent
-
-See [Workflows](../../docs/agents/workflows.md) and [Human in the Loop](../../docs/agents/human-in-the-loop.md).
-
----
-
-## AI Chat Integration
-
-For AI-powered chat experiences with persistent conversations, streaming responses, and tool support, see [`@cloudflare/ai-chat`](../ai-chat/README.md).
-
-```typescript
-import { AIChatAgent } from "@cloudflare/ai-chat";
-import { createWorkersAI } from "workers-ai-provider";
-import { convertToModelMessages, streamText } from "ai";
-
-export class ChatAgent extends AIChatAgent<Env> {
-  async onChatMessage() {
-    const workersai = createWorkersAI({ binding: this.env.AI });
-    const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code"),
-      messages: await convertToModelMessages(this.messages)
-    });
-
-    return result.toUIMessageStreamResponse();
-  }
-}
-```
-
-```tsx
-// Client
-import { useAgentChat } from "@cloudflare/ai-chat/react";
-
-const { messages, sendMessage } = useAgentChat({
-  agent: useAgent({ agent: "chat-agent" })
-});
-```
-
-Features:
-
-- Automatic message persistence
-- Resumable streaming (survives disconnections)
-- Server and client-side tool execution
-- Human-in-the-loop approval for sensitive tools
-
----
-
-## MCP (Model Context Protocol)
-
-Agents integrate with MCP to act as servers (providing tools to AI assistants) or clients (using tools from other services).
-
-### Creating a Stateless MCP server
-
-```typescript
-import { McpServer } from "@modelcontextprotocol/server";
-import { createMcpHandler } from "agents/mcp/server";
-import { z } from "zod";
-
-function createServer() {
-  const server = new McpServer({ name: "my-tools", version: "1.0.0" });
-  server.registerTool(
-    "lookup",
-    { description: "Look up data", inputSchema: { query: z.string() } },
-    async ({ query }) => ({
-      content: [{ type: "text", text: await lookup(query) }]
-    })
-  );
-  return server;
 }
 
 export default {
-  fetch(request, env, ctx) {
-    return createMcpHandler(createServer)(request, env, ctx);
+  // Anyone with this URL can use your AI quota. Add auth before you deploy.
+  async fetch(request: Request, env: Env) {
+    const assistant = env.Assistant.getByName("default");
+    return new Response(await assistant.ask(await request.text()));
   }
-} satisfies ExportedHandler;
+} satisfies ExportedHandler<Env>;
 ```
 
-Install `@modelcontextprotocol/server` alongside `agents`. See
-[Creating MCP Servers](../../docs/agents/mcp-servers.md) for authentication,
-elicitation, and keeping state in bindings.
-
-### Using MCP Tools
-
-```typescript
-// Connect to external MCP servers
-await this.addMcpServer(
-  "weather-service",
-  "https://weather-mcp.example.com/mcp",
-  {
-    transport: { type: "streamable-http" }
-  }
-);
-
-// Use with AI SDK
-const result = await generateText({
-  model: openai("gpt-4o"),
-  tools: this.mcp.getAITools(),
-  prompt: "What's the weather in Tokyo?"
-});
-```
-
----
-
-## Configuration
-
-Add your agent to `wrangler.jsonc`:
+Create `wrangler.jsonc`:
 
 ```jsonc
 {
+  "name": "assistant",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI" },
   "durable_objects": {
-    "bindings": [{ "name": "MyAgent", "class_name": "MyAgent" }]
+    "bindings": [{ "name": "Assistant", "class_name": "Assistant" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MyAgent"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Assistant"] }]
 }
 ```
 
-Route requests to your agent:
+Generate the `Env` type, start the agent and ask it something:
 
-```typescript
-import { routeAgentRequest } from "agents";
-
-export default {
-  async fetch(request: Request, env: Env) {
-    return (
-      (await routeAgentRequest(request, env)) ??
-      new Response("Not found", { status: 404 })
-    );
-  }
-};
+```sh
+npx wrangler types
+npx wrangler dev
+curl -d "Summarize https://developers.cloudflare.com/agents/" http://localhost:8787
 ```
 
----
+Workers AI runs on your Cloudflare account, so `wrangler dev` asks you to log in. Run `npx wrangler deploy` to deploy it.
 
-## Coming Soon
+To start from a complete app instead, deploy the Pi harness example. It adds a chat UI over WebSockets, a filesystem and code execution:
 
-- **Browse the Web** — Headless browser for web scraping and automation
-- **Cloudflare Sandboxes** — Isolated environments for code execution
-- **SMS, Voice, Messengers** — Multi-channel communication
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi)
 
----
+## How an agent is built
 
-## Learn More
+An agent is a Durable Object. A Lifecycle runs the object, and capabilities plug into the Lifecycle: a harness that runs the model loop, a scheduler, WebSockets and others. You add only the ones your agent needs, and each one keeps its data in the object's SQLite database.
 
-The published package includes the complete documentation tree at
-`docs/index.md`.
+The sections below take the quick start apart and then extend it, one capability at a time. Each snippet shows only what it adds to `Assistant`.
 
-[Getting Started](../../docs/agents/getting-started.md) ·
-[State Management](../../docs/agents/state.md) ·
-[Scheduling](../../docs/agents/scheduling.md) ·
-[Callable Methods](../../docs/agents/callable-methods.md) ·
-[Durable Object Lifecycle](../../docs/agents/lifecycle.md) ·
-[MCP Integration](../../docs/agents/mcp-client.md) ·
-[Full Documentation](../../docs/agents/index.md)
+### 1. An agent is a Durable Object
 
----
+A Durable Object is a class with a name. `env.Assistant.getByName("alice")` always reaches the same instance, wherever the request comes from, and there is only ever one of it. Each instance has its own SQLite database at `this.ctx.storage.sql`. When nothing is happening, it leaves memory and costs nothing; the next request starts it again with its data intact.
+
+`Lifecycle.install(this)` turns the object into an agent host:
+
+```ts
+export class Assistant extends DurableObject<Env> {
+  readonly lifecycle = Lifecycle.install(this);
+
+  onStart() {
+    // Runs each time the object starts, before it handles anything.
+    this.ctx.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS sent_emails (id TEXT, recipient TEXT, subject TEXT)"
+    );
+  }
+}
+```
+
+The Lifecycle takes over the object's `fetch`, `alarm` and WebSocket handlers. It runs `onStart`, routes requests, messages and alarms to the capabilities you add with `.use()`, and shares the object's one alarm between them.
+
+### 2. Give it a model loop
+
+A harness is the capability that runs the model loop: it sends the conversation to the model, runs the tools the model calls, and repeats until the model answers. `PiHarness` runs [Pi Durable](https://github.com/earendil-works/pi/tree/main/packages/durable). Pi saves every step, from your input to each model response and tool call, before acting on it. If the object leaves memory mid-turn, the Lifecycle starts it again with an alarm, and Pi carries on where it stopped.
+
+In the quick start, `PiHarness` calls the factory you give it to open Pi over the object's storage. Pi passes `onWake` back so the Lifecycle knows when to set the alarm. Once it is installed, you can talk to the agent in a few ways:
+
+```ts
+// Wait for the answer.
+const { text } = await this.harness.prompt("What is 47 × 19?");
+
+// Or hand over the input and return. Pi has saved it once this resolves.
+await this.harness.submit("Summarize today's notes.");
+
+// Each session has its own transcript, inbox and model.
+const session = await this.harness.sessions.create();
+await session.setModel(this.ai("anthropic/claude-opus-5.5"));
+```
+
+`createAI` from `agents/models/pi-ai` turns the `AI` binding into a Pi model provider. Ids that start with `@cf/` are [Workers AI models](https://developers.cloudflare.com/workers-ai/models/). Other ids, such as `anthropic/claude-opus-5.5`, go through [AI Gateway](https://developers.cloudflare.com/ai-gateway/), which holds the provider credentials, so your Worker needs no API keys.
+
+Learn more in the [Pi harness docs](https://developers.cloudflare.com/agents/harnesses/pi/) and [Pi AI models](https://developers.cloudflare.com/agents/models/pi-ai/).
+
+Also available:
+
+- [OpenCode](https://developers.cloudflare.com/agents/harnesses/opencode/) (`agents/harness/opencode`): OpenCode running in a Durable Object.
+- [Container](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/container) (`agents/harness/container`): Claude Code or Codex in a Cloudflare Container, driven from a Durable Object.
+- [Codex](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/codex): a Codex-derived model loop compiled to WebAssembly, running in the Worker.
+
+### 3. Give it tools
+
+Tools are part of Pi extensions, which you install in the registry. An extension has a name, tools, and sections of the system prompt:
+
+```ts
+import { Type } from "@earendil-works/pi-ai";
+import { defineTool } from "@earendil-works/pi-durable";
+
+export class Assistant extends DurableObject<Env> {
+  readonly sendEmail = defineTool({
+    name: "send_email",
+    description: "Send an email.",
+    replay: "unsafe",
+    parameters: Type.Object({
+      to: Type.String(),
+      subject: Type.String(),
+      text: Type.String()
+    }),
+    execute: async ({ to, subject, text }) => {
+      const email = { from: "assistant@example.com", to, subject, text };
+      const { messageId } = await this.env.EMAIL.send(email);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO sent_emails VALUES (?, ?, ?)",
+        messageId,
+        to,
+        subject
+      );
+      return { output: [{ type: "text", text: `Sent to ${to}.` }] };
+    }
+  });
+
+  readonly harness = new PiHarness({
+    harness: ({ storage, context, onWake }) => {
+      this.registry.install({
+        name: "assistant",
+        sections: [
+          {
+            key: "preamble",
+            render: () => "You are a concise assistant.",
+            tag: false
+          }
+        ],
+        tools: [this.sendEmail, webFetchTool({ binding: this.env.AI })]
+      });
+      // ...then open Pi as in the quick start.
+    }
+  });
+}
+```
+
+The tool sends with [Email Service](https://developers.cloudflare.com/email-service/), through a `send_email` binding, `"send_email": [{ "name": "EMAIL" }]`, in `wrangler.jsonc`. The sender must be an address on a domain you have set up for Email Service. Each email it sends goes in the `sent_emails` table from step 1.
+
+Pi validates the arguments against `parameters` before it calls `execute`. Each call runs as its own durable task. If the object leaves memory during a call, Pi runs it again only if the tool sets `replay: "safe"`. `send_email` sets `replay: "unsafe"`, which is also the default, so after a restart the model gets an interrupted result instead, and an email is never sent twice.
+
+Tools that come with `agents`:
+
+- `webFetchTool` from `agents/webfetch/pi` reads a web page as Markdown. See [Web fetch](https://developers.cloudflare.com/agents/tools/web-fetch/).
+- `webSearchTool` from `agents/websearch/pi` searches the web. See [Web search](https://developers.cloudflare.com/agents/tools/web-search/).
+- `browserTool` from `agents/browser/pi` drives a browser that keeps its tabs, cookies and logins. See [Browser](https://developers.cloudflare.com/agents/tools/browser/).
+- `skills()` from `agents/harness/pi` turns [Agent Skills](https://developers.cloudflare.com/agents/runtime/execution/agent-skills/) from `agents/skills` into an extension, so the model loads instructions only when a task needs them.
+
+To use tools from other services, `MCPClientManager` from `agents/mcp/client` [connects the agent to MCP servers](https://developers.cloudflare.com/agents/model-context-protocol/apis/client-api/). To offer your own tools to other agents, `agents/mcp/server` [serves them over MCP](https://developers.cloudflare.com/agents/model-context-protocol/apis/handler-api/).
+
+More in [Extensions](https://developers.cloudflare.com/agents/harnesses/pi/extensions/).
+
+### 4. Give it a workspace
+
+An agent that writes code or works with documents needs files, and somewhere to run things. [Cloudflare Computer](https://github.com/cloudflare/computer) gives the object a workspace: a filesystem kept in the same SQLite database, and backends that run code against it. `WorkerJavaScriptBackend` runs JavaScript in an isolated sandbox (Code Mode): each call gets a fresh [Dynamic Worker](https://developers.cloudflare.com/dynamic-workers/) with no network access of its own.
+
+```sh
+npm install @cloudflare/computer
+```
+
+```ts
+import { Workspace } from "@cloudflare/computer";
+import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
+
+export class Assistant extends DurableObject<Env> {
+  readonly workspace = new Workspace({
+    storage: this.ctx.storage,
+    backends: [new WorkerJavaScriptBackend({ loader: this.env.LOADER })]
+  });
+
+  readonly saveNote = defineTool({
+    name: "save_note",
+    description: "Add a line to the notes file.",
+    parameters: Type.Object({ text: Type.String() }),
+    execute: async ({ text }) => {
+      const notes = await this.notes();
+      await this.workspace.fs.writeFile("/notes.md", `${notes}- ${text}\n`);
+      return { output: [{ type: "text", text: "Saved." }] };
+    }
+  });
+
+  // The notes, for a page or an API to show. Call it from your Worker with
+  // await env.Assistant.getByName("default").notes()
+  async notes() {
+    return this.workspace.fs.readFile("/notes.md", "utf8").catch(() => "");
+  }
+}
+```
+
+Install `this.saveNote` in the registry. The model writes to `/notes.md`, and your code reads the same file: the model and your app share one filesystem. The backend needs a Worker Loader binding, `"worker_loaders": [{ "binding": "LOADER" }]`, in `wrangler.jsonc`.
+
+To give the model the whole workspace, `createPiTools()` from `@cloudflare/computer/tools/pi-ai` describes it as `read`, `write`, `edit`, `delete`, `ls`, `find`, `grep` and `exec` tools, where `exec` runs JavaScript on the backend. The [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi) installs them in the registry.
+
+### 5. Let it act on its own
+
+An agent does not have to wait for a request. `Scheduler` from `agents/schedules` keeps schedules in SQLite and wakes the object with the Lifecycle's alarm, so this agent summarizes its notes every weekday morning:
+
+```ts
+import { Scheduler } from "agents/schedules";
+
+export class Assistant extends DurableObject<Env> {
+  readonly scheduler = new Scheduler({
+    callbacks: {
+      morningDigest: async () => {
+        const notes = await this.notes();
+        if (notes)
+          await this.harness.submit(`Summarize these notes:\n${notes}`);
+      }
+    }
+  });
+
+  readonly lifecycle = Lifecycle.install(this)
+    .use(this.scheduler)
+    .use(this.harness);
+
+  async onStart() {
+    // 9:00 UTC, Monday to Friday. A cron schedule is only created once.
+    await this.scheduler.set("0 9 * * 1-5", "morningDigest");
+  }
+}
+```
+
+A schedule can also be a delay in seconds or a `Date`. For work that is not tied to a time, `Queue` from `agents/queue` runs jobs one at a time in order, with retries, and `Tasks` from `agents/tasks` runs multi-step work that resumes from its last finished step.
+
+## Examples
+
+Each example is a complete app you can run locally or deploy. Most are built like the agent above, on a plain Durable Object with a Lifecycle.
+
+- [Pi harness](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi): a Pi agent with a chat UI over WebSockets, a workspace and code execution
+- [Schedules](https://github.com/cloudflare/agents/tree/main/examples/next/schedules): reminders with `Scheduler` on a plain Durable Object
+- [Sessions](https://github.com/cloudflare/agents/tree/main/examples/next/sessions): conversation history with branches and compaction
+- [MCP client](https://github.com/cloudflare/agents/tree/main/examples/next/mcp-client): connect to any MCP server, sign in with OAuth, and call its tools
+- [Routing](https://github.com/cloudflare/agents/tree/main/examples/next/routing): one Durable Object per chat, owned by one hub per user
+- [Dynamic agents](https://github.com/cloudflare/agents/tree/main/examples/next/dynamic-agents): run user-supplied Durable Object code under a supervisor
+- [OpenCode harness](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/opencode): OpenCode running in a Durable Object
+- [Container harness](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/container): Claude Code or Codex in a Cloudflare Container
+- [OpenAI Agents SDK](https://github.com/cloudflare/agents/tree/main/openai-sdk): agents built with `@openai/agents`, running on Durable Objects
+
+## Features
+
+| Feature                  | Description                                                                                       |
+| ------------------------ | ------------------------------------------------------------------------------------------------- |
+| **Durable agents**       | A Durable Object per agent, with its own SQLite database. Survives restarts, hibernates when idle |
+| **Pi harness**           | A model loop that saves every step and resumes a turn where it stopped                            |
+| **Other harnesses**      | OpenCode, Claude Code or Codex in a Container, and a Codex loop in WebAssembly                    |
+| **Models**               | Workers AI, and other providers through AI Gateway, with no API keys in your Worker               |
+| **Web tools**            | Fetch a page as Markdown, search the web, and drive a browser that keeps its logins               |
+| **Agent Skills**         | Instructions the model loads only when a task needs them                                          |
+| **MCP**                  | Connect to MCP servers with OAuth, or serve your own tools over MCP                               |
+| **Workspace**            | Files and sandboxed code execution with Cloudflare Computer                                       |
+| **Scheduling**           | One-time, recurring and cron schedules                                                            |
+| **Background work**      | Queues with retries, and multi-step tasks that resume from their last finished step               |
+| **Sessions and streams** | Conversation storage and durable event streams, for building your own model loop                  |
+| **WebSockets**           | Real-time connections that survive hibernation                                                    |
+| **State sync**           | State that syncs to every connected client                                                        |
+| **Routing**              | Requests routed by URL to the right agent, or one agent that owns many others                     |
+| **Clients**              | `useAgent` for React, and `AgentClient` for other environments                                    |
+| **Email**                | Receive, send and reply to email                                                                  |
+| **Observability**        | Events for logging and tracing                                                                    |
+
+## The Agent class
+
+`Agent` from `agents` is a Durable Object with a preset of capabilities already installed, including state that syncs to connected clients, `@callable` methods that clients call over WebSocket, scheduling, queues, MCP connections and email. It runs on the same Lifecycle, so you can add a harness to it with `this.lifecycle.use(this.harness)`. See the [Agents API](https://developers.cloudflare.com/agents/runtime/agents-api/).
+
+## Packages
+
+| Package                                                          | What it is                                                     |
+| ---------------------------------------------------------------- | -------------------------------------------------------------- |
+| [`agents`](https://www.npmjs.com/package/agents)                 | The Agents SDK                                                 |
+| [`@cloudflare/computer`](https://github.com/cloudflare/computer) | A workspace for agents: files, and code execution against them |
+
+## Documentation
+
+- [Agents documentation](https://developers.cloudflare.com/agents/) on developers.cloudflare.com
+- [`docs/`](https://github.com/cloudflare/agents/tree/main/docs) in this repository, the source for those pages
+- [`design/`](https://github.com/cloudflare/agents/tree/main/design), the design records behind the SDK
 
 ## Contributing
 
-Contributions are welcome, especially when:
-
-- You've opened an issue as an RFC to discuss your proposal
-- The contribution isn't "AI slop" — LLMs are tools, but vibe-coded PRs won't meet the quality bar
-- You're open to feedback to ensure changes fit the SDK's goals
-
-Small fixes, type bugs, and documentation improvements can be raised directly as PRs.
-
----
+We are not accepting external pull requests at the moment. [Open an issue](https://github.com/cloudflare/agents/issues) to report a bug or request a feature, or [start a discussion](https://github.com/cloudflare/agents/discussions) to ask a question. To work on the repository, see [CONTRIBUTING.md](https://github.com/cloudflare/agents/blob/main/CONTRIBUTING.md).
 
 ## License
 
-MIT licensed. See the [LICENSE](../../LICENSE) file for details.
-
----
-
-<p align="center">
-  <i>Build something that thinks. Ship something that does.</i>
-</p>
+[MIT](https://github.com/cloudflare/agents/blob/main/LICENSE)
