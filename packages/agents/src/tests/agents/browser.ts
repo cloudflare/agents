@@ -2,9 +2,10 @@ import type { AgentContext } from "../../index.ts";
 import { Agent } from "../../index.ts";
 import { Browser } from "../../browser/browser";
 import { browserRun } from "../../browser/providers/browser-run";
-import type {
-  InternalHostRouterLoopback,
-  InternalHostRouterProps
+import {
+  proxyTo,
+  type InternalHostRouterLoopback,
+  type InternalHostRouterProps
 } from "../../browser/internal-hosts";
 import { browserTool, type BrowserTool } from "../../browser/tools/ai-sdk";
 import { browserTool as piBrowserTool } from "../../browser/tools/pi";
@@ -74,6 +75,9 @@ export class TestBrowserAgent extends Agent<Cloudflare.Env> {
         fetch: async (): Promise<Response> => {
           throw new Error("dev server not listening");
         }
+      },
+      "upstream.internal": {
+        fetch: proxyTo("https://docs.example.com/base")
       }
     }
   };

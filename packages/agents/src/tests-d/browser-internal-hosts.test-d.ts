@@ -5,7 +5,10 @@
  */
 import { z } from "zod";
 import { browserRun } from "../browser/providers/browser-run";
-import type { InternalHostRouterLoopback } from "../browser/internal-hosts";
+import {
+  proxyTo,
+  type InternalHostRouterLoopback
+} from "../browser/internal-hosts";
 
 declare const binding: Fetcher;
 declare const router: InternalHostRouterLoopback;
@@ -17,6 +20,12 @@ browserRun(binding, {
   internalHosts: {
     router,
     hosts: {
+      "docs.internal": {
+        description: "Staging docs",
+        fetch: proxyTo("https://docs.example.com", {
+          headers: { Authorization: "Bearer token" }
+        })
+      },
       "api.internal": { worker },
       "preview.internal": {
         target: z.object({ port: z.number().int() }),
