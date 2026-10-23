@@ -178,8 +178,11 @@ without startup unless they call `await this.lifecycle.start()`:
 
 See [rfc-cold-rpc-initialization.md](./rfc-cold-rpc-initialization.md).
 
-Tracing remains in Agent's existing invocation boundaries. Moving or
-consolidating tracing in Lifecycle is separate work.
+Tracing remains in Agent's existing invocation boundaries, with one exception:
+Lifecycle traces its own job queue. Each job the alarm loop dispatches gets a
+`process {owner}` span that follows the OpenTelemetry messaging conventions,
+so plain Lifecycle Objects get it as well as Agents. Moving the rest of
+Agent's tracing into Lifecycle is separate work.
 
 ## WebSockets
 
