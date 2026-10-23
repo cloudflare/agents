@@ -243,7 +243,10 @@ describe("MCP v2 client MRTR", () => {
       MCPClientManager.prototype
     ) as MCPClientManager;
     manager.mcpConnections = {
-      server: { client } as unknown as MCPClientConnection
+      server: {
+        client,
+        options: { transport: {} }
+      } as unknown as MCPClientConnection
     };
     const options = { timeout: 123, maxTotalTimeout: 456 };
 

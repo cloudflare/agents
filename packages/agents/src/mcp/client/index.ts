@@ -16,6 +16,10 @@ import type {
   Tool
 } from "@modelcontextprotocol/client";
 export type { ElicitRequest, ElicitResult } from "@modelcontextprotocol/client";
+export {
+  MCPAuthorizationRequiredError,
+  MCPConnectionNotFoundError
+} from "./errors";
 import { type RetryOptions, tryN } from "../../retries";
 import { z } from "zod";
 import { nanoid } from "nanoid";
@@ -34,7 +38,12 @@ import {
   type CallToolSchemaOrOptions,
   type LegacyCallToolResultSchema
 } from "./invoker";
-import { toErrorMessage } from "./errors";
+import {
+  isUnauthorized,
+  MCPAuthorizationRequiredError,
+  MCPConnectionNotFoundError,
+  toErrorMessage
+} from "./errors";
 import { restoreRpcConnections } from "./rpc";
 import { RPC_DO_PREFIX } from "../rpc";
 import type { McpClientOptions, TransportType } from "../types";
@@ -320,11 +329,17 @@ class ConnectRetryError extends Error {
  * success indicates whether discovery completed successfully.
  * state is the current connection state at time of return.
  * error is present when success is false.
+ * authUrl is present when discovery needs the user to authorize: the server
+ * answered a catalog request with 401 and the connection is `authenticating`.
  */
 export type MCPDiscoverResult = {
   success: boolean;
   state: MCPConnectionState;
   error?: string;
+  /** Authorization URL to send the user to, when `state` is `authenticating`. */
+  authUrl?: string;
+  /** OAuth client id for `authUrl`, when known. */
+  clientId?: string;
 };
 
 export type MCPClientOAuthCallbackConfig = {
@@ -581,11 +596,7 @@ export class MCPClientManager extends LifecycleCapability {
 
     // Restore work closes over oldId. Drain it before renaming, including
     // replacement work registered while an earlier task settles.
-    while (true) {
-      const pending = this._pendingConnections.get(oldId);
-      if (!pending) break;
-      await pending.catch(() => {});
-    }
+    await this.waitForServer(oldId);
 
     const existing = this.sql<MCPServerRow>(
       "SELECT id FROM cf_agents_mcp_servers WHERE id = ?",
@@ -857,6 +868,33 @@ export class MCPClientManager extends LifecycleCapability {
     }
   }
 
+  /**
+   * @internal Return `authUrl` when it can still complete an OAuth flow: an
+   * absolute http(s) URL whose `state` nonce the provider will redeem. A URL
+   * without a `state` parameter is returned as is, since there is nothing to
+   * check it against. Returns undefined for a missing provider, a malformed
+   * URL, or a state that expired or was already redeemed.
+   */
+  async redeemableAuthUrl(
+    serverId: string,
+    authUrl: string | null | undefined,
+    authProvider: AgentMcpOAuthProvider | undefined
+  ): Promise<string | undefined> {
+    if (!authUrl || !authProvider) return undefined;
+    let url: URL;
+    try {
+      url = new URL(authUrl);
+    } catch {
+      return undefined;
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    const state = url.searchParams.get("state");
+    if (!state) return authUrl;
+    return (await this.hasRedeemableOAuthState(serverId, authProvider, state))
+      ? authUrl
+      : undefined;
+  }
+
   private ignoreUnverifiedCallback(
     serverId: string,
     error: string
@@ -1075,10 +1113,21 @@ export class MCPClientManager extends LifecycleCapability {
         discoverResult: parsedOptions?.discoverResult
       });
 
-      // If auth_url exists, OAuth flow is in progress - set state and wait for callback
       if (server.auth_url) {
-        conn.connectionState = MCPConnectionState.AUTHENTICATING;
-        continue;
+        // An OAuth flow is waiting for its callback while its link can still
+        // complete it.
+        if (
+          await this.redeemableAuthUrl(server.id, server.auth_url, authProvider)
+        ) {
+          conn.connectionState = MCPConnectionState.AUTHENTICATING;
+          continue;
+        }
+        // Otherwise the link is dead: its state expired, or a callback
+        // already redeemed it and the isolate died after saving tokens but
+        // before clearing auth_url. Reconnect instead of showing a link that
+        // cannot work: saved tokens connect directly, and without them the
+        // server answers 401 and a fresh link is persisted.
+        this.clearServerAuthUrl(server.id);
       }
 
       // Start connection in background (don't await) to avoid blocking the DO
@@ -1103,6 +1152,35 @@ export class MCPClientManager extends LifecycleCapability {
       }
     });
     this._pendingConnections.set(serverId, tracked);
+  }
+
+  /**
+   * @internal Run connection work for one server as tracked work, so
+   * `waitForConnections()` and `waitForServer()` observe it.
+   */
+  trackConnectionWork<T>(serverId: string, work: () => Promise<T>): Promise<T> {
+    const result = work();
+    this._trackConnection(
+      serverId,
+      result.then(
+        () => undefined,
+        () => undefined
+      )
+    );
+    return result;
+  }
+
+  /**
+   * @internal Wait until tracked connection work for one server (restore,
+   * post-callback connect, or `trackConnectionWork`) has settled, including
+   * work registered while earlier work was settling.
+   */
+  async waitForServer(serverId: string): Promise<void> {
+    while (true) {
+      const pending = this._pendingConnections.get(serverId);
+      if (!pending) return;
+      await pending.catch(() => {});
+    }
   }
 
   /**
@@ -1489,6 +1567,28 @@ export class MCPClientManager extends LifecycleCapability {
     return id;
   }
 
+  /**
+   * Move a connection to `authenticating` on the authorization URL its
+   * provider holds. Every path that ends up waiting for the user — connect,
+   * discovery, and a request that hits a scope step-up or a failed refresh —
+   * goes through here, so the persisted `auth_url`, the connection state and
+   * the broadcast always agree, and the OAuth callback finds the connection
+   * in the state it completes from.
+   *
+   * Returns undefined, leaving the connection untouched, when the provider
+   * holds no usable authorization URL.
+   */
+  private enterAuthenticating(
+    id: string,
+    conn: MCPClientConnection
+  ): { authUrl: string; clientId?: string } | undefined {
+    const auth = this.persistAuthContinuation(id, conn);
+    if (!auth) return undefined;
+    conn.connectionState = MCPConnectionState.AUTHENTICATING;
+    this._onServerStateChanged.fire();
+    return auth;
+  }
+
   /** Persist and emit an OAuth continuation produced by connect or discovery. */
   private persistAuthContinuation(
     id: string,
@@ -1555,7 +1655,8 @@ export class MCPClientManager extends LifecycleCapability {
         };
 
       case MCPConnectionState.AUTHENTICATING: {
-        const auth = this.persistAuthContinuation(id, conn);
+        // Broadcasts again once auth_url is durable so clients can serve it.
+        const auth = this.enterAuthenticating(id, conn);
         if (!auth) {
           const provider = conn.options.transport.authProvider;
           return {
@@ -1565,10 +1666,7 @@ export class MCPClientManager extends LifecycleCapability {
             }`
           };
         }
-
-        // Broadcast again after auth_url is durable so clients can serve it.
-        this._onServerStateChanged.fire();
-        return { state: conn.connectionState, ...auth };
+        return { state: MCPConnectionState.AUTHENTICATING, ...auth };
       }
 
       case MCPConnectionState.CONNECTED:
@@ -1835,21 +1933,29 @@ export class MCPClientManager extends LifecycleCapability {
     if (!result.success && result.reason === "stale-session") {
       return this._recoverStaleSession(conn, serverId, options);
     }
-    if (conn.connectionState === MCPConnectionState.AUTHENTICATING) {
-      this.persistAuthContinuation(serverId, conn);
-    }
+    // A 401 during discovery (initialize open, catalogs protected) leaves the
+    // connection waiting for the user, exactly like a 401 at connect.
+    const auth =
+      conn.connectionState === MCPConnectionState.AUTHENTICATING
+        ? this.enterAuthenticating(serverId, conn)
+        : undefined;
     this._onServerStateChanged.fire();
 
-    return this._toDiscoverResult(conn, result);
+    return this._toDiscoverResult(conn, result, auth);
   }
 
   private _toDiscoverResult(
     conn: MCPClientConnection,
-    result: MCPDiscoveryResult
+    result: MCPDiscoveryResult,
+    auth?: { authUrl: string; clientId?: string }
   ): MCPDiscoverResult {
-    return result.success
-      ? { success: true, state: conn.connectionState }
-      : { success: false, error: result.error, state: conn.connectionState };
+    if (result.success) return { success: true, state: conn.connectionState };
+    return {
+      success: false,
+      error: result.error,
+      state: conn.connectionState,
+      ...(auth && { authUrl: auth.authUrl, clientId: auth.clientId })
+    };
   }
 
   private async _recoverStaleSession(
@@ -2393,11 +2499,13 @@ export class MCPClientManager extends LifecycleCapability {
   ): ReturnType<Client["callTool"]> {
     const { serverId, ...mcpParams } = params;
     const unqualifiedName = mcpParams.name.replace(`${serverId}.`, "");
-    return callV2Tool(
-      this.mcpConnections[serverId].client,
-      { ...mcpParams, name: unqualifiedName },
-      schemaOrOptions,
-      options
+    return this.withAuthorizationRecovery(serverId, (conn) =>
+      callV2Tool(
+        conn.client,
+        { ...mcpParams, name: unqualifiedName },
+        schemaOrOptions,
+        options
+      )
     );
   }
 
@@ -2409,9 +2517,8 @@ export class MCPClientManager extends LifecycleCapability {
     options?: CacheableRequestOptions
   ) {
     const { serverId, ...mcpParams } = params;
-    return this.mcpConnections[serverId].client.readResource(
-      mcpParams,
-      options
+    return this.withAuthorizationRecovery(serverId, (conn) =>
+      conn.client.readResource(mcpParams, options)
     );
   }
 
@@ -2423,7 +2530,104 @@ export class MCPClientManager extends LifecycleCapability {
     options?: RequestOptions
   ) {
     const { serverId, ...mcpParams } = params;
-    return this.mcpConnections[serverId].client.getPrompt(mcpParams, options);
+    return this.withAuthorizationRecovery(serverId, (conn) =>
+      conn.client.getPrompt(mcpParams, options)
+    );
+  }
+
+  /**
+   * Run a request on an established connection and surface mid-session
+   * re-authorization.
+   *
+   * A request can fail after connect with `403 insufficient_scope` (scope
+   * step-up) or a `401` whose refresh fails. The SDK transport then runs
+   * `auth()`, which hands a new authorization URL to the provider and throws
+   * `UnauthorizedError`. Left as is, nobody sees that URL, and a callback for
+   * it is ignored as stale because the connection is still `ready`. Move the
+   * connection to `authenticating` and persist the URL, as the connect path
+   * does, so the normal OAuth callback exchanges the code and reconnects.
+   */
+  private async withAuthorizationRecovery<T>(
+    serverId: string,
+    request: (conn: MCPClientConnection) => Promise<T>
+  ): Promise<T> {
+    const conn = this.mcpConnections[serverId];
+    if (!conn) throw new MCPConnectionNotFoundError(serverId);
+    const authUrlBefore = conn.options.transport.authProvider?.authUrl;
+    try {
+      return await request(conn);
+    } catch (error) {
+      throw (
+        (await this.requireReauthorization(
+          serverId,
+          conn,
+          error,
+          authUrlBefore
+        )) ?? error
+      );
+    }
+  }
+
+  private async requireReauthorization(
+    serverId: string,
+    conn: MCPClientConnection,
+    error: unknown,
+    authUrlBefore: string | undefined
+  ): Promise<MCPAuthorizationRequiredError | undefined> {
+    // Only take over an established connection. While a callback is being
+    // processed (`connecting`, `discovering`) or after a failure, leave the
+    // state machine alone and rethrow.
+    const canTakeOver = () => {
+      if (this.mcpConnections[serverId] !== conn) return false;
+      const state = conn.connectionState;
+      return (
+        state === MCPConnectionState.READY ||
+        state === MCPConnectionState.CONNECTED ||
+        state === MCPConnectionState.AUTHENTICATING
+      );
+    };
+    if (!canTakeOver() || !isUnauthorized(error)) return undefined;
+
+    // Only a URL set while this request ran counts; an unchanged one is left
+    // over from an earlier flow. A changed one may still belong to a flow
+    // that another request started and the user already completed, so also
+    // require its state nonce to be redeemable: a link the callback would
+    // reject is no use. A custom provider that reuses the same URL gets the
+    // original error, as before.
+    const authProvider = conn.options.transport.authProvider;
+    const authUrl = authProvider?.authUrl;
+    if (!authProvider || !authUrl || authUrl === authUrlBefore) {
+      return undefined;
+    }
+    let nonce: string | null = null;
+    try {
+      nonce = new URL(authUrl).searchParams.get("state");
+    } catch {
+      return undefined;
+    }
+    const stateBefore = conn.connectionState;
+    if (
+      !nonce ||
+      !(await this.hasRedeemableOAuthState(serverId, authProvider, nonce))
+    ) {
+      return undefined;
+    }
+    // Nothing may have moved while the check ran: not the connection (a
+    // callback may have completed) and not the URL that gets saved.
+    if (
+      !canTakeOver() ||
+      conn.connectionState !== stateBefore ||
+      authProvider.authUrl !== authUrl
+    ) {
+      return undefined;
+    }
+
+    const auth = this.enterAuthenticating(serverId, conn);
+    if (!auth) return undefined;
+    return new MCPAuthorizationRequiredError(serverId, auth.authUrl, {
+      clientId: auth.clientId,
+      cause: error
+    });
   }
 }
 

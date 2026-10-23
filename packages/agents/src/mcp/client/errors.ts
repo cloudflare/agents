@@ -1,3 +1,70 @@
+import { UnauthorizedError } from "@modelcontextprotocol/client";
+
+/**
+ * Thrown by `MCPClientManager.callTool()` (and `readResource()` /
+ * `getPrompt()`) when a request on a ready connection needs the user to
+ * authorize again: a `403 insufficient_scope` step-up, or a `401` whose token
+ * refresh failed. The MCP SDK has already built a new authorization URL; the
+ * manager has moved the connection to `authenticating` and persisted
+ * `authUrl`, so sending the user to `authUrl` completes through the normal
+ * OAuth callback. Retry the request once the connection is `ready` again.
+ *
+ * Extends the SDK's `UnauthorizedError`, which these calls threw before, and
+ * keeps its `name`, so existing `instanceof UnauthorizedError` and
+ * `name === "UnauthorizedError"` checks keep matching. Use
+ * `instanceof MCPAuthorizationRequiredError` to read `authUrl`.
+ */
+export class MCPAuthorizationRequiredError extends UnauthorizedError {
+  /** Stable discriminant for this error. */
+  readonly _tag = "MCPAuthorizationRequiredError" as const;
+  /** The MCP server that needs authorization. */
+  readonly serverId: string;
+  /** The authorization URL to send the user to; also persisted as `auth_url`. */
+  readonly authUrl: string;
+  /** The OAuth client id used for the authorization request, when known. */
+  readonly clientId?: string;
+
+  /**
+   * @param serverId - The MCP server that needs authorization.
+   * @param authUrl - The authorization URL the SDK built for the new flow.
+   * @param options - The OAuth client id and the original unauthorized error.
+   */
+  constructor(
+    serverId: string,
+    authUrl: string,
+    options: { clientId?: string; cause?: unknown } = {}
+  ) {
+    super(
+      `MCP server "${serverId}" requires authorization: ${toErrorMessage(options.cause ?? "Unauthorized")}`
+    );
+    this.cause = options.cause;
+    this.serverId = serverId;
+    this.authUrl = authUrl;
+    this.clientId = options.clientId;
+  }
+}
+
+/**
+ * Thrown by `MCPClientManager.callTool()`, `readResource()` and `getPrompt()`
+ * when no connection exists for `serverId`: the id was never registered, the
+ * server was removed, or a restore has not created the connection yet.
+ */
+export class MCPConnectionNotFoundError extends Error {
+  /** Stable discriminant for this error. */
+  readonly _tag = "MCPConnectionNotFoundError" as const;
+
+  /**
+   * @param serverId - The server id that has no connection.
+   */
+  constructor(readonly serverId: string) {
+    super(
+      `No MCP connection for server "${serverId}". It may not be registered yet, may have been removed, or may still be restoring.`
+    );
+    this.name = "MCPConnectionNotFoundError";
+  }
+}
+
+/** Message of an unknown thrown value. */
 export function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

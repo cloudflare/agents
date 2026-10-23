@@ -5,7 +5,10 @@ import {
   routeAgentRequest
 } from "../src/index.ts";
 import { MCPConnectionState } from "../src/mcp/client/connection.ts";
-import { isUnauthorized, toErrorMessage } from "../src/mcp/client/errors.ts";
+import {
+  MCPAuthorizationRequiredError,
+  toErrorMessage
+} from "../src/mcp/client/errors.ts";
 import {
   createLegacyMcpHandler,
   createMcpHandler,
@@ -138,7 +141,8 @@ export class ConformanceHost extends Agent<Env> {
         }
       }
 
-      await this.waitForReady(this._serverId);
+      const ready = await this.waitForReady(this._serverId);
+      if (ready.status === "auth") return ready;
       await this.runScenarioSteps(scenario, this._serverId, context);
       return { status: "done" };
     } catch (error) {
@@ -150,15 +154,13 @@ export class ConformanceHost extends Agent<Env> {
         return this.runScenario(scenario, serverUrl, undefined);
       }
 
-      // A 401 can surface from any phase: connect, discovery (servers that
-      // allow unauthenticated initialize but protect tools/list), or a tool
-      // call (scope step-up). In all cases the SDK has already run the OAuth
-      // authorization request and handed the authorization URL to our
-      // provider — surface it so the driver can authorize in its fake
-      // browser and call /run again.
-      const reauth = this.requestReauth(error);
-      if (reauth) {
-        return reauth;
+      // A request that needs authorization again (scope step-up, or a 401
+      // whose refresh failed) leaves the server authenticating; surface the
+      // link so the driver can authorize in its fake browser and call /run
+      // again. Connect- and discovery-time authorization arrive through
+      // addMcpServer and waitForReady instead.
+      if (error instanceof MCPAuthorizationRequiredError) {
+        return { status: "auth", authUrl: error.authUrl };
       }
       throw error;
     }
@@ -218,31 +220,6 @@ export class ConformanceHost extends Agent<Env> {
     return true;
   }
 
-  private requestReauth(error: unknown): RunResult | undefined {
-    if (!isUnauthorized(error)) {
-      return undefined;
-    }
-
-    // addMcpServer throws before returning an id when discovery fails, so
-    // fall back to looking the server up by name.
-    const serverId =
-      this._serverId ??
-      this.mcp.listServers().find((s) => s.name === SERVER_NAME)?.id;
-    if (!serverId) {
-      return undefined;
-    }
-    this._serverId = serverId;
-
-    const conn = this.mcp.mcpConnections[serverId];
-    const authUrl = conn?.options.transport.authProvider?.authUrl;
-    if (!conn || !authUrl) {
-      return undefined;
-    }
-
-    conn.connectionState = MCPConnectionState.AUTHENTICATING;
-    return { status: "auth", authUrl };
-  }
-
   /**
    * Wait for the connection to reach READY. After an OAuth callback the
    * connection is re-established in the background (establishConnection), so
@@ -250,17 +227,24 @@ export class ConformanceHost extends Agent<Env> {
    */
   // Generous timeout: on cold CI runners, connection retries (exponential
   // backoff) plus the SDK's SSE retry interval can stack well past 25s.
-  private async waitForReady(serverId: string, timeoutMs = 50_000) {
+  private async waitForReady(
+    serverId: string,
+    timeoutMs = 50_000
+  ): Promise<{ status: "ready" } | { status: "auth"; authUrl: string }> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const conn = this.mcp.mcpConnections[serverId];
       if (conn) {
         if (conn.connectionState === MCPConnectionState.READY) {
-          return conn;
+          return { status: "ready" };
         }
         if (conn.connectionState === MCPConnectionState.AUTHENTICATING) {
-          // Routed through requestReauth() by the caller's catch block.
-          throw new Error("Unauthorized: connection requires authorization");
+          // The reconnect after a callback needs another authorization (for
+          // example a discovery-time scope step-up); its link is persisted.
+          const authUrl = this.mcp
+            .listServers()
+            .find((server) => server.id === serverId)?.auth_url;
+          if (authUrl) return { status: "auth", authUrl };
         }
         if (conn.connectionState === MCPConnectionState.FAILED) {
           throw new Error(
