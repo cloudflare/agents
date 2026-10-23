@@ -65,10 +65,8 @@ export const LEGACY_RAW_STASH_PAYLOAD = {
 } as const;
 
 /**
- * Pre-cutover incident records. Includes records missing optional fields added
- * in later builds (`workBaseline`, `lastProgressAt`, `recoveryRootRequestId`)
- * and a record carrying the DEPRECATED `max_recovery_window_exceeded` reason,
- * which must remain tolerated in persisted records.
+ * Pre-cutover incident records missing optional fields added in later builds
+ * (`workBaseline`, `lastProgressAt`, `recoveryRootRequestId`).
  */
 export const LEGACY_INCIDENTS: Record<string, ChatRecoveryIncident> = {
   // Oldest shape: no recoveryRootRequestId, no lastProgressAt, no workBaseline.
@@ -83,22 +81,6 @@ export const LEGACY_INCIDENTS: Record<string, ChatRecoveryIncident> = {
     status: "scheduled",
     firstSeenAt: 1_699_999_000_000,
     lastAttemptAt: 1_699_999_040_000
-  },
-  // Carries the deprecated terminal reason from an older build.
-  deprecatedReason: {
-    incidentId: "root-dep:user-dep",
-    requestId: "req-dep",
-    recoveryRootRequestId: "root-dep",
-    recoveryKind: "retry",
-    attempt: 11,
-    maxAttempts: 10,
-    status: "exhausted",
-    firstSeenAt: 1_699_999_000_000,
-    lastAttemptAt: 1_699_999_900_000,
-    lastProgressAt: 1_699_999_000_000,
-    reason: "max_recovery_window_exceeded",
-    progress: 3,
-    workBaseline: 1
   }
 };
 

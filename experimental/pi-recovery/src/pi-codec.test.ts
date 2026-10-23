@@ -192,50 +192,6 @@ describe("PiRecoveryCodec.decodeEvent", () => {
   });
 });
 
-describe("PiRecoveryCodec.isProgressChunk", () => {
-  it('credits "message_end" as the milestone', () => {
-    expect(codec.isProgressChunk("message_end")).toBe(true);
-  });
-
-  const NON_PROGRESS = [
-    "message_update",
-    "message_start",
-    "turn_start",
-    "turn_end",
-    "text_delta",
-    undefined,
-    "SOMETHING_ELSE"
-  ];
-  for (const type of NON_PROGRESS) {
-    it(`does not treat "${String(type)}" as a milestone`, () => {
-      expect(codec.isProgressChunk(type)).toBe(false);
-    });
-  }
-});
-
-describe("PiRecoveryCodec.isStreamingContentChunk", () => {
-  it('classifies "message_update" as streaming content', () => {
-    expect(codec.isStreamingContentChunk("message_update")).toBe(true);
-  });
-
-  it("keeps the streaming and milestone predicates disjoint", () => {
-    expect(codec.isProgressChunk("message_update")).toBe(false);
-    expect(codec.isStreamingContentChunk("message_end")).toBe(false);
-  });
-
-  const NON_STREAMING = [
-    "message_end",
-    "turn_start",
-    undefined,
-    "SOMETHING_ELSE"
-  ];
-  for (const type of NON_STREAMING) {
-    it(`does not classify "${String(type)}" as streaming content`, () => {
-      expect(codec.isStreamingContentChunk(type)).toBe(false);
-    });
-  }
-});
-
 describe("renderAssistantText", () => {
   it("joins text blocks and filters out non-text content", () => {
     const message = {

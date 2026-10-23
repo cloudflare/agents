@@ -59,60 +59,6 @@ export interface ChatRecoveryCodec {
    * never names a part type.
    */
   toRecoveryPartial(bodies: string[]): RecoveryPartial;
-  /**
-   * Whether a stored chunk of this wire `type` is a **progress milestone** — a
-   * started text/reasoning segment or a settled tool input/output — that should
-   * always credit the host's recovery no-progress window (#1637). The chunk-type
-   * list lives HERE (the codec owns the chunk vocabulary). A `undefined` type (a
-   * non-JSON / typeless body) is never progress.
-   */
-  isProgressChunk(type: string | undefined): boolean;
-  /**
-   * Whether a stored chunk of this wire `type` is **mid-segment streaming
-   * content** — a delta extending an already-started segment (text/reasoning
-   * body, partial tool input). On its own a delta is too granular to credit per
-   * token, but a long single segment that produces only deltas (no new
-   * milestone) must still register forward progress across repeated crashes, or
-   * its no-progress window can false-fire while content is genuinely streaming.
-   * Hosts credit these through a time throttle (see {@link
-   * shouldCreditStreamProgress}). Disjoint from {@link isProgressChunk}; a
-   * `undefined` type is never streaming content.
-   */
-  isStreamingContentChunk(type: string | undefined): boolean;
-}
-
-/** Minimal per-isolate throttle gate (see `StreamProgressCreditThrottle`). */
-export interface ProgressCreditThrottle {
-  shouldCredit(now: number): boolean;
-}
-
-/**
- * The host-agnostic rule for crediting recovery forward progress from a stored
- * stream chunk, from when the marker was a counter bumped per chunk. Neither
- * host bumps a counter any more: the marker is derived from the stream log
- * (`ResumableStream.progressMarker`), so a chunk counts once its segment is
- * durably flushed. The rule stays exported for consumers that still keep a
- * counter of their own:
- *
- *  - a **milestone** ({@link ChatRecoveryCodec.isProgressChunk}) always credits;
- *  - **streaming content** ({@link ChatRecoveryCodec.isStreamingContentChunk})
- *    credits at most once per throttle window, so a long single segment still
- *    registers progress across crashes without writing storage per token;
- *  - anything else never credits.
- *
- * Finer than either host's prior cadence in the worst case and never coarser, so
- * it can only delay/avoid a false `no_progress_timeout`, never hasten give-up.
- */
-export function shouldCreditStreamProgress(input: {
-  codec: Pick<ChatRecoveryCodec, "isProgressChunk" | "isStreamingContentChunk">;
-  type: string | undefined;
-  throttle: ProgressCreditThrottle;
-  now: number;
-}): boolean {
-  const { codec, type, throttle, now } = input;
-  if (codec.isProgressChunk(type)) return true;
-  if (codec.isStreamingContentChunk(type)) return throttle.shouldCredit(now);
-  return false;
 }
 
 /**
@@ -139,25 +85,6 @@ export class AISDKRecoveryCodec implements ChatRecoveryCodec {
       parts,
       hasSettledToolResults: partialHasSettledToolResults(parts)
     };
-  }
-
-  isProgressChunk(type: string | undefined): boolean {
-    return (
-      type === "text-start" ||
-      type === "reasoning-start" ||
-      type === "tool-input-available" ||
-      type === "tool-output-available" ||
-      type === "tool-output-error" ||
-      type === "tool-output-denied"
-    );
-  }
-
-  isStreamingContentChunk(type: string | undefined): boolean {
-    return (
-      type === "text-delta" ||
-      type === "reasoning-delta" ||
-      type === "tool-input-delta"
-    );
   }
 }
 
