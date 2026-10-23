@@ -784,9 +784,16 @@ describe("browser.spec", () => {
     await expect(spec({ domain: "Nope" })).rejects.toThrow(
       "browser.spec() lists the domains"
     );
-    await expect(spec({ domain: 3 })).rejects.toThrow(
+  });
+
+  it("rejects bad input without starting a browser", async () => {
+    const t = setup();
+    const session = t.browser.session();
+    await expect(browserFunctions(session).spec({ domain: 3 })).rejects.toThrow(
       "Invalid arguments for browser.spec"
     );
+    await session.close();
+    expect(t.sockets).toHaveLength(0);
   });
 });
 
