@@ -1,0 +1,27 @@
+.gardener/gardener.lock.json
+  s_de0b486c128948::t_034522a50f2b1b 473-716
+.gardener/tasks/opencode-upgrade/TASK.md
+  s_de0b486c128948::t_0fdbf3f5b2620b 1-257
+.gardener/tasks/pi-upgrade/TASK.md
+  s_de0b486c128948::t_f6b8d2a72eba2b 3-4,6-9,13,42,45-48,54,56-58,62-64,66-68,72,74,77-78,80-82,84-86,91-92,97-100,109-110,120,122-125,127-141,143,148-158,161-162,239,246-248
+.github/workflows/gardener-opencode-upgrade.yml
+  s_de0b486c128948::t_0b63bcd246c814 3-5,8,12,30,43-46
+.github/workflows/gardener-pi-upgrade.yml
+  s_de0b486c128948::t_8d5bf86232c7c3 1-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6cbbe536a1a636245191803fdb599f129823f167",
+  "prompts": {},
+  "sessions": {
+    "s_de0b486c128948": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0a54b-7029-705c-8802-df38dfe75e1f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}
