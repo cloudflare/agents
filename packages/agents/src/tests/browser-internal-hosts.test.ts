@@ -349,6 +349,70 @@ describe("Browser internal hosts", () => {
   });
 });
 
+describe("browserTool with internal hosts", () => {
+  it("lists the sites in its description and lets the model assign them", async () => {
+    await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
+      const tool = instance.internalBrowserTool();
+      expect(tool.description).toContain("## Internal sites");
+      expect(tool.description).toContain(
+        "- http://echo.internal/ — Echoes the request"
+      );
+      expect(tool.description).toContain(
+        '- http://preview.internal/ — A port. Assignable; target schema: {"type":"object"'
+      );
+      expect(tool.description).toContain('like "preview.internal"');
+
+      const run = await tool.execute(
+        {
+          code: `async () => {
+            const assigned = await browser.assignHost({ host: "preview.internal", target: { port: 3001 } });
+            const list = await browser.listHosts();
+            const cleared = await browser.clearHost({ host: "preview.internal" });
+            return { assigned, target: list.find((h) => h.host === "preview.internal").target, cleared };
+          }`
+        },
+        {}
+      );
+      expect(run).toMatchObject({
+        status: "completed",
+        result: {
+          assigned: { url: "http://preview.internal/" },
+          target: { port: 3001 },
+          cleared: { cleared: true }
+        }
+      });
+
+      const bad = await tool.execute(
+        {
+          code: `async () => browser.assignHost({ host: "preview.internal", target: { port: 1 } })`
+        },
+        {}
+      );
+      expect(bad.status === "error" && bad.error).toContain(
+        "Invalid target for preview.internal"
+      );
+
+      const url = await tool.execute(
+        {
+          code: `async () => browser.clearHost({ url: "http://preview.internal/" })`
+        },
+        {}
+      );
+      expect(url.status === "error" && url.error).toContain(
+        'the bare hostname, like "preview.internal"'
+      );
+    });
+  });
+
+  it("leaves a browser without internal hosts without the hosts functions", async () => {
+    await runInDurableObject(agent(), async (instance: TestBrowserAgent) => {
+      const tool = instance.browserTool();
+      expect(tool.description).not.toContain("Internal sites");
+      expect(tool.description).not.toContain("listHosts");
+    });
+  });
+});
+
 describe("InternalHostRouter", () => {
   const props = {
     v: 1 as const,
