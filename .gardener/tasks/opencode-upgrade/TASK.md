@@ -124,8 +124,9 @@ fresh shell: run every Node and pnpm command through `npx -y -p node@24 -p pnpm@
 Run the tests you'll use as evidence once before changing anything, so you can tell a failure the
 upgrade caused from one that was already there.
 
-Move every direct `@opencode/*` dependency in the workspace to the new version, and update the
-lockfile with `pnpm install` (never by hand) until it resolves only the new version. Fix every
+Move every direct `@opencode/*` dependency in the workspace to the new version, and
+update the lockfile with `pnpm install` (never by hand) until it resolves only the new version.
+When a peer range moves, also update every doc and example that names the old range. Fix every
 **breaking**, **docs** and **workaround** item and every new failure, preferring the API upstream
 now provides over keeping our own copy. Don't implement **new feature** items. Make build, `check`
 and every test that covers opencode pass, and record pass counts (as `harness-opencode 40/40`). Add a

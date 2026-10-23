@@ -124,8 +124,9 @@ fresh shell: run every Node and pnpm command through `npx -y -p node@24 -p pnpm@
 Run the tests you'll use as evidence once before changing anything, so you can tell a failure the
 upgrade caused from one that was already there.
 
-Move every direct `@earendil-works/*` dependency in the workspace to the new version, and update the
-lockfile with `pnpm install` (never by hand) until it resolves only the new version. Fix every
+Move every direct `@earendil-works/*` dependency in the workspace to the new version, including the `pnpm-workspace.yaml` override (it pins the `pi-ai` that `pi-agent-core` uses), and
+update the lockfile with `pnpm install` (never by hand) until it resolves only the new version.
+When a peer range moves, also update every doc and example that names the old range. Fix every
 **breaking**, **docs** and **workaround** item and every new failure, preferring the API upstream
 now provides over keeping our own copy. Don't implement **new feature** items. Make build, `check`
 and every test that covers pi pass, and record pass counts (as `harness-pi 51/51`). Add a
