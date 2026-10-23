@@ -11,11 +11,10 @@
 
 ## Quick start
 
-This agent runs [Pi](https://github.com/earendil-works/pi/tree/main/packages/durable) on a Workers AI model. Install the Agents SDK, Pi and Wrangler:
+This agent runs [Pi](https://github.com/earendil-works/pi/tree/main/packages/durable) on a Workers AI model. Install the Agents SDK and Pi:
 
 ```sh
 npm install agents @earendil-works/pi-durable @earendil-works/pi-ai @earendil-works/chord
-npm install -D wrangler
 ```
 
 Create `src/server.ts`:
@@ -214,16 +213,26 @@ export class Assistant extends DurableObject<Env> {
     backends: [new WorkerJavaScriptBackend({ loader: this.env.LOADER })]
   });
 
-  async notes() {
-    await this.workspace.fs.writeFile("/notes.md", "- ship it\n");
-    return this.workspace.fs.readFile("/notes.md", "utf8");
-  }
+  readonly runJavaScript = defineTool({
+    name: "run_javascript",
+    description:
+      "Run JavaScript in a sandbox. `code` is an ES module that default-exports " +
+      "an async function; its return value comes back. The module can read " +
+      "and write the workspace files with node:fs/promises.",
+    parameters: Type.Object({ code: Type.String() }),
+    execute: async ({ code }) => {
+      const run = await this.workspace.runtime.exec(code, { encoding: "utf8" });
+      const { value, stdout, stderr, exitCode } = await run.result();
+      const text = [stdout, stderr, JSON.stringify(value)].join("\n");
+      return { output: [{ type: "text", text }], isError: exitCode !== 0 };
+    }
+  });
 }
 ```
 
-The backend needs a Worker Loader binding, `"worker_loaders": [{ "binding": "LOADER" }]`, in `wrangler.jsonc`.
+Install `this.runJavaScript` in the registry next to `this.saveNote`. The model can now work out answers in code, and keep files from one turn to the next: a CSV it was given, a script it wrote, a report it is building. The backend needs a Worker Loader binding, `"worker_loaders": [{ "binding": "LOADER" }]`, in `wrangler.jsonc`.
 
-To hand the workspace to the model, `createPiTools()` from `@cloudflare/computer/tools/pi-ai` describes it as `read`, `write`, `edit`, `delete`, `ls`, `find`, `grep` and `exec` tools. The [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi) installs them in the registry.
+To give the model the whole workspace, `createPiTools()` from `@cloudflare/computer/tools/pi-ai` describes it as `read`, `write`, `edit`, `delete`, `ls`, `find`, `grep` and `exec` tools. The [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi) installs them in the registry.
 
 ### 5. Let it act on its own
 
@@ -254,35 +263,9 @@ export class Assistant extends DurableObject<Env> {
 
 A schedule can also be a delay in seconds or a `Date`. For work that is not tied to a time, `Queue` from `agents/queue` runs jobs one at a time in order, with retries, and `Tasks` from `agents/tasks` runs multi-step work that resumes from its last finished step.
 
-## What's in `agents`
-
-The main entry points:
-
-| Import                                                           | Use it for                                                                             |
-| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `agents/lifecycle`                                               | `Lifecycle`, which runs a Durable Object and the capabilities you install on it        |
-| `agents`                                                         | `routeAgentRequest`, which sends `/agents/<class>/<name>` requests to the right object |
-| `agents/harness/pi`                                              | `PiHarness`, the Pi model loop, and `skills()`                                         |
-| `agents/harness/opencode`                                        | `OpenCodeHarness`                                                                      |
-| `agents/harness/container`                                       | `ContainerHarness`, for Claude Code or Codex in a Container                            |
-| `agents/models/pi-ai`                                            | `createAI`, Workers AI and AI Gateway models for Pi                                    |
-| `agents/webfetch/pi`, `agents/websearch/pi`, `agents/browser/pi` | Web fetch, web search and browser tools for Pi                                         |
-| `agents/skills`                                                  | Agent Skills sources and registry                                                      |
-| `agents/mcp/client`, `agents/mcp/server`                         | Connect to MCP servers, or serve your own tools over MCP                               |
-| `agents/schedules`                                               | `Scheduler`: delays, dates and cron                                                    |
-| `agents/queue`, `agents/tasks`                                   | Background jobs, and durable multi-step work                                           |
-| `agents/sessions`, `agents/streams`                              | Conversation storage, and durable event streams, for building your own model loop      |
-| `agents/websockets`, `agents/state`                              | WebSocket connections, and state that syncs to connected clients                       |
-| `agents/routing`                                                 | `RoutedAgents`, for one object that owns and routes to many others                     |
-| `agents/client`, `agents/react`                                  | Connect to an agent from a browser, or from React with `useAgent`                      |
-| `agents/email`                                                   | Receive and send email                                                                 |
-| `agents/observability`                                           | Events for logging and tracing                                                         |
-
-## The Agent class
-
-`Agent` from `agents` is a Durable Object with a preset of capabilities already installed, including state that syncs to connected clients, `@callable` methods that clients call over WebSocket, scheduling, queues, MCP connections and email. It runs on the same Lifecycle, so you can add a harness to it with `this.lifecycle.use(this.harness)`. See the [Agents API](https://developers.cloudflare.com/agents/runtime/agents-api/).
-
 ## Examples
+
+Each example is a complete app you can run locally or deploy. Most are built like the agent above, on a plain Durable Object with a Lifecycle.
 
 - [Pi harness](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi): a Pi agent with a chat UI over WebSockets, a workspace and code execution
 - [Schedules](https://github.com/cloudflare/agents/tree/main/examples/next/schedules): reminders with `Scheduler` on a plain Durable Object
@@ -293,6 +276,32 @@ The main entry points:
 - [OpenCode harness](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/opencode): OpenCode running in a Durable Object
 - [Container harness](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/container): Claude Code or Codex in a Cloudflare Container
 - [OpenAI Agents SDK](https://github.com/cloudflare/agents/tree/main/openai-sdk): agents built with `@openai/agents`, running on Durable Objects
+
+## Features
+
+| Feature                  | Description                                                                                       |
+| ------------------------ | ------------------------------------------------------------------------------------------------- |
+| **Durable agents**       | A Durable Object per agent, with its own SQLite database. Survives restarts, hibernates when idle |
+| **Pi harness**           | A model loop that saves every step and resumes a turn where it stopped                            |
+| **Other harnesses**      | OpenCode, Claude Code or Codex in a Container, and a Codex loop in WebAssembly                    |
+| **Models**               | Workers AI, and other providers through AI Gateway, with no API keys in your Worker               |
+| **Web tools**            | Fetch a page as Markdown, search the web, and drive a browser that keeps its logins               |
+| **Agent Skills**         | Instructions the model loads only when a task needs them                                          |
+| **MCP**                  | Connect to MCP servers with OAuth, or serve your own tools over MCP                               |
+| **Workspace**            | Files and sandboxed code execution with Cloudflare Computer                                       |
+| **Scheduling**           | One-time, recurring and cron schedules                                                            |
+| **Background work**      | Queues with retries, and multi-step tasks that resume from their last finished step               |
+| **Sessions and streams** | Conversation storage and durable event streams, for building your own model loop                  |
+| **WebSockets**           | Real-time connections that survive hibernation                                                    |
+| **State sync**           | State that syncs to every connected client                                                        |
+| **Routing**              | Requests routed by URL to the right agent, or one agent that owns many others                     |
+| **Clients**              | `useAgent` for React, and `AgentClient` for other environments                                    |
+| **Email**                | Receive, send and reply to email                                                                  |
+| **Observability**        | Events for logging and tracing                                                                    |
+
+## The Agent class
+
+`Agent` from `agents` is a Durable Object with a preset of capabilities already installed, including state that syncs to connected clients, `@callable` methods that clients call over WebSocket, scheduling, queues, MCP connections and email. It runs on the same Lifecycle, so you can add a harness to it with `this.lifecycle.use(this.harness)`. See the [Agents API](https://developers.cloudflare.com/agents/runtime/agents-api/).
 
 ## Packages
 
