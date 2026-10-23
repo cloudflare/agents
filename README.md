@@ -130,10 +130,10 @@ await this.harness.submit("Summarize today's notes.");
 
 // Each session has its own transcript, inbox and model.
 const session = await this.harness.sessions.create();
-await session.setModel(this.ai("anthropic/claude-opus-4.8"));
+await session.setModel(this.ai("anthropic/claude-opus-5.5"));
 ```
 
-`createAI` from `agents/models/pi-ai` turns the `AI` binding into a Pi model provider. Ids that start with `@cf/` are [Workers AI models](https://developers.cloudflare.com/workers-ai/models/). Other ids, such as `anthropic/claude-opus-4.8`, go through [AI Gateway](https://developers.cloudflare.com/ai-gateway/), which holds the provider credentials, so your Worker needs no API keys.
+`createAI` from `agents/models/pi-ai` turns the `AI` binding into a Pi model provider. Ids that start with `@cf/` are [Workers AI models](https://developers.cloudflare.com/workers-ai/models/). Other ids, such as `anthropic/claude-opus-5.5`, go through [AI Gateway](https://developers.cloudflare.com/ai-gateway/), which holds the provider credentials, so your Worker needs no API keys.
 
 Learn more in the [Pi harness docs](https://developers.cloudflare.com/agents/harnesses/pi/) and [Pi AI models](https://developers.cloudflare.com/agents/models/pi-ai/).
 
