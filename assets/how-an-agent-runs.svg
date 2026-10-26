@@ -5,6 +5,9 @@
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#D84315"/>
     </marker>
+    <marker id="arrow-from-base" viewBox="0 0 10 10" refX="0" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#D84315"/>
+    </marker>
   </defs>
 
   <rect width="960" height="420" rx="16" fill="#FFF8F3"/>
@@ -56,7 +59,7 @@
   <text x="595" y="347" text-anchor="middle" font-size="12" fill="#6B5A50">workspace files and your own tables</text>
 
   <!-- Alarm loop -->
-  <path d="M 430 330 C 380 330, 378 236, 427 201" fill="none" stroke="#D84315" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+  <path d="M 430 330 C 385.3 330, 380.6 226.3, 412.8 204.1" fill="none" stroke="#D84315" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow-from-base)"/>
   <text x="370" y="256" text-anchor="end" font-size="13" font-weight="700" fill="#3A2A20">Alarm</text>
   <text x="370" y="275" text-anchor="end" font-size="12.5" fill="#6B5A50">wakes it after it</text>
   <text x="370" y="292" text-anchor="end" font-size="12.5" fill="#6B5A50">sleeps or crashes</text>
