@@ -15,10 +15,10 @@
   
   <!-- Terminal text -->
   <text x="80" y="135" font-family="'Courier New', monospace" font-size="48" font-weight="bold">
-    <tspan fill="#F6821F">$</tspan>
-    <tspan dx="20" fill="#FF8904">npm i agents</tspan>
+    <tspan fill="#A1A1A1">$</tspan>
+    <tspan dx="20" fill="#F6821F">npm i agents</tspan>
   </text>
   
   <!-- Red square accent -->
-  <rect x="700" y="90" width="40" height="70" fill="#FF8904"/>
+  <rect x="700" y="90" width="40" height="70" fill="#F6821F"/>
 </svg>
