@@ -236,6 +236,7 @@ export class Assistant extends DurableObject<Env> {
   readonly saveNote = defineTool({
     name: "save_note",
     description: "Add a line to the notes file.",
+    executionMode: "sequential",
     parameters: Type.Object({ text: Type.String() }),
     execute: async ({ text }) => {
       const notes = await this.notes();
@@ -252,7 +253,7 @@ export class Assistant extends DurableObject<Env> {
 }
 ```
 
-Install `this.saveNote` in the registry. The model writes to `/notes.md`, and your code reads the same file: the model and your app share one filesystem. The backend needs a Worker Loader binding, `"worker_loaders": [{ "binding": "LOADER" }]`, in `wrangler.jsonc`.
+Install `this.saveNote` in the registry. The model writes to `/notes.md`, and your code reads the same file: the model and your app share one filesystem. Pi runs a round's tool calls at once unless a tool asks to run alone; each save rewrites the whole file, so `executionMode: "sequential"` stops two saves in one round from overwriting each other. The backend needs a Worker Loader binding, `"worker_loaders": [{ "binding": "LOADER" }]`, in `wrangler.jsonc`.
 
 To give the model the whole workspace, `createPiTools()` from `@cloudflare/computer/tools/pi-ai` describes it as `read`, `write`, `edit`, `delete`, `ls`, `find`, `grep` and `exec` tools, where `exec` runs JavaScript on the backend. The [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi) installs them in the registry.
 

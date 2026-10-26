@@ -15,7 +15,16 @@ const copy = resolve(root, "packages/agents/README.md");
 
 const readme = readFileSync(source, "utf8");
 
-const relativeLinks = [...readme.matchAll(/\]\(([^)\s]+)\)/g)]
+// Inline links `[text](url)`, reference definitions `[id]: url`, and HTML
+// `href="url"` or `src="url"`.
+const linkPatterns = [
+  /\]\(([^)\s]+)\)/g,
+  /^\s*\[[^\]]+\]:\s*(\S+)/gm,
+  /\b(?:href|src)="([^"]+)"/g
+];
+
+const relativeLinks = linkPatterns
+  .flatMap((pattern) => [...readme.matchAll(pattern)])
   .map((match) => match[1])
   .filter((target) => !/^(https?:|mailto:|#)/.test(target));
 
