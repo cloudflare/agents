@@ -227,6 +227,54 @@ describe("PiHarness on pi-durable", () => {
     ]);
   });
 
+  it("refuses a whenBusy: reject input while a run is going, saving nothing", async () => {
+    const stub = fresh();
+    // Idle: admitted like any other input.
+    const idle = await stub.trySubmit("hello", {
+      whenBusy: "reject",
+      operationId: "op-idle"
+    });
+    expect(idle).toEqual({
+      receipt: { operationId: "op-idle", session: "1", accepted: true }
+    });
+    expect((await stub.wait("op-idle")).text).toBe("echo: hello");
+
+    const gate = await stub.submit("gate");
+    await stub.gateStarted(1);
+    const busy = await stub.trySubmit("nightly", {
+      whenBusy: "reject",
+      operationId: "op-nightly"
+    });
+    expect(busy).toMatchObject({
+      error: "ConversationBusy",
+      conversationBusy: true
+    });
+    expect(await stub.pending()).toEqual([
+      { operationId: gate.operationId, session: "1", status: "running" }
+    ]);
+    // Retrying an admitted operation id is deduped, not refused.
+    expect(
+      await stub.trySubmit("gate", {
+        whenBusy: "reject",
+        operationId: gate.operationId
+      })
+    ).toMatchObject({ receipt: { accepted: false } });
+
+    await stub.release();
+    await stub.wait(gate.operationId);
+    // Nothing was saved, so the same operation id is admitted once idle.
+    const later = await stub.trySubmit("nightly", {
+      whenBusy: "reject",
+      operationId: "op-nightly"
+    });
+    expect(later).toMatchObject({ receipt: { accepted: true } });
+    expect((await stub.wait("op-nightly")).text).toBe("echo: nightly");
+    expect(
+      (await stub.messages()).filter((text) => text === "nightly")
+    ).toHaveLength(1);
+    expect(await alarmCleared(stub)).toBe(true);
+  });
+
   it("resumes a replay-safe tool after an eviction mid-call, woken by the wake job's alarm", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);

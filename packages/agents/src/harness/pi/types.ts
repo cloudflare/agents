@@ -14,8 +14,11 @@ export type PiSessionId = string;
  *
  * - `followUp` (default): answered after the current run, as its own run.
  * - `steer`: joins the running work after the current tool round.
+ * - `reject`: not admitted. `submit()` rejects with pi-durable's
+ *   `ConversationBusy` and saves nothing, so the same `operationId` can be
+ *   submitted again later. Use it to submit only if idle, atomically.
  */
-export type PiWhenBusy = "followUp" | "steer";
+export type PiWhenBusy = "followUp" | "steer" | "reject";
 
 export type PiSubmitOptions = {
   /** Default: the root session. */

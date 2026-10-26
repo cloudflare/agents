@@ -11,6 +11,7 @@ import {
 import {
   createRegistry,
   defineTask,
+  ConversationBusy,
   Harness,
   type AgentEvent,
   type EntryRecord,
@@ -360,6 +361,28 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     } = {}
   ): Promise<PiReceipt> {
     return this.harness.submit(text, options);
+  }
+
+  /**
+   * `submit()`, with how it settled: a receipt, or the error's name and
+   * whether it is pi's `ConversationBusy`. Error classes do not survive RPC.
+   */
+  async trySubmit(
+    text: string,
+    options: { whenBusy?: PiWhenBusy; operationId?: string } = {}
+  ): Promise<
+    | { receipt: PiReceipt }
+    | { error: string; conversationBusy: boolean; message: string }
+  > {
+    try {
+      return { receipt: await this.harness.submit(text, options) };
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.name : String(error),
+        conversationBusy: error instanceof ConversationBusy,
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
   }
 
   wait(operationId: string, session?: string): Promise<PiOperationResult> {
