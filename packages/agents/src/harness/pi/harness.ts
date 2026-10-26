@@ -398,22 +398,39 @@ export class PiHarness extends LifecycleCapability {
         : conversationId(options.session);
     const inspection = await pi.inspect(BG);
     const parked = await this.#parked(inspection);
-    return inspection.submissions
-      .filter(
-        (record) =>
-          record.requestId !== undefined &&
-          (id === undefined || record.conversationId === id)
-      )
-      .map((record) => ({
-        operationId: record.requestId as string,
-        session: String(record.conversationId),
-        status:
-          record.status === "queued"
-            ? "queued"
-            : parked.some((task) => task.sessions.has(record.conversationId))
-              ? "parked"
-              : "running"
-      }));
+    return inspection.submissions.flatMap((record): PiPendingOperation[] => {
+      if (record.requestId === undefined) return [];
+      if (id !== undefined && record.conversationId !== id) return [];
+      let status: PiPendingOperation["status"];
+      switch (record.status) {
+        case "queued":
+          status = "queued";
+          break;
+        case "placed":
+          status = parked.some((task) =>
+            task.sessions.has(record.conversationId)
+          )
+            ? "parked"
+            : "running";
+          break;
+        case "done":
+        case "unanswered":
+          // Settled. pi's inspection holds only unsettled submissions.
+          return [];
+        default: {
+          // A status added by a newer pi: decide what it reports.
+          const exhaustive: never = record;
+          return exhaustive;
+        }
+      }
+      return [
+        {
+          operationId: record.requestId,
+          session: String(record.conversationId),
+          status
+        }
+      ];
+    });
   }
 
   /** The opened pi Harness, for anything the interface does not cover. */
@@ -490,11 +507,22 @@ export class PiHarness extends LifecycleCapability {
     if (!record || record.status === "done" || record.status === "unanswered") {
       return false;
     }
-    const withdrawn = await pi.abortSubmission(record.id, BG, id);
-    if (withdrawn === "already_placed") {
-      await (await pi.conversation(id, BG))?.abort(BG);
+    const outcome = await pi.abortSubmission(record.id, BG, id);
+    switch (outcome) {
+      case "aborted":
+        return true;
+      case "already_placed":
+        await (await pi.conversation(id, BG))?.abort(BG);
+        return true;
+      case "settled":
+      case "not_found":
+        return false;
+      default: {
+        // An outcome added by a newer pi: decide whether it withdrew.
+        const exhaustive: never = outcome;
+        return exhaustive;
+      }
     }
-    return withdrawn !== "settled" && withdrawn !== "not_found";
   }
 
   /** @internal Wait for pi to settle an operation, by its request id. */
