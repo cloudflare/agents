@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.3.1",
-    "zod": "^4.6.6"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261014.1",
