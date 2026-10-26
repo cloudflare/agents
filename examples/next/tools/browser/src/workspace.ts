@@ -39,7 +39,8 @@ export function createWorkspaceTools(workspace: Workspace): ToolRegistration[] {
         { id: api.callId, name: tool.name, arguments: args },
         { abortSignal: context.abortSignal }
       );
-      return { content, isError };
+      // pi-durable 1.2 and later read `output`, not `content`.
+      return { output: content, isError };
     }
   }));
 }
