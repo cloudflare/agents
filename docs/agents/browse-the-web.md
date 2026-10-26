@@ -167,7 +167,7 @@ try {
 
 ### Internal hostnames
 
-Give the browser hostnames that your Durable Object serves instead of the internet: a dev server in its sandbox, a folder in its workspace, or another Worker. Each host has a `fetch` function that runs in your Durable Object, so it can use its bindings and state:
+Give the browser hostnames that your Durable Object serves instead of the internet: files in an R2 bucket, a folder in its workspace, a dev server in its sandbox, or another Worker. Each host has a `fetch` function that runs in your Durable Object, so it can use its bindings and state:
 
 ```ts
 import { DurableObject } from "cloudflare:workers";
@@ -188,9 +188,21 @@ export class MyObject extends DurableObject<Env> {
       internalHosts: {
         router: this.ctx.exports.InternalHostRouter,
         hosts: {
+          "uploads.internal": {
+            description: "Files your users uploaded",
+            fetch: async (request) => {
+              const key = new URL(request.url).pathname.slice(1);
+              const file = await this.env.UPLOADS.get(key);
+              return file
+                ? new Response(file.body)
+                : new Response("Not found", { status: 404 });
+            }
+          },
           "site.internal": {
-            description: "The production build in /workspace/dist",
-            fetch: (request) => serveWorkspaceFolder("/workspace/dist", request)
+            description: "A workspace folder, such as a production build",
+            target: z.object({ folder: z.string().startsWith("/workspace/") }),
+            fetch: (request, { folder }) =>
+              serveWorkspaceFolder(folder, request)
           },
           "preview.internal": {
             description: "Your dev servers",
