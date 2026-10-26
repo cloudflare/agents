@@ -587,4 +587,55 @@ describe("proxyTo", () => {
       globalThis.fetch = original;
     }
   });
+
+  it("maps a base path in redirects, cookies, Origin and Referer", async () => {
+    const original = globalThis.fetch;
+    const seen: Headers[] = [];
+    const locations = ["/base", "/base/account", "/baseball"];
+    let call = 0;
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit
+    ) => {
+      seen.push(new Headers(init?.headers));
+      const headers = new Headers({ location: locations[call++] });
+      headers.append("set-cookie", "sid=abc; Path=/base; HttpOnly");
+      headers.append("set-cookie", "pref=1; Path=/base/settings");
+      headers.append("set-cookie", "other=1; Path=/baseball");
+      return new Response(null, { status: 302, headers });
+    }) as typeof fetch;
+    try {
+      const handler = proxyTo("https://site.example/base");
+      const post = () =>
+        handler(
+          new Request("http://site.internal/login", {
+            method: "POST",
+            body: "user=a",
+            headers: {
+              origin: "http://site.internal",
+              referer: "http://site.internal/login?next=1"
+            }
+          })
+        );
+      const first = await post();
+      expect(seen[0].get("origin")).toBe("https://site.example");
+      expect(seen[0].get("referer")).toBe(
+        "https://site.example/base/login?next=1"
+      );
+      expect(first.headers.get("location")).toBe("http://site.internal/");
+      expect(first.headers.getSetCookie()).toEqual([
+        "sid=abc; Path=/; HttpOnly",
+        "pref=1; Path=/settings",
+        "other=1; Path=/baseball"
+      ]);
+      expect((await post()).headers.get("location")).toBe(
+        "http://site.internal/account"
+      );
+      expect((await post()).headers.get("location")).toBe(
+        "https://site.example/baseball"
+      );
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
 });

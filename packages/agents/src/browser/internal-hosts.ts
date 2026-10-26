@@ -560,7 +560,11 @@ export interface ProxyToOptions {
 /**
  * A `fetch` for a host that forwards each request to `url`, keeping the path
  * and query. The browser stays on the internal hostname: redirects to `url`
- * are rewritten to the internal host, and cookies are stored for it.
+ * or below it are rewritten to the internal host, and cookies are stored for
+ * it. `Origin` and `Referer` are rewritten to name `url`, so the site's form
+ * checks pass. Other redirects, including ones to the same site outside
+ * `url`'s path, take the browser out to the internet, as a login page on
+ * another domain would. Use an https `url` when `headers` carry credentials.
  *
  * @example
  * ```ts
@@ -585,6 +589,18 @@ export function proxyTo(
 
     const headers = new Headers(request.headers);
     headers.delete("host");
+    const origin = headers.get("origin");
+    if (origin === incoming.origin) headers.set("origin", upstream.origin);
+    const referer = headers.get("referer");
+    if (referer) {
+      const from = new URL(referer);
+      if (from.origin === incoming.origin) {
+        headers.set(
+          "referer",
+          `${upstream.origin}${base}${from.pathname}${from.search}`
+        );
+      }
+    }
     for (const [name, value] of Object.entries(options.headers ?? {})) {
       headers.set(name, value);
     }
@@ -601,21 +617,24 @@ export function proxyTo(
     const location = rewritten.get("location");
     if (location) {
       const resolved = new URL(location, target);
-      if (pointsAtUpstream(resolved, upstream)) {
-        const path = resolved.pathname.startsWith(base)
-          ? resolved.pathname.slice(base.length) || "/"
-          : resolved.pathname;
+      const path = pointsAtUpstream(resolved, upstream)
+        ? toInternalPath(resolved.pathname, base)
+        : undefined;
+      if (path !== undefined) {
         rewritten.set(
           "location",
           `${incoming.origin}${path}${resolved.search}${resolved.hash}`
         );
+      } else {
+        // Absolute, so a relative one doesn't resolve against the internal host.
+        rewritten.set("location", resolved.href);
       }
     }
     const cookies = response.headers.getSetCookie();
     if (cookies.length > 0) {
       rewritten.delete("set-cookie");
       for (const cookie of cookies) {
-        rewritten.append("set-cookie", forInternalHost(cookie));
+        rewritten.append("set-cookie", forInternalHost(cookie, base));
       }
     }
     return new Response(response.body, {
@@ -643,17 +662,33 @@ function pointsAtUpstream(url: URL, upstream: URL): boolean {
 }
 
 /**
+ * The internal path for an upstream path under `base`: `/base/login` is
+ * `/login`, and `/base` is `/`. A path outside `base`, such as `/baseball`,
+ * has no internal path, so it gives `undefined`.
+ */
+function toInternalPath(path: string, base: string): string | undefined {
+  if (base === "") return path;
+  if (path === base) return "/";
+  if (path.startsWith(`${base}/`)) return path.slice(base.length);
+  return undefined;
+}
+
+/**
  * Make an upstream cookie stick on the internal host: drop `Domain` (it
- * names the upstream) and `Secure` (the internal host is plain http).
+ * names the upstream) and `Secure` (the internal host is plain http), and
+ * map a `Path` under the upstream's base path to the internal path.
  * `SameSite=None` needs `Secure`, so it becomes `Lax`. Cookies named
  * `__Secure-` or `__Host-` need `Secure` too, and Chrome drops them.
  */
-function forInternalHost(cookie: string): string {
+function forInternalHost(cookie: string, base: string): string {
   return cookie
     .split(";")
     .filter((part) => !/^\s*(domain|secure)\s*(=|$)/i.test(part))
-    .map((part) =>
-      /^\s*samesite\s*=\s*none\s*$/i.test(part) ? " SameSite=Lax" : part
-    )
+    .map((part) => {
+      if (/^\s*samesite\s*=\s*none\s*$/i.test(part)) return " SameSite=Lax";
+      const path = /^\s*path\s*=\s*(.*?)\s*$/i.exec(part);
+      if (path) return ` Path=${toInternalPath(path[1], base) ?? path[1]}`;
+      return part;
+    })
     .join(";");
 }
