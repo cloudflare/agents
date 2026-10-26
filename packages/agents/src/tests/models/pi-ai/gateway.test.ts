@@ -151,6 +151,29 @@ describe("pi-ai: catalog models on /run", () => {
     expect(binding.calls[0]?.options).not.toHaveProperty("extraHeaders");
   });
 
+  it("sends pi's default betas to /run, and none when the caller nulls the header", async () => {
+    const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
+    const ai = createAI({ binding: asAi(binding) });
+    const model = ai("anthropic/claude-sonnet-4.5");
+    await collectEvents(
+      ai.streamSimple(model, userContext("hi"), { reasoning: "medium" })
+    );
+    // pi headers allow `null` to suppress a default. The null never reaches
+    // the transport, but pi-ai reads it from the call options and picks no
+    // betas, so there is nothing for `/run` to send.
+    await collectEvents(
+      ai.streamSimple(model, userContext("hi"), {
+        headers: { "anthropic-beta": null },
+        reasoning: "medium"
+      })
+    );
+    expect(binding.calls[0]?.options.extraHeaders).toEqual({
+      "anthropic-beta": "interleaved-thinking-2025-05-14"
+    });
+    expect(binding.calls[1]?.input).not.toHaveProperty("betas");
+    expect(binding.calls[1]?.options).not.toHaveProperty("extraHeaders");
+  });
+
   it("lets the caller's anthropic-beta header win on /run", async () => {
     const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
     const ai = createAI({ binding: asAi(binding) });
