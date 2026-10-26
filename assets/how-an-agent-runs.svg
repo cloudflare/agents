@@ -1,6 +1,6 @@
 <svg width="960" height="498" viewBox="0 0 960 498" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
   <title>How an agent runs on Cloudflare</title>
-  <desc>Requests reach your Worker, which finds one Durable Object out of many, one per user. Responses flow back the same way. Requests and the object's alarm both enter its Lifecycle, which starts a scheduler, WebSockets, the Pi harness and the tools Pi runs, and routes work to them. They keep their data in the object's SQLite database. The alarm wakes the object after it sleeps or crashes. The harness calls models through Workers AI and AI Gateway. Tools run inside the object, reach outside services such as web pages, browsers, email and MCP servers, and run code in a sandbox: a fresh Dynamic Worker.</desc>
+  <desc>Requests reach your Worker, which finds one Durable Object out of many, one per user. Requests and the object's alarm both enter its Lifecycle, which starts a scheduler, WebSockets, the Pi harness and the tools Pi runs, and routes work to them. They keep their data in the object's SQLite database. The alarm wakes the object after it sleeps or crashes. The harness calls models through Workers AI and AI Gateway. Tools run inside the object, reach outside services such as web pages, browsers, email and MCP servers, and run code in a sandbox, a Container or a Dynamic Worker.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#D84315"/>
@@ -18,7 +18,7 @@
   <text x="92" y="156" text-anchor="middle" font-size="12.5" fill="#6B5A50">browser, app, curl</text>
   <text x="92" y="174" text-anchor="middle" font-size="12.5" fill="#6B5A50">or another agent</text>
 
-  <line x1="162" y1="150" x2="206" y2="150" stroke="#D84315" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <line x1="160" y1="150" x2="206" y2="150" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
 
   <!-- Worker -->
   <rect x="208" y="106" width="172" height="88" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
@@ -26,7 +26,7 @@
   <text x="294" y="157" text-anchor="middle" font-size="12.5" font-family="'SF Mono', Menlo, Consolas, monospace" fill="#6B5A50">getByName("alice")</text>
   <text x="294" y="176" text-anchor="middle" font-size="12.5" fill="#6B5A50">finds Alice's agent</text>
 
-  <line x1="382" y1="150" x2="427" y2="150" stroke="#D84315" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <line x1="380" y1="150" x2="427" y2="150" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
 
   <!-- Other users' objects, behind Alice's -->
   <rect x="474" y="14" width="252" height="70" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
@@ -54,7 +54,6 @@
   <text x="677.5" y="251" text-anchor="middle" font-size="12.5" fill="#6B5A50">model loop</text>
 
   <line x1="677.5" y1="263" x2="677.5" y2="287" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="669" y="280" text-anchor="end" font-size="12.5" fill="#6B5A50">runs</text>
 
   <rect x="450" y="288" width="145" height="52" rx="10" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
   <text x="522.5" y="310" text-anchor="middle" font-size="13.5" font-weight="700" fill="#3A2A20">WebSockets</text>
@@ -72,7 +71,7 @@
   <text x="600" y="444" text-anchor="middle" font-size="12.5" fill="#6B5A50">workspace files and your own tables</text>
 
   <!-- Alarm loop -->
-  <path d="M 430 400 C 373.1 400, 368.4 219.8, 412.8 190.1" fill="none" stroke="#D84315" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow-from-base)"/>
+  <path d="M 430 400 C 372.8 400, 368.4 217.5, 417.6 189.6" fill="none" stroke="#D84315" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow-from-base)"/>
   <text x="368" y="280" text-anchor="end" font-size="13.5" font-weight="700" fill="#3A2A20">Alarm</text>
   <text x="368" y="299" text-anchor="end" font-size="12.5" fill="#6B5A50">wakes it after it</text>
   <text x="368" y="316" text-anchor="end" font-size="12.5" fill="#6B5A50">sleeps or crashes</text>
@@ -87,12 +86,12 @@
   <line x1="750" y1="306" x2="796" y2="306" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
   <rect x="800" y="279" width="136" height="70" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
   <text x="868" y="303" text-anchor="middle" font-size="15" font-weight="700" fill="#3A2A20">Services</text>
-  <text x="868" y="323" text-anchor="middle" font-size="12.5" fill="#6B5A50">web pages, browsers</text>
+  <text x="868" y="323" text-anchor="middle" font-size="12.5" fill="#6B5A50">web pages, browsers,</text>
   <text x="868" y="340" text-anchor="middle" font-size="12.5" fill="#6B5A50">email, MCP servers</text>
 
   <line x1="750" y1="330" x2="796" y2="382" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
   <rect x="800" y="357" width="136" height="70" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
   <text x="868" y="381" text-anchor="middle" font-size="15" font-weight="700" fill="#3A2A20">Sandbox</text>
-  <text x="868" y="401" text-anchor="middle" font-size="12.5" fill="#6B5A50">runs code in a fresh</text>
+  <text x="868" y="401" text-anchor="middle" font-size="12.5" fill="#6B5A50">Container or</text>
   <text x="868" y="418" text-anchor="middle" font-size="12.5" fill="#6B5A50">Dynamic Worker</text>
 </svg>
