@@ -32,9 +32,8 @@ Each example is an independent workspace package and should stay focused on one
 capability. Once the APIs are stable, move the examples into the main examples
 catalog or replace an existing example where appropriate.
 
-The README, and the npm page built from it, link to `quick-start`,
-`harnesses/pi`, `harnesses/opencode`, `harnesses/container`, `harnesses/codex`,
-`schedules`, `sessions`, `mcp-client`, `routing` and `dynamic-agents`. Each
-`agents` release freezes its npm page, so those links keep working only while
-the paths do. When you move one of these examples, leave a `README.md` at the
-old path that links to the new one.
+The README, and the npm page built from it, link to several of these examples.
+Each `agents` release freezes its npm page, so those links keep working only
+while the paths do. Before you move an example, search `README.md` for its
+path. If it is there, leave a `README.md` at the old path that links to the new
+one.

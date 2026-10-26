@@ -40,6 +40,7 @@ The Lifecycle runs startup, routes requests to capabilities, and owns the object
 ## Getting started
 
 - [Getting Started](./getting-started.md) - Quick start guide for new users
+- [Build your first agent](./build-your-first-agent.md) - Extend a Pi agent one capability at a time: tools, a workspace, a schedule and a browser client
 - [Adding to an Existing Project](./adding-to-existing-project.md) - Integrate agents into your app
 
 ## Lifecycle
