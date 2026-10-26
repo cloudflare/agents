@@ -89,6 +89,11 @@ function isExpired(createdAt: number): boolean {
 export type AgentsOAuthProvider = AgentMcpOAuthProvider;
 
 export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
+  /**
+   * When a refresh is refused and the SDK starts a new authorization, also
+   * request the scope the dropped tokens held, so step-up grants survive.
+   */
+  readonly includePreviouslyGrantedScopes = true;
   private _authUrl_: string | undefined;
   private _serverId_: string | undefined;
   private _clientId_: string | undefined;
