@@ -526,6 +526,13 @@ describe("browserTool over a Browser", () => {
       );
       expect(slow.status === "error" && slow.error).toMatch(/timed out/);
 
+      // Code that cancels the sandbox's own timer still times out.
+      const stuck = await run(
+        "async () => { for (let i = 0; i < 1000; i++) clearTimeout(i); await new Promise((resolve) => setTimeout(resolve, 60000)); }",
+        50
+      );
+      expect(stuck.status === "error" && stuck.error).toMatch(/timed out/);
+
       // No network: fetch is blocked in the sandbox.
       const fetched = await run(
         'async () => (await fetch("https://example.com")).status'

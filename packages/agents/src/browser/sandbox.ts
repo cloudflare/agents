@@ -220,6 +220,12 @@ export async function runBrowserCode(
     : ran;
 }
 
+/**
+ * How long past `timeoutMs` the host waits before giving up on a run whose
+ * sandbox didn't time itself out. Capped at `timeoutMs` for short runs.
+ */
+const HOST_TIMEOUT_GRACE_MS = 5_000;
+
 async function evaluate(
   options: RunBrowserCodeOptions,
   codeModule: string,
@@ -243,9 +249,27 @@ async function evaluate(
     const entrypoint = worker.getEntrypoint() as unknown as {
       evaluate(binding: CdpBinding): Promise<BrowserCodeRun>;
     };
+    const running = entrypoint.evaluate(binding);
+    // If the deadline wins, the run's own settling is ignored.
+    running.catch(() => {});
+    // The sandbox times itself out, but its code can cancel that timer, so
+    // the host keeps a deadline too. Missing it frees the scope's queue;
+    // the run's later browser calls fail once its session closes.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<BrowserCodeRun>((resolve) => {
+      timer = setTimeout(
+        () =>
+          resolve({
+            error: `Execution timed out after ${options.timeoutMs}ms`,
+            logs: []
+          }),
+        options.timeoutMs + Math.min(HOST_TIMEOUT_GRACE_MS, options.timeoutMs)
+      );
+    });
     try {
-      return await entrypoint.evaluate(binding);
+      return await Promise.race([running, deadline]);
     } finally {
+      clearTimeout(timer);
       disposeQuietly(entrypoint);
     }
   } finally {
