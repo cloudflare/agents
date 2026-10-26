@@ -61,3 +61,5 @@ pnpm run check:readme --write
 - the README has a relative link, which would break on npmjs.com
 - a code block marked `<!-- readme-sync: path -->` differs from that file. The quick start is synced with [`examples/next/quick-start`](examples/next/quick-start), so CI typechecks it.
 - an `npm install` line pins a Pi package to a range other than the one in the `agents` peer dependencies. When `agents` moves to a new Pi minor, update the README with it.
+
+Each image in the README has a dark twin in `assets/`, such as `how-an-agent-runs-dark.svg`, which GitHub shows in dark mode. When you change an image, change its twin too.
