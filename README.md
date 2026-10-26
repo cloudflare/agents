@@ -4,8 +4,8 @@
 [![npm downloads](https://img.shields.io/npm/dw/agents)](https://www.npmjs.com/package/agents)
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/cloudflare/agents/main/assets/npm-install-agents-dark.svg">
-  <img alt="npm install agents" src="https://raw.githubusercontent.com/cloudflare/agents/main/assets/npm-install-agents.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/cloudflare/agents/refs/heads/brr/readme-rewrite-tutorial/assets/npm-install-agents-dark.svg">
+  <img alt="npm install agents" src="https://raw.githubusercontent.com/cloudflare/agents/refs/heads/brr/readme-rewrite-tutorial/assets/npm-install-agents.svg">
 </picture>
 
 **Run AI agents on Cloudflare that pick up where they left off.**
@@ -14,7 +14,7 @@ An agent is a model in a loop: it reads the conversation, calls tools, and repea
 
 This package gives a harness a home. Each agent gets its own [Durable Object](https://developers.cloudflare.com/durable-objects/), a small named server with its own database and files. It sleeps when idle, wakes on a request or a timer, and if it is stopped mid-task it resumes from the last saved step. Run one per user, task or conversation.
 
-[Read the docs](https://developers.cloudflare.com/agents/) · [Quick start](#quick-start) · [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi)
+[Read the docs](https://developers.cloudflare.com/agents/) · [Quick start](#quick-start) · [Pi harness example](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/harnesses/pi)
 
 ## Why run an agent on Cloudflare
 
@@ -28,8 +28,8 @@ This package gives a harness a home. Each agent gets its own [Durable Object](ht
 | Call Claude, GPT or open models      | Needs API keys in your Worker            | Uses Workers AI, or AI Gateway, which holds the provider keys   |
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/cloudflare/agents/main/assets/how-an-agent-runs-dark.svg">
-  <img alt="A request goes from a client to your Worker, which finds Alice's agent by name, one of many. The agent is a Durable Object. Requests and its alarm both arrive at its Lifecycle, which starts a harness such as Pi, OpenCode, Claude Code or Codex, the tools the harness runs, a scheduler and WebSockets. They keep their data in the object's SQLite database. The alarm wakes the object after it sleeps or crashes. The harness calls models, and the tools reach outside services and run code the model writes in a sandbox." src="https://raw.githubusercontent.com/cloudflare/agents/main/assets/how-an-agent-runs.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/cloudflare/agents/refs/heads/brr/readme-rewrite-tutorial/assets/how-an-agent-runs-dark.svg">
+  <img alt="A request goes from a client to your Worker, which finds Alice's agent by name, one of many. The agent is a Durable Object. Requests and its alarm both arrive at its Lifecycle, which starts a harness such as Pi, OpenCode, Claude Code or Codex, the tools the harness runs, a scheduler and WebSockets. They keep their data in the object's SQLite database. The alarm wakes the object after it sleeps or crashes. The harness calls models, and the tools reach outside services and run code the model writes in a sandbox." src="https://raw.githubusercontent.com/cloudflare/agents/refs/heads/brr/readme-rewrite-tutorial/assets/how-an-agent-runs.svg">
 </picture>
 
 **Pi brings the loop. Agents gives it a home.** Pi owns everything about a run: the transcript, the inbox of steers and follow-ups, model calls, tool calls, retries and crash recovery. This package gives Pi its storage, in the object's SQLite database, and the alarm that wakes it. It also adds what an agent needs around the loop: tools that work on Workers, a workspace, schedules, and connections to browsers.
@@ -160,7 +160,7 @@ curl -d "What did I last ask you, and what did you answer?" http://localhost:878
 
 Pi saved the interrupted turn and finished it when the agent started again, so the answer is in its transcript.
 
-This code is also a complete project in [`examples/next/quick-start`](https://github.com/cloudflare/agents/tree/main/examples/next/quick-start).
+This code is also a complete project in [`examples/next/quick-start`](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/quick-start).
 
 To start from a complete app instead, use the Pi harness example. It adds a chat UI over WebSockets, a filesystem and code execution. Create a local copy:
 
@@ -170,7 +170,7 @@ npm create cloudflare@latest -- --template=cloudflare/agents/examples/next/harne
 
 Or deploy it to your account:
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/harnesses/pi)
 
 ## How an agent is built
 
@@ -232,11 +232,11 @@ Learn more in the [Pi harness docs](https://developers.cloudflare.com/agents/har
 Other harnesses run on the same Lifecycle:
 
 - [OpenCode](https://developers.cloudflare.com/agents/harnesses/opencode/) (`agents/harness/opencode`): OpenCode running in a Durable Object.
-- [Container](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/container) (`agents/harness/container`): Claude Code or Codex in a Cloudflare Container, driven from a Durable Object.
-- [AI SDK](https://github.com/cloudflare/agents/tree/main/examples/next/channels) (`agents/harness/ai-sdk`): a loop built on the AI SDK's `streamText`, for code that already uses the AI SDK.
-- [Codex](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/codex) (an example, not an import): a Codex-derived model loop compiled to WebAssembly, running in the Worker.
+- [Container](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/harnesses/container) (`agents/harness/container`): Claude Code or Codex in a Cloudflare Container, driven from a Durable Object.
+- [AI SDK](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/channels) (`agents/harness/ai-sdk`): a loop built on the AI SDK's `streamText`, for code that already uses the AI SDK.
+- [Codex](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/harnesses/codex) (an example, not an import): a Codex-derived model loop compiled to WebAssembly, running in the Worker.
 
-To write your own loop, [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) stores the conversation, [Streams](https://github.com/cloudflare/agents/blob/main/docs/agents/streams.md) holds the output as it is written, and [Tasks](https://github.com/cloudflare/agents/blob/main/docs/agents/tasks.md) runs steps that resume after a restart.
+To write your own loop, [Sessions](https://github.com/cloudflare/agents/blob/brr/readme-rewrite-tutorial/docs/agents/sessions.md) stores the conversation, [Streams](https://github.com/cloudflare/agents/blob/brr/readme-rewrite-tutorial/docs/agents/streams.md) holds the output as it is written, and [Tasks](https://github.com/cloudflare/agents/blob/brr/readme-rewrite-tutorial/docs/agents/tasks.md) runs steps that resume after a restart.
 
 ### 3. Give it tools
 
@@ -345,7 +345,7 @@ export class Assistant extends DurableObject<Env> {
 
 Install `this.saveNote` in the registry. The model writes to `/notes.md`, and your code reads the same file: the model and your app share one filesystem. The backend needs a Worker Loader binding, `"worker_loaders": [{ "binding": "LOADER" }]`, in `wrangler.jsonc`.
 
-To give the model the whole workspace, `createPiTools()` from `@cloudflare/computer/tools/pi-ai` describes it as `read`, `write`, `edit`, `delete`, `ls`, `find`, `grep` and `exec` tools, where `exec` runs JavaScript on the backend. The [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi) installs them in the registry.
+To give the model the whole workspace, `createPiTools()` from `@cloudflare/computer/tools/pi-ai` describes it as `read`, `write`, `edit`, `delete`, `ls`, `find`, `grep` and `exec` tools, where `exec` runs JavaScript on the backend. The [Pi harness example](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/harnesses/pi) installs them in the registry.
 
 ### 5. Let it act on its own
 
@@ -402,22 +402,22 @@ stream.start(async (events) => {
 await stream.stop();
 ```
 
-The [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi) wires this up: `src/sockets.ts` gives each WebSocket its own session, and the React client connects with `useAgent` from `agents/react`. Outside React, `AgentClient` from `agents/client` connects the same way. See [WebSockets on a plain Durable Object](https://github.com/cloudflare/agents/blob/main/docs/agents/lifecycle.md#websockets-are-an-opt-in-capability).
+The [Pi harness example](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/harnesses/pi) wires this up: `src/sockets.ts` gives each WebSocket its own session, and the React client connects with `useAgent` from `agents/react`. Outside React, `AgentClient` from `agents/client` connects the same way. See [WebSockets on a plain Durable Object](https://github.com/cloudflare/agents/blob/brr/readme-rewrite-tutorial/docs/agents/lifecycle.md#websockets-are-an-opt-in-capability).
 
 ## Examples
 
 Each example is a complete app you can run locally or deploy. Most are built like the agent above, on a plain Durable Object with a Lifecycle.
 
-- [Quick start](https://github.com/cloudflare/agents/tree/main/examples/next/quick-start): the agent from the quick start, as a project
-- [Pi harness](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi): a Pi agent with a chat UI over WebSockets, a workspace and code execution
-- [Schedules](https://github.com/cloudflare/agents/tree/main/examples/next/schedules): reminders with `Scheduler` on a plain Durable Object
-- [Sessions](https://github.com/cloudflare/agents/tree/main/examples/next/sessions): conversation history with branches and compaction
-- [MCP client](https://github.com/cloudflare/agents/tree/main/examples/next/mcp-client): connect to any MCP server, sign in with OAuth, and call its tools
-- [Routing](https://github.com/cloudflare/agents/tree/main/examples/next/routing): one Durable Object per chat, owned by one hub per user
-- [Dynamic agents](https://github.com/cloudflare/agents/tree/main/examples/next/dynamic-agents): run user-supplied Durable Object code under a supervisor
-- [OpenCode harness](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/opencode): OpenCode running in a Durable Object
-- [Container harness](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/container): Claude Code or Codex in a Cloudflare Container
-- [OpenAI Agents SDK](https://github.com/cloudflare/agents/tree/main/openai-sdk): agents built with `@openai/agents`, running on Durable Objects
+- [Quick start](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/quick-start): the agent from the quick start, as a project
+- [Pi harness](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/harnesses/pi): a Pi agent with a chat UI over WebSockets, a workspace and code execution
+- [Schedules](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/schedules): reminders with `Scheduler` on a plain Durable Object
+- [Sessions](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/sessions): conversation history with branches and compaction
+- [MCP client](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/mcp-client): connect to any MCP server, sign in with OAuth, and call its tools
+- [Routing](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/routing): one Durable Object per chat, owned by one hub per user
+- [Dynamic agents](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/dynamic-agents): run user-supplied Durable Object code under a supervisor
+- [OpenCode harness](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/harnesses/opencode): OpenCode running in a Durable Object
+- [Container harness](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/examples/next/harnesses/container): Claude Code or Codex in a Cloudflare Container
+- [OpenAI Agents SDK](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/openai-sdk): agents built with `@openai/agents`, running on Durable Objects
 
 ## Features
 
@@ -471,13 +471,13 @@ Each example is a complete app you can run locally or deploy. Most are built lik
 ## Documentation
 
 - [Agents documentation](https://developers.cloudflare.com/agents/) on developers.cloudflare.com
-- [`docs/`](https://github.com/cloudflare/agents/tree/main/docs) in this repository, the source for those pages
-- [`design/`](https://github.com/cloudflare/agents/tree/main/design), the design records behind the SDK
+- [`docs/`](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/docs) in this repository, the source for those pages
+- [`design/`](https://github.com/cloudflare/agents/tree/brr/readme-rewrite-tutorial/design), the design records behind the SDK
 
 ## Contributing
 
-We are not accepting external pull requests at the moment. [Open an issue](https://github.com/cloudflare/agents/issues) to report a bug or request a feature, or [start a discussion](https://github.com/cloudflare/agents/discussions) to ask a question. To work on the repository, see [CONTRIBUTING.md](https://github.com/cloudflare/agents/blob/main/CONTRIBUTING.md).
+We are not accepting external pull requests at the moment. [Open an issue](https://github.com/cloudflare/agents/issues) to report a bug or request a feature, or [start a discussion](https://github.com/cloudflare/agents/discussions) to ask a question. To work on the repository, see [CONTRIBUTING.md](https://github.com/cloudflare/agents/blob/brr/readme-rewrite-tutorial/CONTRIBUTING.md).
 
 ## License
 
-[MIT](https://github.com/cloudflare/agents/blob/main/LICENSE)
+[MIT](https://github.com/cloudflare/agents/blob/brr/readme-rewrite-tutorial/LICENSE)
