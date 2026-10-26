@@ -191,16 +191,24 @@ export class MyObject extends DurableObject<Env> {
           "uploads.internal": {
             description: "Files your users uploaded, served from an R2 bucket",
             fetch: async (request) => {
-              const key = new URL(request.url).pathname.slice(1);
-              const file = await this.env.UPLOADS.get(key);
-              return file
-                ? new Response(file.body)
-                : new Response("Not found", { status: 404 });
+              const { pathname } = new URL(request.url);
+              const file = await this.env.UPLOADS.get(
+                decodeURIComponent(pathname.slice(1))
+              );
+              if (!file) return new Response("Not found", { status: 404 });
+              const headers = new Headers();
+              file.writeHttpMetadata(headers); // its Content-Type
+              return new Response(file.body, { headers });
             }
           },
           "site.internal": {
             description: "A workspace folder, such as a production build",
-            target: z.object({ folder: z.string().startsWith("/workspace/") }),
+            target: z.object({
+              folder: z
+                .string()
+                .startsWith("/workspace/")
+                .refine((path) => !path.split("/").includes(".."))
+            }),
             fetch: (request, { folder }) =>
               serveWorkspaceFolder(folder, request)
           },
