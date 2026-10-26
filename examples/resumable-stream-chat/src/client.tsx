@@ -237,11 +237,11 @@ function Chat() {
   const isConnected = connectionStatus === "connected";
 
   // Clear transient thinking state when streaming ends
-  useEffect(() => {
-    if (!isStreaming) {
-      setThinkingData(null);
-    }
-  }, [isStreaming]);
+  const [wasStreaming, setWasStreaming] = useState(isStreaming);
+  if (isStreaming !== wasStreaming) {
+    setWasStreaming(isStreaming);
+    if (!isStreaming) setThinkingData(null);
+  }
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });

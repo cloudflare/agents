@@ -13,6 +13,13 @@ import { createRoot } from "react-dom/client";
 import type { TicTacToeState } from "./server";
 import "./styles.css";
 
+function isGameOver(state: TicTacToeState) {
+  return (
+    state.winner !== null ||
+    state.board.every((row) => row.every((cell) => cell !== null))
+  );
+}
+
 function App() {
   const [gamesPlayed, setGamesPlayed] = useState(0);
   const [autoPlayEnabled, setAutoPlayEnabled] = useState(true);
@@ -24,7 +31,18 @@ function App() {
 
   const agent = useAgent<TicTacToeState>({
     agent: "tic-tac-toe",
-    prefix: "some/prefix"
+    prefix: "some/prefix",
+    // Count each finished game as its final state arrives from the server
+    onStateUpdate: (next) => {
+      if (!isGameOver(next)) return;
+      if (next.winner === "X") {
+        setStats((prev) => ({ ...prev, xWins: prev.xWins + 1 }));
+      } else if (next.winner === "O") {
+        setStats((prev) => ({ ...prev, oWins: prev.oWins + 1 }));
+      } else {
+        setStats((prev) => ({ ...prev, draws: prev.draws + 1 }));
+      }
+    }
   });
 
   const state =
@@ -77,28 +95,17 @@ function App() {
     }
   }, [state.board, gamesPlayed, autoPlayEnabled, handleCellClick]);
 
-  // Check for game over and start new game after delay
+  // Start a new game after a delay once the game is over
+  const gameOver = isGameOver(state);
   useEffect(() => {
-    const isGameOver =
-      state.winner ||
-      state.board.every((row) => row.every((cell) => cell !== null));
-
-    if (isGameOver) {
-      if (state.winner === "X") {
-        setStats((prev) => ({ ...prev, xWins: prev.xWins + 1 }));
-      } else if (state.winner === "O") {
-        setStats((prev) => ({ ...prev, oWins: prev.oWins + 1 }));
-      } else {
-        setStats((prev) => ({ ...prev, draws: prev.draws + 1 }));
-      }
-
+    if (gameOver) {
       const timer = setTimeout(() => {
         handleNewGame();
       }, 3000);
 
       return () => clearTimeout(timer);
     }
-  }, [state.winner, state.board, handleNewGame]);
+  }, [gameOver, handleNewGame]);
 
   const renderCell = (row: number, col: number) => {
     const value = state.board[row][col];

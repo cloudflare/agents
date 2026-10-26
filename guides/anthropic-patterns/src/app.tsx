@@ -468,7 +468,9 @@ function PatternSection({
 }
 
 export default function App() {
-  const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [theme, setTheme] = useState<"light" | "dark">(() =>
+    window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
+  );
   const [toasts, setToasts] = useState<Toast[]>([]);
   const sessionId = useMemo(() => getOrCreateSessionId(), []);
 
@@ -482,16 +484,6 @@ export default function App() {
   };
 
   useEffect(() => {
-    // Theme detection code
-    const prefersDark = window.matchMedia(
-      "(prefers-color-scheme: dark)"
-    ).matches;
-    setTheme(prefersDark ? "dark" : "light");
-    document.documentElement.setAttribute(
-      "data-theme",
-      prefersDark ? "dark" : "light"
-    );
-
     // Add toast event listener
     const handleToast = (
       e: CustomEvent<{ type: ToastType; message: string }>
@@ -506,10 +498,13 @@ export default function App() {
     };
   }, [addToast]);
 
+  // Keep the document's data-theme attribute in sync with the theme
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
+
   const toggleTheme = () => {
-    const newTheme = theme === "light" ? "dark" : "light";
-    setTheme(newTheme);
-    document.documentElement.setAttribute("data-theme", newTheme);
+    setTheme(theme === "light" ? "dark" : "light");
   };
 
   const patterns = {

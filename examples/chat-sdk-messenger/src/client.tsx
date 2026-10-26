@@ -608,24 +608,33 @@ function App() {
     [conversations, selectedThreadId]
   );
 
-  const refresh = useCallback(async () => {
-    try {
+  const refresh = useCallback(() => {
+    // Fetch everything first, then apply it to state in one go.
+    const loadSnapshot = async () => {
       const [nextSetup, nextConversations] = await Promise.all([
         parent.call("getSetupInfo", []) as Promise<AdminSetupInfo>,
         parent.call("listConversations", []) as Promise<AdminConversation[]>
       ]);
-      setSetup(nextSetup);
-      setConversations(nextConversations);
-      const selected = selectedThreadId ?? nextConversations[0]?.threadId;
-      setSelectedThreadId(selected ?? null);
+      const selected =
+        selectedThreadId ?? nextConversations[0]?.threadId ?? null;
       const nextJobs = selected
         ? ((await parent.call("listReplyJobs", [selected])) as AdminReplyJob[])
         : [];
-      setReplyJobs(nextJobs);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
+      return { nextSetup, nextConversations, selected, nextJobs };
+    };
+
+    return loadSnapshot().then(
+      ({ nextSetup, nextConversations, selected, nextJobs }) => {
+        setSetup(nextSetup);
+        setConversations(nextConversations);
+        setSelectedThreadId(selected);
+        setReplyJobs(nextJobs);
+        setError(null);
+      },
+      (err: unknown) => {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    );
   }, [parent, selectedThreadId]);
 
   useEffect(() => {

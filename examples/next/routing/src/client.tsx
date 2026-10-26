@@ -98,9 +98,10 @@ function ChatPane({
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const refresh = useCallback(async () => {
-    setMessages((await chat.call("getMessages")) as ChatMessage[]);
-  }, [chat]);
+  const refresh = useCallback(
+    () => chat.call<ChatMessage[]>("getMessages").then(setMessages),
+    [chat]
+  );
 
   useEffect(() => {
     void refresh();
@@ -202,10 +203,10 @@ function App() {
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
 
-  const refreshChats = useCallback(async () => {
+  const refreshChats = useCallback(() => {
     const needle = query.trim();
-    setChats(
-      needle === "" ? await user.listChats() : await user.searchChats(needle)
+    return (needle === "" ? user.listChats() : user.searchChats(needle)).then(
+      setChats
     );
   }, [query, user]);
 

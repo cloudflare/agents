@@ -1,5 +1,5 @@
 import { useAgent } from "agents/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import type {
   HarnessClientMessage,
   HarnessServerMessage,
@@ -46,8 +46,13 @@ function isActive(turn: HarnessTurn): boolean {
  */
 export function useHarnessSession(name: string) {
   const [state, setState] = useState<State>(INITIAL_STATE);
+  // A new harness object starts from a clean slate.
+  const [stateName, setStateName] = useState(name);
+  if (stateName !== name) {
+    setStateName(name);
+    setState(INITIAL_STATE);
+  }
   const stateRef = useRef(state);
-  stateRef.current = state;
   /** Turns this connection already subscribed to; reset on every open. */
   const subscribedRef = useRef(new Set<string>());
 
@@ -147,18 +152,19 @@ export function useHarnessSession(name: string) {
     [agent]
   );
   const sendRef = useRef(send);
-  sendRef.current = send;
 
   const subscribe = useCallback(
     (turnId: string, from: number) => send({ type: "subscribe", turnId, from }),
     [send]
   );
   const subscribeRef = useRef(subscribe);
-  subscribeRef.current = subscribe;
 
-  useEffect(() => {
-    setState(INITIAL_STATE);
-  }, [name]);
+  // The socket handlers above read the latest values through these refs.
+  useLayoutEffect(() => {
+    stateRef.current = state;
+    sendRef.current = send;
+    subscribeRef.current = subscribe;
+  });
 
   const submit = useCallback(
     (prompt: string) =>

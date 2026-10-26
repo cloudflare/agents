@@ -17,12 +17,7 @@
         "varsIgnorePattern": "^_",
         "caughtErrorsIgnorePattern": "^_"
       }
-    ],
-    "react/set-state-in-effect": "warn",
-    "react/refs": "warn",
-    "react/purity": "warn",
-    "react/immutability": "warn",
-    "react/globals": "warn"
+    ]
   },
   "ignorePatterns": ["**/env.d.ts", "**/routeTree.gen.ts", "**/*.generated.ts"],
   "overrides": [

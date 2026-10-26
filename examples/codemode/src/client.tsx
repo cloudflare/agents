@@ -616,6 +616,7 @@ function App() {
 
   useEffect(() => {
     if (settingsOpen && isConnected) {
+      // oxlint-disable-next-line react/set-state-in-effect -- (re)load tools whenever the open panel has a live connection; showing the loading state first is intended
       refreshMcpTools();
     }
   }, [settingsOpen, isConnected, refreshMcpTools]);

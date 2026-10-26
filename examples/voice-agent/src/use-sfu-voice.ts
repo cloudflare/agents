@@ -11,7 +11,7 @@
  * AnalyserNode, while VoiceClient handles everything else.
  */
 
-import { useState, useRef } from "react";
+import { useState } from "react";
 import { useVoiceAgent, type VoiceAudioInput } from "agents/voice/react";
 import type {
   VoiceStatus,
@@ -192,16 +192,13 @@ export function useSFUVoice(options: UseSFUVoiceOptions): UseSFUVoiceReturn {
 
   // Stable SFUAudioInput instance — persists across renders.
   // VoiceClient calls start()/stop() on call lifecycle.
-  const audioInputRef = useRef<SFUAudioInput | null>(null);
-  if (!audioInputRef.current) {
-    audioInputRef.current = new SFUAudioInput(setWebrtcState);
-  }
+  const [audioInput] = useState(() => new SFUAudioInput(setWebrtcState));
 
   const voice = useVoiceAgent({
     agent: options.agent,
     name: options.name,
     query: options.query,
-    audioInput: audioInputRef.current
+    audioInput
   });
 
   return { ...voice, webrtcState };

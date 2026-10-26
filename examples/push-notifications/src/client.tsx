@@ -92,8 +92,17 @@ function ModeToggle() {
   );
 }
 
+// Push state we can tell without asking the service worker
+function detectPushState(): PushState {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    return "unsupported";
+  }
+  if (Notification.permission === "denied") return "denied";
+  return "loading";
+}
+
 function App() {
-  const [pushState, setPushState] = useState<PushState>("loading");
+  const [pushState, setPushState] = useState<PushState>(detectPushState);
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
   const [agentState, setAgentState] = useState<ReminderAgentState>({
@@ -126,14 +135,7 @@ function App() {
   });
 
   useEffect(() => {
-    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
-      setPushState("unsupported");
-      return;
-    }
-    if (Notification.permission === "denied") {
-      setPushState("denied");
-      return;
-    }
+    if (detectPushState() !== "loading") return;
 
     navigator.serviceWorker
       .register("/sw.js")
