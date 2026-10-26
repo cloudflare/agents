@@ -27,11 +27,10 @@ A stateless function handles one request and then forgets about it. An agent's w
 | An agent needs to…                          | In a stateless function, it…                   | With Agents, it…                                               |
 | ------------------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
 | Work for minutes or hours                   | Stops when the request ends                    | Sets an alarm, so it wakes up and carries on after the request |
-| Survive a crash or a deploy partway through | Starts over, and may send the same email twice | Picks up where it left off, without sending that email again   |
+| Survive a crash or a deploy partway through | Starts over, and may send the same email twice | Picks up where it left off, without rerunning unsafe tools     |
 | Remember each user                          | Needs a separate database                      | Has its own database and files                                 |
 | Wait days for the next message              | Saves everything elsewhere and reloads it      | Sleeps without using compute, and wakes with its data intact   |
 | Act without being asked                     | Needs a cron job that knows about every agent  | Sets its own schedules, and wakes itself when one is due       |
-| Call Claude, GPT or open models             | Needs each provider's API key                  | Uses Workers AI, or AI Gateway, which stores the keys for you  |
 
 ## How an agent runs
 
