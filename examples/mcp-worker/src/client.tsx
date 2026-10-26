@@ -239,6 +239,62 @@ function ModeToggle() {
   );
 }
 
+interface McpSession {
+  sessionId: string | null;
+  serverInfo: ServerInfo | null;
+  tools: McpTool[];
+  resources: McpResource[];
+}
+
+async function openMcpSession(): Promise<McpSession> {
+  const init = await mcpFetch(
+    "/mcp",
+    "initialize",
+    {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: {
+        name: "browser-tester",
+        version: "1.0.0"
+      }
+    },
+    null
+  );
+  const initResult = init.data?.result as
+    | { serverInfo?: ServerInfo }
+    | undefined;
+
+  await mcpFetch("/mcp", "notifications/initialized", {}, init.sessionId);
+
+  const toolsRes = await mcpFetch("/mcp", "tools/list", {}, init.sessionId);
+  const toolsResult = toolsRes.data?.result as
+    | { tools?: McpTool[] }
+    | undefined;
+
+  let resources: McpResource[] = [];
+  try {
+    const resourcesRes = await mcpFetch(
+      "/mcp",
+      "resources/list",
+      {},
+      init.sessionId
+    );
+    const resourcesResult = resourcesRes.data?.result as
+      | { resources?: McpResource[] }
+      | undefined;
+    resources = resourcesResult?.resources ?? [];
+  } catch {
+    // Server may not support resources
+  }
+
+  return {
+    sessionId: init.sessionId,
+    serverInfo: initResult?.serverInfo ?? null,
+    tools: toolsResult?.tools ?? [],
+    resources
+  };
+}
+
 function App() {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [serverInfo, setServerInfo] = useState<ServerInfo | null>(null);
@@ -247,62 +303,29 @@ function App() {
   const [results, setResults] = useState<ToolResult[]>([]);
   const sessionRef = useRef<string | null>(null);
 
-  const connect = useCallback(async () => {
-    try {
-      setStatus("connecting");
-
-      const init = await mcpFetch(
-        "/mcp",
-        "initialize",
-        {
-          protocolVersion: "2025-03-26",
-          capabilities: {},
-          clientInfo: {
-            name: "browser-tester",
-            version: "1.0.0"
-          }
+  const connect = useCallback(
+    () =>
+      openMcpSession().then(
+        (session) => {
+          sessionRef.current = session.sessionId;
+          setServerInfo(session.serverInfo);
+          setTools(session.tools);
+          setResources(session.resources);
+          setStatus("connected");
         },
-        null
-      );
-
-      sessionRef.current = init.sessionId;
-      const initResult = init.data?.result as
-        | { serverInfo?: ServerInfo }
-        | undefined;
-      setServerInfo(initResult?.serverInfo ?? null);
-
-      await mcpFetch("/mcp", "notifications/initialized", {}, init.sessionId);
-
-      const toolsRes = await mcpFetch("/mcp", "tools/list", {}, init.sessionId);
-      const toolsResult = toolsRes.data?.result as
-        | { tools?: McpTool[] }
-        | undefined;
-      setTools(toolsResult?.tools ?? []);
-
-      try {
-        const resourcesRes = await mcpFetch(
-          "/mcp",
-          "resources/list",
-          {},
-          init.sessionId
-        );
-        const resourcesResult = resourcesRes.data?.result as
-          | { resources?: McpResource[] }
-          | undefined;
-        setResources(resourcesResult?.resources ?? []);
-      } catch {
-        // Server may not support resources
-      }
-
-      setStatus("connected");
-    } catch {
-      setStatus("disconnected");
-    }
-  }, []);
+        () => setStatus("disconnected")
+      ),
+    []
+  );
 
   useEffect(() => {
-    connect();
+    void connect();
   }, [connect]);
+
+  const reconnect = () => {
+    setStatus("connecting");
+    void connect();
+  };
 
   const handleCallTool = async (
     name: string,
@@ -394,7 +417,7 @@ function App() {
                 variant="secondary"
                 size="sm"
                 icon={<ArrowClockwiseIcon size={14} />}
-                onClick={connect}
+                onClick={reconnect}
               >
                 Reconnect
               </Button>

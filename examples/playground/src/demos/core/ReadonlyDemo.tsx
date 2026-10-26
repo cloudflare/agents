@@ -111,19 +111,15 @@ function ConnectionPanel({ mode }: { mode: "edit" | "view" }) {
   const connected = agent.readyState === WebSocket.OPEN;
 
   // Refresh permissions when connection opens
-  const refreshPermissions = useCallback(async () => {
-    if (!connected) return;
-    try {
-      const result = await agent.call("getPermissions");
-      setIsReadonly(!result.canEdit);
-    } catch {
-      // ignore — connection may not be ready yet
-    }
-  }, [agent, connected]);
-
   useEffect(() => {
-    refreshPermissions();
-  }, [refreshPermissions]);
+    if (!connected) return;
+    agent
+      .call("getPermissions")
+      .then((result) => setIsReadonly(!result.canEdit))
+      .catch(() => {
+        // ignore — connection may not be ready yet
+      });
+  }, [agent, connected]);
 
   const showError = (msg: string) => addToast(msg, "error");
   const showInfo = (msg: string) => addToast(msg, "info");

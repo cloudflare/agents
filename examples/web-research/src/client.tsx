@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
@@ -612,7 +612,11 @@ function Chat() {
 
   // Open the panel when the window grows wide, close it when it shrinks, so
   // it never covers the chat by surprise.
-  useEffect(() => setPanelOpen(isWide), [isWide]);
+  const [prevIsWide, setPrevIsWide] = useState(isWide);
+  if (isWide !== prevIsWide) {
+    setPrevIsWide(isWide);
+    setPanelOpen(isWide);
+  }
 
   const agent = useAgent<ResearchSettings>({
     agent: "ResearchAgent",

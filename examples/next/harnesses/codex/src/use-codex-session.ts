@@ -1,5 +1,5 @@
 import { useAgent } from "agents/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import type {
   CodexClientMessage,
   CodexOperationSnapshot,
@@ -83,6 +83,12 @@ function isActive(operation: CodexOperationSnapshot): boolean {
  */
 export function useCodexSession(session: string) {
   const [state, setState] = useState<State>(INITIAL_STATE);
+  // A new session starts from a clean slate.
+  const [stateSession, setStateSession] = useState(session);
+  if (stateSession !== session) {
+    setStateSession(session);
+    setState(INITIAL_STATE);
+  }
   const restartingRef = useRef(false);
   /** Operations this connection already subscribed to; reset on every open. */
   const subscribedRef = useRef(new Set<string>());
@@ -194,10 +200,7 @@ export function useCodexSession(session: string) {
     [agent]
   );
   const sendRef = useRef(send);
-  sendRef.current = send;
-
   const stateRef = useRef(state);
-  stateRef.current = state;
   const stateEventsLength = (operationId: string): number =>
     stateRef.current.events[operationId]?.length ?? 0;
 
@@ -207,11 +210,13 @@ export function useCodexSession(session: string) {
     [send]
   );
   const subscribeRef = useRef(subscribe);
-  subscribeRef.current = subscribe;
 
-  useEffect(() => {
-    setState(INITIAL_STATE);
-  }, [session]);
+  // The socket handlers above read the latest values through these refs.
+  useLayoutEffect(() => {
+    sendRef.current = send;
+    stateRef.current = state;
+    subscribeRef.current = subscribe;
+  });
 
   const submit = useCallback(
     (prompt: string) =>

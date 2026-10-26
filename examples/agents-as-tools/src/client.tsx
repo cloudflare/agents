@@ -1091,12 +1091,12 @@ export default function App() {
   // When messages.length drops to 0 (chat cleared in this tab or
   // another tab via `clearHistory`), reset all helper state too so
   // the panels disappear in lockstep with the messages they were
-  // attached to. Also closes any open drill-in — the helper it was
-  // pointing at has been deleted, and rendering would noop anyway.
+  // attached to. Any open drill-in closes on its own: the helper it
+  // was pointing at is no longer in the state map, so the panel
+  // renders nothing.
   useEffect(() => {
     if (messages.length === 0) {
       resetLocalState();
-      setDrillInHelperId(null);
     }
   }, [messages.length, resetLocalState]);
 

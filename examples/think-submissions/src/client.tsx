@@ -123,6 +123,7 @@ function App() {
   }, [agent]);
 
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- refresh only sets state after awaiting the RPC
     void refresh();
     const timer = window.setInterval(() => {
       void refresh();

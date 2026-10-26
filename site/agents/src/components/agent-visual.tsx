@@ -12,7 +12,7 @@ import {
   TypedMessage,
   useSequencedMotionValues
 } from "./_components/chat";
-import { type ReactNode, useMemo, useRef, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 import clsx from "clsx";
 
 export function AgentVisual({ progress }: { progress: MotionValue<number> }) {
@@ -183,7 +183,8 @@ function CodeLine({
   progress: MotionValue<number>;
   width?: number;
 }) {
-  const max = useMemo(() => width ?? Math.random() * 50 + 50, [width]);
+  const [randomWidth] = useState(() => Math.random() * 50 + 50);
+  const max = width ?? randomWidth;
   return (
     <motion.div
       className="h-4 bg-orange-100"

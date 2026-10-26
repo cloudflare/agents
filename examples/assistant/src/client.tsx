@@ -592,16 +592,17 @@ function Chat({
     [agent]
   );
 
-  const refreshWorkspaceFiles = useCallback(async () => {
-    try {
-      const files = await agent.call("listWorkspaceFiles", ["/workspace"]);
-      setWorkspaceFiles(
-        files as { name: string; type: string; size?: number }[]
-      );
-    } catch {
-      setWorkspaceFiles([]);
-    }
-  }, [agent]);
+  const refreshWorkspaceFiles = useCallback(
+    () =>
+      agent.call("listWorkspaceFiles", ["/workspace"]).then(
+        (files) =>
+          setWorkspaceFiles(
+            files as { name: string; type: string; size?: number }[]
+          ),
+        () => setWorkspaceFiles([])
+      ),
+    [agent]
+  );
 
   // Live-refresh the file browser when the shared workspace changes in
   // another chat (or this one). `workspaceRevision` is incremented by
@@ -701,12 +702,11 @@ function Chat({
   >(new Map());
 
   const fetchBranches = useCallback(
-    async (userMessageId: string) => {
-      try {
-        const versions = (await agent.call("getResponseVersions", [
-          userMessageId
-        ])) as UIMessage[];
-        if (versions.length > 1) {
+    (userMessageId: string) =>
+      agent.call("getResponseVersions", [userMessageId]).then(
+        (result) => {
+          const versions = result as UIMessage[];
+          if (versions.length <= 1) return;
           setBranches((prev) => {
             const next = new Map(prev);
             const existing = prev.get(userMessageId);
@@ -716,11 +716,11 @@ function Chat({
             });
             return next;
           });
+        },
+        () => {
+          // Server may not support getBranches yet
         }
-      } catch {
-        // Server may not support getBranches yet
-      }
-    },
+      ),
     [agent]
   );
 
@@ -1942,16 +1942,17 @@ function MultiChatApp({
   // Auto-select the most-recently-active chat when the sidebar loads or
   // when the currently-active chat is deleted from under us. The
   // directory's state is the source of truth — we never invent an id
-  // client-side.
-  useEffect(() => {
-    if (chats.length === 0) {
-      if (activeId !== null) setActiveId(null);
-      return;
-    }
-    if (!activeId || !chats.some((c) => c.id === activeId)) {
-      setActiveId(chats[0].id);
-    }
-  }, [chats, activeId]);
+  // client-side. Adjusting state during render (rather than in an effect)
+  // avoids an extra render pass.
+  const resolvedActiveId =
+    chats.length === 0
+      ? null
+      : activeId && chats.some((c) => c.id === activeId)
+        ? activeId
+        : chats[0].id;
+  if (resolvedActiveId !== activeId) {
+    setActiveId(resolvedActiveId);
+  }
 
   const handleCreate = useCallback(async () => {
     try {

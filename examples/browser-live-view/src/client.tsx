@@ -469,21 +469,26 @@ function App() {
     setEmbeddedSrc(target.url);
   }, []);
 
+  // Background refresh: fetch the tab list without toggling the busy state.
+  const loadLiveView = useCallback(
+    () =>
+      agent.call("liveView", []).then(
+        (result) => {
+          setLiveView(result as BrowserLiveView | null);
+          setLiveError(null);
+        },
+        (e: unknown) => setLiveError(e instanceof Error ? e.message : String(e))
+      ),
+    [agent]
+  );
+
+  // Manual refresh from the panel's refresh button.
   const refreshLiveView = useCallback(async () => {
     setLiveBusy(true);
     setLiveError(null);
-    try {
-      const result = (await agent.call(
-        "liveView",
-        []
-      )) as BrowserLiveView | null;
-      setLiveView(result);
-    } catch (e) {
-      setLiveError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLiveBusy(false);
-    }
-  }, [agent]);
+    await loadLiveView();
+    setLiveBusy(false);
+  }, [loadLiveView]);
 
   const resetBrowser = useCallback(async () => {
     setLiveBusy(true);
@@ -504,27 +509,28 @@ function App() {
   // page) and on a light interval — without touching the embedded iframe, so a
   // human mid-task is never interrupted by a reload.
   useEffect(() => {
-    if (isConnected && !isStreaming) void refreshLiveView();
-  }, [isConnected, isStreaming, refreshLiveView]);
+    if (isConnected && !isStreaming) void loadLiveView();
+  }, [isConnected, isStreaming, loadLiveView]);
 
   useEffect(() => {
     if (!isConnected) return;
-    const id = setInterval(() => void refreshLiveView(), 12_000);
+    const id = setInterval(() => void loadLiveView(), 12_000);
     return () => clearInterval(id);
-  }, [isConnected, refreshLiveView]);
+  }, [isConnected, loadLiveView]);
 
   // Keep a tab embedded: hold the current selection while it exists, otherwise
-  // auto-embed the first available tab (and capture its src once).
-  useEffect(() => {
-    const current = targets.find((t) => t.targetId === selectedTargetId);
-    if (current) {
-      if (!embeddedSrc) setEmbeddedSrc(current.url);
-      return;
-    }
-    const next = targets[0] ?? null;
-    setSelectedTargetId(next?.targetId ?? null);
-    setEmbeddedSrc(next?.url ?? null);
-  }, [targets, selectedTargetId, embeddedSrc]);
+  // auto-embed the first available tab (and capture its src once). Adjusting
+  // state during render (rather than in an effect) avoids an extra render pass.
+  const currentTarget = targets.find((t) => t.targetId === selectedTargetId);
+  if (currentTarget) {
+    if (!embeddedSrc && currentTarget.url) setEmbeddedSrc(currentTarget.url);
+  } else {
+    const nextTarget = targets[0] ?? null;
+    const nextTargetId = nextTarget?.targetId ?? null;
+    const nextSrc = nextTarget?.url ?? null;
+    if (selectedTargetId !== nextTargetId) setSelectedTargetId(nextTargetId);
+    if (embeddedSrc !== nextSrc) setEmbeddedSrc(nextSrc);
+  }
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });

@@ -345,18 +345,20 @@ function App() {
 
   const isStreaming = status === "streaming";
 
-  const refreshPending = useCallback(async () => {
-    try {
-      const next = (await agent.call("pendingApprovals")) as PendingAction[];
-      setPending(next ?? []);
-    } catch {
-      // agent not ready yet
-    }
-  }, [agent]);
+  const refreshPending = useCallback(
+    () =>
+      agent.call("pendingApprovals").then(
+        (next) => setPending((next as PendingAction[]) ?? []),
+        () => {
+          // agent not ready yet
+        }
+      ),
+    [agent]
+  );
 
   // Refresh the approval queue whenever a turn settles.
   useEffect(() => {
-    if (status === "ready") refreshPending();
+    if (status === "ready") void refreshPending();
   }, [status, messages, refreshPending]);
 
   const handleSubmit = async (e: React.FormEvent) => {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Button,
@@ -328,7 +328,21 @@ function App() {
   }, [mode]);
 
   const [mcpStatus, setMcpStatus] = useState<ConnectionStatus>("disconnected");
-  const [pageTools, setPageTools] = useState<RegisteredTool[]>([]);
+  // In-page tools are fixed for the page's lifetime, so build them once.
+  const [inPageTools] = useState(() =>
+    hasWebMcp ? getInPageTools(setMode) : []
+  );
+  const pageTools = useMemo(
+    () =>
+      inPageTools.map((t): RegisteredTool => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: t.inputSchema,
+        source: "page",
+        invoke: t.execute
+      })),
+    [inPageTools]
+  );
   const [remoteTools, setRemoteTools] = useState<RegisteredTool[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const handleRef = useRef<WebMcpHandle | null>(null);
@@ -349,26 +363,16 @@ function App() {
   // registers, so the browser AI sees both.
   useEffect(() => {
     if (!hasWebMcp) return;
-    const tools = getInPageTools(setMode);
-    const registered = registerInPageTools(tools);
+    const registered = registerInPageTools(inPageTools);
     pageToolControllersRef.current = registered;
-    setPageTools(
-      tools.map((t) => ({
-        name: t.name,
-        description: t.description,
-        inputSchema: t.inputSchema,
-        source: "page" as const,
-        invoke: t.execute
-      }))
-    );
-    addLog(`Registered ${tools.length} in-page tool(s)`);
+    addLog(`Registered ${inPageTools.length} in-page tool(s)`);
     return () => {
       for (const { controller } of pageToolControllersRef.current) {
         controller.abort();
       }
       pageToolControllersRef.current = [];
     };
-  }, [addLog]);
+  }, [addLog, inPageTools]);
 
   const connect = useCallback(async () => {
     if (handleRef.current && !handleRef.current.disposed) {
@@ -448,6 +452,7 @@ function App() {
   // followed the Chrome flag instructions).
   useEffect(() => {
     if (hasWebMcp) {
+      // oxlint-disable-next-line react/set-state-in-effect -- connecting to the MCP server is external sync; connect() reports progress via state
       connect();
     }
     return () => {

@@ -170,16 +170,11 @@ function RequestTester({
 
 function SourcePreview({ source }: { source: Record<string, string> }) {
   const keys = Object.keys(source);
-  const keysKey = keys.join(",");
   const [activeFile, setActiveFile] = useState(keys[0]);
-
-  // Reset active file when source files change
-  useEffect(() => {
-    const currentKeys = keysKey.split(",");
-    if (!currentKeys.includes(activeFile)) {
-      setActiveFile(currentKeys[0]);
-    }
-  }, [keysKey, activeFile]);
+  // Reset to the first file when the selected one no longer exists
+  if (!keys.includes(activeFile) && activeFile !== keys[0]) {
+    setActiveFile(keys[0]);
+  }
 
   return (
     <Surface className="rounded-xl ring ring-kumo-line overflow-hidden">

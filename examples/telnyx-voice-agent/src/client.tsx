@@ -110,7 +110,7 @@ function statusIcon(status: VoiceStatus) {
 }
 
 function App() {
-  const sessionId = useRef(getSessionId()).current;
+  const [sessionId] = useState(getSessionId);
   const phoneClientRef = useRef<TelnyxPhoneClient | null>(null);
   const cleanupRef = useRef<(() => Promise<void>) | null>(null);
   const callStartedRef = useRef(false);
@@ -132,6 +132,8 @@ function App() {
   const [isMuted, setIsMuted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [text, setText] = useState("");
+  // Mirrors whether phoneClientRef.current is set, so render can use it.
+  const [hasPhoneClient, setHasPhoneClient] = useState(false);
 
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -149,6 +151,7 @@ function App() {
   async function cleanupCurrentBridge() {
     phoneClientRef.current?.disconnect();
     phoneClientRef.current = null;
+    setHasPhoneClient(false);
     const cleanup = cleanupRef.current;
     cleanupRef.current = null;
     await cleanup?.();
@@ -234,6 +237,7 @@ function App() {
       }
 
       phoneClientRef.current = phoneClient;
+      setHasPhoneClient(true);
       phoneClient.connect();
     } catch (err) {
       await cleanupRef.current?.();
@@ -272,9 +276,8 @@ function App() {
     phoneClientRef.current?.toggleMute();
   }
 
-  const canSendText = connected && phoneClientRef.current !== null;
-  const bridgeActive =
-    connected || connecting || phoneClientRef.current !== null;
+  const canSendText = connected && hasPhoneClient;
+  const bridgeActive = connected || connecting || hasPhoneClient;
 
   return (
     <main className="min-h-screen bg-kumo-base text-kumo-default">
