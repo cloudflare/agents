@@ -141,7 +141,7 @@ export function BrowserPanel({
   state: BrowserState | null;
   busy: boolean;
   error: string | null;
-  onRefresh: () => void;
+  onRefresh: () => Promise<void>;
   onCloseBrowser: () => void;
   /** Closes the panel on narrow screens, where it covers the chat. */
   onClose: () => void;
@@ -164,6 +164,13 @@ export function BrowserPanel({
         ? embedded
         : null;
   if (wanted !== embedded) setEmbedded(wanted);
+  // A Live View URL has to connect within a few minutes of being minted, so
+  // an iframe that lost its connection can't reconnect on its old URL.
+  // Refresh drops the pin, and the iframe loads the newest URL.
+  const reconnect = useCallback(async () => {
+    await onRefresh();
+    setEmbedded(null);
+  }, [onRefresh]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-kumo-base">
@@ -176,16 +183,16 @@ export function BrowserPanel({
         </div>
         <div className="flex items-center gap-1">
           <Tooltip
-            content="Refresh tabs and hosts"
+            content="Refresh tabs and hosts, and reconnect Live View"
             render={
               <Button
                 size="sm"
                 variant="ghost"
                 shape="square"
-                aria-label="Refresh tabs and hosts"
+                aria-label="Refresh tabs and hosts, and reconnect Live View"
                 disabled={busy}
                 icon={<ArrowClockwiseIcon size={14} />}
-                onClick={onRefresh}
+                onClick={() => void reconnect()}
               />
             }
           />

@@ -188,8 +188,13 @@ export class BrowserAgent extends withWorkspaceContainer(BrowserAgentBase) {
   /** Serve one browser request to preview.internal from the container. */
   async #fetchPreview(request: Request, port: number): Promise<Response> {
     // Files the model wrote reach the container on the next sync. Sync on
-    // page loads, so a reload always shows the latest files.
-    if (request.headers.get("sec-fetch-dest") === "document") {
+    // page loads, so a reload always shows the latest files. Chrome sends no
+    // Sec-Fetch-* headers to an http host, so spot a page load by its
+    // Accept header: only navigations ask for text/html first.
+    if (
+      request.method === "GET" &&
+      request.headers.get("accept")?.startsWith("text/html")
+    ) {
       try {
         for await (const _progress of this.workspace.push()) {
           // Drain the sync.

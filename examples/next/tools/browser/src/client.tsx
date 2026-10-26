@@ -452,7 +452,7 @@ function App() {
               state={browser.state}
               busy={browser.busy}
               error={browser.error}
-              onRefresh={() => void browser.refresh()}
+              onRefresh={browser.refresh}
               onCloseBrowser={() => void browser.close()}
               onClose={() => setBrowserOpen(false)}
             />
