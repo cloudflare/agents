@@ -25,9 +25,7 @@ void tools;
 
 // `execute` is always present and typed — no casts needed to call it.
 expectTypeOf(tool.execute).returns.resolves.toEqualTypeOf<BrowserToolOutput>();
-expectTypeOf<BrowserToolOutput["restarted"]>().toEqualTypeOf<
-  true | undefined
->();
+expectTypeOf<BrowserToolOutput["notice"]>().toEqualTypeOf<string | undefined>();
 expectTypeOf<BrowserTool["toModelOutput"]>().toBeFunction();
 
 // The tool takes a browser object, not a session name.
