@@ -56,7 +56,7 @@
   <text x="595" y="347" text-anchor="middle" font-size="12" fill="#6B5A50">workspace files and your own tables</text>
 
   <!-- Alarm loop -->
-  <path d="M 430 330 C 380 330, 380 200, 426 200" fill="none" stroke="#D84315" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+  <path d="M 430 330 L 408 330 C 382 330, 382 200, 404 200 L 426 200" fill="none" stroke="#D84315" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
   <text x="370" y="256" text-anchor="end" font-size="13" font-weight="700" fill="#3A2A20">Alarm</text>
   <text x="370" y="275" text-anchor="end" font-size="12.5" fill="#6B5A50">wakes it after it</text>
   <text x="370" y="292" text-anchor="end" font-size="12.5" fill="#6B5A50">sleeps or crashes</text>
