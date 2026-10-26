@@ -67,7 +67,7 @@ gateway).
   snapshot and are ready in a few seconds. Changing the preset (a new CLI
   version, extra `setup` steps) sets up afresh.
 - **Each turn** is one CLI process run as `agent`: `claude -p
---output-format stream-json` or `codex exec --json`. The daemon turns its
+  --output-format stream-json` or `codex exec --json`. The daemon turns its
   output into the harness's messages and events, and mirrors the CLI's
   session files (`~/.claude/projects`, `~/.codex/sessions`) to the object as
   the turn runs.

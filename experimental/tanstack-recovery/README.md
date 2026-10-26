@@ -29,7 +29,7 @@ dev` + SIGKILL:
 3. **Settled-tool persist gate** — AG-UI tool parts keep the partial under
    `{ persist: false }`.
 4. Text-only partial under `{ persist: false }` is dropped → `recoveredVia:
-"retry"`.
+   "retry"`.
 
 ## Faux vs. real Workers AI
 

@@ -42,11 +42,7 @@ export class Assistant extends Think<Env> {
         maxTurns: 3
       },
       // A messenger channel (Chat SDK webhook).
-      telegram: messengerChannel(
-        telegram({
-          /* adapter config */
-        })
-      )
+      telegram: messengerChannel(telegram({/* adapter config */}))
     };
   }
 }

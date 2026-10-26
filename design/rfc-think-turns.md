@@ -432,7 +432,7 @@ interface TurnSpec {
    continue-from-leaf precondition check).
 7. Optionally wrap in `_runChatRecoveryFiber(requestId, continuation, body)`.
 8. Run `_runInferenceLoop({ signal, clientTools, clientToolExecutor, body,
-workflowPrompt, continuation })` inside the overflow-retry loop when
+   workflowPrompt, continuation })` inside the overflow-retry loop when
    `spec.overflowRetry`.
 9. Stream via the sink: `_streamResult` (ws-broadcast / programmatic-silent) or
    `_streamResultToRpcCallback` (rpc-callback).
@@ -443,27 +443,27 @@ The refactor is mechanical: each existing method becomes a `TurnSpec` builder
 plus a call to `_admitTurn`. No public signature changes.
 
 - `chat` / `chatWithMessengerContext`: `{ trigger: "rpc", admission: "queue",
-continuation: false, persist: "append-user", sink: { kind: "rpc-callback",
-callback }, recoveryFiber: chatRecovery, overflowRetry: true, channelContext }`.
+  continuation: false, persist: "append-user", sink: { kind: "rpc-callback",
+  callback }, recoveryFiber: chatRecovery, overflowRetry: true, channelContext }`.
 - `_handleChatRequest`: `{ trigger: "ws-chat", admission: "queue",
-requestId: event.id, persist: "append-user" (post-reconcile), sink:
-{ kind: "ws-broadcast", connectionId }, generation: epoch,
-recoveryFiber: chatRecovery, overflowRetry: true }`.
+  requestId: event.id, persist: "append-user" (post-reconcile), sink:
+  { kind: "ws-broadcast", connectionId }, generation: epoch,
+  recoveryFiber: chatRecovery, overflowRetry: true }`.
 - `saveMessages`: `{ trigger: "programmatic", admission: "queue",
-persist: "append-user", sink: { kind: "programmatic-silent" },
-recoveryFiber: chatRecovery, overflowRetry: true }`.
+  persist: "append-user", sink: { kind: "programmatic-silent" },
+  recoveryFiber: chatRecovery, overflowRetry: true }`.
 - `submitMessages`: `{ trigger: "submission", admission: "submit",
-idempotencyKey, submissionId, metadata, persist: "append-user",
-sink: { kind: "programmatic-silent" } }`.
+  idempotencyKey, submissionId, metadata, persist: "append-user",
+  sink: { kind: "programmatic-silent" } }`.
 - `continueLastTurn`: `{ trigger: "programmatic", continuation: true,
-persist: "continue-from-leaf", sink: { kind: "programmatic-silent" } }`.
+  persist: "continue-from-leaf", sink: { kind: "programmatic-silent" } }`.
 - `_chatRecoveryContinue` / `_chatRecoveryRetry`: `{ trigger:
-"recovery-continue" | "recovery-retry", ... }` — these stay owned by the
+  "recovery-continue" | "recovery-retry", ... }` — these stay owned by the
   recovery layer and call the same `_admitTurn`.
 - `_fireAutoContinuation`: `{ trigger: "auto-continuation", continuation: true,
-persist: "continue-from-leaf", sink: { kind: "ws-broadcast" } }`.
+  persist: "continue-from-leaf", sink: { kind: "ws-broadcast" } }`.
 - `startAgentToolRun`: `{ trigger: "agent-tool", admission: "queue",
-requestId: <pre-assigned>, sink: { kind: "programmatic-silent" } }`.
+  requestId: <pre-assigned>, sink: { kind: "programmatic-silent" } }`.
 
 This table is the contract for "did the extraction drop a path?" — every row
 must remain behavior-identical (see Testing).
@@ -507,7 +507,7 @@ function addMessages(
 Semantics and implementation:
 
 - Built on the existing Session primitives: `session.appendMessage(message,
-parentId)` (idempotent by id, `providers/agent.ts:245`) and
+  parentId)` (idempotent by id, `providers/agent.ts:245`) and
   `session.updateMessage` for `mode: "upsert"`. Reuses
   `_appendMessageToHistory` so sanitization/row-size enforcement and the
   `_cachedMessages` refresh happen for free (`think.ts:2617`).

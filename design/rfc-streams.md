@@ -134,7 +134,7 @@ for a 100-chunk turn — pinned by the write-accounting test).
 
 1. **The composition contract simplified from checkpoints to cursors.**
    The original contract had the producing step `checkpoint({ streamId,
-cursor })` and a `recover` callback read `status()` as evidence. When
+   cursor })` and a `recover` callback read `status()` as evidence. When
    Tasks' custom recovery was removed (see rfc-fibers.md), the contract
    collapsed to what the producer loop already implied: resume from
    `stream.cursor`, no checkpoint hop, no callback.
