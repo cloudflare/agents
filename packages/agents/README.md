@@ -10,9 +10,11 @@
 
 **Run AI agents on Cloudflare that pick up where they left off.**
 
-An agent is a model in a loop: it reads the conversation, calls tools, and repeats until the job is done. That loop is called a harness. Claude Code and Codex are harnesses, and [Pi](https://github.com/earendil-works/pi/tree/main/packages/durable) is an open-source one that saves every step as it goes.
+An agent is a model that calls tools in a loop until a job is done. The code that runs the loop is called a harness. Claude Code and Codex are harnesses, and so is [Pi](https://github.com/earendil-works/pi/tree/main/packages/durable), an open-source one that saves each step as it goes.
 
-This package gives a harness a home. Each agent gets its own [Durable Object](https://developers.cloudflare.com/durable-objects/), a small named server with its own database and files. It sleeps when idle, wakes on a request or a timer, and if it is stopped mid-task it resumes from the last saved step. Run one per user, task or conversation.
+This package runs a harness on Cloudflare. Each agent is its own [Durable Object](https://developers.cloudflare.com/durable-objects/), a small server with a name, a database and files. It sleeps when nobody is using it and wakes when a request or a timer arrives. If it stops partway through a task, it picks up from its last saved step. You can run one for every user, task or conversation.
+
+Next to the harness you can add other capabilities, such as a scheduler or WebSockets.
 
 [Read the docs](https://developers.cloudflare.com/agents/) · [Quick start](#quick-start) · [Build your first agent](https://github.com/cloudflare/agents/blob/main/docs/agents/build-your-first-agent.md) · [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi)
 
@@ -32,25 +34,7 @@ This package gives a harness a home. Each agent gets its own [Durable Object](ht
   <img alt="A request goes from a client to your Worker, which finds Alice's agent by name, one of many. The agent is a Durable Object. Requests and its alarm both arrive at its Lifecycle, which starts a harness such as Pi, OpenCode, Claude Code or Codex, the tools the harness runs, a scheduler and WebSockets. They keep their data in the object's SQLite database. The alarm wakes the object after it sleeps or crashes. The harness calls models, and the tools reach outside services and run code the model writes in a sandbox." src="https://raw.githubusercontent.com/cloudflare/agents/main/assets/how-an-agent-runs.svg">
 </picture>
 
-**Pi brings the loop. Agents gives it a home.** Pi owns everything about a run: the transcript, the inbox of steers and follow-ups, model calls, tool calls, retries and crash recovery. This package gives Pi its storage, in the object's SQLite database, and the alarm that wakes it. It also adds what an agent needs around the loop: tools that work on Workers, a workspace, schedules, and connections to browsers.
-
-### Three words you will see
-
-- **Harness:** the loop around a model. It sends the conversation to the model, runs the tools the model asks for, and repeats until the model answers. Pi, OpenCode, Claude Code and Codex are harnesses.
-- **Durable Object:** think of it as a small server with a name and its own database. `getByName("alice")` always reaches Alice's, from anywhere. It sleeps when nothing is happening and wakes with its data intact. You pay for compute only while it works.
-- **Capability:** a piece you plug into an agent, such as a harness, a scheduler or WebSockets. You add only the ones you need.
-
-### What you get
-
-- **A durable model loop:** Pi, on Workers AI or any provider through AI Gateway, with no API keys in your Worker
-- **Tools:** read web pages, search the web, drive a browser, load Agent Skills and connect to MCP servers
-- **A workspace:** files in the agent's database, and code that runs in a sandbox
-- **Work on its own:** schedules, queues and multi-step tasks
-- **Live clients:** WebSockets that survive the agent sleeping, and React hooks
-
-The full list is in [Features](#features). The harness APIs are in beta. Pi can change its API in a minor release, so `agents` supports one Pi minor at a time, and the quick start pins it.
-
-Already using the `Agent` class, `AIChatAgent` or Think? They still work. See [The Agent class](#the-agent-class).
+Already using `Agent`, `AIChatAgent` or Think? They still work. See [The Agent class](#the-agent-class).
 
 ## Quick start
 
