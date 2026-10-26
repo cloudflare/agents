@@ -145,7 +145,7 @@ the container's coding filesystem.
   alive). Without it the Docker build's HTTPS fetches fail with certificate
   errors. Hosts without WARP need nothing.
 - **Editing `skills/**` does nothing until you reseed R2**
-(`npm run seed:r2`, or `-- --local` for local dev). The deployed worker
+  (`npm run seed:r2`, or `-- --local` for local dev). The deployed worker
   reads skills from the bucket, not from the repo.
 - **Deploy order matters**: agent-think first (creates the `AgentThink`
   entrypoint), then gh-app (whose service binding points at it).

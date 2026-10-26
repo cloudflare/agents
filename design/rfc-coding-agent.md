@@ -346,7 +346,7 @@ exists):
 _Pending review._ Resolved by the discussion that drove the rewrite:
 
 - ✅ **Own package, not a Think subpath / subclass.** `CodingAgent extends
-AIChatAgent`; no Think core changes.
+  AIChatAgent`; no Think core changes.
 - ✅ **Engine is pluggable;** `CliEngine` ships first, `HarnessEngine` is the
   goal (gated on cloudflare/agents#1829).
 - ✅ **No speculative multi-CLI adapter interface;** extract after codex.

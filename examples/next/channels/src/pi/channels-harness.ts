@@ -200,12 +200,10 @@ class PiChannelsSession implements HarnessSession {
       : [];
     const state: SessionState = {
       messages: transcript,
-      pending: pending.map(
-        (p): OperationStatus => ({
-          operationId: p.operationId,
-          status: p.status === "queued" ? "queued" : "placed"
-        })
-      ),
+      pending: pending.map((p): OperationStatus => ({
+        operationId: p.operationId,
+        status: p.status === "queued" ? "queued" : "placed"
+      })),
       ...(snapshot.run && {
         run: { operations, ...(partial.length && { partial }) }
       })

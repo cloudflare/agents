@@ -24,5 +24,3 @@ declare class PrimitivePropsThink extends Think<
   // @ts-expect-error Props must be an object.
   string
 > {}
-
-export {};
