@@ -132,7 +132,7 @@ Pass options to `browserRun(binding, options)`:
 - `guardrails` restricts which hostnames the browser may reach, for example `{ allowedDomains: ["example.com", "*.example.com"] }`. See [guardrails](https://developers.cloudflare.com/browser-run/features/guardrails/).
 - `recording` turns on [session recording](#session-recording).
 
-To have more than one browser on a Durable Object, give each one a different `name`. It is an option to `new Browser()`, not to `browserRun()`:
+To have more than one browser on a Durable Object, give each one a different `name` when calling `new Browser()`:
 
 ```ts
 research = new Browser({
@@ -174,6 +174,9 @@ import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
 import { Browser, browserRun, type InternalHostMessage } from "agents/browser";
 import { z } from "zod";
+// Your own code: serve a workspace folder's files, and reach a port on your
+// sandbox. Each returns a Response.
+import { fetchSandboxPort, serveWorkspaceFolder } from "./hosts";
 
 // Browser Run calls back into your Worker through this entrypoint.
 export { InternalHostRouter } from "agents/browser";
@@ -187,12 +190,12 @@ export class MyObject extends DurableObject<Env> {
         hosts: {
           "site.internal": {
             description: "The production build in /workspace/dist",
-            fetch: (request) => this.serveFolder("/workspace/dist", request)
+            fetch: (request) => serveWorkspaceFolder("/workspace/dist", request)
           },
           "preview.internal": {
             description: "Your dev servers",
             target: z.object({ port: z.number().int().min(1024) }),
-            fetch: (request, { port }) => this.sandbox.fetchPort(port, request)
+            fetch: (request, { port }) => fetchSandboxPort(port, request)
           },
           "api.internal": { worker: this.env.API }
         }
