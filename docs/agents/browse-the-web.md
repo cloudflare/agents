@@ -161,16 +161,23 @@ try {
 
 ### Internal hostnames
 
-Give the browser hostnames that your agent serves instead of the internet: a dev server in the agent's sandbox, a staging site behind a header, or another Worker. Each host has a `fetch` function that runs in your agent, so it can use the agent's bindings and state:
+Give the browser hostnames that your Durable Object serves instead of the internet: a dev server in its sandbox, a staging site behind a header, or another Worker. Each host has a `fetch` function that runs in your Durable Object, so it can use its bindings and state:
 
 ```ts
-import { Browser, browserRun, proxyTo } from "agents/browser";
+import { DurableObject } from "cloudflare:workers";
+import { Lifecycle } from "agents/lifecycle";
+import {
+  Browser,
+  browserRun,
+  proxyTo,
+  type InternalHostMessage
+} from "agents/browser";
 import { z } from "zod";
 
 // Browser Run calls back into your Worker through this entrypoint.
 export { InternalHostRouter } from "agents/browser";
 
-export class MyAgent extends Agent<Env> {
+export class MyObject extends DurableObject<Env> {
   browser = new Browser({
     provider: browserRun(this.env.BROWSER, {
       guardrails: { allowedDomains: [] }, // internal hosts only
@@ -193,12 +200,18 @@ export class MyAgent extends Agent<Env> {
       }
     })
   });
+  lifecycle = Lifecycle.install(this).use(this.browser);
+
+  // InternalHostRouter calls this to reach your Browser.
+  fetchInternalHost(message: InternalHostMessage) {
+    return this.browser.fetchInternalHost(message);
+  }
 }
 ```
 
 - A host with `fetch` always serves the same thing. Add a `target` schema and the model chooses: it calls `browser.assignHost({ host, target })` in its browser code, the target is checked against the schema and stored, and your `fetch` gets it as its second argument. `target` takes a [Standard JSON Schema](https://standardschema.dev) (Zod 4.2+, ArkType, Valibot via its adapter), which types the argument, or a plain JSON Schema object, which leaves it `unknown`.
 - Assignments survive the browser being replaced, eviction, and redeploys. An assignable host answers 502 until it is assigned. Call `this.browser.internalHosts.assign()`, `.clear()`, or `.list()` to manage them yourself.
-- A host with `worker` (a service binding or a `ctx.exports` entrypoint) goes straight to that Worker, without passing through your agent.
+- A host with `worker` (a service binding or a `ctx.exports` entrypoint) goes straight to that Worker, without passing through your Durable Object.
 - `proxyTo(url, { headers })` forwards to a site and keeps the browser on the internal hostname: it rewrites redirects and drops the cookies' `Domain` and `Secure` attributes. `__Secure-` and `__Host-` cookies do not work over plain http.
 - The browser tool's description lists each host with its description and schema, and its `browser` global gains `listHosts()`, plus `assignHost()` and `clearHost()` when a host is assignable.
 - Internal hosts are plain http on port 80. There is no https and no WebSockets, so a dev server's hot reload will not connect.
@@ -207,37 +220,9 @@ export class MyAgent extends Agent<Env> {
 - Any plain http page open in the browser can send requests to internal hosts, including a page on another internal host (Chrome blocks this from https pages as mixed content). Use `allowedDomains: []`, and if a host's requests have side effects, check that their `Origin` is that host.
 - When a host's `fetch` throws, the browser gets a 502 and the error is logged. The page does not see the error message.
 - Internal hosts only work when deployed. In local dev the browser starts without them and logs a warning.
-- Install the `Browser` on a top-level agent with `this.lifecycle.use()`. Sub-agents are not supported yet.
+- Install the `Browser` on a top-level Durable Object or agent. Sub-agents are not supported yet.
 
-`InternalHostRouter` reaches your agent by calling its `fetchInternalHost()` method. `Agent` has it built in, and so does every class built on it, so the code above works as is. On a plain Durable Object that installs `Lifecycle` itself, add the method and pass the message to your `Browser`:
-
-```ts
-import { DurableObject } from "cloudflare:workers";
-import { Lifecycle } from "agents/lifecycle";
-import { Browser, browserRun, type InternalHostMessage } from "agents/browser";
-
-export class MyObject extends DurableObject<Env> {
-  browser = new Browser({
-    provider: browserRun(this.env.BROWSER, {
-      internalHosts: {
-        router: this.ctx.exports.InternalHostRouter,
-        hosts: {
-          "preview.internal": {
-            fetch: (request) => this.sandbox.fetchPort(5173, request)
-          }
-        }
-      }
-    })
-  });
-  lifecycle = Lifecycle.install(this).use(this.browser);
-
-  fetchInternalHost(message: InternalHostMessage) {
-    return this.browser.fetchInternalHost(message);
-  }
-}
-```
-
-With more than one `Browser`, pick the one named by `message.browser`. Without the method, the browser shows a 502 that says what to add.
+`InternalHostRouter` reaches your Durable Object by calling its `fetchInternalHost()` method. With more than one `Browser`, pick the one named by `message.browser`. Without the method, the browser shows a 502 that says what to add. `Agent` has the method built in, so on an agent leave it out and install the browser with `this.lifecycle.use(this.browser)` in the constructor, as in [Setup](#setup).
 
 ## Session recording
 
