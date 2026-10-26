@@ -1,0 +1,23 @@
+.gardener/gardener.lock.json
+  s_de0b486c128948::t_cb99fdd2dc7b28 828,835,841
+.gardener/tasks/triage/TASK.md
+  s_de0b486c128948::t_2d0b1d0e3f86fd 9,65-69
+.github/workflows/gardener-triage.yml
+  s_de0b486c128948::t_17bc2b3e08f78e 5,47,51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ebf77a9b655b90fa4fed6e9abea7822ca20aa107",
+  "prompts": {},
+  "sessions": {
+    "s_de0b486c128948": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0a54b-7029-705c-8802-df38dfe75e1f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}
