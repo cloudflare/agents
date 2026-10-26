@@ -161,7 +161,8 @@ function stripFences(code: string): string {
 function expressionModule(code: string): string {
   const expression = code
     .replace(/^export\s+default\s+/, "")
-    .replace(/;\s*$/, "");
+    // A last `;`, even with a comment after it, would end the expression.
+    .replace(/;\s*(\/\/[^\n"'`]*)?\s*$/, "");
   return `export default async function (cdp) {
   const value = (
 ${expression}

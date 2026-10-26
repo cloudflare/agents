@@ -450,6 +450,7 @@ describe("browserTool over a Browser", () => {
         `async () => ${send}`,
         "```js\nasync () => " + send + ";\n```",
         `export default async () => ${send}`,
+        `async () => ${send}; // read the title`,
         send,
         `const value = await ${send};\nreturn value;`
       ]) {
