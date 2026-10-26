@@ -43,11 +43,6 @@ export function parentComposer(page: Page): Locator {
   return page.getByPlaceholder("Ask for research on a topic…");
 }
 
-/** The composer inside the open drill-in side panel (when known helper). */
-export function drillInComposer(page: Page): Locator {
-  return page.getByPlaceholder("Continue the conversation with this helper…");
-}
-
 /** All inline helper panels currently on the page (one per helper run). */
 export function helperPanels(page: Page): Locator {
   return page.getByTestId("helper-panel");
@@ -135,12 +130,4 @@ export async function waitForHelperTerminal(panel: Locator): Promise<void> {
  */
 export async function openDrillIn(panel: Locator): Promise<void> {
   await panel.getByRole("button", { name: /^Drill in to / }).click();
-}
-
-/**
- * Click the Clear button in the parent header. Wipes both chat
- * history and the helper-runs registry.
- */
-export async function clickClear(page: Page): Promise<void> {
-  await page.getByRole("button", { name: "Clear" }).click();
 }

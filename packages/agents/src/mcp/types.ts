@@ -1,7 +1,6 @@
 import type { ClientOptions } from "@modelcontextprotocol/client";
 
 export type MaybePromise<T> = T | Promise<T>;
-export type MaybeConnectionTag = { role: string } | undefined;
 
 export type HttpTransportType = "sse" | "streamable-http";
 export type BaseTransportType = HttpTransportType | "rpc";
