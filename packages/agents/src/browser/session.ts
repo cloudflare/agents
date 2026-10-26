@@ -127,14 +127,30 @@ const DEFAULT_MAX_RESULT_BYTES = 1_000_000;
 /** `#liveParams`: nothing to detach. */
 const DETACHED = Symbol("detached");
 
+const MANAGED_BROWSER =
+  "this browser is managed for you and persists between runs. To close a " +
+  "tab, send Target.closeTarget with its targetId.";
+const HOST_ONLY = "it is for the host, not your code.";
+const NO_TUNNELING =
+  "send each command with cdp.send instead, passing sessionId to reach a tab.";
+
 /**
- * Commands that would end the browser. The host owns its lifetime, so the
- * model can't close it out from under the agent (and lose its logins).
+ * Commands model code can't send, and why.
+ *
+ * - Ending the browser: the host owns its lifetime, so the model can't close
+ *   it out from under the agent (and lose its logins).
+ * - Live View and handoff: a Live View link controls the whole browser, so it
+ *   goes to a trusted person through `Browser.liveView()`, never to the model.
+ * - Tunnels: these carry raw protocol messages past this check.
  */
-const BROWSER_LIFETIME_COMMANDS = new Set([
-  "Browser.close",
-  "Browser.crash",
-  "Browser.crashGpuProcess"
+const REFUSED_COMMANDS = new Map([
+  ["Browser.close", MANAGED_BROWSER],
+  ["Browser.crash", MANAGED_BROWSER],
+  ["Browser.crashGpuProcess", MANAGED_BROWSER],
+  ["Cloudflare.getLiveView", HOST_ONLY],
+  ["Cloudflare.handoff", HOST_ONLY],
+  ["Target.sendMessageToTarget", NO_TUNNELING],
+  ["Target.exposeDevToolsProtocol", NO_TUNNELING]
 ]);
 
 /** A CDP target id: for this session, a tab. */
@@ -238,13 +254,8 @@ export class BrowserSession {
       SEND_SCHEMA,
       input
     ) as BrowserSendInput;
-    if (BROWSER_LIFETIME_COMMANDS.has(method)) {
-      throw new Error(
-        `${method} is not available: this browser is managed for you ` +
-          `and persists between runs. To close a tab, send ` +
-          `Target.closeTarget with its targetId.`
-      );
-    }
+    const refused = REFUSED_COMMANDS.get(method);
+    if (refused) throw new Error(`${method} is not available: ${refused}`);
     const state = await this.#connect();
     const live = await this.#resolveSessionId(state, sessionId);
     const liveParams = this.#liveParams(state, method, params);

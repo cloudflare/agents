@@ -623,6 +623,18 @@ describe("BrowserSession", () => {
     expect(t.sockets).toHaveLength(0);
   });
 
+  it.each([
+    "Cloudflare.getLiveView",
+    "Cloudflare.handoff",
+    "Target.sendMessageToTarget",
+    "Target.exposeDevToolsProtocol"
+  ])("refuses %s", async (method) => {
+    const t = setup();
+    const { error } = await t.run([["send", { method }]]);
+    expect(String(error)).toContain(`${method} is not available`);
+    expect(t.sockets).toHaveLength(0);
+  });
+
   it("shares one connection between concurrent first calls", async () => {
     const t = setup();
     const session = t.browser.session();
