@@ -90,13 +90,13 @@ ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 # Node 24. 24.x ships `node:sqlite` without the --experimental-sqlite
 # flag (still RC, but importable as-is) and is the current Active LTS
 # that the Cloudflare Workers runtime aligns against.
-RUN NODE_VERSION=24.16.0 && \
+RUN NODE_VERSION=24.22.1 && \
     curl -fsSL --cacert /etc/ssl/certs/ca-certificates.crt \
       https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
       | tar -xJ -C /usr/local --strip-components=1 && \
     node --version && npm --version && \
     npm install -g esbuild@0.25.0 wrangler@4 pnpm@10 && \
-    BUN_VERSION=1.2.23 && \
+    BUN_VERSION=1.4.4 && \
     curl -fsSL --cacert /etc/ssl/certs/ca-certificates.crt https://bun.sh/install \
       | bash -s "bun-v${BUN_VERSION}" && \
     ln -s /root/.bun/bin/bun /usr/local/bin/bun && \
