@@ -99,6 +99,10 @@ function isCdpMethod(method: string): method is CdpMethod {
   return (CDP_METHODS as readonly string[]).includes(method);
 }
 
+/** Console lines a run keeps, and the characters kept of each. */
+const MAX_LOG_LINES = 100;
+const MAX_LOG_LINE_CHARS = 2_000;
+
 /**
  * The entry module. `code.js` holds the model's code; keeping it in its own
  * module keeps the harness's names out of its scope.
@@ -109,10 +113,23 @@ import run from "./code.js";
 
 export default class BrowserCode extends WorkerEntrypoint {
   async evaluate(binding) {
-    const logs = [];
+    // Logs are kept in the tool's stored output, so bound them here.
+    const lines = [];
+    let dropped = 0;
     const record = (prefix) => (...args) => {
-      logs.push(prefix + args.map(String).join(" "));
+      if (lines.length >= ${MAX_LOG_LINES}) {
+        dropped++;
+        return;
+      }
+      const line = prefix + args.map(String).join(" ");
+      lines.push(
+        line.length > ${MAX_LOG_LINE_CHARS}
+          ? line.slice(0, ${MAX_LOG_LINE_CHARS}) + "…"
+          : line
+      );
     };
+    const logs = () =>
+      dropped > 0 ? [...lines, "[" + dropped + " more lines dropped]"] : lines;
     console.log = record("");
     console.info = record("");
     console.warn = record("[warn] ");
@@ -133,11 +150,11 @@ ${CDP_METHODS.map((method) => `      ${method}: (input) => call(${JSON.stringify
       );
     });
     try {
-      return { result: await Promise.race([run(cdp), timeout]), logs };
+      return { result: await Promise.race([run(cdp), timeout]), logs: logs() };
     } catch (error) {
       return {
         error: error instanceof Error ? error.message : String(error),
-        logs
+        logs: logs()
       };
     } finally {
       clearTimeout(timer);

@@ -504,6 +504,18 @@ describe("browserTool over a Browser", () => {
         logs: ["before 1"]
       });
 
+      // Console output is bounded.
+      const chatty = await run(`async () => {
+        for (let i = 0; i < 150; i++) console.log(i);
+        console.log("x".repeat(5000));
+      }`);
+      const logs = (chatty as { logs?: string[] }).logs ?? [];
+      expect(logs).toHaveLength(101);
+      expect(logs[100]).toBe("[51 more lines dropped]");
+
+      const long = await run(`async () => { console.log("x".repeat(5000)); }`);
+      expect((long as { logs?: string[] }).logs?.[0]).toHaveLength(2001);
+
       // A CDP failure is an error the code can catch.
       const caught = await run(`async () => {
         try {
