@@ -1046,7 +1046,7 @@ Peer dependencies you provide:
 | Package                  | Required | Notes                            |
 | ------------------------ | -------- | -------------------------------- |
 | `agents`                 | yes      | Cloudflare Agents SDK            |
-| `ai`                     | yes      | Vercel AI SDK v6                 |
+| `ai`                     | yes      | Vercel AI SDK v7                 |
 | `zod`                    | yes      | Schema validation (v4)           |
 | `@cloudflare/computer`   | yes      | Workspace and workspace tools    |
 | `@chat-adapter/telegram` | optional | Required for Telegram messengers |
