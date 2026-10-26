@@ -90,7 +90,7 @@ provider parses it, and lift `cf-aig-*` headers off the response:
   the slug is known, so no URL→provider mapping is needed. Resume-bearing.
 - **Gateway-path dispatch (capture/redispatch, #409's mechanism).** Hijack
   `config.fetch`, let `doStream` build the request, capture `{url, headers,
-body}` (sentinel-throw to stop before the network), reshape into
+  body}` (sentinel-throw to stop before the network), reshape into
   `{ provider, endpoint, headers, query }`, dispatch **one**
   `env.AI.gateway(id).run([…])` (array of N for server-side fallback), then feed
   back. Carries the full `cf-aig-*` surface + `cf-aig-step`, but **no resume**.
@@ -410,7 +410,7 @@ returns **`404` `{"error":"Request not found"}`** once the buffer is gone (vs `2
      most durable backstop. Future, gated on §10a delegation.
    - Otherwise a **cold regenerate** (retry).
 3. **Policy hook `onResumeExpired`** → `"continue" | "regenerate" | "accept-partial"
-| "error"` so apps choose cost/consistency trade-offs (cold regeneration spends
+   | "error"` so apps choose cost/consistency trade-offs (cold regeneration spends
    tokens and may diverge from the lost tail; user-message continuation (§10c) is
    cheaper and works on all providers, but is semantic, not byte-exact).
 
@@ -548,7 +548,7 @@ Plug-in path (every hook already exists in `packages/ai-chat` /
 3. **On recovery** (`_handleInternalFiberRecovery` → `onChatRecovery`,
    `ctx.recoveryData` carries the stashed `{ aigRunId, eventOffset }`): build the
    re-attach stream with `createResumableStream({ binding, gateway, runId,
-fromEvent: 0 })` (**no `initial` body**), feed it through the same `@ai-sdk`
+   fromEvent: 0 })` (**no `initial` body**), feed it through the same `@ai-sdk`
    model → `UIMessageChunk`s → the existing `_reply` / Think stream loop. Because
    the run is detached (§7.1), `fromEvent: 0` replays the **complete** run; the
    framework's `continueLastTurn` **replaces** the partial leaf with that replay,
@@ -567,7 +567,7 @@ fromEvent: 0 })` (**no `initial` body**), feed it through the same `@ai-sdk`
    buffer, not the model), and is provably whole — so it is the recommended Layer
    B strategy. The event offset is still worth stashing (observability + the
    opt-in tail path); stash it with a **delta-based** throttle, not `eventOffset %
-N` — SSE offsets jump (one chunk can carry several events), so a modulo check
+   N` — SSE offsets jump (one chunk can carry several events), so a modulo check
    often never lands on a boundary and the offset is never re-stashed (observed:
    only the initial offset-0 stash survived until this was fixed).
 

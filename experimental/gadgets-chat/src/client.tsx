@@ -649,7 +649,9 @@ function App() {
   } = useChat({ transport });
 
   // Keep the ref in sync so onMessage can call setChatMessages
-  setChatMessagesRef.current = setChatMessages;
+  useEffect(() => {
+    setChatMessagesRef.current = setChatMessages;
+  }, [setChatMessages]);
 
   const isConnected = connectionStatus === "connected";
   const isBusy = status === "submitted" || status === "streaming";

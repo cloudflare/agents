@@ -124,6 +124,7 @@ const FileBrowser = forwardRef<
 
   useEffect(() => {
     if (isConnected) {
+      // oxlint-disable-next-line react/set-state-in-effect -- (re)load from the agent whenever the connection opens; showing the loading state first is intended
       loadDir(currentPath);
       loadInfo();
     }

@@ -19,5 +19,14 @@
       }
     ]
   },
-  "ignorePatterns": ["**/env.d.ts", "**/routeTree.gen.ts", "**/*.generated.ts"]
+  "ignorePatterns": ["**/env.d.ts", "**/routeTree.gen.ts", "**/*.generated.ts"],
+  "overrides": [
+    {
+      "files": ["**/react-tests/**"],
+      "rules": {
+        "react/globals": "off",
+        "react/immutability": "off"
+      }
+    }
+  ]
 }

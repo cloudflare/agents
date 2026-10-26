@@ -937,7 +937,7 @@ Suggested phasing:
    the blocking join point — and the join point is the riskiest piece against
    chat-recovery:
    - **4a — ephemeral progress (SHIPPED):** the `reportProgress({ fraction,
-message, phase, data? })` emit API, the transient `data-agent-progress`
+     message, phase, data? })` emit API, the transient `data-agent-progress`
      transport, the `progress` projection on `AgentToolRunState`, the public
      `onProgress(run, progress)` parent hook, the `progress_json` + `last_signal_at`
      snapshot on the child run row surfaced through `inspectAgentToolRun().progress`,

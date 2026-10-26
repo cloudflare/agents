@@ -24,5 +24,3 @@ declare class PrimitivePropsAgent extends AIChatAgent<
   // @ts-expect-error Props must be an object.
   string
 > {}
-
-export {};

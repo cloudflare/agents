@@ -212,16 +212,14 @@ export function useTypedMessage(
   const visibleMessage = message.slice(0, index);
   const finished = index > message.length;
 
-  useEffect(() => {
-    if (index > message.length) {
-      setPlaying(false);
-      onDone?.();
-    }
-  }, [index, message, onDone]);
-
   useInterval(
     () => {
-      setIndex(index + 1);
+      const nextIndex = index + 1;
+      setIndex(nextIndex);
+      if (nextIndex > message.length) {
+        setPlaying(false);
+        onDone?.();
+      }
     },
     playing ? speed : null
   );

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useAgent } from "agents/react";
 import { createRoot } from "react-dom/client";
-import { Chess, type Square } from "chess.js";
+import { Chess, DEFAULT_POSITION, type Square } from "chess.js";
 import {
   Chessboard,
   type ChessboardOptions,
@@ -108,20 +108,21 @@ function App() {
   const [menuError, setMenuError] = useState<string | null>(null);
 
   const gameRef = useRef(new Chess());
-  const [fen, setFen] = useState(gameRef.current.fen());
+  const [fen, setFen] = useState(DEFAULT_POSITION);
+  // The side to move is the second field of the FEN string.
+  const turn = fen.split(" ")[1] === "b" ? "b" : "w";
   const [myColor, setMyColor] = useState<"w" | "b" | "spectator">("spectator");
   const [pending, setPending] = useState(false);
   const [serverState, setServerState] = useState<ServerState | null>(null);
   const [joined, setJoined] = useState(false);
 
-  useEffect(() => {
-    if (!gameId && widgetGameId) {
-      setGameId(widgetGameId);
-    }
-    if (!gameIdInput && widgetGameId) {
-      setGameIdInput(widgetGameId);
-    }
-  }, [widgetGameId, gameId, gameIdInput]);
+  // Pick up a game ID from widget state if it shows up after the first render.
+  if (!gameId && widgetGameId) {
+    setGameId(widgetGameId);
+  }
+  if (!gameIdInput && widgetGameId) {
+    setGameIdInput(widgetGameId);
+  }
 
   function resetLocalGame() {
     gameRef.current.reset();
@@ -389,7 +390,7 @@ function App() {
                 <div style={{ fontSize: "0.9rem", color: "#475569" }}>
                   {myColor === "spectator"
                     ? "You are watching as a spectator"
-                    : playerId === serverState?.players[gameRef.current.turn()]
+                    : playerId === serverState?.players[turn]
                       ? "Your turn"
                       : `Waiting for ${myColor === "w" ? "Black" : "White"}`}
                 </div>

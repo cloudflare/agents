@@ -12,9 +12,7 @@ Chrome is shipping `navigator.modelContext` so any web page can register tools t
 navigator.modelContext.registerTool({
   name: "scroll_to_section",
   description: "...",
-  inputSchema: {
-    /* JSON schema */
-  },
+  inputSchema: {/* JSON schema */},
   execute: async (args) => {
     /* run the tool */
   }

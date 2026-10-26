@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { ReactNode } from "react";
 import { Button } from "@cloudflare/kumo";
 import { SidebarSimpleIcon, XIcon } from "@phosphor-icons/react";
@@ -46,7 +46,12 @@ export function WithSidebar({
 }) {
   const isWide = useMediaQuery("(min-width: 1024px)");
   const [panelOpen, setPanelOpen] = useState(isWide);
-  useEffect(() => setPanelOpen(isWide), [isWide]);
+  // Open the panel when the window grows wide, close it when it shrinks.
+  const [prevIsWide, setPrevIsWide] = useState(isWide);
+  if (isWide !== prevIsWide) {
+    setPrevIsWide(isWide);
+    setPanelOpen(isWide);
+  }
 
   const panel = sidebar({
     onClose: isWide ? undefined : () => setPanelOpen(false)

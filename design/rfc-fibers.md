@@ -41,7 +41,7 @@ registered after startup cannot be resolved on the wake that needs it.)
 ### Execution model
 
 - **Acceptance is durable and idempotent.** `tasks.run(name, input,
-options)` inserts the run row and returns a receipt without waiting for
+  options)` inserts the run row and returns a receipt without waiting for
   terminal state; an existing `runId` or `idempotencyKey` joins the run
   (`accepted: false`) instead of duplicating it.
 - **Replay from the top.** Every execution attempt invokes the handler from

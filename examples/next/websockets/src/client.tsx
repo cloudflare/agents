@@ -96,27 +96,22 @@ function RoomPane({ transport }: { transport: AgentTransport }) {
           append(JSON.stringify(frame));
       }
     },
+    onIdentity: (name, agentName) =>
+      append(`identified as ${agentName}/${name} over ${transport}`),
     onClose: (event) => append(`closed ${event.code} ${event.reason}`)
   });
   const stub = agent.stub as RoomApi;
 
   // The same interface on every wire: `stub.members()` is an rpc frame on
   // "cf-websocket" and the identical frame through the pipe on "capnweb".
-  const refreshMembers = useCallback(async () => {
-    setMembers(await stub.members());
-  }, [stub]);
+  const refreshMembers = useCallback(
+    () => stub.members().then(setMembers),
+    [stub]
+  );
   useEffect(() => {
     if (!agent.identified) return;
-    append(`identified as ${agent.agent}/${agent.name} over ${transport}`);
     void refreshMembers();
-  }, [
-    agent.identified,
-    agent.agent,
-    agent.name,
-    append,
-    refreshMembers,
-    transport
-  ]);
+  }, [agent.identified, agent.agent, agent.name, refreshMembers]);
 
   const send = useCallback(
     async (event: FormEvent) => {

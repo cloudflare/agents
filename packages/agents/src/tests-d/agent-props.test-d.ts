@@ -105,5 +105,3 @@ routeAgentRequest(new Request("https://example.com"), workerEnv, {
   // @ts-expect-error Props must be an object.
   props: 42
 });
-
-export {};

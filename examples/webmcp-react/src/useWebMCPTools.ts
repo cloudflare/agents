@@ -31,22 +31,18 @@ export type WebMCPToolsState = {
 
 export function useWebMCPTools(actions: TodoActions): WebMCPToolsState {
   const { deleteTodo, getTodos, renameTodo, setTodoCompleted } = actions;
-  const [state, setState] = useState<WebMCPToolsState>({
-    supported: false,
+  const [state, setState] = useState<WebMCPToolsState>(() => ({
+    supported: document.modelContext !== undefined,
     registered: false,
     error: null
-  });
+  }));
 
   useEffect(() => {
     const modelContext = document.modelContext;
-    if (!modelContext) {
-      setState({ supported: false, registered: false, error: null });
-      return;
-    }
+    if (!modelContext) return;
 
     const registeredModelContext = modelContext;
     const controller = new AbortController();
-    setState({ supported: true, registered: false, error: null });
 
     // The browser creates add_todo from the HTML form; these are the four
     // imperative tools that do not map naturally to one form submission.

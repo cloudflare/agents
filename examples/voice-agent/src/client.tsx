@@ -116,6 +116,13 @@ function ModeToggle() {
 
 type LlmModel = "kimi" | "glm" | "gpt-oss-20b";
 
+async function listAudioOutputs(): Promise<MediaDeviceInfo[] | undefined> {
+  if (!navigator.mediaDevices?.enumerateDevices) return undefined;
+
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices.filter((device) => device.kind === "audiooutput");
+}
+
 function getAudioOutputLabel(device: MediaDeviceInfo, index: number) {
   if (device.deviceId === "default") return "System default";
   if (device.deviceId === "communications") return "Communications default";
@@ -133,7 +140,7 @@ function WebRTCApp({
   sttSettings: SttSettings;
   onSttSettingsChange: (settings: SttSettings) => void;
 }) {
-  const sessionId = useRef(getSessionId()).current;
+  const [sessionId] = useState(getSessionId);
 
   const {
     status,
@@ -392,7 +399,7 @@ function WebRTCApp({
 // --- Main App ---
 
 function App() {
-  const sessionId = useRef(getSessionId()).current;
+  const [sessionId] = useState(getSessionId);
   const [transport, setTransport] = useState<"websocket" | "webrtc">(
     "websocket"
   );
@@ -462,18 +469,19 @@ function App() {
   }, [toast]);
 
   const refreshAudioOutputs = useCallback(async () => {
-    if (!navigator.mediaDevices?.enumerateDevices) return;
-
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    setAudioOutputDevices(
-      devices.filter((device) => device.kind === "audiooutput")
-    );
+    const devices = await listAudioOutputs();
+    if (devices) setAudioOutputDevices(devices);
   }, []);
 
   useEffect(() => {
-    refreshAudioOutputs().catch(() => {
-      setToast("Could not list speakers for this browser.");
-    });
+    listAudioOutputs().then(
+      (devices) => {
+        if (devices) setAudioOutputDevices(devices);
+      },
+      () => {
+        setToast("Could not list speakers for this browser.");
+      }
+    );
 
     navigator.mediaDevices?.addEventListener(
       "devicechange",
@@ -497,8 +505,11 @@ function App() {
     await refreshAudioOutputs().catch(() => {});
   }, [refreshAudioOutputs, startCall]);
 
-  // Detect speaker conflict from error messages
-  useEffect(() => {
+  // Detect speaker conflict from error messages. Adjust state during render
+  // when the error changes, instead of in an effect.
+  const [prevError, setPrevError] = useState(error);
+  if (error !== prevError) {
+    setPrevError(error);
     if (
       error &&
       (error.includes("active speaker") || error.includes("speaker"))
@@ -509,7 +520,7 @@ function App() {
       setKicked(true);
       setSpeakerConflict(false);
     }
-  }, [error]);
+  }
 
   const handleKickSpeaker = useCallback(() => {
     // Send kick request via a temporary raw WebSocket message.
