@@ -30,7 +30,7 @@
 
   <!-- Other users' objects, behind Alice's -->
   <rect x="474" y="14" width="252" height="70" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
-  <text x="600" y="30.5" text-anchor="middle" font-size="12.5" fill="#9C8A80">Assistant "priya"</text>
+  <text x="600" y="30.5" text-anchor="middle" font-size="12.5" fill="#9C8A80">Assistant "chidi"</text>
   <rect x="452" y="37" width="296" height="45" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
   <text x="600" y="53.5" text-anchor="middle" font-size="12.5" fill="#9C8A80">Assistant "bob"</text>
 
@@ -73,8 +73,8 @@
   <path d="M 450 436 L 450 500 A 150 16 0 0 0 750 500 L 750 436" fill="#FFF1E8" stroke="#F4B393" stroke-width="2"/>
   <ellipse cx="600" cy="436" rx="150" ry="16" fill="#FFE4D6" stroke="#F4B393" stroke-width="2"/>
   <text x="600" y="472" text-anchor="middle" font-size="14" font-weight="700" fill="#3A2A20">SQLite database</text>
-  <text x="600" y="491" text-anchor="middle" font-size="12.5" fill="#6B5A50">every step Pi takes, schedules,</text>
-  <text x="600" y="508" text-anchor="middle" font-size="12.5" fill="#6B5A50">workspace files and your own tables</text>
+  <text x="600" y="491" text-anchor="middle" font-size="12.5" fill="#6B5A50">every message and tool call,</text>
+  <text x="600" y="508" text-anchor="middle" font-size="12.5" fill="#6B5A50">schedules, files and your own tables</text>
 
   <!-- Alarm loop -->
   <path d="M 430 466 C 364.7 466, 360.3 222.4, 417.6 189.6" fill="none" stroke="#D84315" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow-from-base)"/>

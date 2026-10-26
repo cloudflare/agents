@@ -3,7 +3,10 @@
 [![npm version](https://img.shields.io/npm/v/agents)](https://www.npmjs.com/package/agents)
 [![npm downloads](https://img.shields.io/npm/dw/agents)](https://www.npmjs.com/package/agents)
 
-![npm install agents](https://raw.githubusercontent.com/cloudflare/agents/main/assets/npm-install-agents.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/cloudflare/agents/main/assets/npm-install-agents-dark.svg">
+  <img alt="npm install agents" src="https://raw.githubusercontent.com/cloudflare/agents/main/assets/npm-install-agents.svg">
+</picture>
 
 **Run AI agents on Cloudflare that pick up where they left off.**
 
@@ -24,7 +27,10 @@ This package gives a harness a home. Each agent gets its own [Durable Object](ht
 | Act without being asked              | Needs a separate cron service            | Wakes itself on a schedule                                      |
 | Call Claude, GPT or open models      | Needs API keys in your Worker            | Uses Workers AI, or AI Gateway, which holds the provider keys   |
 
-![A request goes from a client to your Worker, which finds Alice's agent by name, one of many. The agent is a Durable Object. Requests and its alarm both arrive at its Lifecycle, which starts a harness such as Pi, OpenCode, Claude Code or Codex, the tools the harness runs, a scheduler and WebSockets. They keep their data in the object's SQLite database. The alarm wakes the object after it sleeps or crashes. The harness calls models, and the tools reach outside services and run code the model writes in a sandbox.](https://raw.githubusercontent.com/cloudflare/agents/main/assets/how-an-agent-runs.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/cloudflare/agents/main/assets/how-an-agent-runs-dark.svg">
+  <img alt="A request goes from a client to your Worker, which finds Alice's agent by name, one of many. The agent is a Durable Object. Requests and its alarm both arrive at its Lifecycle, which starts a harness such as Pi, OpenCode, Claude Code or Codex, the tools the harness runs, a scheduler and WebSockets. They keep their data in the object's SQLite database. The alarm wakes the object after it sleeps or crashes. The harness calls models, and the tools reach outside services and run code the model writes in a sandbox." src="https://raw.githubusercontent.com/cloudflare/agents/main/assets/how-an-agent-runs.svg">
+</picture>
 
 **Pi brings the loop. Agents gives it a home.** Pi owns everything about a run: the transcript, the inbox of steers and follow-ups, model calls, tool calls, retries and crash recovery. This package gives Pi its storage, in the object's SQLite database, and the alarm that wakes it. It also adds what an agent needs around the loop: tools that work on Workers, a workspace, schedules, and connections to browsers.
 
