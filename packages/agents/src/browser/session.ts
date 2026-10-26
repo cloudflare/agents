@@ -121,8 +121,10 @@ const CDP_SESSION_NOT_FOUND = -32001;
  * message must fit SQLite's 2 MB row (see `ROW_MAX_BYTES` in chat/sanitize.ts),
  * or the image is compacted away. Failing early lets the model retake it
  * smaller. Other results are cut to a preview before they're stored.
+ *
+ * @internal The tools also refuse to keep a returned screenshot over it.
  */
-const DEFAULT_MAX_RESULT_BYTES = 1_000_000;
+export const DEFAULT_MAX_RESULT_BYTES = 1_000_000;
 
 /** `#liveParams`: nothing to detach. */
 const DETACHED = Symbol("detached");
@@ -395,9 +397,8 @@ export class BrowserSession {
   }
 
   /**
-   * The JavaScript sandbox caps what a call can return, so a result over
-   * the limit fails with a generic error. A full-page screenshot is the
-   * usual culprit, so say how to take a smaller one instead.
+   * A screenshot over the limit is too big to keep in the chat message
+   * (see `DEFAULT_MAX_RESULT_BYTES`), so fail with how to take a smaller one.
    */
   #assertFits(result: unknown): void {
     // Measure the result as JSON, not just the data, so a screenshot just

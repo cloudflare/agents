@@ -107,8 +107,8 @@ function browserToolResult(
     };
   }
 
-  // No size check: a screenshot comes from one cdp.send result, which
-  // the session caps at 1 MB, well under what model providers accept.
+  // No size check: browserScreenshotOutput only accepts images up to 1 MB,
+  // well under what model providers accept.
   const bytes = Math.floor((screenshot.data.length * 3) / 4).toLocaleString();
   // Keep the rest of the result (status, restarted, notice, newTabs) around
   // the sentence that replaces the screenshot.

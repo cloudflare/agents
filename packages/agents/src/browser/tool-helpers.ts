@@ -3,6 +3,7 @@
  * the `browserTool` adapters in `tools/`. Internal — not an entry point.
  */
 import type { JSONValue } from "ai";
+import { DEFAULT_MAX_RESULT_BYTES } from "./session";
 import { truncateResult } from "./truncate";
 import { redactBase64Payloads } from "../core/base64-redaction";
 import { __DO_NOT_USE_WILL_BREAK__agentContext as agentContext } from "../internal_context";
@@ -13,6 +14,21 @@ interface BrowserScreenshotOutput {
   data: string;
 }
 
+/** What `Page.captureScreenshot` can produce. */
+const SCREENSHOT_MEDIA_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp"
+]);
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/**
+ * The screenshot the model's code returned, or `null` if it didn't return
+ * one. The model writes this shape itself, so only an image type, base64
+ * data, and the session's size limit count: anything else is treated as a
+ * plain result and cut down like one, rather than kept whole or sent to the
+ * model as an image.
+ */
 export function browserScreenshotOutput(
   value: unknown
 ): BrowserScreenshotOutput | null {
@@ -27,7 +43,10 @@ export function browserScreenshotOutput(
   if (
     result?.type !== "browser_screenshot" ||
     typeof result.mediaType !== "string" ||
-    typeof result.data !== "string"
+    typeof result.data !== "string" ||
+    !SCREENSHOT_MEDIA_TYPES.has(result.mediaType) ||
+    result.data.length > DEFAULT_MAX_RESULT_BYTES ||
+    !BASE64.test(result.data)
   ) {
     return null;
   }

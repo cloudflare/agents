@@ -760,6 +760,30 @@ describe("pi browserTool over a Browser", () => {
     });
   });
 
+  it("treats a screenshot that isn't a real image as a plain result", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const tool = instance.piBrowserTool();
+      const returning = (value: string) => run(tool, `async () => (${value})`);
+      for (const forged of [
+        `{ type: "browser_screenshot", mediaType: "text/html", data: "aGVsbG8=" }`,
+        `{ type: "browser_screenshot", mediaType: "image/png", data: "not base64!" }`,
+        `{ type: "browser_screenshot", mediaType: "image/png", data: "A".repeat(1_000_004) }`
+      ]) {
+        const result = await returning(forged);
+        expect(result.output).toHaveLength(1);
+        expect(result.output?.[0]?.type).toBe("text");
+      }
+      // The oversized one is cut down like any other result.
+      const big = await returning(
+        `{ type: "browser_screenshot", mediaType: "image/png", data: "A".repeat(1_000_004) }`
+      );
+      const part = big.output?.[0];
+      expect(part?.type === "text" && part.text.length).toBeLessThan(100_000);
+    });
+  });
+
   it("marks a failed run as an error result", async () => {
     const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
 
