@@ -7,18 +7,18 @@
   </defs>
   
   <!-- Background -->
-  <rect width="800" height="250" fill="#1B1411"/>
+  <rect width="800" height="250" fill="#030303"/>
   <rect width="800" height="250" fill="url(#dots)"/>
   
   <!-- Main container -->
-  <rect x="40" y="40" width="720" height="170" rx="20" ry="20" fill="#261C17" stroke="#FF6B35" stroke-width="3"/>
+  <rect x="40" y="40" width="720" height="170" rx="20" ry="20" fill="#0F0F0F" stroke="#FF6B35" stroke-width="3"/>
   
   <!-- Terminal text -->
   <text x="80" y="135" font-family="'Courier New', monospace" font-size="48" font-weight="bold">
     <tspan fill="#FF6B35">$</tspan>
-    <tspan dx="20" fill="#FFA27A">npm i agents</tspan>
+    <tspan dx="20" fill="#FF8904">npm i agents</tspan>
   </text>
   
   <!-- Red square accent -->
-  <rect x="700" y="90" width="40" height="70" fill="#FF7A45"/>
+  <rect x="700" y="90" width="40" height="70" fill="#FF8904"/>
 </svg>
