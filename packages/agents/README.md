@@ -24,7 +24,7 @@ This package gives a harness a home. Each agent gets its own [Durable Object](ht
 | Act without being asked              | Needs a separate cron service            | Wakes itself on a schedule                                      |
 | Call Claude, GPT or open models      | Needs API keys in your Worker            | Uses Workers AI, or AI Gateway, which holds the provider keys   |
 
-![A request goes from a client to your Worker, which finds Alice's agent by name. The agent is a Durable Object. Its Lifecycle runs the Pi harness, a scheduler and WebSockets, which keep their data in the object's SQLite database. An alarm wakes the object after it sleeps or crashes. The harness calls models, tools and sandboxed code.](https://raw.githubusercontent.com/cloudflare/agents/main/assets/how-an-agent-runs.svg)
+![A request goes from a client to your Worker, which finds Alice's agent by name. The agent is a Durable Object. Its Lifecycle runs a scheduler, WebSockets, the Pi harness and the tools Pi runs, which keep their data in the object's SQLite database. An alarm wakes the object after it sleeps or crashes. The harness calls models, and the tools reach outside services and run code in a fresh Dynamic Worker.](https://raw.githubusercontent.com/cloudflare/agents/main/assets/how-an-agent-runs.svg)
 
 **Pi brings the loop. Agents gives it a home.** Pi owns everything about a run: the transcript, the inbox of steers and follow-ups, model calls, tool calls, retries and crash recovery. This package gives Pi its storage, in the object's SQLite database, and the alarm that wakes it. It also adds what an agent needs around the loop: tools that work on Workers, a workspace, schedules, and connections to browsers.
 
