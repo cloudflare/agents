@@ -1,6 +1,6 @@
-<svg width="960" height="420" viewBox="0 0 960 420" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<svg width="960" height="456" viewBox="0 0 960 456" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
   <title>How an agent runs on Cloudflare</title>
-  <desc>Requests reach your Worker, which calls one Durable Object per user. Inside it, a Lifecycle runs the Pi harness, a scheduler and WebSockets, which keep their data in the object's SQLite database. An alarm wakes the object after it sleeps or crashes. The harness calls models through Workers AI and AI Gateway, and tools such as web fetch, a browser, email and MCP.</desc>
+  <desc>Requests reach your Worker, which calls one Durable Object per user. Inside it, a Lifecycle runs a scheduler, WebSockets, the Pi harness and the tools Pi runs, which keep their data in the object's SQLite database. An alarm wakes the object after it sleeps or crashes. The harness calls models through Workers AI and AI Gateway. Tools run inside the object and reach outside services such as web pages, browsers, email and MCP servers, and run code in a fresh Dynamic Worker.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#D84315"/>
@@ -10,7 +10,7 @@
     </marker>
   </defs>
 
-  <rect width="960" height="420" rx="16" fill="#FFF8F3"/>
+  <rect width="960" height="456" rx="16" fill="#FFF8F3"/>
 
   <!-- Clients -->
   <rect x="24" y="96" width="150" height="88" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
@@ -29,7 +29,7 @@
   <line x1="386" y1="140" x2="426" y2="140" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
 
   <!-- Durable Object -->
-  <rect x="430" y="24" width="330" height="372" rx="16" fill="#FFFFFF" stroke="#FF6B35" stroke-width="3"/>
+  <rect x="430" y="24" width="330" height="408" rx="16" fill="#FFFFFF" stroke="#FF6B35" stroke-width="3"/>
   <text x="595" y="56" text-anchor="middle" font-size="18" font-weight="700" fill="#3A2A20">Assistant "alice"</text>
   <text x="595" y="77" text-anchor="middle" font-size="12.5" fill="#6B5A50">a Durable Object: one per user, task or chat</text>
 
@@ -39,24 +39,31 @@
   <text x="595" y="138" text-anchor="middle" font-size="12" fill="#6B5A50">starts the object, routes work, owns the alarm</text>
 
   <!-- Capabilities -->
-  <rect x="450" y="168" width="90" height="62" rx="10" fill="#FFFFFF" stroke="#FF6B35" stroke-width="2"/>
-  <text x="495" y="193" text-anchor="middle" font-size="13" font-weight="700" fill="#3A2A20">PiHarness</text>
-  <text x="495" y="213" text-anchor="middle" font-size="11.5" fill="#6B5A50">model loop</text>
+  <rect x="450" y="168" width="140" height="52" rx="10" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
+  <text x="520" y="190" text-anchor="middle" font-size="13" font-weight="700" fill="#3A2A20">Scheduler</text>
+  <text x="520" y="208" text-anchor="middle" font-size="11.5" fill="#6B5A50">cron, delays</text>
 
-  <rect x="550" y="168" width="90" height="62" rx="10" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
-  <text x="595" y="193" text-anchor="middle" font-size="13" font-weight="700" fill="#3A2A20">Scheduler</text>
-  <text x="595" y="213" text-anchor="middle" font-size="11.5" fill="#6B5A50">cron, delays</text>
+  <rect x="600" y="168" width="140" height="52" rx="10" fill="#FFFFFF" stroke="#FF6B35" stroke-width="2"/>
+  <text x="670" y="190" text-anchor="middle" font-size="13" font-weight="700" fill="#3A2A20">PiHarness</text>
+  <text x="670" y="208" text-anchor="middle" font-size="11.5" fill="#6B5A50">model loop</text>
 
-  <rect x="650" y="168" width="90" height="62" rx="10" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
-  <text x="695" y="193" text-anchor="middle" font-size="13" font-weight="700" fill="#3A2A20">WebSockets</text>
-  <text x="695" y="213" text-anchor="middle" font-size="11.5" fill="#6B5A50">live clients</text>
+  <line x1="670" y1="221" x2="670" y2="245" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="662" y="237" text-anchor="end" font-size="11.5" fill="#6B5A50">runs</text>
+
+  <rect x="450" y="246" width="140" height="52" rx="10" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
+  <text x="520" y="268" text-anchor="middle" font-size="13" font-weight="700" fill="#3A2A20">WebSockets</text>
+  <text x="520" y="286" text-anchor="middle" font-size="11.5" fill="#6B5A50">live clients</text>
+
+  <rect x="600" y="246" width="140" height="52" rx="10" fill="#FFFFFF" stroke="#FF6B35" stroke-width="2"/>
+  <text x="670" y="268" text-anchor="middle" font-size="13" font-weight="700" fill="#3A2A20">Tools</text>
+  <text x="670" y="286" text-anchor="middle" font-size="11.5" fill="#6B5A50">web, browser, notes…</text>
 
   <!-- SQLite -->
-  <path d="M 450 268 L 450 360 A 145 16 0 0 0 740 360 L 740 268" fill="#FFF1E8" stroke="#F4B393" stroke-width="2"/>
-  <ellipse cx="595" cy="268" rx="145" ry="16" fill="#FFE4D6" stroke="#F4B393" stroke-width="2"/>
-  <text x="595" y="308" text-anchor="middle" font-size="14" font-weight="700" fill="#3A2A20">SQLite database</text>
-  <text x="595" y="329" text-anchor="middle" font-size="12" fill="#6B5A50">every step Pi takes, schedules,</text>
-  <text x="595" y="347" text-anchor="middle" font-size="12" fill="#6B5A50">workspace files and your own tables</text>
+  <path d="M 450 330 L 450 396 A 145 16 0 0 0 740 396 L 740 330" fill="#FFF1E8" stroke="#F4B393" stroke-width="2"/>
+  <ellipse cx="595" cy="330" rx="145" ry="16" fill="#FFE4D6" stroke="#F4B393" stroke-width="2"/>
+  <text x="595" y="366" text-anchor="middle" font-size="14" font-weight="700" fill="#3A2A20">SQLite database</text>
+  <text x="595" y="385" text-anchor="middle" font-size="12" fill="#6B5A50">every step Pi takes, schedules,</text>
+  <text x="595" y="402" text-anchor="middle" font-size="12" fill="#6B5A50">workspace files and your own tables</text>
 
   <!-- Alarm loop -->
   <path d="M 430 330 C 385.3 330, 380.6 226.3, 412.8 204.1" fill="none" stroke="#D84315" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow-from-base)"/>
@@ -64,22 +71,22 @@
   <text x="370" y="275" text-anchor="end" font-size="12.5" fill="#6B5A50">wakes it after it</text>
   <text x="370" y="292" text-anchor="end" font-size="12.5" fill="#6B5A50">sleeps or crashes</text>
 
-  <!-- Models and tools -->
-  <line x1="760" y1="130" x2="796" y2="130" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
-  <rect x="800" y="92" width="136" height="76" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
-  <text x="868" y="118" text-anchor="middle" font-size="15" font-weight="700" fill="#3A2A20">Models</text>
-  <text x="868" y="139" text-anchor="middle" font-size="12.5" fill="#6B5A50">Workers AI</text>
-  <text x="868" y="157" text-anchor="middle" font-size="12.5" fill="#6B5A50">AI Gateway</text>
+  <!-- What the harness and tools reach outside the object -->
+  <line x1="740" y1="194" x2="796" y2="194" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="800" y="159" width="136" height="70" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
+  <text x="868" y="183" text-anchor="middle" font-size="15" font-weight="700" fill="#3A2A20">Models</text>
+  <text x="868" y="203" text-anchor="middle" font-size="12.5" fill="#6B5A50">Workers AI</text>
+  <text x="868" y="220" text-anchor="middle" font-size="12.5" fill="#6B5A50">AI Gateway</text>
 
-  <line x1="760" y1="220" x2="796" y2="220" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
-  <rect x="800" y="182" width="136" height="76" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
-  <text x="868" y="208" text-anchor="middle" font-size="15" font-weight="700" fill="#3A2A20">Tools</text>
-  <text x="868" y="229" text-anchor="middle" font-size="12.5" fill="#6B5A50">web, browser</text>
-  <text x="868" y="247" text-anchor="middle" font-size="12.5" fill="#6B5A50">email, MCP</text>
+  <line x1="740" y1="264" x2="796" y2="264" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="800" y="237" width="136" height="70" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
+  <text x="868" y="261" text-anchor="middle" font-size="15" font-weight="700" fill="#3A2A20">Services</text>
+  <text x="868" y="281" text-anchor="middle" font-size="12.5" fill="#6B5A50">web pages, browsers</text>
+  <text x="868" y="298" text-anchor="middle" font-size="12.5" fill="#6B5A50">email, MCP servers</text>
 
-  <line x1="760" y1="310" x2="796" y2="310" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
-  <rect x="800" y="272" width="136" height="76" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
-  <text x="868" y="298" text-anchor="middle" font-size="15" font-weight="700" fill="#3A2A20">Code</text>
-  <text x="868" y="319" text-anchor="middle" font-size="12.5" fill="#6B5A50">runs in a fresh</text>
-  <text x="868" y="337" text-anchor="middle" font-size="12.5" fill="#6B5A50">Dynamic Worker</text>
+  <line x1="740" y1="288" x2="796" y2="340" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="800" y="315" width="136" height="70" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
+  <text x="868" y="339" text-anchor="middle" font-size="15" font-weight="700" fill="#3A2A20">Code</text>
+  <text x="868" y="359" text-anchor="middle" font-size="12.5" fill="#6B5A50">runs in a fresh</text>
+  <text x="868" y="376" text-anchor="middle" font-size="12.5" fill="#6B5A50">Dynamic Worker</text>
 </svg>
