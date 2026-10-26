@@ -16,10 +16,10 @@ const copy = resolve(root, "packages/agents/README.md");
 const readme = readFileSync(source, "utf8");
 
 // Inline links `[text](url)`, reference definitions `[id]: url`, and HTML
-// `href="url"` or `src="url"`.
+// `href="url"` or `src="url"`. Markdown allows `<url>` in the first two.
 const linkPatterns = [
-  /\]\(([^)\s]+)\)/g,
-  /^\s*\[[^\]]+\]:\s*(\S+)/gm,
+  /\]\(<?([^)\s>]+)>?\)/g,
+  /^\s*\[[^\]]+\]:\s*<?([^\s>]+)>?/gm,
   /\b(?:href|src)="([^"]+)"/g
 ];
 
