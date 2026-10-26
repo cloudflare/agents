@@ -27,9 +27,10 @@ The example composes:
 - a Browser panel in the UI: Live View of the browser's tabs and each
   host's current target.
 
-The model is Workers AI `@cf/moonshotai/kimi-k2.7-code`, set in
-`src/shared.ts`. It accepts images, so it sees the screenshots the browser
-tool returns.
+The model is Workers AI `@cf/zai-org/glm-5.3`, set in `src/shared.ts`. It
+reads text only, so it works from the page's text and DOM. Screenshots the
+browser tool takes show in the chat, and reach the model as a placeholder.
+For a model that sees them, use `@cf/zai-org/glm-5.3-flash`.
 
 ## Run locally
 

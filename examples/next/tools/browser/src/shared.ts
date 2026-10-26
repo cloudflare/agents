@@ -2,8 +2,11 @@
 
 import type { BrowserLiveView, InternalHostInfo } from "agents/browser";
 
-/** The Workers AI model the agent runs on. It takes images, so it sees screenshots. */
-export const MODEL_ID = "@cf/moonshotai/kimi-k2.7-code";
+/**
+ * The Workers AI model the agent runs on. It reads text only: screenshots
+ * show in the chat for you, and reach the model as a placeholder.
+ */
+export const MODEL_ID = "@cf/zai-org/glm-5.3";
 
 /** The agent's internal hostnames: sites only its browser can open. */
 export const PREVIEW_HOST = "preview.internal";

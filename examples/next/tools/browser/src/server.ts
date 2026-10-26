@@ -124,7 +124,7 @@ export class BrowserAgent extends withWorkspaceContainer(BrowserAgentBase) {
 
   readonly registry = createRegistry();
   readonly harness = new PiHarness({
-    harness: async ({ storage, context }) => {
+    harness: async ({ storage, context, onWake }) => {
       this.registry.install({
         name: "browser-tools",
         sections: [{ key: "preamble", render: () => PREAMBLE, tag: false }],
@@ -143,6 +143,7 @@ export class BrowserAgent extends withWorkspaceContainer(BrowserAgentBase) {
         {
           models,
           registry: this.registry,
+          onWake,
           settings: {
             retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 }
           },
