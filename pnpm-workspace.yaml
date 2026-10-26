@@ -50,8 +50,8 @@ overrides:
   "@earendil-works/pi-agent-core>@earendil-works/pi-ai": "~1.4.0"
   # Preview of modelcontextprotocol/typescript-sdk#2448 (keep granted scopes on 401 re-authorization).
   # The preview client depends on the preview core by URL, which needs blockExoticSubdeps off below.
-  "@modelcontextprotocol/client": "https://pkg.pr.new/@modelcontextprotocol/client@c1128b3"
-  "@modelcontextprotocol/core": "https://pkg.pr.new/@modelcontextprotocol/core@c1128b3"
+  "@modelcontextprotocol/client": "https://pkg.pr.new/@modelcontextprotocol/client@3731069"
+  "@modelcontextprotocol/core": "https://pkg.pr.new/@modelcontextprotocol/core@3731069"
 
 # Only for the typescript-sdk#2448 preview above; pnpm 10.x blocks URL subdependencies by default.
 blockExoticSubdeps: false

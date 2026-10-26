@@ -6,8 +6,8 @@ settings:
 
 overrides:
   '@earendil-works/pi-agent-core>@earendil-works/pi-ai': ~1.4.0
-  '@modelcontextprotocol/client': https://pkg.pr.new/@modelcontextprotocol/client@c1128b3
-  '@modelcontextprotocol/core': https://pkg.pr.new/@modelcontextprotocol/core@c1128b3
+  '@modelcontextprotocol/client': https://pkg.pr.new/@modelcontextprotocol/client@3731069
+  '@modelcontextprotocol/core': https://pkg.pr.new/@modelcontextprotocol/core@3731069
 
 patchedDependencies:
   '@chonkiejs/chunk@0.9.3': 3a49e38f3640c0c74dbbc562d6bb7f765d90a90a94692ffb78d1d490b6b6f196
@@ -2600,8 +2600,8 @@ importers:
         specifier: ^2.6.0
         version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.5.4)
       '@modelcontextprotocol/client':
-        specifier: https://pkg.pr.new/@modelcontextprotocol/client@c1128b3
-        version: https://pkg.pr.new/@modelcontextprotocol/client@c1128b3
+        specifier: https://pkg.pr.new/@modelcontextprotocol/client@3731069
+        version: https://pkg.pr.new/@modelcontextprotocol/client@3731069
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -4709,8 +4709,8 @@ importers:
         specifier: ^4.1.1
         version: 4.1.1
       '@modelcontextprotocol/client':
-        specifier: https://pkg.pr.new/@modelcontextprotocol/client@c1128b3
-        version: https://pkg.pr.new/@modelcontextprotocol/client@c1128b3
+        specifier: https://pkg.pr.new/@modelcontextprotocol/client@3731069
+        version: https://pkg.pr.new/@modelcontextprotocol/client@3731069
       '@rolldown/plugin-babel':
         specifier: ^0.2.3
         version: 0.2.3(@babel/core@8.0.6)(@babel/runtime@7.29.7)(rolldown@1.1.2)(vite@8.2.2(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
@@ -7416,18 +7416,18 @@ packages:
   '@mixmark-io/domino@2.2.0':
     resolution: {integrity: sha512-Y28PR25bHXUg88kCV7nivXrP2Nj2RueZ3/l/jdx6J9f8J4nsEGcgX0Qe6lt7Pa+J79+kPiJU3LguR6O/6zrLOw==}
 
-  '@modelcontextprotocol/client@https://pkg.pr.new/@modelcontextprotocol/client@c1128b3':
-    resolution: {integrity: sha512-8fOPoF9sQk3qkZOQMUx+G7/lMJAKQoD5/sNI3n3EfcEWTL2GZvQjtqMkOvN6jNRTuztggz4bNjQenrNv5wkc8A==, tarball: https://pkg.pr.new/@modelcontextprotocol/client@c1128b3}
-    version: 2.3.1
+  '@modelcontextprotocol/client@https://pkg.pr.new/@modelcontextprotocol/client@3731069':
+    resolution: {integrity: sha512-9ObkK3y2p+bQ2b2NZJDbZLDlBw9O2WSowmvgfWPkJJkKAAjUXPmJovSdNoqQo8YhPZb5ZlI3OamTQRedVgktSw==, tarball: https://pkg.pr.new/@modelcontextprotocol/client@3731069}
+    version: 2.4.0
     engines: {node: '>=20'}
 
   '@modelcontextprotocol/conformance@0.2.0-alpha.12':
     resolution: {integrity: sha512-eXtZFgmtZiU5SsvXty+RGXGnyIqEVm3GLU/HZmg1wMjtKOocPZZgD9HQKd30oJhio5UB0wFJmsc6r8u48Q+EYA==}
     hasBin: true
 
-  '@modelcontextprotocol/core@https://pkg.pr.new/@modelcontextprotocol/core@c1128b3':
-    resolution: {integrity: sha512-qNHzJOhwV4AEeW3PFGtlt7AWM0xur2U13Qu6dR5PYr+oeGcT+CRcOcskOPsVwcW9YG/bJ+x9Cqe9TUUs/Hk31A==, tarball: https://pkg.pr.new/@modelcontextprotocol/core@c1128b3}
-    version: 2.3.1
+  '@modelcontextprotocol/core@https://pkg.pr.new/@modelcontextprotocol/core@3731069':
+    resolution: {integrity: sha512-oeE0c/gRcfG+yrhthc9U1L1njJt2gSC/ayLnVpKqBwvrnS08oayn5M2ZEkYINl9ChsN7CFxmDF+I+BQRH7d77Q==, tarball: https://pkg.pr.new/@modelcontextprotocol/core@3731069}
+    version: 2.4.0
     engines: {node: '>=20'}
 
   '@modelcontextprotocol/sdk@1.31.0':
@@ -17413,9 +17413,9 @@ snapshots:
 
   '@mixmark-io/domino@2.2.0': {}
 
-  '@modelcontextprotocol/client@https://pkg.pr.new/@modelcontextprotocol/client@c1128b3':
+  '@modelcontextprotocol/client@https://pkg.pr.new/@modelcontextprotocol/client@3731069':
     dependencies:
-      '@modelcontextprotocol/core': https://pkg.pr.new/@modelcontextprotocol/core@c1128b3
+      '@modelcontextprotocol/core': https://pkg.pr.new/@modelcontextprotocol/core@3731069
       cross-spawn: 7.0.6
       eventsource: 3.0.7
       eventsource-parser: 3.1.0
@@ -17440,7 +17440,7 @@ snapshots:
       - '@cfworker/json-schema'
       - supports-color
 
-  '@modelcontextprotocol/core@https://pkg.pr.new/@modelcontextprotocol/core@c1128b3':
+  '@modelcontextprotocol/core@https://pkg.pr.new/@modelcontextprotocol/core@3731069':
     dependencies:
       zod: 4.5.4
 
@@ -17518,7 +17518,7 @@ snapshots:
 
   '@modelcontextprotocol/server@2.3.1':
     dependencies:
-      '@modelcontextprotocol/core': https://pkg.pr.new/@modelcontextprotocol/core@c1128b3
+      '@modelcontextprotocol/core': https://pkg.pr.new/@modelcontextprotocol/core@3731069
       zod: 4.5.4
 
   '@mongodb-js/zstd@7.0.0':
@@ -17980,8 +17980,8 @@ snapshots:
       '@ff-labs/fff-bun': 0.10.5
       '@ff-labs/fff-node': 0.10.5
       '@lydell/node-pty': 1.2.0-beta.12
-      '@modelcontextprotocol/client': https://pkg.pr.new/@modelcontextprotocol/client@c1128b3
-      '@modelcontextprotocol/core': https://pkg.pr.new/@modelcontextprotocol/core@c1128b3
+      '@modelcontextprotocol/client': https://pkg.pr.new/@modelcontextprotocol/client@3731069
+      '@modelcontextprotocol/core': https://pkg.pr.new/@modelcontextprotocol/core@3731069
       '@opencode-ai/pty': 0.2.0
       '@opencode/ai': 2.0.24(supports-color@10.2.2)
       '@opencode/codemode': 2.0.24
@@ -18089,8 +18089,8 @@ snapshots:
       '@ff-labs/fff-bun': 0.10.5
       '@ff-labs/fff-node': 0.10.5
       '@lydell/node-pty': 1.2.0-beta.12
-      '@modelcontextprotocol/client': https://pkg.pr.new/@modelcontextprotocol/client@c1128b3
-      '@modelcontextprotocol/core': https://pkg.pr.new/@modelcontextprotocol/core@c1128b3
+      '@modelcontextprotocol/client': https://pkg.pr.new/@modelcontextprotocol/client@3731069
+      '@modelcontextprotocol/core': https://pkg.pr.new/@modelcontextprotocol/core@3731069
       '@opencode-ai/pty': 0.2.0
       '@opencode/ai': 2.0.24(supports-color@10.2.2)
       '@opencode/codemode': 2.0.24
@@ -18198,8 +18198,8 @@ snapshots:
       '@ff-labs/fff-bun': 0.10.5
       '@ff-labs/fff-node': 0.10.5
       '@lydell/node-pty': 1.2.0-beta.12
-      '@modelcontextprotocol/client': https://pkg.pr.new/@modelcontextprotocol/client@c1128b3
-      '@modelcontextprotocol/core': https://pkg.pr.new/@modelcontextprotocol/core@c1128b3
+      '@modelcontextprotocol/client': https://pkg.pr.new/@modelcontextprotocol/client@3731069
+      '@modelcontextprotocol/core': https://pkg.pr.new/@modelcontextprotocol/core@3731069
       '@opencode-ai/pty': 0.2.0
       '@opencode/ai': 2.0.24(supports-color@10.2.2)
       '@opencode/codemode': 2.0.24
@@ -18307,8 +18307,8 @@ snapshots:
       '@ff-labs/fff-bun': 0.10.5
       '@ff-labs/fff-node': 0.10.5
       '@lydell/node-pty': 1.2.0-beta.12
-      '@modelcontextprotocol/client': https://pkg.pr.new/@modelcontextprotocol/client@c1128b3
-      '@modelcontextprotocol/core': https://pkg.pr.new/@modelcontextprotocol/core@c1128b3
+      '@modelcontextprotocol/client': https://pkg.pr.new/@modelcontextprotocol/client@3731069
+      '@modelcontextprotocol/core': https://pkg.pr.new/@modelcontextprotocol/core@3731069
       '@opencode-ai/pty': 0.2.0
       '@opencode/ai': 2.0.24(supports-color@10.2.2)
       '@opencode/codemode': 2.0.24
