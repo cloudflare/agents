@@ -189,7 +189,7 @@ export class MyObject extends DurableObject<Env> {
         router: this.ctx.exports.InternalHostRouter,
         hosts: {
           "uploads.internal": {
-            description: "Files your users uploaded",
+            description: "Files your users uploaded, served from an R2 bucket",
             fetch: async (request) => {
               const key = new URL(request.url).pathname.slice(1);
               const file = await this.env.UPLOADS.get(key);
