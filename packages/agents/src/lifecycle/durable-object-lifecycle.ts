@@ -30,6 +30,7 @@ import {
   runWithoutCurrentAgent,
   type LifecycleObject
 } from "./current-agent";
+import { markRetryable } from "./retryable";
 import { isBenignTeardownError } from "./transport-errors";
 import type { WSMessage } from "./types";
 
@@ -206,6 +207,32 @@ export class Lifecycle<
     const lifecycle = new Lifecycle<Env, Props>(host, options);
     lifecycle.installHandlers();
     return lifecycle;
+  }
+
+  /**
+   * Mark a host's methods as safe for the runtime to retry over Durable
+   * Object RPC. Use this rather than `retryable()` from
+   * `cloudflare:durable-objects`: a host such as `Agent` replaces public
+   * methods with wrappers, and only methods marked here have their wrappers
+   * marked as well.
+   *
+   * @param host - The Durable Object class whose methods are retryable. The
+   *   opt-in also applies to its subclasses.
+   * @param methods - Methods read from `host.prototype`.
+   * @throws TypeError if a function is not a method of `host`.
+   * @example
+   * class MyObject extends DurableObject<Env> {
+   *   static {
+   *     Lifecycle.retryable(this, this.prototype.doWork);
+   *   }
+   *   async doWork() {}
+   * }
+   */
+  static retryable(
+    host: abstract new (...args: never[]) => object,
+    ...methods: ((...args: never[]) => unknown)[]
+  ): void {
+    markRetryable(host, methods);
   }
 
   /**

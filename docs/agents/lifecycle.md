@@ -492,6 +492,31 @@ with `newUniqueId()` or `idFromString()` fails instead of running before
 initialization. Address the Agent by name with `getAgentByName()`, `getByName()`,
 or `idFromName()`.
 
+### Retryable methods
+
+To let the runtime retry an RPC call to a method after a disconnect, mark the
+method with `Lifecycle.retryable()` in a static block. The opt-in also applies
+to subclasses:
+
+```ts
+export class MyObject extends DurableObject<Env> {
+  static {
+    Lifecycle.retryable(this, this.prototype.runTask);
+  }
+
+  readonly lifecycle = Lifecycle.install(this);
+
+  async runTask(): Promise<void> {
+    // ...
+  }
+}
+```
+
+Only mark methods that are safe to run more than once. In an `Agent`, use
+`Lifecycle.retryable()` rather than `retryable()` from
+`cloudflare:durable-objects`: Agent wraps public methods, and only methods
+marked through Lifecycle have their wrappers marked too.
+
 ## Object names
 
 Use `idFromName()` or `getByName()`. The lifecycle reads the authoritative name

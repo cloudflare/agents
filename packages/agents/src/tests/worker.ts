@@ -140,6 +140,11 @@ export {
   TestSessionAgent,
   TestWaitConnectionsAgent,
   TestNativeRpcAgent,
+  RetryableBaseAgent,
+  RetryableChildAgent,
+  LateRetryableChildAgent,
+  RetryablePlainObject,
+  NonRetryablePlainObject,
   RoutingOwnerAgent,
   RoutedChatAgent,
   TestSubAgentParent,
@@ -227,6 +232,11 @@ import type {
   TestSessionAgent,
   TestWaitConnectionsAgent,
   TestNativeRpcAgent,
+  RetryableBaseAgent,
+  RetryableChildAgent,
+  LateRetryableChildAgent,
+  RetryablePlainObject,
+  NonRetryablePlainObject,
   RoutingOwnerAgent,
   RoutedChatAgent,
   TestSubAgentParent,
@@ -311,6 +321,11 @@ export type Env = {
   TestSessionAgent: DurableObjectNamespace<TestSessionAgent>;
   TestWaitConnectionsAgent: DurableObjectNamespace<TestWaitConnectionsAgent>;
   TestNativeRpcAgent: DurableObjectNamespace<TestNativeRpcAgent>;
+  RetryableBaseAgent: DurableObjectNamespace<RetryableBaseAgent>;
+  RetryableChildAgent: DurableObjectNamespace<RetryableChildAgent>;
+  LateRetryableChildAgent: DurableObjectNamespace<LateRetryableChildAgent>;
+  RetryablePlainObject: DurableObjectNamespace<RetryablePlainObject>;
+  NonRetryablePlainObject: DurableObjectNamespace<NonRetryablePlainObject>;
   RoutingOwnerAgent: DurableObjectNamespace<RoutingOwnerAgent>;
   RoutedChatAgent: DurableObjectNamespace<RoutedChatAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;

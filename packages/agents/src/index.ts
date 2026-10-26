@@ -348,6 +348,11 @@ export {
   type CallableMetadata
 } from "./callable-decorator";
 import {
+  isRetryableFor,
+  registerMethodWrapper,
+  unwrapMethod
+} from "./lifecycle/retryable";
+import {
   copyCallableMetadata,
   decoratedMethods,
   getCallableMetadata,
@@ -1018,9 +1023,6 @@ const AsyncFunction: Function = Object.getPrototypeOf(
   async () => {}
 ).constructor;
 
-/** Functions produced by {@link withAgentContext}, so they are wrapped once. */
-const agentContextWrappers = new WeakSet<Function>();
-
 /**
  * Restore Agent context when a public method is entered outside a Lifecycle
  * hook, notably through native Durable Object RPC or cross-Agent re-entry.
@@ -1065,7 +1067,6 @@ function withAgentContext<T extends (...args: any[]) => any>(
   };
 
   if (!(method instanceof AsyncFunction)) {
-    agentContextWrappers.add(enter);
     return enter;
   }
 
@@ -1078,7 +1079,6 @@ function withAgentContext<T extends (...args: any[]) => any>(
     }
     return enter.apply(this, args);
   };
-  agentContextWrappers.add(enterStarted);
   return enterStarted as unknown as (
     this: Agent<Cloudflare.Env, unknown>,
     ...args: Parameters<T>
@@ -3015,13 +3015,20 @@ export class Agent<
           methodName.startsWith("_") ||
           !descriptor ||
           !!descriptor.get ||
-          typeof descriptor.value !== "function" ||
-          agentContextWrappers.has(descriptor.value)
+          typeof descriptor.value !== "function"
         ) {
           continue;
         }
 
-        const method = descriptor.value as Function;
+        // An ancestor constructed first has already wrapped this method, and
+        // its wrapper is shared with sibling classes. Reuse it unless this
+        // class opted in to retries, which needs a wrapper of its own.
+        const original = unwrapMethod(descriptor.value);
+        if (original && !isRetryableFor(this.constructor, original)) {
+          continue;
+        }
+
+        const method = original ?? (descriptor.value as Function);
         /* oxlint-disable @typescript-eslint/no-explicit-any -- dynamic method wrapping requires any */
         const wrappedFunction = withAgentContext(
           method as (...args: any[]) => any
@@ -3032,6 +3039,9 @@ export class Agent<
         if (this._isCallable(methodName)) {
           copyCallableMetadata(method, wrappedFunction);
         }
+
+        // RPC calls the wrapper, so it needs the runtime's retryable mark too
+        registerMethodWrapper(this.constructor, method, wrappedFunction);
 
         // set the wrapped function on the prototype
         this.constructor.prototype[methodName as keyof this] = wrappedFunction;
