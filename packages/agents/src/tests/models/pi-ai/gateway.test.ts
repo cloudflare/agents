@@ -116,12 +116,58 @@ describe("pi-ai: catalog models on /run", () => {
     expect(message.content).toEqual([{ text: "Hi there!", type: "text" }]);
   });
 
-  // TODO: AI Gateway drops `anthropic-beta` on the binding's `/run` path today:
-  // aig-entry forwards only `cf-aig-*` extra headers, and the Anthropic provider
-  // library sends fixed headers. Turn this on once the gateway forwards it.
-  it.todo(
-    "sends pi's anthropic-beta to /run for a catalog Claude model, and AI Gateway passes it to Anthropic"
-  );
+  it("sends pi's betas to /run as anthropic-beta for a catalog Claude model", async () => {
+    const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
+    const ai = createAI({ binding: asAi(binding) });
+    await collectEvents(
+      ai.streamSimple(ai("anthropic/claude-opus-4.8"), userContext("hi"), {
+        onPayload: (payload) => ({
+          ...(payload as Record<string, unknown>),
+          betas: ["example-beta-2026-01-01", "other-beta-2026-02-02"]
+        })
+      })
+    );
+    const call = binding.calls[0];
+    // The betas leave the body, as the Anthropic SDK would send them.
+    expect(call?.input).not.toHaveProperty("betas");
+    expect(call?.options.extraHeaders).toEqual({
+      "anthropic-beta": "example-beta-2026-01-01,other-beta-2026-02-02"
+    });
+  });
+
+  it("sends no anthropic-beta to /run when pi chose no betas", async () => {
+    const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
+    const ai = createAI({ binding: asAi(binding) });
+    await collectEvents(
+      ai.streamSimple(ai("anthropic/claude-opus-4.8"), userContext("hi"), {
+        onPayload: (payload) => ({
+          ...(payload as Record<string, unknown>),
+          betas: []
+        })
+      })
+    );
+    // The other vendor headers (`anthropic-version`, `accept`, ...) belong to
+    // the gateway on `/run`, so nothing is sent.
+    expect(binding.calls[0]?.options).not.toHaveProperty("extraHeaders");
+  });
+
+  it("lets the caller's anthropic-beta header win on /run", async () => {
+    const binding = fakeBinding(() => sseEventResponse(anthropicTextEvents()));
+    const ai = createAI({ binding: asAi(binding) });
+    await collectEvents(
+      ai.streamSimple(ai("anthropic/claude-opus-4.8"), userContext("hi"), {
+        headers: { "Anthropic-Beta": "caller-beta-2026-03-03" },
+        onPayload: (payload) => ({
+          ...(payload as Record<string, unknown>),
+          betas: ["example-beta-2026-01-01"]
+        })
+      })
+    );
+    // Header names compare case-insensitively: one value, the caller's.
+    expect(binding.calls[0]?.options.extraHeaders).toEqual({
+      "Anthropic-Beta": "caller-beta-2026-03-03"
+    });
+  });
 
   it("ends the stream with the gateway's error when /run refuses the model", async () => {
     const binding = fakeBinding(() =>

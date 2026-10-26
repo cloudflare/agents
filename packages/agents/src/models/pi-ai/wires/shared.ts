@@ -350,6 +350,36 @@ export function anthropicVendorHeaders(betas: readonly string[]): {
   };
 }
 
+/**
+ * The vendor headers `/run` also carries. The rest (`anthropic-version`,
+ * `accept`, `content-type`) belong to the gateway there, but `anthropic-beta`
+ * holds the beta features the body was built for: without it Anthropic refuses
+ * a body that uses one, or quietly drops the feature. The binding sends
+ * `extraHeaders` as request headers, and AI Gateway passes this one on.
+ */
+const RUN_VENDOR_HEADERS: readonly string[] = ["anthropic-beta"];
+
+/**
+ * The headers a `/run` request sends: the vendor headers in
+ * {@link RUN_VENDOR_HEADERS}, then the caller's own, which win. Names compare
+ * case-insensitively, so a caller's `Anthropic-Beta` replaces the wire's
+ * rather than being sent alongside it.
+ */
+function runHeaders(
+  vendorHeaders: Record<string, string>,
+  callerHeaders: Record<string, string>
+): Record<string, string> {
+  const callerNames = new Set(
+    Object.keys(callerHeaders).map((name) => name.toLowerCase())
+  );
+  const headers: Record<string, string> = {};
+  for (const name of RUN_VENDOR_HEADERS) {
+    const value = vendorHeaders[name];
+    if (value !== undefined && !callerNames.has(name)) headers[name] = value;
+  }
+  return { ...headers, ...callerHeaders };
+}
+
 /** The vendor headers an OpenAI-shaped request needs. */
 export function openAIVendorHeaders(): Record<string, string> {
   return { accept: "application/json", "content-type": "application/json" };
@@ -399,7 +429,7 @@ export async function sendGateway(
     const response = await transport.run({
       format,
       gateway: resolved.gateway,
-      headers: request.headers,
+      headers: runHeaders(vendorHeaders, request.headers),
       input,
       model: catalogId,
       signal: options.signal
