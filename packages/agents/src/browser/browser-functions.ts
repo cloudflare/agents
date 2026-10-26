@@ -50,7 +50,7 @@ const BROWSER_FUNCTIONS = {
       session.attachToTarget(input as BrowserAttachInput)
   },
   spec: {
-    doc: '`browser.spec()` lists the protocol\'s domains as `{ domains: [{ name, description }] }`; `browser.spec({ domain: "Page" })` returns one domain\'s `{ commands, events, types }`, each command a `{ method, description, parameters, returns }`. Big domains get cut short in your result, so filter in code: `(await browser.spec({ domain: "Network" })).commands.find((c) => c.name === "enable")`.',
+    doc: '`browser.spec()` lists the protocol\'s domains as `{ domains: [{ name, description }] }`; `browser.spec({ domain: "Page" })` returns one domain\'s `{ commands, events, types }`, each command a `{ name, method, description, parameters, returns }` (`name` is `"navigate"`, `method` is `"Page.navigate"`). Big domains get cut short in your result, so filter in code: `(await browser.spec({ domain: "Network" })).commands.find((c) => c.name === "enable")`.',
     call: async (session, input) => {
       // Check the input before connecting, like the session's own methods.
       const { domain } = validate(
