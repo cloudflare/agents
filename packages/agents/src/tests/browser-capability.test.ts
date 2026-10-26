@@ -504,6 +504,12 @@ describe("browserTool over a Browser", () => {
         logs: ["before 1"]
       });
 
+      // A huge thrown error is cut down like a result.
+      const huge = await run(
+        `async () => { throw new Error("x".repeat(100000)); }`
+      );
+      expect(huge.status === "error" && huge.error.length).toBeLessThan(30_000);
+
       // Console output is bounded.
       const chatty = await run(`async () => {
         for (let i = 0; i < 150; i++) console.log(i);

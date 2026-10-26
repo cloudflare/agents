@@ -16,8 +16,8 @@ There are three `browserTool`s, one per harness: `agents/browser/pi`, `agents/br
 
 1. `execute(input, scope)` queues the run behind earlier runs in the same scope on the same `Browser`. The queue lives in the isolate and is keyed by the `Browser` object, so separately built tools share it. Runs in different scopes run in parallel over their own CDP connections, which Browser Run allows.
 2. The run opens a `BrowserSession` on the browser for its scope.
-3. `runBrowserCode` (`browser/sandbox.ts`) loads the model's code into a fresh Dynamic Worker from `loader`, with no bindings and `globalOutbound: null`. Its only way out is a `cdp` global whose calls go over RPC to the session. The run times out after `timeoutMs` (60 seconds by default).
-4. A screenshot result is kept whole. Any other result has base64 payloads redacted and is cut to about 24,000 characters.
+3. `runBrowserCode` (`browser/sandbox.ts`) loads the model's code into a fresh Dynamic Worker from `loader`, with no bindings and `globalOutbound: null`. Its only way out is a `cdp` global whose calls go over RPC to the session. The run times out after `timeoutMs` (60 seconds by default). The host keeps its own deadline a few seconds later, since the code can cancel the sandbox's timer. Console output is capped at 100 lines.
+4. A screenshot result (a png, jpeg or webp of base64 data under 1 MB) is kept whole. Any other result has base64 payloads redacted and is cut to about 24,000 characters, and so is an error.
 5. `session.close()` saves the scope's active tab, closes the CDP connection, and returns a report of what happened to the browser.
 6. The tool returns `{ status, executionId, result | error, logs?, notice?, restarted?, newTabs? }`. Errors are returned, not thrown, so the model can read them and try again.
 

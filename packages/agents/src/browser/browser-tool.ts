@@ -12,6 +12,7 @@ import {
   type BrowserSource
 } from "./session";
 import { transformBrowserResult } from "./tool-helpers";
+import { truncateResult } from "./truncate";
 
 export interface BrowserToolOptions {
   /**
@@ -272,7 +273,13 @@ export function createBrowserToolCore(
       const logs = ran.logs.length > 0 ? { logs: ran.logs } : {};
       output =
         "error" in ran
-          ? { status: "error", executionId, error: ran.error, ...logs }
+          ? {
+              status: "error",
+              executionId,
+              // The code can throw anything, so bound it like a result.
+              error: truncateResult(ran.error) as string,
+              ...logs
+            }
           : {
               status: "completed",
               executionId,
