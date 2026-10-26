@@ -2,4 +2,4 @@
 "agents": minor
 ---
 
-Add `internalHosts` to `browserRun()`: hostnames the browser reaches through your agent, which the model can point at targets with `browser.assignHost()`, and `proxyTo()` to serve one from another site. See [Internal hostnames](https://developers.cloudflare.com/agents/tools/browser/).
+Add `internalHosts` to `browserRun()` provider: set internal hostnames the browser can reach through your agent. Allow the model to point these hostnames at specific targets like container ports or workspace folders with `browser.assignHost()`. See [Internal hostnames](https://developers.cloudflare.com/agents/tools/browser/).

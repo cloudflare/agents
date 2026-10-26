@@ -20,7 +20,7 @@ For simple page fetches where you do not need a full browser, `fetch()` is simpl
 
 ## Persistent browser
 
-You create the browser once on your Durable Object and give the model a tool that drives it. The model never starts or closes the browser.
+You create the browser once on your agent and give the model a tool that drives it. The model never starts or closes the browser.
 
 ### Setup
 
@@ -56,7 +56,7 @@ export class MyObject extends DurableObject<Env> {
 }
 ```
 
-An `Agent` installs its own `Lifecycle`, so on an agent call `this.lifecycle.use(this.browser)` in the constructor instead.
+If you use the `Agent` class, it installs its own `Lifecycle`, so call `this.lifecycle.use(this.browser)` in its constructor instead.
 
 Only Chromium on Browser Run is supported.
 
@@ -132,7 +132,14 @@ Pass options to `browserRun(binding, options)`:
 - `guardrails` restricts which hostnames the browser may reach, for example `{ allowedDomains: ["example.com", "*.example.com"] }`. See [guardrails](https://developers.cloudflare.com/browser-run/features/guardrails/).
 - `recording` turns on [session recording](#session-recording).
 
-To have more than one browser on a Durable Object, give each `Browser` a different `name`.
+To have more than one browser on a Durable Object, give each one a different `name`. It is an option to `new Browser()`, not to `browserRun()`:
+
+```ts
+research = new Browser({
+  name: "research",
+  provider: browserRun(this.env.BROWSER)
+});
+```
 
 ### Live View and closing
 
@@ -160,17 +167,12 @@ try {
 
 ### Internal hostnames
 
-Give the browser hostnames that your Durable Object serves instead of the internet: a dev server in its sandbox, a staging site behind a header, or another Worker. Each host has a `fetch` function that runs in your Durable Object, so it can use its bindings and state:
+Give the browser hostnames that your Durable Object serves instead of the internet: a dev server in its sandbox, a folder in its workspace, or another Worker. Each host has a `fetch` function that runs in your Durable Object, so it can use its bindings and state:
 
 ```ts
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
-import {
-  Browser,
-  browserRun,
-  proxyTo,
-  type InternalHostMessage
-} from "agents/browser";
+import { Browser, browserRun, type InternalHostMessage } from "agents/browser";
 import { z } from "zod";
 
 // Browser Run calls back into your Worker through this entrypoint.
@@ -183,11 +185,9 @@ export class MyObject extends DurableObject<Env> {
       internalHosts: {
         router: this.ctx.exports.InternalHostRouter,
         hosts: {
-          "docs.internal": {
-            description: "Staging docs",
-            fetch: proxyTo("https://staging.example.com", {
-              headers: { authorization: `Bearer ${this.env.STAGING_TOKEN}` }
-            })
+          "site.internal": {
+            description: "The production build in /workspace/dist",
+            fetch: (request) => this.serveFolder("/workspace/dist", request)
           },
           "preview.internal": {
             description: "Your dev servers",
@@ -211,7 +211,6 @@ export class MyObject extends DurableObject<Env> {
 - A host with `fetch` always serves the same thing. Add a `target` schema and the model chooses: it calls `browser.assignHost({ host, target })` in its browser code, the target is checked against the schema and stored, and your `fetch` gets it as its second argument. `target` takes a [Standard JSON Schema](https://standardschema.dev) (Zod 4.2+, ArkType, Valibot via its adapter), which types the argument, or a plain JSON Schema object, which leaves it `unknown`.
 - Assignments survive the browser being replaced, eviction, and redeploys. An assignable host answers 502 until it is assigned. Call `this.browser.internalHosts.assign()`, `.clear()`, or `.list()` to manage them yourself.
 - A host with `worker` (a service binding or a `ctx.exports` entrypoint) goes straight to that Worker, without passing through your Durable Object.
-- `proxyTo(url, { headers })` forwards to a site and keeps the browser on the internal hostname: it rewrites redirects to the site, `Origin` and `Referer`, and drops the cookies' `Domain` and `Secure` attributes. A `url` with a path, such as `https://example.com/app`, serves that path as the internal host's root. Redirects elsewhere take the browser out to the internet. `__Secure-` and `__Host-` cookies do not work over plain http. Use an https `url` when `headers` carry credentials.
 - The browser tool's description lists each host with its description and schema, and its `browser` global gains `listHosts()`, plus `assignHost()` and `clearHost()` when a host is assignable.
 - Internal hosts are plain http on port 80. There is no https and no WebSockets, so a dev server's hot reload will not connect.
 - At most 8 hostnames, as bare lowercase names ending in `.internal`, `.test`, `.example`, or `.invalid` (`preview.internal`, not `http://preview.internal:5173`). These suffixes never resolve on the internet, so a host cannot shadow a real site. They are fixed when the browser starts. Changing the set replaces the browser on its next use; changing a `fetch` function does not. Pointing a `worker` host at a different Worker does not either, so call `this.browser.close()` after such a change.
