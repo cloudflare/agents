@@ -35,7 +35,7 @@
   <text x="600" y="53.5" text-anchor="middle" font-size="12.5" fill="#737373">Assistant "bob"</text>
 
   <!-- Durable Object -->
-  <rect x="430" y="60" width="340" height="476" rx="16" fill="#0F0F0F" stroke="#FF6B35" stroke-width="3"/>
+  <rect x="430" y="60" width="340" height="476" rx="16" fill="#0F0F0F" stroke="#F6821F" stroke-width="3"/>
   <text x="600" y="92" text-anchor="middle" font-size="18" font-weight="700" fill="#F5F5F5">Assistant "alice"</text>
   <text x="600" y="113" text-anchor="middle" font-size="12.5" fill="#A1A1A1">a Durable Object: one per user, task or chat</text>
 
@@ -45,9 +45,9 @@
   <text x="600" y="177" text-anchor="middle" font-size="12.5" fill="#A1A1A1">starts capabilities, routes requests and the alarm</text>
 
   <!-- Harness: the main capability, which runs the tools -->
-  <rect x="450" y="206" width="300" height="130" rx="12" fill="#2A1C0A" stroke="#FF6B35" stroke-width="2.5"/>
+  <rect x="450" y="206" width="300" height="130" rx="12" fill="#2A1C0A" stroke="#F6821F" stroke-width="2.5"/>
   <text x="600" y="231" text-anchor="middle" fill="#F5F5F5"><tspan font-size="16" font-weight="700">Harness</tspan><tspan font-size="12.5" fill="#A1A1A1">  ·  the model loop</tspan></text>
-  <rect x="461" y="242" width="34" height="22" rx="11" fill="#262626" stroke="#FF6B35" stroke-width="1.5"/>
+  <rect x="461" y="242" width="34" height="22" rx="11" fill="#3B2406" stroke="#F6821F" stroke-width="1.5"/>
   <text x="478" y="257.5" text-anchor="middle" font-size="12.5" font-weight="700" fill="#F5F5F5">Pi</text>
   <rect x="503" y="242" width="78" height="22" rx="11" fill="#0F0F0F" stroke="#333333" stroke-width="1.5"/>
   <text x="542" y="257.5" text-anchor="middle" font-size="12.5" fill="#F5F5F5">OpenCode</text>
