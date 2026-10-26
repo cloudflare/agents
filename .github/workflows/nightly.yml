@@ -281,17 +281,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      # Pin an exact Node patch. Wrangler's local Browser Rendering simulator
-      # downloads its own Chrome via @puppeteer/browsers, whose extract-zip dep
-      # silently aborts mid-extraction on some Node versions
-      # (puppeteer/puppeteer#14957). That leaves a partial Chrome cache, which
-      # Wrangler then "clears and retries" on every test — a re-corrupting loop
-      # that, with retry:3 + a 120s test timeout, ran this job to the 30m cancel.
-      # 24.22.1 has the October 2026 security fixes and extracts Chrome fully
-      # (checked in a node:24.22.1 container); bump deliberately.
       - uses: ./.github/actions/install
-        with:
-          node-version: 24.22.1
 
       - run: pnpm run build
 
