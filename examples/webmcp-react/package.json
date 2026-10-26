@@ -43,7 +43,7 @@
     "agents": "*",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "zod": "^4.5.4"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.62.3",
