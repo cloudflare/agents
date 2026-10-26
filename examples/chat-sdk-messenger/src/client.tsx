@@ -608,34 +608,32 @@ function App() {
     [conversations, selectedThreadId]
   );
 
-  const refresh = useCallback(() => {
-    // Fetch everything first, then apply it to state in one go.
-    const loadSnapshot = async () => {
-      const [nextSetup, nextConversations] = await Promise.all([
+  const refresh = useCallback(
+    () =>
+      Promise.all([
         parent.call("getSetupInfo", []) as Promise<AdminSetupInfo>,
         parent.call("listConversations", []) as Promise<AdminConversation[]>
-      ]);
-      const selected =
-        selectedThreadId ?? nextConversations[0]?.threadId ?? null;
-      const nextJobs = selected
-        ? ((await parent.call("listReplyJobs", [selected])) as AdminReplyJob[])
-        : [];
-      return { nextSetup, nextConversations, selected, nextJobs };
-    };
-
-    return loadSnapshot().then(
-      ({ nextSetup, nextConversations, selected, nextJobs }) => {
-        setSetup(nextSetup);
-        setConversations(nextConversations);
-        setSelectedThreadId(selected);
-        setReplyJobs(nextJobs);
-        setError(null);
-      },
-      (err: unknown) => {
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    );
-  }, [parent, selectedThreadId]);
+      ])
+        .then(async ([nextSetup, nextConversations]) => {
+          // Show setup and conversations even if the job lookup fails.
+          setSetup(nextSetup);
+          setConversations(nextConversations);
+          const selected =
+            selectedThreadId ?? nextConversations[0]?.threadId ?? null;
+          setSelectedThreadId(selected);
+          const nextJobs = selected
+            ? ((await parent.call("listReplyJobs", [
+                selected
+              ])) as AdminReplyJob[])
+            : [];
+          setReplyJobs(nextJobs);
+          setError(null);
+        })
+        .catch((err: unknown) => {
+          setError(err instanceof Error ? err.message : String(err));
+        }),
+    [parent, selectedThreadId]
+  );
 
   useEffect(() => {
     void refresh();
