@@ -23,25 +23,23 @@ const REPLAY_SAFE = new Set(["read", "ls", "find", "grep", "write", "delete"]);
  */
 export function createWorkspaceTools(workspace: Workspace): ToolRegistration[] {
   const { tools, execute } = createPiTools({ workspace });
-  return tools.map(
-    (tool): ToolRegistration => ({
-      name: tool.name,
-      description: tool.description,
-      // Plain JSON Schema: pi validates with TypeBox, which accepts it.
-      parameters: tool.parameters,
-      ...(tool.constrainedSampling
-        ? { constrainedSampling: tool.constrainedSampling }
-        : {}),
-      replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
-      // Run one round's exec calls in order: `npm install` before `npm run dev`.
-      ...(tool.name === "exec" ? { executionMode: "sequential" as const } : {}),
-      async execute(args, api, context) {
-        const { content, isError } = await execute(
-          { id: api.callId, name: tool.name, arguments: args },
-          { abortSignal: context.abortSignal }
-        );
-        return { content, isError };
-      }
-    })
-  );
+  return tools.map((tool): ToolRegistration => ({
+    name: tool.name,
+    description: tool.description,
+    // Plain JSON Schema: pi validates with TypeBox, which accepts it.
+    parameters: tool.parameters,
+    ...(tool.constrainedSampling
+      ? { constrainedSampling: tool.constrainedSampling }
+      : {}),
+    replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
+    // Run one round's exec calls in order: `npm install` before `npm run dev`.
+    ...(tool.name === "exec" ? { executionMode: "sequential" as const } : {}),
+    async execute(args, api, context) {
+      const { content, isError } = await execute(
+        { id: api.callId, name: tool.name, arguments: args },
+        { abortSignal: context.abortSignal }
+      );
+      return { content, isError };
+    }
+  }));
 }

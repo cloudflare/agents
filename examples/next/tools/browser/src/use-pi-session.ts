@@ -35,6 +35,12 @@ export function usePiSession(object: string) {
   const [state, setState] = useState<State>(INITIAL_STATE);
   // Unanswered submits, sent again each time the socket opens.
   const [outbox] = useState(() => new PiCommandOutbox());
+  // Another object starts from a clean slate.
+  const [stateObject, setStateObject] = useState(object);
+  if (stateObject !== object) {
+    setStateObject(object);
+    setState(INITIAL_STATE);
+  }
 
   const agent = useAgent({
     agent: "browser-agent",
@@ -69,7 +75,6 @@ export function usePiSession(object: string) {
   });
 
   useEffect(() => {
-    setState(INITIAL_STATE);
     // Submits belong to the last object's session: never send them here.
     outbox.clear();
   }, [object, outbox]);

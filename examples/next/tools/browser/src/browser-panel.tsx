@@ -16,20 +16,34 @@ import type { BrowserState } from "./shared";
  * that's when the agent opens pages and assigns hosts.
  */
 export function useBrowserState(session: string, running: boolean) {
-  const [state, setState] = useState<BrowserState | null>(null);
+  // Tagged with its session, so another session's state never shows.
+  const [loaded, setLoaded] = useState<{
+    session: string;
+    state: BrowserState;
+  } | null>(null);
+  const state = loaded?.session === session ? loaded.state : null;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    try {
-      const response = await fetch(`/api/browser/${session}`);
-      if (!response.ok) throw new Error(await response.text());
-      setState((await response.json()) as BrowserState);
-      setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }, [session]);
+  // Then-chained, not async, so nothing sets state synchronously in the
+  // effects that call it.
+  const refresh = useCallback(
+    () =>
+      fetch(`/api/browser/${session}`)
+        .then(async (response) => {
+          if (!response.ok) throw new Error(await response.text());
+          return (await response.json()) as BrowserState;
+        })
+        .then(
+          (state) => {
+            setLoaded({ session, state });
+            setError(null);
+          },
+          (cause: unknown) =>
+            setError(cause instanceof Error ? cause.message : String(cause))
+        ),
+    [session]
+  );
 
   const close = useCallback(async () => {
     setBusy(true);
@@ -43,7 +57,6 @@ export function useBrowserState(session: string, running: boolean) {
 
   // Once on load and when a turn ends, then every 5s during a turn.
   useEffect(() => {
-    setState(null);
     void refresh();
     if (!running) return;
     const id = setInterval(() => void refresh(), 5_000);
@@ -144,12 +157,13 @@ export function BrowserPanel({
   const [embedded, setEmbedded] = useState<{ id: string; url: string } | null>(
     null
   );
-  useEffect(() => {
-    if (!selected) setEmbedded(null);
-    else if (embedded?.id !== selected.targetId) {
-      setEmbedded({ id: selected.targetId, url: selected.url });
-    }
-  }, [selected, embedded]);
+  const wanted =
+    selected && embedded?.id !== selected.targetId
+      ? { id: selected.targetId, url: selected.url }
+      : selected
+        ? embedded
+        : null;
+  if (wanted !== embedded) setEmbedded(wanted);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-kumo-base">
