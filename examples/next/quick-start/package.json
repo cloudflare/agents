@@ -1,0 +1,24 @@
+{
+  "name": "@cloudflare/agents-next-quick-start-example",
+  "description": "Next: the README quick start, a Pi agent on a plain Durable Object",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "~1.4.0",
+    "@earendil-works/pi-ai": "~1.4.0",
+    "@earendil-works/pi-durable": "~1.4.0",
+    "agents": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261014.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.145.0"
+  }
+}

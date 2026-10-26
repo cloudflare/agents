@@ -2691,6 +2691,31 @@ importers:
         specifier: ^4.145.0
         version: 4.145.0(@cloudflare/workers-types@5.20261014.1)(@types/node@26.0.1)
 
+  examples/next/quick-start:
+    dependencies:
+      '@earendil-works/chord':
+        specifier: ~1.4.0
+        version: 1.4.0
+      '@earendil-works/pi-ai':
+        specifier: ~1.4.0
+        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@8.10.2)(ws@8.21.3)(zod@4.5.4)
+      '@earendil-works/pi-durable':
+        specifier: ~1.4.0
+        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@8.10.2)(ws@8.21.3)(zod@4.5.4)
+      agents:
+        specifier: '*'
+        version: link:../../../packages/agents
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^5.20261014.1
+        version: 5.20261014.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      wrangler:
+        specifier: ^4.145.0
+        version: 4.145.0(@cloudflare/workers-types@5.20261014.1)(@types/node@26.0.1)
+
   examples/next/routing:
     dependencies:
       '@cloudflare/kumo':
