@@ -32,6 +32,8 @@ A stateless function handles one request and then forgets about it. An agent's w
 | Wait days for the next message              | Saves everything elsewhere and reloads it      | Sleeps without using compute, and wakes with its data intact   |
 | Act without being asked                     | Needs a cron job that knows about every agent  | Sets its own schedules, and wakes itself when one is due       |
 
+You pay for compute only while an agent is working. A sleeping agent costs only its storage, so you can scale to millions of agents, one for every user, without paying for servers that sit idle.
+
 ## How an agent runs
 
 Your Worker finds each agent by name, so every user, task or chat gets its own. Inside it, the Lifecycle starts the harness and anything else you've added, and they all keep their data in the agent's SQLite database. If the agent sleeps or crashes, its alarm wakes it to carry on.
