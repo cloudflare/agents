@@ -74,7 +74,7 @@
     "vitest-browser-react": "^2.2.0",
     "workers-ai-provider": "^4.0.0",
     "wrangler": "^4.145.0",
-    "zod": "^4.5.4"
+    "zod": "^4.6.7"
   },
   "packageManager": "pnpm@11.19.0"
 }

@@ -27,7 +27,7 @@
     "agents": "workspace:*",
     "ai": "^7.0.0",
     "react": "^19.2.7",
-    "zod": "^4.5.4"
+    "zod": "^4.6.7"
   },
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.0 || ^4.0.0",
