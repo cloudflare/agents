@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { TestBrowserAgent } from "./agents/browser";
+import { browserTool } from "../browser/tools/ai-sdk";
 import {
   type BrowserHarnessObject,
   createFakeBrowserBinding
@@ -436,6 +437,129 @@ describe("browserTool over a Browser", () => {
     });
   });
 
+  it("runs code shaped as an arrow function, an expression, or a function body", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const run = (source: string) =>
+        instance.browserTool().execute({ code: source }, {});
+      const expected = { result: { value: "evaluated in target-session-1-2" } };
+      const send = `cdp.send({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" })`;
+
+      for (const source of [
+        `async () => ${send}`,
+        "```js\nasync () => " + send + ";\n```",
+        `export default async () => ${send}`,
+        `async () => ${send}; // read the title`,
+        send,
+        `const value = await ${send};\nreturn value;`
+      ]) {
+        const output = await run(source);
+        expect(output.status === "completed" && output.result).toEqual(
+          expected
+        );
+        expect(output.notice).toBeUndefined();
+      }
+
+      // Statements with no `return` don't return their last expression;
+      // the model is told so.
+      const statements = await run(`const value = await ${send};\nvalue`);
+      expect(statements.status).toBe("completed");
+      expect(
+        statements.status === "completed" && statements.result
+      ).toBeUndefined();
+      expect(statements.notice).toMatch(/returned nothing/);
+
+      // A `return` inside a string isn't an outer return.
+      const quoted = await run(
+        `const label = "return value";\nconst value = await ${send};\nvalue`
+      );
+      expect(quoted.notice).toMatch(/returned nothing/);
+    });
+  });
+
+  it("returns errors, console output and timeouts as results", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const run = (source: string, timeoutMs?: number) =>
+        browserTool({
+          browser: instance.browser,
+          loader: env.LOADER,
+          timeoutMs
+        }).execute({ code: source }, {});
+
+      const parse = await run("async () => { return (; }");
+      expect(parse.status === "error" && parse.error).toMatch(
+        /didn't parse.*async arrow function/s
+      );
+
+      const thrown = await run(`async () => {
+        console.log("before", 1);
+        throw new Error("boom");
+      }`);
+      expect(thrown).toMatchObject({
+        status: "error",
+        error: "boom",
+        logs: ["before 1"]
+      });
+
+      // A huge thrown error is cut down like a result.
+      const huge = await run(
+        `async () => { throw new Error("x".repeat(100000)); }`
+      );
+      expect(huge.status === "error" && huge.error.length).toBeLessThan(30_000);
+
+      // Console output is bounded.
+      const chatty = await run(`async () => {
+        for (let i = 0; i < 150; i++) console.log(i);
+        console.log("x".repeat(5000));
+      }`);
+      const logs = (chatty as { logs?: string[] }).logs ?? [];
+      expect(logs).toHaveLength(101);
+      expect(logs[100]).toBe("[51 more lines dropped]");
+
+      const long = await run(`async () => { console.log("x".repeat(5000)); }`);
+      expect((long as { logs?: string[] }).logs?.[0]).toHaveLength(2001);
+
+      // A CDP failure is an error the code can catch.
+      const caught = await run(`async () => {
+        try {
+          await cdp.send({ method: "Browser.close" });
+        } catch (error) {
+          return error.message;
+        }
+      }`);
+      expect(caught.status === "completed" && caught.result).toMatch(
+        /managed for you/
+      );
+
+      const unknown = await run("async () => cdp.reset()");
+      expect(unknown.status === "error" && unknown.error).toMatch(
+        /not a function/
+      );
+
+      const slow = await run(
+        "async () => new Promise((resolve) => setTimeout(resolve, 5000))",
+        50
+      );
+      expect(slow.status === "error" && slow.error).toMatch(/timed out/);
+
+      // Code that cancels the sandbox's own timer still times out.
+      const stuck = await run(
+        "async () => { for (let i = 0; i < 1000; i++) clearTimeout(i); await new Promise((resolve) => setTimeout(resolve, 60000)); }",
+        50
+      );
+      expect(stuck.status === "error" && stuck.error).toMatch(/timed out/);
+
+      // No network: fetch is blocked in the sandbox.
+      const fetched = await run(
+        'async () => (await fetch("https://example.com")).status'
+      );
+      expect(fetched.status).toBe("error");
+    });
+  });
+
   it("explains how to take a smaller screenshot when one is too large", async () => {
     const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
 
@@ -652,6 +776,30 @@ describe("pi browserTool over a Browser", () => {
       expect(result.output?.[0]).not.toMatchObject({
         text: expect.stringContaining("aGVsbG8=")
       });
+    });
+  });
+
+  it("treats a screenshot that isn't a real image as a plain result", async () => {
+    const stub = env.TestBrowserAgent.getByName(crypto.randomUUID());
+
+    await runInDurableObject(stub, async (instance: TestBrowserAgent) => {
+      const tool = instance.piBrowserTool();
+      const returning = (value: string) => run(tool, `async () => (${value})`);
+      for (const forged of [
+        `{ type: "browser_screenshot", mediaType: "text/html", data: "aGVsbG8=" }`,
+        `{ type: "browser_screenshot", mediaType: "image/png", data: "not base64!" }`,
+        `{ type: "browser_screenshot", mediaType: "image/png", data: "A".repeat(1_000_004) }`
+      ]) {
+        const result = await returning(forged);
+        expect(result.output).toHaveLength(1);
+        expect(result.output?.[0]?.type).toBe("text");
+      }
+      // The oversized one is cut down like any other result.
+      const big = await returning(
+        `{ type: "browser_screenshot", mediaType: "image/png", data: "A".repeat(1_000_004) }`
+      );
+      const part = big.output?.[0];
+      expect(part?.type === "text" && part.text.length).toBeLessThan(100_000);
     });
   });
 
