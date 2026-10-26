@@ -61,7 +61,7 @@ Live View is for the host. It calls `browser.liveView()` to give a person a link
 ## Key Decisions
 
 - **One browser, owned by the host.** The host creates a `Browser` and passes it in; the tool doesn't start, close, or reset browsers, and the model can't either.
-- **No codemode.** Each run is a fresh Dynamic Worker with `globalOutbound: null`. Codemode's replay log mattered for pausing inside a run (approvals, handoffs); handing the browser to a person now ends the turn instead, via the host's `browser.liveView()`.
+- **No codemode.** Each run is a fresh Dynamic Worker with `globalOutbound: null`. Codemode's replay log mattered for pausing inside a run (approvals, handoffs); handing the browser to a person now ends the turn instead, via the host's `browser.liveView()`. `@cloudflare/codemode` must still be installed while `agents/browser` exports the deprecated codemode APIs (`CodemodeRuntime`, `BrowserConnector`); removing them drops it.
 - Do not bundle the CDP spec; fetch it from the live browser and normalize it.
 - Keep browser state host-side. The sandbox gets RPC functions only.
 - **One active tab per scope**, with runs in a scope queued, so conversations sharing a browser don't fight over a tab.

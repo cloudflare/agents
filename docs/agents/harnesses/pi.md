@@ -162,7 +162,7 @@ harness: async ({ storage, context, onWake }) => {
 readonly lifecycle = Lifecycle.install(this).use(this.browser).use(this.harness);
 ```
 
-It needs a `browser` binding and a `LOADER` Worker Loader binding. Screenshots come back as images, and each conversation works in its own tab. Refer to [Persistent browser](../browse-the-web.md#persistent-browser) for how it behaves.
+It needs a `browser` binding, a `LOADER` Worker Loader binding, and `@cloudflare/codemode` installed (only until the deprecated codemode browser APIs are removed from `agents/browser`). Screenshots come back as images, and each conversation works in its own tab. Refer to [Persistent browser](../browse-the-web.md#persistent-browser) for how it behaves.
 
 ## Work with sessions
 

@@ -35,7 +35,13 @@ Add a [Browser Run](https://developers.cloudflare.com/browser-run/) binding and 
 }
 ```
 
-Install `agents`, plus the package for your harness: the pi packages for [pi-durable](./harnesses/pi.md), `@tanstack/ai` for TanStack AI, or `ai` for the AI SDK.
+Install `agents` and `@cloudflare/codemode`, plus the package for your harness: the pi packages for [pi-durable](./harnesses/pi.md), `@tanstack/ai` for TanStack AI, or `ai` for the AI SDK.
+
+```sh
+npm install agents @cloudflare/codemode
+```
+
+`browserTool` does not use codemode, but `agents/browser` still exports the deprecated APIs that do, so your bundler needs it installed. That requirement goes away when those APIs are removed.
 
 Create a `Browser` on your agent and install it on the agent's [Lifecycle](./lifecycle.md), which stores the browser's record and keeps it across hibernation:
 
