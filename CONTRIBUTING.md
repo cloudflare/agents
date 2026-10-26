@@ -55,4 +55,9 @@ The root `README.md` is also the README of the `agents` package on npm. npm publ
 pnpm run check:readme --write
 ```
 
-`pnpm run check` fails if the copy is out of date, or if the README has a relative link, which would break on npmjs.com.
+`pnpm run check` fails if:
+
+- the copy is out of date
+- the README has a relative link, which would break on npmjs.com
+- a code block marked `<!-- readme-sync: path -->` differs from that file. The quick start is synced with [`examples/next/quick-start`](examples/next/quick-start), so CI typechecks it.
+- an `npm install` line pins a Pi package to a range other than the one in the `agents` peer dependencies. When `agents` moves to a new Pi minor, update the README with it.

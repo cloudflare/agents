@@ -1,12 +1,14 @@
 # Next examples
 
-Early-access examples for APIs being introduced across a short stack of Agents
-SDK pull requests. Keeping them under `examples/next` avoids presenting the new
-composition patterns as part of the current stable examples before the stack
-lands.
+Examples for the Lifecycle and harness APIs: a plain Durable Object with a
+Lifecycle and the capabilities it needs. The repository README teaches this
+way of building an agent, and links here for its examples and its Deploy
+button. Many of the APIs are still beta or experimental, so the examples stay
+under `examples/next` until those APIs are stable.
 
 | Example                                                  | Status    | Demonstrates                                                                                                                                        |
 | -------------------------------------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`quick-start`](./quick-start)                           | Available | The README quick start: Pi on a plain `DurableObject`, kept as a project so CI typechecks it                                                        |
 | [`lifecycle`](./lifecycle)                               | Available | A plain `DurableObject` composed with `Lifecycle` and a reusable capability                                                                         |
 | [`schedules`](./schedules)                               | Available | `Scheduler` installed as a reusable lifecycle capability                                                                                            |
 | [`queue`](./queue)                                       | This PR   | Durable background work: `Queue` installed as a reusable lifecycle capability                                                                       |
@@ -29,3 +31,10 @@ lands.
 Each example is an independent workspace package and should stay focused on one
 capability. Once the APIs are stable, move the examples into the main examples
 catalog or replace an existing example where appropriate.
+
+The README, and the npm page built from it, link to `quick-start`,
+`harnesses/pi`, `harnesses/opencode`, `harnesses/container`, `harnesses/codex`,
+`schedules`, `sessions`, `mcp-client`, `routing` and `dynamic-agents`. Each
+`agents` release freezes its npm page, so those links keep working only while
+the paths do. When you move one of these examples, leave a `README.md` at the
+old path that links to the new one.

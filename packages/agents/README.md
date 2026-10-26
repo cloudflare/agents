@@ -14,7 +14,7 @@
 This agent runs [Pi](https://github.com/earendil-works/pi/tree/main/packages/durable) on a Workers AI model, with one tool: it can read web pages. Install the Agents SDK and Pi:
 
 ```sh
-npm install agents @earendil-works/pi-durable @earendil-works/pi-ai @earendil-works/chord
+npm install agents @earendil-works/pi-durable@~1.4.0 @earendil-works/pi-ai@~1.4.0 @earendil-works/chord@~1.4.0
 ```
 
 Create `src/server.ts`:
