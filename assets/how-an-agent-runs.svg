@@ -1,6 +1,6 @@
-<svg width="960" height="498" viewBox="0 0 960 498" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<svg width="960" height="560" viewBox="0 0 960 560" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
   <title>How an agent runs on Cloudflare</title>
-  <desc>Requests reach your Worker, which finds one Durable Object out of many, one per user. Requests and the object's alarm both enter its Lifecycle, which starts a scheduler, WebSockets, the Pi harness and the tools Pi runs, and routes work to them. They keep their data in the object's SQLite database. The alarm wakes the object after it sleeps or crashes. The harness calls models through Workers AI and AI Gateway. Tools run inside the object, reach outside services such as web pages, browsers, email and MCP servers, and run code in a sandbox, a Container or a Dynamic Worker.</desc>
+  <desc>Requests reach your Worker, which finds one Durable Object out of many, one per user. Requests and the object's alarm both enter its Lifecycle, which starts the object's capabilities and routes work to them. The main one is the harness, the model loop, such as Pi, OpenCode, Claude Code or Codex, which runs tools. Beside it are a scheduler and WebSockets. They keep their data in the object's SQLite database. The alarm wakes the object after it sleeps or crashes. The harness calls models through Workers AI and AI Gateway. Tools run inside the object, reach outside services such as web pages, browsers, email and MCP servers, and run code the model writes in a sandbox.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#D84315"/>
@@ -10,7 +10,7 @@
     </marker>
   </defs>
 
-  <rect width="960" height="498" rx="16" fill="#FFF8F3"/>
+  <rect width="960" height="560" rx="16" fill="#FFF8F3"/>
 
   <!-- Clients -->
   <rect x="24" y="106" width="136" height="88" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
@@ -30,12 +30,12 @@
 
   <!-- Other users' objects, behind Alice's -->
   <rect x="474" y="14" width="252" height="70" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
-  <text x="600" y="30.5" text-anchor="middle" font-size="12.5" fill="#9C8A80">Assistant "carol"</text>
+  <text x="600" y="30.5" text-anchor="middle" font-size="12.5" fill="#9C8A80">Assistant "priya"</text>
   <rect x="452" y="37" width="296" height="45" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
   <text x="600" y="53.5" text-anchor="middle" font-size="12.5" fill="#9C8A80">Assistant "bob"</text>
 
   <!-- Durable Object -->
-  <rect x="430" y="60" width="340" height="414" rx="16" fill="#FFFFFF" stroke="#FF6B35" stroke-width="3"/>
+  <rect x="430" y="60" width="340" height="476" rx="16" fill="#FFFFFF" stroke="#FF6B35" stroke-width="3"/>
   <text x="600" y="92" text-anchor="middle" font-size="18" font-weight="700" fill="#3A2A20">Assistant "alice"</text>
   <text x="600" y="113" text-anchor="middle" font-size="12.5" fill="#6B5A50">a Durable Object: one per user, task or chat</text>
 
@@ -44,54 +44,60 @@
   <text x="600" y="155" text-anchor="middle" font-size="14" font-weight="700" fill="#3A2A20">Lifecycle</text>
   <text x="600" y="177" text-anchor="middle" font-size="12.5" fill="#6B5A50">starts capabilities, routes requests and the alarm</text>
 
-  <!-- Capabilities -->
-  <rect x="450" y="210" width="145" height="52" rx="10" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
-  <text x="522.5" y="232" text-anchor="middle" font-size="13.5" font-weight="700" fill="#3A2A20">Scheduler</text>
-  <text x="522.5" y="251" text-anchor="middle" font-size="12.5" fill="#6B5A50">cron, delays</text>
+  <!-- Harness: the main capability, which runs the tools -->
+  <rect x="450" y="206" width="300" height="130" rx="12" fill="#FFF4EE" stroke="#FF6B35" stroke-width="2.5"/>
+  <text x="600" y="231" text-anchor="middle" fill="#3A2A20"><tspan font-size="16" font-weight="700">Harness</tspan><tspan font-size="12.5" fill="#6B5A50">  ·  the model loop</tspan></text>
+  <rect x="461" y="242" width="34" height="22" rx="11" fill="#FFE4D6" stroke="#FF6B35" stroke-width="1.5"/>
+  <text x="478" y="257.5" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3A2A20">Pi</text>
+  <rect x="503" y="242" width="78" height="22" rx="11" fill="#FFFFFF" stroke="#F4B393" stroke-width="1.5"/>
+  <text x="542" y="257.5" text-anchor="middle" font-size="12.5" fill="#3A2A20">OpenCode</text>
+  <rect x="589" y="242" width="88" height="22" rx="11" fill="#FFFFFF" stroke="#F4B393" stroke-width="1.5"/>
+  <text x="633" y="257.5" text-anchor="middle" font-size="12.5" fill="#3A2A20">Claude Code</text>
+  <rect x="685" y="242" width="54" height="22" rx="11" fill="#FFFFFF" stroke="#F4B393" stroke-width="1.5"/>
+  <text x="712" y="257.5" text-anchor="middle" font-size="12.5" fill="#3A2A20">Codex</text>
 
-  <rect x="605" y="210" width="145" height="52" rx="10" fill="#FFFFFF" stroke="#FF6B35" stroke-width="2"/>
-  <text x="677.5" y="232" text-anchor="middle" font-size="13.5" font-weight="700" fill="#3A2A20">PiHarness</text>
-  <text x="677.5" y="251" text-anchor="middle" font-size="12.5" fill="#6B5A50">model loop</text>
+  <rect x="466" y="276" width="268" height="46" rx="10" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
+  <text x="600" y="295" text-anchor="middle" font-size="13.5" font-weight="700" fill="#3A2A20">Tools</text>
+  <text x="600" y="313" text-anchor="middle" font-size="12.5" fill="#6B5A50">built-in and your own</text>
 
-  <line x1="677.5" y1="263" x2="677.5" y2="287" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
+  <!-- Other capabilities -->
+  <rect x="450" y="352" width="145" height="52" rx="10" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
+  <text x="522.5" y="374" text-anchor="middle" font-size="13.5" font-weight="700" fill="#3A2A20">Scheduler</text>
+  <text x="522.5" y="393" text-anchor="middle" font-size="12.5" fill="#6B5A50">cron, delays</text>
 
-  <rect x="450" y="288" width="145" height="52" rx="10" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
-  <text x="522.5" y="310" text-anchor="middle" font-size="13.5" font-weight="700" fill="#3A2A20">WebSockets</text>
-  <text x="522.5" y="329" text-anchor="middle" font-size="12.5" fill="#6B5A50">live clients</text>
-
-  <rect x="605" y="288" width="145" height="52" rx="10" fill="#FFFFFF" stroke="#FF6B35" stroke-width="2"/>
-  <text x="677.5" y="310" text-anchor="middle" font-size="13.5" font-weight="700" fill="#3A2A20">Tools</text>
-  <text x="677.5" y="329" text-anchor="middle" font-size="12.5" fill="#6B5A50">built-in and your own</text>
+  <rect x="605" y="352" width="145" height="52" rx="10" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
+  <text x="677.5" y="374" text-anchor="middle" font-size="13.5" font-weight="700" fill="#3A2A20">WebSockets</text>
+  <text x="677.5" y="393" text-anchor="middle" font-size="12.5" fill="#6B5A50">live clients</text>
 
   <!-- SQLite -->
-  <path d="M 450 372 L 450 438 A 150 16 0 0 0 750 438 L 750 372" fill="#FFF1E8" stroke="#F4B393" stroke-width="2"/>
-  <ellipse cx="600" cy="372" rx="150" ry="16" fill="#FFE4D6" stroke="#F4B393" stroke-width="2"/>
-  <text x="600" y="408" text-anchor="middle" font-size="14" font-weight="700" fill="#3A2A20">SQLite database</text>
-  <text x="600" y="427" text-anchor="middle" font-size="12.5" fill="#6B5A50">every step Pi takes, schedules,</text>
-  <text x="600" y="444" text-anchor="middle" font-size="12.5" fill="#6B5A50">workspace files and your own tables</text>
+  <path d="M 450 436 L 450 500 A 150 16 0 0 0 750 500 L 750 436" fill="#FFF1E8" stroke="#F4B393" stroke-width="2"/>
+  <ellipse cx="600" cy="436" rx="150" ry="16" fill="#FFE4D6" stroke="#F4B393" stroke-width="2"/>
+  <text x="600" y="472" text-anchor="middle" font-size="14" font-weight="700" fill="#3A2A20">SQLite database</text>
+  <text x="600" y="491" text-anchor="middle" font-size="12.5" fill="#6B5A50">every step Pi takes, schedules,</text>
+  <text x="600" y="508" text-anchor="middle" font-size="12.5" fill="#6B5A50">workspace files and your own tables</text>
 
   <!-- Alarm loop -->
-  <path d="M 430 400 C 372.8 400, 368.4 217.5, 417.6 189.6" fill="none" stroke="#D84315" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow-from-base)"/>
-  <text x="368" y="280" text-anchor="end" font-size="13.5" font-weight="700" fill="#3A2A20">Alarm</text>
-  <text x="368" y="299" text-anchor="end" font-size="12.5" fill="#6B5A50">wakes it after it</text>
-  <text x="368" y="316" text-anchor="end" font-size="12.5" fill="#6B5A50">sleeps or crashes</text>
+  <path d="M 430 466 C 364.7 466, 360.3 222.4, 417.6 189.6" fill="none" stroke="#D84315" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow-from-base)"/>
+  <text x="362" y="312" text-anchor="end" font-size="13.5" font-weight="700" fill="#3A2A20">Alarm</text>
+  <text x="362" y="331" text-anchor="end" font-size="12.5" fill="#6B5A50">wakes it after it</text>
+  <text x="362" y="348" text-anchor="end" font-size="12.5" fill="#6B5A50">sleeps or crashes</text>
 
   <!-- What the harness and tools reach outside the object -->
-  <line x1="750" y1="236" x2="796" y2="236" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
-  <rect x="800" y="201" width="136" height="70" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
-  <text x="868" y="225" text-anchor="middle" font-size="15" font-weight="700" fill="#3A2A20">Models</text>
-  <text x="868" y="245" text-anchor="middle" font-size="12.5" fill="#6B5A50">Workers AI</text>
-  <text x="868" y="262" text-anchor="middle" font-size="12.5" fill="#6B5A50">AI Gateway</text>
+  <line x1="751" y1="225" x2="796" y2="225" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="800" y="192" width="136" height="66" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
+  <text x="868" y="214" text-anchor="middle" font-size="15" font-weight="700" fill="#3A2A20">Models</text>
+  <text x="868" y="233" text-anchor="middle" font-size="12.5" fill="#6B5A50">Workers AI</text>
+  <text x="868" y="249" text-anchor="middle" font-size="12.5" fill="#6B5A50">AI Gateway</text>
 
-  <line x1="750" y1="306" x2="796" y2="306" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
-  <rect x="800" y="279" width="136" height="70" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
-  <text x="868" y="303" text-anchor="middle" font-size="15" font-weight="700" fill="#3A2A20">Services</text>
-  <text x="868" y="323" text-anchor="middle" font-size="12.5" fill="#6B5A50">web pages, browsers,</text>
-  <text x="868" y="340" text-anchor="middle" font-size="12.5" fill="#6B5A50">email, MCP servers</text>
+  <line x1="734" y1="299" x2="796" y2="299" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="800" y="266" width="136" height="66" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
+  <text x="868" y="288" text-anchor="middle" font-size="15" font-weight="700" fill="#3A2A20">Services</text>
+  <text x="868" y="307" text-anchor="middle" font-size="12.5" fill="#6B5A50">web pages, browsers,</text>
+  <text x="868" y="323" text-anchor="middle" font-size="12.5" fill="#6B5A50">email, MCP servers</text>
 
-  <line x1="750" y1="330" x2="796" y2="382" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
-  <rect x="800" y="357" width="136" height="70" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
-  <text x="868" y="381" text-anchor="middle" font-size="15" font-weight="700" fill="#3A2A20">Sandbox</text>
-  <text x="868" y="401" text-anchor="middle" font-size="12.5" fill="#6B5A50">Container or</text>
-  <text x="868" y="418" text-anchor="middle" font-size="12.5" fill="#6B5A50">Dynamic Worker</text>
+  <line x1="734" y1="314" x2="796" y2="368" stroke="#D84315" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="800" y="340" width="136" height="66" rx="12" fill="#FFFFFF" stroke="#F4B393" stroke-width="2"/>
+  <text x="868" y="362" text-anchor="middle" font-size="15" font-weight="700" fill="#3A2A20">Sandbox</text>
+  <text x="868" y="381" text-anchor="middle" font-size="12.5" fill="#6B5A50">runs code that</text>
+  <text x="868" y="397" text-anchor="middle" font-size="12.5" fill="#6B5A50">the model writes</text>
 </svg>
