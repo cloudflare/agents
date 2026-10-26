@@ -68,27 +68,6 @@ export function sseResponse(
   });
 }
 
-/**
- * An SSE `Response` in the shape the live Anthropic captures use: a named
- * `event:` line before each `data:` line, and the run-length padding Anthropic
- * appends inside the data payload. Both are things the decoder has to survive.
- */
-export function sseEventResponse(
-  events: { event: string; data: unknown }[],
-  init: { headers?: Record<string, string> } = {}
-): Response {
-  const body = events
-    .map(
-      (entry, index) =>
-        `event: ${entry.event}\r\ndata: ${JSON.stringify(entry.data)}${" ".repeat(index % 5)}\r\n\r\n`
-    )
-    .join("");
-  return new Response(body, {
-    headers: { "content-type": "text/event-stream", ...init.headers },
-    status: 200
-  });
-}
-
 /** Drains a stream into an array. */
 export async function collect<T>(stream: ReadableStream<T>): Promise<T[]> {
   const parts: T[] = [];

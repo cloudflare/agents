@@ -307,41 +307,6 @@ function ToolPayload({
   );
 }
 
-/** A tool call waiting for the user to allow it. */
-export function ToolApproval({
-  title,
-  children,
-  onApprove,
-  onReject
-}: {
-  title: ReactNode;
-  children?: ReactNode;
-  onApprove: () => void;
-  onReject: () => void;
-}) {
-  return (
-    <div className="flex flex-col gap-3 rounded-xl bg-kumo-base p-4 ring-1 ring-kumo-line">
-      <div className="flex items-center gap-2 text-sm">
-        <WarningCircleIcon size={16} className="text-kumo-warning" />
-        <span className="font-medium text-kumo-default">{title}</span>
-      </div>
-      {children && (
-        <pre className="max-h-40 overflow-auto rounded-lg bg-kumo-recessed p-3 font-mono text-xs whitespace-pre-wrap text-kumo-subtle">
-          {children}
-        </pre>
-      )}
-      <div className="flex gap-2">
-        <Button size="sm" variant="primary" onClick={onApprove}>
-          Allow
-        </Button>
-        <Button size="sm" variant="secondary" onClick={onReject}>
-          Deny
-        </Button>
-      </div>
-    </div>
-  );
-}
-
 // ── Composer ────────────────────────────────────────────────────────
 
 /**

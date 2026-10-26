@@ -34,8 +34,3 @@ export async function releaseContainer(
 export function primePool(env: PoolEnv): Promise<void> {
   return pool(env).ensureWarm();
 }
-
-/** Pool stats for local diagnostics and tests. */
-export function poolStats(env: PoolEnv) {
-  return pool(env).getStats();
-}
