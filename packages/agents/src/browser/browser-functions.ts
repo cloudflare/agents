@@ -211,7 +211,7 @@ export function browserFunctionDocs(hosts?: BrowserInternalHosts): string {
     "",
     "## Internal sites",
     "",
-    "The browser can open these sites, served by your agent rather than the internet. Plain http only: no https:// and no WebSockets, so a dev server's hot reload won't connect; reload the page instead.",
+    "The browser can open these sites, which aren't on the public internet. Plain http only: no https:// and no WebSockets, so a dev server's hot reload won't connect; reload the page instead.",
     "",
     ...infos.map(describeHost)
   ].join("\n");
