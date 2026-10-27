@@ -1,5 +1,15 @@
 # @cloudflare/think
 
+## 0.22.0
+
+### Minor Changes
+
+- [#2632](https://github.com/cloudflare/agents/pull/2632) [`361046e`](https://github.com/cloudflare/agents/commit/361046e4f5f528540783d9078c438cb3cbe2d470) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Remove `lazyWorkspace`, exported by mistake in 0.21.0. Use `getWorkspace(() => stub)` from `@cloudflare/computer` instead. Think's `@cloudflare/computer` peer is now `^0.8.0`, so upgrade Computer to 0.8 alongside Think. See [Multi-session chat](https://github.com/cloudflare/agents/blob/main/docs/think/multi-chat.md#share-the-workspace).
+
+### Patch Changes
+
+- [#2678](https://github.com/cloudflare/agents/pull/2678) [`325c6ca`](https://github.com/cloudflare/agents/commit/325c6ca1c9c28f056aa14df6c611c165062151f5) Thanks [@github-actions](https://github.com/apps/github-actions)! - Fix the `ai` peer dependency version in the Think README; see [Think dependencies](https://github.com/cloudflare/agents/blob/main/docs/think/index.md#dependencies).
+
 ## 0.21.0
 
 ### Minor Changes
