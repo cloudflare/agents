@@ -1,0 +1,55 @@
+docs/agents/callable-methods.md
+  s_f332e176eb9835::t_bcee6f1741408f 517-534
+.changeset/agent-retryable.md
+  s_f332e176eb9835::t_899cc87a7068e3 1-5
+packages/agents/src/index.ts
+  s_94fc8332a330cc::t_aae946357548c5 348-349,1021-1022,1068,1081,1420-1442,3041,3046-3054,3066-3070
+pnpm-workspace.yaml
+  s_11fa28ca60720a::t_d43efbb55d0b82 53-56
+pnpm-lock.yaml
+  s_11fa28ca60720a::t_a1d6efee25977a 9,4836,6129,6138,6158-6159,6164-6165,6170-6171,6176-6177,6182-6183,14727-14728,16500,16539,16543,16545,16549,16553,16557,16567,16571,16581,16585,16595,16599,16622,16625,16628,16631,16634,24485,24497,24510,24523,24536,27346,27348-27352,27366,27372,27383,27389,27401,27407,27419,27425
+packages/agents/src/retryable-methods.ts
+  s_94fc8332a330cc::t_99dca30a35a0c6 1-48
+packages/agents/src/tests/agents/index.ts
+  s_94fc8332a330cc::t_bb93e5d5937ae9 55-59
+packages/agents/src/tests/agents/retryable.ts
+  s_94fc8332a330cc::t_39a9cd5f3bbd6a 1-20
+packages/agents/src/tests/retryable-methods.test.ts
+  s_94fc8332a330cc::t_e5dc7d335273da 1-93
+packages/agents/src/tests/worker.ts
+  s_94fc8332a330cc::t_52b936bea91561 132-134,222-224,307-309
+packages/agents/src/tests/wrangler.jsonc
+  s_94fc8332a330cc::t_733d9625e7b153 289-300,534-536
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ea1fb8f596815dc86956be5fc38d67ff7c4a8e1e",
+  "prompts": {},
+  "sessions": {
+    "s_11fa28ca60720a": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e874acb74ffeFypQ2IOOqckruA",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ashley Peacock <apeacock@cloudflare.com>"
+    },
+    "s_94fc8332a330cc": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e8360850fffey5Sg2IRD1oIu9I",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ashley Peacock <apeacock@cloudflare.com>"
+    },
+    "s_f332e176eb9835": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_ec654b52dffe5R4MDhsJqmPWkg",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ashley Peacock <apeacock@cloudflare.com>"
+    }
+  }
+}
