@@ -1,0 +1,43 @@
+pnpm-lock.yaml
+  s_11fa28ca60720a::t_a1d6efee25977a 9,4836,6129,6138,6158-6159,6164-6165,6170-6171,6176-6177,6182-6183,14727-14728,16500,16539,16543,16545,16549,16553,16557,16567,16571,16581,16585,16595,16599,16622,16625,16628,16631,16634,24485,24497,24510,24523,24536,27346,27348-27352,27366,27372,27383,27389,27401,27407,27419,27425
+docs/agents/callable-methods.md
+  s_f332e176eb9835::t_bcee6f1741408f 517-534
+.changeset/agent-retryable.md
+  s_f332e176eb9835::t_899cc87a7068e3 1-5
+pnpm-workspace.yaml
+  s_11fa28ca60720a::t_d43efbb55d0b82 53-56
+packages/agents/src/index.ts
+  s_94fc8332a330cc::t_aae946357548c5 348-349,1420-1436,3053-3057
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fd1e971c7618ad9a45ae39aea07bfcb0cad8a4ec",
+  "prompts": {},
+  "sessions": {
+    "s_11fa28ca60720a": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e874acb74ffeFypQ2IOOqckruA",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ashley Peacock <apeacock@cloudflare.com>"
+    },
+    "s_94fc8332a330cc": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e8360850fffey5Sg2IRD1oIu9I",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ashley Peacock <apeacock@cloudflare.com>"
+    },
+    "s_f332e176eb9835": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_ec654b52dffe5R4MDhsJqmPWkg",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ashley Peacock <apeacock@cloudflare.com>"
+    }
+  }
+}
