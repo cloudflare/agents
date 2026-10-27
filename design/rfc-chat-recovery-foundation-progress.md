@@ -182,7 +182,7 @@ the change, and the key review findings.
   shared merge primitive (LANDED)_ — Factored ai-chat's `_persistOrphanedStream`
   into the three RFC seams now that the Session-provider spike settled their shape.
   **(b):** extracted `AIChatAgent._resolveOrphanTargetId(streamId, reconstructedId,
-fallbackId)` — the #1691 stored-id / last-assistant-fallback policy — as a named
+  fallbackId)` — the #1691 stored-id / last-assistant-fallback policy — as a named
   per-host method. **Design correction:** kept the hook **on the host, not the shared
   engine adapter** (the earlier plan floated an engine-level `resolveOrphanTargetId`);
   hoisting the orchestration into the engine would need strip/broadcast/flush hooks
@@ -252,7 +252,7 @@ fallbackId)` — the #1691 stored-id / last-assistant-fallback policy — as a n
   no code)_ — Before implementing the proposed standalone "(c) dedup" fix, a read
   of the actual reconstruction code **reversed the finding**. `applyChunkToParts`
   is **already fully idempotent by `toolCallId`** (`message-builder.ts:237–240,
-273–297` — the #1404 `findToolPartByCallId` guards), so the accumulator never
+  273–297` — the #1404 `findToolPartByCallId` guards), so the accumulator never
   holds duplicate tool parts and `StreamAccumulator.mergeInto` (which _replaces_
   with the deduped parts, not append) needs no dedup — the premise "`mergeInto`
   lacks dedup" was wrong. Think also has **no early/mid-stream message persist**
@@ -676,7 +676,7 @@ fallbackId)` — the #1691 stored-id / last-assistant-fallback policy — as a n
   **regenerates** the unanswered user turn via pi's real `continue()` rather than
   merging the orphaned partial (the AI SDK adapter merges). Concretely the wake
   hooks set `classifyRecoveredTurn → "retry"` and `shouldPersistOrphanedPartial →
-false`; the engine supported this with **no engine-side change**, and the
+  false`; the engine supported this with **no engine-side change**, and the
   `createChatFiberSnapshot` input was already generalized off `UIMessage` to
   `SnapshotMessage` (prior slice) so the snapshot builder stayed wire-agnostic — the
   two together are the genericity proof. **e2e (the P5-1 exit criterion):** a real
@@ -691,7 +691,7 @@ false`; the engine supported this with **no engine-side change**, and the
   behind adapters, then folding corrections back into the AI SDK adapter) is the
   remaining Phase-5 work; P5-1 establishes the proof and the second-consumer harness
   that extraction will be driven against. Tests: pi SIGKILL e2e 1/1 ✅; `pnpm run
-check` ✅ (112 projects); agents workers 1996 ✅, ai-chat ✅, Think ✅ (the
+  check` ✅ (112 projects); agents workers 1996 ✅, ai-chat ✅, Think ✅ (the
   `SnapshotMessage` widening is type-only — all three consume `agents/chat`
   unchanged at runtime). No changeset (no `packages/` runtime behavior change; the
   fixture is `experimental/` and unpublished).
@@ -756,7 +756,7 @@ check` ✅ (112 projects); agents workers 1996 ✅, ai-chat ✅, Think ✅ (the
   `data.type === MessageType.X` switch and onto the shared `parseProtocolMessage`
   (which Think already uses), dispatching on the typed `ChatProtocolEvent` discriminants
   (`event.type === "chat-request" | "clear" | "messages" | "cancel" |
-"stream-resume-request" | "stream-resume-ack" | "tool-result" | "tool-approval"`).
+  "stream-resume-request" | "stream-resume-ack" | "tool-result" | "tool-approval"`).
   **Classification-only:** all eight handler bodies are byte-preserved (`data.` →
   `event.`); the `messages` event still calls `autoTransformMessages` + `persistMessages`
   (ai-chat persists the client snapshot — explicitly NOT converged onto Think's no-op).
@@ -775,7 +775,7 @@ check` ✅ (112 projects); agents workers 1996 ✅, ai-chat ✅, Think ✅ (the
   `""`) — strictly safer for malformed frames, no change for real traffic. One type fix:
   the parser types `clientTools[].parameters` as `unknown` (vs ai-chat's `ClientToolSchema`
   `JSONSchema7`), so the auto-continuation call site now casts `clientTools as
-ClientToolSchema[] | undefined`, mirroring the existing cast on the `_lastClientTools`
+  ClientToolSchema[] | undefined`, mirroring the existing cast on the `_lastClientTools`
   assignment two lines up. Removed the now-unused `type IncomingMessage` import. Tests:
   `pnpm run check` ✅ (111 projects); ai-chat workers 686 ✅; ai-chat real-`wrangler dev`
   SIGKILL e2e 10/10 ✅ (the dispatch-path gate); Think workers 686 ✅ for parity. Think
@@ -1063,7 +1063,7 @@ ClientToolSchema[] | undefined`, mirroring the existing cast on the `_lastClient
   `getPartialStreamText`, `activeChatRecoveryRootRequestId`,
   `onGiveUpBookkeepingError`); each package method is now a one-line delegation.
   **Byte-equivalence review:** the unified root-id chain (`originalRequestId ??
-recoveredRequestId ?? activeRoot ?? stored.root ?? stored.requestId ?? ""`)
+  recoveredRequestId ?? activeRoot ?? stored.root ?? stored.requestId ?? ""`)
   reproduces Think verbatim and collapses to AIChat's chain because AIChat's
   payload type has no `recoveredRequestId` (always `undefined` → skipped);
   `reason` is the only behavioral parameter (Think `stable_timeout` |
@@ -1084,7 +1084,7 @@ recoveredRequestId ?? activeRoot ?? stored.root ?? stored.requestId ?? ""`)
   ✅ and Think recovery workers 285 ✅ (fiber/submissions/stream + think-session +
   messengers; benign SQLite-alarm harness log only); Think remote-Workers-AI
   give-up e2e (`stall-recovery` + `chat-recovery`) 6/6 ✅; ai-chat real-`wrangler
-dev` SIGKILL give-up e2e (`chat-recovery-exhaustion` + `chat-recovery` +
+  dev` SIGKILL give-up e2e (`chat-recovery-exhaustion` + `chat-recovery` +
   `chat-recovering-status`) 9/9 ✅. No changeset (internal `@internal` seam, zero
   behavior change).
 
@@ -1095,12 +1095,12 @@ dev` SIGKILL give-up e2e (`chat-recovery-exhaustion` + `chat-recovery` +
   DELAYED schedule (it runs inside the executing one-shot row that `alarm()` deletes
   on return, so an idempotent reschedule would dedup onto the doomed row and never
   fire). Lifted into `ChatRecoveryEngine.rescheduleAfterStableTimeout({ incidentId,
-callback, data, fallbackMaxAttempts })`; each package method is now a one-line
+  callback, data, fallbackMaxAttempts })`; each package method is now a one-line
   delegation. Generalized the `ChatRecoveryAdapter.scheduleRecovery` hook (from 4b)
   to carry `delaySeconds` — the initial triplet passes `0`, the reschedule passes
   `CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS` — so a single schedule seam serves both.
   **Bonus dedup:** both packages also kept a private `CHAT_RECOVERY_STABLE_RETRY_
-DELAY_SECONDS = 3` that shadowed the canonical agents/chat constant; removed both,
+  DELAY_SECONDS = 3` that shadowed the canonical agents/chat constant; removed both,
   the engine uses the shared one (byte-identical value). **Byte-equivalence review:**
   `adapter.getIncident(key)` returns `ctx.storage.get(key) ?? null` (same `!incident`
   short-circuit, incl. the missing-id case → no key → false); the attempt cap uses
@@ -1126,15 +1126,15 @@ DELAY_SECONDS = 3` that shadowed the canonical agents/chat constant; removed bot
   `schedule(0, callback, data, chatRecoverySchedulePolicy("initial"))` block
   appeared at 7 call sites (Think: stall + 2 fiber; AIChat: stall + 3 fiber).
   Collapsed into one engine method `ChatRecoveryEngine.scheduleRecovery({ incident,
-recoveryKind, callback, data, reason? })` driving transition → emit → enqueue in
+  recoveryKind, callback, data, reason? })` driving transition → emit → enqueue in
   that order, behind a new `ChatRecoveryAdapter.scheduleRecovery(callback, data,
-reason)` hook (each package: `schedule(0, callback, data,
-chatRecoverySchedulePolicy(reason))`). Widened `ChatRecoveryIncidentEvent["type"]`
+  reason)` hook (each package: `schedule(0, callback, data,
+  chatRecoverySchedulePolicy(reason))`). Widened `ChatRecoveryIncidentEvent["type"]`
   to include `"chat:recovery:scheduled"` so the emit flows through the existing
   `emitRecoveryEvent` mapping (byte-identical payload). **Byte-equivalence review:**
   (1) the engine preserves the exact order; (2) `incident.requestId` is what every
   call site emitted — the budget evaluation rewrites `incident.requestId =
-identity.requestId` on each attempt (`recovery-incident.ts`), so reading it off
+  identity.requestId` on each attempt (`recovery-incident.ts`), so reading it off
   the incident matches; (3) `recoveryKind` is passed EXPLICITLY (not derived),
   because AIChat's lost-partial branch opens a `continue` incident but schedules +
   reports a `retry` — each call site passes the same literal/variable it emitted
@@ -1190,8 +1190,8 @@ identity.requestId` on each attempt (`recovery-incident.ts`), so reading it off
   on `scheduled`; `_markStreamError` on `exhausted`; `aborted` status so the turn
   is not terminalised) — confirmed by reading both side by side. (2) The
   continuation re-anchor id is safe: the catch passes `targetAssistantId =
-message.id`, and the tool-approval early-persist writes under `sanitized.id ===
-message.id` (sanitize preserves id), so `earlyPersistedId === message.id` and
+  message.id`, and the tool-approval early-persist writes under `sanitized.id ===
+  message.id` (sanitize preserves id), so `earlyPersistedId === message.id` and
   the continuation's leaf-check cannot mis-skip. (3) **Coverage gap found + closed:**
   no test exercised a _healthy_ stream with the watchdog armed (`timeout > 0`,
   non-stalling) — the guarded `pull()` must pass healthy streams through unchanged
@@ -1292,9 +1292,9 @@ message.id` (sanitize preserves id), so `earlyPersistedId === message.id` and
   a chat candidate). The engine now owns the ordering invariant (non-chat
   dispatch before the chat-fiber gate); the behavior stays adapter-owned.
   Behavior is byte-equivalent: previously `if (await
-_messengerRuntime?.handleFiberRecovery(ctx))`, now `if (await
-engine.handleNonChatFiber(ctx))` which is `(await
-adapter.tryHandleNonChatFiberRecovery?.(ctx)) ?? false` — same truthiness, same
+  _messengerRuntime?.handleFiberRecovery(ctx))`, now `if (await
+  engine.handleNonChatFiber(ctx))` which is `(await
+  adapter.tryHandleNonChatFiberRecovery?.(ctx)) ?? false` — same truthiness, same
   `undefined`→skip when no messenger runtime (child facet). `FiberRecoveryContext`
   imports `import type` from `../index` (same package, erased — no cycle). Tests:
   3 Layer-2 fake-adapter cases (consume→true, decline→false, omitted→false);
@@ -1305,7 +1305,7 @@ adapter.tryHandleNonChatFiberRecovery?.(ctx)) ?? false` — same truthiness, sam
 
 - _Slice 2e (incident-update transitions behind the engine)_ — The transition
   twin of slice 2a: `ChatRecoveryEngine.updateIncident(incidentId, status,
-reason?)` now owns the incident state-machine transitions both packages
+  reason?)` now owns the incident state-machine transitions both packages
   duplicated near byte-for-byte (`completed` → delete the record; other states →
   persist; emit the `completed`/`skipped`/`failed` lifecycle event; drive the
   #1620 "recovering…" status — set on `scheduled`, cleared on every terminal).
@@ -1450,8 +1450,8 @@ reason?)` now owns the incident state-machine transitions both packages
   incident-begin (the only divergence is the predicate — `hasPendingInteraction`
   vs `hasPendingClientInteraction` — and the presence of the hook). Review:
   engine order (`get → ensureInteractionStateLoaded → readProgress →
-predicate`) is byte-identical to the old inline order (`get → guard → progress
-→ hasPendingInteraction`); `_restoreClientTools`/`hasPendingInteraction` keep
+  predicate`) is byte-identical to the old inline order (`get → guard → progress
+  → hasPendingInteraction`); `_restoreClientTools`/`hasPendingInteraction` keep
   their other callers; key derivation unchanged. Gates: Think workers (686) pass;
   typecheck (111) and oxlint clean.
 - _Phase 2 (slice 2a — incident-begin orchestration)_ — Added
@@ -1885,13 +1885,13 @@ each slice ships with its own review + e2e gate before the next begins:
     (`stored.status==="exhausted"` ⇒ return) → build the exhausted incident →
     resolve streamId + partial → `_exhaustChatRecovery` (terminalize) → best-effort
     seal write. Lift this spine into `ChatRecoveryEngine.exhaustRecoveryGiveUp({
-callback, data, reason })` behind hooks `exhaustChatRecovery`,
+    callback, data, reason })` behind hooks `exhaustChatRecovery`,
     `resolveRecoveryStreamId`, `getPartialStreamText`, `activeChatRecoveryRootRequestId`,
     and `onGiveUpBookkeepingError`. Divergences parameterize cleanly: Think passes
     `reason` (`stable_timeout` | `recovery_error`) and its root-id chain includes
     `recoveredRequestId`; AIChat hardcodes `stable_timeout` and never sets
     `recoveredRequestId` (so a unified chain — `originalRequestId ?? recoveredRequestId
-?? activeRoot ?? stored.root ?? stored.requestId ?? ""` — collapses identically
+    ?? activeRoot ?? stored.root ?? stored.requestId ?? ""` — collapses identically
     there). Moderate risk; its hooks are exactly what 4d-2 needs, so this lands first
     and de-risks 4d-2.
 
@@ -2088,14 +2088,14 @@ callback, data, reason })` behind hooks `exhaustChatRecovery`,
     (`agents/chat/parse-protocol.ts`). ✅ DONE (Slice 4f-ii(b)). ai-chat's `onMessage`
     wrapper now classifies via `parseProtocolMessage` and dispatches on the typed
     `event.type` discriminants instead of inline `JSON.parse` + `data.type ===
-MessageType.X` checks; the eight handler bodies are kept verbatim
+    MessageType.X` checks; the eight handler bodies are kept verbatim
     (`data.` → `event.`), in particular the `messages` event still persists the client
     snapshot (Think no-ops it). Verified behavior-preserving: the wire strings in
     ai-chat's `MessageType` and `agents`' `CHAT_MESSAGE_TYPES` are byte-identical for
     all eight incoming types, so the parser recognizes exactly what the inline switch
     did; the non-POST `use-chat-request` fall-through to the consumer's `onMessage` is
     preserved by gating the delegate on `!(event.type === "chat-request" &&
-event.init.method !== "POST")` (equivalently: only the POST branch enters the
+    event.init.method !== "POST")` (equivalently: only the POST branch enters the
     handler). No changeset — internal dispatch refactor, no user-visible behavior
     change for well-formed traffic (the parser is in fact slightly more robust for
     malformed frames: it defaults a missing `init` to `{}` rather than throwing, and
@@ -2193,7 +2193,7 @@ seam carry pi's (or any) transcript with no `UIMessage` leak — the thing P5-1 
 prove. The half that does **not** port is, deliberately, the substrate:
 
 - **Trigger.** The engine is entered through `handleChatFiberRecovery(ctx:
-FiberRecoveryContext, …)` — the Agents-SDK fiber-recovery wake (`cf_agents_runs`,
+  FiberRecoveryContext, …)` — the Agents-SDK fiber-recovery wake (`cf_agents_runs`,
   `_runFiberWithStashWrapper`, `wrap/unwrapChatFiberSnapshot`). A host without fibers
   (Flue uses a lease/queue + recover-on-start drain) would have to synthesize a
   `FiberRecoveryContext` and bypass the stash machinery — adopting the orchestration but
@@ -2258,7 +2258,7 @@ into `agents/chat`). Ranked by payoff:
    (`buildChatRecoveryExhaustedContext` → `notifyChatRecoveryExhausted` →
    `recordChatTerminal` → `setChatRecovering(false)`) is hand-assembled identically in
    each host (~30 lines). A single `runChatRecoveryExhaustion(incident, config, partial,
-…, { emit, broadcast, storage })` would absorb it, leaving the host to supply only the
+   …, { emit, broadcast, storage })` would absorb it, leaving the host to supply only the
    emit/broadcast primitives. The duplicated `setChatRecovering` option bag
    (`{ storage, messageType, broadcast, now }`, constructed in two places per host) folds
    into the same helper. _(Since closed — `runChatRecoveryExhaustion(input, { emit,
@@ -2277,7 +2277,7 @@ into `agents/chat`). Ranked by payoff:
    decode.
 5. **Drop the redundant classify `detail` when it mirrors `recoveryKind`.** The pi
    adapter threads `{ continueFromPartial }` that is identical to `recoveryKind ===
-"continue"`, then `dispatchRecoveredTurn` re-derives it and re-maps to a callback name.
+   "continue"`, then `dispatchRecoveredTurn` re-derives it and re-maps to a callback name.
    Either let `recoveryKind` drive the callback selection, or stop requiring a custom
    `TClassify` for the common continue-vs-retry case.
 6. **Make trivially-no-op hooks optional with engine-side defaults.** A host without
@@ -2294,7 +2294,7 @@ Two correctness caveats the fixture also exposed, to record honestly:
   through the AI SDK adapter. A turn carrying tool calls would be needed to prove the
   settled-tool seam end-to-end off `UIMessage`. _(Since closed — not in pi, but in the
   TanStack harness: it reconstructs AG-UI `TOOL_CALL_\*`chunks into its own **AG-UI-native**
-tool parts and computes`hasSettledToolResults`itself — no AI-SDK`MessagePart`fabrication — and proves the engine's gate keeps a settled-tool partial under`{ persist: false }`. The follow-up `RecoveryPartial` refactor then made the engine seam
+  tool parts and computes`hasSettledToolResults`itself — no AI-SDK`MessagePart`fabrication — and proves the engine's gate keeps a settled-tool partial under`{ persist: false }`. The follow-up `RecoveryPartial` refactor then made the engine seam
   agnostic by type, not just at runtime. See the two newest progress-log entries.)\_
 - **The fixture's continuation is simulated, not pi-native.** `_resumeRecoveredTurn`
   recomputes the full reply (`replyFor`) and primes the faux model with

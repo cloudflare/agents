@@ -72,7 +72,7 @@ substrate → keep per-package) and the ai-chat-as-subset end-state.
   north-star item below.
 - `66e7a790` / `b62241e9` — **engine-owned exhaustion helper** (API-ergonomics
   finding **#3**, closed): `runChatRecoveryExhaustion(input, { emit, onExhausted?,
-onError, terminalize })` folds the `build → notify → terminalize` give-up
+  onError, terminalize })` folds the `build → notify → terminalize` give-up
   sequence every host repeated, owning the invariant (notify before any terminal
   write; a throwing `onExhausted` never blocks terminal UX) while the host
   expresses its terminal writes in `terminalize(ctx)`. All four hosts moved onto
@@ -1688,7 +1688,7 @@ net-new coverage, not a duplicate).
   `parts:[]`): a TanStack AI tool call streaming would finally exercise `MessagePart`
   reconstruction + the settled-tool persist gate (`partialHasSettledToolResults`) end-to-end.
   _(Done — the harness now reconstructs AG-UI `TOOL_CALL_\*`chunks into tool parts and proves
-the gate keeps a settled-tool partial under`{ persist: false }` while dropping a text-only
+  the gate keeps a settled-tool partial under`{ persist: false }` while dropping a text-only
   one; see the progress log. The real-Workers-AI provider run is now ALSO done — see the
   newest progress-log entry — so no open codec axis remains.)\_
 

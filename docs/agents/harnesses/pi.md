@@ -1,10 +1,10 @@
 ---
-title: Pi harness (Beta)
+title: Pi harness
 pcx_content_type: get-started
-description: Host pi-durable sessions in a Durable Object with the beta PiHarness lifecycle capability. Connect a pi-ai model, add tools and skills, and keep sessions running across eviction.
+description: Host pi-durable sessions in a Durable Object with the PiHarness lifecycle capability. Connect a pi-ai model, add tools and skills, and keep sessions running across eviction.
 ---
 
-`PiHarness` hosts [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable) in a Durable Object. It opens Pi over the object's SQLite database and connects Pi's sessions to the Agents SDK lifecycle, which wakes sessions with work after eviction. The API is in beta and may change.
+`PiHarness` hosts [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable) in a Durable Object. It opens Pi over the object's SQLite database and connects Pi's sessions to the Agents SDK lifecycle, which wakes sessions with work after eviction.
 
 Pi owns everything about a run: the transcript, the inbox of steers and follow-ups, generation, tool calls, retries, and crash recovery. `PiHarness` supplies the storage and the wake. It does not provide a chat protocol or user interface. Your application chooses how clients reach sessions, such as WebSockets, HTTP, or RPC.
 
@@ -21,13 +21,14 @@ The three Pi packages are optional peer dependencies of `agents`, at `~1.4.0`. p
 `PiHarness` uses a factory function to construct Pi's `Harness` so it can be instantiated lazily:
 
 ```ts
+import { DurableObject } from "cloudflare:workers";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
-import { Agent } from "agents";
 import { PiHarness } from "agents/harness/pi";
+import { Lifecycle } from "agents/lifecycle";
 import { createAI } from "agents/models/pi-ai";
 
-export class Assistant extends Agent<Env> {
+export class Assistant extends DurableObject<Env> {
   ai = createAI({ binding: this.env.AI });
   registry = createRegistry();
 
@@ -42,21 +43,20 @@ export class Assistant extends Agent<Env> {
       );
     },
     defaults: {
-      model: this.ai("@cf/zai-org/glm-4.7-flash"),
+      model: this.ai("@cf/zai-org/glm-5.3-flash"),
       thinkingLevel: "low"
     }
   });
 
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    this.lifecycle.use(this.harness);
-  }
+  lifecycle = Lifecycle.install(this).use(this.harness);
 
   async ask(prompt: string) {
     return (await this.harness.prompt(prompt)).text;
   }
 }
 ```
+
+`PiHarness` is a Lifecycle capability, so it runs on a plain Durable Object. `Lifecycle.install(this)` gives the object its startup, alarms and job queue, and `.use(this.harness)` installs the harness on it. The object needs a SQLite migration in your Wrangler configuration, like any Durable Object that uses SQLite storage. To use it from an `Agent`, which already has a lifecycle, call `this.lifecycle.use(this.harness)` in the constructor instead.
 
 | Option     | What it is                                                                                                                                                                                                                                                                                                                          |
 | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -149,7 +149,7 @@ harness: async ({ storage, context, onWake }) => {
   this.registry.install({
     name: "browser",
     tools: [
-      browserTool({ ctx: this.ctx, browser: this.browser, loader: this.env.LOADER })
+      browserTool({ browser: this.browser, loader: this.env.LOADER })
     ]
   });
   return Harness.open(
@@ -162,7 +162,7 @@ harness: async ({ storage, context, onWake }) => {
 readonly lifecycle = Lifecycle.install(this).use(this.browser).use(this.harness);
 ```
 
-It needs a `browser` binding, a `LOADER` Worker Loader binding, and `export { CodemodeRuntime } from "@cloudflare/codemode"` from the Worker entry. Screenshots come back as images, and each conversation works in its own tab. Refer to [Persistent browser](../browse-the-web.md#persistent-browser) for how it behaves.
+It needs a `browser` binding, a `LOADER` Worker Loader binding, and `@cloudflare/codemode` installed (only until the deprecated codemode browser APIs are removed from `agents/browser`). Screenshots come back as images, and each conversation works in its own tab. Refer to [Persistent browser](../browse-the-web.md#persistent-browser) for how it behaves.
 
 ## Work with sessions
 
@@ -174,7 +174,7 @@ const { text } = await this.harness.prompt("What is 47 × 19?");
 
 // Another session, on a cheaper model.
 const session = await this.harness.sessions.create();
-await session.setModel(this.ai("@cf/zai-org/glm-4.7-flash"));
+await session.setModel(this.ai("@cf/zai-org/glm-5.3-flash"));
 
 // Durable once it returns; the same operation id twice is one submission.
 const receipt = await session.submit("Summarize the latest report", {
@@ -183,20 +183,20 @@ const receipt = await session.submit("Summarize the latest report", {
 const result = await session.wait(receipt.operationId);
 ```
 
-| Call                                              | What it does                                                                                                                                                                                                                                                                                                                         |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `prompt(input)`                                   | Submits and waits: the answer, and the transcript after it.                                                                                                                                                                                                                                                                          |
-| `submit(input, { operationId, whenBusy, entry })` | Hands the input to Pi and returns as soon as Pi has saved it, without waiting for the model. If the session is already working, the input waits until that work finishes. With `whenBusy: "steer"`, it joins the running work instead, after the current round of tool calls. `entry` records where the input came from (see below). |
-| `wait(operationId, signal?)`                      | The operation's result once Pi settles it. Aborting `signal` stops only the wait, not the work.                                                                                                                                                                                                                                      |
-| `steer(input)`                                    | `submit` with `whenBusy: "steer"`.                                                                                                                                                                                                                                                                                                   |
-| `abort(operationId?)`                             | Withdraws a queued operation, or with no id, stops everything running in the session.                                                                                                                                                                                                                                                |
-| `pending()`                                       | Operations Pi has not settled yet: queued, part of the running work, or `parked` (see [How recovery works](#how-recovery-works)).                                                                                                                                                                                                    |
-| `retry()`                                         | Runs again the tasks Pi's restart limit parked in the session's work. Resolves `false` when nothing was parked.                                                                                                                                                                                                                      |
-| `messages()`                                      | Pi's transcript entries since the newest reset.                                                                                                                                                                                                                                                                                      |
-| `events()`                                        | Pi's agent events: a `snapshot`, then one batch per commit.                                                                                                                                                                                                                                                                          |
-| `reset(handoff?)`                                 | Starts a new context, optionally from a handoff note.                                                                                                                                                                                                                                                                                |
-| `setModel(model)`                                 | Changes this session's model.                                                                                                                                                                                                                                                                                                        |
-| `busy()`                                          | Whether a run is going.                                                                                                                                                                                                                                                                                                              |
+| Call                                              | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prompt(input)`                                   | Submits and waits: the answer, and the transcript after it.                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `submit(input, { operationId, whenBusy, entry })` | Hands the input to Pi and returns as soon as Pi has saved it, without waiting for the model. If the session is already working, the input waits until that work finishes. With `whenBusy: "steer"`, it joins the running work instead, after the current round of tool calls. With `whenBusy: "reject"`, it is not admitted: `submit` rejects with Pi's `ConversationBusy` and nothing is saved, so the same `operationId` can be submitted again later. `entry` records where the input came from (see below). |
+| `wait(operationId, signal?)`                      | The operation's result once Pi settles it. Aborting `signal` stops only the wait, not the work.                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `steer(input)`                                    | `submit` with `whenBusy: "steer"`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `abort(operationId?)`                             | Withdraws a queued operation, or with no id, stops everything running in the session.                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pending()`                                       | Operations Pi has not settled yet: queued, part of the running work, or `parked` (see [How recovery works](#how-recovery-works)).                                                                                                                                                                                                                                                                                                                                                                               |
+| `retry()`                                         | Runs again the tasks Pi's restart limit parked in the session's work. Resolves `false` when nothing was parked.                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `messages()`                                      | Pi's transcript entries since the newest reset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `events()`                                        | Pi's agent events: a `snapshot`, then one batch per commit.                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `reset(handoff?)`                                 | Starts a new context, optionally from a handoff note.                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `setModel(model)`                                 | Changes this session's model.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `busy()`                                          | Whether a run is going.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 `harness.prompt()`, `submit()`, `wait()`, `abort()`, `retry()`, `messages()` and `pending()` act on the root session, or on `{ session }`. `harness.sessions` has `create()`, `fork(from)`, `get(id)` and `list()`, which includes sessions subagents created. `ROOT_SESSION` is the root's id.
 
@@ -246,7 +246,7 @@ With `keep`, the kept inputs are not work to Pi: its `wake()` counts tasks, not 
 
 ## How recovery works
 
-The harness schedules one lifecycle job, driven by Pi's `wake()`. While Pi has work running, the job waits on it and refreshes itself as a heartbeat. While Pi's tasks sleep, such as a retry backoff, the job is due when the first one wakes. Pi says when through the `onWake` the factory passes to `Harness.open`, and sets no in-memory timer of its own, so the object can hibernate until then. Without `onWake` the harness still works, but Pi's timer keeps the object in memory, and billed, while a task sleeps, and the harness logs a warning. When Pi has nothing to do, the job completes. If the object is evicted or crashes, the job is still due, so its alarm restarts the object. Pi reopens its stored state and resumes the session's work: a replay-safe tool call runs again, and an unsafe one is reported to the model as interrupted.
+The harness schedules one lifecycle job, driven by Pi's `wake()`. While Pi has work running, the job waits on it and refreshes itself as a heartbeat. While Pi's tasks sleep, such as a retry backoff, the job is due when the first one wakes. Pi says when through the `onWake` the factory passes to `Harness.open`, and sets no in-memory timer of its own, so the object can hibernate until then. A task that sleeps while other work runs, such as a compaction retry during a generation, is resumed from the job's wait when it is due. Without `onWake` the harness still works, but Pi's timer keeps the object in memory, and billed, while a task sleeps, and the harness logs a warning. When Pi has nothing to do, the job completes. If the object is evicted or crashes, the job is still due, so its alarm restarts the object. Pi reopens its stored state and resumes the session's work: a replay-safe tool call runs again, and an unsafe one is reported to the model as interrupted.
 
 A task that keeps crashing the object would restart it forever, so Pi parks a task cut off by a crash or eviction `settings.restartLimit` times in a row (default 5) without progress. A parked task is not work: the job completes and the object can hibernate. Its operations show as `parked` in `pending()`, and `wait()` keeps waiting. If your factory passes `onReport` to `Harness.open`, Pi reports it there as `task_parked`. Once you have dealt with the cause, `session.retry()` runs it again and wakes the harness; `session.abort()` gives up on it instead.
 

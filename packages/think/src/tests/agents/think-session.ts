@@ -11817,13 +11817,6 @@ export class ThinkWindowedHydrationAgent extends Think {
 const BIG_MEDIA_CHARS = 16_000;
 
 /**
- * A payload the message row CANNOT hold, so Sessions splits the message
- * across continuation rows. The part is still an inline `data:` URL, so
- * eviction decodes it exactly as it does a small one.
- */
-export const POINTER_MEDIA_CHARS = 1_600_000;
-
-/**
  * Eviction disabled by default so tests can seed deterministically, then
  * enable a specific config and run passes explicitly.
  */

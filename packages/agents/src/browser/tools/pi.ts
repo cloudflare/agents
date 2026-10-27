@@ -13,7 +13,6 @@ import {
   type BrowserToolOptions,
   type BrowserToolOutput
 } from "../browser-tool";
-import type { BrowserNewTab } from "../session-connector";
 import {
   browserExecuteModelOutput,
   browserScreenshotOutput
@@ -24,7 +23,7 @@ export type {
   BrowserToolOptions,
   BrowserToolOutput
 } from "../browser-tool";
-export type { BrowserNewTab, BrowserSource } from "../session-connector";
+export type { BrowserNewTab, BrowserSource } from "../session";
 
 export interface PiBrowserToolOptions<
   TName extends string = "browser"
@@ -43,19 +42,18 @@ export interface PiBrowserToolOptions<
 
 const browserToolParameters = Type.Object({
   code: Type.String({
-    description: "An async arrow function that drives the browser with `cdp`"
+    description:
+      "An async arrow function that drives the browser with `browser`"
   })
 });
 
 /**
- * What a UI can show about a run without reading the content: the run's
- * outcome and what happened to the browser.
+ * What a UI can show about a run without reading the content: its id and
+ * outcome.
  */
 export type PiBrowserToolDetails = {
   executionId: string;
   status: BrowserToolOutput["status"];
-  restarted?: true;
-  newTabs?: { targetId: string; url?: string; title?: string }[];
 };
 
 export type PiBrowserTool<TName extends string = "browser"> = ToolRegistration<
@@ -68,17 +66,7 @@ export type PiBrowserTool<TName extends string = "browser"> = ToolRegistration<
 function details(output: BrowserToolOutput): PiBrowserToolDetails {
   return {
     executionId: output.executionId,
-    status: output.status,
-    ...(output.restarted ? { restarted: true as const } : {}),
-    ...(output.newTabs
-      ? {
-          newTabs: output.newTabs.map((tab: BrowserNewTab) => ({
-            targetId: tab.targetId,
-            ...(tab.url === undefined ? {} : { url: tab.url }),
-            ...(tab.title === undefined ? {} : { title: tab.title })
-          }))
-        }
-      : {})
+    status: output.status
   };
 }
 
@@ -107,10 +95,10 @@ function browserToolResult(
     };
   }
 
-  // No size check: a screenshot comes from one cdp.send result, which
-  // codemode caps at 1 MB, well under what model providers accept.
+  // No size check: browserScreenshotOutput only accepts images up to 1 MB,
+  // well under what model providers accept.
   const bytes = Math.floor((screenshot.data.length * 3) / 4).toLocaleString();
-  // Keep the rest of the result (status, restarted, notice, newTabs) around
+  // Keep the rest of the result (status, notice) around
   // the sentence that replaces the screenshot.
   const summary = browserExecuteModelOutput({
     ...output,
@@ -137,8 +125,8 @@ function conversationScope(api: ToolExecutionApi): string {
  *
  * Works like `browserTool` in `agents/browser/ai-sdk`: tabs, cookies, and
  * logins carry over between runs, `sessionId: "active"` addresses the tab the
- * model last worked in, and a replaced browser is reported as
- * `restarted: true`. A returned screenshot comes back as an image part that
+ * model last worked in, and a replaced browser is reported in the
+ * result's `notice`. A returned screenshot comes back as an image part that
  * the model sees, when its model accepts images.
  *
  * Each conversation gets its own active tab (see
@@ -146,7 +134,6 @@ function conversationScope(api: ToolExecutionApi): string {
  * time, since they share its tab, and the tool doesn't rerun after an
  * eviction (its code may have clicked or
  * submitted something): pi gives the model an interrupted result instead.
- * Pass `ctx` unless the tool is built inside an Agent.
  *
  * @example
  * ```ts
@@ -162,7 +149,6 @@ function conversationScope(api: ToolExecutionApi): string {
  *         name: "browser",
  *         tools: [
  *           browserTool({
- *             ctx: this.ctx,
  *             browser: this.browser,
  *             loader: this.env.LOADER
  *           })

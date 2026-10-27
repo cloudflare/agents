@@ -1,8 +1,13 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import type { BrowserBinding } from "../../browser/browser-run";
 import { Browser } from "../../browser/browser";
 import { browserRun } from "../../browser/providers/browser-run";
+import type {
+  InternalHostMessage,
+  InternalHostRouterLoopback
+} from "../../browser/internal-hosts";
 import { Lifecycle } from "../../lifecycle";
+import { z } from "zod";
 
 /** One request the fake Browser Run binding served, in arrival order. */
 export interface RecordedBrowserRequest {
@@ -83,8 +88,16 @@ class FakeBrowserSocket {
   }
 }
 
+/** One `acquire()` the fake binding served, with its options. */
+export interface RecordedBrowserAcquire {
+  sessionId: string;
+  outboundByHost?: Record<string, Fetcher>;
+}
+
 export interface FakeBrowserBinding {
   browser: BrowserBinding;
+  /** Every typed `acquire()`, when made with `{ typed: true }`. */
+  acquired: RecordedBrowserAcquire[];
   requests: RecordedBrowserRequest[];
   /** `start`/`end` of each `wait:<ms>` evaluation, in order. */
   events: string[];
@@ -101,8 +114,14 @@ export interface FakeBrowserBinding {
  * fresh token per response (so tests can prove Live View URLs are minted
  * fresh, never cached), and DELETE marks the session dead.
  */
-export function createFakeBrowserBinding(): FakeBrowserBinding {
+export function createFakeBrowserBinding(
+  options: {
+    /** Give the binding a typed `acquire()`, as deployed bindings have. */
+    typed?: boolean;
+  } = {}
+): FakeBrowserBinding {
   const requests: RecordedBrowserRequest[] = [];
+  const acquired: RecordedBrowserAcquire[] = [];
   const dead = new Set<string>();
   let created = 0;
   let minted = 0;
@@ -154,9 +173,21 @@ export function createFakeBrowserBinding(): FakeBrowserBinding {
       return new Response(null, { status: 204 });
     }
   };
+  if (options.typed) {
+    browser.acquire = async (acquireOptions) => {
+      created++;
+      const sessionId = `session-${created}`;
+      acquired.push({
+        sessionId,
+        outboundByHost: acquireOptions?.outboundByHost
+      });
+      return { sessionId };
+    };
+  }
 
   return {
     browser,
+    acquired,
     requests,
     events,
     kill: (sessionId) => dead.add(sessionId)
@@ -178,4 +209,81 @@ export class BrowserHarnessObject extends DurableObject<Cloudflare.Env> {
     provider: browserRun(this.#binding.browser)
   });
   readonly lifecycle = Lifecycle.install(this).use(this.browser);
+}
+
+/**
+ * A `Browser` named "internal" with one `echo.internal` host, on a typed fake
+ * binding, for a plain Durable Object host.
+ */
+function internalHostsBrowser(ctx: DurableObjectState) {
+  const binding = createFakeBrowserBinding({ typed: true });
+  const browser = new Browser({
+    name: "internal",
+    provider: browserRun(binding.browser, {
+      internalHosts: {
+        router: (ctx as unknown as { exports: Record<string, unknown> }).exports
+          .InternalHostRouter as InternalHostRouterLoopback,
+        hosts: {
+          "echo.internal": {
+            fetch: async (request: Request) =>
+              new Response(
+                `echo ${new URL(request.url).pathname} from ${ctx.id.name}`
+              )
+          },
+          // A Standard Schema with a transform: stored as assigned, passed
+          // to fetch as parsed.
+          "port.internal": {
+            target: z.object({ port: z.coerce.number().int() }),
+            fetch: async (_request: Request, { port }) =>
+              new Response(`port ${port} (${typeof port})`)
+          }
+        }
+      }
+    })
+  });
+  /** Resolve the browser and fetch `url` through its route. */
+  const fetchThroughRoute = async (url: string) => {
+    await browser.resolve();
+    const route =
+      binding.acquired.at(-1)?.outboundByHost?.[new URL(url).hostname];
+    if (!route) throw new Error(`no route for ${url}`);
+    const response = await route.fetch(url);
+    return { status: response.status, text: await response.text() };
+  };
+  return { browser, fetchThroughRoute };
+}
+
+/**
+ * A plain Durable Object with internal hostnames: it adds the one
+ * `fetchInternalHost()` method the docs show.
+ */
+export class InternalHostsPlainObject extends DurableObject<Cloudflare.Env> {
+  readonly #internal = internalHostsBrowser(this.ctx);
+  readonly browser = this.#internal.browser;
+  readonly fetchThroughRoute = this.#internal.fetchThroughRoute;
+  readonly lifecycle = Lifecycle.install(this).use(this.browser);
+
+  fetchInternalHost(message: InternalHostMessage) {
+    return this.browser.fetchInternalHost(message);
+  }
+}
+
+/** Like {@link InternalHostsPlainObject}, but missing `fetchInternalHost()`. */
+export class InternalHostsNoMethodObject extends DurableObject<Cloudflare.Env> {
+  readonly #internal = internalHostsBrowser(this.ctx);
+  readonly browser = this.#internal.browser;
+  readonly fetchThroughRoute = this.#internal.fetchThroughRoute;
+  readonly lifecycle = Lifecycle.install(this).use(this.browser);
+}
+
+/**
+ * A Worker entrypoint served as a `worker` host. Echoes the path and the
+ * props it was called with, so tests can see how the route was made.
+ */
+export class InternalHostsDocsSite extends WorkerEntrypoint {
+  override fetch(request: Request): Response {
+    return new Response(
+      `docs ${new URL(request.url).pathname} props ${JSON.stringify(this.ctx.props)}`
+    );
+  }
 }

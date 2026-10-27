@@ -19,7 +19,7 @@
     "@playwright/test": "^1.61.1",
     "@tanstack/ai": "0.38.0",
     "ai": "^7.0.0",
-    "zod": "^4.5.4"
+    "zod": "^4.6.7"
   },
   "peerDependencies": {
     "@modelcontextprotocol/sdk": "^1.25.0",

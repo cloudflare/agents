@@ -20,7 +20,7 @@ import { TEST_TIMING } from "./timing";
 
 /** Model code that reads the active tab and returns a screenshot. */
 const SCREENSHOT_CODE = `async () => {
-  await cdp.send({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" });
+  await browser.cdp({ method: "Runtime.evaluate", params: { expression: "1" }, sessionId: "active" });
   return { type: "browser_screenshot", mediaType: "image/png", data: "aGVsbG8=" };
 }`;
 
@@ -54,7 +54,6 @@ export class PiBrowserTestObject extends DurableObject<Cloudflare.Env> {
         name: "browser",
         tools: [
           browserTool({
-            ctx: this.ctx,
             browser: this.browser,
             loader: this.env.LOADER
           })

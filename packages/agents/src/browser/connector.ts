@@ -39,7 +39,11 @@ import type {
 } from "./session-store";
 import { DEFAULT_SWEEP_IDLE_MS } from "./session-store";
 
-/** Browser session lifecycle for the connector (binding-backed only). */
+/**
+ * Browser session lifecycle for the connector (binding-backed only).
+ *
+ * @deprecated Part of `BrowserConnector`, which is deprecated.
+ */
 export interface BrowserConnectorSessionOptions {
   /**
    * - `"one-shot"` (default) — one Browser Run session per codemode
@@ -70,6 +74,11 @@ export interface BrowserConnectorSessionOptions {
   browser?: "kitesurf";
 }
 
+/**
+ * Options for {@link BrowserConnector}.
+ *
+ * @deprecated Part of `BrowserConnector`, which is deprecated.
+ */
 export type BrowserConnectorOptions = (
   | {
       /** Browser Rendering binding (Fetcher) — used in production. */
@@ -102,6 +111,11 @@ export type BrowserConnectorOptions = (
   timeout?: number;
 };
 
+/**
+ * Options for {@link BrowserConnector.sweep}.
+ *
+ * @deprecated Part of `BrowserConnector`, which is deprecated.
+ */
 export interface BrowserConnectorSweepOptions {
   /**
    * Close the shared (reuse/promoted) session when idle for at least this
@@ -119,6 +133,11 @@ export interface BrowserConnectorSweepOptions {
   maxExecIdleMs?: number;
 }
 
+/**
+ * What {@link BrowserConnector.sweep} reclaimed.
+ *
+ * @deprecated Part of `BrowserConnector`, which is deprecated.
+ */
 export interface BrowserConnectorSweepResult {
   /** Store keys (and their Browser Run session ids) closed by this sweep. */
   swept: Array<{ key: string; sessionId: string }>;
@@ -145,6 +164,8 @@ const REUSE_KEY_PREFIX = "cdp:reuse:";
  * per-execution session. Matches the codemode runtime's default paused TTL
  * (24h): an execution paused for approval keeps its browser until the run
  * itself is expired.
+ *
+ * @deprecated Part of `BrowserConnector`, which is deprecated.
  */
 export const DEFAULT_EXEC_SWEEP_IDLE_MS = 24 * 60 * 60 * 1000;
 
@@ -203,6 +224,10 @@ const ATTACH_HANDLE_PREFIX = "target:";
  *
  * Locks on the session store are held only around store reads/writes, never
  * across network calls to Browser Run or while a socket is open.
+ *
+ * @deprecated Use `browserTool` from `agents/browser/ai-sdk`,
+ * `agents/browser/tanstack-ai` or `agents/browser/pi`. See
+ * https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser
  */
 export class BrowserConnector extends CodemodeConnector {
   #options: BrowserConnectorOptions;

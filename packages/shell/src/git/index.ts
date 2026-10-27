@@ -185,18 +185,16 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
         ref: opts?.ref ?? "HEAD"
       });
 
-      return commits.map(
-        (c): GitLogEntry => ({
-          oid: c.oid,
-          message: c.commit.message,
-          author: {
-            name: c.commit.author.name,
-            email: c.commit.author.email,
-            timestamp: c.commit.author.timestamp
-          },
-          parent: c.commit.parent
-        })
-      );
+      return commits.map((c): GitLogEntry => ({
+        oid: c.oid,
+        message: c.commit.message,
+        author: {
+          name: c.commit.author.name,
+          email: c.commit.author.email,
+          timestamp: c.commit.author.timestamp
+        },
+        parent: c.commit.parent
+      }));
     },
 
     /** git branch [--list] or git branch <name> */

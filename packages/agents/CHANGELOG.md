@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.30.1
+
+### Patch Changes
+
+- [#2684](https://github.com/cloudflare/agents/pull/2684) [`9c79ba1`](https://github.com/cloudflare/agents/commit/9c79ba12778cbb53b6c50db79282d780466c9897) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Fix `PiHarness` with `onWake` not resuming a sleeping Pi task, such as a compaction retry, while another task is running ([#2683](https://github.com/cloudflare/agents/issues/2683)). See [How recovery works](https://developers.cloudflare.com/agents/harnesses/pi/#how-recovery-works).
+
 ## 0.30.0
 
 This release adds support for [Pi 1.4](https://github.com/earendil-works/pi/blob/v1.4.0/packages/durable/CHANGELOG.md#140---2026-10-21) and makes `PiHarness` recover more reliably from evictions, crashes and storage errors.

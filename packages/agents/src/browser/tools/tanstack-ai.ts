@@ -21,7 +21,7 @@ export type {
   BrowserToolOptions,
   BrowserToolOutput
 } from "../browser-tool";
-export type { BrowserNewTab, BrowserSource } from "../session-connector";
+export type { BrowserNewTab, BrowserSource } from "../session";
 
 export interface TanStackBrowserToolOptions<
   TName extends string = "browser"
@@ -39,7 +39,7 @@ function browserToolModelResult(output: BrowserToolOutput): unknown {
   const screenshot = browserScreenshotOutput(output);
   if (!screenshot) return browserExecuteModelOutput(output).value;
   const bytes = Math.floor((screenshot.data.length * 3) / 4);
-  // Keep the rest of the result (status, restarted, notice, newTabs).
+  // Keep the rest of the result (status, notice).
   return browserExecuteModelOutput({
     ...output,
     result: `Screenshot captured (${screenshot.mediaType}, approximately ${bytes.toLocaleString()} bytes), but this tool can't return images, so neither you nor the user can see it. Read the page with Runtime.evaluate instead.`
@@ -52,8 +52,8 @@ function browserToolModelResult(output: BrowserToolOutput): unknown {
  *
  * Works like `browserTool` in `agents/browser/ai-sdk`: tabs, cookies, and
  * logins carry over between runs, `sessionId: "active"` addresses the tab the
- * model last worked in, and a replaced browser is reported as
- * `restarted: true`. The tool is named `browser` unless you pass `name`.
+ * model last worked in, and a replaced browser is reported in the
+ * result's `notice`. The tool is named `browser` unless you pass `name`.
  *
  * Unlike the AI SDK tool, the host gets the same output as the model, and
  * screenshots aren't supported: a returned screenshot is replaced by a

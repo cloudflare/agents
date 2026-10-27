@@ -3,92 +3,83 @@ import { codeToHtml } from 'shiki';
 import { BackgroundDots } from './_components/background';
 import { InstallCommand } from './_components/install-command';
 
-const codeExampleChat = `import { Agent, callable } from 'agents';
-import { searchMenusByAgent, chooseWinners } from '../utils';
+const codeExampleChat = `import { DurableObject } from 'cloudflare:workers';
+import { createModels } from '@earendil-works/pi-ai/models';
+import { createRegistry, Harness } from '@earendil-works/pi-durable';
+import { PiHarness } from 'agents/harness/pi';
+import { Lifecycle } from 'agents/lifecycle';
+import { createAI } from 'agents/models/pi-ai';
+import { Scheduler } from 'agents/schedules';
+import { restaurantTools, chooseWinners } from '../utils';
 
-export class LunchAgent extends Agent<Env, LunchState> {
-	onStart() {
-		this.schedule('weekdays at 11:30pm', 'chooseLunch');
-		this.schedule('daily at 5pm', 'resetLunch');
+export class LunchAgent extends DurableObject<Env> {
+	ai = createAI({ binding: this.env.AI });
+	registry = createRegistry();
+
+	// Pi runs the model loop, and picks up where it left off after an eviction
+	harness = new PiHarness({
+		harness: ({ storage, context, onWake }) => {
+			// Browser search and a vector store of menus, as Pi tools
+			this.registry.install(restaurantTools(this.env));
+			const models = createModels();
+			models.setProvider(this.ai.provider);
+			return Harness.open(storage, { models, registry: this.registry, onWake }, context);
+		},
+		defaults: { model: this.ai('@cf/zai-org/glm-5.3-flash') },
+	});
+
+	scheduler = new Scheduler({
+		callbacks: {
+			chooseLunch: () => this.chooseLunch(),
+			resetLunch: () => this.resetLunch(),
+		},
+	});
+
+	lifecycle = Lifecycle.install(this).use(this.scheduler).use(this.harness);
+
+	async onStart() {
+		this.ctx.storage.sql.exec(
+			'CREATE TABLE IF NOT EXISTS votes (username TEXT PRIMARY KEY, restaurant TEXT)'
+		);
+		await this.scheduler.set('30 11 * * 1-5', 'chooseLunch'); // Weekdays at 11:30
+		await this.scheduler.set('0 17 * * *', 'resetLunch'); // Daily at 17:00
 	}
 
-	@callable()
-	async nominateRestaurant(restaurantName: string) {
-		// Uses a Browser Search tool to find restaurant info
-		// Finds menu and stores it into Vectorize
-		// On success updates Agent state with available restaurants
-		await this.env.RESTAURANT_RESEARCHER_WORKFLOW.create({
-			restaurantName,
-			agent: this.name,
-			near: this.state.officeAddress,
-		});
+	async nominateRestaurant(name: string) {
+		// Pi finds the menu with its browser tool and saves it
+		await this.harness.submit(\`Find the menu for \${name} and save it.\`);
 	}
 
-	@callable()
 	async searchRestaurants(query: string) {
-		// Uses Vector store results filtered by Metadata limited
-		// To this agent
-		const results = await searchMenusByAgent(query, this.name);
-		return results.map((result) => result.metadata.restaurantName);
+		const { text } = await this.harness.prompt(\`Which saved restaurants serve \${query}?\`);
+		return text;
 	}
 
-	@callable()
-	async vote(username: string, restaurantName: string) {
-		const votes = this.state.todaysVotes;
-		votes.push({
+	vote(username: string, restaurant: string) {
+		this.ctx.storage.sql.exec(
+			'INSERT OR REPLACE INTO votes VALUES (?, ?)',
 			username,
-			restaurantName,
-		});
-		// Send update to all connected eaters
-		this.setState({
-			...this.state,
-			todaysVotes: votes,
-		});
-	}
-
-	async resetLunch() {
-		const state = this.state;
-		state.todaysVotes = [];
-		state.todaysRuling = undefined;
-		this.setState(state);
+			restaurant
+		);
 	}
 
 	async chooseLunch() {
-		const restaurantWinners = chooseWinners(this.state.todaysVotes);
-		const { response } = await this.env.AI.run("@cf/zai-org/glm-4.7-flash", {
-			messages: [
-				{role: "system", content: \`
-					You help deliver results to a bunch of co-workers who are choosing lunch together.
-					The user is going to provide you with the options.
-					Your task is to make the choice sound exciting so people who voted for something
-                    else feel validated.
-					\`},
-				{role: "user", content: restaurantWinners?.join(", ") as string}
-			],
-		});
-		this.setState({
-			...this.state,
-			todaysRuling: response
-		})
+		const votes = this.ctx.storage.sql.exec<Vote>('SELECT * FROM votes').toArray();
+		await this.harness.submit(
+			\`Today's winners: \${chooseWinners(votes).join(', ')}. Announce lunch \` +
+				'so that people who voted for something else feel validated.'
+		);
+	}
+
+	async resetLunch() {
+		this.ctx.storage.sql.exec('DELETE FROM votes');
+		await this.harness.session().reset();
 	}
 }
 
-export type Restaurant = {
-	cuisine: string;
-	name: string;
-	address: string;
-};
-
 export type Vote = {
 	username: string;
-	restaurantName: string;
-};
-
-export type LunchState = {
-	officeAddress: string;
-	todaysVotes: Vote[];
-	todaysRuling?: string;
-	restaurants: Restaurant[];
+	restaurant: string;
 };`;
 
 const chatExample = await codeToHtml(codeExampleChat, {

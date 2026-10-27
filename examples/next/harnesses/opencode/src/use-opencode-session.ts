@@ -4,7 +4,7 @@ import type {
   OpenCodeSessionInfo
 } from "agents/harness/opencode";
 import { useAgent } from "agents/react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import type { ClientMessage, ServerMessage } from "./protocol";
 
 export type ConnectionStatus = "connecting" | "open" | "closed";
@@ -118,6 +118,12 @@ export function useOpenCodeSession(
   onUnknownSession: () => void
 ) {
   const [state, setState] = useState<State>(INITIAL_STATE);
+  // Another object or session starts from a clean slate.
+  const [stateKey, setStateKey] = useState({ object, session });
+  if (stateKey.object !== object || stateKey.session !== session) {
+    setStateKey({ object, session });
+    setState(INITIAL_STATE);
+  }
 
   const agent = useAgent({
     agent: "open-code-agent",
@@ -189,10 +195,6 @@ export function useOpenCodeSession(
       }
     }
   });
-
-  useEffect(() => {
-    setState(INITIAL_STATE);
-  }, [object, session]);
 
   const send = useCallback(
     (message: ClientMessage) => {

@@ -493,9 +493,7 @@ Skip bundling to preserve the module structure:
 
 ```ts
 const { mainModule, modules } = await createWorker({
-  files: {
-    /* ... */
-  },
+  files: {/* ... */},
   bundle: false
 });
 ```

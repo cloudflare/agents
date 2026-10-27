@@ -80,9 +80,10 @@ function App() {
     ]);
   }, []);
 
-  const refresh = useCallback(async () => {
-    setGadgets((await supervisor.call("listGadgets")) as GadgetInfo[]);
-  }, [supervisor]);
+  const refresh = useCallback(
+    () => supervisor.call<GadgetInfo[]>("listGadgets").then(setGadgets),
+    [supervisor]
+  );
 
   useEffect(() => {
     void refresh();

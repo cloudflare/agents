@@ -61,6 +61,14 @@
         "name": "BrowserHarnessObject"
       },
       {
+        "class_name": "InternalHostsPlainObject",
+        "name": "InternalHostsPlainObject"
+      },
+      {
+        "class_name": "InternalHostsNoMethodObject",
+        "name": "InternalHostsNoMethodObject"
+      },
+      {
         "class_name": "TestBrowserAgent",
         "name": "TestBrowserAgent"
       },
@@ -465,6 +473,8 @@
         "SchedulerStartupWarnObject",
         "QueueHarnessObject",
         "BrowserHarnessObject",
+        "InternalHostsPlainObject",
+        "InternalHostsNoMethodObject",
         "TestBrowserAgent",
         "TaskHarnessObject",
         "TaskSchedulerCoexistObject",

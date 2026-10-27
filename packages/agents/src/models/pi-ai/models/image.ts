@@ -30,20 +30,15 @@ import { emptyUsage } from "../wires/shared";
 
 /**
  * The `api` marker on image models from this provider.
- *
- * @beta This surface is in beta and may change.
  */
 export const CLOUDFLARE_AI_IMAGES_API = "cloudflare-ai-images";
 
-/** @beta This surface is in beta and may change. */
 export type CloudflareImagesModel = ImageModel<typeof CLOUDFLARE_AI_IMAGES_API>;
 
 /**
  * Per-model options for image models: gateway options plus the generation
  * knobs Workers AI understands. Anything given here is the default for every
  * call; `generateImages` options override it.
- *
- * @beta This surface is in beta and may change.
  */
 export interface PiImagesModelOptions extends ModelOptions {
   name?: string;
@@ -155,8 +150,6 @@ async function readImage(
  * pi-ai's `AssistantImages` has no warnings channel, so a knob this catalog
  * drops is reported the way the language wires report theirs: as a diagnostic
  * of type {@link COMPAT_DIAGNOSTIC}.
- *
- * @beta This surface is in beta and may change.
  */
 export interface CloudflareAssistantImages extends AssistantImages {
   diagnostics?: {

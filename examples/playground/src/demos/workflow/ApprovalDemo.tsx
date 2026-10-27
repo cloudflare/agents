@@ -1,5 +1,5 @@
 import { useAgent } from "agents/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ClockIcon,
   CheckCircleIcon,
@@ -98,6 +98,13 @@ function ApprovalCard({
 }) {
   const [rejectReason, setRejectReason] = useState("");
   const [showRejectForm, setShowRejectForm] = useState(false);
+  // Tick once a second so the relative "time ago" label stays current.
+  const [now, setNow] = useState(Date.now);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const statusIcons = {
     pending: <ClockIcon size={20} className="text-kumo-warning" />,
@@ -112,7 +119,7 @@ function ApprovalCard({
   };
 
   const timeAgo = (date: string) => {
-    const seconds = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
+    const seconds = Math.floor((now - new Date(date).getTime()) / 1000);
     if (seconds < 60) return `${seconds}s ago`;
     const minutes = Math.floor(seconds / 60);
     if (minutes < 60) return `${minutes}m ago`;

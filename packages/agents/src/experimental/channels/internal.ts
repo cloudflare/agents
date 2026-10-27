@@ -1,8 +1,4 @@
-import type {
-  ChannelMessage,
-  DeliveryResult,
-  ParticipantResult
-} from "./channel";
+import type { DeliveryResult, ParticipantResult } from "./channel";
 import type { ChannelIngressResult } from "./ingress";
 import type { Participant } from "./protocol";
 
@@ -18,33 +14,6 @@ export function utf8ByteLength(value: string): number {
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-export function defaultText(message: ChannelMessage): string {
-  return message.title
-    ? `${message.title}\n\n${message.markdown}`
-    : message.markdown;
-}
-
-export function renderInput(input: unknown): string {
-  if (typeof input === "string") return input;
-  try {
-    return JSON.stringify(input, null, 2) ?? String(input);
-  } catch {
-    return String(input);
-  }
-}
-
-export function uncertain(
-  code: string,
-  message: string,
-  reference?: string
-): Extract<DeliveryResult, { status: "uncertain" }> {
-  return {
-    status: "uncertain",
-    ...(reference !== undefined && { reference }),
-    error: { code, message }
-  };
 }
 
 export function emptyIngressResponse<TRaw>(

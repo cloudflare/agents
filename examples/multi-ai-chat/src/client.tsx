@@ -351,16 +351,17 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(null);
 
   // When the sidebar updates, auto-select the most recent chat if
-  // nothing is active or the active one was deleted.
-  useEffect(() => {
-    if (chats.length === 0) {
-      if (activeId !== null) setActiveId(null);
-      return;
-    }
-    if (!activeId || !chats.some((c) => c.id === activeId)) {
-      setActiveId(chats[0].id);
-    }
-  }, [chats, activeId]);
+  // nothing is active or the active one was deleted. Adjusting state
+  // during render (rather than in an effect) avoids an extra render pass.
+  const resolvedActiveId =
+    chats.length === 0
+      ? null
+      : activeId && chats.some((c) => c.id === activeId)
+        ? activeId
+        : chats[0].id;
+  if (resolvedActiveId !== activeId) {
+    setActiveId(resolvedActiveId);
+  }
 
   const createChat = useCallback(async () => {
     const created = (await inbox.call("createChat")) as ChatSummary;

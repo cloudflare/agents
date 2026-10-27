@@ -43,7 +43,7 @@
     "agents": "*",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "zod": "^4.5.4"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.62.3",
@@ -58,7 +58,7 @@
     "jsdom": "^29.1.1",
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
-    "vite": "^8.1.0",
+    "vite": "^8.1.6",
     "vitest": "4.1.11",
     "wrangler": "^4.145.0"
   },

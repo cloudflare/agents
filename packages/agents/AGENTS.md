@@ -12,7 +12,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/client`                           | `src/client.ts`                               | Browser/Node WebSocket client (`AgentClient`) via partysocket                                                                                 |
 | `agents/lifecycle`                        | `src/lifecycle/index.ts`                      | Composable Durable Object lifecycle and hibernating connections                                                                               |
 | `agents/harness/ai-sdk`                   | `src/harness/ai-sdk/index.ts`                 | Experimental: `AiSdkHarness`, AI SDK turn conversions and `createSendMessageTool`                                                             |
-| `agents/harness/pi`                       | `src/harness/pi/index.ts`                     | Experimental: pi-durable hosted in a Durable Object (`PiHarness`)                                                                             |
+| `agents/harness/pi`                       | `src/harness/pi/index.ts`                     | pi-durable hosted in a Durable Object (`PiHarness`)                                                                                           |
 | `agents/harness/think`                    | `src/harness/think/index.ts`                  | Experimental: Think's agent loop as a Lifecycle capability (`ThinkHarness`, `ThinkChat`)                                                      |
 | `agents/harness/container`                | `src/harness/container/index.ts`              | Experimental: an agent CLI (Claude Code, Codex) in a Container, driven from a Durable Object (`ContainerHarness`, presets, `ContainerEgress`) |
 | `agents/harness/container/daemon`         | `src/harness/container/daemon/index.ts`       | Experimental: the runtime-agnostic core of the daemon that runs in the container                                                              |
@@ -31,17 +31,17 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/schedules/parser`                 | `src/schedules/parser.ts`                     | Zod-based natural-language scheduling prompt and schema helpers                                                                               |
 | `agents/observability`                    | `src/observability/index.ts`                  | Observability event types and emitters                                                                                                        |
 | `agents/models/ai-sdk`                    | `src/models/ai-sdk/index.ts`                  | Experimental `createAI` for the AI SDK — model ids on `env.AI.run`, vendor model objects on AI Gateway's provider-native path                 |
-| `agents/models/pi-ai`                     | `src/models/pi-ai/index.ts`                   | Experimental `createAI` for pi-ai — Workers AI ids, vendor models routed through AI Gateway                                                   |
+| `agents/models/pi-ai`                     | `src/models/pi-ai/index.ts`                   | `createAI` for pi-ai — Workers AI ids, vendor models routed through AI Gateway                                                                |
 | `agents/ai-chat-agent`                    | `src/ai-chat-agent.ts`                        | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                                                                                           |
 | `agents/ai-react`                         | `src/ai-react.tsx`                            | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                                                                                          |
 | `agents/tsconfig`                         | `agents.tsconfig.json`                        | Shared TypeScript config for all projects in the repo                                                                                         |
 | `agents/vite`                             | `src/vite.ts`                                 | Vite plugin — decorator transforms and the `agents:skills` import transform                                                                   |
 | `agents/skills`                           | `src/skills/index.ts`                         | Framework-agnostic Agent Skills engine — sources, `SkillRegistry`, runner                                                                     |
 | `agents/experimental/webmcp`              | `src/experimental/webmcp.ts`                  | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`                                                                       |
-| `agents/browser`                          | `src/browser/index.ts`                        | Browser Run helpers — CDP sessions, connector, Quick Action primitives                                                                        |
-| `agents/browser/ai`                       | `src/browser/ai.ts`                           | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools`                                                                  |
+| `agents/browser`                          | `src/browser/index.ts`                        | `Browser`, `browserRun()`, `BrowserSession`, CDP helpers, Quick Action primitives, deprecated `BrowserConnector` (needs codemode)             |
+| `agents/browser/ai`                       | `src/browser/ai.ts`                           | Deprecated AI SDK tools — `createBrowserTools` (codemode) + `createQuickActionTools`                                                          |
 | `agents/browser/ai-sdk`                   | `src/browser/tools/ai-sdk.ts`                 | AI SDK `browserTool` for a persistent `Browser` (+ `createQuickActionTools` re-export)                                                        |
-| `agents/browser/tanstack-ai`              | `src/browser/tools/tanstack-ai.ts`            | TanStack AI `browserTool` for a persistent `Browser` (+ legacy `createBrowserTools`)                                                          |
+| `agents/browser/tanstack-ai`              | `src/browser/tools/tanstack-ai.ts`            | TanStack AI `browserTool` for a persistent `Browser` (+ deprecated `createBrowserTools`)                                                      |
 | `agents/browser/pi`                       | `src/browser/tools/pi.ts`                     | pi-durable `browserTool` for a persistent `Browser`                                                                                           |
 | `agents/websearch`                        | `src/web/search/index.ts`                     | Web Search API sources (`createAIWebSearch`, `createHTTPWebSearch`), `WebSearchError`, renderer                                               |
 | `agents/websearch/pi`                     | `src/web/search/tools/pi.ts`                  | pi harness `webSearchTool`                                                                                                                    |
@@ -186,13 +186,17 @@ src/
     cdp-connection.ts   # CdpConnection — one Chrome DevTools Protocol WebSocket
     browser.ts          # Browser — one named persistent browser (Lifecycle capability)
     providers/          # browserRun() + its adapter; provider-adapter.ts is the internal seam Browser calls
-    connector.ts        # BrowserConnector — codemode connector + session helpers
+    connector.ts        # deprecated BrowserConnector — codemode connector + session helpers
     session-store.ts    # Durable session-id store + sweep
     live-view.ts        # Live View URL minting shared by Browser and BrowserConnector
     spec.ts             # CDP protocol spec loader (cdp.spec())
     quick-actions.ts    # Stateless Quick Action primitives (browserMarkdown, …)
-    ai.ts               # createBrowserTools + createQuickActionTools (AI SDK)
+    ai.ts               # deprecated createBrowserTools (codemode) + createQuickActionTools (deprecated)
+    session.ts          # BrowserSession — one run's CDP session: active tab, handles, error hints, report
+    browser-functions.ts # the `browser` API model code calls: functions, docs, CDP rules
+    sandbox.ts          # runs browserTool's code in a Dynamic Worker with a `browser` global
     browser-tool.ts     # harness-neutral browserTool core shared by the tools/ adapters
+    truncate.ts         # truncateResult, copied from codemode
     tool-helpers.ts     # model-output + ctx helpers shared by ai.ts and the tools/ adapters
     tanstack-ai.ts      # legacy createBrowserTools for TanStack AI (re-exported by tools/tanstack-ai.ts)
     tools/              # browserTool adapters for a persistent Browser: ai-sdk.ts, tanstack-ai.ts, pi.ts

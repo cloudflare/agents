@@ -1214,15 +1214,13 @@ export class OpenCodeSession {
       messages,
       busy,
       pending,
-      permissions: permissions.map(
-        (request): OpenCodePermission => ({
-          id: request.id,
-          session: request.sessionID,
-          action: request.action,
-          resources: request.resources,
-          ...(request.message === undefined ? {} : { message: request.message })
-        })
-      )
+      permissions: permissions.map((request): OpenCodePermission => ({
+        id: request.id,
+        session: request.sessionID,
+        action: request.action,
+        resources: request.resources,
+        ...(request.message === undefined ? {} : { message: request.message })
+      }))
     };
   }
 

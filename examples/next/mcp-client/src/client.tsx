@@ -38,6 +38,13 @@ type ConnectResult = {
   readonly connection: { readonly state: string; readonly authUrl?: string };
 };
 
+async function fetchCatalog(): Promise<McpCatalog> {
+  const response = await fetch(OBJECT_PATH);
+  if (!response.ok) throw new Error(await response.text());
+  // SAFETY: This route is owned by getMcpCatalog in the same example.
+  return (await response.json()) as McpCatalog;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -186,19 +193,20 @@ function App() {
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string>();
 
-  const refresh = useCallback(async () => {
-    try {
-      const response = await fetch(OBJECT_PATH);
-      if (!response.ok) throw new Error(await response.text());
-      // SAFETY: This route is owned by getMcpCatalog in the same example.
-      setCatalog((await response.json()) as McpCatalog);
-      setError(undefined);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const refresh = useCallback(
+    () =>
+      fetchCatalog()
+        .then(
+          (next) => {
+            setCatalog(next);
+            setError(undefined);
+          },
+          (cause: unknown) =>
+            setError(cause instanceof Error ? cause.message : String(cause))
+        )
+        .finally(() => setLoading(false)),
+    []
+  );
 
   useEffect(() => {
     void refresh();

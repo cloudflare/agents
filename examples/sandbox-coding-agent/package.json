@@ -13,7 +13,7 @@
     "@cloudflare/ai-chat": "*",
     "@cloudflare/computer": "^0.5.1",
     "@cloudflare/kumo": "^2.6.0",
-    "@cloudflare/sandbox": "0.12.2",
+    "@cloudflare/sandbox": "0.12.14",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.1.1",
@@ -22,7 +22,7 @@
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "streamdown": "^2.5.0",
-    "zod": "^4.5.4"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.62.3",

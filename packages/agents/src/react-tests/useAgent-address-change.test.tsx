@@ -94,6 +94,7 @@ describe("useAgent when the name changes", () => {
       useEffect(() => {
         setName = setNameState;
         // Leave A before its first socket can identify.
+        // oxlint-disable-next-line react/set-state-in-effect -- the test needs one committed render with A before switching
         setNameState("address-ready-b");
       }, []);
       return <div>{name}</div>;

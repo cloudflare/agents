@@ -123,6 +123,9 @@ export type PiHarnessContext = {
    * alarm. Without it the harness still works, but pi's timer keeps the
    * object in memory, and billed, while a task sleeps, and the harness logs
    * a warning when it opens pi.
+   *
+   * The harness reads pi's wake times against `Date.now()`, so do not pass
+   * `now` to `Harness.open`.
    */
   readonly onWake: (wake: Wake) => void;
 };
@@ -237,8 +240,6 @@ function signalContext(signal: AbortSignal | undefined): Context {
  * nothing to do, the job completes. An eviction mid-run leaves the job due,
  * so its alarm restarts the object, pi reopens and resumes its own tasks,
  * and the job waits again.
- *
- * @beta The API may change between releases.
  */
 export class PiHarness extends LifecycleCapability {
   readonly sessions: PiSessions;
@@ -397,22 +398,39 @@ export class PiHarness extends LifecycleCapability {
         : conversationId(options.session);
     const inspection = await pi.inspect(BG);
     const parked = await this.#parked(inspection);
-    return inspection.submissions
-      .filter(
-        (record) =>
-          record.requestId !== undefined &&
-          (id === undefined || record.conversationId === id)
-      )
-      .map((record) => ({
-        operationId: record.requestId as string,
-        session: String(record.conversationId),
-        status:
-          record.status === "queued"
-            ? "queued"
-            : parked.some((task) => task.sessions.has(record.conversationId))
-              ? "parked"
-              : "running"
-      }));
+    return inspection.submissions.flatMap((record): PiPendingOperation[] => {
+      if (record.requestId === undefined) return [];
+      if (id !== undefined && record.conversationId !== id) return [];
+      let status: PiPendingOperation["status"];
+      switch (record.status) {
+        case "queued":
+          status = "queued";
+          break;
+        case "placed":
+          status = parked.some((task) =>
+            task.sessions.has(record.conversationId)
+          )
+            ? "parked"
+            : "running";
+          break;
+        case "done":
+        case "unanswered":
+          // Settled. pi's inspection holds only unsettled submissions.
+          return [];
+        default: {
+          // A status added by a newer pi: decide what it reports.
+          const exhaustive: never = record;
+          return exhaustive;
+        }
+      }
+      return [
+        {
+          operationId: record.requestId,
+          session: String(record.conversationId),
+          status
+        }
+      ];
+    });
   }
 
   /** The opened pi Harness, for anything the interface does not cover. */
@@ -489,11 +507,22 @@ export class PiHarness extends LifecycleCapability {
     if (!record || record.status === "done" || record.status === "unanswered") {
       return false;
     }
-    const withdrawn = await pi.abortSubmission(record.id, BG, id);
-    if (withdrawn === "already_placed") {
-      await (await pi.conversation(id, BG))?.abort(BG);
+    const outcome = await pi.abortSubmission(record.id, BG, id);
+    switch (outcome) {
+      case "aborted":
+        return true;
+      case "already_placed":
+        await (await pi.conversation(id, BG))?.abort(BG);
+        return true;
+      case "settled":
+      case "not_found":
+        return false;
+      default: {
+        // An outcome added by a newer pi: decide whether it withdrew.
+        const exhaustive: never = outcome;
+        return exhaustive;
+      }
     }
-    return withdrawn !== "settled" && withdrawn !== "not_found";
   }
 
   /** @internal Wait for pi to settle an operation, by its request id. */
@@ -626,8 +655,12 @@ export class PiHarness extends LifecycleCapability {
   /**
    * Wait while pi has work running, up to the wait budget. With `onWake`, a
    * change ends each sleep early, and so does pi closing; without it, the
-   * sleep is `pollMs`. Whether the wait ended, with pi idle or at the
-   * budget, rather than failing. Rejects with a memory-limit reset.
+   * sleep is `pollMs`. A task sleeping beside the running work, such as a
+   * retry backoff, also ends the sleep when it is due, and the wait calls
+   * `pi.resume()` to run it: with `onWake`, pi arms no timer for it, and
+   * the wake job's alarm is not set for it while the job waits. Whether the
+   * wait ended, with pi idle or at the budget, rather than failing. Rejects
+   * with a memory-limit reset.
    */
   async #waitWhileActive(pi: Harness): Promise<boolean> {
     const deadline = Date.now() + this.#waitBudgetMs;
@@ -636,20 +669,27 @@ export class PiHarness extends LifecycleCapability {
       // storage error), which is what ends this loop: a closed pi's wake does
       // not go inactive. Closing kicks `#changed` only so the loop reads it
       // again now rather than at the end of its sleep.
-      while (pi.wake().active) {
-        const left = deadline - Date.now();
+      let wake = pi.wake();
+      while (wake.active) {
+        const now = Date.now();
+        const left = deadline - now;
         if (left <= 0) return true;
+        let sleep = this.#onWakeWired ? left : Math.min(left, this.#pollMs);
+        // `at` is a sleep not yet due on pi's clock, so this is positive.
+        // That holds because pi keeps its default clock, `Date.now`; see
+        // `PiHarnessContext`.
+        if (wake.at !== undefined) sleep = Math.min(sleep, wake.at - now);
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(
-            resolve,
-            this.#onWakeWired ? left : Math.min(left, this.#pollMs)
-          );
+          const timer = setTimeout(resolve, sleep);
           this.#changed = () => {
             clearTimeout(timer);
             resolve();
           };
         });
         this.#changed = undefined;
+        // A sleep beside the running work came due: make it runnable.
+        if (wake.at !== undefined && Date.now() >= wake.at) pi.resume();
+        wake = pi.wake();
       }
       return true;
     } catch (error) {

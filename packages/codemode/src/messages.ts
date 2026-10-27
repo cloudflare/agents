@@ -86,18 +86,3 @@ export function isExecutionResultMessage(
   if (typeof data.result !== "object" || data.result === null) return false;
   return true;
 }
-
-export function isExecuteRequestMessageShape(
-  data: unknown
-): data is ExecuteRequestMessage {
-  return (
-    isRecord(data) &&
-    data.type === "execute-request" &&
-    typeof data.nonce === "string" &&
-    typeof data.code === "string" &&
-    Array.isArray(data.providers) &&
-    data.providers.every(
-      (provider) => isRecord(provider) && typeof provider.name === "string"
-    )
-  );
-}

@@ -192,7 +192,10 @@ type StoredSessions = Record<
   { sessionId: string; createdAt: number; updatedAt: number }
 >;
 
-interface NamedRunOutput extends RunOutput {
+interface NamedRunOutput {
+  status: "completed" | "error";
+  result?: unknown;
+  error?: string;
   report: {
     restarted: boolean;
     newTabs: Array<{ targetId: string; url?: string }>;
@@ -603,7 +606,8 @@ describe("browser connector e2e", () => {
       await callAgent("closeSession", ["reuse"]);
     });
   });
-  // The persistent named browser behind BrowserSessionConnector. These run
+  // The persistent named browser, driven through a BrowserSession and
+  // runBrowserCode as browserTool does. These run
   // against real Chrome, so they also check what the unit-test fake assumes.
   describe("persistent named browser", () => {
     afterAll(async () => {
@@ -611,14 +615,14 @@ describe("browser connector e2e", () => {
     });
 
     const setTitle = (title: string) => `async () => {
-      await cdp.send({
+      await browser.cdp({
         method: "Runtime.evaluate",
         params: { expression: "document.title = '${title}'" },
         sessionId: "active"
       });
     }`;
     const readTitle = `async () => {
-      const { result } = await cdp.send({
+      const { result } = await browser.cdp({
         method: "Runtime.evaluate",
         params: { expression: "document.title", returnByValue: true },
         sessionId: "active"
@@ -648,10 +652,10 @@ describe("browser connector e2e", () => {
       await runNamed(setTitle("doomed"), "closed");
       const closed = await runNamed(
         `async () => {
-        const { targetInfos } = await cdp.send({ method: "Target.getTargets" });
+        const { targetInfos } = await browser.cdp({ method: "Target.getTargets" });
         for (const tab of targetInfos) {
           if (tab.type === "page" && tab.title === "doomed") {
-            await cdp.send({ method: "Target.closeTarget", params: { targetId: tab.targetId } });
+            await browser.cdp({ method: "Target.closeTarget", params: { targetId: tab.targetId } });
           }
         }
       }`,
@@ -667,7 +671,7 @@ describe("browser connector e2e", () => {
     it("reports a popup as a new tab without switching to it", async () => {
       await runNamed(setTitle("opener"));
       const output = await runNamed(`async () => {
-        await cdp.send({
+        await browser.cdp({
           method: "Runtime.evaluate",
           params: { expression: "void window.open('about:blank', '_blank')", userGesture: true },
           sessionId: "active"
@@ -684,7 +688,7 @@ describe("browser connector e2e", () => {
       await runNamed(setTitle("noopener-opener"));
       // Chrome still sets openerId on these; only canAccessOpener is false.
       const output = await runNamed(`async () => {
-        const open = (expression) => cdp.send({
+        const open = (expression) => browser.cdp({
           method: "Runtime.evaluate",
           params: { expression, userGesture: true },
           sessionId: "active"
@@ -702,40 +706,16 @@ describe("browser connector e2e", () => {
       );
     });
 
-    it("keeps the active tab across a pause for approval", async () => {
-      const output = await runNamed(`async () => {
-        await cdp.send({
-          method: "Runtime.evaluate",
-          params: { expression: "document.title = 'paused'" },
-          sessionId: "active"
-        });
-        await gate.confirm({ label: "continue" });
-        const { result } = await cdp.send({
-          method: "Runtime.evaluate",
-          params: { expression: "document.title", returnByValue: true },
-          sessionId: "active"
-        });
-        return result.value;
-      }`);
-      expect(output.status).toBe("paused");
-
-      const resumed = (await callAgent("approveNamed", [
-        output.executionId
-      ])) as RunOutput;
-      expect(resumed.status).toBe("completed");
-      expect(resumed.result).toBe("paused");
-    });
-
     it("passes a raw Target.attachToTarget through to Chrome", async () => {
       await runNamed(setTitle("raw-attach"));
       const output = await runNamed(`async () => {
-        const { targetInfos } = await cdp.send({ method: "Target.getTargets" });
+        const { targetInfos } = await browser.cdp({ method: "Target.getTargets" });
         const page = targetInfos.find((t) => t.type === "page" && t.title === "raw-attach");
-        const { sessionId } = await cdp.send({
+        const { sessionId } = await browser.cdp({
           method: "Target.attachToTarget",
           params: { targetId: page.targetId, flatten: true }
         });
-        const { result } = await cdp.send({
+        const { result } = await browser.cdp({
           method: "Runtime.evaluate",
           params: { expression: "document.title", returnByValue: true },
           sessionId
@@ -751,7 +731,7 @@ describe("browser connector e2e", () => {
       expect(title).toBe("raw-attach");
 
       const later = await runNamed(`async () => {
-        await cdp.send({
+        await browser.cdp({
           method: "Runtime.evaluate",
           params: { expression: "1" },
           sessionId: "${sessionId}"
@@ -763,7 +743,7 @@ describe("browser connector e2e", () => {
 
     it("doesn't report a tab opened with Target.createTarget as a popup", async () => {
       const output = await runNamed(`async () => {
-        const { targetId } = await cdp.send({
+        const { targetId } = await browser.cdp({
           method: "Target.createTarget",
           params: { url: "about:blank" }
         });
@@ -775,7 +755,7 @@ describe("browser connector e2e", () => {
 
     it('teaches sessionId: "active" for a page command sent without one', async () => {
       const output = await runNamed(`async () => {
-        await cdp.send({ method: "Runtime.evaluate", params: { expression: "1" } });
+        await browser.cdp({ method: "Runtime.evaluate", params: { expression: "1" } });
       }`);
       expect(output.status).toBe("error");
       expect(output.error).toContain('sessionId: "active"');
@@ -783,7 +763,7 @@ describe("browser connector e2e", () => {
 
     it("explains that a CDP event cannot be sent, using the live spec", async () => {
       const output = await runNamed(`async () => {
-        await cdp.send({ method: "Page.loadEventFired" });
+        await browser.cdp({ method: "Page.loadEventFired" });
       }`);
       expect(output.status).toBe("error");
       expect(output.error).toContain("CDP *event*");
@@ -792,18 +772,18 @@ describe("browser connector e2e", () => {
     it("reattaches after the model detaches from the active tab", async () => {
       await runNamed(setTitle("detached"));
       const output = await runNamed(`async () => {
-        const { targetInfos } = await cdp.send({ method: "Target.getTargets" });
-        await cdp.send({
+        const { targetInfos } = await browser.cdp({ method: "Target.getTargets" });
+        await browser.cdp({
           method: "Runtime.evaluate",
           params: { expression: "1" },
           sessionId: "active"
         });
         const page = targetInfos.find((t) => t.type === "page" && t.title === "detached");
-        await cdp.send({
+        await browser.cdp({
           method: "Target.detachFromTarget",
           params: { targetId: page.targetId }
         });
-        const { result } = await cdp.send({
+        const { result } = await browser.cdp({
           method: "Runtime.evaluate",
           params: { expression: "document.title", returnByValue: true },
           sessionId: "active"
@@ -817,7 +797,7 @@ describe("browser connector e2e", () => {
     it("refuses to close the browser", async () => {
       await runNamed(setTitle("survivor"));
       const output = await runNamed(`async () => {
-        await cdp.send({ method: "Browser.close" });
+        await browser.cdp({ method: "Browser.close" });
       }`);
       expect(output.status).toBe("error");
       expect(output.error).toContain("managed for you");

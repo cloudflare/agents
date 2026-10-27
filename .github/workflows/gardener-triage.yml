@@ -2,7 +2,7 @@
 #
 # Source: .gardener/tasks/triage/TASK.md
 # Task: triage
-# Bundle: sha256:d87757d406d6bd9eaa5be6f9caaff7255f1c08487d1beb0b0493cce7384b00fe
+# Bundle: sha256:68501a5ed005a97974a95b760325f09dcc7d0cbb841f63250b08f747cd815879
 # Regenerate: gardener generate
 # Do not edit this workflow directly.
 name: "Gardener · Triage"
@@ -38,17 +38,17 @@ jobs:
       issues: write
       pull-requests: read
       statuses: read
-    uses: scuffi/gardener/.github/workflows/gardener-task.yml@e927a2a726ef283e60d32ad09efa7c2aea0b47eb
+    uses: scuffi/gardener/.github/workflows/gardener-task.yml@0d02b66f47cc8802ba14a243dd827bf5555b3469
     with:
       runtime-url: ${{ vars.GARDENER_RUNTIME_URL }}
       task-id: "triage"
       task-name: "Triage"
       task-source: ".gardener/tasks/triage/TASK.md"
-      task-bundle-hash: d87757d406d6bd9eaa5be6f9caaff7255f1c08487d1beb0b0493cce7384b00fe
+      task-bundle-hash: 68501a5ed005a97974a95b760325f09dcc7d0cbb841f63250b08f747cd815879
       plan-timeout-minutes: 20
       reactions: >-
         ${{
-        (github.event_name == 'issues' && github.event.action == 'opened' && github.event.issue.user.login == 'scuffi')
+        (github.event_name == 'issues' && github.event.action == 'opened')
         }}
     secrets:
       chat-webhook: ${{ secrets.GARDENER_CHAT_WEBHOOK }}

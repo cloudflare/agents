@@ -398,11 +398,13 @@ type OptionalParametersMethod<T extends RPCMethod> =
 export type AgentMethods<T> = Omit<RPCMethods<T>, keyof Agent<any, any>>;
 
 export type OptionalAgentMethods<T> = {
-  [K in keyof AgentMethods<T> as AgentMethods<T>[K] extends OptionalParametersMethod<
-    AgentMethods<T>[K]
-  >
-    ? K
-    : never]: OptionalParametersMethod<AgentMethods<T>[K]>;
+  [
+    K in keyof AgentMethods<T> as AgentMethods<T>[K] extends OptionalParametersMethod<
+      AgentMethods<T>[K]
+    >
+      ? K
+      : never
+  ]: OptionalParametersMethod<AgentMethods<T>[K]>;
 };
 
 export type RequiredAgentMethods<T> = Omit<

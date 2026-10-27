@@ -54,6 +54,24 @@ async function evictWhenIdle(
   return { result, evicted };
 }
 
+/**
+ * Poll the live reminder count until it is at most `count`, for up to `ms`.
+ * Returns the last count read.
+ */
+async function liveRemindersWithin(
+  stub: DurableObjectStub<PiHarnessTestObject>,
+  count: number,
+  ms: number
+): Promise<number> {
+  const deadline = Date.now() + ms;
+  let live = await stub.liveReminders();
+  while (live > count && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    live = await stub.liveReminders();
+  }
+  return live;
+}
+
 /** Whether the alarm clears within a second, as a completed wake leaves it. */
 async function alarmCleared(
   stub: DurableObjectStub<PiHarnessTestObject>
@@ -209,6 +227,54 @@ describe("PiHarness on pi-durable", () => {
     ]);
   });
 
+  it("refuses a whenBusy: reject input while a run is going, saving nothing", async () => {
+    const stub = fresh();
+    // Idle: admitted like any other input.
+    const idle = await stub.trySubmit("hello", {
+      whenBusy: "reject",
+      operationId: "op-idle"
+    });
+    expect(idle).toEqual({
+      receipt: { operationId: "op-idle", session: "1", accepted: true }
+    });
+    expect((await stub.wait("op-idle")).text).toBe("echo: hello");
+
+    const gate = await stub.submit("gate");
+    await stub.gateStarted(1);
+    const busy = await stub.trySubmit("nightly", {
+      whenBusy: "reject",
+      operationId: "op-nightly"
+    });
+    expect(busy).toMatchObject({
+      error: "ConversationBusy",
+      conversationBusy: true
+    });
+    expect(await stub.pending()).toEqual([
+      { operationId: gate.operationId, session: "1", status: "running" }
+    ]);
+    // Retrying an admitted operation id is deduped, not refused.
+    expect(
+      await stub.trySubmit("gate", {
+        whenBusy: "reject",
+        operationId: gate.operationId
+      })
+    ).toMatchObject({ receipt: { accepted: false } });
+
+    await stub.release();
+    await stub.wait(gate.operationId);
+    // Nothing was saved, so the same operation id is admitted once idle.
+    const later = await stub.trySubmit("nightly", {
+      whenBusy: "reject",
+      operationId: "op-nightly"
+    });
+    expect(later).toMatchObject({ receipt: { accepted: true } });
+    expect((await stub.wait("op-nightly")).text).toBe("echo: nightly");
+    expect(
+      (await stub.messages()).filter((text) => text === "nightly")
+    ).toHaveLength(1);
+    expect(await alarmCleared(stub)).toBe(true);
+  });
+
   it("resumes a replay-safe tool after an eviction mid-call, woken by the wake job's alarm", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);
@@ -335,6 +401,81 @@ describe("PiHarness on pi-durable", () => {
     // The alarm restarts the object at the retry, and pi runs it.
     const result = await stub.wait(receipt.operationId);
     expect(result).toMatchObject({ status: "done", text: "echo: flaky" });
+  });
+
+  it.each(["", "nowake:"])(
+    "resumes a due sleep while other work keeps pi active (%s)",
+    async (variant) => {
+      const stub = fresh(`${variant}${crypto.randomUUID()}`);
+      // A foreground run stays active: its tool waits in memory, committing
+      // nothing, so nothing else kicks pi's scheduler.
+      const receipt = await stub.submit("hold");
+      await stub.holdStarted(1);
+      // A background task sleeps briefly, as a retry backoff does.
+      await stub.remindAt(Date.now() + 1_000);
+      expect(await stub.liveReminders()).toBe(1);
+
+      expect(await liveRemindersWithin(stub, 0, 5_000)).toBe(0);
+
+      expect(await stub.releaseHold()).toBe(true);
+      expect((await stub.wait(receipt.operationId)).text).toBe(
+        "tool said: held after 1 runs"
+      );
+    }
+  );
+
+  it.each(["retry:", "nowake:retry:"])(
+    "runs pi's retry in one session while another session's run stays active (%s)",
+    async (variant) => {
+      const stub = fresh(`${variant}${crypto.randomUUID()}`);
+      const held = await stub.submit("hold");
+      await stub.holdStarted(1);
+      // The first generation fails as retryable, and pi sleeps two seconds
+      // before its retry, beside the held run.
+      const session = await stub.createSession();
+      const flaky = await stub.submit("flaky", { session });
+      expect(
+        await stub.waitWithin(flaky.operationId, 8_000, session)
+      ).toMatchObject({
+        status: "done",
+        text: "echo: flaky"
+      });
+
+      expect(await stub.releaseHold()).toBe(true);
+      expect((await stub.wait(held.operationId)).text).toBe(
+        "tool said: held after 1 runs"
+      );
+    }
+  );
+
+  it("resumes a sleep that became the earliest during the wait", async () => {
+    const stub = fresh();
+    const receipt = await stub.submit("hold");
+    await stub.holdStarted(1);
+    const start = Date.now();
+    await stub.remindAt(start + 6_000);
+    // A sooner sleep moves pi's `at` while the wait is sleeping toward the
+    // later one.
+    await stub.remindAt(start + 1_000);
+
+    expect(await liveRemindersWithin(stub, 1, 4_000)).toBe(1);
+    expect(Date.now() - start).toBeLessThan(6_000);
+
+    expect(await stub.releaseHold()).toBe(true);
+    await stub.wait(receipt.operationId);
+  });
+
+  it("resumes a sleep due after the wait budget, in the next wait", async () => {
+    const stub = fresh();
+    await stub.setWaitBudget(100);
+    const receipt = await stub.submit("hold");
+    await stub.holdStarted(1);
+    await stub.remindAt(Date.now() + 1_000);
+
+    expect(await liveRemindersWithin(stub, 0, 5_000)).toBe(0);
+
+    expect(await stub.releaseHold()).toBe(true);
+    await stub.wait(receipt.operationId);
   });
 
   it("answers after a sleeping retry without onWake, on pi's own timer", async () => {

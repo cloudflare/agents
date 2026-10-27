@@ -45,9 +45,7 @@ export class MyAgent extends AIChatAgent<Env> {
         messages: await convertToModelMessages(this.messages),
         toolCalls: "before-last-2-messages"
       }),
-      tools: {
-        /* ... */
-      },
+      tools: {/* ... */},
       abortSignal: options?.abortSignal
     });
     return result.toUIMessageStreamResponse();
@@ -415,10 +413,12 @@ The hook also uses `@ts-expect-error` to access internal `PartySocket` propertie
 ```typescript
 // packages/ai-chat/src/react.tsx, lines 469–474
 const agentUrl = new URL(
-  `${// @ts-expect-error we're using a protected _url property
-  ((agent._url as string | null) || agent._pkurl)
-    ?.replace("ws://", "http://")
-    .replace("wss://", "https://")}`
+  `${
+    // @ts-expect-error we're using a protected _url property
+    ((agent._url as string | null) || agent._pkurl)
+      ?.replace("ws://", "http://")
+      .replace("wss://", "https://")
+  }`
 );
 ```
 

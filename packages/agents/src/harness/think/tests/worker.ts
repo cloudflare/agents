@@ -78,14 +78,12 @@ function callReply(
 ): StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
-    ...calls.map(
-      (call): StreamPart => ({
-        type: "tool-call",
-        toolCallId: call.id ?? `call-${crypto.randomUUID()}`,
-        toolName: call.name,
-        input: JSON.stringify(call.input ?? {})
-      })
-    ),
+    ...calls.map((call): StreamPart => ({
+      type: "tool-call",
+      toolCallId: call.id ?? `call-${crypto.randomUUID()}`,
+      toolName: call.name,
+      input: JSON.stringify(call.input ?? {})
+    })),
     finish("tool-calls")
   ];
 }

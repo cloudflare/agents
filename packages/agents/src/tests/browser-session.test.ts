@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { BrowserSessionConnector } from "../browser/session-connector";
 import {
   Browser,
   MAX_BROWSER_SCOPES,
   namedBrowserSessionKey
 } from "../browser/browser";
+import { browserFunctions } from "../browser/browser-functions";
 import { browserRun } from "../browser/providers/browser-run";
+import type { BrowserSession } from "../browser/session";
 import type {
   BrowserSessionLock,
   BrowserSessionStore,
@@ -231,9 +232,12 @@ function createFakeBrowser() {
           domains: [
             {
               domain: "Page",
+              description:
+                "Actions and events related to the inspected page. More detail.",
               commands: [{ name: "navigate" }],
               events: [{ name: "loadEventFired" }]
-            }
+            },
+            { domain: "Target" }
           ]
         });
       }
@@ -244,7 +248,16 @@ function createFakeBrowser() {
   return { browser, instances, sockets };
 }
 
-const fakeCtx = {} as ExecutionContext;
+type Call = [method: string, input: Record<string, unknown>];
+
+/** Call a session method by name, as model code does. */
+function call(session: BrowserSession, [method, input]: Call) {
+  // SAFETY: The tests only name the session's own methods.
+  const fn = (
+    session as unknown as Record<string, (input: unknown) => unknown>
+  )[method];
+  return fn.call(session, input);
+}
 
 function setup() {
   const fake = createFakeBrowser();
@@ -254,53 +267,30 @@ function setup() {
     name: "work",
     store
   });
-  const connector = new BrowserSessionConnector(fakeCtx, { browser });
-  let executions = 0;
 
-  /** Run `calls` as one pass of `executionId`, without taking its report. */
-  async function pass(
-    executionId: string,
-    calls: Array<[tool: string, args: Record<string, unknown>]>
-  ) {
-    const results: unknown[] = [];
-    for (const [tool, args] of calls) {
-      results.push(await connector.executeTool(tool, args, { executionId }));
-    }
-    await connector.onPassEnd(executionId);
-    return results;
+  /** Run `calls` as one session and return its results and report. */
+  function run(calls: Call[]) {
+    return runWith(undefined, calls);
   }
 
-  /** Run `calls` as one execution (one pass) and return its report. */
-  function run(calls: Array<[tool: string, args: Record<string, unknown>]>) {
-    return runWith(connector, calls);
-  }
-
-  /** A connector for another scope of the same browser. */
+  /** Runs in another scope of the same browser. */
   function scoped(scope: string) {
-    const other = new BrowserSessionConnector(fakeCtx, { browser, scope });
     return {
-      connector: other,
-      run: (calls: Array<[tool: string, args: Record<string, unknown>]>) =>
-        runWith(other, calls)
+      session: () => browser.session({ scope }),
+      run: (calls: Call[]) => runWith(scope, calls)
     };
   }
 
-  async function runWith(
-    connector: BrowserSessionConnector,
-    calls: Array<[tool: string, args: Record<string, unknown>]>
-  ) {
-    const executionId = `exec-${++executions}`;
+  async function runWith(scope: string | undefined, calls: Call[]) {
+    const session = browser.session({ scope });
     const results: unknown[] = [];
     let error: unknown;
     try {
-      for (const [tool, args] of calls) {
-        results.push(await connector.executeTool(tool, args, { executionId }));
-      }
+      for (const entry of calls) results.push(await call(session, entry));
     } catch (caught) {
       error = caught;
     }
-    await connector.onPassEnd(executionId);
-    return { results, error, report: connector.takeReport(executionId) };
+    return { results, error, report: await session.close() };
   }
 
   function stored() {
@@ -323,8 +313,6 @@ function setup() {
     ...fake,
     store,
     browser,
-    connector,
-    pass,
     run,
     scoped,
     stored,
@@ -334,7 +322,7 @@ function setup() {
   };
 }
 
-const evaluateActive: [string, Record<string, unknown>] = [
+const evaluateActive: Call = [
   "send",
   {
     method: "Runtime.evaluate",
@@ -344,7 +332,7 @@ const evaluateActive: [string, Record<string, unknown>] = [
 ];
 
 /** Make the active page open a popup tab. */
-const openPopup: [string, Record<string, unknown>] = [
+const openPopup: Call = [
   "send",
   {
     method: "Runtime.evaluate",
@@ -358,22 +346,7 @@ function evaluatedIn(result: unknown): string {
   return (result as { result: { value: string } }).result.value;
 }
 
-describe("BrowserSessionConnector", () => {
-  it("exposes cdp without any session-management tools", async () => {
-    const { connector } = setup();
-    expect(connector.name()).toBe("cdp");
-    const description = await connector.describe();
-    expect(Object.keys(description.descriptors).sort()).toEqual([
-      "attachToTarget",
-      "clearDebugLog",
-      "getDebugLog",
-      "send",
-      "spec"
-    ]);
-    expect(description.instructions).toContain('sessionId: "active"');
-    expect(description.instructions).toContain("restarted: true");
-  });
-
+describe("BrowserSession", () => {
   it('opens a tab of its own for "active" and remembers it', async () => {
     const t = setup();
     const { results, report } = await t.run([evaluateActive]);
@@ -402,7 +375,7 @@ describe("BrowserSessionConnector", () => {
     expect(evaluatedIn(results[0])).toBe("target-2");
   });
 
-  it("drops the socket at pass end but keeps the browser", async () => {
+  it("drops the socket when the session closes but keeps the browser", async () => {
     const t = setup();
     await t.run([evaluateActive]);
     await t.run([evaluateActive]);
@@ -424,7 +397,7 @@ describe("BrowserSessionConnector", () => {
 
     const { results, report } = await t.run([evaluateActive]);
     expect(evaluatedIn(results[0])).toBe("target-2");
-    // A tab the connector opened for the agent is not a page-opened tab.
+    // A tab the session opened for the agent is not a page-opened tab.
     expect(report?.newTabs).toEqual([]);
   });
 
@@ -569,16 +542,14 @@ describe("BrowserSessionConnector", () => {
 
   it("doesn't report a tab another execution created as a popup", async () => {
     const t = setup();
-    // Both executions connect before either creates a tab.
-    await t.connector.executeTool(evaluateActive[0], evaluateActive[1], {
-      executionId: "exec-a"
-    });
-    await t.pass("exec-b", [
+    // Both sessions connect before either creates a tab.
+    const a = t.browser.session();
+    await call(a, evaluateActive);
+    await t.run([
       ["send", { method: "Target.createTarget", params: { url: "" } }]
     ]);
-    await t.connector.onPassEnd("exec-a");
 
-    expect(t.connector.takeReport("exec-a")?.newTabs).toEqual([]);
+    expect((await a.close())?.newTabs).toEqual([]);
   });
 
   it("reports tabs the page opened as newTabs without switching to them", async () => {
@@ -616,43 +587,29 @@ describe("BrowserSessionConnector", () => {
     ]);
   });
 
-  it("keeps popups from earlier passes of a resumed execution", async () => {
+  it("drops a popup that closed before the session ended", async () => {
     const t = setup();
-    // The first pass opens a popup, then pauses for approval.
-    await t.pass("exec-resumed", [openPopup]);
-    await t.pass("exec-resumed", [evaluateActive]);
-
-    expect(t.connector.takeReport("exec-resumed")?.newTabs).toEqual([
-      { targetId: "target-3", url: "https://popup.example/" }
-    ]);
-  });
-
-  it("drops a popup that closed before the execution ended", async () => {
-    const t = setup();
-    await t.pass("exec-resumed", [openPopup]);
-    await t.pass("exec-resumed", [
+    const { report } = await t.run([
+      openPopup,
       [
         "send",
         { method: "Target.closeTarget", params: { targetId: "target-3" } }
       ]
     ]);
 
-    expect(t.connector.takeReport("exec-resumed")?.newTabs).toEqual([]);
+    expect(report?.newTabs).toEqual([]);
   });
 
-  it("saves a tab switch even if the socket drops before the pass ends", async () => {
+  it("saves a tab switch even if the socket drops before the session ends", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const t = setup();
       (await t.start()).addTab("https://other.example/");
-      await t.connector.executeTool(
-        "attachToTarget",
-        { targetId: "target-2" },
-        { executionId: "exec-drop" }
-      );
+      const session = t.browser.session();
+      await session.attachToTarget({ targetId: "target-2" });
       // Browser Run drops the socket; the browser itself lives on.
       t.sockets[0].close();
-      await t.connector.onPassEnd("exec-drop");
+      await session.close();
 
       expect(t.activeTab()).toBe("target-2");
       expect(warn).toHaveBeenCalledOnce();
@@ -670,20 +627,26 @@ describe("BrowserSessionConnector", () => {
     expect(t.sockets).toHaveLength(0);
   });
 
+  it.each([
+    "Cloudflare.getLiveView",
+    "Cloudflare.handoff",
+    "Target.sendMessageToTarget",
+    "Target.exposeDevToolsProtocol"
+  ])("refuses %s", async (method) => {
+    const t = setup();
+    const { error } = await t.run([["send", { method }]]);
+    expect(String(error)).toContain(`${method} is not available`);
+    expect(t.sockets).toHaveLength(0);
+  });
+
   it("shares one connection between concurrent first calls", async () => {
     const t = setup();
-    const executionId = "exec-parallel";
+    const session = t.browser.session();
     await Promise.all([
-      t.connector.executeTool(evaluateActive[0], evaluateActive[1], {
-        executionId
-      }),
-      t.connector.executeTool(
-        "send",
-        { method: "Target.getTargets" },
-        { executionId }
-      )
+      call(session, evaluateActive),
+      session.send({ method: "Target.getTargets" })
     ]);
-    await t.connector.onPassEnd(executionId);
+    await session.close();
     expect(t.sockets).toHaveLength(1);
   });
 
@@ -729,7 +692,7 @@ describe("BrowserSessionConnector", () => {
     expect(t.activeTab()).toBe("target-2");
   });
 
-  it("reports nothing for an execution that never touched the browser", async () => {
+  it("reports nothing for a session that never touched the browser", async () => {
     const t = setup();
     const { report } = await t.run([]);
     expect(report).toBeUndefined();
@@ -760,20 +723,82 @@ describe("BrowserSessionConnector", () => {
   it("validates arguments before touching the browser", async () => {
     const t = setup();
     const { error } = await t.run([["send", { sessionId: "active" }]]);
-    expect(String(error)).toContain("Invalid arguments for cdp.send");
+    expect(String(error)).toContain("Invalid arguments for browser.cdp");
     expect(t.sockets).toHaveLength(0);
   });
 
-  it("reads the protocol spec from the session's own browser", async () => {
+  it("refuses calls once closed, and closes once", async () => {
+    const t = setup();
+    const session = t.browser.session();
+    await call(session, evaluateActive);
+    expect(await session.close()).toMatchObject({ restarted: false });
+    expect(await session.close()).toBeUndefined();
+    await expect(call(session, evaluateActive)).rejects.toThrow("closed");
+  });
+
+  it("returns the full protocol to host code", async () => {
     const t = setup();
     const { results } = await t.run([["spec", {}]]);
-    const spec = results[0] as { domains: Array<{ name: string }> };
-    expect(spec.domains.map((domain) => domain.name)).toEqual(["Page"]);
+    expect(results[0]).toMatchObject({
+      domains: [
+        { name: "Page", commands: [{ method: "Page.navigate" }] },
+        { name: "Target" }
+      ]
+    });
   });
 });
 
-describe("BrowserSessionConnector scopes", () => {
-  const createTab: [string, Record<string, unknown>] = [
+describe("browser.spec", () => {
+  async function spec(input: unknown) {
+    const t = setup();
+    const session = t.browser.session();
+    try {
+      return await browserFunctions(session).spec(input);
+    } finally {
+      await session.close();
+    }
+  }
+
+  it("lists the protocol's domains, then returns one domain", async () => {
+    expect(await spec(undefined)).toEqual({
+      domains: [
+        {
+          name: "Page",
+          description: "Actions and events related to the inspected page."
+        },
+        { name: "Target" }
+      ],
+      hint: expect.stringContaining('browser.spec({ domain: "Page" })')
+    });
+    expect(await spec({ domain: "Page" })).toMatchObject({
+      name: "Page",
+      commands: [{ method: "Page.navigate" }],
+      events: [{ event: "Page.loadEventFired" }]
+    });
+  });
+
+  it("says when a domain doesn't exist", async () => {
+    await expect(spec({ domain: "page" })).rejects.toThrow(
+      "Did you mean 'Page'?"
+    );
+    await expect(spec({ domain: "Nope" })).rejects.toThrow(
+      "browser.spec() lists the domains"
+    );
+  });
+
+  it("rejects bad input without starting a browser", async () => {
+    const t = setup();
+    const session = t.browser.session();
+    await expect(browserFunctions(session).spec({ domain: 3 })).rejects.toThrow(
+      "Invalid arguments for browser.spec"
+    );
+    await session.close();
+    expect(t.sockets).toHaveLength(0);
+  });
+});
+
+describe("BrowserSession scopes", () => {
+  const createTab: Call = [
     "send",
     { method: "Target.createTarget", params: { url: "about:blank" } }
   ];
@@ -810,12 +835,11 @@ describe("BrowserSessionConnector scopes", () => {
     const t = setup();
     const a = t.scoped("a");
     const b = t.scoped("b");
-    // A opens a blank tab, and B starts before A's pass ends.
-    await a.connector.executeTool("send", createTab[1], {
-      executionId: "a-1"
-    });
+    // A opens a blank tab, and B starts before A's session ends.
+    const first = a.session();
+    await call(first, createTab);
     const { results } = await b.run([evaluateActive]);
-    await a.connector.onPassEnd("a-1");
+    await first.close();
 
     expect(evaluatedIn(results[0])).toBe("target-3");
     expect(t.activeTab("a")).toBe("target-2");
@@ -848,14 +872,12 @@ describe("BrowserSessionConnector scopes", () => {
     const a = t.scoped("a");
     const b = t.scoped("b");
     await b.run([evaluateActive]);
-    // A's pass is open while B's page opens a popup.
-    await a.connector.executeTool("send", evaluateActive[1], {
-      executionId: "a-1"
-    });
+    // A's session is open while B's page opens a popup.
+    const first = a.session();
+    await call(first, evaluateActive);
     const fromB = await b.run([openPopup]);
-    await a.connector.onPassEnd("a-1");
 
-    expect(a.connector.takeReport("a-1")?.newTabs).toEqual([]);
+    expect((await first.close())?.newTabs).toEqual([]);
     expect(fromB.report?.newTabs.map((tab) => tab.url)).toEqual([
       "https://popup.example/"
     ]);

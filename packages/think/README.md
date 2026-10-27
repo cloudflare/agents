@@ -725,9 +725,7 @@ Extensions can subscribe to `beforeTurn`, `beforeToolCall`, `afterToolCall`, `on
 ```js
 // extension source (loaded via getExtensions())
 ({
-  tools: {
-    /* ... */
-  },
+  tools: {/* ... */},
   hooks: {
     beforeToolCall: async (snapshot, host) => {
       /* observation */
@@ -1162,7 +1160,7 @@ getTools() {
 | Package                      | Notes                                                     |
 | ---------------------------- | --------------------------------------------------------- |
 | `agents`                     | Cloudflare Agents SDK peer dependency                     |
-| `ai`                         | Vercel AI SDK v6 peer dependency                          |
+| `ai`                         | Vercel AI SDK v7 peer dependency                          |
 | `zod`                        | Schema validation peer dependency                         |
 | `@cloudflare/computer`       | Workspace and workspace tools peer dependency             |
 | `@cloudflare/codemode`       | Code execution, `createExecuteTool`, and JS skill scripts |

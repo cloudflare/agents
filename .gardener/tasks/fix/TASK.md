@@ -52,11 +52,12 @@ including adding a changeset when a published package changes.
    maintainer.
 4. Make the new test pass and run the relevant tests and checks. If you can't reach a fix you're
    confident in, open nothing and comment on the issue with what you found.
-5. Commit it to a new branch `gardener/issue-<number>` (add `-2`, `-3` and so on if that branch
-   exists) and open a pull request into the default branch as step `open-pr`. Its body
+5. Commit it as step `commit` to a new branch `gardener/issue-<number>` (add `-2`, `-3` and so on if that branch
+   exists) and open a pull request into the default branch as step `open-pr`, with the reference
+   `{"/expectedHeadSha": {"step": "commit", "output": "commitSha"}}` so it opens on your commit. Its body
    starts with `Fixes #<number>`, then explains the cause (citing `path:line`), the change and why
    it's the best option, the alternatives you considered, and the checks you ran. It ends by noting
-   that commits pushed by this task don't start CI, and that a maintainer can mention @gardener-cf
+   that commits pushed by this task don't start CI, and that a maintainer can mention @ask-gardener
    on the pull request to switch to an alternative or ask for changes.
 6. Comment on the issue linking the pull request: write `{{pr}}` and add the reference
    `{"/body": {"placeholders": {"pr": {"step": "open-pr", "output": "pullUrl"}}}}`.

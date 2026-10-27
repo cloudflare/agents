@@ -408,7 +408,7 @@
     helper and `result.stream` are v7-only.
   - The workspace read tool emits `{ type: "file-data", data, mediaType, filename }`
     model output, accepted by both majors (v7's newer `{ type: "file", data: {
-type: "data", data } }` shape does not exist in v6).
+    type: "data", data } }` shape does not exist in v6).
 
   Public API notes:
 
