@@ -13,7 +13,7 @@
     "@ai-sdk/anthropic": "^4.0.0",
     "@ai-sdk/openai": "^4.0.0",
     "@ai-sdk/provider": "^4.0.0",
-    "@cloudflare/computer": "https://pkg.pr.new/@cloudflare/computer@9e798fb",
+    "@cloudflare/computer": "^0.8.0",
     "@cloudflare/think": "*",
     "agents": "*",
     "ai": "^7.0.0"
