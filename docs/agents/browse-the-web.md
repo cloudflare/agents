@@ -188,11 +188,11 @@ export class MyObject extends DurableObject<Env> {
       internalHosts: {
         router: this.ctx.exports.InternalHostRouter,
         hosts: {
-          "uploads.internal": {
-            description: "Files your users uploaded, served from an R2 bucket",
+          "assets.internal": {
+            description: "Your app's static assets, served from an R2 bucket",
             fetch: async (request) => {
               const { pathname } = new URL(request.url);
-              const file = await this.env.UPLOADS.get(
+              const file = await this.env.ASSETS_BUCKET.get(
                 decodeURIComponent(pathname.slice(1))
               );
               if (!file) return new Response("Not found", { status: 404 });
