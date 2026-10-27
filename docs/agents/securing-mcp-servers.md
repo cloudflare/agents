@@ -101,7 +101,7 @@ Ask for consent first, then hand the user to the provider:
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `beginUpstream(authRequest, options)` | Call after `approveConsent()`. Stores the authorization request and your `data` (for example, a PKCE verifier), and returns a `state` value for the provider redirect, bound to the user's browser by a `__Host-` cookie. |
 | `finishUpstream(request)`             | Call in your callback. Checks `state` against the cookie and returns the original authorization request and your `data`. A provider code replayed in another browser is rejected.                                         |
-| `tokenExchangeCallback`               | An `OAuthProvider` option that runs on token refresh. Refresh the provider's token there, and throw `OAuthError("invalid_grant")` when the provider has revoked access.                                                   |
+| `tokenExchangeCallback`               | An `OAuthProvider` option that runs on token refresh. Refresh the provider's token there, and throw `new OAuthError("invalid_grant", { description })` when the provider has revoked access.                              |
 
 ```typescript
 // POST /authorize: the user approved this client
@@ -143,7 +143,12 @@ See [Signing in through another provider](https://github.com/cloudflare/workers-
 Scopes are not enforced for you. Check them before handling a request, and return `insufficientScope()` when one is missing so the client can ask the user for it (step-up authorization):
 
 ```typescript
-import { insufficientScope } from "@cloudflare/workers-oauth-provider";
+import {
+  insufficientScope,
+  type OAuthResourceContext
+} from "@cloudflare/workers-oauth-provider";
+
+type Props = { userId: string }; // what you passed to completeAuthorization()
 
 apiHandler: {
   fetch(request: Request, env: Env, ctx: OAuthResourceContext<Props>) {

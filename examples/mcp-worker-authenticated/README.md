@@ -53,7 +53,7 @@ export default new OAuthProvider({
 });
 ```
 
-Set `MCP_RESOURCE` in `wrangler.jsonc` to your deployed URL, for example `https://mcp-worker-authenticated.<your-subdomain>.workers.dev/mcp`. The default, `http://localhost:5173/mcp`, works with `pnpm start`.
+Set `MCP_RESOURCE` in `wrangler.jsonc` to your deployed URL, for example `https://mcp-worker-authenticated.<your-subdomain>.workers.dev/mcp`. The default, `http://localhost:5173/mcp`, works with `pnpm start`. If `MCP_RESOURCE` doesn't match the origin the Worker is served from, the example returns a 500 that names the value to set.
 
 Inside tool handlers, access standard token metadata and the existing application props. Do not log or return the raw access token:
 

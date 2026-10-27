@@ -198,7 +198,7 @@ export default new OAuthProvider({
 
 `OAuthProvider` needs an object with a `fetch` method, so wrap the handler as shown. Passing the handler function directly throws at startup.
 
-`getMcpAuthContext().props` returns the `props` you passed to `completeAuthorization()` in your auth flow. Tool callbacks also receive the standard SDK v2 `AuthInfo` at `context.http.authInfo`. Do not log or return `context.http.authInfo.token` or `authInfo.extra.props`.
+`getMcpAuthContext().props` returns the `props` you passed to `completeAuthorization()` in your auth flow. Tool callbacks also receive the standard SDK v2 `AuthInfo` at `context.http.authInfo`. `authInfo` is set only when the token has a client ID and `props` is a plain object. Tokens from `resolveExternalToken` have no client ID, so for those only `getMcpAuthContext().props` is available. Do not log or return `context.http.authInfo.token` or `authInfo.extra.props`.
 
 Set `MCP_RESOURCE` in `wrangler.jsonc` to the URL clients connect to: Workers OAuth Provider 1.x binds every token to it. The OAuth flow also needs a KV namespace bound as `OAUTH_KV`. For a complete server with a login page, see [`examples/mcp-worker-authenticated`](https://github.com/cloudflare/agents/tree/main/examples/mcp-worker-authenticated). For the consent page and signing in through a third-party provider, see [Securing MCP Servers](./securing-mcp-servers.md).
 
