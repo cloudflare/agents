@@ -165,9 +165,8 @@ import {
 } from "./observability/tracing/tracer";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
-import { RPC_DO_PREFIX } from "./mcp/rpc";
+import { RPC_DO_PREFIX, type McpRpcAgent } from "./mcp/rpc";
 import { ensureMcpServerTable } from "./mcp/client/storage";
-import type { McpAgent } from "./mcp";
 import { Scheduler, setSchedulerCallbackResolver } from "./schedules/scheduler";
 import { Queue, setQueueCallbackResolver } from "./queue/queue";
 import type { QueueItem } from "./queue/types";
@@ -9446,7 +9445,7 @@ export class Agent<
   }
 
   private _findBindingNameForNamespace(
-    namespace: DurableObjectNamespace<McpAgent>
+    namespace: DurableObjectNamespace<McpRpcAgent>
   ): string | undefined {
     for (const [key, value] of Object.entries(
       this.env as Record<string, unknown>
@@ -9662,7 +9661,7 @@ export class Agent<
    * await this.addMcpServer("counter", env.MY_MCP);
    * await this.addMcpServer("counter", env.MY_MCP, { props: { userId: "123" } });
    */
-  async addMcpServer<T extends McpAgent>(
+  async addMcpServer<T extends McpRpcAgent>(
     serverName: string,
     binding: DurableObjectNamespace<T>,
     options?: AddRpcMcpServerOptions
@@ -9691,7 +9690,7 @@ export class Agent<
     | { id: string; state: typeof MCPConnectionState.READY }
   >;
 
-  async addMcpServer<T extends McpAgent>(
+  async addMcpServer<T extends McpRpcAgent>(
     serverName: string,
     urlOrBinding: string | DurableObjectNamespace<T>,
     callbackHostOrOptions?:
@@ -9853,7 +9852,7 @@ export class Agent<
           transport: {
             type: "rpc" as TransportType,
             namespace:
-              urlOrBinding as unknown as DurableObjectNamespace<McpAgent>,
+              urlOrBinding as unknown as DurableObjectNamespace<McpRpcAgent>,
             name: normalizedName,
             props: rpcOpts?.props
           }
@@ -9875,7 +9874,7 @@ export class Agent<
       }
 
       const bindingName = this._findBindingNameForNamespace(
-        urlOrBinding as unknown as DurableObjectNamespace<McpAgent>
+        urlOrBinding as unknown as DurableObjectNamespace<McpRpcAgent>
       );
       if (bindingName) {
         this.mcp.saveRpcServerToStorage(

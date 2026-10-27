@@ -63,6 +63,8 @@ Install the exact MCP client peer used by this Agents release:
 pnpm add agents @modelcontextprotocol/client@2.3.1
 ```
 
+The MCP client does not need `@modelcontextprotocol/sdk` or `@modelcontextprotocol/server`. Those packages are optional peers used only by the MCP server APIs.
+
 ```typescript
 import { Agent } from "agents";
 

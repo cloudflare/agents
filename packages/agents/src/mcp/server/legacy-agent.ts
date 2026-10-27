@@ -30,11 +30,11 @@ import {
 import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
 import type { EventStore } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { DurableObjectEventStore } from "./event-store";
+import { isDurableObjectNamespace } from "../rpc";
 import {
-  isDurableObjectNamespace,
   RPCServerTransport,
   type RPCServerTransportOptions
-} from "../rpc";
+} from "../rpc-server";
 
 /**
  * @deprecated McpAgent is feature-frozen. Migrate to an SDK v2 factory with
@@ -602,7 +602,7 @@ export abstract class McpAgent<
         }
 
         // Ensure that the binding is to a DurableObject
-        if (!isDurableObjectNamespace(bindingValue)) {
+        if (!isDurableObjectNamespace<McpAgent>(bindingValue)) {
           throw new Error(
             `Invalid McpAgent binding for ${binding}. Make sure it's a Durable Object binding.`
           );
@@ -662,10 +662,12 @@ export {
 export {
   RPC_DO_PREFIX,
   RPCClientTransport,
-  RPCServerTransport,
-  type RPCClientTransportOptions,
-  type RPCServerTransportOptions
+  type RPCClientTransportOptions
 } from "../rpc";
+export {
+  RPCServerTransport,
+  type RPCServerTransportOptions
+} from "../rpc-server";
 
 export { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 export type { ElicitRequest, ElicitResult } from "@modelcontextprotocol/client";

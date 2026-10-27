@@ -108,6 +108,12 @@
     "@earendil-works/pi-durable": {
       "optional": true
     },
+    "@modelcontextprotocol/sdk": {
+      "optional": true
+    },
+    "@modelcontextprotocol/server": {
+      "optional": true
+    },
     "@opencode/plugin": {
       "optional": true
     },
