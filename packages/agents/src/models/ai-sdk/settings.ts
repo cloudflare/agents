@@ -49,7 +49,15 @@ export type FallbackLeg = CloudflareLanguageModelId | LanguageModelV4;
  * Per-model and per-call options: the framework-neutral options, with the
  * fallback leg type this module accepts.
  */
-export type ModelOptions = CoreModelOptions<FallbackLeg>;
+export type ModelOptions = CoreModelOptions<FallbackLeg> & {
+  /**
+   * Per-model opt-in for a dynamic route whose targets are all Workers AI.
+   * Applies the generic Workers AI request profile, including chat templates
+   * and `reasoningEffort: null`. Ignored for other model ids. Not a per-call
+   * option, and not inherited by fallback legs.
+   */
+  workersAI?: boolean;
+};
 
 /**
  * Which key authenticates a vendor model object routed through AI Gateway.
@@ -72,7 +80,8 @@ export interface VendorKeyOptions {
  * Workers-AI-only knobs (`reasoningEffort`, `chatTemplateKwargs`) are ignored
  * with a warning.
  */
-export type GatewayModelOptions = ModelOptions & VendorKeyOptions;
+export type GatewayModelOptions = Omit<ModelOptions, "workersAI"> &
+  VendorKeyOptions;
 
 /**
  * The options `ai.routed()` takes: the gateway options, `headers`,
@@ -86,7 +95,7 @@ export type GatewayModelOptions = ModelOptions & VendorKeyOptions;
  */
 export type RoutedModelOptions = Omit<
   ModelOptions,
-  "fallback" | "reasoningEffort" | "chatTemplateKwargs"
+  "fallback" | "reasoningEffort" | "chatTemplateKwargs" | "workersAI"
 > &
   VendorKeyOptions;
 
