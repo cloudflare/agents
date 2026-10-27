@@ -7,15 +7,15 @@ here is in `agents`.
 
 ## What changed
 
-| Before (#2210)                               | Now                                                             |
-| -------------------------------------------- | --------------------------------------------------------------- |
-| pi-agent-core `AgentHarness`                 | pi-durable `Harness`                                            |
-| `Tasks` run per lane, replay-driving pi      | one Lifecycle wake job, driven by pi's `onWake`                 |
-| intake table for queued submissions          | pi's own inbox                                                  |
-| `Streams` log per operation, cursors, replay | pi's `watchEvents`: snapshot, then one batch per commit         |
-| pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (session store) |
-| own event and message projections            | pi's `AgentEvent`s on the wire, one reducer (`view.ts`)         |
-| compaction config                            | none; pi-durable has no compaction yet                          |
+| Before (#2210)                               | Now                                                              |
+| -------------------------------------------- | ---------------------------------------------------------------- |
+| pi-agent-core `AgentHarness`                 | pi-durable `Harness`                                             |
+| `Tasks` run per lane, replay-driving pi      | one Lifecycle wake job, driven by pi's `onWake`                  |
+| intake table for queued submissions          | pi's own inbox                                                   |
+| `Streams` log per operation, cursors, replay | pi's conversation view (`session.watch()`), with its operations  |
+| pi's 7 session tables namespaced by adapter  | pi's own `SqliteStorage` schema, prefixed `pi_` (session store)  |
+| own event and message projections            | pi's view and operations on the wire, one projection (`view.ts`) |
+| compaction config                            | none; pi-durable has no compaction yet                           |
 
 The harness went from about 3,600 lines to under 2,000, with no other SDK
 primitive besides Lifecycle jobs. It now lives in `packages/agents` as
@@ -94,12 +94,12 @@ pi's submissions directly. The wake holds no per-submission state.
 `PiHarness` has the shape the other `examples/next/harnesses` share:
 `harness.prompt()`, `harness.submit()`, `harness.abort()`, `harness.wait()`,
 `harness.messages()` (pi's own `EntryRecord`s), `harness.sessions` (`create`, `get`, `fork`, `list`),
-`harness.session(id)` handles, and `session.events()`. A session is a pi
+`harness.session(id)` handles, and `session.watch()`. A session is a pi
 conversation. The root is `"1"`.
 
 Transport is not part of the harness. The socket protocol (one session per
 socket, a tool list on connect, commands) lives in the app's `sockets.ts` and
-`protocol.ts`, and the UI reducer in `view.ts`. They use only the harness's
+`protocol.ts`, and the UI projection in `view.ts`. They use only the harness's
 public API, so another app could put the same sessions on SSE or RPC
 instead.
 
@@ -108,8 +108,9 @@ The shared `Harness` capability in #2285 goes further than this. It has
 round trips, `compact`/`rewind`/`configure`, and capability flags. Gaps
 against it:
 
-- **Events have no cursor.** pi's watch always starts from a snapshot, and
-  there is nothing to replay. That is simpler and correct for UIs, but an
+- **Events have no cursor.** pi's watch always starts from the current view
+  (a window can start after the newest entry a client has), and there is no
+  event log to replay. That is simpler and correct for UIs, but an
   API that promises "replay from any cursor" cannot be built without a log
   that pi does not keep.
 - **No requests or replies.** pi-durable has no approval or permission
@@ -210,9 +211,9 @@ check the signal. pi's abort has no grace period.
 ### Watches are per socket and in memory
 
 This is app glue in `sockets.ts`, not the harness. Each socket gets its own
-`session.events()` stream. After hibernation or eviction, the host's
+`session.watch()`. After hibernation or eviction, the host's
 `onStart` calls `sockets.reattach()`, which re-watches every socket and
-sends a fresh snapshot, and the client replaces its state.
+sends the whole view again, and the client replaces its state.
 `ctx.getWebSockets(tag)` finds sockets by tag, but nothing gives the tags of
 a socket, so the re-watch walks `sessions.list()` and looks up each
 session's tag.

@@ -12,14 +12,14 @@ The example composes:
 
 - `PiHarness extends LifecycleCapability`, the harness interface:
   `harness.prompt()`, `harness.submit()`, `harness.sessions`,
-  `harness.session(id)`, and `session.events()` for pi's live events;
+  `harness.session(id)`, and `session.watch()` for pi's live view;
 - one Lifecycle job as the wake, driven by pi's `onWake`: it keeps the
   object alive while pi has work running, is due when pi's next sleep ends,
   and completes when pi has nothing to do;
 - a pi session store on the object's SQLite database;
 - app glue that is not part of the harness: `sockets.ts` puts one session
-  per socket on `WebSockets`, and `view.ts` and `transcript.ts` fold pi's
-  entries and events into what the UI shows;
+  per socket on `WebSockets`, and `view.ts` and `transcript.ts` project
+  pi's view into what the UI shows;
 - a `Workspace` from `@cloudflare/computer` on the same SQLite database,
   and its tools for the model (see [Workspace](#workspace));
 - `createAI` from `agents/models/pi-ai`: Workers AI, and other vendors through
@@ -55,7 +55,7 @@ before a tool was added never sees it; start a new session instead.
 - While a turn runs, type and press Enter to queue a follow-up, or Steer to
   join the running turn.
 
-Reload the page mid-turn: the client gets a snapshot of the current state,
+Reload the page mid-turn: the client gets the session's whole view,
 including the partial answer, and continues from there.
 
 A submit whose answer the socket never delivered is sent again on
@@ -73,7 +73,7 @@ pnpm test
 - `sockets.test.ts` connects real WebSockets: a run started over the
   socket, a client joining mid-run, and a socket that outlives an eviction.
 - `view.test.ts` checks that a client following a run and one joining after
-  it fold pi's events into the same view.
+  it project the same view.
 - `outbox.test.ts` checks the client's command outbox, and that a submit
   sent again on reconnect runs once.
 
@@ -118,7 +118,7 @@ export class PiAgent extends DurableObject<Env> {
     },
     defaults: { model: this.ai(MODEL_ID), thinkingLevel: "low" }
   });
-  // App glue: this app's socket protocol, built on session.events().
+  // App glue: this app's socket protocol, built on session.watch().
   readonly sockets = new PiSessionSockets(this.harness, this.registry, (tag) =>
     this.ctx.getWebSockets(tag)
   );
@@ -153,10 +153,14 @@ model gets an interrupted result. For `agents/skills` sources,
 `session.setModel`. Without a default model, a session's prompts end
 unanswered (`no_model`) until one is set.
 
-The harness does not choose a transport. `session.events()` returns pi's own
-`AgentEvent` stream: a `snapshot`, then one batch per commit. This app sends
-it over WebSockets (`src/sockets.ts`, `src/protocol.ts`) and folds it with
-`reduceView` (`src/view.ts`) in the browser and in the tests.
+The harness does not choose a transport. `session.watch()` returns pi's own
+conversation view: a window over the transcript and the session's live state,
+with pi's operations for each change. This app sends the view, then the
+operations, over WebSockets (`src/sockets.ts`, `src/protocol.ts`), applies them
+in the browser, and projects the view with `projectView` (`src/view.ts`) in the
+browser and in the tests. The window holds the newest 200 to 400 entries; a
+client that shows a longer transcript pages it with pi's
+`ConversationTranscript` and `session.entries()`.
 
 `harness.messages()` and `prompt()`'s `messages` are pi's own transcript
 entries (`EntryRecord`). The display model the UI renders is this app's

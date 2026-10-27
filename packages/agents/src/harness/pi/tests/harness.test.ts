@@ -350,22 +350,17 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.pending()).toEqual([]);
   });
 
-  it("streams pi's events, and a late snapshot carries the same transcript", async () => {
+  it("watches the session's view through a run, and a late watch shows the same transcript", async () => {
     const stub = fresh();
     const watching = stub.watch();
     const receipt = await stub.submit("multiply 5");
     await stub.wait(receipt.operationId);
-    const types = await watching;
-    for (const type of [
-      "snapshot",
-      "run_start",
-      "tool_execution_start",
-      "tool_execution_end",
-      "run_end"
-    ]) {
-      expect(types).toContain(type);
-    }
-    expect(await stub.snapshotTexts()).toEqual(await stub.messages());
+    const watched = await watching;
+    expect(watched.sawRun).toBe(true);
+    const messages = await stub.messages();
+    expect(watched.texts).toEqual(messages);
+    expect(await stub.watchTexts()).toEqual(messages);
+    expect(await stub.pagedTexts(2)).toEqual(messages);
   });
 
   it("completes the wake once pi is idle, leaving no alarm", async () => {

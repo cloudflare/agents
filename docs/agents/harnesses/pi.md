@@ -199,14 +199,32 @@ const result = await session.wait(receipt.operationId);
 | `pending()`                                       | Operations Pi has not settled yet: queued, part of the running work, or `parked` (see [How recovery works](#how-recovery-works)).                                                                                                                                                                                                                                                                                                                                                                               |
 | `retry()`                                         | Runs again the tasks Pi's restart limit parked in the session's work. Resolves `false` when nothing was parked.                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `messages()`                                      | Pi's transcript entries since the newest reset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `events()`                                        | Pi's agent events: a `snapshot`, then one batch per commit.                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `watch(window?)`                                  | Pi's view of the session: the newest transcript entries, and the session's live state, such as the answer being streamed, running tools, and why the last run ended without an answer. Each change carries Pi's operations, for a client that forwards them.                                                                                                                                                                                                                                                    |
+| `entries(query, limit)`                           | A page of the session's transcript, including entries before its resets. Pages a transcript longer than the view's window.                                                                                                                                                                                                                                                                                                                                                                                      |
 | `reset(handoff?)`                                 | Starts a new context, optionally from a handoff note.                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `setModel(model)`                                 | Changes this session's model.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `busy()`                                          | Whether a run is going.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 `harness.prompt()`, `submit()`, `wait()`, `abort()`, `retry()`, `messages()` and `pending()` act on the root session, or on `{ session }`. `harness.sessions` has `create()`, `fork(from)`, `get(id)` and `list()`, which includes sessions subagents created. `ROOT_SESSION` is the root's id.
 
-`messages()` and `events()` are Pi's own records, not a UI-ready chat transcript. The example below folds them into one.
+`messages()` and `watch()` are Pi's own records, not a UI-ready chat transcript. The example below projects them into one.
+
+```ts
+const watch = await session.watch();
+render(watch.value);
+watch.start(async (call) => {
+  if (call.kind === "value") render(call.value);
+});
+
+function render(view: ConversationView): void {
+  const live = view.docs["pi.live"] as LiveState;
+  drawEntries(view.entries);
+  if (live.generation?.message) drawStreaming(live.generation.message);
+  if (live.runFailure) drawFailure(live.runFailure);
+}
+```
+
+The window holds the newest 50 entries and grows to 100 before its oldest leave. To render a longer transcript, merge each value into Pi's `ConversationTranscript`, which pages older entries with `session.entries()`.
 
 ### Label input the user did not type
 
@@ -256,7 +274,7 @@ The harness schedules one lifecycle job, driven by Pi's `wake()`. While Pi has w
 
 A task that keeps crashing the object would restart it forever, so Pi parks a task cut off by a crash or eviction `settings.restartLimit` times in a row (default 5) without progress. A parked task is not work: the job completes and the object can hibernate. Its operations show as `parked` in `pending()`, and `wait()` keeps waiting. If your factory passes `onReport` to `Harness.open`, Pi reports it there as `task_parked`. Once you have dealt with the cause, `session.retry()` runs it again and wakes the harness; `session.abort()` gives up on it instead.
 
-A storage error closes Pi for good: the call that hit it rejects with the error, and calls and `events()` streams already underway end with Pi's `SessionFailed`, so retry them. If your factory passes `onReport` to `Harness.open`, Pi reports the failure there as `session_failed`. Once the failed Pi has closed, the harness opens Pi again, which runs the factory again, on the next call or the job's next step. Closing waits for running task code, such as a tool call, to return, so code that ignores its abort signal delays the reopen. Pi recovers from what it committed and resumes its work the same way.
+A storage error closes Pi for good: the call that hit it rejects with the error, and calls underway reject with Pi's `SessionFailed` and `watch()` handles already open end with reason `failed`, so retry them. If your factory passes `onReport` to `Harness.open`, Pi reports the failure there as `session_failed`. Once the failed Pi has closed, the harness opens Pi again, which runs the factory again, on the next call or the job's next step. Closing waits for running task code, such as a tool call, to return, so code that ignores its abort signal delays the reopen. Pi recovers from what it committed and resumes its work the same way.
 
 If a step of the job fails, such as when the factory throws, the job is not dropped. It tries again after 30 seconds, doubling the delay with each failure in a row up to 10 minutes, and goes back to its usual schedule once a step succeeds. A Durable Object memory-limit reset that fails Pi while the job waits on it counts against the alarm's memory-limit circuit breaker. Lifecycle backs the job off and drops it after repeated resets. The next call opens Pi again and pushes the job again, so Pi's restart limit is what eventually parks a task that keeps causing resets.
 
@@ -264,4 +282,4 @@ Every operation waits for the object's startup, which runs the factory. A call o
 
 ## Run the example
 
-The [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi) streams `session.events()` over WebSockets and folds Pi's entries into a browser transcript. Its tools come from a `Workspace` from `@cloudflare/computer`: files, `exec` for JavaScript in a Dynamic Worker, and git. It uses a Workers AI model.
+The [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi) sends `session.watch()` over WebSockets and projects Pi's view into a browser transcript. Its tools come from a `Workspace` from `@cloudflare/computer`: files, `exec` for JavaScript in a Dynamic Worker, and git. It uses a Workers AI model.

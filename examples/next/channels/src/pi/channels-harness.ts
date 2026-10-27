@@ -1,9 +1,10 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type {
-  AgentEvent,
+  ConversationView,
   EntryRecord,
-  MessageChange,
+  InboxState,
+  LiveState,
   SubmissionId,
   SubmissionRecord,
   UserInput
@@ -50,8 +51,9 @@ export type PiChannelsHarnessOptions = {
 
 /**
  * `PiHarness` behind the shared harness interface (`AgentHarness`). Only a
- * shape translation: pi entries become transcript messages, pi events become
- * session events, and pi's submission ids become the caller's operation ids
+ * shape translation: pi entries become transcript messages, changes of pi's
+ * conversation view become session events, and pi's submission ids become
+ * the caller's operation ids
  * (pi's `requestId`). It knows nothing about how sessions reach clients.
  *
  * Opt-in and permanent: `PiHarness` keeps pi's own shape, and this adapter
@@ -189,41 +191,39 @@ class PiChannelsSession implements HarnessSession {
   }
 
   async watch(): Promise<SessionWatch> {
-    const stream = await this.session.events();
+    const watch = await this.session.watch();
     const transcript = await this.transcript();
     const pending = await this.pi.pending({ session: this.id });
-    const snapshot = stream.snapshot;
-    const operations = await this.operations(snapshot.run?.inputs ?? []);
-    const translator = new EventTranslator(this, transcript);
-    const partial = snapshot.run
-      ? translator.attachToRun(snapshot.generation?.message)
-      : [];
+    const view = watch.value;
+    const live = liveOf(view);
+    const operations = await this.operations(live.run?.inputs ?? []);
+    const translator = new ViewTranslator(this, transcript, view);
+    const partial = translator.attach(view);
     const state: SessionState = {
       messages: transcript,
       pending: pending.map((p): OperationStatus => ({
         operationId: p.operationId,
         status: p.status === "queued" ? "queued" : "placed"
       })),
-      ...(snapshot.run && {
+      ...(live.run && {
         run: { operations, ...(partial.length && { partial }) }
       })
     };
     return {
       state,
       start: (listener) =>
-        stream.start(async (events) => {
-          const out: SessionEvent[] = [];
-          for (const event of events) {
-            try {
-              out.push(...(await translator.translate(event)));
-            } catch (error) {
-              console.warn("pi → session event", event.type, error);
-            }
+        watch.start(async (call) => {
+          if (call.kind !== "value") return;
+          let out: SessionEvent[] = [];
+          try {
+            out = await translator.advance(call.value);
+          } catch (error) {
+            console.warn("pi view → session events", error);
           }
           if (out.length) await listener(out);
         }),
-      stop: async () => void (await stream.stop()),
-      closed: stream.closed.then(() => undefined)
+      stop: async () => void (await watch.stop()),
+      closed: watch.closed.then(() => undefined)
     };
   }
 
@@ -240,6 +240,11 @@ class PiChannelsSession implements HarnessSession {
     this.ids.placed(this.id, record);
   }
 
+  /** pi's record of a submission, read from its storage. */
+  async submission(id: SubmissionId): Promise<SubmissionRecord | undefined> {
+    return (await this.pi.storage()).submission(id, BG);
+  }
+
   /** pi submission ids as operation ids, read from pi's storage. */
   async operations(inputs: readonly SubmissionId[]): Promise<string[]> {
     const out: string[] = [];
@@ -251,146 +256,230 @@ class PiChannelsSession implements HarnessSession {
   }
 }
 
+function liveOf(view: ConversationView): LiveState {
+  return (view.docs["pi.live"] ?? {}) as LiveState;
+}
+
+/** What identifies a run across changes: its first input, or its task. */
+function runKey(live: LiveState): string | undefined {
+  if (live.run === undefined) return undefined;
+  return String(live.run.inputs[0] ?? `task:${live.run.taskId}`);
+}
+
+/** What identifies the message being streamed: its generation and attempt. */
+function generationKey(live: LiveState): string | undefined {
+  if (live.generation?.message === undefined) return undefined;
+  return `${live.run?.taskId}:${live.generation.attempt}`;
+}
+
 /**
- * pi's agent events as session events. The live message streams as chunks;
- * every saved entry republishes the messages it changed, since a tool
- * result changes the assistant message holding its call.
+ * Changes of pi's conversation view as session events. pi's watch hands
+ * over the newest view, with what changed since the last one folded in, so
+ * this compares each view with the last: inputs that joined the inbox or the
+ * run, a run starting or ending, new transcript entries, and the text the
+ * streamed message gained. Every saved entry republishes the messages it
+ * changed, since a tool result changes the assistant message holding its
+ * call.
  */
-class EventTranslator {
+class ViewTranslator {
   #messages: Map<string, string>;
   #run: RunChunks | undefined;
+  #runKey: string | undefined;
+  #runInputs: SubmissionId[] = [];
+  /** The streamed message the run's chunks belong to. */
+  #streaming: string | undefined;
+  /** The newest entry seen. */
+  #newest: number;
+  /** Inputs reported queued or placed and not yet settled. */
+  readonly #open = new Set<SubmissionId>();
 
   constructor(
     private readonly session: PiChannelsSession,
-    transcript: readonly TranscriptMessage[]
+    transcript: readonly TranscriptMessage[],
+    view: ConversationView
   ) {
     this.#messages = digest(transcript);
+    this.#newest = view.entries.at(-1)?.id ?? view.before ?? 0;
+    const live = liveOf(view);
+    for (const item of inboxOf(view)) this.#open.add(item.id);
+    for (const id of live.run?.inputs ?? []) this.#open.add(id);
   }
 
   /**
    * Join a run already in progress: the in-flight message so far as chunks,
-   * with its text and reasoning parts left open so the deltas that follow
-   * continue them.
+   * with its text and reasoning parts left open so the text that follows
+   * continues them.
    */
-  attachToRun(partial: AssistantMessage | undefined): ResponseChunk[] {
+  attach(view: ConversationView): ResponseChunk[] {
+    const live = liveOf(view);
+    if (live.run === undefined) return [];
+    this.#startRun(live, live.run.inputs);
+    const partial = live.generation?.message as AssistantMessage | undefined;
+    if (partial === undefined) return [];
+    this.#streaming = generationKey(live);
+    return this.#run?.seed(partial) ?? [];
+  }
+
+  async advance(view: ConversationView): Promise<SessionEvent[]> {
+    const live = liveOf(view);
+    const inbox = inboxOf(view);
+    const out: SessionEvent[] = [];
+    // A run ended, or the next one already started.
+    const key = runKey(live);
+    if (this.#runKey !== undefined && key !== this.#runKey) {
+      out.push(...(await this.#entries(view)));
+      out.push(...(await this.#settled(live, inbox)));
+      out.push(...(await this.#endRun()));
+    }
+    for (const item of inbox) {
+      if (this.#open.has(item.id)) continue;
+      this.#open.add(item.id);
+      const operations = await this.session.operations([item.id]);
+      for (const operationId of operations) {
+        out.push({
+          type: "operation",
+          status: { operationId, status: "queued" }
+        });
+      }
+    }
+    if (live.run !== undefined && this.#runKey === undefined) {
+      this.#startRun(live);
+      const operations = await this.session.operations(live.run.inputs);
+      out.push({ type: "run-start", operations });
+    }
+    // Inputs the run took, at its start or as steers.
+    for (const id of live.run?.inputs ?? []) {
+      if (this.#runInputs.includes(id)) continue;
+      this.#runInputs.push(id);
+      this.#open.add(id);
+      const record = await this.session.submission(id);
+      if (record?.type !== "input" || record.requestId === undefined) continue;
+      this.session.placed(record);
+      out.push({
+        type: "operation",
+        status: { operationId: record.requestId, status: "placed" }
+      });
+    }
+    out.push(...(await this.#entries(view)));
+    out.push(...this.#partial(live));
+    out.push(...(await this.#settled(live, inbox)));
+    return out;
+  }
+
+  /** A new run; `inputs` are the ones already reported as placed. */
+  #startRun(live: LiveState, inputs: readonly SubmissionId[] = []): void {
     this.#run = new RunChunks();
-    this.#run.nextMessage();
-    return partial ? this.#run.seed(partial) : [];
+    this.#runKey = runKey(live);
+    this.#runInputs = [...inputs];
+    this.#streaming = undefined;
   }
 
-  async translate(event: AgentEvent): Promise<SessionEvent[]> {
-    switch (event.type) {
-      case "submission":
-        return this.#submission(event.record);
-      case "run_start": {
-        this.#run = new RunChunks();
-        const operations = await this.session.operations(event.inputs);
-        return [{ type: "run-start", operations }];
-      }
-      case "message_start":
-        if (event.message.role !== "assistant") return [];
-        this.#run?.nextMessage();
-        // The partial may already hold text that no update will repeat.
-        return this.#chunks(this.#run?.seed(event.message) ?? []);
-      case "message_update":
-        return this.#chunks(this.#run?.apply(event.changes) ?? []);
-      case "message_end": {
-        const message = event.entry.model?.[0];
-        // pi coalesces live updates; a message can finish with text that no
-        // update carried. Complete it from the saved entry before closing.
-        const chunks = [
-          ...(message?.role === "assistant"
-            ? (this.#run?.complete(message) ?? [])
-            : []),
-          ...(this.#run?.closeParts() ?? [])
-        ];
-        if (message?.role === "assistant") {
-          for (const part of message.content) {
-            if (part.type === "toolCall") {
-              chunks.push(
-                ...(this.#run?.toolCall(
-                  part.id,
-                  part.name,
-                  part.arguments as Json
-                ) ?? [])
-              );
-            }
-          }
-        }
-        return [...this.#chunks(chunks), ...(await this.#saved(event.entry))];
-      }
-      case "tool_execution_end": {
-        const chunks: ResponseChunk[] = [];
-        const result = event.entry?.model?.[0];
-        if (result?.role === "toolResult") {
-          const text = toolText(result.content);
-          chunks.push(
-            result.isError
-              ? {
-                  type: "tool-output-error",
-                  toolCallId: event.toolCallId,
-                  errorText: text
-                }
-              : {
-                  type: "tool-output-available",
-                  toolCallId: event.toolCallId,
-                  output: toolOutput(result.content, result.details)
-                }
-          );
-        }
-        return [
-          ...this.#chunks(chunks),
-          ...(event.entry ? await this.#saved(event.entry) : [])
-        ];
-      }
-      case "entry_appended":
-        return this.#saved(event.entry);
-      case "run_end": {
-        const chunks = this.#run?.closeParts() ?? [];
-        this.#run = undefined;
-        const operations = await this.session.operations(event.inputs);
-        return [
-          ...this.#chunks(chunks),
-          ...(await this.#changed()),
-          { type: "run-end", operations }
-        ];
-      }
-      default:
-        return [];
+  async #endRun(): Promise<SessionEvent[]> {
+    const chunks = this.#run?.closeParts() ?? [];
+    const operations = await this.session.operations(this.#runInputs);
+    this.#run = undefined;
+    this.#runKey = undefined;
+    this.#runInputs = [];
+    this.#streaming = undefined;
+    return [
+      ...this.#chunks(chunks),
+      ...(await this.#changed()),
+      { type: "run-end", operations }
+    ];
+  }
+
+  /** The text the streamed message gained since the last view. */
+  #partial(live: LiveState): SessionEvent[] {
+    const message = live.generation?.message as AssistantMessage | undefined;
+    const key = generationKey(live);
+    if (message === undefined || key === undefined || !this.#run) return [];
+    if (key !== this.#streaming) {
+      this.#run.nextMessage();
+      this.#streaming = key;
     }
+    // Tool calls are shown once their message is saved.
+    return this.#chunks(this.#run.complete(message));
   }
 
-  #submission(record: SubmissionRecord): SessionEvent[] {
-    if (record.type !== "input" || record.requestId === undefined) return [];
-    const operationId = record.requestId;
-    switch (record.status) {
-      case "queued":
-        return [
-          { type: "operation", status: { operationId, status: "queued" } }
-        ];
-      case "placed":
-        this.session.placed(record);
-        return [
-          { type: "operation", status: { operationId, status: "placed" } }
-        ];
-      case "done":
-        return [{ type: "operation", status: { operationId, status: "done" } }];
-      case "unanswered":
-        return [
-          {
-            type: "operation",
-            status: { operationId, status: "unanswered", reason: record.reason }
-          }
-        ];
-    }
+  /** Entries added since the last view. */
+  async #entries(view: ConversationView): Promise<SessionEvent[]> {
+    const added = view.entries.filter((entry) => entry.id > this.#newest);
+    if (added.length === 0) return [];
+    this.#newest = added[added.length - 1].id;
+    const out: SessionEvent[] = [];
+    for (const entry of added) out.push(...this.#entry(entry));
+    return [...out, ...(await this.#changed())];
   }
 
-  async #saved(entry: EntryRecord): Promise<SessionEvent[]> {
+  #entry(entry: EntryRecord): SessionEvent[] {
     if (entry.kind === "pi.reset") {
       this.#messages = new Map();
-      return [{ type: "reset" }, ...(await this.#changed())];
+      return [{ type: "reset" }];
     }
-    return this.#changed();
+    const message = entry.model?.[0];
+    const run = this.#run;
+    if (!run) return [];
+    if (message?.role === "assistant") {
+      // pi saves the message with text the last view may not have shown.
+      if (this.#streaming === undefined) run.nextMessage();
+      this.#streaming = undefined;
+      const chunks = [...run.complete(message), ...run.closeParts()];
+      for (const part of message.content) {
+        if (part.type === "toolCall") {
+          chunks.push(
+            ...run.toolCall(part.id, part.name, part.arguments as Json)
+          );
+        }
+      }
+      return this.#chunks(chunks);
+    }
+    if (message?.role === "toolResult") {
+      const text = toolText(message.content);
+      return this.#chunks([
+        message.isError
+          ? {
+              type: "tool-output-error",
+              toolCallId: message.toolCallId,
+              errorText: text
+            }
+          : {
+              type: "tool-output-available",
+              toolCallId: message.toolCallId,
+              output: toolOutput(message.content, message.details)
+            }
+      ]);
+    }
+    return [];
+  }
+
+  /** Inputs that left the inbox and the run: how pi settled each. */
+  async #settled(
+    live: LiveState,
+    inbox: readonly { id: SubmissionId }[]
+  ): Promise<SessionEvent[]> {
+    const out: SessionEvent[] = [];
+    const current = new Set([
+      ...inbox.map((item) => item.id),
+      ...(live.run?.inputs ?? [])
+    ]);
+    for (const id of [...this.#open]) {
+      if (current.has(id)) continue;
+      const record = await this.session.submission(id);
+      if (record?.status !== "done" && record?.status !== "unanswered") {
+        continue;
+      }
+      this.#open.delete(id);
+      if (record.type !== "input" || record.requestId === undefined) continue;
+      const operationId = record.requestId;
+      out.push({
+        type: "operation",
+        status:
+          record.status === "done"
+            ? { operationId, status: "done" }
+            : { operationId, status: "unanswered", reason: record.reason }
+      });
+    }
+    return out;
   }
 
   /** Messages that are new or differ from what was last published. */
@@ -412,6 +501,10 @@ class EventTranslator {
   }
 }
 
+function inboxOf(view: ConversationView): readonly { id: SubmissionId }[] {
+  return (view.docs["pi.inbox"] as InboxState | undefined)?.items ?? [];
+}
+
 /** Part ids for one run: unique across the run's assistant messages. */
 class RunChunks {
   #open = new Map<number, { kind: "text" | "reasoning"; id: string }>();
@@ -424,50 +517,6 @@ class RunChunks {
     this.#message += 1;
     this.#open.clear();
     this.#emitted.clear();
-  }
-
-  apply(changes: readonly MessageChange[]): ResponseChunk[] {
-    const out: ResponseChunk[] = [];
-    for (const change of changes) {
-      switch (change.type) {
-        case "text_start":
-        case "thinking_start": {
-          const kind = change.block.type === "thinking" ? "reasoning" : "text";
-          const part = this.#start(change.contentIndex, kind, out);
-          this.#delta(
-            change.contentIndex,
-            part.id,
-            kind,
-            blockText(change.block),
-            out
-          );
-          break;
-        }
-        case "text_delta":
-        case "thinking_delta": {
-          const kind = change.type === "text_delta" ? "text" : "reasoning";
-          const part = this.#start(change.contentIndex, kind, out);
-          this.#delta(change.contentIndex, part.id, kind, change.delta, out);
-          break;
-        }
-        case "block":
-          if (change.block.type === "toolCall") {
-            const { id, name, arguments: input } = change.block;
-            out.push(...this.toolCall(id, name, input as Json));
-          } else {
-            this.#rest(change.contentIndex, change.block, out);
-            this.#close(change.contentIndex, out);
-          }
-          break;
-        case "message":
-          out.push(...this.complete(change.message));
-          break;
-        default:
-          // Tool call deltas: the call is shown once its block completes.
-          break;
-      }
-    }
-    return out;
   }
 
   /**

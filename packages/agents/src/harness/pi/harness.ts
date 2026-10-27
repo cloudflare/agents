@@ -2,15 +2,18 @@ import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
   LiveDoc,
   ROOT_CONVERSATION_ID,
-  watchEvents,
-  type AgentEventStream,
   type Conversation,
   type ConversationId,
+  type ConversationWatch,
+  type ConversationWindow,
+  type Cursor,
   type AgentChange,
+  type EntryQuery,
   type EntryRecord,
   type Harness,
   type HarnessInspection,
   type ModelRef,
+  type Page,
   type SettledSubmissionRecord,
   type TaskId,
   type UserInput,
@@ -965,10 +968,38 @@ export class PiSession {
     return [...view.entries];
   }
 
-  /** pi's agent events for this session: a snapshot, then one batch per commit. */
-  async events(context: Context = BG): Promise<AgentEventStream> {
-    const pi = await this.#harness.pi();
-    return watchEvents(pi, conversationId(this.id), context);
+  /**
+   * Watch this session: pi's conversation view, a window over the transcript
+   * with the session's documents, such as `pi.live` (the answer being
+   * streamed, running tools, and why the last run ended without an answer)
+   * and `pi.inbox`. The first value holds the newest entries; new entries
+   * are appended. Each change carries pi's operations, for a client that
+   * forwards them. To render more than the window, merge each value into a
+   * `ConversationTranscript` that pages with `entries()`.
+   */
+  async watch(
+    window?: ConversationWindow,
+    context: Context = BG
+  ): Promise<ConversationWatch> {
+    return (await this.#harness.conversation(this.id)).watch(context, window);
+  }
+
+  /**
+   * A page of this session's transcript, newest first unless `query.order`
+   * is `ascending`, including entries before its resets. The loader a
+   * `ConversationTranscript` takes.
+   */
+  async entries(
+    query: Omit<EntryQuery, "conversationId">,
+    limit: number,
+    context: Context = BG
+  ): Promise<Page<EntryRecord, Cursor>> {
+    return (await this.#harness.conversation(this.id)).entries(
+      query,
+      limit,
+      undefined,
+      context
+    );
   }
 
   async busy(): Promise<boolean> {

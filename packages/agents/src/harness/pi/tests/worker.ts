@@ -13,10 +13,10 @@ import {
   defineTask,
   ConversationBusy,
   Harness,
-  type AgentEvent,
   type EntryRecord,
   type Extension,
   type InputEntry,
+  type LiveState,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
@@ -489,25 +489,52 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return (await this.ctx.storage.get<number>(GATE_RUNS_KEY)) ?? 0;
   }
 
-  /** Watch the root session's events until a run ends. */
-  async watch(): Promise<string[]> {
-    const stream = await this.harness.session().events();
-    const types: string[] = [stream.snapshot.type];
+  /**
+   * Watch the root session through one run: what the view showed on the way,
+   * and the transcript in its last value.
+   */
+  async watch(): Promise<{ sawRun: boolean; texts: string[] }> {
+    const watch = await this.harness.session().watch();
+    let sawRun = false;
+    let texts: string[] = [];
     await new Promise<void>((resolve) => {
-      stream.start(async (events: readonly AgentEvent[]) => {
-        types.push(...events.map((event) => event.type));
-        if (events.some((event) => event.type === "run_end")) resolve();
+      watch.start(async (call) => {
+        if (call.kind !== "value") return;
+        const { value } = call;
+        const live = value.docs["pi.live"] as LiveState | undefined;
+        if (live?.run !== undefined) sawRun = true;
+        if (sawRun && live?.run === undefined) {
+          texts = entryTexts(value.entries);
+          resolve();
+        }
       });
     });
-    await stream.stop();
-    return types;
+    await watch.stop();
+    return { sawRun, texts };
   }
 
-  /** The transcript in a fresh snapshot, as a client joining now sees it. */
-  async snapshotTexts(): Promise<string[]> {
-    const stream = await this.harness.session().events();
-    await stream.stop();
-    return entryTexts(stream.snapshot.entries);
+  /** The transcript in a new watch's first value, as a client joining now sees it. */
+  async watchTexts(): Promise<string[]> {
+    const watch = await this.harness.session().watch();
+    await watch.stop();
+    return entryTexts(watch.value.entries);
+  }
+
+  /** The root session's transcript, oldest first, paged `size` entries at a time. */
+  async pagedTexts(size: number): Promise<string[]> {
+    const session = this.harness.session();
+    const entries: EntryRecord[] = [];
+    let page = await session.entries({ order: "ascending" }, size);
+    entries.push(...page.items);
+    while (page.items.length === size) {
+      const last = page.items[page.items.length - 1];
+      page = await session.entries(
+        { order: "ascending", minEntryId: (last.id + 1) as EntryRecord["id"] },
+        size
+      );
+      entries.push(...page.items);
+    }
+    return entryTexts(entries);
   }
 
   async alarmTime(): Promise<number | null> {
