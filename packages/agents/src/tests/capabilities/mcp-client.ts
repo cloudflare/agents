@@ -2,6 +2,12 @@ import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../lifecycle";
 import { MCPClientManager } from "../../mcp/client";
 import { MCPConnectionState } from "../../mcp/client/connection";
+import {
+  backdateMcpJobs,
+  expireOAuthStates,
+  mcpJobs,
+  type McpJobRow
+} from "../shared/mcp-time-travel";
 
 /**
  * A plain Lifecycle Object with the MCP client manager installed, used to
@@ -64,155 +70,57 @@ export class PlainMcpClientObject extends DurableObject<Cloudflare.Env> {
     return authProvider.state();
   }
 
-  async startFreshOAuthFlow(): Promise<unknown> {
-    await this.lifecycle.start();
-    const serverUrl = "https://mcp.example.com/mcp";
-    const resourceMetadataUrl =
-      "https://mcp.example.com/.well-known/oauth-protected-resource/mcp";
-    const authorizationServerUrl = "https://auth.example.com";
-
-    const oauthFetch: typeof fetch = async (input, init) => {
-      const request = new Request(input, init);
-      const url = new URL(request.url);
-
-      if (request.url === serverUrl) {
-        return new Response(null, {
-          status: 401,
-          headers: {
-            "www-authenticate": `Bearer resource_metadata="${resourceMetadataUrl}"`
-          }
-        });
-      }
-
-      if (request.url === resourceMetadataUrl) {
-        return Response.json({
-          resource: serverUrl,
-          authorization_servers: [authorizationServerUrl]
-        });
-      }
-
-      if (
-        url.origin === authorizationServerUrl &&
-        url.pathname.includes(".well-known")
-      ) {
-        return Response.json({
-          issuer: authorizationServerUrl,
-          authorization_endpoint: `${authorizationServerUrl}/authorize`,
-          token_endpoint: `${authorizationServerUrl}/token`,
-          registration_endpoint: `${authorizationServerUrl}/register`,
-          response_types_supported: ["code"],
-          grant_types_supported: ["authorization_code", "refresh_token"],
-          token_endpoint_auth_methods_supported: ["none"],
-          code_challenge_methods_supported: ["S256"]
-        });
-      }
-
-      if (
-        url.origin === authorizationServerUrl &&
-        url.pathname === "/register" &&
-        request.method === "POST"
-      ) {
-        return Response.json({
-          client_id: "test-client-id",
-          redirect_uris: ["https://example.com/callback"]
-        });
-      }
-
-      return new Response(`Unexpected OAuth test request: ${request.url}`, {
-        status: 500
-      });
-    };
-
-    await this.mcp.registerServer("fresh-oauth-server", {
-      name: "Fresh OAuth server",
-      url: serverUrl,
-      callbackUrl: "https://example.com/callback",
-      transport: { type: "streamable-http", fetch: oauthFetch }
-    });
-
-    return this.mcp.connectToServer("fresh-oauth-server");
-  }
-
-  /** Whether the flaky test server accepts connections. */
-  #flakyServerUp = false;
-
   /**
-   * A minimal MCP server reached through the transport's `fetch`, which
-   * answers 503 until {@link allowFlakyServer} is called.
+   * Register an MCP server with the default transport and connect to it, as
+   * a standalone manager does. One quick attempt per connect.
    */
-  readonly #flakyFetch: typeof fetch = async (input, init) => {
-    const request = new Request(input, init);
-    if (!this.#flakyServerUp) {
-      return new Response("unavailable", { status: 503 });
-    }
-    if (request.method !== "POST") return new Response(null, { status: 405 });
-    const message = (await request.json()) as { id?: number; method?: string };
-    if (message.id === undefined) return new Response(null, { status: 202 });
-    const ok = (result: unknown) =>
-      Response.json({ jsonrpc: "2.0", id: message.id, result });
-    switch (message.method) {
-      case "initialize":
-        return ok({
-          protocolVersion: "2025-06-18",
-          capabilities: { tools: {} },
-          serverInfo: { name: "flaky", version: "1.0.0" }
-        });
-      case "tools/list":
-        return ok({
-          tools: [{ name: "echo", inputSchema: { type: "object" } }]
-        });
-      default:
-        return ok({});
-    }
-  };
-
-  /** Register a server that is down, and start connecting to it. */
-  async prepareFlakyServer(): Promise<void> {
+  async addServer(
+    id: string,
+    url: string,
+    callbackUrl: string
+  ): Promise<{ state: string; authUrl?: string; clientId?: string }> {
     await this.lifecycle.start();
-    this.#flakyServerUp = false;
-    await this.mcp.registerServer("flaky", {
-      name: "Flaky server",
-      url: "https://flaky.example.com/mcp",
-      transport: { type: "streamable-http", fetch: this.#flakyFetch },
+    await this.mcp.registerServer(id, {
+      name: id,
+      url,
+      callbackUrl,
+      transport: { type: "auto" },
       retry: { maxAttempts: 1 }
     });
-    await this.mcp.establishConnection("flaky");
+    const result = await this.mcp.connectToServer(id);
+    return result.state === "authenticating"
+      ? {
+          state: result.state,
+          authUrl: result.authUrl,
+          clientId: result.clientId
+        }
+      : { state: result.state };
   }
 
-  /** Bring the flaky server up. */
-  allowFlakyServer(): void {
-    this.#flakyServerUp = true;
+  /** Wait for connection work started by callbacks, restores and jobs. */
+  async settle(): Promise<void> {
+    await this.lifecycle.start();
+    await this.mcp.waitForConnections();
   }
 
-  /** The MCP manager's queued jobs, oldest first. */
-  mcpJobs(): Array<{ id: string; fn: string; time: number; payload: unknown }> {
-    return this.ctx.storage.sql
-      .exec<{ id: string; fn: string; time: number; payload: string | null }>(
-        "SELECT id, fn, time, payload FROM cf_agents_jobs WHERE capability = 'mcp' ORDER BY time"
-      )
-      .toArray()
-      .map((row) => ({
-        id: row.id,
-        fn: row.fn,
-        time: row.time,
-        payload: row.payload ? JSON.parse(row.payload) : undefined
-      }));
+  /**
+   * Reset the object the way the runtime does when it tears one down: memory
+   * is gone, storage stays, and the next call starts a fresh instance.
+   */
+  restart(): void {
+    this.ctx.abort("restarted by test");
   }
 
-  /** Make every queued MCP job due now. */
+  mcpJobs(): McpJobRow[] {
+    return mcpJobs(this.ctx.storage);
+  }
+
   backdateMcpJobs(): void {
-    this.ctx.storage.sql.exec(
-      "UPDATE cf_agents_jobs SET time = ? WHERE capability = 'mcp'",
-      Date.now() - 1
-    );
+    backdateMcpJobs(this.ctx.storage);
   }
 
-  /** Forget every OAuth state nonce, as if each authorization link expired. */
-  async expireOAuthStates(): Promise<void> {
-    const keys = [
-      ...(await this.ctx.storage.list({ prefix: "/" })).keys()
-    ].filter((key) => key.includes("/state/"));
-    if (keys.length > 0) await this.ctx.storage.delete(keys);
+  expireOAuthStates(): Promise<void> {
+    return expireOAuthStates(this.ctx.storage);
   }
 
   /** One connection's state and error. */

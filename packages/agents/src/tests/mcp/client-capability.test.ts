@@ -1,25 +1,68 @@
 import { env } from "cloudflare:workers";
 import { evictDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import type { PlainMcpClientObject } from "../capabilities/mcp-client";
+import { useOAuthMcpServer } from "./integration/harness";
+import {
+  AUTH_ORIGIN,
+  CLIENT_ORIGIN,
+  MCP_URL
+} from "./integration/oauth-mcp-server";
+
+// The MCP server and its authorization server, served through msw.
+const server = useOAuthMcpServer();
+
+const CALLBACK_URL = `${CLIENT_ORIGIN}/callback`;
+
+type Plain = DurableObjectStub<PlainMcpClientObject>;
+
+/** A standalone manager with the server registered and authorized. */
+async function authorizedObject(): Promise<{ stub: Plain; name: string }> {
+  const name = crypto.randomUUID();
+  const stub = env.PlainMcpClientObject.getByName(name);
+  const result = await stub.addServer("files", MCP_URL, CALLBACK_URL);
+  if (result.state !== "authenticating" || !result.authUrl) {
+    throw new Error(`expected a link, got ${result.state}`);
+  }
+  await stub.fetch(new Request(server.authorize(result.authUrl)));
+  await stub.settle();
+  expect(await stub.connectionStatus("files")).toMatchObject({
+    state: "ready"
+  });
+  return { stub, name };
+}
+
+/** Restart the object, as after an eviction, and return a fresh stub. */
+async function restart(stub: Plain, name: string): Promise<Plain> {
+  await stub.restart().catch(() => {});
+  return env.PlainMcpClientObject.getByName(name);
+}
+
+/** Make the manager's jobs due and run the object's alarm. */
+async function runDueJobs(stub: Plain): Promise<void> {
+  await stub.backdateMcpJobs();
+  await runDurableObjectAlarm(stub);
+  await stub.settle();
+}
 
 describe("MCPClientManager capability", () => {
-  it("starts OAuth for a fresh standalone registration", async () => {
+  it("connects a standalone registration through OAuth and its callback", async () => {
     const stub = env.PlainMcpClientObject.getByName(crypto.randomUUID());
 
-    const result = (await stub.startFreshOAuthFlow()) as unknown as {
-      state: string;
-      authUrl?: string;
-      clientId?: string;
-      error?: string;
-    };
+    const result = await stub.addServer("files", MCP_URL, CALLBACK_URL);
+    expect(result).toMatchObject({ state: "authenticating" });
+    if (result.state !== "authenticating" || !result.authUrl) {
+      throw new Error("expected a link");
+    }
+    expect(result.authUrl.startsWith(`${AUTH_ORIGIN}/authorize?`)).toBe(true);
+    expect(result.clientId).toMatch(/^client-/);
 
-    expect(result).toMatchObject({
-      state: "authenticating",
-      clientId: "test-client-id"
+    await stub.fetch(new Request(server.authorize(result.authUrl)));
+    await stub.settle();
+    expect(await stub.connectionStatus("files")).toEqual({
+      state: "ready",
+      error: null
     });
-    expect(result.authUrl).toMatch(
-      /^https:\/\/auth\.example\.com\/authorize\?/
-    );
   });
 
   it("restores persisted connections after eviction", async () => {
@@ -52,73 +95,67 @@ describe("MCPClientManager capability", () => {
   });
 
   describe("durable connection jobs", () => {
-    type Job = { id: string; fn: string; time: number; payload: unknown };
+    it("reconnects a server that went down from the job queue with backoff", async () => {
+      const authorized = await authorizedObject();
+      server.options.up = false;
+      const stub = await restart(authorized.stub, authorized.name);
+      await stub.settle();
 
-    it("reconnects a failed server from the job queue with backoff", async () => {
-      const stub = env.PlainMcpClientObject.getByName(crypto.randomUUID());
-      await stub.prepareFlakyServer();
-
-      expect(await stub.connectionStatus("flaky")).toMatchObject({
+      expect(await stub.connectionStatus("files")).toMatchObject({
         state: "failed"
       });
-      const [first] = (await stub.mcpJobs()) as Job[];
+      const [first] = await stub.mcpJobs();
       expect(first).toMatchObject({
-        id: "connect:flaky",
+        id: "connect:files",
         fn: "connect",
-        payload: { serverId: "flaky", attempt: 1 }
+        payload: { serverId: "files", attempt: 1 }
       });
 
       // Still down when the alarm drives the job: the next attempt backs off.
-      await stub.backdateMcpJobs();
-      await runDurableObjectAlarm(stub);
-      const [second] = (await stub.mcpJobs()) as Job[];
+      await runDueJobs(stub);
+      const [second] = await stub.mcpJobs();
       expect(second).toMatchObject({
-        id: "connect:flaky",
-        payload: { serverId: "flaky", attempt: 2 }
+        id: "connect:files",
+        payload: { serverId: "files", attempt: 2 }
       });
       expect(second.time).toBeGreaterThan(Date.now() + 30_000);
 
       // Back up: the next drive connects and the job is gone.
-      await stub.allowFlakyServer();
-      await stub.backdateMcpJobs();
-      await runDurableObjectAlarm(stub);
-      expect(await stub.connectionStatus("flaky")).toMatchObject({
+      server.options.up = true;
+      await runDueJobs(stub);
+      expect(await stub.connectionStatus("files")).toMatchObject({
         state: "ready"
       });
       expect(await stub.mcpJobs()).toEqual([]);
     });
 
-    it("fails an authorization link that expires unused, and keeps it failed after eviction", async () => {
-      const stub = env.PlainMcpClientObject.getByName(crypto.randomUUID());
-      const started = (await stub.startFreshOAuthFlow()) as unknown as {
-        state: string;
-        authUrl?: string;
-      };
+    it("fails an authorization link that expires unused, and keeps it failed after a restart", async () => {
+      const name = crypto.randomUUID();
+      const stub = env.PlainMcpClientObject.getByName(name);
+      const started = await stub.addServer("files", MCP_URL, CALLBACK_URL);
       expect(started.state).toBe("authenticating");
-      expect((await stub.mcpJobs()) as Job[]).toMatchObject([
+      expect(await stub.mcpJobs()).toMatchObject([
         {
-          id: "auth-expiry:fresh-oauth-server",
+          id: "auth-expiry:files",
           fn: "auth-expiry",
-          payload: {
-            serverId: "fresh-oauth-server",
-            authUrl: started.authUrl
-          }
+          payload: { serverId: "files", authUrl: started.authUrl }
         }
       ]);
 
       await stub.expireOAuthStates();
-      await stub.backdateMcpJobs();
-      await runDurableObjectAlarm(stub);
+      await runDueJobs(stub);
 
-      const expired = await stub.connectionStatus("fresh-oauth-server");
+      const expired = await stub.connectionStatus("files");
       expect(expired?.state).toBe("failed");
       expect(expired?.error).toContain("Authorization expired");
       expect(await stub.mcpJobs()).toEqual([]);
 
-      await evictDurableObject(stub);
-      const response = await stub.fetch(new Request("https://example.com"));
+      const restarted = await restart(stub, name);
+      const response = await restarted.fetch(
+        new Request("https://example.com")
+      );
       expect(await response.json()).toMatchObject({
-        states: { "fresh-oauth-server": "failed" }
+        states: { files: "failed" }
       });
     });
   });

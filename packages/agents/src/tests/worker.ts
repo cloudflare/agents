@@ -125,6 +125,7 @@ export {
   TestAgentToolStubChild,
   TestOAuthAgent,
   TestCustomOAuthAgent,
+  McpIntegrationAgent,
   TestReadonlyAgent,
   TestProtocolMessagesAgent,
   TestCallableAgent,
@@ -196,6 +197,7 @@ import type {
   TestUserNotificationAgent,
   TestOAuthAgent,
   TestCustomOAuthAgent,
+  McpIntegrationAgent,
   TestMcpJurisdiction,
   TestAlarmInitAgent,
   TestDestroyScheduleAgent,
@@ -279,6 +281,7 @@ export type Env = {
   UserNotificationAgent: DurableObjectNamespace<TestUserNotificationAgent>;
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
   TestCustomOAuthAgent: DurableObjectNamespace<TestCustomOAuthAgent>;
+  McpIntegrationAgent: DurableObjectNamespace<McpIntegrationAgent>;
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
   TestAlarmInitAgent: DurableObjectNamespace<TestAlarmInitAgent>;
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
