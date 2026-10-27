@@ -9,6 +9,6 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
     "agents": "*",
-    "zod": "^4.5.4"
+    "zod": "^4.6.7"
   }
 }
