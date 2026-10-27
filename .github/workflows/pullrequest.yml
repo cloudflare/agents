@@ -16,9 +16,83 @@ env:
   NX_PARALLEL: "2"
 
 jobs:
-  ci:
-    timeout-minutes: 35
+  # Build every project, then run the repo-wide checks (sherif, exports,
+  # oxfmt, oxlint, typecheck).
+  check:
+    timeout-minutes: 20
     runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/install
+
+      - run: pnpm run build
+      - run: pnpm run check
+
+  # Preview packages on pkg.pr.new. Builds only the published packages so it
+  # doesn't wait on the full build in `check`.
+  publish:
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/install
+
+      - run: pnpm exec nx run-many -t build --projects='packages/*'
+
+      # pkg.pr.new accepts a publish only after its GitHub App has received
+      # this run's `workflow_run` webhook. This job reaches the publish step in
+      # about a minute, which can be before the webhook lands (seen on a
+      # re-run), so retry for up to two minutes.
+      - name: Publish previews
+        run: |
+          for attempt in 1 2 3 4; do
+            pnpm exec pkg-pr-new publish --peerDeps ./packages/* && exit 0
+            echo "pkg-pr-new publish failed (attempt $attempt), retrying in 30s"
+            sleep 30
+          done
+          pnpm exec pkg-pr-new publish --peerDeps ./packages/*
+
+  # `nx affected -t test`, split across runners. Each shard runs only its
+  # slice of the affected test targets and builds only what those targets
+  # depend on. Together the shards cover every affected test target:
+  #   - agents: its `workers` vitest project in four parts, plus every other
+  #     agents vitest project (`!workers`)
+  #   - think and ai-chat on their own runners
+  #   - every other affected project
+  test:
+    name: test (${{ matrix.name }})
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: agents workers 1/4
+            exclude: "*,!agents"
+            args: --project workers --shard=1/4
+          - name: agents workers 2/4
+            exclude: "*,!agents"
+            args: --project workers --shard=2/4
+          - name: agents workers 3/4
+            exclude: "*,!agents"
+            args: --project workers --shard=3/4
+          - name: agents workers 4/4
+            exclude: "*,!agents"
+            args: --project workers --shard=4/4
+          - name: agents other
+            exclude: "*,!agents"
+            args: --project '!workers'
+            browsers: true
+          - name: think
+            exclude: "*,!@cloudflare/think"
+          - name: ai-chat
+            exclude: "*,!@cloudflare/ai-chat"
+            browsers: true
+          - name: rest
+            exclude: "agents,@cloudflare/think,@cloudflare/ai-chat"
+            browsers: true
     steps:
       - uses: actions/checkout@v6
         with:
@@ -29,23 +103,42 @@ jobs:
 
       - uses: nrwl/nx-set-shas@v5
 
-      - run: pnpm run build
-      - run: pnpm run check
-
       - name: Get Playwright version
+        if: matrix.browsers
         id: playwright-version
         run: echo "version=$(node -p "require('playwright/package.json').version")" >> $GITHUB_OUTPUT
 
       - name: Cache Playwright browsers
+        if: matrix.browsers
         uses: actions/cache@v5
-        id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
 
+      # No `--with-deps`: the runner image already has Chromium's system
+      # libraries, and `--with-deps` only adds fonts and package upgrades from
+      # an apt mirror that sometimes takes minutes.
       - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
+        if: matrix.browsers
+        run: pnpm exec playwright install chromium
 
-      - run: CI=true pnpm exec nx affected -t test
+      - name: Test
+        env:
+          EXCLUDE: ${{ matrix.exclude }}
+          ARGS: ${{ matrix.args }}
+        run: eval "pnpm exec nx affected -t test --exclude='$EXCLUDE' -- $ARGS"
 
-      - run: pnpm exec pkg-pr-new publish --peerDeps ./packages/*
+  # One status for the whole workflow: `ci` passes only if every job above
+  # passed, as it did when it was a single job.
+  ci:
+    if: always()
+    needs: [check, publish, test]
+    runs-on: ubuntu-slim
+    steps:
+      - name: Fail unless every job passed
+        env:
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+          RESULTS: ${{ join(needs.*.result, ', ') }}
+        run: |
+          echo "$RESULTS"
+          test "$FAILED" = false
