@@ -20,32 +20,19 @@ Already using `Agent`, `AIChatAgent` or Think? They still work. See [The Agent c
 
 [Read the docs](https://developers.cloudflare.com/agents/) · [Quick start](#quick-start) · [Build your first agent](https://github.com/cloudflare/agents/blob/main/docs/agents/build-your-first-agent.md) · [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi)
 
-## Why run an agent on Cloudflare
-
-A stateless function handles one request and then forgets about it. An agent's work can go on for hours or days, so it needs a few things a function doesn't give you:
-
-| An agent needs to…                          | In a stateless function, it…                   | With Agents, it…                                               |
-| ------------------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
-| Work for minutes or hours                   | Stops when the request ends                    | Sets an alarm, so it wakes up and carries on after the request |
-| Survive a crash or a deploy partway through | Starts over, and may send the same email twice | Picks up where it left off, without rerunning unsafe tools     |
-| Remember each user                          | Needs a separate database                      | Has its own database and files                                 |
-| Wait days for the next message              | Saves everything elsewhere and reloads it      | Sleeps without using compute, and wakes with its data intact   |
-| Act without being asked                     | Needs a cron job that knows about every agent  | Sets its own schedules, and wakes itself when one is due       |
-
-You pay for compute only while an agent is working. A sleeping agent costs only its storage, so you can scale to millions of agents, one for every user, without paying for servers that sit idle.
-
-## How an agent runs
-
-Your Worker finds each agent by name, so every user, task or chat gets its own. Inside it, the Lifecycle starts the harness and anything else you've added, and they all keep their data in the agent's SQLite database. If the agent sleeps or crashes, its alarm wakes it to carry on.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/cloudflare/agents/main/assets/how-an-agent-runs-dark.svg">
-  <img width="100%" alt="A request goes from a client to your Worker, which finds Alice's agent by name, one of many. The agent is a Durable Object. Requests and its alarm both arrive at its Lifecycle, which starts a harness such as Pi, OpenCode, Claude Code or Codex, the tools the harness runs, a scheduler and WebSockets. They keep their data in the object's SQLite database. The alarm wakes the object after it sleeps or crashes. The harness calls models, and the tools reach outside services and run code the model writes in a sandbox." src="https://raw.githubusercontent.com/cloudflare/agents/main/assets/how-an-agent-runs.svg">
-</picture>
-
 ## Quick start
 
-This agent runs Pi on a Workers AI model, with one tool: it can read web pages. Install the Agents SDK and Pi:
+To start from a complete app, with a chat UI over WebSockets, a filesystem and code execution, create a copy of the [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi):
+
+```sh
+npm create cloudflare@latest -- --template=cloudflare/agents/examples/next/harnesses/pi
+```
+
+Or deploy it to your account:
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi)
+
+To build a small one yourself instead, start here. This agent runs Pi on a Workers AI model, with one tool: it can read web pages. Install the Agents SDK and Pi:
 
 ```sh
 npm install agents @earendil-works/pi-durable@~1.4.0 @earendil-works/pi-ai@~1.4.0 @earendil-works/chord@~1.4.0
@@ -153,15 +140,28 @@ Pi saved the interrupted turn and finished it when the agent started again, so t
 
 This code is also a complete project in [`examples/next/quick-start`](https://github.com/cloudflare/agents/tree/main/examples/next/quick-start).
 
-To start from a complete app instead, use the Pi harness example. It adds a chat UI over WebSockets, a filesystem and code execution. Create a local copy:
+## Why run an agent on Cloudflare
 
-```sh
-npm create cloudflare@latest -- --template=cloudflare/agents/examples/next/harnesses/pi
-```
+A stateless function handles one request and then forgets about it. An agent's work can go on for hours or days, so it needs a few things a function doesn't give you:
 
-Or deploy it to your account:
+| An agent needs to…                          | In a stateless function, it…                   | With Agents, it…                                               |
+| ------------------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
+| Work for minutes or hours                   | Stops when the request ends                    | Sets an alarm, so it wakes up and carries on after the request |
+| Survive a crash or a deploy partway through | Starts over, and may send the same email twice | Picks up where it left off, without rerunning unsafe tools     |
+| Remember each user                          | Needs a separate database                      | Has its own database and files                                 |
+| Wait days for the next message              | Saves everything elsewhere and reloads it      | Sleeps without using compute, and wakes with its data intact   |
+| Act without being asked                     | Needs a cron job that knows about every agent  | Sets its own schedules, and wakes itself when one is due       |
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi)
+You pay for compute only while an agent is working. A sleeping agent costs only its storage, so you can scale to millions of agents, one for every user, without paying for servers that sit idle.
+
+## How an agent runs
+
+Your Worker finds each agent by name, so every user, task or chat gets its own. Inside it, the Lifecycle starts the harness and anything else you've added, and they all keep their data in the agent's SQLite database. If the agent sleeps or crashes, its alarm wakes it to carry on.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/cloudflare/agents/main/assets/how-an-agent-runs-dark.svg">
+  <img width="100%" alt="A request goes from a client to your Worker, which finds Alice's agent by name, one of many. The agent is a Durable Object. Requests and its alarm both arrive at its Lifecycle, which starts a harness such as Pi, OpenCode, Claude Code or Codex, the tools the harness runs, a scheduler and WebSockets. They keep their data in the object's SQLite database. The alarm wakes the object after it sleeps or crashes. The harness calls models, and the tools reach outside services and run code the model writes in a sandbox." src="https://raw.githubusercontent.com/cloudflare/agents/main/assets/how-an-agent-runs.svg">
+</picture>
 
 ## Build your first agent
 
