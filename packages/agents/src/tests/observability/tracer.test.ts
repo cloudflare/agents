@@ -1,3 +1,4 @@
+import { SpanStatusCode } from "@opentelemetry/api";
 import { describe, expect, it } from "vitest";
 import {
   withInvocationScope,
@@ -269,6 +270,38 @@ describe("createTracer", () => {
         "error.type"
       ]);
       expect(tracing.rootSpans[0]?.ended).toBe(true);
+    });
+
+    it("sets error status, without the cause message, on failure", async () => {
+      const tracing = new RecordingTracer();
+
+      await expect(
+        Promise.resolve(
+          tracing.withSpan("op", {}, async () => {
+            throw new TypeError("secret detail");
+          })
+        )
+      ).rejects.toThrow("secret detail");
+
+      expect(tracing.rootSpans[0]?.status).toEqual({
+        code: SpanStatusCode.ERROR
+      });
+      expect(tracing.rootSpans[0]?.exceptions).toEqual([]);
+    });
+
+    it("leaves status unset on success and on cancellation", () => {
+      const tracing = new RecordingTracer();
+
+      tracing.withSpan("ok", {}, () => undefined);
+      tracing
+        .openSpan("canceled", {}, (span) => span)
+        .fail({
+          name: "AbortError"
+        });
+
+      for (const span of tracing.rootSpans) {
+        expect(span.status).toEqual({ code: SpanStatusCode.UNSET });
+      }
     });
 
     it("classifies a non-Error AbortError-named cause as canceled", () => {

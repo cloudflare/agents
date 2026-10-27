@@ -1,11 +1,24 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { INVALID_SPAN_CONTEXT, SpanStatusCode } from "@opentelemetry/api";
+import type {
+  AttributeValue,
+  Attributes,
+  Span,
+  SpanKind,
+  SpanOptions,
+  SpanStatus,
+  Tracer
+} from "@opentelemetry/api";
 import { createTracer } from "../../observability/tracing/tracer";
 import type {
   TraceAttributeValue,
-  SpanWriter,
   AgentTracer
 } from "../../observability/tracing/tracer";
 
+/**
+ * An AgentTracer over a recording OpenTelemetry tracer, so tests can inspect
+ * the spans, attributes, kinds, and statuses the Agents SDK emits.
+ */
 export class RecordingTracer implements AgentTracer {
   readonly spans: RecordingSpan[] = [];
   readonly rootSpans: RecordingSpan[] = [];
@@ -16,34 +29,44 @@ export class RecordingTracer implements AgentTracer {
 
   constructor(options: { readonly isTraced?: boolean } = {}) {
     this.isTraced = options.isTraced ?? true;
-    this.#tracer = createTracer({
-      startActiveSpan: (name, run) => this.recordSpan(name, run)
-    });
+    const recorder = this;
+    const tracer: Tracer = {
+      startSpan() {
+        throw new Error("The Agents SDK only opens active spans");
+      },
+      startActiveSpan<F extends (span: Span) => unknown>(
+        name: string,
+        ...rest: unknown[]
+      ): ReturnType<F> {
+        const fn = rest.at(-1) as F;
+        const spanOptions = (rest.length > 1 ? rest[0] : {}) as SpanOptions;
+        return recorder.recordSpan(name, spanOptions, fn) as ReturnType<F>;
+      }
+    };
+    this.#tracer = createTracer(tracer);
   }
 
-  withSpan: AgentTracer["withSpan"] = (name, attributes, run, lifetime) => {
-    return this.#tracer.withSpan(name, attributes, run, lifetime);
+  withSpan: AgentTracer["withSpan"] = (name, attributes, run, options) => {
+    return this.#tracer.withSpan(name, attributes, run, options);
   };
 
-  openSpan: AgentTracer["openSpan"] = (
-    name,
-    attributes,
-    activate,
-    lifetime
-  ) => {
-    return this.#tracer.openSpan(name, attributes, activate, lifetime);
+  openSpan: AgentTracer["openSpan"] = (name, attributes, activate, options) => {
+    return this.#tracer.openSpan(name, attributes, activate, options);
   };
 
   recordSpan<T>(
     name: string,
+    options: SpanOptions,
     callback: (span: RecordingSpan) => T,
     parent: RecordingSpan | undefined = this.#activeSpan.getStore()
   ): T {
     const span = new RecordingSpan({
       isTraced: this.isTraced,
+      kind: options.kind,
       name,
       parent
     });
+    span.setAttributes(options.attributes ?? {});
 
     this.spans.push(span);
     if (parent) {
@@ -67,11 +90,14 @@ export function deferred<T = void>(): {
   return { promise, resolve };
 }
 
-export class RecordingSpan implements SpanWriter {
+export class RecordingSpan implements Span {
   readonly name: string;
+  readonly kind: SpanKind | undefined;
   readonly parent: RecordingSpan | undefined;
   readonly attributes: Record<string, TraceAttributeValue> = {};
   readonly children: RecordingSpan[] = [];
+  status: SpanStatus = { code: SpanStatusCode.UNSET };
+  readonly exceptions: unknown[] = [];
 
   #ended = false;
   #endCount = 0;
@@ -79,16 +105,14 @@ export class RecordingSpan implements SpanWriter {
 
   constructor(input: {
     readonly isTraced: boolean;
+    readonly kind: SpanKind | undefined;
     readonly name: string;
     readonly parent: RecordingSpan | undefined;
   }) {
     this.#isTraced = input.isTraced;
+    this.kind = input.kind;
     this.name = input.name;
     this.parent = input.parent;
-  }
-
-  get isTraced(): boolean {
-    return this.#isTraced && !this.#ended;
   }
 
   get ended(): boolean {
@@ -99,12 +123,60 @@ export class RecordingSpan implements SpanWriter {
     return this.#endCount;
   }
 
-  setAttribute(key: string, value: TraceAttributeValue): void {
-    if (!this.isTraced || value === undefined) {
-      return;
-    }
+  spanContext() {
+    return INVALID_SPAN_CONTEXT;
+  }
 
-    this.attributes[key] = value;
+  isRecording(): boolean {
+    return this.#isTraced && !this.#ended;
+  }
+
+  setAttribute(key: string, value: AttributeValue | undefined): this {
+    if (!this.isRecording() || value === undefined) {
+      return this;
+    }
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      this.attributes[key] = value;
+    }
+    return this;
+  }
+
+  setAttributes(attributes: Attributes): this {
+    for (const [key, value] of Object.entries(attributes)) {
+      this.setAttribute(key, value);
+    }
+    return this;
+  }
+
+  setStatus(status: SpanStatus): this {
+    if (this.isRecording()) {
+      this.status = status;
+    }
+    return this;
+  }
+
+  updateName(): this {
+    return this;
+  }
+
+  recordException(exception: unknown): void {
+    this.exceptions.push(exception);
+  }
+
+  addEvent(): this {
+    return this;
+  }
+
+  addLink(): this {
+    return this;
+  }
+
+  addLinks(): this {
+    return this;
   }
 
   end(): void {

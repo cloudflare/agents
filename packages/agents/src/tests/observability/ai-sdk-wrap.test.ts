@@ -1,3 +1,4 @@
+import { SpanKind } from "@opentelemetry/api";
 import { describe, expect, it } from "vitest";
 import { RecordingTracer } from "./recording-tracer";
 import {
@@ -103,6 +104,9 @@ describe("createAISDKWrapper", () => {
     });
     expect(modelCall?.attributes).not.toHaveProperty(["gen_ai.request.stream"]);
     expect(modelCall?.ended).toBe(true);
+    // GenAI semantic conventions: inference is CLIENT, the agent INTERNAL.
+    expect(modelCall?.kind).toBe(SpanKind.CLIENT);
+    expect(tracing.rootSpans[0]?.kind).toBeUndefined();
   });
 
   it("records an AI Gateway response-header log id on the chat span", async () => {

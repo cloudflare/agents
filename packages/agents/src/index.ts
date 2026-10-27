@@ -156,7 +156,7 @@ import {
   type ObservabilityEvent
 } from "./observability/emitter";
 import { agentSpanAttributes } from "./observability/agent-span-attributes";
-import { tracer } from "./observability/tracing/cloudflare";
+import { tracer } from "./observability/tracing/agents";
 import {
   withInvocationScope,
   writeSpanAttributes,

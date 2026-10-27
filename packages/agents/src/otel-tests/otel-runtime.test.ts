@@ -208,7 +208,26 @@ afterAll(() => {
   }
 });
 
-describe("registerOpenTelemetry() in workerd", () => {
+// Order matters: the first test proves the Agents SDK registers the bridge on
+// its own; the rest run in the same isolate afterwards.
+describe("OpenTelemetry on Workers tracing in workerd", () => {
+  it("registers automatically on the first Agents SDK span", async () => {
+    const { span, parentOf, childrenOf } = await trace("/agent-first", [
+      "invoke_agent first-agent",
+      "first model work"
+    ]);
+    const agent = span("invoke_agent first-agent");
+    const work = span("first model work");
+    expect(parentOf(agent)?.name).toBe("GET");
+    expect(parentOf(work)?.name).toMatch(/^chat /);
+    expect(parentOf(parentOf(work)!)?.span_id).toBe(agent.span_id);
+    expect(childrenOf(work).map((child) => child.name)).toEqual(["kv_get"]);
+    expect(agent.attributes).toMatchObject({
+      "gen_ai.operation.name": "invoke_agent",
+      "gen_ai.agent.name": "first-agent"
+    });
+  });
+
   it("records plain OTel spans with platform spans nested inside", async () => {
     const { span, parentOf, childrenOf } = await trace("/otel", [
       "user span",

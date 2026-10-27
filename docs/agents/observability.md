@@ -299,6 +299,16 @@ After that, OpenTelemetry spans from these sources become Workers spans:
 - AI SDK v6 `experimental_telemetry`.
 - Your own spans from `trace.getTracer(...)`.
 
+The Agents SDK records its own spans (agent lifecycle, `wrapAISDK`, Think)
+through the OpenTelemetry API too, and registers the bridge automatically the
+first time it records a span. A Worker that runs an Agent, Think,
+or `wrapAISDK` therefore needs no `registerOpenTelemetry()` call. Call it
+yourself to record OpenTelemetry spans that can start before any Agents SDK
+span, for example in a Worker that only serves `createMcpHandler`.
+
+If you register your own OpenTelemetry SDK at module scope, the Agents SDK's
+spans go to that SDK instead, like any other OpenTelemetry instrumentation.
+
 They sit in the same trace as the Agents SDK's spans and the automatic fetch,
 KV, D1, and Durable Object spans, and they export through
 `observability.traces.destinations` like every other Workers span. An MCP tool
@@ -377,17 +387,20 @@ this one stable parent instead of appearing as top-level clutter. The span
 carries `cloudflare.agents.agent.name` (the agent class),
 `cloudflare.agents.agent.id` (the named instance, omitted when the name is not
 yet readable during construction), and `cloudflare.agents.operation.name`
-(`agent_initialization`). Like the rest of the tracing in this package, it is a
-no-op when the runtime has no native tracing capability.
+(`agent_initialization`). Like the rest of the tracing in this package, it is
+recorded through the OpenTelemetry API (see [OpenTelemetry](#opentelemetry)) and
+is a no-op when no tracer is available.
 
 ## AI SDK tracing
 
-`agents/observability/ai` instruments the Vercel AI SDK with Workers' native
-custom spans. It projects the scalar subset supported by the Workers `Span` API
-onto the current
+`agents/observability/ai` instruments the Vercel AI SDK through the
+OpenTelemetry API, which records Workers spans (see
+[OpenTelemetry](#opentelemetry)). It projects the scalar subset supported by the
+Workers `Span` API onto the current
 [OpenTelemetry GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai).
 Spans flow to Workers Observability and configured OTLP destinations. The
-integration is a no-op when the runtime has no native tracing capability.
+integration is a no-op when no tracer is available. `chat {model}` spans have
+span kind `CLIENT`; the others are `INTERNAL`.
 
 **Think agents are traced out of the box.** Enable
 `observability.traces.enabled` in `wrangler.jsonc`; no Think option is required.
@@ -546,9 +559,9 @@ exists:
 `gen_ai.response.finish_reasons` and `gen_ai.request.stop_sequences` are arrays
 in OTel. Workers' custom `Span.setAttribute` currently accepts only a string,
 number, or boolean, so the wrapper omits those attributes rather than placing
-JSON text under an array-typed key. Similarly, span status is state rather than
-an attribute: failures emit `error.type`, but the wrapper does not invent an
-`otel.status_code` attribute when Workers exposes no custom-span status setter.
+JSON text under an array-typed key. Failures set span status `ERROR` without a
+description and emit `error.type`; the raw error message is never recorded.
+Cancellations leave the status unset.
 
 ### Context and safety
 

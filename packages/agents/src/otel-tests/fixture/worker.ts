@@ -6,12 +6,12 @@
 import { context, SpanKind, trace } from "@opentelemetry/api";
 import * as ai from "ai";
 import { MockLanguageModelV3 } from "ai/test";
-import { registerOpenTelemetry } from "agents/observability";
 import { wrapAISDK } from "agents/observability/ai";
 
 type Env = { readonly KV: KVNamespace };
 
-registerOpenTelemetry();
+// No registerOpenTelemetry() call: the first Agents SDK span registers the
+// bridge (the test requests /agent-first before anything else).
 const tracer = trace.getTracer("otel-runtime-test");
 
 const usage = {
@@ -44,6 +44,26 @@ export default {
     switch (url.pathname) {
       case "/ready":
         return new Response("ready");
+
+      case "/agent-first": {
+        // An Agents SDK span before any OTel registration, with an OTel span
+        // inside it.
+        const { generateText } = wrapAISDK(ai);
+        const result = await generateText({
+          model: mockModel(env, (read) =>
+            tracer.startActiveSpan("first model work", async (inner) => {
+              try {
+                return await read();
+              } finally {
+                inner.end();
+              }
+            })
+          ),
+          prompt: "Hello",
+          experimental_telemetry: { functionId: "first-agent" }
+        });
+        return new Response(result.text);
+      }
 
       case "/otel": {
         // Plain OTel API: an active span, and a manual span activated later.

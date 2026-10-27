@@ -9,7 +9,7 @@ import type {
   NativeException,
   NativeSpan,
   NativeSpanStatus
-} from "../../observability/tracing/native";
+} from "../../observability/otel/native";
 
 let nextId = 0;
 

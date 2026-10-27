@@ -44,11 +44,7 @@ import type {
   Tracer,
   TracerProvider
 } from "@opentelemetry/api";
-import type {
-  NativeException,
-  NativeSpan,
-  NativeTracing
-} from "../tracing/native";
+import type { NativeException, NativeSpan, NativeTracing } from "./native";
 
 /**
  * Runs `fn` in a captured async context (`AsyncLocalStorage.snapshot()`),

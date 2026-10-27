@@ -1,6 +1,6 @@
 import type { AISDKInstrumentationOptions } from "./options";
 import { createAISDKWrapper } from "./wrapper/wrap";
-import { tracer } from "../tracing/cloudflare";
+import { tracer } from "../tracing/agents";
 
 /**
  * Wraps an AI SDK namespace with tracing.

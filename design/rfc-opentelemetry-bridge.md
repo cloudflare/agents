@@ -132,31 +132,28 @@ throws is swallowed and reported through `diag`, as in `AgentTracer`.
 
 ## One path for Agents SDK spans
 
-Today `AgentTracer` (`src/observability/tracing/`) writes native spans directly
-for agent lifecycle spans, the AI SDK wrapper, Think, and the GenAI spans. Those
-spans nest correctly with bridged OTel spans in both directions, because both
-sit on native async context (covered by the `agent-spans` case of
-`src/otel-tests`).
+The bridge is the only code that touches Workers native tracing. `AgentTracer`
+(`src/observability/tracing/`), which carries agent lifecycle spans, the AI SDK
+wrapper, Think, and the GenAI spans, takes an OTel `Tracer`: the global
+`trace.getTracer("agents")`. Deleting the bridge later removes one directory.
 
-Moving them onto the OTel API is mostly mechanical: `AgentTracer` only needs a
-`SpanRuntime` (`startActiveSpan(name, run)` with `isTraced`, `setAttribute`,
-`end`), which a few lines can implement over any OTel `Tracer`. This PR does not
-do it, because the switch is not behavior-neutral:
-
-- With no OTel registration, agent spans must keep recording natively. The
-  runtime would use `trace.getTracer("agents")` when a provider is registered
-  and the bridge's tracer (unregistered) otherwise.
-- With a user's own OTel SDK registered, agent spans would move from Workers
-  tracing to that SDK. That is the goal of "one mechanism", but it is a
-  user-visible change.
-- The bridge refuses spans under remote or inactive parents; native spans
-  never are. Agent spans opened inside such a context would stop recording.
-- `ManagedSpan.fail()` should then call `setStatus(ERROR)` (the reason
-  `error.type` stands in for status today), and Think/AI-wrapper tests that use
-  `RecordingTracer` keep working because they inject a `SpanRuntime`.
-
-Once Workers registers the OTel API natively, the bridge steps aside and the
-same code paths go to the native implementation.
+- The first Agents SDK span registers the bridge. Agents SDK spans start in
+  handlers and Durable Object constructors, after module evaluation, so an
+  application's own module-scope OTel setup registers first; the bridge then
+  steps aside and Agents SDK spans go to that SDK.
+- Span names and attributes are unchanged. Workers Observability's agent views
+  key on span names (`invoke_agent ...`, `chat ...`), `gen_ai.*` attributes,
+  and an error derived from exception events or `error.type`. The bridge writes
+  the same native span-open, attribute, and span-close events as before.
+- Failures add span status `ERROR` with no description; no exception event is
+  recorded, which would change the derived error to the raw message.
+- `chat {model}` spans are `CLIENT` (GenAI semantic conventions). Workers spans
+  have no kind, so this shows only under another OTel SDK.
+- With no registered provider (a runtime without `tracing.getActiveSpan()`),
+  Agents SDK spans are no-ops rather than falling back to a second native path.
+- The bridge refuses spans under remote or inactive parents. An Agents SDK span
+  opened inside such an OTel context is not recorded, where a direct native
+  span would have been.
 
 ## The decision
 

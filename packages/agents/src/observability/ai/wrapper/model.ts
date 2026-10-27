@@ -1,5 +1,6 @@
 import { aiGatewayLogAttributes, modelCallSpan } from "../../genai/telemetry";
 import type { SemanticContext } from "../../genai/telemetry";
+import { SpanKind } from "@opentelemetry/api";
 import { writeSpanAttributes } from "../../tracing/tracer";
 import type { AgentSpan, AgentTracer } from "../../tracing/tracer";
 import {
@@ -70,7 +71,8 @@ export function wrapModel(
               throw cause;
             }
           },
-          boundToInvocation ? { boundToInvocation: true } : undefined
+          // GenAI semantic conventions: inference spans are CLIENT.
+          { kind: SpanKind.CLIENT, boundToInvocation }
         );
       },
       wrapStream: async ({ doStream, params }) => {
@@ -107,7 +109,8 @@ export function wrapModel(
               throw cause;
             }
           },
-          boundToInvocation ? { boundToInvocation: true } : undefined
+          // GenAI semantic conventions: inference spans are CLIENT.
+          { kind: SpanKind.CLIENT, boundToInvocation }
         );
       }
     }

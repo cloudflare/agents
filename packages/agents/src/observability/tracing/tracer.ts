@@ -1,4 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { SpanStatusCode } from "@opentelemetry/api";
+import type { Attributes, Span, SpanKind, Tracer } from "@opentelemetry/api";
 
 /** Attribute values accepted by custom spans. */
 export type TraceAttributeValue = string | number | boolean | undefined;
@@ -9,20 +11,13 @@ export type TraceAttributes = Readonly<Record<string, TraceAttributeValue>>;
 /** A value that may complete synchronously or through a promise-like result. */
 export type MaybePromise<T> = T | PromiseLike<T>;
 
-/** Minimal runtime span surface used by tracers. */
-export type SpanWriter = {
-  readonly isTraced: boolean;
-  setAttribute(key: string, value: TraceAttributeValue): void;
-  end(): void;
-};
-
-/** Runtime capability for starting an active span in the current async context. */
-export type SpanRuntime = {
-  startActiveSpan<T>(name: string, run: (span: SpanWriter) => T): T;
-};
-
-/** Optional automatic lifetime policy for invocation-bounded spans. */
-export type SpanLifetime = {
+/** Per-span options: OpenTelemetry span kind and lifetime policy. */
+export type AgentSpanOptions = {
+  /**
+   * OpenTelemetry span kind. Defaults to `INTERNAL`; GenAI inference spans
+   * (`chat {model}`) are `CLIENT` per the GenAI semantic conventions.
+   */
+  readonly kind?: SpanKind;
   /**
    * Close the span no later than the end of the surrounding
    * {@link withInvocationScope}, so it cannot outlive the native invocation
@@ -45,7 +40,7 @@ export type AgentTracer = {
     name: string,
     attributes: TraceAttributes,
     run: (span: AgentSpan) => MaybePromise<T>,
-    lifetime?: SpanLifetime
+    options?: AgentSpanOptions
   ): T | Promise<T>;
   /**
    * Activates a span and returns whatever `activate` returns (typically the
@@ -60,7 +55,7 @@ export type AgentTracer = {
     name: string,
     attributes: TraceAttributes,
     activate: (span: AgentSpan) => T,
-    lifetime?: SpanLifetime
+    options?: AgentSpanOptions
   ): T;
 };
 
@@ -109,7 +104,7 @@ const invocationScope = new AsyncLocalStorage<InvocationScope>();
  * Work that escapes its native invocation cannot be traced from the context it
  * started in: the still-open span is force-closed against the invocation that
  * owned that context, which reports a negative duration or `span_not_ended`.
- * Spans opened with {@link SpanLifetime.boundToInvocation} inside this scope
+ * Spans opened with {@link AgentSpanOptions.boundToInvocation} inside this scope
  * are therefore closed before `body` settles — but not one moment earlier, so
  * everything that completes during the invocation (the normal case: a chat
  * turn is awaited by the handler that received it) still records its finish
@@ -134,12 +129,12 @@ export function withInvocationScope<T>(
     scope.ended = true;
     for (const span of scope.open) {
       // Fail open: this runs on the return path of every agent handler, so a
-      // span writer that throws must not take the handler's result with it,
+      // span that throws must not take the handler's result with it,
       // nor stop the remaining spans from closing.
       try {
         span.truncate();
       } catch {
-        // Nothing useful to do with a broken span writer.
+        // Nothing useful to do with a broken span.
       }
     }
     scope.open.clear();
@@ -164,25 +159,25 @@ export function withInvocationScope<T>(
   });
 }
 
-/** Creates a tracer from a runtime span capability. */
-export function createTracer(runtime: SpanRuntime): AgentTracer {
-  return new RuntimeTracer(runtime);
+/** Creates an AgentTracer that records through an OpenTelemetry tracer. */
+export function createTracer(tracer: Tracer): AgentTracer {
+  return new OpenTelemetryAgentTracer(tracer);
 }
 
-class RuntimeTracer implements AgentTracer {
-  constructor(private readonly runtime: SpanRuntime) {}
+class OpenTelemetryAgentTracer implements AgentTracer {
+  constructor(private readonly tracer: Tracer) {}
 
   withSpan<T>(
     name: string,
     attributes: TraceAttributes,
     run: (span: AgentSpan) => MaybePromise<T>,
-    lifetime?: SpanLifetime
+    options?: AgentSpanOptions
   ): T | Promise<T> {
-    return this.activate(name, attributes, (span) => {
+    return this.activate(name, attributes, options, (span) => {
       // Ask before running: a span that opens and closes in one tick still
       // needs to know whether that tick happened after its invocation ended.
       const outOfBand =
-        lifetime?.boundToInvocation === true && bindToInvocation(span);
+        options?.boundToInvocation === true && bindToInvocation(span);
       const result = run(span);
       if (isPromiseLike(result)) {
         if (outOfBand) {
@@ -210,13 +205,13 @@ class RuntimeTracer implements AgentTracer {
     name: string,
     attributes: TraceAttributes,
     activate: (span: AgentSpan) => T,
-    lifetime?: SpanLifetime
+    options?: AgentSpanOptions
   ): T {
-    if (!lifetime?.boundToInvocation) {
-      return this.activate(name, attributes, activate);
+    if (!options?.boundToInvocation) {
+      return this.activate(name, attributes, options, activate);
     }
 
-    return this.activate(name, attributes, (span) => {
+    return this.activate(name, attributes, options, (span) => {
       const invocationEnded = bindToInvocation(span);
       try {
         return activate(span);
@@ -240,11 +235,16 @@ class RuntimeTracer implements AgentTracer {
   private activate<T>(
     name: string,
     attributes: TraceAttributes,
+    options: AgentSpanOptions | undefined,
     body: (span: ManagedSpan) => T
   ): T {
-    return this.runtime.startActiveSpan(name, (writer) => {
-      setAttributes(writer, attributes);
-      const span = new ManagedSpan(writer);
+    // Initial attributes go in the creation options, where samplers see them.
+    const spanOptions = {
+      attributes: definedAttributes(attributes),
+      ...(options?.kind === undefined ? {} : { kind: options.kind })
+    };
+    return this.tracer.startActiveSpan(name, spanOptions, (otelSpan) => {
+      const span = new ManagedSpan(otelSpan);
 
       try {
         return body(span);
@@ -259,10 +259,10 @@ class RuntimeTracer implements AgentTracer {
 class ManagedSpan implements AgentSpan {
   #closed = false;
 
-  constructor(private readonly span: SpanWriter) {}
+  constructor(private readonly span: Span) {}
 
   get isTraced(): boolean {
-    return this.span.isTraced;
+    return this.span.isRecording();
   }
 
   /** INTERNAL: see {@link writeSpanAttributes}. */
@@ -294,13 +294,17 @@ class ManagedSpan implements AgentSpan {
       // operations do not inflate error rates. The vendor marker is additive.
       setAttributes(this.span, { "cloudflare.agents.canceled": true });
     } else {
-      // Workers' custom Span API does not currently expose setStatus(). Do not
-      // invent an `otel.status_code` attribute: status is span state in OTel,
-      // not an attribute. error.type remains the standard queryable marker.
+      // Status without a description: the cause message is never recorded.
+      // error.type is the low-cardinality, queryable marker.
       setAttributes(this.span, {
         "error.type":
           cause instanceof Error ? cause.name || "Error" : typeof cause
       });
+      try {
+        this.span.setStatus({ code: SpanStatusCode.ERROR });
+      } catch {
+        // A broken span must not replace the application's error.
+      }
     }
 
     this.close();
@@ -370,12 +374,23 @@ export function writeSpanAttributes(
   }
 }
 
-function setAttributes(span: SpanWriter, attributes: TraceAttributes): void {
-  if (!span.isTraced) {
+/** Drops `undefined` values, which OTel attributes cannot carry. */
+function definedAttributes(attributes: TraceAttributes): Attributes {
+  const defined: Attributes = {};
+  for (const [key, value] of Object.entries(attributes)) {
+    if (value !== undefined) {
+      defined[key] = value;
+    }
+  }
+  return defined;
+}
+
+function setAttributes(span: Span, attributes: TraceAttributes): void {
+  if (!span.isRecording()) {
     return;
   }
 
-  // Fail-safe: a throwing writer must not leak the span or replace the
+  // Fail-safe: a throwing span must not leak the span or replace the
   // application's original error with a telemetry one.
   try {
     for (const [key, value] of Object.entries(attributes)) {

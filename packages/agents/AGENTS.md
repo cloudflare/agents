@@ -138,8 +138,8 @@ src/
     base.ts
     agent.ts            # Agent-level events
     mcp.ts              # MCP-level events
-    tracing/            # Native Workers tracing: AgentTracer, native span types
-    otel/               # registerOpenTelemetry(): OpenTelemetry API on native tracing
+    tracing/            # AgentTracer over the OpenTelemetry API (Agents SDK spans)
+    otel/               # The only code on Workers native tracing: the OTel bridge, registerOpenTelemetry()
 
   codemode/             # Experimental code generation
     ai.ts
