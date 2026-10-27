@@ -21,6 +21,7 @@ export default defineConfig({
       //   (spawns real `wrangler dev` + SIGKILL); runs nightly via the `e2e-agents`
       //   job in .github/workflows/nightly.yml, or locally via `pnpm run test:e2e`.
       // "src/browser-tests/vitest.config.ts" — run via `pnpm run test:browser` (spawns wrangler + Chromium)
+      // "src/otel-tests/vitest.config.ts" — run via `pnpm run test:otel-runtime` (packs the package, spawns wrangler dev)
     ]
   }
 });

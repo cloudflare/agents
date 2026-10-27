@@ -29,7 +29,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/schedule`                         | `src/schedule.ts`                             | Deprecated scheduling-parser compatibility entry point                                                                                        |
 | `agents/schedules`                        | `src/schedules/index.ts`                      | Dependency-light Lifecycle Scheduler primitive and runtime types                                                                              |
 | `agents/schedules/parser`                 | `src/schedules/parser.ts`                     | Zod-based natural-language scheduling prompt and schema helpers                                                                               |
-| `agents/observability`                    | `src/observability/index.ts`                  | Observability event types and emitters                                                                                                        |
+| `agents/observability`                    | `src/observability/index.ts`                  | Observability event types and emitters; `experimental_registerOpenTelemetry()` (OpenTelemetry API on Workers tracing)                         |
 | `agents/models/ai-sdk`                    | `src/models/ai-sdk/index.ts`                  | `createAI` for the AI SDK — model ids on `env.AI.run`, vendor model objects on AI Gateway's provider-native path                              |
 | `agents/models/pi-ai`                     | `src/models/pi-ai/index.ts`                   | `createAI` for pi-ai — Workers AI ids, vendor models routed through AI Gateway                                                                |
 | `agents/ai-chat-agent`                    | `src/ai-chat-agent.ts`                        | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                                                                                           |
@@ -132,11 +132,14 @@ src/
       sse-keepalive.ts
       utils.ts
 
-  observability/        # Observability event system
-    index.ts
+  observability/        # Observability event system and tracing
+    index.ts            # agents/observability barrel
+    emitter.ts          # genericObservability (imported by the main entry)
     base.ts
     agent.ts            # Agent-level events
     mcp.ts              # MCP-level events
+    tracing/            # Native Workers tracing: AgentTracer, native span types
+    otel/               # experimental_registerOpenTelemetry(): OpenTelemetry API on native tracing
 
   codemode/             # Experimental code generation
     ai.ts
@@ -328,6 +331,18 @@ loader) and exercises the `BrowserConnector` end to end: CDP spec queries,
 promotion, reuse + sweep, survive-a-pause, multi-socket probe). Kept out of
 the default `test` target so CI's `nx affected -t test` doesn't require
 Chromium — run it locally when touching `src/browser/`.
+
+### OpenTelemetry runtime tests (`src/otel-tests/`)
+
+```bash
+pnpm run build
+pnpm run test:otel-runtime
+```
+
+Packs the package, installs it into a scratch Worker with AI SDK v6, runs
+`wrangler dev` (a release with native span IDs), and asserts the span tree
+through Local Explorer. Not part of the default `test` target. Unit tests for the bridge run in the `node` project
+(`src/node-tests/otel/`) against a model of native tracing.
 
 ### Chat primitive tests (`src/chat/__tests__/`)
 

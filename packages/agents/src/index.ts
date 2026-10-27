@@ -154,7 +154,7 @@ import {
   genericObservability,
   type Observability,
   type ObservabilityEvent
-} from "./observability";
+} from "./observability/emitter";
 import { agentSpanAttributes } from "./observability/agent-span-attributes";
 import { tracer } from "./observability/tracing/cloudflare";
 import {
