@@ -12,7 +12,7 @@ the sub-agent routing primitive from `agents`.
   `useAgent({ sub: [{ agent: "MyAssistant", name: chatId }] })`
 - **Shared workspace across chats** — `AssistantDirectory` owns one
   `@cloudflare/computer` `Workspace` backed by its SQLite; every `MyAssistant`
-  child reaches it with `getWorkspace()`, wrapped in Think's `lazyWorkspace`.
+  child reaches it with `getWorkspace()`.
   A `hello.txt` written in chat A is visible verbatim in chat B, and every
   workspace-aware tool routes through it
 - **Shared MCP across chats** — server registry, OAuth credentials, live
@@ -166,19 +166,16 @@ class AssistantDirectory extends Think<Env, DirectoryState> {
 }
 ```
 
-Each `MyAssistant` overrides `this.workspace` with a client for it.
-`lazyWorkspace` defers `getWorkspace()` until a turn first touches a file,
-then keeps the client:
+Each `MyAssistant` overrides `this.workspace` with a client for it from
+`getWorkspace()`, which reaches the directory on the first file call, so
+its tools work on the shared files:
 
 ```ts
 import { getWorkspace } from "@cloudflare/computer";
 import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
-import { lazyWorkspace } from "@cloudflare/think";
 
 class MyAssistant extends Think<Env> {
-  override workspace = lazyWorkspace(async () =>
-    getWorkspace(await this.parentAgent(AssistantDirectory))
-  );
+  override workspace = getWorkspace(() => this.parentAgent(AssistantDirectory));
 
   getTools() {
     return {

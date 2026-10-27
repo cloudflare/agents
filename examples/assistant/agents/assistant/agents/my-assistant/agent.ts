@@ -1,11 +1,10 @@
 import { callable } from "agents";
-import { getWorkspace, type WorkspaceHandle } from "@cloudflare/computer";
+import { getWorkspace } from "@cloudflare/computer";
 import {
   Think,
   Session,
   skills,
-  defaultContextOverflowClassifier,
-  lazyWorkspace
+  defaultContextOverflowClassifier
 } from "@cloudflare/think";
 import bundledSkills from "agents:skills";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
@@ -61,22 +60,15 @@ export class MyAssistant extends Think<Env> {
   /**
    * Override Think's default per-chat workspace with the shared
    * `AssistantDirectory.workspace`. `getWorkspace()` asks the directory for
-   * an RPC stub (see `AssistantDirectory.__getWorkspaceStub`), and
-   * `lazyWorkspace` defers that until a turn first touches a file, so a
-   * chat that never reads or writes files never reaches the directory.
+   * an RPC stub (see `AssistantDirectory.__getWorkspaceStub`) when a turn
+   * first touches a file, so a chat that never reads or writes files never
+   * reaches the directory.
    *
    * Everything workspace-aware routes through this: Think's workspace
    * tools, skill scripts, the fetch tool's saved responses,
    * and the `listWorkspaceFiles` / `readWorkspaceFile` callables below.
    */
-  override workspace = lazyWorkspace(async () => {
-    const directory = await this.parentAgent(AssistantDirectory);
-    // SAFETY: AssistantDirectory implements `__getWorkspaceStub()`, which is
-    // what getWorkspace() calls. The DO stub types its result as
-    // `Stub<WorkspaceStub>` while WorkspaceHandle expects `WorkspaceStub`,
-    // so TypeScript cannot relate the two.
-    return getWorkspace(directory as unknown as WorkspaceHandle);
-  });
+  override workspace = getWorkspace(() => this.parentAgent(AssistantDirectory));
 
   /**
    * Proxy to the directory's MCP state. Used by `beforeTurn` below to

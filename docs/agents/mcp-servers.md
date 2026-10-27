@@ -8,7 +8,9 @@ Build an MCP server on Workers with `createMcpHandler` from `agents/mcp/server` 
 pnpm add agents @modelcontextprotocol/server@2.3.1 zod
 ```
 
-Use the exact `@modelcontextprotocol/server` version required by your installed Agents release.
+`@modelcontextprotocol/server` is an optional peer dependency of `agents`, so your package manager does not install it for you. Use the exact version required by your installed Agents release.
+
+Upgrading a server that uses `McpAgent`? See [Upgrading an existing `McpAgent` server](#upgrading-an-existing-mcpagent-server).
 
 ## Create a server
 
@@ -150,6 +152,7 @@ Wrap the handler with `OAuthProvider` from `@cloudflare/workers-oauth-provider` 
 ```typescript
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
+import { env } from "cloudflare:workers";
 
 function createServer() {
   const server = new McpServer({ name: "Authenticated", version: "1.0.0" });
@@ -189,15 +192,17 @@ export default new OAuthProvider({
       return mcpHandler(request, env, ctx);
     }
   },
-  defaultHandler: AuthHandler // your consent and login flow
+  defaultHandler: AuthHandler, // your consent and login flow
+  // The URL MCP clients connect to. Every token is bound to it.
+  resourceMetadata: { resource: env.MCP_RESOURCE }
 });
 ```
 
 `OAuthProvider` needs an object with a `fetch` method, so wrap the handler as shown. Passing the handler function directly throws at startup.
 
-`getMcpAuthContext().props` returns the `props` you passed to `completeAuthorization()` in your auth flow. Tool callbacks also receive the standard SDK v2 `AuthInfo` at `context.http.authInfo`. Do not log or return `context.http.authInfo.token` or `authInfo.extra.props`.
+`getMcpAuthContext().props` returns the `props` you passed to `completeAuthorization()` in your auth flow. Tool callbacks also receive the standard SDK v2 `AuthInfo` at `context.http.authInfo`. `authInfo` is set only when the token has a client ID and `props` is a plain object. Tokens from `resolveExternalToken` have no client ID, so for those only `getMcpAuthContext().props` is available. Do not log or return `context.http.authInfo.token` or `authInfo.extra.props`.
 
-The OAuth flow needs a KV namespace bound as `OAUTH_KV`. For a complete server with a login page, see [`examples/mcp-worker-authenticated`](https://github.com/cloudflare/agents/tree/main/examples/mcp-worker-authenticated). For consent dialogs, CSRF, and proxying to a third-party identity provider, see [Securing MCP Servers](./securing-mcp-servers.md).
+Set `MCP_RESOURCE` in `wrangler.jsonc` to the URL clients connect to: Workers OAuth Provider 1.x binds every token to it. The OAuth flow also needs a KV namespace bound as `OAUTH_KV`. For a complete server with a login page, see [`examples/mcp-worker-authenticated`](https://github.com/cloudflare/agents/tree/main/examples/mcp-worker-authenticated). For the consent page and signing in through a third-party provider, see [Securing MCP Servers](./securing-mcp-servers.md).
 
 ## Elicitation
 
@@ -269,9 +274,23 @@ The handler does not serve the standalone SSE transport.
 
 If the handler lifecycle does not fit, use the SDK's `WebStandardStreamableHTTPServerTransport` from `@modelcontextprotocol/server` directly in your Worker.
 
-## Migrating from `McpAgent`
+## Upgrading an existing `McpAgent` server
 
-`McpAgent` is deprecated. To move an existing server to `createMcpHandler`, follow [Migrate to MCP SDK v2](https://developers.cloudflare.com/agents/model-context-protocol/guides/migrate-to-mcp-sdk-v2/).
+`McpAgent` is deprecated, but existing servers keep working. It is built on MCP SDK v1, which is an optional peer dependency of `agents`, so your package manager no longer installs it for you. Add the exact version your Agents release expects before you upgrade:
+
+```sh
+pnpm add agents @modelcontextprotocol/sdk@1.32.1 zod
+```
+
+Keep importing `McpServer` from `@modelcontextprotocol/sdk/server/mcp.js` in an `McpAgent`. An SDK v2 server from `@modelcontextprotocol/server` cannot run inside `McpAgent`. The same applies to `WorkerTransport` and `createLegacyMcpHandler` from `agents/mcp`.
+
+`agents/x402` also needs `@modelcontextprotocol/sdk`. It does not load the package at runtime, but its types refer to SDK v1 clients and tools.
+
+If your server imported `@modelcontextprotocol/sdk` without listing it in `package.json`, it only worked because `agents` installed the package. After you upgrade, the build fails with an unresolved `@modelcontextprotocol/sdk` import until you add it.
+
+Client code does not need the v1 SDK. If you import client helpers such as `RPCClientTransport` or `normalizeServerId` from `agents/mcp`, import them from `agents/mcp/client` instead.
+
+To move the server itself to `createMcpHandler`, follow [Migrate to MCP SDK v2](https://developers.cloudflare.com/agents/model-context-protocol/guides/migrate-to-mcp-sdk-v2/).
 
 ## Examples
 

@@ -41,11 +41,86 @@ function invalidVerifiedContext(): never {
   throw new TypeError("Invalid verified OAuth request context");
 }
 
+/**
+ * Token details that `@cloudflare/workers-oauth-provider` 1.x sets on the
+ * execution context as `ctx.auth`, beside `ctx.props`, after it validates the
+ * bearer token. Both `OAuthProvider` (for its `apiHandler`) and
+ * `OAuthResourceServer` (for its `handler`) set it.
+ */
+interface WorkersOAuthResourceAuth {
+  token: string;
+  audience: string;
+  expiresAt?: number;
+  scope: string[];
+  userId?: string;
+  clientId?: string;
+}
+
+function isHttpUrl(value: string): URL | undefined {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Map `ctx.auth` from Workers OAuth Provider 1.x to SDK v2 `AuthInfo`.
+ * Returns `undefined` when `ctx.auth` is absent or not in the provider's
+ * shape, so the handler falls back to plain `ctx.props`.
+ */
+function getResourceAuthInfo(
+  ctx: ExecutionContext
+): { authInfo: AuthInfo; props: Record<string, unknown> } | undefined {
+  const auth = (ctx as ExecutionContext & { auth?: unknown }).auth;
+  if (!isPlainRecord(auth)) return undefined;
+
+  const candidate = auth as Partial<WorkersOAuthResourceAuth>;
+  const { token, audience, expiresAt, scope, clientId } = candidate;
+  if (
+    typeof token !== "string" ||
+    token.length === 0 ||
+    typeof audience !== "string" ||
+    !Array.isArray(scope) ||
+    !scope.every((entry) => typeof entry === "string") ||
+    // SDK v2 AuthInfo requires a client ID.
+    typeof clientId !== "string" ||
+    clientId.length === 0 ||
+    (expiresAt !== undefined &&
+      (typeof expiresAt !== "number" ||
+        !Number.isFinite(expiresAt) ||
+        expiresAt <= 0))
+  ) {
+    return undefined;
+  }
+
+  const resource = isHttpUrl(audience);
+  const props = ctx.props;
+  if (!resource || !isPlainRecord(props)) return undefined;
+
+  return {
+    props,
+    authInfo: {
+      token,
+      clientId,
+      scopes: [...scope],
+      ...(expiresAt !== undefined && { expiresAt }),
+      resource,
+      extra: { props }
+    }
+  };
+}
+
 export function getVerifiedOAuthAuthInfo(
   ctx: ExecutionContext
 ): { authInfo: AuthInfo; props: Record<string, unknown> } | undefined {
   const symbolContext = ctx as ExecutionContext & Record<symbol, unknown>;
-  if (!(VERIFIED_OAUTH_CONTEXT in symbolContext)) return undefined;
+  if (!(VERIFIED_OAUTH_CONTEXT in symbolContext)) {
+    return getResourceAuthInfo(ctx);
+  }
 
   const value = symbolContext[VERIFIED_OAUTH_CONTEXT];
   if (!isPlainRecord(value) || value.version !== 1) invalidVerifiedContext();

@@ -26,12 +26,11 @@ import type {
   CallToolResult,
   ToolAnnotations
 } from "@modelcontextprotocol/sdk/types.js";
-import {
-  bindMcpClient,
-  type CallToolSchemaOrOptions,
-  type CompatibleMcpClient,
-  type LegacyCallToolResultSchema
+import type {
+  CallToolSchemaOrOptions,
+  LegacyCallToolResultSchema
 } from "./invoker";
+import { bindMcpClient, type CompatibleMcpClient } from "./invoker-compat";
 import type { z, ZodRawShape } from "zod";
 
 // v2 imports from @x402/core

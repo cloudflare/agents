@@ -16,6 +16,17 @@ import type {
   Tool
 } from "@modelcontextprotocol/client";
 export type { ElicitRequest, ElicitResult } from "@modelcontextprotocol/client";
+export {
+  RPC_DO_PREFIX,
+  RPCClientTransport,
+  type McpRpcAgent,
+  type RPCClientTransportOptions
+} from "../rpc";
+export type {
+  MCPElicitationHandler,
+  MCPElicitationHandlers
+} from "./connection";
+export type { McpClientOptions } from "../types";
 import { type RetryOptions, tryN } from "../../retries";
 import { z } from "zod";
 import { nanoid } from "nanoid";
