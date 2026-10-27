@@ -246,6 +246,25 @@ export default defineConfig({
 When the stub is enabled and app code calls `turndown()`, the stub throws an
 error that points back to this option.
 
+### Latin-1 Worker Chunks
+
+The `agents()` plugin also escapes every character above U+00FF in the
+Worker's chunks, writing `—` as `\u2014`. V8 stores a module's source as a
+two-byte string once it holds one such character, and the Worker keeps that
+source in memory, so a single em dash in a dependency's comment doubles the
+memory the module's code takes. Wrangler's own bundler, esbuild, escapes
+non-ASCII characters by default; Vite does not.
+
+The values of strings, template literals and regular expressions do not
+change. A tagged template that reads `strings.raw` sees the escape sequence
+instead of the character. To turn the escaping off:
+
+```typescript
+export default defineConfig({
+  plugins: [agents({ escapeNonLatin1: false }), react(), cloudflare()]
+});
+```
+
 The starter template and all examples include this plugin by default.
 
 ## Generating Types

@@ -407,6 +407,36 @@ export default TurndownService;
   };
 }
 
+const NON_LATIN1 = /[\u0100-\uffff]/g;
+
+function escapeAboveLatin1(code: string): string {
+  return code.replace(
+    NON_LATIN1,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`
+  );
+}
+
+// V8 stores a script's source as a two-byte string as soon as it holds one
+// character above U+00FF, and Workers keeps every module's source on the
+// isolate heap. One em dash in a comment doubles the memory a bundled Worker
+// spends on its code. esbuild, and so Wrangler, escapes non-ASCII by default;
+// Vite does not. Escaping inside strings, templates and regexes keeps their
+// values; comments and identifiers stay valid.
+function latin1WorkerChunksPlugin(): Plugin {
+  return {
+    name: "agents-latin1-worker-chunks",
+    apply: "build",
+    applyToEnvironment: (environment) =>
+      environment.config.consumer === "server",
+    generateBundle(_options, bundle) {
+      for (const output of Object.values(bundle)) {
+        if (output.type !== "chunk") continue;
+        output.code = escapeAboveLatin1(output.code);
+      }
+    }
+  };
+}
+
 function skillsImportPlugin(): Plugin {
   return {
     name: "agents-skills-import",
@@ -447,20 +477,30 @@ export interface AgentsPluginOptions {
    * implementation.
    */
   stubTurndown?: boolean;
+  /**
+   * Escape every character above U+00FF in server (Worker) chunks, so V8
+   * keeps each module's source as a one-byte string. One such character
+   * otherwise doubles the memory the whole module's source takes on the
+   * isolate heap. Enabled by default. String, template and regex values are
+   * unchanged; only a tagged template that reads `.raw` sees the escape.
+   */
+  escapeNonLatin1?: boolean;
 }
 
 /**
  * Vite plugin for Agents SDK projects.
  *
  * Handles TC39 decorator transforms (Oxc doesn't support them yet, oxc#9170) so
- * `@callable()` works at runtime, the `agents:skills` import transform, and
- * stubbing `turndown` to keep Workers deploys clean. Will grow to cover other
- * Agents-specific build concerns as needed.
+ * `@callable()` works at runtime, the `agents:skills` import transform,
+ * stubbing `turndown` to keep Workers deploys clean, and escaping non-Latin-1
+ * characters in Worker chunks to halve the memory their source takes. Will
+ * grow to cover other Agents-specific build concerns as needed.
  */
 export default function agents(options: AgentsPluginOptions = {}): Plugin[] {
-  const { stubTurndown = true } = options;
+  const { stubTurndown = true, escapeNonLatin1 = true } = options;
   return [
     ...(stubTurndown ? [turndownStubPlugin()] : []),
+    ...(escapeNonLatin1 ? [latin1WorkerChunksPlugin()] : []),
     skillsImportPlugin(),
     babel({
       presets: [
