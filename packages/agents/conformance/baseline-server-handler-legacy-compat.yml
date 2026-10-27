@@ -1,4 +1,6 @@
-# SDK v2 handler's explicit Legacy compatibility path.
+# SDK v2 handler's explicit Legacy compatibility path (deprecated).
+# These need a server-to-client channel or a durable event stream, which a
+# stateless request does not have; they are kept rather than fixed.
 # All 33 scenarios execute; this is not the alpha harness's smaller `active`
 # subset. Complete sessionful compatibility is tested in the legacy lanes.
 server:

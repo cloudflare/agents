@@ -7,7 +7,7 @@
     "start": "wrangler dev"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.32.1",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "agents": "*",
     "zod": "^4.6.7"
   }

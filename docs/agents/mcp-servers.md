@@ -5,7 +5,7 @@ Build an MCP server on Workers with `createMcpHandler` from `agents/mcp/server` 
 ## Install
 
 ```sh
-pnpm add agents @modelcontextprotocol/server@2.3.1 zod
+pnpm add agents @modelcontextprotocol/server@2.4.0 zod
 ```
 
 `@modelcontextprotocol/server` is an optional peer dependency of `agents`, so your package manager does not install it for you. Use the exact version required by your installed Agents release.
@@ -279,7 +279,7 @@ If the handler lifecycle does not fit, use the SDK's `WebStandardStreamableHTTPS
 `McpAgent` is deprecated, but existing servers keep working. It is built on MCP SDK v1, which is an optional peer dependency of `agents`, so your package manager no longer installs it for you. Add the exact version your Agents release expects before you upgrade:
 
 ```sh
-pnpm add agents @modelcontextprotocol/sdk@1.32.1 zod
+pnpm add agents @modelcontextprotocol/sdk@1.32.2 zod
 ```
 
 Keep importing `McpServer` from `@modelcontextprotocol/sdk/server/mcp.js` in an `McpAgent`. An SDK v2 server from `@modelcontextprotocol/server` cannot run inside `McpAgent`. The same applies to `WorkerTransport` and `createLegacyMcpHandler` from `agents/mcp`.

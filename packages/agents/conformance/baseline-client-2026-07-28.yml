@@ -1,22 +1,18 @@
 # SDK v2 client against the latest published conformance protocol revision.
 # Every entry is executed by alpha.12; run-suite.mjs rejects unseen entries.
 client:
-  # SHOULD-level only: the built-in provider uses Dynamic Client Registration
-  # instead of a URL-based Client ID Metadata Document.
-  # Impact if unchanged: servers that require CIMD rather than DCR need a
-  # custom OAuth provider.
-  - auth/basic-cimd
-
   # The default scope step-up budget produces four authorization attempts;
-  # the referee's SHOULD-level limit is three or fewer.
+  # the referee's SHOULD-level limit is three or fewer. Fixed by the
+  # step-up round limit in cloudflare/agents#2663; remove this entry with it.
   # Impact if unchanged: a permanently unsatisfiable insufficient_scope
   # challenge can send the user through one additional OAuth round-trip before
   # the client stops retrying.
   - auth/scope-retry-limit
 
-  # Alpha.12 omits resultType after negotiating 2026-07-28. The final draft
-  # requires servers implementing that revision to include it; the
-  # absent-means-complete bridge applies only to earlier revisions. All five
-  # MRTR wire assertions pass before the fixture's invalid final result.
+  # Referee bug (modelcontextprotocol/conformance#475): test_mrtr_no_result_type
+  # omits resultType after negotiating 2026-07-28. The released spec
+  # (basic/index, ResultType) requires 2026-07-28 servers to include it and
+  # limits absent-means-complete to earlier-revision servers, so the SDK v2
+  # client rejects the result. All five MRTR wire checks pass first.
   # Impact if unchanged: none for conforming 2026-07-28 servers.
   - sep-2322-client-request-state

@@ -15,7 +15,7 @@
     "acorn": "^8.17.0"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "1.32.1",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@playwright/test": "^1.61.1",
     "@tanstack/ai": "0.38.0",
     "ai": "^7.0.0",
