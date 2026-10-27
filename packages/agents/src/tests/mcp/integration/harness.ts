@@ -70,9 +70,14 @@ export async function eventually(
   }
 }
 
-/** Let in-flight work reach the point where it waits on the server. */
+/** Give queued work a moment to reach its queue. */
 export function pause(ms = 50): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Wait until `count` requests are waiting at the server's hold. */
+export function waitingAtServer(server: OAuthMcpServer, count = 1) {
+  return eventually(async () => server.waitingRequests() >= count);
 }
 
 /**
@@ -131,11 +136,17 @@ export async function connectAuthorized(
   agent: IntegrationAgent,
   server: OAuthMcpServer,
   grant?: { scope: string },
-  options: { id?: string; name?: string } = {}
+  options: {
+    id?: string;
+    name?: string;
+    url?: string;
+    transport?: "auto" | "streamable-http" | "sse";
+  } = {}
 ): Promise<string> {
-  const added = await agent.connectServer(server.url, {
+  const { url = server.url, ...rest } = options;
+  const added = await agent.connectServer(url, {
     callbackHost: CLIENT_ORIGIN,
-    ...options
+    ...rest
   });
   expect(added.state).toBe("authenticating");
   if (added.state !== "authenticating") throw new Error("unreachable");

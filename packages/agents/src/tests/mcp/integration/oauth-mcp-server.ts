@@ -7,7 +7,9 @@ import { createMcpHandler } from "../../../mcp";
 /**
  * An OAuth-protected MCP server for integration tests, served through msw.
  *
- * The resource server answers at `<origin>/mcp`: protected-resource metadata,
+ * The resource server answers at `<origin>/mcp`, and over the older SSE
+ * transport at `<origin>/sse` with a per-session message endpoint. It serves
+ * protected-resource metadata,
  * a bearer check, `403 insufficient_scope` step-ups for the operations listed
  * in {@link STEP_UPS}, and a real MCP endpoint built with `createMcpHandler`.
  * The authorization server serves metadata, dynamic client registration and
@@ -115,7 +117,7 @@ export function createOAuthMcpServer({
   authOrigin = AUTH_ORIGIN
 }: { origin?: string; authOrigin?: string } = {}) {
   const url = `${origin}/mcp`;
-  const resourceMetadataUrl = `${origin}/.well-known/oauth-protected-resource/mcp`;
+  const metadataPrefix = "/.well-known/oauth-protected-resource";
 
   const accessTokens = new Map<string, Grant>();
   const refreshTokens = new Map<string, Grant>();
@@ -147,6 +149,24 @@ export function createOAuthMcpServer({
   let held: Promise<void> | undefined;
   let heldEndpoint: "mcp" | "token" = "mcp";
   let releaseHeld = () => {};
+  /** How many requests are waiting at the hold right now. */
+  let waiting = 0;
+
+  async function waitIfHeld(endpoint: "mcp" | "token"): Promise<void> {
+    if (!held || heldEndpoint !== endpoint) return;
+    waiting += 1;
+    try {
+      await held;
+    } finally {
+      waiting -= 1;
+    }
+  }
+
+  /** Open SSE streams, by session id. */
+  const sseSessions = new Map<
+    string,
+    ReadableStreamDefaultController<Uint8Array>
+  >();
 
   /** Every token request the authorization server received. */
   const tokenRequests: URLSearchParams[] = [];
@@ -162,12 +182,13 @@ export function createOAuthMcpServer({
   function challenge(
     status: 401 | 403,
     scope: string,
-    error?: string
+    error?: string,
+    resourcePath = "/mcp"
   ): Response {
     const parts = [
       error && `error="${error}"`,
       `scope="${scope}"`,
-      `resource_metadata="${resourceMetadataUrl}"`
+      `resource_metadata="${origin}${metadataPrefix}${resourcePath}"`
     ].filter(Boolean);
     return new Response(null, {
       status,
@@ -224,17 +245,22 @@ export function createOAuthMcpServer({
 
   async function resourceServer(request: Request): Promise<Response> {
     const { pathname } = new URL(request.url);
-    if (pathname.startsWith("/.well-known/oauth-protected-resource")) {
+    if (pathname.startsWith(metadataPrefix)) {
+      // Each resource path has its own metadata: /mcp, or /sse for SSE.
+      const resourcePath = pathname.slice(metadataPrefix.length) || "/mcp";
       return Response.json({
-        resource: url,
+        resource: `${origin}${resourcePath}`,
         authorization_servers: [authOrigin],
         scopes_supported: [READ_SCOPE, WRITE_SCOPE, ADMIN_SCOPE]
       });
     }
+    if (pathname === "/sse" || pathname === "/sse/message") {
+      return sseServer(request);
+    }
     if (pathname !== "/mcp") {
       return new Response("Not found", { status: 404 });
     }
-    if (held && heldEndpoint === "mcp") await held;
+    await waitIfHeld("mcp");
     if (!options.up) return new Response("unavailable", { status: 503 });
 
     const token = (request.headers.get("authorization") ?? "").replace(
@@ -277,6 +303,94 @@ export function createOAuthMcpServer({
     return mcpHandler(request, env, createExecutionContext());
   }
 
+  /**
+   * A minimal MCP server over the SSE transport: `GET /sse` opens a stream
+   * that names a per-session message endpoint, and replies to the messages
+   * posted there arrive on the stream. The stream is open; every message
+   * needs a bearer token, so OAuth runs on the message endpoint.
+   */
+  async function sseServer(request: Request): Promise<Response> {
+    await waitIfHeld("mcp");
+    if (!options.up) return new Response("unavailable", { status: 503 });
+    const { pathname, searchParams } = new URL(request.url);
+    const token = (request.headers.get("authorization") ?? "").replace(
+      /^Bearer /,
+      ""
+    );
+    if (pathname === "/sse/message" && !accessTokens.get(token)) {
+      unauthorizedMethods.push(`SSE ${request.method}`);
+      return challenge(401, options.challengeScope, undefined, "/sse");
+    }
+
+    const encode = (text: string) => new TextEncoder().encode(text);
+    if (pathname === "/sse" && request.method === "GET") {
+      const sessionId = crypto.randomUUID();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          sseSessions.set(sessionId, controller);
+          controller.enqueue(
+            encode(
+              `event: endpoint\ndata: /sse/message?sessionId=${sessionId}\n\n`
+            )
+          );
+        },
+        cancel() {
+          sseSessions.delete(sessionId);
+        }
+      });
+      return new Response(stream, {
+        headers: {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache"
+        }
+      });
+    }
+    const session = sseSessions.get(searchParams.get("sessionId") ?? "");
+    if (pathname !== "/sse/message" || request.method !== "POST" || !session) {
+      return new Response("Not found", { status: 404 });
+    }
+    const message = (await request.json()) as {
+      id?: string | number;
+      method?: string;
+      params?: { protocolVersion?: string };
+    };
+    if (message.method) mcpMethods.push(message.method);
+    if (message.id !== undefined) {
+      const result = (() => {
+        switch (message.method) {
+          case "initialize":
+            return {
+              protocolVersion: message.params?.protocolVersion ?? "2025-06-18",
+              capabilities: { tools: {} },
+              serverInfo: { name: "files-sse", version: "1.0.0" }
+            };
+          case "tools/list":
+            return {
+              tools: [{ name: "read", inputSchema: { type: "object" } }]
+            };
+          case "tools/call":
+            return { content: [{ type: "text", text: "read it" }] };
+          case "ping":
+            return {};
+          default:
+            return undefined;
+        }
+      })();
+      const reply =
+        result === undefined
+          ? {
+              jsonrpc: "2.0",
+              id: message.id,
+              error: { code: -32601, message: "Method not found" }
+            }
+          : { jsonrpc: "2.0", id: message.id, result };
+      session.enqueue(
+        encode(`event: message\ndata: ${JSON.stringify(reply)}\n\n`)
+      );
+    }
+    return new Response("Accepted", { status: 202 });
+  }
+
   async function authorizationServer(request: Request): Promise<Response> {
     const { pathname } = new URL(request.url);
     if (pathname === "/.well-known/oauth-authorization-server") {
@@ -302,7 +416,7 @@ export function createOAuthMcpServer({
       );
     }
     if (pathname === "/token" && request.method === "POST") {
-      if (held && heldEndpoint === "token") await held;
+      await waitIfHeld("token");
       const params = new URLSearchParams(await request.text());
       tokenRequests.push(params);
       const invalidGrant = () =>
@@ -370,6 +484,8 @@ export function createOAuthMcpServer({
 
   return {
     url,
+    /** The same server over the older SSE transport. */
+    sseUrl: `${origin}/sse`,
     handlers,
     options,
     tokenRequests,
@@ -436,6 +552,11 @@ export function createOAuthMcpServer({
       return releaseHeld;
     },
 
+    /** How many requests are waiting at the hold right now. */
+    waitingRequests(): number {
+      return waiting;
+    },
+
     /** Invalidate every access token, so the next request gets a 401. */
     revokeAccessTokens(): void {
       accessTokens.clear();
@@ -456,6 +577,14 @@ export function createOAuthMcpServer({
       options.challengeScope = READ_SCOPE;
       options.legacyOnly = false;
       releaseHeld();
+      for (const session of sseSessions.values()) {
+        try {
+          session.close();
+        } catch {
+          // Already closed by the client.
+        }
+      }
+      sseSessions.clear();
     }
   };
 }

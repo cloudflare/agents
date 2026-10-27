@@ -83,13 +83,19 @@ export class McpIntegrationAgent extends Agent {
   /** Add an MCP server with a single quick attempt per connect. */
   async connectServer(
     url: string,
-    options: { callbackHost: string; id?: string; name?: string }
+    options: {
+      callbackHost: string;
+      id?: string;
+      name?: string;
+      transport?: "auto" | "streamable-http" | "sse";
+    }
   ): Promise<AddServerOutcome> {
     try {
       const result = await this.addMcpServer(options.name ?? "files", url, {
         callbackHost: options.callbackHost,
         id: options.id,
-        retry: { maxAttempts: 1 }
+        retry: { maxAttempts: 1 },
+        transport: { type: options.transport ?? "auto" }
       });
       return result.state === "authenticating"
         ? { id: result.id, state: "authenticating", authUrl: result.authUrl }

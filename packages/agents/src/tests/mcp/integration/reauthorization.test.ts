@@ -7,8 +7,10 @@ import {
   eventually,
   followCallback,
   newAgent,
+  pause,
   restartAgent,
   useOAuthMcpServer,
+  waitingAtServer,
   type IntegrationAgent
 } from "./harness";
 import {
@@ -151,15 +153,22 @@ describe.each([
       expect((await agent.server(id))?.state).toBe("ready");
     });
 
-    it("refreshes once for two calls whose token expired together", async () => {
+    it("keeps both calls working when their token expired together, without asking the user", async () => {
       const agent = await newAgent();
       const id = await connectAuthorized(agent, server);
 
       server.revokeAccessTokens();
-      const [first, second] = await Promise.all([
+      // Both refreshes would reach the token endpoint together unless the
+      // second waits for the first; rotation would then refuse one of them.
+      const release = server.holdRequests("token");
+      const calls = Promise.all([
         agent.callServerTool(id, "read"),
         agent.callServerTool(id, "read")
       ]);
+      await waitingAtServer(server);
+      await pause();
+      release();
+      const [first, second] = await calls;
 
       expect(first).toEqual({ ok: true, text: "read it" });
       expect(second).toEqual({ ok: true, text: "read it" });
@@ -268,6 +277,41 @@ describe.each([
       });
       expect((await agent.server(id))?.error).toContain(ADMIN_SCOPE);
     });
+  });
+});
+
+describe("MCP over the older SSE transport", () => {
+  const sse = { url: server.sseUrl, transport: "sse" as const };
+
+  it("connects through OAuth and calls a tool", async () => {
+    const agent = await newAgent();
+    const id = await connectAuthorized(agent, server, undefined, sse);
+    expect(await agent.callServerTool(id, "read")).toEqual({
+      ok: true,
+      text: "read it"
+    });
+  });
+
+  it("keeps both calls working when their token expired together, without asking the user", async () => {
+    const agent = await newAgent();
+    const id = await connectAuthorized(agent, server, undefined, sse);
+
+    server.revokeAccessTokens();
+    // Both refreshes would reach the token endpoint together unless the
+    // second waits for the first; rotation would then refuse one of them.
+    const release = server.holdRequests("token");
+    const calls = Promise.all([
+      agent.callServerTool(id, "read"),
+      agent.callServerTool(id, "read")
+    ]);
+    await waitingAtServer(server);
+    await pause();
+    release();
+    const [first, second] = await calls;
+
+    expect(first).toEqual({ ok: true, text: "read it" });
+    expect(second).toEqual({ ok: true, text: "read it" });
+    expect((await agent.server(id))?.state).toBe("ready");
   });
 });
 

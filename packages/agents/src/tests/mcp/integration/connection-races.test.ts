@@ -6,6 +6,7 @@ import {
   newAgent,
   pause,
   restartAgent,
+  waitingAtServer,
   useOAuthMcpServers
 } from "./harness";
 import { CLIENT_ORIGIN, MCP_URL, READ_SCOPE } from "./oauth-mcp-server";
@@ -23,6 +24,7 @@ describe("MCP connection work in an Agent", () => {
     // The wake's restore starts connecting and waits on the server.
     const release = server.holdRequests();
     const agent = await restartAgent(before);
+    await waitingAtServer(server);
     expect((await agent.server(id))?.state).not.toBe("ready");
 
     await agent.remove(id);
@@ -40,10 +42,12 @@ describe("MCP connection work in an Agent", () => {
 
     const release = server.holdRequests();
     const agent = await restartAgent(before);
+    await waitingAtServer(server);
     const added = agent.connectServer(MCP_URL, {
       callbackHost: CLIENT_ORIGIN,
       id: "files"
     });
+    // The add queues behind the restore; nothing outside shows it queued.
     await pause();
     await agent.remove("files");
     release();
@@ -65,8 +69,9 @@ describe("MCP connection work in an Agent", () => {
     // A connect holds the server's queue; the user's callback waits behind it.
     const release = server.holdRequests();
     const connecting = agent.connectNow(id);
-    await pause();
+    await waitingAtServer(server);
     const callback = followCallback(server.authorize(denied.authUrl));
+    // The callback queues behind the connect; nothing outside shows it queued.
     await pause();
     await agent.remove(id);
     release();
@@ -93,7 +98,7 @@ describe("MCP connection work in an Agent", () => {
     // The user approves; the code exchange waits on the token endpoint.
     const release = server.holdRequests("token");
     const callback = followCallback(server.authorize(first.authUrl));
-    await pause();
+    await waitingAtServer(server);
 
     await agent.remove("files");
     const second = await agent.connectServer(MCP_URL, {
@@ -122,7 +127,7 @@ describe("MCP connection work in an Agent", () => {
 
     const release = server.holdRequests("token");
     const callback = followCallback(server.authorize(first.authUrl));
-    await pause();
+    await waitingAtServer(server);
     await agent.remove("files");
     const second = await agent.connectServer(MCP_URL, {
       callbackHost: CLIENT_ORIGIN,
@@ -152,7 +157,7 @@ describe("MCP connection work in an Agent", () => {
 
     const release = server.holdRequests("token");
     const callback = followCallback(server.authorize(first.authUrl));
-    await pause();
+    await waitingAtServer(server);
     await agent.remove("files");
     release();
     expect(await callback).toMatchObject({ authorized: false });
