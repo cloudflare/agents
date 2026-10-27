@@ -2,6 +2,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { DurableObject } from "cloudflare:workers";
 
 import { publishDiagnosticsEvent } from "../observability/diagnostics";
+import { tracer as cloudflareTracer } from "../observability/tracing/cloudflare";
+import type { AgentTracer } from "../observability/tracing/tracer";
 import {
   CapabilityRunner,
   type DurableObjectCapability,
@@ -117,6 +119,7 @@ export type LifecycleHostInvoker = <T>(
 const lifecycleEventSinks = new WeakMap<object, LifecycleEventSink>();
 const lifecycleRouteTransports = new WeakMap<object, LifecycleRouteTransport>();
 const lifecycleHostInvokers = new WeakMap<object, LifecycleHostInvoker>();
+const lifecycleTracers = new WeakMap<object, AgentTracer>();
 
 /**
  * Startup tokens of the Lifecycles whose startup the current async context
@@ -133,6 +136,17 @@ export function setLifecycleHostInvoker<
   Props extends object
 >(lifecycle: Lifecycle<Env, Props>, invoker: LifecycleHostInvoker): void {
   lifecycleHostInvokers.set(lifecycle, invoker);
+}
+
+/**
+ * @internal Replace the tracer behind Lifecycle's own spans. Defaults to the
+ * native Workers tracer; tests substitute a recording one.
+ */
+export function setLifecycleTracer<Env extends object, Props extends object>(
+  lifecycle: Lifecycle<Env, Props>,
+  tracer: AgentTracer
+): void {
+  lifecycleTracers.set(lifecycle, tracer);
 }
 
 /** @internal Supply a host's routed Lifecycle transport. */
@@ -238,6 +252,7 @@ export class Lifecycle<
       },
       emit: (type, payload) =>
         this.#emitCapabilityEvent({ source: "lifecycle", type, payload }),
+      tracer: () => lifecycleTracers.get(this) ?? cloudflareTracer,
       rearm: () => this.rearmAlarm(),
       // Deferred a tick so the current invocation settles (its RPC/alarm
       // completes and its writes confirm) before the instance resets —
