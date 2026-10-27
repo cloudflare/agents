@@ -141,7 +141,7 @@ src/
   codemode/             # Experimental code generation
     ai.ts
 
-  models/               # Model providers (one createAI() per framework, same skeleton; pi-ai is experimental)
+  models/               # Model providers (one createAI() per framework, same skeleton)
     core/               # Framework-neutral, not exported: binding transport, gateway options, Workers AI ids, SSE, errors
       transport.ts      #   env.AI.run + env.AI.gateway(id).run (universal), envelope unwrap, errors
       settings.ts       #   AISettings (binding only), GatewayOptions/ModelOptions, option merging

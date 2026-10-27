@@ -26,8 +26,6 @@ export interface CloudflareAIAttempt {
  * modules wrap it into their own error type at their boundary (the AI SDK
  * module into an `APICallError`, so `ai`'s retry loop honours
  * {@link CloudflareAIError.isRetryable}).
- *
- * @experimental This surface is experimental and may change.
  */
 export class CloudflareAIError extends Error {
   /** HTTP status, when the failure carried one. */

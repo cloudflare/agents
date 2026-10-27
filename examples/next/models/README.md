@@ -1,6 +1,6 @@
 # Next: models
 
-The `createAI` factories, `agents/models/ai-sdk` and the experimental
+The `createAI` factories, `agents/models/ai-sdk` and
 `agents/models/pi-ai`, driven from a plain Worker. Same rule, same routes, one
 per framework.
 
@@ -135,5 +135,3 @@ rather than a completion — `/fallback` is the route that shows what to do abou
 it. On `/stream` the response status is already 200 by the time the model is
 reached, so a failure before the first token shows up as an empty body with the
 error in the `wrangler dev` log.
-
-`agents/models/pi-ai` is experimental and its surface may change.
