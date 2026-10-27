@@ -2,7 +2,7 @@
 #
 # Source: .gardener/tasks/mention-reply/TASK.md
 # Task: mention-reply
-# Bundle: sha256:41b7598784f2d78e1f286e840d9b771348b26499464ecb022ae3b30663926bf9
+# Bundle: sha256:f49d05677086284ab7af350998b354aff2e5eab45d792fb8ec8e41c417a1ae07
 # Regenerate: gardener generate
 # Do not edit this workflow directly.
 name: "Gardener · Mention reply"
@@ -54,7 +54,7 @@ jobs:
       task-id: "mention-reply"
       task-name: "Mention reply"
       task-source: ".gardener/tasks/mention-reply/TASK.md"
-      task-bundle-hash: 41b7598784f2d78e1f286e840d9b771348b26499464ecb022ae3b30663926bf9
+      task-bundle-hash: f49d05677086284ab7af350998b354aff2e5eab45d792fb8ec8e41c417a1ae07
       plan-timeout-minutes: 40
       pull-request-head: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || github.event.inputs.pull_request || '' }}
       merge-base: true
