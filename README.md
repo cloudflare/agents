@@ -22,17 +22,18 @@ Already using `Agent`, `AIChatAgent` or Think? They still work. See [The Agent c
 
 ## Quick start
 
-To start from a complete app, with a chat UI over WebSockets, a filesystem and code execution, create a copy of the [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi):
+> [!TIP]
+> **Start from a complete app instead.** The [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi) has a chat UI over WebSockets, a filesystem and code execution. Create a copy:
+>
+> ```sh
+> npm create cloudflare@latest -- --template=cloudflare/agents/examples/next/harnesses/pi
+> ```
+>
+> Or deploy it to your account:
+>
+> [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi)
 
-```sh
-npm create cloudflare@latest -- --template=cloudflare/agents/examples/next/harnesses/pi
-```
-
-Or deploy it to your account:
-
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi)
-
-To build a small one yourself instead, start here. This agent runs Pi on a Workers AI model, with one tool: it can read web pages. Install the Agents SDK and Pi:
+This agent runs Pi on a Workers AI model, with one tool: it can read web pages. Install the Agents SDK and Pi:
 
 ```sh
 npm install agents @earendil-works/pi-durable@~1.4.0 @earendil-works/pi-ai@~1.4.0 @earendil-works/chord@~1.4.0
