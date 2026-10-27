@@ -265,6 +265,17 @@ pnpm run test:workers   # or: pnpm exec vitest -r src/tests
 
 Runs inside the Workers runtime via `@cloudflare/vitest-pool-workers`. Uses a `wrangler.jsonc` to configure Durable Object bindings, queues, workflows, etc. Tests cover: state, scheduling, sub-agent routing, callable methods, WebSocket message handling, email routing, MCP protocol, workflows.
 
+### Faking HTTP servers in integration tests
+
+Use [msw](https://mswjs.io) (`setupServer` from `msw/node`) for any server an integration test talks to over HTTP. It intercepts `fetch` across the test isolate, including code running inside Durable Objects, so the code under test uses its real transport and the test reads like a server, not a stub.
+
+- Start it with `server.listen({ onUnhandledRequest: "error" })` so a request with no handler fails the test.
+- Don't assign `globalThis.fetch`, `vi.spyOn(globalThis, "fetch")` or `vi.stubGlobal("fetch", ...)`.
+- Don't pass a hand-written `fetch` option (for example a transport's `fetch`) just to fake a server.
+- Serve real protocol where the repo has it, for example an MCP endpoint built with `createMcpHandler` rather than hand-rolled JSON-RPC.
+
+`src/tests/mcp/integration/` shows the pattern. Some older tests still mock `fetch`; move them to msw when you touch them.
+
 ### Lifecycle and capability tests (`src/tests/lifecycle/`, `src/tests/capabilities/`)
 
 Part of the shared workers project — there is no separate Lifecycle vitest
