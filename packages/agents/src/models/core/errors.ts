@@ -1,7 +1,5 @@
 /**
  * Coarse classification of a failed Cloudflare AI call.
- *
- * @experimental This surface is experimental and may change.
  */
 export type CloudflareAIErrorCode =
   | "auth"
@@ -14,8 +12,6 @@ export type CloudflareAIErrorCode =
 
 /**
  * One leg of a {@link CloudflareAIError} fallback chain.
- *
- * @experimental This surface is experimental and may change.
  */
 export interface CloudflareAIAttempt {
   /** The model id that was tried. */
@@ -30,8 +26,6 @@ export interface CloudflareAIAttempt {
  * modules wrap it into their own error type at their boundary (the AI SDK
  * module into an `APICallError`, so `ai`'s retry loop honours
  * {@link CloudflareAIError.isRetryable}).
- *
- * @experimental This surface is experimental and may change.
  */
 export class CloudflareAIError extends Error {
   /** HTTP status, when the failure carried one. */

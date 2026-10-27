@@ -10,8 +10,6 @@ export const PROVIDER_OPTIONS_KEY = "cloudflare";
  * AI Gateway settings for a request. The gateway is an option, not a separate
  * product: every call goes through one, and `id` defaults to `"default"`,
  * which Cloudflare creates on first use.
- *
- * @experimental This surface is experimental and may change.
  */
 export interface GatewayOptions {
   /** Gateway id. Defaults to `"default"` (auto-created on first use). */
@@ -56,8 +54,6 @@ export interface GatewayOptions {
  * API token. Both take the same routes — a model id to the run path, a
  * vendor's model object to the provider-native path — and the same gateway
  * options.
- *
- * @experimental This surface is experimental and may change.
  */
 export type AISettings = (BindingAccess | AccountAccess) &
   ProviderGatewaySettings;
@@ -65,8 +61,6 @@ export type AISettings = (BindingAccess | AccountAccess) &
 /**
  * Reach Cloudflare through the `AI` binding: no account id or token to hold,
  * and the gateway is the Worker's own account's.
- *
- * @experimental This surface is experimental and may change.
  */
 export interface BindingAccess {
   /** The `AI` binding from a Worker's env. */
@@ -82,8 +76,6 @@ export interface BindingAccess {
  * a model object to the provider-native path
  * (`gateway.ai.cloudflare.com/v1/{accountId}/{gateway}/...`). The token is
  * only ever sent to those two hosts.
- *
- * @experimental This surface is experimental and may change.
  */
 export interface AccountAccess {
   /** The account the gateway belongs to. */
@@ -100,8 +92,6 @@ export interface AccountAccess {
 /**
  * Provider-wide gateway defaults, in either spelling: nested under `gateway`,
  * or flat (`{ id: "prod", cacheTtl: 60 }`). Both merge, the flat key winning.
- *
- * @experimental This surface is experimental and may change.
  */
 export interface ProviderGatewaySettings extends GatewayOptions {
   /** Gateway id or full gateway options. */
@@ -121,8 +111,6 @@ export interface ProviderGatewaySettings extends GatewayOptions {
  * default; a module whose legs may also be model objects says so
  * (`ModelOptions<WorkersAIModelId | LanguageModelV4>`) rather than rebuilding
  * the type.
- *
- * @experimental This surface is experimental and may change.
  */
 export interface ModelOptions<
   Leg = WorkersAIModelId

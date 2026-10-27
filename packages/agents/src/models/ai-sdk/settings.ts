@@ -33,8 +33,6 @@ export {
  * A language model id: a Workers AI id, an AI Gateway catalog id
  * (`<author>/<model>`), or a dynamic route (`dynamic/<route>`). All three run
  * on `env.AI.run`.
- *
- * @experimental This surface is experimental and may change.
  */
 export type CloudflareLanguageModelId =
   | WorkersAIModelId
@@ -44,23 +42,17 @@ export type CloudflareLanguageModelId =
 /**
  * One leg of a fallback chain: a language model id, or any AI SDK language
  * model — which is routed through AI Gateway like `ai(model)`.
- *
- * @experimental This surface is experimental and may change.
  */
 export type FallbackLeg = CloudflareLanguageModelId | LanguageModelV4;
 
 /**
  * Per-model and per-call options: the framework-neutral options, with the
  * fallback leg type this module accepts.
- *
- * @experimental This surface is experimental and may change.
  */
 export type ModelOptions = CoreModelOptions<FallbackLeg>;
 
 /**
  * Which key authenticates a vendor model object routed through AI Gateway.
- *
- * @experimental This surface is experimental and may change.
  */
 export interface VendorKeyOptions {
   /**
@@ -79,8 +71,6 @@ export interface VendorKeyOptions {
  * {@link ModelOptions} plus {@link VendorKeyOptions.vendorKey}; the
  * Workers-AI-only knobs (`reasoningEffort`, `chatTemplateKwargs`) are ignored
  * with a warning.
- *
- * @experimental This surface is experimental and may change.
  */
 export type GatewayModelOptions = ModelOptions & VendorKeyOptions;
 
@@ -93,8 +83,6 @@ export type GatewayModelOptions = ModelOptions & VendorKeyOptions;
  * and no Workers AI reasoning knob to apply. They are absent from the type
  * rather than dropped at runtime, so the mistake is a compile error naming the
  * option.
- *
- * @experimental This surface is experimental and may change.
  */
 export type RoutedModelOptions = Omit<
   ModelOptions,
@@ -109,8 +97,6 @@ export type RoutedModelOptions = Omit<
  * Their fallback legs are ids: those models run through the Workers AI run
  * path, which resolves a leg by id, so a model object would type-check and
  * then be silently dropped.
- *
- * @experimental This surface is experimental and may change.
  */
 export type ModalityOptions = CoreModelOptions<WorkersAIModelId>;
 
@@ -134,8 +120,6 @@ export function fallbackLegs(
  * wrote there: `parseModelOptions` is framework-neutral and drops rather than
  * throws, and no type ever sees that JSON. A vendor id in a leg would
  * otherwise reach `env.AI.run` — the path a vendor model must never take.
- *
- * @experimental This surface is experimental and may change.
  */
 export function parseCallOptions(
   providerOptions: SharedV4ProviderOptions | undefined
@@ -150,8 +134,6 @@ export function parseCallOptions(
  * transcription, reranking. The same bag as {@link parseCallOptions}, but a
  * fallback leg must be a Workers AI id: a dynamic route answers in the
  * chat-completions shape, which none of those models can read.
- *
- * @experimental This surface is experimental and may change.
  */
 export function parseModalityCallOptions(
   providerOptions: SharedV4ProviderOptions | undefined

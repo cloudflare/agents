@@ -234,8 +234,6 @@ function readSegments(body: Record<string, unknown>): Segment[] {
 
 /**
  * A `TranscriptionModelV4` over the Workers AI speech-recognition catalog.
- *
- * @experimental This surface is experimental and may change.
  */
 export class CloudflareTranscriptionModel
   extends CloudflareModalityModel

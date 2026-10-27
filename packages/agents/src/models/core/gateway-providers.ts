@@ -17,8 +17,6 @@
 /**
  * The gateway provider slugs this table maps onto. A subset of the ambient
  * `AIGatewayProviders` union; {@link GatewayProviderNameCheck} keeps it one.
- *
- * @experimental This surface is experimental and may change.
  */
 export const GATEWAY_PROVIDER_NAMES = [
   "workers-ai",
@@ -44,8 +42,6 @@ export const GATEWAY_PROVIDER_NAMES = [
 
 /**
  * A gateway provider slug.
- *
- * @experimental This surface is experimental and may change.
  */
 export type GatewayProviderName = (typeof GATEWAY_PROVIDER_NAMES)[number];
 
