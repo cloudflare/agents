@@ -1942,8 +1942,8 @@ importers:
         specifier: '*'
         version: link:../../packages/agents
       hono:
-        specifier: ^4.13.5
-        version: 4.13.8
+        specifier: ^4.13.11
+        version: 4.13.11
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -4217,13 +4217,13 @@ importers:
         version: 2.17.0
       '@x402/hono':
         specifier: ^2.17.0
-        version: 2.17.0(hono@4.13.8)(typescript@6.0.3)
+        version: 2.17.0(hono@4.13.11)(typescript@6.0.3)
       agents:
         specifier: '*'
         version: link:../../packages/agents
       hono:
-        specifier: ^4.13.5
-        version: 4.13.8
+        specifier: ^4.13.11
+        version: 4.13.11
       nanoid:
         specifier: ^5.1.16
         version: 5.1.16
@@ -4975,8 +4975,8 @@ importers:
         specifier: ^0.31.0
         version: link:../agents
       hono:
-        specifier: ^4.13.5
-        version: 4.13.8
+        specifier: ^4.13.11
+        version: 4.13.11
 
   packages/shell:
     dependencies:
@@ -11820,6 +11820,10 @@ packages:
   highlight.js@11.12.0:
     resolution: {integrity: sha512-nbfWpyRMcMrPMmDwJB+dhX/eiaPKtc2RB+0QZskqJ3WjRA/FDS0e9hZrx8EC/lbEv8gXy98FcDbNa/dspAaJMg==}
     engines: {node: '>=12.0.0'}
+
+  hono@4.13.11:
+    resolution: {integrity: sha512-/SMX/RQNJn7oNmFwH6DtwDqcrzZU2otm1FD6OJe2cWF6cfy/F8hq0XVBv7xW3FTJshRQwuBnXHDq2kNsdZnshg==}
+    engines: {node: '>=16.9.0'}
 
   hono@4.13.8:
     resolution: {integrity: sha512-/Gng7NfoykZl2pjukW5Z6+8Yxm3BPRf86GTbQnt0SbySkvax4fyL4H3HhY1cCpBGmiW9XDRFzRV+CXK2W8QudQ==}
@@ -21482,11 +21486,11 @@ snapshots:
     dependencies:
       '@x402/core': 2.17.0
 
-  '@x402/hono@2.17.0(hono@4.13.8)(typescript@6.0.3)':
+  '@x402/hono@2.17.0(hono@4.13.11)(typescript@6.0.3)':
     dependencies:
       '@x402/core': 2.17.0
       '@x402/extensions': 2.17.0(typescript@6.0.3)
-      hono: 4.13.8
+      hono: 4.13.11
     transitivePeerDependencies:
       - bufferutil
       - ethers
@@ -23429,6 +23433,8 @@ snapshots:
       set-cookie-parser: 3.1.2
 
   highlight.js@11.12.0: {}
+
+  hono@4.13.11: {}
 
   hono@4.13.8: {}
 
