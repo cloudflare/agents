@@ -1,0 +1,43 @@
+.gardener/gardener.lock.json
+  s_6ce11858a29312::t_4e8ae8555da10e 14,21,133,140,287,294,409,416,531,538,638,645
+.gardener/tasks/fix/TASK.md
+  s_6ce11858a29312::t_5b75ce3319478d 67-68
+.gardener/tasks/mention-reply/TASK.md
+  s_6ce11858a29312::t_0be03dcf4dcf6a 72-76,87,114-117,129,135,140
+.gardener/tasks/opencode-upgrade/TASK.md
+  s_6ce11858a29312::t_a4b654fdd8ca5f 48,66,80,86-87,136,146,152,157,262,267
+.gardener/tasks/pi-upgrade/TASK.md
+  s_6ce11858a29312::t_67b4b4956758d3 48,66,80,86-87,136,146,152,157,262,267
+.gardener/tasks/pr-review-fix/TASK.md
+  s_6ce11858a29312::t_32a2cb1dff653b 47,53,82,84-87,94-95,97-99,103,105
+.gardener/tasks/triage/TASK.md
+  s_6ce11858a29312::t_9557c369ba0334 74-79
+.github/workflows/gardener-fix.yml
+  s_6ce11858a29312::t_f0daa40cc03477 5,47
+.github/workflows/gardener-mention-reply.yml
+  s_6ce11858a29312::t_2eecc68e8dbfe0 5,57
+.github/workflows/gardener-opencode-upgrade.yml
+  s_6ce11858a29312::t_764ce71dc8f060 5,46
+.github/workflows/gardener-pi-upgrade.yml
+  s_6ce11858a29312::t_2979169dde9766 5,46
+.github/workflows/gardener-pr-review-fix.yml
+  s_6ce11858a29312::t_9ccabcd5f26ac0 5,50
+.github/workflows/gardener-triage.yml
+  s_6ce11858a29312::t_b1aa07d06f052d 5,47
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "453a827210b625fb3a978fac170e572c3df9b263",
+  "prompts": {},
+  "sessions": {
+    "s_6ce11858a29312": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a17d3c-2653-7bb6-bcf6-d3c2ffa7aaee",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}
