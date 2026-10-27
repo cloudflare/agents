@@ -3,22 +3,39 @@ import { setupServer } from "msw/node";
 import { afterAll, afterEach, beforeAll, expect } from "vitest";
 import { getAgentByName } from "../../../index";
 import {
+  OAUTH_ERROR_PATH,
+  OAUTH_SUCCESS_PATH
+} from "../../agents/mcp-integration";
+import {
   CLIENT_ORIGIN,
-  MCP_URL,
   createOAuthMcpServer,
   type OAuthMcpServer
 } from "./oauth-mcp-server";
 
 /**
- * Serve the OAuth-protected MCP server through msw for one test file. Any
- * request without a handler fails the test.
+ * Serve OAuth-protected MCP servers through msw for one test file: the
+ * default one, plus one per extra origin pair. Any request without a handler
+ * fails the test.
  */
-export function useOAuthMcpServer(): OAuthMcpServer {
-  const server = createOAuthMcpServer();
-  const msw = setupServer(...server.handlers);
+export function useOAuthMcpServers(
+  ...extra: Array<{ origin: string; authOrigin: string }>
+): OAuthMcpServer[] {
+  const servers = [
+    createOAuthMcpServer(),
+    ...extra.map((origins) => createOAuthMcpServer(origins))
+  ];
+  const msw = setupServer(...servers.flatMap((server) => server.handlers));
   beforeAll(() => msw.listen({ onUnhandledRequest: "error" }));
-  afterEach(() => server.reset());
+  afterEach(() => {
+    for (const server of servers) server.reset();
+  });
   afterAll(() => msw.close());
+  return servers;
+}
+
+/** Serve the default OAuth-protected MCP server for one test file. */
+export function useOAuthMcpServer(): OAuthMcpServer {
+  const [server] = useOAuthMcpServers();
   return server;
 }
 
@@ -33,6 +50,30 @@ export async function newAgent() {
 }
 
 export type IntegrationAgent = Awaited<ReturnType<typeof newAgent>>;
+
+/** The instance name of an agent from {@link newAgent}. */
+export function agentName(agent: IntegrationAgent): string {
+  const name = agentNames.get(agent);
+  if (!name) throw new Error("Not an agent from newAgent()");
+  return name;
+}
+
+/** Poll `check` until it holds, or fail after `timeoutMs`. */
+export async function eventually(
+  check: () => Promise<boolean>,
+  timeoutMs = 3000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error("Condition never held");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/** Let in-flight work reach the point where it waits on the server. */
+export function pause(ms = 50): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /**
  * Restart an agent's Durable Object, as after an eviction, and return a stub
@@ -50,13 +91,36 @@ export async function restartAgent(
   return restarted;
 }
 
-/** Send the browser to an OAuth callback URL, through the worker's routing. */
-export async function followCallback(callbackUrl: string): Promise<Response> {
+/** Where the OAuth callback sent the browser. */
+export type CallbackOutcome =
+  | { authorized: true }
+  | { authorized: false; error: string };
+
+/**
+ * Send the browser to an OAuth callback URL, through the worker's routing,
+ * and report which page the agent redirected it to.
+ */
+export async function followCallback(
+  callbackUrl: string
+): Promise<CallbackOutcome> {
   const response = await exports.default.fetch(
     new Request(callbackUrl, { redirect: "manual" })
   );
   await response.body?.cancel();
-  return response;
+  const location = new URL(
+    response.headers.get("location") ?? "",
+    CLIENT_ORIGIN
+  );
+  if (location.pathname === OAUTH_SUCCESS_PATH) return { authorized: true };
+  if (location.pathname === OAUTH_ERROR_PATH) {
+    return {
+      authorized: false,
+      error: location.searchParams.get("error") ?? ""
+    };
+  }
+  throw new Error(
+    `Unexpected callback response ${response.status} ${location.href}`
+  );
 }
 
 /**
@@ -67,15 +131,17 @@ export async function connectAuthorized(
   agent: IntegrationAgent,
   server: OAuthMcpServer,
   grant?: { scope: string },
-  options: { id?: string } = {}
+  options: { id?: string; name?: string } = {}
 ): Promise<string> {
-  const added = await agent.connectServer(MCP_URL, {
+  const added = await agent.connectServer(server.url, {
     callbackHost: CLIENT_ORIGIN,
     ...options
   });
   expect(added.state).toBe("authenticating");
   if (added.state !== "authenticating") throw new Error("unreachable");
-  await followCallback(server.authorize(added.authUrl, grant));
+  expect(await followCallback(server.authorize(added.authUrl, grant))).toEqual({
+    authorized: true
+  });
   await agent.settle();
   expect((await agent.server(added.id))?.state).toBe("ready");
   return added.id;

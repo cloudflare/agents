@@ -127,6 +127,66 @@ describe("MCP durable reconnects in an Agent", () => {
   });
 });
 
+describe("MCP durable jobs and the rest of the flow", () => {
+  it("retries a server that was down when it was added, and asks for authorization once it is back", async () => {
+    server.options.up = false;
+    const agent = await newAgent();
+    const added = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN
+    });
+    expect(added.state).toBe("error");
+    const [id] = await agent.serverIds();
+    expect((await agent.mcpJobs()).map((job) => job.id)).toEqual([
+      `connect:${id}`
+    ]);
+
+    server.options.up = true;
+    await runDueJobs(agent);
+    const server_ = await agent.server(id);
+    expect(server_?.state).toBe("authenticating");
+    expect(server_?.auth_url).toBeTruthy();
+    expect((await agent.mcpJobs()).map((job) => job.id)).toEqual([
+      `auth-expiry:${id}`
+    ]);
+  });
+
+  it("asks the user when a reconnect finds the grant can no longer be refreshed", async () => {
+    const { agent, id } = await serverDownAfterWake();
+    server.revokeAccessTokens();
+    server.options.refuseRefresh = true;
+    server.options.up = true;
+
+    await runDueJobs(agent);
+    const view = await agent.server(id);
+    expect(view?.state).toBe("authenticating");
+    if (!view?.auth_url) throw new Error("expected a link");
+    expect((await agent.mcpJobs()).map((job) => job.id)).toEqual([
+      `auth-expiry:${id}`
+    ]);
+
+    await followCallback(server.authorize(view.auth_url));
+    await agent.settle();
+    expect((await agent.server(id))?.state).toBe("ready");
+  });
+
+  it("cancels a server's pending jobs when it is removed", async () => {
+    const { agent, id } = await serverDownAfterWake();
+    expect(await agent.mcpJobs()).toHaveLength(1);
+    await agent.remove(id);
+    expect(await agent.mcpJobs()).toEqual([]);
+
+    server.options.up = true;
+    const added = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN,
+      id: "pending"
+    });
+    expect(added.state).toBe("authenticating");
+    expect(await agent.mcpJobs()).toHaveLength(1);
+    await agent.remove("pending");
+    expect(await agent.mcpJobs()).toEqual([]);
+  });
+});
+
 describe("MCP authorization link expiry in an Agent", () => {
   it("fails a link that expires unused, keeps it failed across wakes, and offers a new one when added again", async () => {
     const before = await newAgent();

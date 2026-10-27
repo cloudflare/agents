@@ -7,17 +7,18 @@ import { createMcpHandler } from "../../../mcp";
 /**
  * An OAuth-protected MCP server for integration tests, served through msw.
  *
- * The resource server answers at {@link MCP_URL}: protected-resource metadata,
- * a bearer check, a `403 insufficient_scope` step-up for the `write` tool, and
- * a real MCP endpoint built with `createMcpHandler`. The authorization server
- * at {@link AUTH_ORIGIN} serves metadata, dynamic client registration and a
- * token endpoint that checks PKCE and the redirect URI.
+ * The resource server answers at `<origin>/mcp`: protected-resource metadata,
+ * a bearer check, `403 insufficient_scope` step-ups for the operations listed
+ * in {@link STEP_UPS}, and a real MCP endpoint built with `createMcpHandler`.
+ * The authorization server serves metadata, dynamic client registration and
+ * a token endpoint that checks PKCE, the redirect URI and the client id, and
+ * rotates refresh tokens.
  *
  * Nothing is injected into the client. msw intercepts `fetch` across the test
  * isolate, so the agent's default transport and the SDK's OAuth discovery run
  * exactly as they do in production. The test plays the user with
- * {@link OAuthMcpServer.authorize}, which approves an authorization URL and
- * returns the callback URL the browser would be sent to.
+ * {@link OAuthMcpServer.authorize} and {@link OAuthMcpServer.deny}, which
+ * return the callback URL the browser would be sent to.
  */
 
 export const MCP_ORIGIN = "https://mcp.integration.example";
@@ -30,7 +31,46 @@ export const WRITE_SCOPE = "files:write";
 /** The `admin` tool's step-up scope, named like an `Object` member. */
 export const ADMIN_SCOPE = "constructor";
 
-const RESOURCE_METADATA_URL = `${MCP_ORIGIN}/.well-known/oauth-protected-resource/mcp`;
+/** A resource anyone with a token can read. */
+export const NOTES_URI = "files://notes";
+/** A resource that needs {@link WRITE_SCOPE}. */
+export const SECRET_URI = "files://secret";
+
+/**
+ * Operations that need more than a token, and the scope their `403`
+ * challenge asks for.
+ */
+const STEP_UPS: Array<{
+  method: string;
+  name: string;
+  needs: string;
+  challenge: string;
+}> = [
+  {
+    method: "tools/call",
+    name: "write",
+    needs: WRITE_SCOPE,
+    challenge: `${READ_SCOPE} ${WRITE_SCOPE}`
+  },
+  {
+    method: "resources/read",
+    name: SECRET_URI,
+    needs: WRITE_SCOPE,
+    challenge: `${READ_SCOPE} ${WRITE_SCOPE}`
+  },
+  {
+    method: "prompts/get",
+    name: "draft",
+    needs: WRITE_SCOPE,
+    challenge: `${READ_SCOPE} ${WRITE_SCOPE}`
+  },
+  {
+    method: "tools/call",
+    name: "admin",
+    needs: ADMIN_SCOPE,
+    challenge: ADMIN_SCOPE
+  }
+];
 
 type Grant = { scope: string };
 type PendingCode = Grant & {
@@ -39,9 +79,44 @@ type PendingCode = Grant & {
   clientId: string;
 };
 
+function createFilesServer(): McpServer {
+  const server = new McpServer({ name: "files", version: "1.0.0" });
+  const text = (value: string) => ({
+    content: [{ type: "text" as const, text: value }]
+  });
+  server.registerTool("read", { inputSchema: {} }, async () => text("read it"));
+  server.registerTool("write", { inputSchema: {} }, async () =>
+    text("wrote it")
+  );
+  server.registerTool("admin", { inputSchema: {} }, async () =>
+    text("administered it")
+  );
+  server.registerResource("notes", NOTES_URI, {}, async (uri) => ({
+    contents: [{ uri: uri.href, text: "some notes" }]
+  }));
+  server.registerResource("secret", SECRET_URI, {}, async (uri) => ({
+    contents: [{ uri: uri.href, text: "the secret" }]
+  }));
+  server.registerPrompt("draft", {}, async () => ({
+    messages: [
+      {
+        role: "user" as const,
+        content: { type: "text" as const, text: "a draft" }
+      }
+    ]
+  }));
+  return server;
+}
+
 export type OAuthMcpServer = ReturnType<typeof createOAuthMcpServer>;
 
-export function createOAuthMcpServer() {
+export function createOAuthMcpServer({
+  origin = MCP_ORIGIN,
+  authOrigin = AUTH_ORIGIN
+}: { origin?: string; authOrigin?: string } = {}) {
+  const url = `${origin}/mcp`;
+  const resourceMetadataUrl = `${origin}/.well-known/oauth-protected-resource/mcp`;
+
   const accessTokens = new Map<string, Grant>();
   const refreshTokens = new Map<string, Grant>();
   const codes = new Map<string, PendingCode>();
@@ -52,13 +127,20 @@ export function createOAuthMcpServer() {
     up: true,
     /** The token endpoint refuses every refresh token while true. */
     refuseRefresh: false,
+    /** The token endpoint refuses every authorization code while true. */
+    refuseCodes: false,
     /**
      * Serve the handshake (`initialize`, `server/discover`, notifications)
      * without a token and protect only the rest, as some servers do.
      */
     openHandshake: false,
     /** The scope a `401` challenge asks for. */
-    challengeScope: READ_SCOPE
+    challengeScope: READ_SCOPE,
+    /**
+     * Speak only the 2025-11-25 protocol, as an older server does: the
+     * 2026-07-28 `server/discover` probe gets "method not found".
+     */
+    legacyOnly: false
   };
 
   /** While set, requests to the held endpoint wait before they are answered. */
@@ -68,22 +150,14 @@ export function createOAuthMcpServer() {
 
   /** Every token request the authorization server received. */
   const tokenRequests: URLSearchParams[] = [];
+  /** Every client id the authorization server registered. */
+  const registeredClients: string[] = [];
+  /** Every request the resource server refused with a 401, by MCP method. */
+  const unauthorizedMethods: string[] = [];
   /** Every MCP method the resource server served, in order. */
   const mcpMethods: string[] = [];
 
-  const mcpHandler = createMcpHandler(() => {
-    const server = new McpServer({ name: "files", version: "1.0.0" });
-    server.registerTool("read", { inputSchema: {} }, async () => ({
-      content: [{ type: "text" as const, text: "read it" }]
-    }));
-    server.registerTool("write", { inputSchema: {} }, async () => ({
-      content: [{ type: "text" as const, text: "wrote it" }]
-    }));
-    server.registerTool("admin", { inputSchema: {} }, async () => ({
-      content: [{ type: "text" as const, text: "administered it" }]
-    }));
-    return server;
-  });
+  const mcpHandler = createMcpHandler(createFilesServer);
 
   function challenge(
     status: 401 | 403,
@@ -93,7 +167,7 @@ export function createOAuthMcpServer() {
     const parts = [
       error && `error="${error}"`,
       `scope="${scope}"`,
-      `resource_metadata="${RESOURCE_METADATA_URL}"`
+      `resource_metadata="${resourceMetadataUrl}"`
     ].filter(Boolean);
     return new Response(null, {
       status,
@@ -103,8 +177,8 @@ export function createOAuthMcpServer() {
 
   function issue(scope: string) {
     issued += 1;
-    const accessToken = `access-${issued}`;
-    const refreshToken = `refresh-${issued}`;
+    const accessToken = `access-${origin}-${issued}`;
+    const refreshToken = `refresh-${origin}-${issued}`;
     accessTokens.set(accessToken, { scope });
     refreshTokens.set(refreshToken, { scope });
     return Response.json({
@@ -131,35 +205,33 @@ export function createOAuthMcpServer() {
       .replace(/=+$/, "");
   }
 
-  /** Which MCP method and tool name a request carries. */
-  async function describeRequest(
-    request: Request
-  ): Promise<{ method?: string; tool?: string }> {
-    const headerMethod = request.headers.get("mcp-method") ?? undefined;
-    const headerName = request.headers.get("mcp-name") ?? undefined;
-    if (headerMethod) return { method: headerMethod, tool: headerName };
+  /** The JSON-RPC message a request carries, when it carries one. */
+  async function readMessage(request: Request): Promise<{
+    id?: string | number;
+    method?: string;
+    params?: { name?: string; uri?: string };
+  }> {
     if (request.method !== "POST") return {};
     try {
-      const body = (await request.clone().json()) as {
-        method?: string;
-        params?: { name?: string };
-      };
-      return { method: body.method, tool: body.params?.name };
+      const body: unknown = await request.clone().json();
+      return typeof body === "object" && body !== null && !Array.isArray(body)
+        ? body
+        : {};
     } catch {
       return {};
     }
   }
 
   async function resourceServer(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    if (url.pathname.startsWith("/.well-known/oauth-protected-resource")) {
+    const { pathname } = new URL(request.url);
+    if (pathname.startsWith("/.well-known/oauth-protected-resource")) {
       return Response.json({
-        resource: MCP_URL,
-        authorization_servers: [AUTH_ORIGIN],
+        resource: url,
+        authorization_servers: [authOrigin],
         scopes_supported: [READ_SCOPE, WRITE_SCOPE, ADMIN_SCOPE]
       });
     }
-    if (url.pathname !== "/mcp") {
+    if (pathname !== "/mcp") {
       return new Response("Not found", { status: 404 });
     }
     if (held && heldEndpoint === "mcp") await held;
@@ -170,54 +242,66 @@ export function createOAuthMcpServer() {
       ""
     );
     const grant = accessTokens.get(token);
-    const { method, tool } = await describeRequest(request);
+    const message = await readMessage(request);
+    const method = request.headers.get("mcp-method") ?? message.method;
+    const name =
+      message.params?.name ??
+      message.params?.uri ??
+      request.headers.get("mcp-name") ??
+      undefined;
     const handshake =
       method === "initialize" ||
       method === "server/discover" ||
       method?.startsWith("notifications/");
     if (!grant && !(options.openHandshake && handshake)) {
+      unauthorizedMethods.push(method ?? request.method);
       return challenge(401, options.challengeScope);
     }
     if (method) mcpMethods.push(method);
+
+    if (options.legacyOnly && method === "server/discover") {
+      return Response.json({
+        jsonrpc: "2.0",
+        id: message.id ?? null,
+        error: { code: -32601, message: "Method not found" }
+      });
+    }
+
     const granted = grant?.scope.split(" ") ?? [];
-    if (method === "tools/call") {
-      if (tool === "write" && !granted.includes(WRITE_SCOPE)) {
-        return challenge(
-          403,
-          `${READ_SCOPE} ${WRITE_SCOPE}`,
-          "insufficient_scope"
-        );
-      }
-      if (tool === "admin" && !granted.includes(ADMIN_SCOPE)) {
-        return challenge(403, ADMIN_SCOPE, "insufficient_scope");
-      }
+    const stepUp = STEP_UPS.find(
+      (rule) => rule.method === method && rule.name === name
+    );
+    if (stepUp && !granted.includes(stepUp.needs)) {
+      return challenge(403, stepUp.challenge, "insufficient_scope");
     }
     return mcpHandler(request, env, createExecutionContext());
   }
 
   async function authorizationServer(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    if (url.pathname === "/.well-known/oauth-authorization-server") {
+    const { pathname } = new URL(request.url);
+    if (pathname === "/.well-known/oauth-authorization-server") {
       return Response.json({
-        issuer: AUTH_ORIGIN,
-        authorization_endpoint: `${AUTH_ORIGIN}/authorize`,
-        token_endpoint: `${AUTH_ORIGIN}/token`,
-        registration_endpoint: `${AUTH_ORIGIN}/register`,
+        issuer: authOrigin,
+        authorization_endpoint: `${authOrigin}/authorize`,
+        token_endpoint: `${authOrigin}/token`,
+        registration_endpoint: `${authOrigin}/register`,
         response_types_supported: ["code"],
         grant_types_supported: ["authorization_code", "refresh_token"],
         code_challenge_methods_supported: ["S256"],
         token_endpoint_auth_methods_supported: ["none"],
-        scopes_supported: [READ_SCOPE, WRITE_SCOPE]
+        scopes_supported: [READ_SCOPE, WRITE_SCOPE, ADMIN_SCOPE]
       });
     }
-    if (url.pathname === "/register" && request.method === "POST") {
+    if (pathname === "/register" && request.method === "POST") {
       const metadata = (await request.json()) as Record<string, unknown>;
+      const clientId = `client-${crypto.randomUUID()}`;
+      registeredClients.push(clientId);
       return Response.json(
-        { ...metadata, client_id: `client-${crypto.randomUUID()}` },
+        { ...metadata, client_id: clientId },
         { status: 201 }
       );
     }
-    if (url.pathname === "/token" && request.method === "POST") {
+    if (pathname === "/token" && request.method === "POST") {
       if (held && heldEndpoint === "token") await held;
       const params = new URLSearchParams(await request.text());
       tokenRequests.push(params);
@@ -225,14 +309,19 @@ export function createOAuthMcpServer() {
         Response.json({ error: "invalid_grant" }, { status: 400 });
 
       if (params.get("grant_type") === "refresh_token") {
-        const grant = refreshTokens.get(params.get("refresh_token") ?? "");
+        // Refresh tokens rotate: each one can be used once.
+        const refreshToken = params.get("refresh_token") ?? "";
+        const grant = refreshTokens.get(refreshToken);
+        refreshTokens.delete(refreshToken);
         if (!grant || options.refuseRefresh) return invalidGrant();
         return issue(grant.scope);
       }
 
-      const pending = codes.get(params.get("code") ?? "");
-      codes.delete(params.get("code") ?? "");
+      const code = params.get("code") ?? "";
+      const pending = codes.get(code);
+      codes.delete(code);
       if (
+        options.refuseCodes ||
         !pending ||
         pending.redirectUri !== params.get("redirect_uri") ||
         pending.clientId !== params.get("client_id") ||
@@ -246,22 +335,47 @@ export function createOAuthMcpServer() {
     return new Response("Not found", { status: 404 });
   }
 
+  /** The parts of an authorization URL the callback needs. */
+  function parseAuthorizationUrl(authUrl: string) {
+    const parsed = new URL(authUrl);
+    if (parsed.origin !== authOrigin || parsed.pathname !== "/authorize") {
+      throw new Error(`Not an authorization URL: ${authUrl}`);
+    }
+    const redirectUri = parsed.searchParams.get("redirect_uri");
+    const state = parsed.searchParams.get("state");
+    const codeChallenge = parsed.searchParams.get("code_challenge");
+    const clientId = parsed.searchParams.get("client_id");
+    if (!redirectUri || !state || !codeChallenge || !clientId) {
+      throw new Error(`Incomplete authorization URL: ${authUrl}`);
+    }
+    return {
+      redirectUri,
+      state,
+      codeChallenge,
+      clientId,
+      scope: parsed.searchParams.get("scope")
+    };
+  }
+
   // msw types its requests with the DOM `Request`; at runtime they are the
   // Workers `Request` the client sent.
   const handlers: HttpHandler[] = [
-    http.all(`${MCP_ORIGIN}/*`, ({ request }) =>
+    http.all(`${origin}/*`, ({ request }) =>
       resourceServer(request as unknown as Request)
     ),
-    http.all(`${AUTH_ORIGIN}/*`, ({ request }) =>
+    http.all(`${authOrigin}/*`, ({ request }) =>
       authorizationServer(request as unknown as Request)
     )
   ];
 
   return {
+    url,
     handlers,
     options,
     tokenRequests,
     mcpMethods,
+    registeredClients,
+    unauthorizedMethods,
 
     /**
      * Approve an authorization URL as the user would, and return the callback
@@ -269,33 +383,39 @@ export function createOAuthMcpServer() {
      * the URL asked for unless `grant` says otherwise.
      */
     authorize(authUrl: string, grant?: { scope: string }): string {
-      const url = new URL(authUrl);
-      if (url.origin !== AUTH_ORIGIN || url.pathname !== "/authorize") {
-        throw new Error(`Not an authorization URL: ${authUrl}`);
-      }
-      const redirectUri = url.searchParams.get("redirect_uri");
-      const state = url.searchParams.get("state");
-      const codeChallenge = url.searchParams.get("code_challenge");
-      const clientId = url.searchParams.get("client_id");
-      if (!redirectUri || !state || !codeChallenge || !clientId) {
-        throw new Error(`Incomplete authorization URL: ${authUrl}`);
-      }
+      const request = parseAuthorizationUrl(authUrl);
       const code = `code-${crypto.randomUUID()}`;
       codes.set(code, {
-        scope: grant?.scope ?? url.searchParams.get("scope") ?? READ_SCOPE,
-        codeChallenge,
-        redirectUri,
-        clientId
+        scope: grant?.scope ?? request.scope ?? READ_SCOPE,
+        codeChallenge: request.codeChallenge,
+        redirectUri: request.redirectUri,
+        clientId: request.clientId
       });
-      const callback = new URL(redirectUri);
+      const callback = new URL(request.redirectUri);
       callback.searchParams.set("code", code);
-      callback.searchParams.set("state", state);
+      callback.searchParams.set("state", request.state);
+      return callback.toString();
+    },
+
+    /** Refuse an authorization URL as the user would; returns the callback. */
+    deny(authUrl: string): string {
+      const request = parseAuthorizationUrl(authUrl);
+      const callback = new URL(request.redirectUri);
+      callback.searchParams.set("error", "access_denied");
+      callback.searchParams.set("state", request.state);
       return callback.toString();
     },
 
     /** The scope an authorization URL asks for. */
     requestedScope(authUrl: string): string | null {
       return new URL(authUrl).searchParams.get("scope");
+    },
+
+    /** How many authorization codes the token endpoint was asked to redeem. */
+    codeExchanges(): number {
+      return tokenRequests.filter(
+        (params) => params.get("grant_type") === "authorization_code"
+      ).length;
     },
 
     /**
@@ -327,10 +447,14 @@ export function createOAuthMcpServer() {
       codes.clear();
       tokenRequests.length = 0;
       mcpMethods.length = 0;
+      registeredClients.length = 0;
+      unauthorizedMethods.length = 0;
       options.up = true;
       options.refuseRefresh = false;
+      options.refuseCodes = false;
       options.openHandshake = false;
       options.challengeScope = READ_SCOPE;
+      options.legacyOnly = false;
       releaseHeld();
     }
   };
