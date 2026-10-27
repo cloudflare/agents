@@ -2,25 +2,11 @@ import {
   subscribe as dcSubscribe,
   unsubscribe as dcUnsubscribe
 } from "node:diagnostics_channel";
-import type { AgentObservabilityEvent } from "./agent";
-import type { MCPObservabilityEvent } from "./mcp";
-import { publishDiagnosticsEvent } from "./diagnostics";
+import type { ObservabilityEvent } from "./emitter";
 export { channels } from "./diagnostics";
-
-/**
- * Union of all observability event types from different domains
- */
-export type ObservabilityEvent =
-  | AgentObservabilityEvent
-  | MCPObservabilityEvent;
-
-export interface Observability {
-  /**
-   * Emit an event for the Agent's observability implementation to handle.
-   * @param event - The event to emit
-   */
-  emit(event: ObservabilityEvent): void;
-}
+export { genericObservability } from "./emitter";
+export type { Observability, ObservabilityEvent } from "./emitter";
+export { registerOpenTelemetry } from "./otel";
 
 /**
  * Channel keys whose diagnostics channel name differs from `agents:${key}`.
@@ -29,18 +15,6 @@ export interface Observability {
  */
 const CHANNEL_DIAGNOSTIC_NAME_OVERRIDES: Partial<Record<string, string>> = {
   agentTool: "agents:agent_tool"
-};
-
-/**
- * The default observability implementation.
- *
- * Publishes events to diagnostics_channel. Events are silent unless
- * a subscriber is registered or a Tail Worker is attached.
- */
-export const genericObservability: Observability = {
-  emit(event) {
-    publishDiagnosticsEvent(event);
-  }
 };
 
 /**

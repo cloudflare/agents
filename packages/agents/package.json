@@ -26,6 +26,7 @@
   "dependencies": {
     "@babel/plugin-proposal-decorators": "^8.0.2",
     "@cfworker/json-schema": "^4.1.1",
+    "@opentelemetry/api": "^1.9.0",
     "@rolldown/plugin-babel": "^0.2.3",
     "capnweb": "^0.12.0",
     "cron-schedule": "^6.0.0",
@@ -579,6 +580,7 @@
     "test:voice:react": "vitest --project voice-react",
     "test:channels": "vitest --project channels",
     "test:browser": "vitest run --config src/browser-tests/vitest.config.ts",
+    "test:otel-runtime": "vitest run --config src/otel-tests/vitest.config.ts",
     "test:workers": "vitest --project workers",
     "test:chat": "vitest --project chat",
     "test:harness:opencode": "vitest --project harness-opencode",

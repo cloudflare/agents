@@ -260,6 +260,114 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 | `email:receive` | `{ from, to, subject? }` | An email is received  |
 | `email:reply`   | `{ from, to, subject? }` | A reply email is sent |
 
+## OpenTelemetry
+
+Libraries that instrument themselves with the
+[OpenTelemetry API](https://opentelemetry.io/docs/languages/js/) (`@opentelemetry/api`)
+record nothing on Workers until something registers an implementation of that
+API. `registerOpenTelemetry()` registers one that writes Workers
+[custom spans](https://developers.cloudflare.com/workers/observability/traces/):
+
+```ts
+import { registerOpenTelemetry } from "agents/observability";
+
+registerOpenTelemetry();
+
+export default {
+  async fetch(request, env, ctx) {
+    // ...
+  }
+} satisfies ExportedHandler<Env>;
+```
+
+Call it once at module scope, then enable traces in `wrangler.jsonc`:
+
+```jsonc
+{
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true, "head_sampling_rate": 1 }
+  }
+}
+```
+
+After that, OpenTelemetry spans from these sources become Workers spans:
+
+- The MCP TypeScript SDK, which records a span per request and notification
+  (`tools/call get-weather`, `initialize`, ...). This covers `createMcpHandler`,
+  `McpAgent`, and MCP clients.
+- AI SDK v6 `experimental_telemetry`.
+- Your own spans from `trace.getTracer(...)`.
+
+They sit in the same trace as the Agents SDK's spans and the automatic fetch,
+KV, D1, and Durable Object spans, and they export through
+`observability.traces.destinations` like every other Workers span. An MCP tool
+call served by `createMcpHandler` looks like this:
+
+```text
+POST
+  tools/call get-weather   {mcp.method.name: tools/call, gen_ai.tool.name: get-weather}
+    kv_get                 {db.system.name: cloudflare-kv}
+    look up forecast       {weather.city: Lisbon}
+```
+
+The Worker needs a runtime with `tracing.getActiveSpan()` (the 2026-09-25
+release or later). Span IDs, status, and renames need the 2026-10-26 release;
+on older runtimes those calls do nothing. Keep a single copy of
+`@opentelemetry/api` in your dependency tree. The OpenTelemetry API refuses
+registrations from a copy with a different version, and instrumentation that
+loads a newer minor version than the one that registered sees no tracer.
+
+`registerOpenTelemetry()` is safe to call more than once. When both an
+OpenTelemetry context manager and tracer provider are already registered,
+either by your own OpenTelemetry SDK setup or natively by the Workers runtime
+once it supports the OpenTelemetry API, it leaves them in place and does
+nothing. It throws when only one of the two is registered, because that
+half-configured setup would detach spans from Workers tracing.
+
+### What is recorded
+
+Workers spans are smaller than OpenTelemetry spans. The bridge records what
+Workers can represent and drops the rest instead of approximating it.
+
+| OpenTelemetry                                      | On Workers                                                                                                               |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `startActiveSpan()`                                | A span that is the active parent while the callback runs. You call `end()`.                                              |
+| `startSpan()`                                      | A span under the current span. It becomes the active parent inside `context.with(trace.setSpan(ctx, span), fn)`.         |
+| `trace.getActiveSpan()` outside your own spans     | The invocation span (`GET`, `POST`, ...). You can add attributes or rename it. `end()` has no effect.                    |
+| String, number, and boolean attributes             | Recorded as is                                                                                                           |
+| Array and other attribute values                   | Dropped, never serialized                                                                                                |
+| `setStatus()`, `updateName()`, `recordException()` | Recorded. Status follows OpenTelemetry's rules: `UNSET` is ignored and `OK` is final.                                    |
+| Span kind (`CLIENT`, `SERVER`, ...)                | The span is recorded without a kind. Workers spans have no kind, and the bridge does not invent an attribute.            |
+| Links, events other than exceptions                | Dropped                                                                                                                  |
+| Explicit end or exception timestamps               | Recorded at the time of the call                                                                                         |
+| Explicit start timestamps                          | Not recorded. The call returns a non-recording span.                                                                     |
+| A remote parent, `root: true`, or no parent        | Not recorded. The call returns a non-recording span that carries the parent's context, so no span gets a made-up parent. |
+| A parent span from another request                 | Not recorded                                                                                                             |
+| Spans outside a request (module scope)             | Not recorded                                                                                                             |
+| Metrics, logs                                      | Not supported                                                                                                            |
+
+The bridge registers no propagator, so `propagation.inject()` writes no
+`traceparent`. The `traceFlags` of a span context do not reflect Workers
+sampling; do not build `traceparent` headers from them.
+
+When `context.with()` (or `context.bind()`) makes a span from `startSpan()` the
+active span, the callback runs in the async context where that span started:
+other `AsyncLocalStorage` values inside the callback are the ones from that
+moment. Workers can only make a span the active parent from inside the async
+context that opened it. In the usual pattern, where instrumentation starts a
+span and activates it in the same function, the two contexts are the same.
+
+The bridge reports each unsupported feature once through OpenTelemetry's
+`diag` logger. The messages name the feature, never span names or values. To
+see them:
+
+```ts
+import { diag, DiagConsoleLogger, DiagLogLevel } from "@opentelemetry/api";
+
+diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.WARN);
+```
+
 ## Agent initialization span
 
 When Worker traces are enabled, every `Agent` constructor runs its setup —

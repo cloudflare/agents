@@ -12,6 +12,7 @@
     "src/harness/think/tests/**/*.ts",
     "src/harness/container/tests/**/*.ts",
     "src/harness/container/runtime/tests/**/*.ts",
-    "src/experimental/channels/__tests__/**/*.ts"
+    "src/experimental/channels/__tests__/**/*.ts",
+    "src/otel-tests/fixture/**/*.ts"
   ]
 }
