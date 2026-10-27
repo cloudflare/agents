@@ -136,7 +136,7 @@ Building your own harness? Sessions stores the conversation, Streams holds durab
 - TODO: [AI SDK Integration](./ai-sdk.md) - Using Vercel AI SDK with agents
 - TODO: [TanStack Integration](./tanstack.md) - Using TanStack AI with agents
 - TODO: [Using AI Models](./using-ai-models.md) - OpenAI, Anthropic, Workers AI, and other providers
-- [Models (Experimental)](./models.md) - `createAI` — one AI SDK provider for Workers AI and third-party catalog models, same string space
+- [Models](./models.md) - `createAI` — one AI SDK provider for Workers AI and third-party catalog models, same string space
 - [Models for pi-ai](./models-pi-ai.md) - `createAI` for pi-ai: Workers AI ids and third-party models through AI Gateway, as a pi-ai provider
 - [Context (Experimental)](./context.md) - System-prompt blocks, frozen prompts, writable/searchable/loadable providers, and their tools
 - [Workspace (Experimental)](https://github.com/cloudflare/agents/blob/main/docs/shell/index.md) - Durable virtual filesystem backed by SQLite + R2

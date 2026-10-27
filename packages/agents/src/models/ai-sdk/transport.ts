@@ -34,8 +34,6 @@ export function errorFromGatewayEnvelope(
  * The transport this module uses: the run path for a model id, and the
  * provider-native path for a vendor's own model object, through the binding
  * or over HTTP.
- *
- * @experimental This surface is experimental and may change.
  */
 export type Transport = CoreTransport;
 
@@ -67,8 +65,6 @@ export async function errorFromResponse(
 /**
  * Builds the transport for a set of provider settings, with every failure
  * lifted into the AI SDK error type.
- *
- * @experimental This surface is experimental and may change.
  */
 export function createTransport(settings: AISettings): Transport {
   const inner = createCoreTransport(settings);

@@ -1,4 +1,4 @@
-# Models (Experimental)
+# Models
 
 `agents/models/ai-sdk` is Cloudflare's AI SDK provider. It takes two call
 forms, through the `AI` binding or
@@ -557,12 +557,15 @@ try {
 On a model object this covers the gateway's own failures; a vendor's own error
 is raised by that vendor's provider in its own error type.
 
-## Experimental
+## Stability
 
-This module is experimental. The surface may change in a minor release, and
-every exported symbol is tagged `@experimental`. It ships from `agents` first;
-the plan is for `cloudflare/ai` to re-export it and deprecate the older
-`workers-ai-provider` / `ai-gateway-provider` packages.
+`agents/models/ai-sdk` is stable. Its twin,
+[`agents/models/pi-ai`](./models-pi-ai.md), is still experimental, and its API
+may change in a minor release.
+
+The provider ships from `agents` first; the plan is for `cloudflare/ai` to
+re-export it and deprecate the older `workers-ai-provider` /
+`ai-gateway-provider` packages.
 
 ## See also
 

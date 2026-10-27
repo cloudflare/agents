@@ -1,7 +1,5 @@
 /**
  * Coarse classification of a failed Cloudflare AI call.
- *
- * @experimental This surface is experimental and may change.
  */
 export type CloudflareAIErrorCode =
   | "auth"
@@ -14,8 +12,6 @@ export type CloudflareAIErrorCode =
 
 /**
  * One leg of a {@link CloudflareAIError} fallback chain.
- *
- * @experimental This surface is experimental and may change.
  */
 export interface CloudflareAIAttempt {
   /** The model id that was tried. */

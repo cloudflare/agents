@@ -8,8 +8,6 @@
  * request — method, headers, body — to
  * `env.AI.fetch(".../ai-gateway/gateways/{gateway}/{provider}/{endpoint}")`,
  * and hands the vendor's answer straight back to the vendor's own parser.
- *
- * @experimental This surface is experimental and may change.
  */
 
 import type {
@@ -62,8 +60,6 @@ import {
 /**
  * The options accepted beside a vendor model. Re-exported under the name the
  * module's public surface uses.
- *
- * @experimental This surface is experimental and may change.
  */
 export type { GatewayModelOptions } from "../settings";
 
@@ -397,8 +393,6 @@ function stampStream(
  * A `LanguageModelV4` that is the user's own vendor model, routed through AI
  * Gateway. Generation, parsing, tool handling and error shapes stay the
  * vendor's; only the transport is Cloudflare's.
- *
- * @experimental This surface is experimental and may change.
  */
 export class GatewayLanguageModel implements LanguageModelV4 {
   readonly specificationVersion = "v4" as const;
@@ -597,8 +591,6 @@ interface RoutedCall {
  * `fetch` is swapped; every `do…` method stays the vendor's, and its result
  * gains `providerMetadata.cloudflare` when the result is an object that can
  * carry one.
- *
- * @experimental This surface is experimental and may change.
  */
 export function routed<T extends object>(
   model: T,

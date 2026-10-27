@@ -1,6 +1,6 @@
 # Next: models
 
-The experimental `createAI` factories, `agents/models/ai-sdk` and
+The `createAI` factories, `agents/models/ai-sdk` and the experimental
 `agents/models/pi-ai`, driven from a plain Worker. Same rule, same routes, one
 per framework.
 
@@ -136,4 +136,4 @@ it. On `/stream` the response status is already 200 by the time the model is
 reached, so a failure before the first token shows up as an empty body with the
 error in the `wrangler dev` log.
 
-`agents/models/ai-sdk` is experimental and its surface may change.
+`agents/models/pi-ai` is experimental and its surface may change.

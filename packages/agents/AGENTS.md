@@ -30,7 +30,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/schedules`                        | `src/schedules/index.ts`                      | Dependency-light Lifecycle Scheduler primitive and runtime types                                                                              |
 | `agents/schedules/parser`                 | `src/schedules/parser.ts`                     | Zod-based natural-language scheduling prompt and schema helpers                                                                               |
 | `agents/observability`                    | `src/observability/index.ts`                  | Observability event types and emitters                                                                                                        |
-| `agents/models/ai-sdk`                    | `src/models/ai-sdk/index.ts`                  | Experimental `createAI` for the AI SDK — model ids on `env.AI.run`, vendor model objects on AI Gateway's provider-native path                 |
+| `agents/models/ai-sdk`                    | `src/models/ai-sdk/index.ts`                  | `createAI` for the AI SDK — model ids on `env.AI.run`, vendor model objects on AI Gateway's provider-native path                              |
 | `agents/models/pi-ai`                     | `src/models/pi-ai/index.ts`                   | `createAI` for pi-ai — Workers AI ids, vendor models routed through AI Gateway                                                                |
 | `agents/ai-chat-agent`                    | `src/ai-chat-agent.ts`                        | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                                                                                           |
 | `agents/ai-react`                         | `src/ai-react.tsx`                            | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                                                                                          |
@@ -141,7 +141,7 @@ src/
   codemode/             # Experimental code generation
     ai.ts
 
-  models/               # Experimental model providers (one createAI() per framework, same skeleton)
+  models/               # Model providers (one createAI() per framework, same skeleton; pi-ai is experimental)
     core/               # Framework-neutral, not exported: binding transport, gateway options, Workers AI ids, SSE, errors
       transport.ts      #   env.AI.run + env.AI.gateway(id).run (universal), envelope unwrap, errors
       settings.ts       #   AISettings (binding only), GatewayOptions/ModelOptions, option merging

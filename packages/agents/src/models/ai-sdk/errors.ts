@@ -74,8 +74,6 @@ export function requireLanguageModelId<Id extends string>(modelId: Id): Id {
  *
  * Extends the AI SDK's `APICallError` so `ai`'s built-in retry loop honours
  * {@link CloudflareAIError.isRetryable} without any extra wiring.
- *
- * @experimental This surface is experimental and may change.
  */
 export class CloudflareAIError extends APICallError {
   /** HTTP status, when the failure carried one. */

@@ -46,8 +46,6 @@ import {
 
 /**
  * What a request needs beyond the AI SDK call options.
- *
- * @experimental This surface is experimental and may change.
  */
 export interface OpenAIWireContext {
   /** The catalog id; the compat layer keys its quirks off it. */
@@ -404,8 +402,6 @@ function reasoningEffortField(
 /**
  * Builds a strict OpenAI chat-completions body from AI SDK call options and
  * runs it through the compat layer for the target model.
- *
- * @experimental This surface is experimental and may change.
  */
 export function buildOpenAIRequest(
   options: LanguageModelV4CallOptions,
@@ -555,8 +551,6 @@ function toolCallsFrom(
 /**
  * Parses a non-streaming response. The body is normalized to the strict
  * `chat.completion` shape first, so only `choices[0].message` is read.
- *
- * @experimental This surface is experimental and may change.
  */
 export function parseOpenAIGeneration(
   json: unknown,
@@ -614,8 +608,6 @@ interface ToolCallState {
  * parts. Tool calls arrive either as incremental `arguments` fragments closed
  * by a null-finalization chunk, or as one delta with the complete arguments
  * string; both are handled. Usage is read from whichever chunk carries it.
- *
- * @experimental This surface is experimental and may change.
  */
 export function openAIStreamParser(): WireStreamParser {
   const toolCalls = new Map<number, ToolCallState>();

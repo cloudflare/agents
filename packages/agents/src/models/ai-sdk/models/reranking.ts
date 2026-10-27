@@ -48,8 +48,6 @@ export function buildRerankingRequest(
 
 /**
  * A `RerankingModelV4` over the Workers AI reranker catalog.
- *
- * @experimental This surface is experimental and may change.
  */
 export class CloudflareRerankingModel
   extends CloudflareModalityModel

@@ -29,9 +29,6 @@
  * await generateText({ model: ai(anthropic("claude-opus-4-8")), prompt: "Hi" });
  * ```
  *
- * @experimental Everything exported here is experimental: the surface may
- * change in a minor release while the unified catalog settles.
- *
  * @module
  */
 
@@ -121,8 +118,6 @@ function isModel(value: unknown): value is LanguageModelV4 {
  * `createProviderRegistry({ cloudflare: ai })` and into
  * `globalThis.AI_SDK_DEFAULT_PROVIDER`, where the AI SDK resolves a bare
  * `model: "@cf/…"` or `"openai/gpt-5.5"` string through it.
- *
- * @experimental This surface is experimental and may change.
  */
 export interface AI {
   /**
@@ -235,8 +230,6 @@ export interface AI {
  * ai("anthropic/claude-opus-4.8", { fallback: ["openai/gpt-5.5"] });
  * ai.embedding("@cf/baai/bge-base-en-v1.5");
  * ```
- *
- * @experimental This surface is experimental and may change.
  */
 export function createAI(settings: AISettings): AI {
   const config: LanguageModelConfig = {

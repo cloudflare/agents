@@ -204,8 +204,6 @@ function imageUsage(json: unknown): ImageModelV4Usage | undefined {
  * The run path generates one image per call, so `maxImagesPerCall` is 1 and
  * `generateImage` fans a larger `n` out itself; a direct `doGenerate` with
  * `n > 1` is fanned out here instead.
- *
- * @experimental This surface is experimental and may change.
  */
 export class CloudflareImageModel
   extends CloudflareModalityModel

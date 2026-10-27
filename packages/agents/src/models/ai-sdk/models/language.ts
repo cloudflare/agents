@@ -47,8 +47,6 @@ import {
  * Typed observability attached to every result under
  * `providerMetadata.cloudflare`, so consumers never have to walk response
  * objects looking for a gateway log id.
- *
- * @experimental This surface is experimental and may change.
  */
 export interface CloudflareMetadata {
   /** The model that actually answered — the fallback leg, when one was used. */
@@ -276,8 +274,6 @@ function emitContent(
 /**
  * A `LanguageModelV4` backed by the Cloudflare run path. The model id decides
  * the wire format; nothing about transport or wire format reaches user land.
- *
- * @experimental This surface is experimental and may change.
  */
 export class CloudflareLanguageModel implements LanguageModelV4 {
   readonly specificationVersion = "v4" as const;

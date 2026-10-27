@@ -116,8 +116,6 @@ export function toBytes(data: Uint8Array | string): Uint8Array {
  * A model over the Cloudflare run path that is not a language model. Holds
  * the one call path all four modalities share; each subclass only builds a
  * body and reads an answer.
- *
- * @experimental This surface is experimental and may change.
  */
 export abstract class CloudflareModalityModel {
   readonly specificationVersion = "v4" as const;

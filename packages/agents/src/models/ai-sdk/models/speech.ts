@@ -133,8 +133,6 @@ function readAudio(answer: ModalityAnswer): string | Uint8Array {
 
 /**
  * A `SpeechModelV4` over the Workers AI text-to-speech catalog.
- *
- * @experimental This surface is experimental and may change.
  */
 export class CloudflareSpeechModel
   extends CloudflareModalityModel
