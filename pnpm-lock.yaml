@@ -4828,9 +4828,6 @@ importers:
       '@earendil-works/pi-durable':
         specifier: ~1.4.0
         version: 1.4.0(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7))(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@8.12.3)(ws@8.21.3)(zod@4.6.7)
-      '@earendil-works/pi-tui':
-        specifier: 1.4.0
-        version: 1.4.0
       '@modelcontextprotocol/client':
         specifier: 2.3.1
         version: 2.3.1
@@ -4873,9 +4870,6 @@ importers:
       glob:
         specifier: ^13.0.6
         version: 13.0.6
-      highlight.js:
-        specifier: 11.12.0
-        version: 11.12.0
       just-bash:
         specifier: ^3.0.2
         version: 3.0.2(supports-color@10.2.2)
@@ -6408,10 +6402,6 @@ packages:
 
   '@earendil-works/pi-telemetry@1.4.0':
     resolution: {integrity: sha512-MLIfowwUYIY65jSjMX82paZOrX/NTvLk6D08h+3Jq42a99RzUOewzuCR0zOlPul3D6UBfddat76VT6LvsHEs1w==}
-    engines: {node: '>=22.19.0'}
-
-  '@earendil-works/pi-tui@1.4.0':
-    resolution: {integrity: sha512-4obPOjgOD7g4mGSlngIvxyujC1UPdmyI9zdVthbr8GufacFEX+Ce0+scPgHg++k2xj5+QjESM2d5TxvIuzCVmg==}
     engines: {node: '>=22.19.0'}
 
   '@effect/opentelemetry@4.0.0-rc.112':
@@ -11815,10 +11805,6 @@ packages:
   headers-polyfill@5.0.1:
     resolution: {integrity: sha512-1TJ6Fih/b8h5TIcv+1+Hw0PDQWJTKDKzFZzcKOiW1wJza3XoAQlkCuXLbymPYB8+ZQyw8mHvdw560e8zVFIWyA==}
 
-  highlight.js@11.12.0:
-    resolution: {integrity: sha512-nbfWpyRMcMrPMmDwJB+dhX/eiaPKtc2RB+0QZskqJ3WjRA/FDS0e9hZrx8EC/lbEv8gXy98FcDbNa/dspAaJMg==}
-    engines: {node: '>=12.0.0'}
-
   hono@4.13.8:
     resolution: {integrity: sha512-/Gng7NfoykZl2pjukW5Z6+8Yxm3BPRf86GTbQnt0SbySkvax4fyL4H3HhY1cCpBGmiW9XDRFzRV+CXK2W8QudQ==}
     engines: {node: '>=16.9.0'}
@@ -12429,12 +12415,6 @@ packages:
   markdown-table@3.0.4:
     resolution: {integrity: sha512-wiYz4+JrLyb/DqW2hkFJxP7Vd7JuTDm77fvbM8VfEQdmSMqcImWeeRbHwZjBjIFki/VaMK2BhFi7oUUZeM5bqw==}
 
-  marked-cjk-friendly@0.1.2:
-    resolution: {integrity: sha512-GUj8HjiEbur9yhgUo52FBgKizggF1QtT6gVdrYdWW6ZB4lVVjgS3EyyXPyfyRD0V4ghGRPlO7MO80rgSWbm0eA==}
-    engines: {node: '>=18'}
-    peerDependencies:
-      marked: '>=15.0.0'
-
   marked@16.4.2:
     resolution: {integrity: sha512-TI3V8YYWvkVf3KJe1dRkpnjs68JUPyEa5vjKrp1XEEJUAOaQc+Qj+L1qWbPd0SJuAdQkFU0h73sXXqwDYxsiDA==}
     engines: {node: '>= 20'}
@@ -12447,11 +12427,6 @@ packages:
 
   marked@17.0.6:
     resolution: {integrity: sha512-gB0gkNafnonOw0obSTEGZTT86IuhILt2Wfx0mWH/1Au83kybTayroZ/V6nS25mN7u8ASy+5fMhgB3XPNrOZdmA==}
-    engines: {node: '>= 20'}
-    hasBin: true
-
-  marked@18.0.11:
-    resolution: {integrity: sha512-HnslJfsZkRPBDJRHvVtAaWlZHEpSu7u8LgQuJCELjRKuWR+hpq4A7sLq3p8HaI9ypVoXDXxV34CsQJEe1+J5Aw==}
     engines: {node: '>= 20'}
     hasBin: true
 
@@ -16917,12 +16892,6 @@ snapshots:
       - zod
 
   '@earendil-works/pi-telemetry@1.4.0': {}
-
-  '@earendil-works/pi-tui@1.4.0':
-    dependencies:
-      get-east-asian-width: 1.6.0
-      marked: 18.0.11
-      marked-cjk-friendly: 0.1.2(marked@18.0.11)
 
   '@effect/opentelemetry@4.0.0-rc.112(@opentelemetry/api-logs@0.219.0)(@opentelemetry/api@1.9.0)(@opentelemetry/resources@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-logs@0.219.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-metrics@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-node@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/semantic-conventions@1.43.0)(effect@4.0.0-rc.112)':
     dependencies:
@@ -23542,8 +23511,6 @@ snapshots:
       '@types/set-cookie-parser': 2.4.10
       set-cookie-parser: 3.1.2
 
-  highlight.js@11.12.0: {}
-
   hono@4.13.8: {}
 
   hookable@6.1.1: {}
@@ -24110,17 +24077,11 @@ snapshots:
 
   markdown-table@3.0.4: {}
 
-  marked-cjk-friendly@0.1.2(marked@18.0.11):
-    dependencies:
-      marked: 18.0.11
-
   marked@16.4.2: {}
 
   marked@17.0.1: {}
 
   marked@17.0.6: {}
-
-  marked@18.0.11: {}
 
   math-intrinsics@1.1.0: {}
 

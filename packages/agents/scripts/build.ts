@@ -122,29 +122,6 @@ async function main() {
     fixedExtension: false
   });
 
-  // The CLI is self-contained: its dependencies are devDependencies bundled
-  // here, so installing `agents` pulls in none of them.
-  await build({
-    clean: false,
-    dts: false,
-    platform: "node",
-    target: "node22",
-    entry: { cli: "src/cli/index.ts" },
-    deps: {
-      onlyBundle: [
-        "@earendil-works/pi-tui",
-        "highlight.js",
-        "marked",
-        "marked-cjk-friendly",
-        "get-east-asian-width"
-      ]
-    },
-    format: "esm",
-    minify: true,
-    banner: "#!/usr/bin/env node",
-    fixedExtension: false
-  });
-
   // then run oxfmt on the generated .d.ts files
   formatDeclarationFiles();
 
