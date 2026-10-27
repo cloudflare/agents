@@ -557,15 +557,6 @@ try {
 On a model object this covers the gateway's own failures; a vendor's own error
 is raised by that vendor's provider in its own error type.
 
-## Stability
-
-`agents/models/ai-sdk` and its twin,
-[`agents/models/pi-ai`](./models-pi-ai.md), are stable.
-
-The AI SDK provider ships from `agents` first; the plan is for `cloudflare/ai` to
-re-export it and deprecate the older `workers-ai-provider` /
-`ai-gateway-provider` packages.
-
 ## See also
 
 - [Models for pi-ai](./models-pi-ai.md) — the same factory for pi-ai and pi-durable
