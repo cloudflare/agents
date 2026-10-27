@@ -1,5 +1,29 @@
 # @cloudflare/agents
 
+## 0.31.0
+
+### Minor Changes
+
+- [#2673](https://github.com/cloudflare/agents/pull/2673) [`865a57e`](https://github.com/cloudflare/agents/commit/865a57e5222cf34d6eb8bf6383e3af1358690aa5) Thanks [@ben-reitz](https://github.com/ben-reitz)! - Add `internalHosts` to `browserRun()` provider: set internal hostnames the browser can reach through your agent. Allow the model to point these hostnames at specific targets like container ports or workspace folders with `browser.assignHost()`. See [Internal hostnames](https://developers.cloudflare.com/agents/tools/browser/).
+
+- [#2667](https://github.com/cloudflare/agents/pull/2667) [`03b4609`](https://github.com/cloudflare/agents/commit/03b46094ff6625569bd1799e0f02f30fef9d6257) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `browserTool` now runs the model's code in its own Dynamic Worker instead of on codemode, so it needs no `ctx` or `CodemodeRuntime` export (keep `@cloudflare/codemode` installed for now) and its output has no `calls` log; `browser.session()` gives your own code the same connection to the browser. See [Persistent browser](https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser).
+
+- [#2634](https://github.com/cloudflare/agents/pull/2634) [`565e37c`](https://github.com/cloudflare/agents/commit/565e37c666d8df74268a78108c5e1551541a87bf) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `@modelcontextprotocol/sdk` and `@modelcontextprotocol/server` are now optional peer dependencies, so add them to your `package.json` if you use `agents/mcp`, `agents/mcp/server`, `agents/x402` or `agents/experimental/webmcp`. See [Upgrading an existing `McpAgent` server](https://github.com/cloudflare/agents/blob/main/docs/agents/mcp-servers.md#upgrading-an-existing-mcpagent-server).
+
+### Patch Changes
+
+- [#2668](https://github.com/cloudflare/agents/pull/2668) [`183c141`](https://github.com/cloudflare/agents/commit/183c1416c064924d6d2353f7e2a9decc988568dd) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `browserTool`'s model code now calls a `browser` global (`browser.cdp(...)`, `browser.spec({ domain })`) instead of `cdp.send(...)`, and the result's `notice` replaces the `restarted` and `newTabs` fields. See [Persistent browser](https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser).
+
+- [#2666](https://github.com/cloudflare/agents/pull/2666) [`57c7813`](https://github.com/cloudflare/agents/commit/57c78139793a65940171a9b80653721c972de4fb) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `createBrowserTools`, `createBrowserRuntime` and `BrowserConnector` are deprecated; use `browserTool`. See [Persistent browser](https://github.com/cloudflare/agents/blob/main/docs/agents/browse-the-web.md#persistent-browser). The Quick Action helpers (`createQuickActionTools`, `runQuickAction`, `browserMarkdown` and the rest) are deprecated too and will not change.
+
+- [#2743](https://github.com/cloudflare/agents/pull/2743) [`f049ee1`](https://github.com/cloudflare/agents/commit/f049ee11cc70584681b58753c122d3fd60b69b31) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `agents/models/ai-sdk` and `agents/models/pi-ai` are no longer experimental. See [Models](https://github.com/cloudflare/agents/blob/main/docs/agents/models.md).
+
+- [#2718](https://github.com/cloudflare/agents/pull/2718) [`916c0e3`](https://github.com/cloudflare/agents/commit/916c0e33d80cb7b34fb96a2b1f447dac274a7efb) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `createAI` from `agents/models/pi-ai` now sends pi-ai's `betas` as the `anthropic-beta` header for catalog Claude models on `/run`, as it already did on the provider-native path. See [#2714](https://github.com/cloudflare/agents/issues/2714).
+
+- [#2717](https://github.com/cloudflare/agents/pull/2717) [`4d7734a`](https://github.com/cloudflare/agents/commit/4d7734a09a0eabb0f5e9df40000801303cd8c528) Thanks [@ben-reitz](https://github.com/ben-reitz)! - `PiWhenBusy` accepts `"reject"`, which `PiHarness.submit()` already passed through to pi-durable. See [Pi harness](https://developers.cloudflare.com/agents/harnesses/pi/).
+
+- [#2680](https://github.com/cloudflare/agents/pull/2680) [`2a25d88`](https://github.com/cloudflare/agents/commit/2a25d8890686b106758f4a127c6165ea63a05ab5) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `createMcpHandler` now reads the verified token that `@cloudflare/workers-oauth-provider` 1.x sets as `ctx.auth`, so tool callbacks receive `context.http.authInfo` (token, client ID, scopes, expiry and resource) behind `OAuthProvider` and `OAuthResourceServer`. `getMcpAuthContext().props` is unchanged.
+
 ## 0.30.1
 
 ### Patch Changes
