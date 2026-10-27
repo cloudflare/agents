@@ -924,9 +924,9 @@ export class MCPClientConnection {
   }
 
   /**
-   * HTTP transport options with OAuth flows taken one at a time: a `401`
-   * waits for the authorization an earlier one started, so concurrent
-   * requests share one client registration and one pending link.
+   * HTTP transport options with OAuth flows taken one at a time: a `401` on
+   * an MCP request waits for the authorization an earlier one started, so
+   * concurrent requests share one client registration and one pending link.
    */
   private httpTransportOptions<
     T extends StreamableHTTPClientTransportOptions | SSEClientTransportOptions
@@ -936,7 +936,7 @@ export class MCPClientConnection {
     return {
       ...options,
       authProvider: this._authorizationTurns.wrapProvider(authProvider),
-      fetch: this._authorizationTurns.wrapFetch(this.url, options.fetch)
+      fetch: this._authorizationTurns.wrapFetch(options.fetch)
     };
   }
 

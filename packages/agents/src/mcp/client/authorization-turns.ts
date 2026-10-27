@@ -26,9 +26,12 @@ const AUTHORIZATION_TURN_TIMEOUT_MS = 10_000;
  * the link can never complete. Concurrent refreshes have the same shape.
  *
  * Requests still go out together, and responses other than `401` return at
- * once. A `401` from the MCP endpoint waits until the authorization started by
+ * once. A `401` for an MCP request waits until the authorization started by
  * the previous one has settled (it built a link or saved tokens), so the next
- * flow reuses the client and tokens the previous one saved.
+ * flow reuses the client and tokens the previous one saved. MCP requests are
+ * recognised by what they carry, not where they go: the SSE transport posts
+ * to a per-session message endpoint, and the SDK's own OAuth requests share
+ * this `fetch` and may share the server's origin.
  */
 export class AuthorizationTurns {
   /** Settles when the authorization currently running has finished. */
@@ -37,16 +40,13 @@ export class AuthorizationTurns {
   #endTurn: (() => void) | undefined;
 
   /**
-   * A `fetch` for the transport: requests to `endpoint` that get a `401`
-   * take turns before the SDK sees them.
+   * A `fetch` for the transport: MCP requests that get a `401` take turns
+   * before the SDK sees them.
    */
-  wrapFetch(endpoint: URL, base: TransportFetch | undefined): TransportFetch {
-    const target = withoutHash(endpoint.href);
+  wrapFetch(base: TransportFetch | undefined): TransportFetch {
     return async (input, init) => {
       const response = await (base ?? fetch)(input, init);
-      if (response.status !== 401 || requestUrl(input) !== target) {
-        return response;
-      }
+      if (response.status !== 401 || !isMcpRequest(init)) return response;
       await this.#takeTurn();
       return response;
     };
@@ -109,11 +109,27 @@ export class AuthorizationTurns {
   }
 }
 
-function requestUrl(input: string | URL): string {
-  return withoutHash(typeof input === "string" ? input : input.href);
-}
-
-function withoutHash(url: string): string {
-  const index = url.indexOf("#");
-  return index === -1 ? url : url.slice(0, index);
+/**
+ * Whether a transport request carries MCP traffic: a JSON-RPC message, or the
+ * GET that opens a server-sent event stream. OAuth discovery, registration
+ * and token requests are neither.
+ */
+function isMcpRequest(init: RequestInit | undefined): boolean {
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (method === "GET") {
+    const accept = new Headers(init?.headers).get("accept") ?? "";
+    return accept.includes("text/event-stream");
+  }
+  if (typeof init?.body !== "string") return false;
+  try {
+    const message: unknown = JSON.parse(init.body);
+    const first = Array.isArray(message) ? message[0] : message;
+    return (
+      typeof first === "object" &&
+      first !== null &&
+      (first as { jsonrpc?: unknown }).jsonrpc === "2.0"
+    );
+  } catch {
+    return false;
+  }
 }
