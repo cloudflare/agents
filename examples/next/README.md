@@ -22,6 +22,7 @@ Experimental use APIs that may change between releases.
 | [`harnesses/think`](./harnesses/think)                   | Available | Experimental: Think's agent loop on a plain `DurableObject` with `agents/harness/think`, served to `useAgentChat` by `ThinkChat`                    |
 | [`harnesses/container`](./harnesses/container)           | Available | Experimental: Claude Code or Codex in a Cloudflare Container, driven from a Durable Object by `agents/harness/container`, resumed across containers |
 | [`harnesses/self-modifying`](./harnesses/self-modifying) | Available | A Lifecycle capability runs editable harness revisions in fresh Dynamic Workers with trusted System tools and auto-discovered Custom tools          |
+| [`tools/browser`](./tools/browser)                       | Available | Experimental: a pi agent with a container workspace and a persistent browser that opens its dev server, build, and docs on internal hostnames       |
 | [`models`](./models)                                     | Available | One `createAI` per framework (AI SDK and pi-ai): `@cf/` ids for Workers AI, vendor models routed through AI Gateway                                 |
 | [`channels`](./channels)                                 | Available | Agents on different harnesses served through `Channels.forHarness` and one `ChannelGateway`, to a browser client and terminal clients               |
 
