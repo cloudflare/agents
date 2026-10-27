@@ -8,16 +8,11 @@
   <img alt="npm install agents" width="100%" src="https://raw.githubusercontent.com/cloudflare/agents/main/assets/npm-install-agents.svg">
 </picture>
 
-**Run AI agents on Cloudflare that pick up where they left off.**
-
 The Agents SDK is a TypeScript library for running AI agents on Cloudflare. You bring a harness, the loop that sends a conversation to a model and runs the tools it asks for. The quick start uses [Pi](https://github.com/earendil-works/pi/tree/main/packages/durable), but you can also use OpenCode, Claude Code and Codex. The SDK runs the harness in a [Durable Object](https://developers.cloudflare.com/durable-objects/), a small server with its own database, so each user, task or chat can have an agent of its own.
 
 Use it when an agent's work outlasts a single request: when it runs for hours, waits days for a reply, or acts on a schedule. It sleeps when idle and you pay for compute only while it works, so it stays cheap to run millions of them. If it crashes partway through a task, it carries on from its last step. Next to the harness you can add other capabilities: tools that work on Workers, files and a sandbox, schedules, and WebSockets.
 
-[Read the docs](https://developers.cloudflare.com/agents/) · [Build your first agent](https://github.com/cloudflare/agents/blob/main/docs/agents/build-your-first-agent.md)
-
-> [!NOTE]
-> Already using `Agent`, `AIChatAgent` or Think? They still work. See [The Agent class](#the-agent-class).
+[Read the docs](https://developers.cloudflare.com/agents/) · [Build your first agent](https://github.com/cloudflare/agents/blob/main/docs/agents/build-your-first-agent.md) · [Already using `Agent`, `AIChatAgent` or Think?](#the-agent-class)
 
 ## Quick start
 
