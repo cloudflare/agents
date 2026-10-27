@@ -60,7 +60,7 @@ available.
 Install the exact MCP client peer used by this Agents release:
 
 ```sh
-pnpm add agents @modelcontextprotocol/client@2.3.1
+pnpm add agents @modelcontextprotocol/client@2.4.0
 ```
 
 The MCP client does not need `@modelcontextprotocol/sdk` or `@modelcontextprotocol/server`. Those packages are optional peers used only by the MCP server APIs.
@@ -366,6 +366,28 @@ class MyAgent extends Agent {
   }
 }
 ```
+
+#### Client ID Metadata Documents
+
+Some authorization servers accept a [Client ID Metadata Document](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization#client-id-metadata-documents) instead of dynamic client registration. Pass `clientMetadataUrl` to use one. When a server advertises `client_id_metadata_document_supported`, the agent sends that URL as its `client_id`. Servers that don't advertise it still get dynamic client registration.
+
+```typescript
+import { Agent, DurableObjectOAuthClientProvider } from "agents";
+import type { AgentMcpOAuthProvider } from "agents";
+
+class MyAgent extends Agent {
+  createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
+    return new DurableObjectOAuthClientProvider(
+      this.ctx.storage,
+      this.name,
+      callbackUrl,
+      { clientMetadataUrl: "https://my-app.example.com/oauth/client.json" }
+    );
+  }
+}
+```
+
+Serve the document at that URL. `provider.clientMetadataDocument` returns its JSON: `client_id` is the URL and `redirect_uris` holds the callback URL. The authorization server checks every redirect URI against the document, so pass a fixed `callbackPath` to `addMcpServer` rather than relying on the per-instance default.
 
 ## Using MCP Capabilities
 

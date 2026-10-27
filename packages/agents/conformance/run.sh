@@ -116,7 +116,7 @@ case "$MODE" in
     ;;
   server-handler-legacy)
     run_server "$WORKER_ORIGIN/mcp-handler-legacy" 2025-11-25 \
-      conformance/baseline-server-handler.yml "$@"
+      conformance/baseline-server-handler-legacy.yml "$@"
     ;;
   server-mcp-agent)
     run_server "$WORKER_ORIGIN/mcp-agent" 2025-11-25 \

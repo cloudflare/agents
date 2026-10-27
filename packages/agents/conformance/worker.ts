@@ -1,6 +1,8 @@
 import {
   Agent,
+  type AgentMcpOAuthProvider,
   type AgentNamespace,
+  DurableObjectOAuthClientProvider,
   getAgentByName,
   routeAgentRequest
 } from "../src/index.ts";
@@ -47,6 +49,10 @@ type Env = {
 
 const SERVER_NAME = "conformance";
 
+// Fixed client_id the referee's auth/basic-cimd scenario expects.
+const CIMD_CLIENT_METADATA_URL =
+  "https://conformance-test.local/client-metadata.json";
+
 type RunRequest = { scenario: string; serverUrl: string; context?: string };
 
 type RunResult =
@@ -58,6 +64,19 @@ export class ConformanceHost extends Agent<Env> {
   private _serverId: string | undefined;
   private _scenario: string | undefined;
   private _mrtrIsolationCallMade = false;
+
+  // Offer a Client ID Metadata Document URL. Authorization servers that
+  // advertise CIMD support receive it as the client_id; the rest still use
+  // dynamic client registration. The referee accepts this fixed URL without
+  // fetching it.
+  createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
+    return new DurableObjectOAuthClientProvider(
+      this.ctx.storage,
+      this.name,
+      callbackUrl,
+      { clientMetadataUrl: CIMD_CLIENT_METADATA_URL }
+    );
+  }
 
   onStart() {
     // Accept elicitation requests. Form-mode defaults are applied by the SDK

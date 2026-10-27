@@ -1,4 +1,6 @@
 # createLegacyMcpHandler + WorkerTransport at 2025-11-25.
+# Deprecated surface: these stay baselined rather than fixed. createMcpHandler
+# passes all three at 2026-07-28 (server-handler lane).
 server:
   # SDK v1's Zod conversion emits draft-07 and strips JSON Schema 2020-12
   # $defs/additionalProperties fields.

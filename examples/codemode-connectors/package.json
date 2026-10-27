@@ -12,7 +12,7 @@
     "@cloudflare/ai-chat": "*",
     "@cloudflare/codemode": "*",
     "@cloudflare/kumo": "^2.6.0",
-    "@modelcontextprotocol/sdk": "1.32.1",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.1.1",
     "agents": "*",
