@@ -72,12 +72,12 @@ which covers every conversation, background tasks included:
   push the job due now to re-check.
 - **`at`:** pi's tasks are asleep until then. Reschedule the job to `at`.
 - **Neither:** complete the job, so there is no alarm. If a submit is
-  between steps 1 and 2 (an in-memory counter), reschedule instead. A task
-  that pi's restart limit parked does not count: it waits for
-  `pi.retryTask()`, and waiting on it would keep the object awake forever.
+  between steps 1 and 2 (an in-memory counter), reschedule instead.
 
-The step used to wait on `conversation.waitForIdle()`, which does count a
-parked task, so a crash-looping task held the object awake indefinitely.
+Before Pi's next release, the restart limit parked a crash-looping task
+until `pi.retryTask()`, and the step had to leave parked tasks out, or it
+would keep the object awake forever. Pi now ends such a task, so it is
+never left waiting.
 
 The whole thing relies on one Lifecycle rule: a same-id `push()` made while
 the job is dispatching supersedes that dispatch's outcome. So a submit

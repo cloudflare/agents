@@ -81,7 +81,7 @@ const Reminder = defineTask<
  *
  * - `nowake:` opens pi without `onWake`.
  * - `retry:` retries a failed generation once, after two seconds.
- * - `park:` parks a task after its first restart.
+ * - `park:` ends a task cut off once (pi's `restartLimit` of 1).
  */
 function variantSettings(name: string) {
   const plain = name.replace(/^nowake:/, "");
@@ -462,10 +462,6 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   async abort(operationId?: string): Promise<boolean> {
     return this.harness.abort({ operationId });
-  }
-
-  async retry(): Promise<boolean> {
-    return this.harness.retry();
   }
 
   async createSession(): Promise<string> {
