@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@cloudflare/ai-chat": "*",
-    "@cloudflare/computer": "^0.5.1",
+    "@cloudflare/computer": "^0.8.0",
     "@cloudflare/kumo": "^2.6.0",
     "@cloudflare/sandbox": "0.12.14",
     "@cloudflare/think": "*",

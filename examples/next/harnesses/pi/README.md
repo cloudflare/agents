@@ -199,8 +199,8 @@ Pi comes from npm: `@earendil-works/pi-durable`, `pi-ai`, `chord` and
 `pi-telemetry` at `~1.4.0`. Pi is MIT licensed; see
 [`licenses/mit-earendil-pi.txt`](./licenses/mit-earendil-pi.txt).
 
-`@cloudflare/computer` comes from npm at `^0.5.1`. 0.5 is the first release with
-the `ws:git` module that `exec` uses for git.
+`@cloudflare/computer` comes from npm at `^0.8.0`, the version Think requires.
+It includes the `ws:git` module that `exec` uses for git (added in 0.5).
 
 Note that the repository sets `minimumReleaseAge: 1440` in
 `pnpm-workspace.yaml`, so a pi release less than 24 hours old will not
