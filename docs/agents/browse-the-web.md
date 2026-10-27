@@ -43,21 +43,20 @@ npm install agents @cloudflare/codemode
 
 `browserTool` does not use codemode, but `agents/browser` still exports the deprecated APIs that do, so your bundler needs it installed. That requirement goes away when those APIs are removed.
 
-Create a `Browser` on your agent and install it on the agent's [Lifecycle](./lifecycle.md), which stores the browser's record and keeps it across hibernation:
+Create a `Browser` on your Durable Object and install it on the object's [Lifecycle](./lifecycle.md), which stores the browser's record and keeps it across hibernation:
 
 ```ts
-import { Agent } from "agents";
+import { DurableObject } from "cloudflare:workers";
+import { Lifecycle } from "agents/lifecycle";
 import { Browser, browserRun } from "agents/browser";
 
-export class MyAgent extends Agent<Env> {
+export class MyObject extends DurableObject<Env> {
   browser = new Browser({ provider: browserRun(this.env.BROWSER) });
-
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    this.lifecycle.use(this.browser);
-  }
+  lifecycle = Lifecycle.install(this).use(this.browser);
 }
 ```
+
+If you use the `Agent` class, it installs its own `Lifecycle`, so call `this.lifecycle.use(this.browser)` in its constructor instead.
 
 Only Chromium on Browser Run is supported.
 
@@ -120,7 +119,7 @@ To show a screenshot, the model returns it from its code. The full result, image
 - The model writes an async arrow function against a `browser` global: `browser.cdp({ method, params, sessionId })` sends a command, `browser.attachToTarget({ targetId })` switches tabs, `browser.spec()` lists the protocol's domains and `browser.spec({ domain })` returns one, and `browser.getDebugLog()` shows recent traffic. `sessionId: "active"` points at the tab it is working in, and that tab is remembered across turns.
 - The code runs in a fresh Dynamic Worker for each call, with no network access: `browser` is its only way out.
 - The tool's description covers the `browser` API and the CDP mistakes models commonly make, so the model does not need a discovery pass first.
-- If several chats or users share one `Browser` (for example, many threads on one agent), pass each one's id as `scope`: `browserTool({ browser, loader, scope: threadId })`. Each scope keeps its own active tab, so one chat never drives another's page, while cookies and logins stay shared. Tools that leave `scope` out share one tab. Calls in the same scope wait for each other; calls in different scopes run in parallel.
+- If several chats or users share one `Browser` (for example, many threads on one Durable Object), pass each one's id as `scope`: `browserTool({ browser, loader, scope: threadId })`. Each scope keeps its own active tab, so one chat never drives another's page, while cookies and logins stay shared. Tools that leave `scope` out share one tab. Calls in the same scope wait for each other; calls in different scopes run in parallel.
 - The result's `notice` tells the model what happened to its browser: it was lost (idle past `keepAliveMs`, closed, or crashed) and the code ran in a new one, another chat closed its tab or works in it too, or the page opened new tabs.
 - Each call times out after `timeoutMs` (default 60 seconds).
 - Results are cut to about 24,000 characters. A screenshot can be at most 1 MB, so a full-page screenshot of a long page fails; the model is told to capture the viewport or use JPEG instead.
@@ -133,7 +132,14 @@ Pass options to `browserRun(binding, options)`:
 - `guardrails` restricts which hostnames the browser may reach, for example `{ allowedDomains: ["example.com", "*.example.com"] }`. See [guardrails](https://developers.cloudflare.com/browser-run/features/guardrails/).
 - `recording` turns on [session recording](#session-recording).
 
-To have more than one browser on an agent, give each `Browser` a different `name`.
+To have more than one browser on a Durable Object, give each one a different `name` when calling `new Browser()`:
+
+```ts
+research = new Browser({
+  name: "research",
+  provider: browserRun(this.env.BROWSER)
+});
+```
 
 ### Live View and closing
 
@@ -158,6 +164,86 @@ try {
   // { restarted, newTabs, tabClosed, tabShared }, or undefined if unused
 }
 ```
+
+### Internal hostnames
+
+Give the browser hostnames that your Durable Object serves instead of the internet: files in an R2 bucket, a folder in its workspace, a dev server in its sandbox, or another Worker. Each host has a `fetch` function that runs in your Durable Object, so it can use its bindings and state:
+
+```ts
+import { DurableObject } from "cloudflare:workers";
+import { Lifecycle } from "agents/lifecycle";
+import { Browser, browserRun, type InternalHostMessage } from "agents/browser";
+import { z } from "zod";
+// Your own code: serve a workspace folder's files, and reach a port on your
+// sandbox. Each returns a Response.
+import { fetchSandboxPort, serveWorkspaceFolder } from "./hosts";
+
+// Browser Run calls back into your Worker through this entrypoint.
+export { InternalHostRouter } from "agents/browser";
+
+export class MyObject extends DurableObject<Env> {
+  browser = new Browser({
+    provider: browserRun(this.env.BROWSER, {
+      guardrails: { allowedDomains: [] }, // internal hosts only
+      internalHosts: {
+        router: this.ctx.exports.InternalHostRouter,
+        hosts: {
+          "assets.internal": {
+            description: "Your app's static assets, served from an R2 bucket",
+            fetch: async (request) => {
+              const { pathname } = new URL(request.url);
+              const file = await this.env.ASSETS_BUCKET.get(
+                decodeURIComponent(pathname.slice(1))
+              );
+              if (!file) return new Response("Not found", { status: 404 });
+              const headers = new Headers();
+              file.writeHttpMetadata(headers); // its Content-Type
+              return new Response(file.body, { headers });
+            }
+          },
+          "site.internal": {
+            description: "A workspace folder, such as a production build",
+            target: z.object({
+              folder: z
+                .string()
+                .startsWith("/workspace/")
+                .refine((path) => !path.split("/").includes(".."))
+            }),
+            fetch: (request, { folder }) =>
+              serveWorkspaceFolder(folder, request)
+          },
+          "preview.internal": {
+            description: "Your dev servers",
+            target: z.object({ port: z.number().int().min(1024) }),
+            fetch: (request, { port }) => fetchSandboxPort(port, request)
+          },
+          "api.internal": { worker: this.env.API }
+        }
+      }
+    })
+  });
+  lifecycle = Lifecycle.install(this).use(this.browser);
+
+  // InternalHostRouter calls this to reach your Browser.
+  fetchInternalHost(message: InternalHostMessage) {
+    return this.browser.fetchInternalHost(message);
+  }
+}
+```
+
+- A host with `fetch` always serves the same thing. Add a `target` schema and the model chooses: it calls `browser.assignHost({ host, target })` in its browser code, the target is checked against the schema and stored, and your `fetch` gets it as its second argument. `target` takes a [Standard JSON Schema](https://standardschema.dev) (Zod 4.2+, ArkType, Valibot via its adapter), which types the argument, or a plain JSON Schema object, which leaves it `unknown`.
+- Assignments survive the browser being replaced, eviction, and redeploys. An assignable host answers 502 until it is assigned. Call `this.browser.internalHosts.assign()`, `.clear()`, or `.list()` to manage them yourself.
+- A host with `worker` (a service binding or a `ctx.exports` entrypoint) goes straight to that Worker, without passing through your Durable Object.
+- The browser tool's description lists each host with its description and schema, and its `browser` global gains `listHosts()`, plus `assignHost()` and `clearHost()` when a host is assignable.
+- Internal hosts are plain http on port 80. There is no https and no WebSockets, so a dev server's hot reload will not connect.
+- At most 8 hostnames, as bare lowercase names ending in `.internal`, `.test`, `.example`, or `.invalid` (`preview.internal`, not `http://preview.internal:5173`). These suffixes never resolve on the internet, so a host cannot shadow a real site. They are fixed when the browser starts. Changing the set replaces the browser on its next use; changing a `fetch` function does not. Pointing a `worker` host at a different Worker does not either, so call `this.browser.close()` after such a change.
+- `guardrails` do not apply to internal hosts. `allowedDomains: []` lets the browser reach only them.
+- Any plain http page open in the browser can send requests to internal hosts, including a page on another internal host (Chrome blocks this from https pages as mixed content). Use `allowedDomains: []`, and if a host's requests have side effects, check that their `Origin` is that host.
+- When a host's `fetch` throws, the browser gets a 502 and the error is logged. The page does not see the error message.
+- Internal hosts only work when deployed. In local dev the browser starts without them and logs a warning.
+- Install the `Browser` on a top-level Durable Object or agent. Sub-agents are not supported yet.
+
+`InternalHostRouter` reaches your Durable Object by calling its `fetchInternalHost()` method. With more than one `Browser`, pick the one named by `message.browser`. Without the method, the browser shows a 502 that says what to add. `Agent` has the method built in, so on an agent leave it out.
 
 ## Session recording
 
@@ -217,7 +303,7 @@ Recent Wrangler releases support Browser Run in local development. `npx wrangler
 ## Security considerations
 
 - The model's code runs in a fresh Dynamic Worker for every call, with no network access (`fetch` and `connect` are blocked). `browser` is its only way out.
-- CDP commands go to your agent over Workers RPC. The WebSocket and the browser stay in your agent, not the sandbox.
+- CDP commands go to your Durable Object over Workers RPC. The WebSocket and the browser stay in your Durable Object, not the sandbox.
 - The model cannot close or crash the browser; `Browser.close` and `Browser.crash*` are refused.
 - The model cannot get a Live View link: `Cloudflare.getLiveView` and `Cloudflare.handoff` are refused, and so are `Target.sendMessageToTarget` and `Target.exposeDevToolsProtocol`, which could carry those commands inside them.
 - Live View links give whoever holds them control of the browser, including its logins. Do not show them to the model or store them.
