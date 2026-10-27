@@ -2,7 +2,7 @@
 #
 # Source: .gardener/tasks/dependabot-merge/TASK.md
 # Task: dependabot-merge
-# Bundle: sha256:cb1bdab5f9c5937eb22ece4af49addd318306aeefcebfac0236951059e4b309a
+# Bundle: sha256:550cd7f6ae254840456065f7e369ae55a72fb5ea966d0478fb63dd14ad6fed57
 # Regenerate: gardener generate
 # Do not edit this workflow directly.
 name: "Gardener · Dependabot merge"
@@ -40,5 +40,5 @@ jobs:
       task-id: "dependabot-merge"
       task-name: "Dependabot merge"
       task-source: ".gardener/tasks/dependabot-merge/TASK.md"
-      task-bundle-hash: cb1bdab5f9c5937eb22ece4af49addd318306aeefcebfac0236951059e4b309a
+      task-bundle-hash: 550cd7f6ae254840456065f7e369ae55a72fb5ea966d0478fb63dd14ad6fed57
       plan-timeout-minutes: 25
