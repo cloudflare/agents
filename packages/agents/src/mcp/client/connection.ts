@@ -27,6 +27,7 @@ import {
   fetchMcpTools
 } from "./catalog";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
+import { AuthorizationTurns } from "./authorization-turns";
 import { createMcpSdkClient, normalizeMcpClientOptions } from "./runtime";
 export { elicitationCapabilitiesFromHandlers } from "./runtime";
 import {
@@ -135,6 +136,8 @@ export class MCPClientConnection {
     | SSEClientTransport
     | RPCClientTransport;
   private _restoredListSubscription?: McpSubscription;
+  /** Keeps concurrent `401`s from starting interleaved OAuth flows. */
+  private readonly _authorizationTurns = new AuthorizationTurns();
   prompts: Prompt[] = [];
   resources: Resource[] = [];
   resourceTemplates: ResourceTemplate[] = [];
@@ -900,12 +903,16 @@ export class MCPClientConnection {
       case "streamable-http":
         return new StreamableHTTPClientTransport(
           this.url,
-          this.options.transport as StreamableHTTPClientTransportOptions
+          this.httpTransportOptions(
+            this.options.transport as StreamableHTTPClientTransportOptions
+          )
         );
       case "sse":
         return new SSEClientTransport(
           this.url,
-          this.options.transport as SSEClientTransportOptions
+          this.httpTransportOptions(
+            this.options.transport as SSEClientTransportOptions
+          )
         );
       case "rpc":
         return new RPCClientTransport(
@@ -914,6 +921,23 @@ export class MCPClientConnection {
       default:
         throw new Error(`Unsupported transport type: ${transportType}`);
     }
+  }
+
+  /**
+   * HTTP transport options with OAuth flows taken one at a time: a `401`
+   * waits for the authorization an earlier one started, so concurrent
+   * requests share one client registration and one pending link.
+   */
+  private httpTransportOptions<
+    T extends StreamableHTTPClientTransportOptions | SSEClientTransportOptions
+  >(options: T): T {
+    const { authProvider } = this.options.transport;
+    if (!authProvider) return options;
+    return {
+      ...options,
+      authProvider: this._authorizationTurns.wrapProvider(authProvider),
+      fetch: this._authorizationTurns.wrapFetch(this.url, options.fetch)
+    };
   }
 
   private async tryConnect(
