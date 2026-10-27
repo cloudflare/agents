@@ -1,13 +1,16 @@
 /**
  * The `browser` object model-written code drives a browser with, defined
- * once. `browserTool`'s sandbox exposes it as the
- * `browser` global, and the same functions, docs and rules are what a
+ * once. `browserTool`'s sandbox exposes it as the `browser` global, and the same functions, docs and rules are what a
  * Workspace module would expose later. Internal — not an entry point.
  *
- * Every function takes one options object and is backed by a
- * `BrowserSession`, which validates the input. `spec` shapes the session's
- * full protocol into pieces small enough for a result.
+ * Every function takes one options object. The CDP functions are backed by
+ * a `BrowserSession`, which validates the input; `spec` shapes the session's
+ * full protocol into pieces small enough for a result. The hosts functions,
+ * there only when the browser has internal hostnames, are backed by its
+ * `internalHosts`.
  */
+import type { BrowserInternalHosts } from "./browser";
+import type { InternalHostInfo } from "./internal-hosts";
 import {
   validate,
   type BrowserAttachInput,
@@ -105,22 +108,114 @@ function firstSentence(text: string): string {
   return text.match(/^[\s\S]*?\.(?=\s|$)/)?.[0] ?? text;
 }
 
-/** The `browser` object's functions, bound to one run's session. */
+interface HostsFunctionDefinition {
+  doc: string;
+  /** Only offered when at least one host is assignable. */
+  assignable?: true;
+  call(hosts: BrowserInternalHosts, input: unknown): Promise<unknown>;
+}
+
+/** The `host` field of a hosts function's input, or a fix-it error. */
+function hostOf(name: string, input: unknown): string {
+  const host =
+    typeof input === "object" && input !== null
+      ? (input as { host?: unknown }).host
+      : undefined;
+  if (typeof host !== "string") {
+    throw new Error(
+      `browser.${name} needs { host }: the bare hostname, like "preview.internal".`
+    );
+  }
+  return host;
+}
+
+const HOSTS_FUNCTIONS = {
+  listHosts: {
+    doc: "`browser.listHosts()` returns each internal site and the target it points at.",
+    call: (hosts) => hosts.list()
+  },
+  assignHost: {
+    doc: '`browser.assignHost({ host, target })` points an assignable site at a target matching its schema and returns `{ url }`; `host` is the bare hostname, like "preview.internal". Navigate to the url next. It stays assigned across runs.',
+    assignable: true,
+    call: (hosts, input) =>
+      hosts.assign(
+        hostOf("assignHost", input),
+        (input as { target?: unknown }).target
+      )
+  },
+  clearHost: {
+    doc: "`browser.clearHost({ host })` unassigns a site and returns `{ cleared }`. An unassigned site answers 502.",
+    assignable: true,
+    call: async (hosts, input) => ({
+      cleared: await hosts.clear(hostOf("clearHost", input))
+    })
+  }
+} satisfies Record<string, HostsFunctionDefinition>;
+
+/** The hosts functions to offer: assign and clear only if any host can be. */
+function hostsFunctions(
+  infos: InternalHostInfo[]
+): [string, HostsFunctionDefinition][] {
+  const assignable = infos.some((info) => info.assignable);
+  return Object.entries(HOSTS_FUNCTIONS).filter(
+    ([, definition]: [string, HostsFunctionDefinition]) =>
+      assignable || !definition.assignable
+  );
+}
+
+/**
+ * The `browser` object's functions, bound to one run's session, plus the
+ * hosts functions when the browser has internal hostnames.
+ */
 export function browserFunctions(
-  session: BrowserSession
+  session: BrowserSession,
+  hosts?: BrowserInternalHosts
 ): Record<string, BrowserFunction> {
-  return Object.fromEntries(
+  const functions: Record<string, BrowserFunction> = Object.fromEntries(
     Object.entries(BROWSER_FUNCTIONS).map(([name, definition]) => [
       name,
       (input: unknown) => definition.call(session, input)
     ])
   );
+  if (hosts) {
+    for (const [name, definition] of hostsFunctions(hosts.describe())) {
+      functions[name] = (input: unknown) => definition.call(hosts, input);
+    }
+  }
+  return functions;
 }
 
-/** One line per function, for the model. */
-export const BROWSER_FUNCTION_DOCS: readonly string[] = Object.values(
-  BROWSER_FUNCTIONS
-).map((definition) => definition.doc);
+/** How one internal site reads in the docs. */
+function describeHost(info: InternalHostInfo): string {
+  const description = info.description ? ` — ${info.description}` : "";
+  const target = info.assignable
+    ? `. Assignable; target schema: ${JSON.stringify(info.targetSchema ?? {})}`
+    : "";
+  return `- ${info.url}${description}${target}`;
+}
+
+/**
+ * The `browser` object's docs for the model, in Markdown: one line per
+ * function, then the internal sites when the browser has any.
+ */
+export function browserFunctionDocs(hosts?: BrowserInternalHosts): string {
+  const infos = hosts?.describe() ?? [];
+  const functions = [
+    ...Object.values(BROWSER_FUNCTIONS),
+    ...(hosts ? hostsFunctions(infos).map(([, definition]) => definition) : [])
+  ];
+  const lines = functions.map((definition) => `- ${definition.doc}`);
+  if (!hosts) return lines.join("\n");
+  return [
+    ...lines,
+    "",
+    "## Internal sites",
+    "",
+    "The browser can open these sites, which aren't on the public internet. Plain http only: no https:// and no WebSockets, so a dev server's hot reload won't connect; reload the page instead.",
+    "",
+    ...infos.map(describeHost)
+  ].join("\n");
+}
 
 /**
  * How to use the browser, one rule per line. Each rule fixes a mistake
