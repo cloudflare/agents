@@ -766,5 +766,6 @@ export {
   PiFactoryTestObject,
   PiFlakyFactoryTestObject
 } from "./factory-fixture";
+export { PiWireTestObject } from "./wire-fixture";
 
 export default { fetch: () => new Response("Not found", { status: 404 }) };
