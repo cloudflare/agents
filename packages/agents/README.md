@@ -10,15 +10,14 @@
 
 **Run AI agents on Cloudflare that pick up where they left off.**
 
-An agent is a model that calls tools in a loop until a job is done. The code that runs the loop is called a harness. Claude Code and Codex are harnesses, and so is [Pi](https://github.com/earendil-works/pi/tree/main/packages/durable), an open-source one that saves each step as it goes.
+The Agents SDK is a TypeScript library for running AI agents on Cloudflare. You bring a harness, the loop that sends a conversation to a model and runs the tools it asks for. The quick start uses [Pi](https://github.com/earendil-works/pi/tree/main/packages/durable), but you can also use OpenCode, Claude Code and Codex. The SDK runs the harness in a [Durable Object](https://developers.cloudflare.com/durable-objects/), a small server with its own database, so each user, task or chat can have an agent of its own.
 
-This package runs a harness on Cloudflare. Each agent is its own [Durable Object](https://developers.cloudflare.com/durable-objects/), a small server with a name, a database and files. It sleeps when nobody is using it and wakes when a request or a timer arrives. If it stops partway through a task, it picks up from its last saved step. You can run one for every user, task or conversation.
+Use it when an agent's work outlasts a single request: when it runs for hours, waits days for a reply, or acts on a schedule. It sleeps when idle and you pay for compute only while it works, so it stays cheap to run millions of them. If it crashes partway through a task, it carries on from its last step. Next to the harness you can add other capabilities: tools that work on Workers, files and a sandbox, schedules, and WebSockets.
 
-Next to the harness you can add other capabilities, such as a scheduler or WebSockets.
+[Read the docs](https://developers.cloudflare.com/agents/) · [Build your first agent](https://github.com/cloudflare/agents/blob/main/docs/agents/build-your-first-agent.md)
 
-Already using `Agent`, `AIChatAgent` or Think? They still work. See [The Agent class](#the-agent-class).
-
-[Read the docs](https://developers.cloudflare.com/agents/) · [Quick start](#quick-start) · [Build your first agent](https://github.com/cloudflare/agents/blob/main/docs/agents/build-your-first-agent.md) · [Pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi)
+> [!NOTE]
+> Already using `Agent`, `AIChatAgent` or Think? They still work. See [The Agent class](#the-agent-class).
 
 ## Quick start
 
@@ -145,15 +144,13 @@ This code is also a complete project in [`examples/next/quick-start`](https://gi
 
 A stateless function handles one request and then forgets about it. An agent's work can go on for hours or days, so it needs a few things a function doesn't give you:
 
-| An agent needs to…                          | In a stateless function, it…                   | With Agents, it…                                               |
+| An agent needs to…                          | In a stateless function, it…                   | With the Agents SDK, it…                                       |
 | ------------------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
 | Work for minutes or hours                   | Stops when the request ends                    | Sets an alarm, so it wakes up and carries on after the request |
 | Survive a crash or a deploy partway through | Starts over, and may send the same email twice | Picks up where it left off, without rerunning unsafe tools     |
 | Remember each user                          | Needs a separate database                      | Has its own database and files                                 |
 | Wait days for the next message              | Saves everything elsewhere and reloads it      | Sleeps without using compute, and wakes with its data intact   |
 | Act without being asked                     | Needs a cron job that knows about every agent  | Sets its own schedules, and wakes itself when one is due       |
-
-You pay for compute only while an agent is working. A sleeping agent costs only its storage, so you can scale to millions of agents, one for every user, without paying for servers that sit idle.
 
 ## How an agent runs
 
