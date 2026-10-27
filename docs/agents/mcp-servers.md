@@ -281,6 +281,8 @@ pnpm add agents @modelcontextprotocol/sdk@1.32.1 zod
 
 Keep importing `McpServer` from `@modelcontextprotocol/sdk/server/mcp.js` in an `McpAgent`. An SDK v2 server from `@modelcontextprotocol/server` cannot run inside `McpAgent`. The same applies to `WorkerTransport` and `createLegacyMcpHandler` from `agents/mcp`.
 
+`agents/x402` also needs `@modelcontextprotocol/sdk`. It does not load the package at runtime, but its types refer to SDK v1 clients and tools.
+
 If your server imported `@modelcontextprotocol/sdk` without listing it in `package.json`, it only worked because `agents` installed the package. After you upgrade, the build fails with an unresolved `@modelcontextprotocol/sdk` import until you add it.
 
 Client code does not need the v1 SDK. If you import client helpers such as `RPCClientTransport` or `normalizeServerId` from `agents/mcp`, import them from `agents/mcp/client` instead.
