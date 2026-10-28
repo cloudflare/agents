@@ -172,6 +172,12 @@ export type PiSessionDefaults = {
    */
   readonly model?: PiModel;
   readonly thinkingLevel?: ModelThinkingLevel;
+  /**
+   * Most tool rounds one run takes: the round that reaches it runs its
+   * tools, then the run's operations end unanswered with reason
+   * `turn_limit`. An integer, 1 or more. Default: no limit.
+   */
+  readonly maxTurns?: number;
 };
 
 /** How long the wake waits on pi, and how often it checks. */
@@ -814,7 +820,10 @@ export class PiHarness extends LifecycleCapability {
         : { model: modelRef(defaults.model) }),
       ...(defaults?.thinkingLevel === undefined
         ? {}
-        : { thinkingLevel: defaults.thinkingLevel })
+        : { thinkingLevel: defaults.thinkingLevel }),
+      ...(defaults?.maxTurns === undefined
+        ? {}
+        : { maxTurns: defaults.maxTurns })
     };
   }
 

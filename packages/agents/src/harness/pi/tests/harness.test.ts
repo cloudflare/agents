@@ -527,6 +527,21 @@ describe("PiHarness on pi-durable", () => {
     expect(await stub.messages()).toEqual(["flaky", "", "echo: flaky"]);
   });
 
+  it("ends a run at the session's turn limit, and a continue answers it", async () => {
+    const stub = fresh(`turns:${crypto.randomUUID()}`);
+    // The round that reaches the limit still runs its tool.
+    expect(await stub.prompt("multiply 3")).toMatchObject({
+      status: "unanswered",
+      reason: "turn_limit",
+      messages: ["multiply 3", "", "9"]
+    });
+    const receipt = await stub.continueSession();
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done",
+      text: "tool said: 9"
+    });
+  });
+
   it("settles a continue with nothing to answer as unanswered", async () => {
     const stub = fresh();
     await stub.prompt("hello");

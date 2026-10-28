@@ -61,7 +61,7 @@ export class Assistant extends DurableObject<Env> {
 | Option     | What it is                                                                                                                                                                                                                                                                                                                          |
 | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `harness`  | Required. Receives `{ storage, context, onWake }` and returns Pi's `Harness`, usually from `Harness.open`. Pass `onWake` to `Harness.open`, so the object can hibernate while Pi's tasks sleep (see [How recovery works](#how-recovery-works)). Models, the registry, `settings`, `env` and `onReport` are all yours to build here. |
-| `defaults` | What a new session starts with: `model`, a pi-ai `Model` such as `ai("@cf/…")`, and `thinkingLevel`. Without a model, a session's prompts end unanswered (`no_model`) until one is set.                                                                                                                                             |
+| `defaults` | What a new session starts with: `model`, a pi-ai `Model` such as `ai("@cf/…")`, `thinkingLevel`, and `maxTurns`, the most tool rounds one run takes before it ends unanswered (`turn_limit`). Without a model, a session's prompts end unanswered (`no_model`) until one is set.                                                    |
 
 Create the registry per object, as the `registry` field above does, not at module scope: Pi keeps every `Harness` subscribed to its registry until the `Harness` closes, and an evicted object never closes it.
 
@@ -244,7 +244,7 @@ The example app folds the transcript into chat messages, ignores `kind` and `dat
 
 ### Inputs queued behind a failed run
 
-A run fails with `model_error` when the model errors and Pi does not retry or the error outlasts its retries, and with `no_model` when the session has no usable model. Its own operation settles `unanswered` with that reason; to answer it once the cause is fixed, call `session.continue()`. Pi's `settings.afterFailedRun` decides what happens to the inputs queued behind it. Refer to [Failures and Recovery](https://github.com/earendil-works/pi/tree/main/packages/durable#failures-and-recovery) in the pi-durable README for what each value does. Set it in the factory:
+A run fails with `model_error` when the model errors and Pi does not retry or the error outlasts its retries, with `no_model` when the session has no usable model, and with `turn_limit` when it reaches `defaults.maxTurns` (after that round's tools ran). Its own operation settles `unanswered` with that reason; to answer it once the cause is fixed, call `session.continue()`. Pi's `settings.afterFailedRun` decides what happens to the inputs queued behind it. Refer to [Failures and Recovery](https://github.com/earendil-works/pi/tree/main/packages/durable#failures-and-recovery) in the pi-durable README for what each value does. Set it in the factory:
 
 ```ts
 harness: ({ storage, context, onWake }) =>
