@@ -131,7 +131,7 @@ export function createWebSearchToolCore(
     description: options.description ?? WEB_SEARCH_TOOL_DESCRIPTION,
     limit,
     render,
-    async run(input, { signal } = {}) {
+    async run(input, { signal }: { signal?: AbortSignal } = {}) {
       signal?.throwIfAborted();
       const request = {
         query: input.query,

@@ -23,7 +23,7 @@ including non-recovery features.
 
 | Layer   | Name                            | Runtime                                                              | Where                                                           | Runs in                                       |
 | ------- | ------------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------- |
-| **0**   | Type-level                      | `tsgo`, `*.test-d.ts`                                                | `packages/*/src/tests-d/`, `*.test-d.ts`                        | PR + release (`check` → typecheck)            |
+| **0**   | Type-level                      | `tsrs`, `*.test-d.ts`                                                | `packages/*/src/tests-d/`, `*.test-d.ts`                        | PR + release (`check` → typecheck)            |
 | **1/2** | Unit / adapter contract         | in-process vitest (Node)                                             | `src/chat/__tests__/`, `src/tests/` (pure)                      | PR (affected) + release (all)                 |
 | **3**   | Workers-pool integration        | `@cloudflare/vitest-pool-workers` (simulated workerd, in-process DO) | `src/tests/` + `vitest.config.ts` using `cloudflareTest()`      | PR (affected) + release (all)                 |
 | **3b**  | React hooks (browser)           | Playwright via `@vitest/browser-playwright`, or jsdom                | `src/react-tests/`                                              | PR + release (when in package default `test`) |
