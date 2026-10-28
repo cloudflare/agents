@@ -32,6 +32,7 @@ import { createMcpSdkClient, normalizeMcpClientOptions } from "./runtime";
 export { elicitationCapabilitiesFromHandlers } from "./runtime";
 import {
   isTransportNotImplemented,
+  isAuthorizationRefused,
   isUnauthorized,
   toErrorMessage
 } from "./errors";
@@ -136,6 +137,13 @@ export class MCPClientConnection {
     | SSEClientTransport
     | RPCClientTransport;
   private _restoredListSubscription?: McpSubscription;
+  /**
+   * Whether the last connect or discovery failed because authorization was
+   * refused in a way retrying cannot change: a 403 from the server, or an
+   * OAuth error such as `invalid_target` from the authorization server. The
+   * manager stops reconnecting such a server instead of asking again.
+   */
+  accessRefused = false;
   /** Keeps concurrent `401`s from starting interleaved OAuth flows. */
   private readonly _authorizationTurns = new AuthorizationTurns();
   prompts: Prompt[] = [];
@@ -268,6 +276,9 @@ export class MCPClientConnection {
 
     // Set the connection state
     this.connectionState = res.state;
+    this.accessRefused =
+      res.state === MCPConnectionState.FAILED &&
+      isAuthorizationRefused(res.error);
 
     // Handle the result and emit appropriate events
     if (res.state === MCPConnectionState.CONNECTED && res.transport) {
@@ -623,6 +634,7 @@ export class MCPClientConnection {
       this.connectionState = isUnauthorized(e)
         ? MCPConnectionState.AUTHENTICATING
         : MCPConnectionState.CONNECTED;
+      this.accessRefused = isAuthorizationRefused(e);
 
       const error = e instanceof Error ? e.message : String(e);
       // A restored streamable HTTP session rejected with 404 must be

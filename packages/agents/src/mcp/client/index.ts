@@ -171,6 +171,11 @@ export type MCPServerSettlement =
       readonly state: typeof MCPConnectionState.FAILED;
       readonly phase: "connect" | "discover";
       readonly error: string;
+      /**
+       * Authorization was refused in a way retrying cannot change: a 401 no
+       * link could answer, a 403, or a refusing OAuth error.
+       */
+      readonly refused?: true;
     }
   | { readonly state: "removed" };
 
@@ -513,6 +518,27 @@ export class MCPClientManager extends LifecycleCapability {
       payload: { serverId, authUrl } satisfies AuthExpiryJobPayload,
       retry: { maxAttempts: 1 }
     });
+  }
+
+  /**
+   * After a failed connect or discovery: retry later when the failure may
+   * pass (the network, a 5xx, a timeout, a temporarily unavailable
+   * authorization server), or stop and record it when authorization was
+   * refused, since every retry would get the same answer.
+   */
+  private afterFailure(
+    serverId: string,
+    settlement: { readonly error: string; readonly refused?: true }
+  ): void {
+    if (settlement.refused) {
+      this.recordFailure(
+        serverId,
+        "authorization-failed",
+        `Authorization was refused: ${settlement.error}. Reconnect the server once it can be authorized.`
+      );
+      return;
+    }
+    this.scheduleReconnect(serverId, settlement.error);
   }
 
   /**
@@ -1116,10 +1142,13 @@ export class MCPClientManager extends LifecycleCapability {
             : {
                 state: MCPConnectionState.FAILED,
                 phase: "connect",
-                error: connected.error
+                error: connected.error,
+                ...(this.mcpConnections[id]?.accessRefused && {
+                  refused: true as const
+                })
               };
       if (settlement.state === MCPConnectionState.FAILED) {
-        this.scheduleReconnect(id, settlement.error);
+        this.afterFailure(id, settlement);
       }
       return settlement;
     });
@@ -1163,7 +1192,7 @@ export class MCPClientManager extends LifecycleCapability {
         case MCPConnectionState.CONNECTED: {
           const settlement = await this._settleDiscovery(id);
           if (settlement.state === MCPConnectionState.FAILED) {
-            this.scheduleReconnect(id, settlement.error);
+            this.afterFailure(id, settlement);
           }
           return settlement;
         }
@@ -1194,16 +1223,28 @@ export class MCPClientManager extends LifecycleCapability {
     const discovered = await this.discoverIfConnected(id);
     if (discovered?.state === MCPConnectionState.AUTHENTICATING) {
       // Initialize was open but the catalogs need OAuth.
+      if (discovered.authUrl) {
+        return {
+          state: MCPConnectionState.AUTHENTICATING,
+          authUrl: discovered.authUrl
+        };
+      }
+      // A 401 no link can answer: asking again gets the same answer.
       return {
-        state: MCPConnectionState.AUTHENTICATING,
-        authUrl: discovered.authUrl
+        state: MCPConnectionState.FAILED,
+        phase: "discover",
+        error: discovered.error ?? "The server requires authorization",
+        refused: true
       };
     }
     if (!discovered?.success) {
       return {
         state: MCPConnectionState.FAILED,
         phase: "discover",
-        error: discovered?.error ?? "connection not found"
+        error: discovered?.error ?? "connection not found",
+        ...(this.mcpConnections[id]?.accessRefused && {
+          refused: true as const
+        })
       };
     }
     return { state: MCPConnectionState.READY };
@@ -1255,7 +1296,11 @@ export class MCPClientManager extends LifecycleCapability {
         maxAttempts,
         async () => {
           const result = await this.connectToServer(serverId);
-          if (result.state === MCPConnectionState.FAILED) {
+          // A refusal gets the same answer on every attempt.
+          if (
+            result.state === MCPConnectionState.FAILED &&
+            !this.mcpConnections[serverId]?.accessRefused
+          ) {
             throw new ConnectRetryError(result);
           }
           return result;
@@ -1669,6 +1714,9 @@ export class MCPClientManager extends LifecycleCapability {
         // Broadcasts again once auth_url is durable so clients can serve it.
         const auth = this.enterAuthenticating(id, conn);
         if (!auth) {
+          // A 401 nothing here can answer with a link: retrying gets the
+          // same 401, so automatic reconnects stop.
+          conn.accessRefused = true;
           const provider = conn.options.transport.authProvider;
           return {
             state: MCPConnectionState.FAILED,

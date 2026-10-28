@@ -1,4 +1,4 @@
-import { UnauthorizedError } from "@modelcontextprotocol/client";
+import { OAuthError, UnauthorizedError } from "@modelcontextprotocol/client";
 
 /**
  * Thrown by `MCPClientManager.callTool()` (and `readResource()` /
@@ -98,6 +98,33 @@ export function isUnauthorized(error: unknown): boolean {
 
   const msg = toErrorMessage(error);
   return msg.includes("Unauthorized") || msg.includes("401");
+}
+
+/**
+ * OAuth error codes a retry can change: the authorization server's own
+ * trouble. Every other code (`invalid_target`, `invalid_scope`,
+ * `access_denied`, `unauthorized_client`, ...) refuses the request itself.
+ * The SDK already recovers `invalid_grant` and `invalid_client` once by
+ * starting a fresh authorization, so when they reach us that has failed too.
+ */
+const RETRYABLE_OAUTH_ERRORS = new Set([
+  "server_error",
+  "temporarily_unavailable"
+]);
+
+/**
+ * Whether an error means authorization was refused in a way retrying cannot
+ * change: the MCP server answered 403, or the authorization server answered
+ * with an OAuth error other than a temporary one.
+ */
+export function isAuthorizationRefused(error: unknown, depth = 0): boolean {
+  if (depth > 5 || !error || typeof error !== "object") return false;
+  if (OAuthError.isInstance(error)) {
+    return !RETRYABLE_OAUTH_ERRORS.has(error.code);
+  }
+  if (getErrorStatus(error) === 403) return true;
+  const cause = getErrorCause(error);
+  return cause !== error && isAuthorizationRefused(cause, depth + 1);
 }
 
 // MCP SDK change (v1.24.0, commit 6b90e1a):

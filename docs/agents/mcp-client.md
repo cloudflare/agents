@@ -180,6 +180,14 @@ These options are persisted and used when reconnecting after hibernation or afte
 
 When a connection or discovery attempt fails (the server is down, times out, or returns an error), the manager keeps trying in the background on a schedule stored in the Durable Object's job queue, so it survives hibernation and eviction: after 30 seconds, 1, 2, 5 and 10 minutes, then every 30 minutes. The server shows `failed` with the last error in between, including after a wake for some other reason: the agent waits for the scheduled attempt rather than connecting early. Once it connects, the schedule is dropped.
 
+Retrying only helps when the failure can pass, so the manager does not retry when authorization was refused:
+
+- The server answered `401` and the agent cannot ask the user, for example a revoked static token passed in `transport.headers`, or no OAuth callback configured. When it can ask, the server moves to `authenticating` with a new link instead.
+- The server answered `403`. A `403` with `error="insufficient_scope"` still starts a [step-up](#re-authorization-during-a-session) first; it only counts as refused when no step-up is possible.
+- The authorization server refused with an OAuth error such as `invalid_target`, `invalid_scope` or `access_denied`. An expired or revoked refresh token (`invalid_grant`) starts a new authorization instead. `server_error` and `temporarily_unavailable` are retried like any other outage.
+
+The server is marked `failed` with `Authorization was refused: …`, and the failure is recorded the same way as below.
+
 After 24 hours without a successful connection, the manager stops and records the failure with the server. Later wakes show the same `failed` state without trying again. Calling `addMcpServer()` for the server again, or `connectToServer()` / `establishConnection()`, clears the failure and connects immediately. `removeMcpServer()` cancels any pending reconnect.
 
 A standalone `MCPClientManager` can change the schedule:

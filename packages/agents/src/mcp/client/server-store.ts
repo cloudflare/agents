@@ -26,8 +26,13 @@ export type StoredServerFailure = {
   /**
    * `authorization-expired`: the authorization link expired before the user
    * completed it. `reconnect-exhausted`: automatic reconnects gave up.
+   * `authorization-failed`: the server refused access and no authorization
+   * link could be made, so retrying would get the same answer.
    */
-  readonly reason: "authorization-expired" | "reconnect-exhausted";
+  readonly reason:
+    | "authorization-expired"
+    | "reconnect-exhausted"
+    | "authorization-failed";
   /** Human-readable message, shown as the connection error. */
   readonly message: string;
   /** When the failure was recorded, in epoch milliseconds. */
