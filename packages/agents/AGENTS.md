@@ -109,7 +109,11 @@ src/
     rpc.ts              # RPC transports shared by client + server
     abort.ts            # Shared abort/race helper
     client/             # MCP client submodule (agents/mcp/client)
-      index.ts          # MCPClientManager for connecting to remote MCP servers
+      index.ts          # Public exports for agents/mcp/client
+      manager.ts        # MCPClientManager: public API and Lifecycle hooks, delegates to:
+      servers.ts        #   each server's connection life; decides retry or stop after a failure
+      authorization.ts  #   links, OAuth callbacks, re-authorization during requests
+      jobs.ts           #   durable reconnect and link-expiry jobs
       connection.ts
       rpc.ts            # Persisted RPC binding restoration
       storage.ts
@@ -403,7 +407,7 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 - **Sub-agents are facets** — `subAgent(Cls, name)` creates or resolves a child DO colocated on the same machine. Clients reach a child via `/agents/{parent}/{name}/sub/{child}/{name}` and `useAgent({ sub: [...] })`. Parents gate access with `onBeforeSubAgent`; children reach their parent with `parentAgent(Cls)` or `parentPath`.
 - **Lifecycle owns the job queue and the physical alarm** — capabilities and the host push jobs (`capability` + `fn` + due time + payload) into the `cf_agents_jobs` table; Lifecycle drives due jobs as an alarm event loop with retry, deferral, and the memory-limit circuit breaker, and derives the physical alarm from queue state. Queue mutations re-arm automatically. Each capability keeps its own durable state rather than depending on Scheduler.
 - **Scheduling uses cron-schedule** — `Scheduler` is the vocabulary over the job queue: it validates schedules, resolves named callbacks, and pushes jobs whose `fn` is the callback name. `Agent` installs the same primitive and delegates `this.schedule()` and related APIs to it. Schedules persist in SQLite and survive hibernation.
-- **MCP has separate package boundaries** — `mcp/server/index.ts` is the Stateless Worker wrapper; `mcp/client/index.ts` connects Agents to external servers; `mcp/index.ts` is a compatibility barrel for retained Legacy APIs whose implementation lives in `mcp/server/legacy-agent.ts`.
+- **MCP has separate package boundaries** — `mcp/server/index.ts` is the Stateless Worker wrapper; `mcp/client/manager.ts` (exported from `mcp/client/index.ts`) connects Agents to external servers; `mcp/index.ts` is a compatibility barrel for retained Legacy APIs whose implementation lives in `mcp/server/legacy-agent.ts`.
 - **Telemetry has an independent schema version** — `instrumentation_scope.version` is hardcoded to `"1"`; it is not the package version. Notify Workers Observability and any other downstream consumers before bumping it.
 
 ## Boundaries

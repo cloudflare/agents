@@ -15,7 +15,7 @@ const SERVER_COLUMNS =
   "id, name, server_url, client_id, auth_url, callback_url, server_options";
 
 /** Outcome of renaming a stored server. */
-export type ServerRenameResult = "renamed" | "missing" | "collision";
+type ServerRenameResult = "renamed" | "missing" | "collision";
 
 /**
  * Why a server stopped trying to connect on its own. Stored with the server
@@ -51,7 +51,7 @@ export type StoredServerFailure = {
 };
 
 /** A resumable MCP session persisted with its server. */
-export type StoredMcpSession = {
+type StoredMcpSession = {
   readonly id: string;
   readonly protocolVersion: string;
   readonly discoverResult?: DiscoverResult;

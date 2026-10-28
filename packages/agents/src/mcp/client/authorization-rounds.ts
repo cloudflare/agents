@@ -15,13 +15,13 @@
  */
 
 /** Completed authorization rounds allowed for one scope set. */
-export const MAX_AUTHORIZATION_ROUNDS = 3;
+const MAX_AUTHORIZATION_ROUNDS = 3;
 
 /** A scope set's rounds are forgotten this long after its latest round. */
-export const AUTHORIZATION_ROUNDS_WINDOW_MS = 60 * 60 * 1000;
+const AUTHORIZATION_ROUNDS_WINDOW_MS = 60 * 60 * 1000;
 
 /** Rounds recorded for one requested scope set. */
-export type ScopeRounds = {
+type ScopeRounds = {
   /** Rounds started for this scope set within the window. */
   readonly rounds: number;
   /** Whether this scope set's latest round's callback exchanged a code. */
@@ -31,7 +31,7 @@ export type ScopeRounds = {
 };
 
 /** Authorization rounds recorded for one server. */
-export type AuthorizationRounds = {
+type AuthorizationRounds = {
   /** The scope set of the round started most recently. */
   readonly latest: string;
   /** Rounds per normalized scope set; `""` when no scope was requested. */
@@ -39,7 +39,7 @@ export type AuthorizationRounds = {
 };
 
 /** Whether the next authorization link may be shown. */
-export type RoundDecision =
+type RoundDecision =
   | { readonly _tag: "start"; readonly rounds: AuthorizationRounds }
   | {
       readonly _tag: "exhausted";

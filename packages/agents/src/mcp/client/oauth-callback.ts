@@ -30,7 +30,7 @@ export type MCPClientOAuthResult =
     };
 
 /** A callback request, parsed far enough to find its connection. */
-export type ParsedOAuthCallback =
+type ParsedOAuthCallback =
   | {
       readonly _tag: "callback";
       readonly serverId: string;

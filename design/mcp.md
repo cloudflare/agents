@@ -85,20 +85,30 @@ supporting modules live in `src/mcp/client/`; `types.ts`, `rpc.ts`, and
 
 The SDK v2 client negotiates Stateless first and falls back to Legacy on the same connection. Agents persists the selected protocol and discovery result alongside resumable HTTP state. An in-flight elicitation handler and continuation remain memory-only; isolate restart rejects the operation and the caller retries it.
 
-`MCPClientManager` (`src/mcp/client/index.ts`) is the capability facade. It keeps one `MCPClientConnection` per server and delegates to:
+`MCPClientManager` (`src/mcp/client/manager.ts`) is the public API and the Lifecycle hooks; it decides nothing itself. It keeps one `MCPClientConnection` per server and hands every controller one `McpClientContext` (`context.ts`): the connections, the store, the lanes, storage, and the manager's events. Dependencies point one way, top to bottom:
 
-| Module              | Owns                                                                                 |
-| ------------------- | ------------------------------------------------------------------------------------ |
-| `server-store.ts`   | Every SQL statement over `cf_agents_mcp_servers`                                     |
-| `server-lanes.ts`   | One queue of connection work per server; re-entrant for nested calls                 |
-| `oauth-callback.ts` | Callback recognition and parsing, state checks, code exchange, response rendering    |
-| `ai-tools.ts`       | AI SDK tool conversion and its per-connection schema cache                           |
-| `url-policy.ts`     | Stable server ids and the SSRF policy                                                |
-| `connection.ts`     | Transport selection, the SDK client, catalogs and the connection-level state machine |
+| Module                      | Owns                                                                                                                                                             |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `servers.ts`                | Each server's life: register, connect, discover, restore, settle, reconnect, close, remove, migrate. `afterFailure` is the one place that decides retry or stop. |
+| `authorization.ts`          | Links and OAuth: entering `authenticating` (round limit, spent links), callbacks, request recovery, link expiry, provider creation and storage                   |
+| `status.ts`                 | The transitions both share: stop with a recorded failure, ready, save the session                                                                                |
+| `jobs.ts`                   | The durable `connect` and `auth-expiry` jobs and the reconnect policy; schedules, moves and cancels, decides nothing                                             |
+| `elicitation.ts`            | Elicitation handlers and the capabilities they advertise                                                                                                         |
+| `legacy-connect.ts`         | The deprecated `connect()`                                                                                                                                       |
+| `server-store.ts`           | Every SQL statement over `cf_agents_mcp_servers`                                                                                                                 |
+| `server-lanes.ts`           | One queue of connection work per server; re-entrant for nested calls                                                                                             |
+| `authorization-turns.ts`    | One OAuth flow at a time per connection, so concurrent 401s share one client and one link                                                                        |
+| `authorization-rounds.ts`   | The step-up round count, as pure functions                                                                                                                       |
+| `oauth-callback.ts`         | Callback recognition and parsing, state checks, code exchange, response rendering                                                                                |
+| `catalog.ts`, `ai-tools.ts` | Paginated catalogs, namespaced listings and filters; AI SDK tool conversion                                                                                      |
+| `url-policy.ts`             | Stable server ids and the SSRF policy                                                                                                                            |
+| `connection.ts`             | Transport selection, the SDK client, catalogs and the connection-level state machine                                                                             |
+
+`servers.ts` reaches `connectToServer` and `discoverIfConnected` through the manager, so a subclass override (or a test spy) sees internal calls too.
 
 Connect, discovery, establish, OAuth callback completion and restore for one server run through its lane, so they never interleave on one connection.
 
-Background work that must happen even if the isolate dies lives in the Lifecycle job queue (`reconnect-policy.ts`), not in memory:
+Background work that must happen even if the isolate dies lives in the Lifecycle job queue (`jobs.ts`), not in memory:
 
 - `connect:<serverId>`: after a failed connect or discovery, the next attempt on a 30s → 30m backoff. Each run is one bounded attempt. Restore leaves a server with a pending job `failed` (showing the job's last error) instead of connecting early. Ready or `authenticating` cancels it; 24h without success records a `reconnect-exhausted` failure. A refused authorization is never retried: a 401 no link can answer, a 403 left after any step-up, or an OAuth error other than `server_error` / `temporarily_unavailable` records an `authorization-failed` failure instead of scheduling the job. `migrateServerId` moves both jobs to the new id.
 - `auth-expiry:<serverId>`: armed with every persisted `auth_url`. If the link's `state` can no longer be redeemed when it fires, the server records an `authorization-expired` failure instead of minting a new link. The OAuth callback clears `auth_url` before it redeems the state, so a dead link found on wake was never completed and is recorded the same way.
