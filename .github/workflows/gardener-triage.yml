@@ -2,7 +2,7 @@
 #
 # Source: .gardener/tasks/triage/TASK.md
 # Task: triage
-# Bundle: sha256:e513967e7f60b62eb04cb426b02cfe338f2aaad724e513101b6f4366dc89e890
+# Bundle: sha256:abbe882cb8f50451c6322aeca0b705062097c1c3eaed8c79d26629087f7470c2
 # Regenerate: gardener generate
 # Do not edit this workflow directly.
 name: "Gardener · Triage"
@@ -31,6 +31,7 @@ jobs:
         || github.event_name == 'workflow_dispatch'
       }}
     permissions:
+      actions: write
       checks: read
       contents: read
       discussions: read
@@ -38,13 +39,13 @@ jobs:
       issues: write
       pull-requests: read
       statuses: read
-    uses: scuffi/gardener/.github/workflows/gardener-task.yml@0d02b66f47cc8802ba14a243dd827bf5555b3469
+    uses: scuffi/gardener/.github/workflows/gardener-task.yml@cc58329877208742b061f3c570d632be824aaf1e
     with:
       runtime-url: ${{ vars.GARDENER_RUNTIME_URL }}
       task-id: "triage"
       task-name: "Triage"
       task-source: ".gardener/tasks/triage/TASK.md"
-      task-bundle-hash: e513967e7f60b62eb04cb426b02cfe338f2aaad724e513101b6f4366dc89e890
+      task-bundle-hash: abbe882cb8f50451c6322aeca0b705062097c1c3eaed8c79d26629087f7470c2
       plan-timeout-minutes: 20
       reactions: >-
         ${{
