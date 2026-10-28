@@ -1,0 +1,23 @@
+.gardener/tasks/fix-ready/TASK.md
+  s_de0b486c128948::t_79d6a6940f717d 1-34
+.gardener/tasks/fix/TASK.md
+  s_de0b486c128948::t_cf6c1a50237e38 5,7-12,27,40-41,44-46,54-55,64-65,74-75
+.gardener/tasks/triage/TASK.md
+  s_de0b486c128948::t_926f1b33bf8e9a 5,20,54-55,58-59,70-73,78-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c1242d743f7b3eaa8cafa2d7aa75d27830cd1bcb",
+  "prompts": {},
+  "sessions": {
+    "s_de0b486c128948": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0a54b-7029-705c-8802-df38dfe75e1f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}
