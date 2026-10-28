@@ -901,16 +901,16 @@ export class MCPClientConnection {
   getTransport(transportType: BaseTransportType) {
     switch (transportType) {
       case "streamable-http":
-        return new StreamableHTTPClientTransport(
-          this.url,
-          this.httpTransportOptions(
+        return this.withAuthorizationTurns(
+          new StreamableHTTPClientTransport(
+            this.url,
             this.options.transport as StreamableHTTPClientTransportOptions
           )
         );
       case "sse":
-        return new SSEClientTransport(
-          this.url,
-          this.httpTransportOptions(
+        return this.withAuthorizationTurns(
+          new SSEClientTransport(
+            this.url,
             this.options.transport as SSEClientTransportOptions
           )
         );
@@ -924,20 +924,16 @@ export class MCPClientConnection {
   }
 
   /**
-   * HTTP transport options with OAuth flows taken one at a time: a `401` on
-   * an MCP request waits for the authorization an earlier one started, so
-   * concurrent requests share one client registration and one pending link.
+   * Take an HTTP transport's OAuth flows one at a time: a `401` waits for the
+   * authorization an earlier one started, so concurrent requests share one
+   * client registration and one pending link.
    */
-  private httpTransportOptions<
-    T extends StreamableHTTPClientTransportOptions | SSEClientTransportOptions
-  >(options: T): T {
+  private withAuthorizationTurns<T extends object>(transport: T): T {
     const { authProvider } = this.options.transport;
-    if (!authProvider) return options;
-    return {
-      ...options,
-      authProvider: this._authorizationTurns.wrapProvider(authProvider),
-      fetch: this._authorizationTurns.wrapFetch(options.fetch)
-    };
+    if (authProvider) {
+      this._authorizationTurns.wrapTransport(transport, authProvider);
+    }
+    return transport;
   }
 
   private async tryConnect(

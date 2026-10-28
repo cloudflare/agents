@@ -1,135 +1,69 @@
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 
-/** The `fetch` shape the SDK's HTTP transports accept. */
-export type TransportFetch = (
-  input: string | URL,
-  init?: RequestInit
-) => Promise<Response>;
-
-/**
- * How long a `401` waits for an earlier one's authorization to settle before
- * it is handed to the SDK anyway, so a flow that fails can't hold the
- * connection forever.
- */
-const AUTHORIZATION_TURN_TIMEOUT_MS = 10_000;
+/** The part of the SDK's adapted auth provider a transport calls on a 401. */
+type UnauthorizedHandler = {
+  onUnauthorized?: (context: unknown) => Promise<void>;
+};
 
 /**
  * One OAuth flow at a time per connection.
  *
- * The SDK transport answers every `401` from the MCP endpoint by running its
- * own authorization: it registers a client when none is saved, then builds an
- * authorization URL with a fresh state and code verifier. When several
+ * The SDK transport answers every `401` by calling its auth provider's
+ * `onUnauthorized`, which refreshes the token or registers a client and builds
+ * an authorization URL with a fresh state and code verifier. When several
  * requests get a `401` together (catalog discovery lists tools, prompts and
  * resources in parallel, alongside the listen stream), those flows interleave
  * on one provider: each registers its own client, and the link the manager
  * saves can belong to a different client than the verifier stored for it, so
- * the link can never complete. Concurrent refreshes have the same shape.
+ * the link can never complete. Two refreshes racing on a rotating refresh
+ * token lose the same way.
  *
- * Requests still go out together, and responses other than `401` return at
- * once. A `401` for an MCP request waits until the authorization started by
- * the previous one has settled (it built a link or saved tokens), so the next
- * flow reuses the client and tokens the previous one saved. MCP requests are
- * recognised by what they carry, not where they go: the SSE transport posts
- * to a per-session message endpoint, and the SDK's own OAuth requests share
- * this `fetch` and may share the server's origin.
+ * Requests still go out together. Each `401`'s authorization waits until the
+ * one before it has finished, whether it succeeded, built a link or failed,
+ * so it reuses the client and tokens the previous flow saved. When that flow
+ * already saved a newer access token, there is nothing left to authorize:
+ * the SDK retries the request with the new token.
  */
 export class AuthorizationTurns {
-  /** Settles when the authorization currently running has finished. */
-  #turn: Promise<void> = Promise.resolve();
-  /** Ends the authorization currently running. */
-  #endTurn: (() => void) | undefined;
+  /** Settles when every flow started so far has finished. */
+  #tail: Promise<void> = Promise.resolve();
 
   /**
-   * A `fetch` for the transport: MCP requests that get a `401` take turns
-   * before the SDK sees them.
+   * Take a transport's 401 handling in turns. The SDK keeps the adapted
+   * provider on the transport as `_authProvider`; when a later SDK moves it,
+   * this does nothing, and the integration tests that send concurrent 401s
+   * fail.
    */
-  wrapFetch(base: TransportFetch | undefined): TransportFetch {
-    return async (input, init) => {
-      const response = await (base ?? fetch)(input, init);
-      if (response.status !== 401 || !isMcpRequest(init)) return response;
-      await this.#takeTurn();
-      return response;
+  wrapTransport(transport: object, provider: AgentMcpOAuthProvider): void {
+    const adapted = (transport as { _authProvider?: UnauthorizedHandler })
+      ._authProvider;
+    const onUnauthorized = adapted?.onUnauthorized?.bind(adapted);
+    if (!adapted || !onUnauthorized) return;
+
+    adapted.onUnauthorized = async (context) => {
+      const tokenBefore = await accessToken(provider);
+      await this.#run(async () => {
+        const tokenNow = await accessToken(provider);
+        if (tokenNow && tokenNow !== tokenBefore) return;
+        await onUnauthorized(context);
+      });
     };
   }
 
-  /**
-   * The provider to hand the transport: the same provider, reporting when an
-   * authorization settles so the next `401` can take its turn.
-   */
-  wrapProvider(provider: AgentMcpOAuthProvider): AgentMcpOAuthProvider {
-    const settled = () => this.#settle();
-    return new Proxy(provider, {
-      get(target, property) {
-        const value: unknown = Reflect.get(target, property, target);
-        if (typeof value !== "function") return value;
-        if (
-          property === "redirectToAuthorization" ||
-          property === "saveTokens"
-        ) {
-          return async (...args: unknown[]) => {
-            try {
-              return await value.apply(target, args);
-            } finally {
-              settled();
-            }
-          };
-        }
-        return value.bind(target);
-      },
-      set(target, property, value) {
-        return Reflect.set(target, property, value, target);
-      }
-    });
-  }
-
-  /** Wait for the running authorization, then start the next one. */
-  async #takeTurn(): Promise<void> {
-    const previous = this.#turn;
-    let end!: () => void;
-    const current = new Promise<void>((resolve) => {
-      end = resolve;
-    });
-    this.#turn = previous.then(() => current);
-    await previous;
-
-    const timer = setTimeout(
-      () => this.#settle(),
-      AUTHORIZATION_TURN_TIMEOUT_MS
-    );
-    this.#endTurn = () => {
-      clearTimeout(timer);
-      end();
-    };
-  }
-
-  #settle(): void {
-    const endTurn = this.#endTurn;
-    this.#endTurn = undefined;
-    endTurn?.();
+  /** Run `flow` once every flow started before it has finished. */
+  #run(flow: () => Promise<void>): Promise<void> {
+    const result = this.#tail.then(flow);
+    this.#tail = result.catch(() => {});
+    return result;
   }
 }
 
-/**
- * Whether a transport request carries MCP traffic: a JSON-RPC message, or the
- * GET that opens a server-sent event stream. OAuth discovery, registration
- * and token requests are neither.
- */
-function isMcpRequest(init: RequestInit | undefined): boolean {
-  const method = (init?.method ?? "GET").toUpperCase();
-  if (method === "GET") {
-    const accept = new Headers(init?.headers).get("accept") ?? "";
-    return accept.includes("text/event-stream");
-  }
-  if (typeof init?.body !== "string") return false;
+async function accessToken(
+  provider: AgentMcpOAuthProvider
+): Promise<string | undefined> {
   try {
-    const message: unknown = JSON.parse(init.body);
-    const first = Array.isArray(message) ? message[0] : message;
-    return (
-      typeof first === "object" &&
-      first !== null &&
-      (first as { jsonrpc?: unknown }).jsonrpc === "2.0"
-    );
+    return (await provider.tokens())?.access_token;
   } catch {
-    return false;
+    return undefined;
   }
 }
