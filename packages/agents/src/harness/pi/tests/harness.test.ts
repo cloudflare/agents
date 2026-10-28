@@ -503,6 +503,41 @@ describe("PiHarness on pi-durable", () => {
     await stub.wait(receipt.operationId);
   });
 
+  it("continues a run that ended unanswered, without a new message", async () => {
+    const stub = fresh();
+    expect(await stub.prompt("flaky")).toMatchObject({
+      status: "unanswered",
+      reason: "model_error"
+    });
+
+    const receipt = await stub.continueSession("again");
+    expect(receipt).toEqual({
+      operationId: "again",
+      session: "1",
+      accepted: true
+    });
+    expect(await stub.continueSession("again")).toMatchObject({
+      accepted: false
+    });
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done",
+      text: "echo: flaky"
+    });
+    // The failed answer stays in the transcript, empty; the model never sees it.
+    expect(await stub.messages()).toEqual(["flaky", "", "echo: flaky"]);
+  });
+
+  it("settles a continue with nothing to answer as unanswered", async () => {
+    const stub = fresh();
+    await stub.prompt("hello");
+    const receipt = await stub.continueSession();
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "nothing_to_answer"
+    });
+    expect(await stub.messages()).toEqual(["hello", "echo: hello"]);
+  });
+
   it("answers after a sleeping retry without onWake, on pi's own timer", async () => {
     const stub = fresh(`nowake:retry:${crypto.randomUUID()}`);
     const result = await stub.prompt("flaky");

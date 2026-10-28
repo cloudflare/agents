@@ -365,6 +365,10 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.submit(text, options);
   }
 
+  continueSession(operationId?: string): Promise<PiReceipt> {
+    return this.harness.continue(operationId ? { operationId } : {});
+  }
+
   /**
    * `submit()`, with how it settled: a receipt, or the error's name and
    * whether it is pi's `ConversationBusy` or `ConversationIdle`. Error

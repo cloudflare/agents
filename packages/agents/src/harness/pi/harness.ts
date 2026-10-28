@@ -14,6 +14,7 @@ import {
   type ModelRef,
   type Page,
   type SettledSubmissionRecord,
+  type SubmissionDraft,
   type UserInput,
   type Wake
 } from "@earendil-works/pi-durable";
@@ -32,6 +33,7 @@ import {
 } from "@earendil-works/chord/context";
 import { openPiSessionStore } from "./session-store";
 import type {
+  PiContinueOptions,
   PiOperationResult,
   PiPendingOperation,
   PiPromptResponse,
@@ -363,6 +365,16 @@ export class PiHarness extends LifecycleCapability {
     return this.session(options.session).submit(input, options);
   }
 
+  /**
+   * Run an idle session again on its transcript as it is, without new input.
+   * See `PiSession.continue`.
+   */
+  continue(
+    options: PiSessionOptions & PiContinueOptions = {}
+  ): Promise<PiReceipt> {
+    return this.session(options.session).continue(options);
+  }
+
   /** Stop one operation, or everything running in a session. */
   abort(
     options: PiSessionOptions & { readonly operationId?: string } = {}
@@ -447,7 +459,31 @@ export class PiHarness extends LifecycleCapability {
     input: UserInput,
     options: PiSubmitOptions
   ): Promise<PiReceipt> {
-    const operationId = options.operationId ?? crypto.randomUUID();
+    return this.#admitDraft(session, options.operationId, {
+      type: "input",
+      content: input,
+      whenBusy: options.whenBusy ?? "followUp",
+      ...(options.whenIdle ? { whenIdle: options.whenIdle } : {}),
+      ...(options.entry ? { entry: options.entry } : {})
+    });
+  }
+
+  /** @internal Start a run on the context as it is, without new input. */
+  enqueueContinue(
+    session: PiSessionId,
+    options: PiContinueOptions
+  ): Promise<PiReceipt> {
+    return this.#admitDraft(session, options.operationId, {
+      type: "continue"
+    });
+  }
+
+  async #admitDraft(
+    session: PiSessionId,
+    requested: string | undefined,
+    draft: SubmissionDraft
+  ): Promise<PiReceipt> {
+    const operationId = requested ?? crypto.randomUUID();
     const { storage } = await this.#open();
     const conversation = await this.conversation(session);
     const accepted = await this.#admit(async () => {
@@ -458,17 +494,7 @@ export class PiHarness extends LifecycleCapability {
           operationId,
           BG
         )) === undefined;
-      await conversation.submit(
-        {
-          type: "input",
-          content: input,
-          whenBusy: options.whenBusy ?? "followUp",
-          ...(options.whenIdle ? { whenIdle: options.whenIdle } : {}),
-          requestId: operationId,
-          ...(options.entry ? { entry: options.entry } : {})
-        },
-        BG
-      );
+      await conversation.submit({ ...draft, requestId: operationId }, BG);
       return accepted;
     });
     return { operationId, session, accepted };
@@ -817,7 +843,7 @@ export class PiHarness extends LifecycleCapability {
         reason: settled.reason
       };
     }
-    if (settled.type !== "input")
+    if (settled.type === "write")
       return { operationId, session, status: "done" };
     const conversation = await this.conversation(session);
     const page = await conversation.entries(
@@ -858,6 +884,17 @@ export class PiSession {
     const receipt = await this.submit(input, options);
     const result = await this.wait(receipt.operationId);
     return { ...result, messages: await this.messages() };
+  }
+
+  /**
+   * Start a run on the transcript as it is, without a new message: for
+   * example, after a run ended unanswered because the model failed or the
+   * object kept crashing. Only an idle session takes one; a busy one rejects
+   * with pi-durable's `ConversationBusy`. A transcript that ends in an answer
+   * settles `unanswered` with reason `nothing_to_answer`.
+   */
+  continue(options: PiContinueOptions = {}): Promise<PiReceipt> {
+    return this.#harness.enqueueContinue(this.id, options);
   }
 
   /** Join the running work after its current tool round. */
