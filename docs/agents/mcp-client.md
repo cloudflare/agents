@@ -304,7 +304,7 @@ Calling `addMcpServer()` again for a server that is already registered returns i
 - Add servers with a stable `id`, from a callable the user triggers or from `onStart`.
 - Render each server from `getMcpServers()` (`onMcpUpdate` in `useAgent`): send the user to `auth_url` while it is `authenticating`, and show `error` with a **Reconnect** button that calls `reconnectMcpServer(id)` while it is `failed`.
 - Catch [`MCPAuthorizationRequiredError`](#re-authorization-during-a-session) from `callTool()`, `readResource()` and `getPrompt()`, and give the user `error.authUrl`.
-- In a plain `Agent`, call [`waitForConnections()`](#waiting-for-connections) before relying on restored tools. `AIChatAgent` and Think already do.
+- Call [`waitForConnections()`](#waiting-for-connections) before relying on restored tools. `AIChatAgent` waits up to 10 seconds by default; in Think, set `waitForMcpConnections`.
 - Close the OAuth popup with [`configureOAuthCallback()`](#oauth-authentication).
 
 ## OAuth Authentication

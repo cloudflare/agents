@@ -60,7 +60,8 @@ export class MyAgent extends Agent {
 
   @callable()
   async reconnectServer(serverId: string) {
-    await this.reconnectMcpServer(serverId);
+    // Returns a new authUrl when the server needs the user again
+    return await this.reconnectMcpServer(serverId);
   }
 
   @callable()

@@ -428,7 +428,14 @@ function App() {
   };
 
   const handleReconnect = async (serverId: string) => {
-    await agent.call("reconnectServer", [serverId]);
+    const result = (await agent.call("reconnectServer", [serverId])) as {
+      state: string;
+      authUrl?: string;
+    };
+    // The server may need the user to authorize again.
+    if (result.state === "authenticating" && result.authUrl) {
+      openPopup(result.authUrl);
+    }
   };
 
   const serverEntries = Object.entries(mcpState.servers);

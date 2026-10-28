@@ -116,7 +116,7 @@ export class MyAgent extends Agent {
    */
   @callable()
   async reconnectServer(serverId: string) {
-    await this.reconnectMcpServer(serverId);
+    return await this.reconnectMcpServer(serverId);
   }
 
   @callable()

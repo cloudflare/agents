@@ -120,6 +120,10 @@ export function McpOAuthDemo() {
           </div>
           <div className="space-y-2">
             {[
+              {
+                state: "not-connected",
+                desc: "Stored, with no live connection yet (for example right after a wake)"
+              },
               { state: "connecting", desc: "Establishing connection" },
               {
                 state: "authenticating",
