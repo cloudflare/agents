@@ -104,7 +104,7 @@
     },
     "fix": {
       "source": "tasks/fix/TASK.md",
-      "bundleHash": "b3b00cabc662218b91612c3bc7371f13db94b5fd5f1af868d45d6f683d0aa6d3",
+      "bundleHash": "20ac81e188f9a8e5d3ffe48b97789222ed4db4fc0a979c2b17390761efcf1b3f",
       "workflow": ".github/workflows/gardener-fix.yml",
       "bundle": {
         "schemaVersion": "gardener.task-bundle/v1",
@@ -170,7 +170,8 @@
           "maxTurns": 60,
           "maxToolCalls": 120,
           "inputTokens": 1500000,
-          "outputTokens": 60000
+          "outputTokens": 60000,
+          "runsPerAuthor": "10/day"
         },
         "model": "anthropic/claude-sonnet-5-5"
       },
@@ -231,7 +232,7 @@
     },
     "fix-ready": {
       "source": "tasks/fix-ready/TASK.md",
-      "bundleHash": "5202cadd4595f3c4b61c2cc20c7241753a676ce579288432b9b92d726cd7f888",
+      "bundleHash": "08095ec5d11f64cca892ab77a39ab27bf905ae70399be0f01ee1661e8453ad98",
       "workflow": ".github/workflows/gardener-fix-ready.yml",
       "bundle": {
         "schemaVersion": "gardener.task-bundle/v1",
@@ -261,7 +262,8 @@
           "maxTurns": 8,
           "maxToolCalls": 8,
           "inputTokens": 100000,
-          "outputTokens": 8000
+          "outputTokens": 8000,
+          "runsPerAuthor": "10/day"
         },
         "model": "anthropic/claude-sonnet-5-5"
       },
