@@ -438,9 +438,11 @@ exists:
 `gen_ai.response.finish_reasons` and `gen_ai.request.stop_sequences` are arrays
 in OTel. Workers' custom `Span.setAttribute` currently accepts only a string,
 number, or boolean, so the wrapper omits those attributes rather than placing
-JSON text under an array-typed key. Similarly, span status is state rather than
-an attribute: failures emit `error.type`, but the wrapper does not invent an
-`otel.status_code` attribute when Workers exposes no custom-span status setter.
+JSON text under an array-typed key. Failures emit `error.type` and, on runtimes
+with `Span.setStatus()` (the 2026-10-26 release or later), set span status
+`error` without a description. Status is span state, exported to OpenTelemetry
+destinations, not an attribute; the raw error message is never recorded.
+Cancellations leave the status unset.
 
 ### Context and safety
 

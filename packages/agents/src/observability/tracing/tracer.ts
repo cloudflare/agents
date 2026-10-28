@@ -14,6 +14,11 @@ export type SpanWriter = {
   readonly isTraced: boolean;
   setAttribute(key: string, value: TraceAttributeValue): void;
   end(): void;
+  /**
+   * Sets the span status. Workers added `Span.setStatus()` in the 2026-10-26
+   * runtime release; older runtimes do not have it.
+   */
+  setStatus?(status: { readonly code: "error" }): unknown;
 };
 
 /** Runtime capability for starting an active span in the current async context. */
@@ -294,13 +299,14 @@ class ManagedSpan implements AgentSpan {
       // operations do not inflate error rates. The vendor marker is additive.
       setAttributes(this.span, { "cloudflare.agents.canceled": true });
     } else {
-      // Workers' custom Span API does not currently expose setStatus(). Do not
-      // invent an `otel.status_code` attribute: status is span state in OTel,
-      // not an attribute. error.type remains the standard queryable marker.
+      // error.type stays the low-cardinality, queryable marker; status is span
+      // state, set where the runtime supports it. No description: the cause
+      // message is never recorded.
       setAttributes(this.span, {
         "error.type":
           cause instanceof Error ? cause.name || "Error" : typeof cause
       });
+      setErrorStatus(this.span);
     }
 
     this.close();
@@ -385,6 +391,20 @@ function setAttributes(span: SpanWriter, attributes: TraceAttributes): void {
     }
   } catch {
     // Drop the attributes; the span still closes.
+  }
+}
+
+function setErrorStatus(span: SpanWriter): void {
+  if (!span.isTraced || typeof span.setStatus !== "function") {
+    return;
+  }
+
+  // Fail-safe, like setAttributes: telemetry must not replace the
+  // application's original error.
+  try {
+    span.setStatus({ code: "error" });
+  } catch {
+    // The span still closes.
   }
 }
 
