@@ -17,40 +17,58 @@ const codeSections: CodeSection[] = [
   {
     title: "Connect to OAuth-protected MCP servers",
     description:
-      "When an MCP server requires OAuth, the SDK handles the full flow — detecting the requirement, generating the auth URL, exchanging codes for tokens, and reconnecting.",
-    code: `// Client-side: initiate OAuth connection
-const result = await agent.call("connectWithOAuth", [serverUrl]);
-
-if (result.needsAuth) {
-  // Open the OAuth provider's login page
-  window.open(result.authUrl, "_blank");
+      "When an MCP server requires OAuth, addMcpServer returns the link to send the user to. The agent finishes the flow on its /callback endpoint and every connected client sees the server move to ready.",
+    code: `// Server: add the server from a callable. Calling it again for the
+// same server reports its state; it never starts a second flow.
+@callable()
+async connect(url: string) {
+  return this.addMcpServer("oauth-server", url, { id: "oauth-server" });
 }
 
-// Listen for connection updates
-const agent = useAgent({
+// Client
+const result = await agent.call("connect", [serverUrl]);
+if (result.state === "authenticating") {
+  window.open(result.authUrl, "_blank");
+}`
+  },
+  {
+    title: "Show every server's state",
+    description:
+      "onMcpUpdate delivers getMcpServers() whenever a server changes. Render from it: the link while a server is authenticating, the error and a Reconnect button when it failed.",
+    code: `const agent = useAgent({
   agent: "my-agent",
   name: "demo",
-  onMcpUpdate: (servers) => {
-    const server = servers.find(s => s.id === "oauth-server");
-    if (server?.state === "ready") {
-      console.log("OAuth complete, connected!");
+  onMcpUpdate: ({ servers }) => {
+    for (const [id, server] of Object.entries(servers)) {
+      if (server.state === "authenticating" && server.auth_url) {
+        showAuthorizeLink(id, server.auth_url);
+      } else if (server.state === "failed") {
+        showError(id, server.error); // with a Reconnect button
+      }
     }
-  },
+  }
 });`
   },
   {
-    title: "Token management",
+    title: "Re-authorization and reconnecting",
     description:
-      "OAuth tokens are stored in the agent's Durable Object storage and automatically refreshed. The agent reconnects with saved tokens on restart.",
-    code: `// Tokens are managed automatically:
-// 1. Agent detects OAuth requirement
-// 2. Client opens auth URL in browser
-// 3. OAuth provider redirects to /callback
-// 4. Agent exchanges code for tokens
-// 5. Tokens stored in Durable Object storage
-// 6. Agent connects with tokens
-// 7. On restart, tokens are loaded and reused
-// 8. Expired tokens are refreshed automatically`
+      "A tool call can need the user again: a scope step-up, or a token that can no longer be refreshed. A server that stopped (authorization refused or expired, reconnects gave up) stays failed until someone reconnects it.",
+    code: `import { MCPAuthorizationRequiredError } from "agents/mcp/client";
+
+try {
+  return await this.mcp.callTool({ serverId, name, arguments: args });
+} catch (error) {
+  if (error instanceof MCPAuthorizationRequiredError) {
+    return { authorizationRequired: true, authUrl: error.authUrl };
+  }
+  throw error;
+}
+
+// The Reconnect button
+@callable()
+async reconnect(serverId: string) {
+  return this.reconnectMcpServer(serverId);
+}`
   }
 ];
 
@@ -102,15 +120,17 @@ export function McpOAuthDemo() {
           </div>
           <div className="space-y-2">
             {[
-              {
-                state: "not-connected",
-                desc: "Server registered but not connected"
-              },
-              { state: "authenticating", desc: "Waiting for OAuth completion" },
               { state: "connecting", desc: "Establishing connection" },
+              {
+                state: "authenticating",
+                desc: "Waiting for the user to open auth_url and approve"
+              },
               { state: "discovering", desc: "Fetching server capabilities" },
               { state: "ready", desc: "Connected and ready to use" },
-              { state: "failed", desc: "Connection failed" }
+              {
+                state: "failed",
+                desc: "Retrying in the background, or stopped with a reason until reconnectMcpServer()"
+              }
             ].map(({ state, desc }) => (
               <div
                 key={state}
@@ -135,27 +155,19 @@ export function McpOAuthDemo() {
           </div>
           <CodeBlock
             lang="ts"
-            code={`// Check if OAuth is needed
-const result = await agent.call("connectWithOAuth", [url]);
-
-if (result.needsAuth) {
-  // Open OAuth popup or redirect
-  const popup = window.open(result.authUrl, "_blank");
-  
-  // Or redirect current page
-  // window.location.href = result.authUrl;
+            code={`const result = await agent.call("connect", [url]);
+if (result.state === "authenticating") {
+  // Open the link in a popup; the agent's callback can close it
+  window.open(result.authUrl, "_blank");
 }
 
-// Listen for connection updates via onMcpUpdate
 const agent = useAgent({
   agent: "my-agent",
   name: "demo",
-  onMcpUpdate: (servers) => {
-    console.log("MCP servers updated:", servers);
-    // Check if OAuth server is now ready
-    const oauthServer = servers.find(s => s.id === "oauth-server");
-    if (oauthServer?.state === "ready") {
-      console.log("OAuth complete, server connected!");
+  onMcpUpdate: ({ servers }) => {
+    const server = servers["oauth-server"];
+    if (server?.state === "ready") {
+      console.log("Connected");
     }
   }
 });`}
@@ -165,8 +177,10 @@ const agent = useAgent({
         <Surface className="p-4 rounded-lg bg-kumo-elevated">
           <Text variant="secondary" size="sm">
             <strong className="text-kumo-default">Token Storage:</strong> OAuth
-            tokens are stored in the agent's Durable Object storage and
-            automatically used for reconnection. Tokens are refreshed as needed.
+            tokens are stored in the agent's Durable Object storage, refreshed
+            as needed, and reused after a restart. When a refresh is refused the
+            server asks the user again; a link nobody completes expires after 10
+            minutes.
           </Text>
         </Surface>
       </div>

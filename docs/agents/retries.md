@@ -333,12 +333,12 @@ await this.addMcpServer("github", "https://mcp.github.com", {
 });
 ```
 
-These options are persisted and used when:
+These options are persisted and used for the quick in-place attempts when:
 
 - Restoring server connections after hibernation
 - Establishing connections after OAuth completion
 
-Default: 3 attempts, 500ms base delay, 5s max delay.
+Default: 3 attempts, 500ms base delay, 5s max delay. If those attempts fail, the server keeps reconnecting in the background on a durable schedule, unless authorization was refused; see [Automatic reconnects](./mcp-client.md#automatic-reconnects).
 
 ### Internal Retries
 

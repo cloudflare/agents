@@ -1,5 +1,9 @@
 import { Agent, callable, routeAgentRequest } from "agents";
-import type { ElicitRequest, ElicitResult } from "agents/mcp/client";
+import {
+  MCPAuthorizationRequiredError,
+  type ElicitRequest,
+  type ElicitResult
+} from "agents/mcp/client";
 
 /**
  * An elicitation forwarded to the browser, awaiting a human response.
@@ -94,9 +98,25 @@ export class MyAgent extends Agent {
     }
   }
 
+  /**
+   * Add a server. Safe to call again for the same server: it reports the
+   * server's current state and never reconnects or replaces its link.
+   * The browser sees the state, the authorization link and any error
+   * through the `cf_agent_mcp_servers` broadcast.
+   */
   @callable()
   async addServer(name: string, url: string) {
     await this.addMcpServer(name, url);
+  }
+
+  /**
+   * The "Reconnect" button: try a failed server again. It forgets why the
+   * server stopped (reconnects gave up, authorization was refused or
+   * expired) and connects now, showing a new link if it needs one.
+   */
+  @callable()
+  async reconnectServer(serverId: string) {
+    await this.reconnectMcpServer(serverId);
   }
 
   @callable()
@@ -104,13 +124,25 @@ export class MyAgent extends Agent {
     await this.removeMcpServer(serverId);
   }
 
+  /**
+   * Run a tool. When the server needs the user to authorize again (a scope
+   * step-up, or a token that can no longer be refreshed), hand the link to
+   * the browser instead of failing; the server shows it too.
+   */
   @callable()
   async callTool(
     serverId: string,
     name: string,
     args: Record<string, unknown>
   ) {
-    return await this.mcp.callTool({ serverId, name, arguments: args });
+    try {
+      return await this.mcp.callTool({ serverId, name, arguments: args });
+    } catch (error) {
+      if (error instanceof MCPAuthorizationRequiredError) {
+        return { authorizationRequired: true, authUrl: error.authUrl };
+      }
+      throw error;
+    }
   }
 }
 
