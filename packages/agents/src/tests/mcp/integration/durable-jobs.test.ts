@@ -374,9 +374,13 @@ describe("MCP servers an app adds again", () => {
     server.options.up = true;
     const methodsBefore = server.mcpMethods.length;
 
-    expect(
-      await agent.connectServer(MCP_URL, { callbackHost: CLIENT_ORIGIN })
-    ).toMatchObject({ state: "error" });
+    const added = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN
+    });
+    expect(added).toMatchObject({ state: "error" });
+    if (added.state !== "error") throw new Error("unreachable");
+    // It reports why the server is down, not a generic failure.
+    expect(added.message).toContain("503");
     expect(server.mcpMethods.length).toBe(methodsBefore);
     expect((await agent.mcpJobs()).map((job) => job.id)).toEqual([
       `connect:${id}`

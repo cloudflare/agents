@@ -916,14 +916,18 @@ export class MCPClientConnection {
         return this.withAuthorizationTurns(
           new StreamableHTTPClientTransport(
             this.url,
-            this.options.transport as StreamableHTTPClientTransportOptions
+            this.authorizationTurnOptions(
+              this.options.transport as StreamableHTTPClientTransportOptions
+            )
           )
         );
       case "sse":
         return this.withAuthorizationTurns(
           new SSEClientTransport(
             this.url,
-            this.options.transport as SSEClientTransportOptions
+            this.authorizationTurnOptions(
+              this.options.transport as SSEClientTransportOptions
+            )
           )
         );
       case "rpc":
@@ -940,6 +944,17 @@ export class MCPClientConnection {
    * authorization an earlier one started, so concurrent requests share one
    * client registration and one pending link.
    */
+  /** Transport options whose `fetch` records the token each 401 carried. */
+  private authorizationTurnOptions<
+    T extends StreamableHTTPClientTransportOptions | SSEClientTransportOptions
+  >(options: T): T {
+    if (!this.options.transport.authProvider) return options;
+    return {
+      ...options,
+      fetch: this._authorizationTurns.wrapFetch(options.fetch)
+    };
+  }
+
   private withAuthorizationTurns<T extends object>(transport: T): T {
     const { authProvider } = this.options.transport;
     if (authProvider) {

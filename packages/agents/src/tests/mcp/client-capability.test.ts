@@ -159,4 +159,22 @@ describe("MCPClientManager capability", () => {
       });
     });
   });
+
+  it("keeps the authorization link when a forgotten session restarts into OAuth", async () => {
+    const name = crypto.randomUUID();
+    const stub = env.PlainMcpClientObject.getByName(name);
+    await stub.registerResumedServer("files", MCP_URL, CALLBACK_URL, "gone");
+
+    // The wake resumes the saved session, the server has forgotten it, and
+    // the fresh session it starts needs the user to authorize.
+    const restarted = await restart(stub, name);
+    await restarted.settle();
+
+    expect(await restarted.connectionStatus("files")).toMatchObject({
+      state: "authenticating"
+    });
+    expect(await restarted.mcpJobs()).toMatchObject([
+      { id: "auth-expiry:files" }
+    ]);
+  });
 });

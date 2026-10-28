@@ -283,6 +283,10 @@ export function createOAuthMcpServer({
     }
     await waitIfHeld("mcp");
     if (!options.up) return new Response("unavailable", { status: 503 });
+    // This server keeps no sessions, so any session id is one it forgot.
+    if (request.headers.has("mcp-session-id")) {
+      return new Response("Session not found", { status: 404 });
+    }
 
     const token = (request.headers.get("authorization") ?? "").replace(
       /^Bearer /,

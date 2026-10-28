@@ -320,13 +320,20 @@ export class ServerController {
         state: conn.connectionState
       };
     }
+    if (connected.state === MCPConnectionState.AUTHENTICATING) {
+      // The fresh session needs the user: keep the link it produced.
+      return {
+        success: false,
+        error: "The server requires authorization",
+        state: conn.connectionState,
+        authUrl: connected.authUrl,
+        clientId: connected.clientId
+      };
+    }
     if (connected.state !== MCPConnectionState.CONNECTED) {
       return {
         success: false,
-        error:
-          connected.state === MCPConnectionState.FAILED
-            ? connected.error
-            : `Connection in ${connected.state} state after session re-initialization`,
+        error: connected.error,
         state: conn.connectionState
       };
     }
@@ -437,6 +444,8 @@ export class ServerController {
       return;
     }
     const { gaveUpAfter } = this.jobs.scheduleReconnect(id, settlement.error);
+    // Show why while the reconnect waits, as a wake does.
+    this.ctx.connections[id].connectionError = settlement.error;
     if (gaveUpAfter !== undefined) {
       this.status.stop(
         id,

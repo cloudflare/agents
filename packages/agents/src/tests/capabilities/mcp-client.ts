@@ -97,6 +97,29 @@ export class PlainMcpClientObject extends DurableObject<Cloudflare.Env> {
       : { state: result.state };
   }
 
+  /**
+   * Register a server as if a session with it had been saved, so the next
+   * wake resumes that session instead of starting a new one.
+   */
+  async registerResumedServer(
+    id: string,
+    url: string,
+    callbackUrl: string,
+    sessionId: string
+  ): Promise<void> {
+    await this.lifecycle.start();
+    await this.mcp.registerServer(id, {
+      name: id,
+      url,
+      callbackUrl,
+      transport: {
+        type: "streamable-http",
+        sessionId,
+        protocolVersion: "2025-11-25"
+      }
+    });
+  }
+
   /** Wait for connection work started by callbacks, restores and jobs. */
   async settle(): Promise<void> {
     await this.lifecycle.start();

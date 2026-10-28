@@ -131,15 +131,16 @@ export function parseAuthExpiryJobPayload(
   if (
     !isRecord(value) ||
     typeof value.serverId !== "string" ||
-    typeof value.authUrl !== "string" ||
-    typeof value.savedAt !== "number"
+    typeof value.authUrl !== "string"
   ) {
     return undefined;
   }
   return {
     serverId: value.serverId,
     authUrl: value.authUrl,
-    savedAt: value.savedAt
+    // A job saved before links carried their age counts as old, so its
+    // link expires on the next run instead of never.
+    savedAt: typeof value.savedAt === "number" ? value.savedAt : 0
   };
 }
 
