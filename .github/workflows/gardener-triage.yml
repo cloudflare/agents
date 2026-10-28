@@ -2,7 +2,7 @@
 #
 # Source: .gardener/tasks/triage/TASK.md
 # Task: triage
-# Bundle: sha256:abbe882cb8f50451c6322aeca0b705062097c1c3eaed8c79d26629087f7470c2
+# Bundle: sha256:3a4e1f872687f951fa84467e299519a91088f96851295af14ef1a7f92b7b1a1e
 # Regenerate: gardener generate
 # Do not edit this workflow directly.
 name: "Gardener · Triage"
@@ -45,7 +45,7 @@ jobs:
       task-id: "triage"
       task-name: "Triage"
       task-source: ".gardener/tasks/triage/TASK.md"
-      task-bundle-hash: abbe882cb8f50451c6322aeca0b705062097c1c3eaed8c79d26629087f7470c2
+      task-bundle-hash: 3a4e1f872687f951fa84467e299519a91088f96851295af14ef1a7f92b7b1a1e
       plan-timeout-minutes: 20
       reactions: >-
         ${{
