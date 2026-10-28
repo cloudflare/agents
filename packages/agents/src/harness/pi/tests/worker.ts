@@ -223,7 +223,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
             registry: this.registry,
             settings: variantSettings(name),
             ...(name.startsWith("nowake:") ? {} : { onWake }),
-            onReport: (error) => console.warn("pi report", error)
+            onReport: (report) => console.warn("pi report", report)
           },
           context
         )

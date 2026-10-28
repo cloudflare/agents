@@ -123,7 +123,7 @@ export class PiHarnessTestObject extends DurableObject<Env> {
           settings: {
             retry: { enabled: false, maxRetries: 0, baseDelayMs: 0 }
           },
-          onReport: (error) => console.warn("pi report", error)
+          onReport: (report) => console.warn("pi report", report)
         },
         context
       );

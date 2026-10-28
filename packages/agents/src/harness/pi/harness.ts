@@ -667,7 +667,7 @@ export class PiHarness extends LifecycleCapability {
       return true;
     } catch (error) {
       // A pi that began closing is expected to throw; it is no longer the
-      // harness's pi, and Pi reports a failure itself (`session_failed`).
+      // harness's pi, and Pi reports a failure itself (`storage_failed`).
       if (!this.#closing.has(pi)) this.#wakeError(error);
       // Only Lifecycle's alarm breaker can act on a memory-limit reset,
       // including one that failed pi's Session (SessionFailed's cause).

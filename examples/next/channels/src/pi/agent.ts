@@ -57,7 +57,7 @@ export class PiAgent extends DurableObject<Env> {
           models,
           registry: this.registry,
           onWake,
-          onReport: (error) => console.warn("pi report", error)
+          onReport: (report) => console.warn("pi report", report)
         },
         context
       );
