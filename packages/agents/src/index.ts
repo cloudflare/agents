@@ -10039,6 +10039,28 @@ export class Agent<
     }
   }
 
+  /**
+   * Try an MCP server again, for example from a "Reconnect" button: forgets
+   * why it stopped (gave up reconnecting, authorization refused or expired,
+   * step-up limit reached), drops pending reconnects and connects now.
+   *
+   * `addMcpServer()` never does this for a server that is already
+   * registered, so calling it from `onStart` or `onConnect` cannot undo a
+   * recorded failure or skip the reconnect backoff.
+   *
+   * @returns The same result as `addMcpServer()`: `ready`, or
+   * `authenticating` with a new `authUrl`. Throws when the attempt fails.
+   */
+  async reconnectMcpServer(id: string): Promise<AddMcpServerResult> {
+    const server = this.mcp.listServers().find((s) => s.id === id);
+    if (!server) throw new Error(`MCP server "${id}" is not registered`);
+    return this._mcpServerResult(id, await this.mcp.reconnectServer(id), {
+      name: server.name,
+      url: server.server_url,
+      oauth: server.callback_url ? "available" : "unavailable"
+    });
+  }
+
   async removeMcpServer(id: string) {
     await this.mcp.removeServer(id);
   }

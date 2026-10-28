@@ -235,11 +235,14 @@ describe.each([
       agent = await restartAgent(agent);
       expect((await agent.server(id))?.state).toBe("failed");
 
-      // Adding the server again is an explicit reconnect: it clears the limit.
-      const retried = await agent.connectServer(MCP_URL, {
-        callbackHost: CLIENT_ORIGIN
+      // Adding the server again keeps the limit; reconnecting clears it.
+      expect(
+        await agent.connectServer(MCP_URL, { callbackHost: CLIENT_ORIGIN })
+      ).toMatchObject({ state: "error" });
+      expect(await agent.callServerTool(id, "write")).toMatchObject({
+        authorizationRequired: false
       });
-      expect(retried).toMatchObject({ id, state: "ready" });
+      expect(await agent.reconnect(id)).toMatchObject({ id, state: "ready" });
       const again = await agent.callServerTool(id, "write");
       expect(again).toMatchObject({ authorizationRequired: true });
     });
@@ -448,7 +451,7 @@ describe("MCP OAuth callbacks in an Agent", () => {
     expect(server.codeExchanges()).toBe(1);
   });
 
-  it("reports a denied authorization and offers a new link when the server is added again", async () => {
+  it("records a denied authorization across wakes, and offers a new link on request", async () => {
     const agent = await newAgent();
     const added = await agent.connectServer(MCP_URL, {
       callbackHost: CLIENT_ORIGIN
@@ -460,18 +463,27 @@ describe("MCP OAuth callbacks in an Agent", () => {
     });
     await agent.settle();
     expect(server.codeExchanges()).toBe(0);
-    expect((await agent.server(added.id))?.state).not.toBe("ready");
+    expect((await agent.server(added.id))?.state).toBe("failed");
 
-    const again = await agent.connectServer(MCP_URL, {
-      callbackHost: CLIENT_ORIGIN
+    // A wake does not start another flow the user just turned down.
+    const clients = server.registeredClients.length;
+    const woken = await restartAgent(agent);
+    await woken.settle();
+    expect(await woken.server(added.id)).toMatchObject({
+      state: "failed",
+      auth_url: null
     });
+    expect(server.registeredClients).toHaveLength(clients);
+    expect(await woken.mcpJobs()).toEqual([]);
+
+    const again = await woken.reconnect(added.id);
     expect(again.state).toBe("authenticating");
     if (again.state !== "authenticating") throw new Error("unreachable");
     expect(await followCallback(server.authorize(again.authUrl))).toEqual({
       authorized: true
     });
-    await agent.settle();
-    expect((await agent.server(added.id))?.state).toBe("ready");
+    await woken.settle();
+    expect((await woken.server(added.id))?.state).toBe("ready");
   });
 
   it("refuses a callback whose state it did not issue", async () => {
@@ -503,5 +515,30 @@ describe("MCP OAuth callbacks in an Agent", () => {
     expect(await agent.callServerTool(id, "write")).toMatchObject({
       authorizationRequired: true
     });
+  });
+
+  it("stops asking when the server rejects every token the authorization server issues", async () => {
+    const agent = await newAgent();
+    const added = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN
+    });
+    if (added.state !== "authenticating") throw new Error("expected a link");
+
+    server.options.rejectEveryToken = true;
+    let link: string | null = added.authUrl;
+    let rounds = 0;
+    while (link && rounds < 10) {
+      rounds += 1;
+      await followCallback(server.authorize(link));
+      await agent.settle();
+      link = (await agent.server(added.id))?.auth_url ?? null;
+    }
+
+    // One authorization, then no link that cannot work.
+    expect(rounds).toBe(1);
+    const view = await agent.server(added.id);
+    expect(view?.state).toBe("failed");
+    expect(view?.error).toContain("still answers 401");
+    expect(await agent.mcpJobs()).toEqual([]);
   });
 });

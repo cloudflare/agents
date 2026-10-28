@@ -101,3 +101,26 @@ export function ageAuthorizationRounds(
     serverId
   );
 }
+
+/** Move when a server's pending authorization link was saved back by `ms`. */
+export function ageAuthorizationLink(
+  storage: DurableObjectStorage,
+  serverId: string,
+  ms: number
+): void {
+  const id = `auth-expiry:${serverId}`;
+  const [row] = storage.sql
+    .exec<{ payload: string }>(
+      "SELECT payload FROM cf_agents_jobs WHERE capability = 'mcp' AND id = ?",
+      id
+    )
+    .toArray();
+  if (!row) throw new Error(`No link expiry job for ${serverId}`);
+  const payload = JSON.parse(row.payload) as { savedAt: number };
+  payload.savedAt -= ms;
+  storage.sql.exec(
+    "UPDATE cf_agents_jobs SET payload = ? WHERE capability = 'mcp' AND id = ?",
+    JSON.stringify(payload),
+    id
+  );
+}

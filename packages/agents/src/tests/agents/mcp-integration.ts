@@ -1,6 +1,7 @@
 import { Agent } from "../../index.ts";
 import { MCPAuthorizationRequiredError } from "../../mcp/client/errors";
 import {
+  ageAuthorizationLink,
   ageAuthorizationRounds,
   ageReconnectFailures,
   backdateMcpJobs,
@@ -104,6 +105,21 @@ export class McpIntegrationAgent extends Agent {
           headers: options.headers
         }
       });
+      return result.state === "authenticating"
+        ? { id: result.id, state: "authenticating", authUrl: result.authUrl }
+        : { id: result.id, state: "ready" };
+    } catch (error) {
+      return {
+        state: "error",
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  /** `reconnectMcpServer`, as a "Reconnect" button calls it. */
+  async reconnect(serverId: string): Promise<AddServerOutcome> {
+    try {
+      const result = await this.reconnectMcpServer(serverId);
       return result.state === "authenticating"
         ? { id: result.id, state: "authenticating", authUrl: result.authUrl }
         : { id: result.id, state: "ready" };
@@ -237,6 +253,10 @@ export class McpIntegrationAgent extends Agent {
 
   ageReconnectFailures(serverId: string, ms: number): void {
     ageReconnectFailures(this.ctx.storage, serverId, ms);
+  }
+
+  ageAuthorizationLink(serverId: string, ms: number): void {
+    ageAuthorizationLink(this.ctx.storage, serverId, ms);
   }
 
   ageAuthorizationRounds(serverId: string, ms: number): void {

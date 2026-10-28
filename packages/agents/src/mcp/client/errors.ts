@@ -1,4 +1,8 @@
-import { OAuthError, UnauthorizedError } from "@modelcontextprotocol/client";
+import {
+  OAuthError,
+  RegistrationRejectedError,
+  UnauthorizedError
+} from "@modelcontextprotocol/client";
 
 /**
  * Thrown by `MCPClientManager.callTool()` (and `readResource()` /
@@ -114,13 +118,17 @@ const RETRYABLE_OAUTH_ERRORS = new Set([
 
 /**
  * Whether an error means authorization was refused in a way retrying cannot
- * change: the MCP server answered 403, or the authorization server answered
- * with an OAuth error other than a temporary one.
+ * change: the MCP server answered 403, the authorization server answered
+ * with an OAuth error other than a temporary one, or it rejected dynamic
+ * client registration with a 4xx other than 429.
  */
 export function isAuthorizationRefused(error: unknown, depth = 0): boolean {
   if (depth > 5 || !error || typeof error !== "object") return false;
   if (OAuthError.isInstance(error)) {
     return !RETRYABLE_OAUTH_ERRORS.has(error.code);
+  }
+  if (RegistrationRejectedError.isInstance(error)) {
+    return error.status >= 400 && error.status < 500 && error.status !== 429;
   }
   if (getErrorStatus(error) === 403) return true;
   const cause = getErrorCause(error);

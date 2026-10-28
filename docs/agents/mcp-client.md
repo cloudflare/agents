@@ -186,9 +186,31 @@ Retrying only helps when the failure can pass, so the manager does not retry whe
 - The server answered `403`. A `403` with `error="insufficient_scope"` still starts a [step-up](#re-authorization-during-a-session) first; it only counts as refused when no step-up is possible.
 - The authorization server refused with an OAuth error such as `invalid_target`, `invalid_scope` or `access_denied`. An expired or revoked refresh token (`invalid_grant`) starts a new authorization instead. `server_error` and `temporarily_unavailable` are retried like any other outage.
 
+- The authorization server rejected dynamic client registration with a `4xx` other than `429`.
+- The server still answers `401` right after the user completed an authorization, for example because it rejects tokens from its own authorization server. The link that was just used is never shown again.
+
 The server is marked `failed` with `Authorization was refused: …`, and the failure is recorded the same way as below.
 
-After 24 hours without a successful connection, the manager stops and records the failure with the server. Later wakes show the same `failed` state without trying again. Calling `addMcpServer()` for the server again, or `connectToServer()` / `establishConnection()`, clears the failure and connects immediately. `removeMcpServer()` cancels any pending reconnect.
+A callback where the user denied access, or whose code could not be exchanged, is recorded too, so a later wake does not start another flow the user just turned down. An authorization link stays pending for at most 24 hours, even when a custom OAuth provider would still accept its `state`.
+
+After 24 hours without a successful connection, the manager stops and records the failure with the server. Later wakes show the same `failed` state without trying again. `removeMcpServer()` cancels any pending reconnect.
+
+#### Reconnecting on request
+
+Calling `addMcpServer()` for a server that is already registered never reconnects it. It returns the server's current state: `ready`, `authenticating` with the link still waiting for the user, or it throws with the current error while the server is `failed`. That makes it safe to call from `onStart`, `onConnect` or `onRequest` without undoing a recorded failure or skipping the reconnect backoff.
+
+To try a failed server again because the user asked, for example from a "Reconnect" button, call `reconnectMcpServer(id)`. It forgets why the server stopped (reconnects gave up, authorization was refused, expired or hit the step-up limit), drops pending reconnects and connects now. It returns the same result as `addMcpServer()`, including a fresh `authUrl` when the user needs to authorize again.
+
+```typescript
+import { Agent, callable } from "agents";
+
+class MyAgent extends Agent<Env> {
+  @callable()
+  async reconnectServer(id: string) {
+    return this.reconnectMcpServer(id);
+  }
+}
+```
 
 A standalone `MCPClientManager` can change the schedule:
 
@@ -328,7 +350,7 @@ For example: `https://my-worker.workers.dev/agents/my-agent/default/callback`
 
 OAuth tokens are securely stored in SQLite and persist across agent restarts.
 
-An authorization link stays valid for 10 minutes. If the user does not complete it in time, the server moves to `failed` with the error "Authorization expired before it was completed", its `auth_url` is cleared, and it stays failed across wakes. Call `addMcpServer()` again to get a fresh link. If a callback already redeemed the link and the agent restarted before it finished, the agent reconnects with the saved tokens instead.
+An authorization link stays valid for 10 minutes. If the user does not complete it in time, the server moves to `failed` with the error "Authorization expired before it was completed", its `auth_url` is cleared, and it stays failed across wakes. Call `reconnectMcpServer(id)` to get a fresh link. If a callback already redeemed the link and the agent restarted before it finished, the agent reconnects with the saved tokens instead.
 
 ### Re-authorization during a session
 
@@ -336,7 +358,7 @@ A request can need authorization again after the server is `ready`: a tool call 
 
 Calls for a `serverId` with no connection (never registered, removed, or still being restored) throw `MCPConnectionNotFoundError`.
 
-Re-authorization is limited, as the MCP authorization spec asks. If the user completes three authorizations for the same scopes within an hour and the server still asks for them (for example because the authorization server never grants a scope), the next challenge does not produce a link. The server moves to `failed` with an error naming the scopes, the request throws the SDK's `UnauthorizedError`, and the server stays failed until you call `addMcpServer()` for it again.
+Re-authorization is limited, as the MCP authorization spec asks. If the user completes three authorizations for the same scopes within an hour and the server still asks for them (for example because the authorization server never grants a scope), the next challenge does not produce a link. The server moves to `failed` with an error naming the scopes, the request throws the SDK's `UnauthorizedError`, and the server stays failed until you call `reconnectMcpServer(id)`.
 
 ```typescript
 import { MCPAuthorizationRequiredError } from "agents/mcp/client";

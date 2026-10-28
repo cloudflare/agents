@@ -74,7 +74,7 @@ describe("MCP durable reconnects in an Agent", () => {
     expect((await agent.server(id))?.state).toBe("ready");
   });
 
-  it("gives up after a day, stays failed across wakes, and reconnects when the server is added again", async () => {
+  it("gives up after a day, stays failed across wakes and when added again, and reconnects on request", async () => {
     const { agent: down, id } = await serverDownAfterWake();
     await down.ageReconnectFailures(id, DAY_MS + 1);
     await runDueJobs(down);
@@ -91,10 +91,14 @@ describe("MCP durable reconnects in an Agent", () => {
     expect((await agent.server(id))?.state).toBe("failed");
     expect(server.mcpMethods.length).toBe(methodsBefore);
 
+    // Adding it again, as an app does from onStart, reports the failure.
     const added = await agent.connectServer(MCP_URL, {
       callbackHost: CLIENT_ORIGIN
     });
-    expect(added).toMatchObject({ id, state: "ready" });
+    expect(added).toMatchObject({ state: "error" });
+    expect(server.mcpMethods.length).toBe(methodsBefore);
+
+    expect(await agent.reconnect(id)).toMatchObject({ id, state: "ready" });
   });
 
   it("moves pending jobs when a server is given a stable id", async () => {
@@ -107,15 +111,13 @@ describe("MCP durable reconnects in an Agent", () => {
       `connect:${generated}`
     ]);
 
-    // Adding it again with an id renames it and tries once more; the server
-    // is still down, so that attempt fails.
+    // Adding it again with an id renames it; it stays failed, waiting for
+    // its reconnect, which moves with it.
     const renamed = await agent.connectServer(MCP_URL, {
       callbackHost: CLIENT_ORIGIN,
       id: "files"
     });
     expect(renamed).toMatchObject({ state: "error" });
-    if (renamed.state !== "error") throw new Error("unreachable");
-    expect(renamed.message).toContain("503");
 
     expect(await agent.serverIds()).toEqual(["files"]);
     expect((await agent.mcpJobs()).map((job) => job.id)).toEqual([
@@ -188,7 +190,7 @@ describe("MCP durable jobs and the rest of the flow", () => {
 });
 
 describe("MCP authorization link expiry in an Agent", () => {
-  it("fails a link that expires unused, keeps it failed across wakes, and offers a new one when added again", async () => {
+  it("fails a link that expires unused, keeps it failed across wakes and when added again, and offers a new one on request", async () => {
     const before = await newAgent();
     const added = await before.connectServer(MCP_URL, {
       callbackHost: CLIENT_ORIGIN
@@ -212,9 +214,11 @@ describe("MCP authorization link expiry in an Agent", () => {
     await agent.settle();
     expect((await agent.server(added.id))?.state).toBe("failed");
 
-    const again = await agent.connectServer(MCP_URL, {
-      callbackHost: CLIENT_ORIGIN
-    });
+    expect(
+      await agent.connectServer(MCP_URL, { callbackHost: CLIENT_ORIGIN })
+    ).toMatchObject({ state: "error" });
+
+    const again = await agent.reconnect(added.id);
     expect(again.state).toBe("authenticating");
     if (again.state !== "authenticating") throw new Error("unreachable");
     expect(again.authUrl).not.toBe(added.authUrl);
@@ -331,4 +335,88 @@ describe("MCP refused authorization in an Agent", () => {
       expect(server.unauthorizedMethods).toHaveLength(requests);
     }
   );
+});
+
+describe("MCP servers an app adds again", () => {
+  it("does not skip a scheduled reconnect when the server is added again", async () => {
+    const { agent, id } = await serverDownAfterWake();
+    server.options.up = true;
+    const methodsBefore = server.mcpMethods.length;
+
+    expect(
+      await agent.connectServer(MCP_URL, { callbackHost: CLIENT_ORIGIN })
+    ).toMatchObject({ state: "error" });
+    expect(server.mcpMethods.length).toBe(methodsBefore);
+    expect((await agent.mcpJobs()).map((job) => job.id)).toEqual([
+      `connect:${id}`
+    ]);
+
+    await runDueJobs(agent);
+    expect((await agent.server(id))?.state).toBe("ready");
+  });
+
+  it("returns a pending link instead of starting another flow", async () => {
+    const agent = await newAgent();
+    const first = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN
+    });
+    if (first.state !== "authenticating") throw new Error("expected a link");
+
+    const again = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN
+    });
+    expect(again).toEqual(first);
+    expect(server.registeredClients).toHaveLength(1);
+  });
+});
+
+describe("MCP client registration the authorization server rejects", () => {
+  it("stops when registration is refused with a 4xx", async () => {
+    server.options.registrationStatus = 400;
+    const agent = await newAgent();
+
+    const added = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN
+    });
+    expect(added.state).toBe("error");
+    const [id] = await agent.serverIds();
+    const view = await agent.server(id);
+    expect(view?.state).toBe("failed");
+    expect(view?.error).toContain("Authorization was refused");
+    expect(await agent.mcpJobs()).toEqual([]);
+    expect(server.registrationAttempts()).toBe(1);
+  });
+
+  it("keeps retrying while registration answers 503", async () => {
+    server.options.registrationStatus = 503;
+    const agent = await newAgent();
+
+    await agent.connectServer(MCP_URL, { callbackHost: CLIENT_ORIGIN });
+    const [id] = await agent.serverIds();
+    expect((await agent.mcpJobs()).map((job) => job.id)).toEqual([
+      `connect:${id}`
+    ]);
+
+    server.options.registrationStatus = undefined;
+    await runDueJobs(agent);
+    expect((await agent.server(id))?.state).toBe("authenticating");
+  });
+});
+
+describe("MCP authorization links that never expire on their own", () => {
+  it("records a link as expired after a day even when its state could still be redeemed", async () => {
+    const agent = await newAgent();
+    const added = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN
+    });
+    if (added.state !== "authenticating") throw new Error("expected a link");
+
+    await agent.ageAuthorizationLink(added.id, DAY_MS + 1);
+    await runDueJobs(agent);
+
+    const view = await agent.server(added.id);
+    expect(view).toMatchObject({ state: "failed", auth_url: null });
+    expect(view?.error).toContain("Authorization expired");
+    expect(await agent.mcpJobs()).toEqual([]);
+  });
 });

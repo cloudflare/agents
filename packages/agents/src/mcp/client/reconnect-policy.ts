@@ -23,6 +23,13 @@ export const AUTH_EXPIRY_JOB = "auth-expiry";
  */
 export const AUTHORIZATION_LINK_TTL_MS = 10 * 60 * 1000;
 
+/**
+ * The longest a link stays pending, even when a custom provider would still
+ * redeem its `state`. Past this the flow is recorded as expired, so a link
+ * nobody completes does not wake the object every ten minutes forever.
+ */
+export const AUTHORIZATION_LINK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 /** Message shown on a server whose authorization link expired unused. */
 export const AUTHORIZATION_EXPIRED_MESSAGE =
   "Authorization expired before it was completed. Reconnect the server to start again.";
@@ -94,6 +101,8 @@ export type AuthExpiryJobPayload = {
   readonly serverId: string;
   /** The link this job expires; a newer link makes the job moot. */
   readonly authUrl: string;
+  /** When the link was saved, in epoch milliseconds. */
+  readonly savedAt: number;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -127,11 +136,16 @@ export function parseAuthExpiryJobPayload(
   if (
     !isRecord(value) ||
     typeof value.serverId !== "string" ||
-    typeof value.authUrl !== "string"
+    typeof value.authUrl !== "string" ||
+    typeof value.savedAt !== "number"
   ) {
     return undefined;
   }
-  return { serverId: value.serverId, authUrl: value.authUrl };
+  return {
+    serverId: value.serverId,
+    authUrl: value.authUrl,
+    savedAt: value.savedAt
+  };
 }
 
 /** What to do after a failed connection attempt. */

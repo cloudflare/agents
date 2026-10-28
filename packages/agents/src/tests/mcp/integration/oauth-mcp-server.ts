@@ -151,10 +151,19 @@ export function createOAuthMcpServer({
      * Accept only this static bearer token and serve no OAuth metadata, as a
      * server configured with an API key does.
      */
-    staticToken: undefined as string | undefined
+    staticToken: undefined as string | undefined,
+    /** An HTTP status dynamic client registration answers with instead. */
+    registrationStatus: undefined as number | undefined,
+    /**
+     * Answer every MCP request with 401, even with a token this server's
+     * authorization server issued, as a server with the wrong audience does.
+     */
+    rejectEveryToken: false
   };
   /** How many MCP requests the resource server refused with a 403. */
   let forbiddenResponses = 0;
+  /** How many times a client tried to register, accepted or not. */
+  let registrationAttempts = 0;
 
   /** While set, requests to the held endpoint wait before they are answered. */
   let held: Promise<void> | undefined;
@@ -279,7 +288,9 @@ export function createOAuthMcpServer({
       /^Bearer /,
       ""
     );
-    const grant = accessTokens.get(token);
+    const grant = options.rejectEveryToken
+      ? undefined
+      : accessTokens.get(token);
     const message = await readMessage(request);
     const method = request.headers.get("mcp-method") ?? message.method;
     const name =
@@ -440,7 +451,18 @@ export function createOAuthMcpServer({
         scopes_supported: [READ_SCOPE, WRITE_SCOPE, ADMIN_SCOPE]
       });
     }
+    if (
+      pathname === "/register" &&
+      request.method === "POST" &&
+      options.registrationStatus !== undefined
+    ) {
+      registrationAttempts += 1;
+      return new Response("registration refused", {
+        status: options.registrationStatus
+      });
+    }
     if (pathname === "/register" && request.method === "POST") {
+      registrationAttempts += 1;
       const metadata = (await request.json()) as Record<string, unknown>;
       const clientId = `client-${crypto.randomUUID()}`;
       registeredClients.push(clientId);
@@ -589,6 +611,11 @@ export function createOAuthMcpServer({
       return releaseHeld;
     },
 
+    /** How many times a client tried to register, accepted or not. */
+    registrationAttempts(): number {
+      return registrationAttempts;
+    },
+
     /** How many MCP requests were refused with a plain 403. */
     forbiddenResponses(): number {
       return forbiddenResponses;
@@ -621,7 +648,10 @@ export function createOAuthMcpServer({
       options.forbidden = false;
       options.tokenError = undefined;
       options.staticToken = undefined;
+      options.registrationStatus = undefined;
+      options.rejectEveryToken = false;
       forbiddenResponses = 0;
+      registrationAttempts = 0;
       releaseHeld();
       for (const session of sseSessions.values()) {
         try {

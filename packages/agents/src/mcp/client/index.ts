@@ -80,6 +80,7 @@ import type { StoredServerFailure } from "./server-store";
 import {
   AUTH_EXPIRY_JOB,
   AUTHORIZATION_EXPIRED_MESSAGE,
+  AUTHORIZATION_LINK_MAX_AGE_MS,
   AUTHORIZATION_LINK_TTL_MS,
   authExpiryJobId,
   CONNECT_JOB,
@@ -303,6 +304,11 @@ export class MCPClientManager extends LifecycleCapability {
     | undefined;
   #servers: McpServerStore | undefined;
   private readonly _reconnect: ReconnectPolicy;
+  /**
+   * The OAuth state each server's callback last redeemed. The provider keeps
+   * that link in memory afterwards; it must never be shown again.
+   */
+  private readonly _spentStates = new Map<string, string>();
   private _isRestored = false;
   private readonly _lanes = new ServerLanes();
   private _elicitationHandlers?: MCPClientElicitationHandlers;
@@ -451,14 +457,19 @@ export class MCPClientManager extends LifecycleCapability {
   private async _runAuthExpiryJob(
     payload: AuthExpiryJobPayload
   ): Promise<LifecycleJobOutcome | void> {
-    const { serverId, authUrl } = payload;
+    const { serverId, authUrl, savedAt } = payload;
     const row = this._servers.get(serverId);
     if (!row || row.auth_url !== authUrl) return;
     const conn = this.mcpConnections[serverId];
     const provider =
       conn?.options.transport.authProvider ??
       this.authProviderFromStorage(serverId);
-    if (provider && (await this.authLinkIsLive(serverId, authUrl, provider))) {
+    const young = Date.now() - savedAt < AUTHORIZATION_LINK_MAX_AGE_MS;
+    if (
+      young &&
+      provider &&
+      (await this.authLinkIsLive(serverId, authUrl, provider))
+    ) {
       return { rescheduleAt: Date.now() + AUTHORIZATION_LINK_TTL_MS };
     }
     await this._lanes.run(serverId, async () => {
@@ -532,7 +543,11 @@ export class MCPClientManager extends LifecycleCapability {
       id: authExpiryJobId(serverId),
       fn: AUTH_EXPIRY_JOB,
       time: Date.now() + AUTHORIZATION_LINK_TTL_MS,
-      payload: { serverId, authUrl } satisfies AuthExpiryJobPayload,
+      payload: {
+        serverId,
+        authUrl,
+        savedAt: Date.now()
+      } satisfies AuthExpiryJobPayload,
       retry: { maxAttempts: 1 }
     });
   }
@@ -844,17 +859,22 @@ export class MCPClientManager extends LifecycleCapability {
     );
   }
 
+  /**
+   * The user denied the authorization or its code could not be exchanged.
+   * Recorded, so a later wake does not start another flow nobody asked for;
+   * reconnectServer() tries again.
+   */
   private failConnection(
     serverId: string,
     error: string
   ): MCPOAuthCallbackResult {
-    this._servers.clearAuthUrl(serverId);
-    this.cancelJob(authExpiryJobId(serverId));
-    if (this.mcpConnections[serverId]) {
+    if (this._servers.get(serverId)) {
+      this.recordFailure(serverId, "authorization-failed", error);
+    } else if (this.mcpConnections[serverId]) {
       this.mcpConnections[serverId].connectionState = MCPConnectionState.FAILED;
       this.mcpConnections[serverId].connectionError = error;
+      this.fireServerStateChanged();
     }
-    this.fireServerStateChanged();
     return { serverId, authSuccess: false, authError: error };
   }
 
@@ -1179,10 +1199,30 @@ export class MCPClientManager extends LifecycleCapability {
    * @internal Bring an already-registered server to a settled state once the
    * work queued for it has run: a ready server stays ready, a flow whose
    * link still works keeps waiting, a server left connected is discovered,
-   * and anything else, including a failed server, is connected again.
+   * one never connected is connected, and a failed server is reported as
+   * failed. Retrying a failed server is {@link reconnectServer}'s job.
    */
   settleServer(id: string): Promise<MCPServerSettlement> {
     return this.removedIfCancelled(this._settleServer(id));
+  }
+
+  /**
+   * @internal Try a server again because someone asked: forget a recorded
+   * failure and the step-up budget, drop pending jobs, and connect now.
+   * The only path that retries a failed server on demand.
+   */
+  reconnectServer(id: string): Promise<MCPServerSettlement> {
+    return this.removedIfCancelled(
+      this._lanes.run(id, async () => {
+        if (!this.mcpConnections[id]) return { state: "removed" as const };
+        this._servers.clearFailure(id);
+        this._servers.setAuthorizationRounds(id, undefined);
+        this._servers.clearAuthUrl(id);
+        this.cancelJob(connectJobId(id));
+        this.cancelJob(authExpiryJobId(id));
+        return this.connectAndDiscover(id);
+      })
+    );
   }
 
   /** Report queued work cancelled by removal as a removed server. */
@@ -1206,11 +1246,14 @@ export class MCPClientManager extends LifecycleCapability {
         case MCPConnectionState.READY:
           return { state: MCPConnectionState.READY };
         case MCPConnectionState.FAILED:
-          // An explicit reconnect: forget why it stopped and try now.
-          this._servers.clearFailure(id);
-          this._servers.setAuthorizationRounds(id, undefined);
-          this.cancelJob(connectJobId(id));
-          return this.connectAndDiscover(id);
+          // Report it; only reconnectServer() tries again. Apps call
+          // addMcpServer() from onStart and onConnect, so retrying here
+          // would undo every recorded failure and the reconnect backoff.
+          return {
+            state: MCPConnectionState.FAILED,
+            phase: "connect",
+            error: conn.connectionError ?? "Connection failed"
+          };
         case MCPConnectionState.CONNECTED: {
           const settlement = await this._settleDiscovery(id);
           if (settlement.state === MCPConnectionState.FAILED) {
@@ -1230,8 +1273,18 @@ export class MCPClientManager extends LifecycleCapability {
           if (authUrl) {
             return { state: MCPConnectionState.AUTHENTICATING, authUrl };
           }
-          // The pending link can no longer complete; start a fresh flow.
-          return this.connectAndDiscover(id);
+          // The link expired unused: record it rather than mint a new one
+          // nobody asked for.
+          this.recordFailure(
+            id,
+            "authorization-expired",
+            AUTHORIZATION_EXPIRED_MESSAGE
+          );
+          return {
+            state: MCPConnectionState.FAILED,
+            phase: "connect",
+            error: AUTHORIZATION_EXPIRED_MESSAGE
+          };
         }
         case MCPConnectionState.CONNECTING:
         case MCPConnectionState.DISCOVERING:
@@ -1660,6 +1713,9 @@ export class MCPClientManager extends LifecycleCapability {
     if (!authUrl || !conn.options.transport.authProvider?.redirectUrl) {
       return { _tag: "unavailable" };
     }
+    // The provider still holds the link whose callback was just redeemed:
+    // the server rejected the tokens it produced, and no new flow started.
+    if (this.isSpentLink(id, authUrl)) return { _tag: "unavailable" };
     const round = startRound(
       parseAuthorizationRounds(this._servers.authorizationRounds(id)),
       requestedScope(authUrl),
@@ -1679,6 +1735,28 @@ export class MCPClientManager extends LifecycleCapability {
     this.armAuthExpiry(id, auth.authUrl);
     this.fireServerStateChanged();
     return { _tag: "authenticating", ...auth };
+  }
+
+  /** Whether `authUrl` carries the state this server's callback redeemed. */
+  private isSpentLink(id: string, authUrl: string): boolean {
+    const spent = this._spentStates.get(id);
+    if (!spent) return false;
+    try {
+      return new URL(authUrl).searchParams.get("state") === spent;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Why a 401 left no link to show, for the recorded failure. */
+  private noLinkReason(id: string, conn: MCPClientConnection): string {
+    const provider = conn.options.transport.authProvider;
+    if (provider?.authUrl && this.isSpentLink(id, provider.authUrl)) {
+      return "The server still answers 401 after a completed authorization";
+    }
+    return `OAuth configuration incomplete: missing ${
+      !provider?.authUrl ? "authUrl" : "redirectUrl"
+    }`;
   }
 
   /** Persist and emit an OAuth continuation produced by connect or discovery. */
@@ -1767,18 +1845,14 @@ export class MCPClientManager extends LifecycleCapability {
             };
           case "exhausted":
             return { state: MCPConnectionState.FAILED, error: auth.error };
-          case "unavailable": {
+          case "unavailable":
             // A 401 nothing here can answer with a link: retrying gets the
             // same 401, so automatic reconnects stop.
             conn.accessRefused = true;
-            const provider = conn.options.transport.authProvider;
             return {
               state: MCPConnectionState.FAILED,
-              error: `OAuth configuration incomplete: missing ${
-                !provider?.authUrl ? "authUrl" : "redirectUrl"
-              }`
+              error: this.noLinkReason(id, conn)
             };
-          }
         }
       }
 
@@ -1927,6 +2001,7 @@ export class MCPClientManager extends LifecycleCapability {
       // fresh flow) instead of restoring a link whose state is spent.
       this._servers.clearAuthUrl(serverId);
       this.cancelJob(authExpiryJobId(serverId));
+      this._spentStates.set(serverId, state);
       await authProvider.consumeState(state);
       await exchangeAuthorizationCode(
         serverId,

@@ -260,6 +260,28 @@ export class TestOAuthAgent extends Agent {
     };
   }
 
+  async testReconnectMcpServer(
+    serverId: string
+  ): Promise<{ id: string; state: string; authUrl?: string }> {
+    const result = await this.reconnectMcpServer(serverId);
+    return {
+      id: result.id,
+      state: result.state,
+      authUrl: "authUrl" in result ? result.authUrl : undefined
+    };
+  }
+
+  async testReconnectMcpServerExpectingError(
+    serverId: string
+  ): Promise<string> {
+    try {
+      await this.testReconnectMcpServer(serverId);
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   testGetMcpServerState(serverId: string): string | undefined {
     return this.getMcpServers().servers[serverId]?.state;
   }
