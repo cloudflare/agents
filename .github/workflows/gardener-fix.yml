@@ -2,7 +2,7 @@
 #
 # Source: .gardener/tasks/fix/TASK.md
 # Task: fix
-# Bundle: sha256:8bb8e05da874d7c400f3982422b48ace20013691e486c5f4e5cd5828aa2eac7f
+# Bundle: sha256:05c2699aeefff53c037b531033e843cd0a3d0841968697299ca7c222c59a33de
 # Regenerate: gardener generate
 # Do not edit this workflow directly.
 name: "Gardener · Fix"
@@ -31,6 +31,7 @@ jobs:
         || github.event_name == 'workflow_dispatch'
       }}
     permissions:
+      actions: write
       checks: read
       contents: write
       discussions: read
@@ -38,13 +39,13 @@ jobs:
       issues: write
       pull-requests: write
       statuses: read
-    uses: scuffi/gardener/.github/workflows/gardener-task.yml@0d02b66f47cc8802ba14a243dd827bf5555b3469
+    uses: scuffi/gardener/.github/workflows/gardener-task.yml@cc58329877208742b061f3c570d632be824aaf1e
     with:
       runtime-url: ${{ vars.GARDENER_RUNTIME_URL }}
       task-id: "fix"
       task-name: "Fix"
       task-source: ".gardener/tasks/fix/TASK.md"
-      task-bundle-hash: 8bb8e05da874d7c400f3982422b48ace20013691e486c5f4e5cd5828aa2eac7f
+      task-bundle-hash: 05c2699aeefff53c037b531033e843cd0a3d0841968697299ca7c222c59a33de
       plan-timeout-minutes: 35
       reactions: >-
         ${{
