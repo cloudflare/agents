@@ -142,8 +142,19 @@ export function createOAuthMcpServer({
      * Speak only the 2025-11-25 protocol, as an older server does: the
      * 2026-07-28 `server/discover` probe gets "method not found".
      */
-    legacyOnly: false
+    legacyOnly: false,
+    /** Refuse every authorized MCP request with a plain 403. */
+    forbidden: false,
+    /** An OAuth error code the token endpoint answers every request with. */
+    tokenError: undefined as string | undefined,
+    /**
+     * Accept only this static bearer token and serve no OAuth metadata, as a
+     * server configured with an API key does.
+     */
+    staticToken: undefined as string | undefined
   };
+  /** How many MCP requests the resource server refused with a 403. */
+  let forbiddenResponses = 0;
 
   /** While set, requests to the held endpoint wait before they are answered. */
   let held: Promise<void> | undefined;
@@ -245,6 +256,7 @@ export function createOAuthMcpServer({
 
   async function resourceServer(request: Request): Promise<Response> {
     const { pathname } = new URL(request.url);
+    if (options.staticToken !== undefined) return staticTokenServer(request);
     if (pathname.startsWith(metadataPrefix)) {
       // Each resource path has its own metadata: /mcp, or /sse for SSE.
       const resourcePath = pathname.slice(metadataPrefix.length) || "/mcp";
@@ -284,6 +296,10 @@ export function createOAuthMcpServer({
       return challenge(401, options.challengeScope);
     }
     if (method) mcpMethods.push(method);
+    if (options.forbidden) {
+      forbiddenResponses += 1;
+      return new Response("Forbidden", { status: 403 });
+    }
 
     if (options.legacyOnly && method === "server/discover") {
       return Response.json({
@@ -391,6 +407,24 @@ export function createOAuthMcpServer({
     return new Response("Accepted", { status: 202 });
   }
 
+  /** The MCP endpoint behind a static bearer token, with no OAuth at all. */
+  async function staticTokenServer(request: Request): Promise<Response> {
+    const { pathname } = new URL(request.url);
+    if (pathname !== "/mcp") return new Response("Not found", { status: 404 });
+    if (
+      request.headers.get("authorization") !== `Bearer ${options.staticToken}`
+    ) {
+      unauthorizedMethods.push((await readMessage(request)).method ?? "GET");
+      return new Response("Unauthorized", {
+        status: 401,
+        headers: { "www-authenticate": "Bearer" }
+      });
+    }
+    const message = await readMessage(request);
+    if (message.method) mcpMethods.push(message.method);
+    return mcpHandler(request, env, createExecutionContext());
+  }
+
   async function authorizationServer(request: Request): Promise<Response> {
     const { pathname } = new URL(request.url);
     if (pathname === "/.well-known/oauth-authorization-server") {
@@ -419,6 +453,9 @@ export function createOAuthMcpServer({
       await waitIfHeld("token");
       const params = new URLSearchParams(await request.text());
       tokenRequests.push(params);
+      if (options.tokenError) {
+        return Response.json({ error: options.tokenError }, { status: 400 });
+      }
       const invalidGrant = () =>
         Response.json({ error: "invalid_grant" }, { status: 400 });
 
@@ -552,6 +589,11 @@ export function createOAuthMcpServer({
       return releaseHeld;
     },
 
+    /** How many MCP requests were refused with a plain 403. */
+    forbiddenResponses(): number {
+      return forbiddenResponses;
+    },
+
     /** How many requests are waiting at the hold right now. */
     waitingRequests(): number {
       return waiting;
@@ -576,6 +618,10 @@ export function createOAuthMcpServer({
       options.openHandshake = false;
       options.challengeScope = READ_SCOPE;
       options.legacyOnly = false;
+      options.forbidden = false;
+      options.tokenError = undefined;
+      options.staticToken = undefined;
+      forbiddenResponses = 0;
       releaseHeld();
       for (const session of sseSessions.values()) {
         try {

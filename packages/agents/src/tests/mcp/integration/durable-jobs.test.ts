@@ -236,3 +236,99 @@ describe("MCP authorization link expiry in an Agent", () => {
     expect(await agent.mcpJobs()).toEqual([]);
   });
 });
+
+describe("MCP refused authorization in an Agent", () => {
+  it("stops after one attempt when the server refuses access with a 403, and connects again once it allows access", async () => {
+    const before = await newAgent();
+    const id = await connectAuthorized(before, server);
+
+    server.options.forbidden = true;
+    const agent = await restartAgent(before);
+    await agent.settle();
+
+    const refused = await agent.server(id);
+    expect(refused?.state).toBe("failed");
+    expect(refused?.error).toContain("Authorization was refused");
+    expect(await agent.mcpJobs()).toEqual([]);
+    expect(server.forbiddenResponses()).toBe(1);
+
+    // Later wakes stay failed without asking the server again.
+    const woken = await restartAgent(agent);
+    await woken.settle();
+    expect((await woken.server(id))?.state).toBe("failed");
+    expect(server.forbiddenResponses()).toBe(1);
+
+    server.options.forbidden = false;
+    expect(await woken.connectNow(id)).toMatchObject({ state: "connected" });
+  });
+
+  it("stops when the authorization server refuses the refresh with invalid_target", async () => {
+    const before = await newAgent();
+    const id = await connectAuthorized(before, server);
+
+    server.revokeAccessTokens();
+    server.options.tokenError = "invalid_target";
+    const agent = await restartAgent(before);
+    await agent.settle();
+
+    const refused = await agent.server(id);
+    expect(refused?.state).toBe("failed");
+    expect(refused?.error).toContain("Authorization was refused");
+    expect(await agent.mcpJobs()).toEqual([]);
+    const refreshes = server.tokenRequests.filter(
+      (params) => params.get("grant_type") === "refresh_token"
+    );
+    expect(refreshes).toHaveLength(1);
+  });
+
+  it("keeps retrying while the authorization server is temporarily unavailable", async () => {
+    const before = await newAgent();
+    const id = await connectAuthorized(before, server);
+
+    server.revokeAccessTokens();
+    server.options.tokenError = "temporarily_unavailable";
+    const agent = await restartAgent(before);
+    await agent.settle();
+    expect((await agent.server(id))?.state).toBe("failed");
+    expect((await agent.mcpJobs()).map((job) => job.id)).toEqual([
+      `connect:${id}`
+    ]);
+
+    server.options.tokenError = undefined;
+    await runDueJobs(agent);
+    expect((await agent.server(id))?.state).toBe("ready");
+  });
+
+  it.each([
+    { label: "without an OAuth callback", callbackHost: undefined },
+    { label: "with an OAuth callback", callbackHost: CLIENT_ORIGIN }
+  ])(
+    "stops after one attempt when a static token is revoked, $label",
+    async ({ callbackHost }) => {
+      server.options.staticToken = "key-1";
+      const before = await newAgent();
+      const added = await before.connectServer(server.url, {
+        callbackHost,
+        headers: { Authorization: "Bearer key-1" }
+      });
+      expect(added.state).toBe("ready");
+      if (added.state !== "ready") throw new Error("unreachable");
+
+      server.options.staticToken = "key-2";
+      const agent = await restartAgent(before);
+      await agent.settle();
+
+      const refused = await agent.server(added.id);
+      expect(refused?.state).toBe("failed");
+      expect(refused?.error).toContain("Authorization was refused");
+      expect(await agent.mcpJobs()).toEqual([]);
+
+      // Later wakes stay failed without asking the server again.
+      const requests = server.unauthorizedMethods.length;
+      const woken = await restartAgent(agent);
+      await woken.settle();
+      expect((await woken.server(added.id))?.state).toBe("failed");
+      expect(server.unauthorizedMethods).toHaveLength(requests);
+    }
+  );
+});

@@ -84,18 +84,25 @@ export class McpIntegrationAgent extends Agent {
   async connectServer(
     url: string,
     options: {
-      callbackHost: string;
+      /** Without one, the agent has no way to ask the user to authorize. */
+      callbackHost?: string;
       id?: string;
       name?: string;
       transport?: "auto" | "streamable-http" | "sse";
+      headers?: Record<string, string>;
+      /** Quick connect attempts; one by default. */
+      maxAttempts?: number;
     }
   ): Promise<AddServerOutcome> {
     try {
       const result = await this.addMcpServer(options.name ?? "files", url, {
         callbackHost: options.callbackHost,
         id: options.id,
-        retry: { maxAttempts: 1 },
-        transport: { type: options.transport ?? "auto" }
+        retry: { maxAttempts: options.maxAttempts ?? 1 },
+        transport: {
+          type: options.transport ?? "auto",
+          headers: options.headers
+        }
       });
       return result.state === "authenticating"
         ? { id: result.id, state: "authenticating", authUrl: result.authUrl }
