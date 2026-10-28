@@ -1,0 +1,11 @@
+{
+  "name": "agents-otel-runtime-test",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "kv_namespaces": [{ "binding": "KV", "id": "otel-runtime-test" }],
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true, "head_sampling_rate": 1 }
+  }
+}
