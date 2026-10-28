@@ -1,0 +1,27 @@
+.gardener/gardener.lock.json
+  s_de0b486c128948::t_e63807ce53cb0a 107,173-174,235,265-266
+.gardener/tasks/fix-ready/TASK.md
+  s_de0b486c128948::t_cfe81af75d7875 24
+.gardener/tasks/fix/TASK.md
+  s_de0b486c128948::t_db25c94a87d208 38
+.github/workflows/gardener-fix-ready.yml
+  s_de0b486c128948::t_40d7911f252fdc 5,44
+.github/workflows/gardener-fix.yml
+  s_de0b486c128948::t_c85114679d5a5b 5,48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "56fb81b03b9afedc619a7b2e21b112c316a3f823",
+  "prompts": {},
+  "sessions": {
+    "s_de0b486c128948": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0a54b-7029-705c-8802-df38dfe75e1f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}
