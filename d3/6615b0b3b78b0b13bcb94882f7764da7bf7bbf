@@ -1,0 +1,76 @@
+packages/agents/src/index.ts
+  s_f332e176eb9835::t_281a938a90f3c6 350-354
+  s_94fc8332a330cc::t_aae946357548c5 3018,3023-3031,3043-3045
+pnpm-lock.yaml
+  s_11fa28ca60720a::t_a1d6efee25977a 9,6184,6193,6213-6214,6219-6220,6225-6226,6231-6232,6237-6238,14742-14743,16526,16565,16569,16571,16575,16579,16583,16593,16597,16607,16611,16621,16625,16635,16639,16662,16665,16668,16671,16674,24533,24545,24558,24571,24584,27378,27380-27384,27398,27404,27415,27421,27433,27439,27451,27457
+docs/agents/callable-methods.md
+  s_f332e176eb9835::t_bcee6f1741408f 517-536
+packages/agents/src/tests/agents/native-rpc.ts
+  s_f332e176eb9835::t_54f1985d294075 3
+  s_11fa28ca60720a::t_17346b689c8040 12-15,42-45,70-72
+packages/agents/src/tests/worker.ts
+  s_94fc8332a330cc::t_52b936bea91561 143-147,235-239,324-326
+  s_94fc8332a330cc::t_4cc29cd2e94b7b 327-328
+packages/agents/src/tests/lifecycle/retryable.test.ts
+  s_11fa28ca60720a::t_3746abf2dfd76e 1-128
+pnpm-workspace.yaml
+  s_11fa28ca60720a::t_d43efbb55d0b82 55-58
+packages/agents/src/tests/wrangler.jsonc
+  s_94fc8332a330cc::t_733d9625e7b153 297-316,552-554
+  s_94fc8332a330cc::t_c152b551a40110 555-556
+packages/agents/src/tests/agents/index.ts
+  s_94fc8332a330cc::t_bb93e5d5937ae9 55-61
+docs/agents/lifecycle.md
+  s_f332e176eb9835::t_f146c2a258c56a 495-519
+packages/agents/src/lifecycle/durable-object-lifecycle.ts
+  s_c77095033a1105::t_bf900c343f0631 33,212-237
+.changeset/agent-retryable.md
+  s_f332e176eb9835::t_899cc87a7068e3 1-5
+packages/agents/src/lifecycle/retryable.ts
+  s_f332e176eb9835::t_570fc9710cd516 1-103
+packages/agents/src/tests/agents/retryable.ts
+  s_94fc8332a330cc::t_39a9cd5f3bbd6a 1-31,38-39,42-45
+  s_94fc8332a330cc::t_ba86e6e5ab6806 40-41
+  s_94fc8332a330cc::t_4b007510847b55 32-37
+  s_94fc8332a330cc::t_c1efe5a3f9ebbd 46-47
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d36615b0b3b78b0b13bcb94882f7764da7bf7bbf",
+  "prompts": {},
+  "sessions": {
+    "s_11fa28ca60720a": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e874acb74ffeFypQ2IOOqckruA",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ashley Peacock <apeacock@cloudflare.com>"
+    },
+    "s_94fc8332a330cc": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e8360850fffey5Sg2IRD1oIu9I",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ashley Peacock <apeacock@cloudflare.com>"
+    },
+    "s_c77095033a1105": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e9a984a51ffeLxK55Db4aJKHDK",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Ashley Peacock <apeacock@cloudflare.com>"
+    },
+    "s_f332e176eb9835": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_ec654b52dffe5R4MDhsJqmPWkg",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ashley Peacock <apeacock@cloudflare.com>"
+    }
+  }
+}
