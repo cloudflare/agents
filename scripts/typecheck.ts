@@ -35,7 +35,7 @@ async function checkProject(tsconfig: string): Promise<Result> {
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     try {
-      await execAsync(`tsgo -p ${tsconfig}`);
+      await execAsync(`tsrs -p ${tsconfig}`);
       return { tsconfig, success: true, attempts: attempt, output: "" };
     } catch (rawError: unknown) {
       const error = rawError as { stdout?: string; stderr?: string };

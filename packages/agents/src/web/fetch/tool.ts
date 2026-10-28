@@ -123,7 +123,7 @@ export function createWebFetchToolCore(
     description: options.description ?? WEB_FETCH_TOOL_DESCRIPTION,
     pageChars,
     render: renderWebFetchPage,
-    async run(input, { signal } = {}) {
+    async run(input, { signal }: { signal?: AbortSignal } = {}) {
       try {
         signal?.throwIfAborted();
         // The source owns `url` and `format`; the tool owns paging.
