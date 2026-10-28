@@ -72,6 +72,8 @@ export class RecordingSpan implements SpanWriter {
   readonly parent: RecordingSpan | undefined;
   readonly attributes: Record<string, TraceAttributeValue> = {};
   readonly children: RecordingSpan[] = [];
+  /** The last status set through `setStatus`, if any. */
+  status: { readonly code: "error" } | undefined;
 
   #ended = false;
   #endCount = 0;
@@ -105,6 +107,12 @@ export class RecordingSpan implements SpanWriter {
     }
 
     this.attributes[key] = value;
+  }
+
+  setStatus(status: { readonly code: "error" }): void {
+    if (this.isTraced) {
+      this.status = status;
+    }
   }
 
   end(): void {

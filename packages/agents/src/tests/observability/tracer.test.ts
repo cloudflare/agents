@@ -271,6 +271,38 @@ describe("createTracer", () => {
       expect(tracing.rootSpans[0]?.ended).toBe(true);
     });
 
+    it("sets error status, without the cause message, on failure", async () => {
+      const tracing = new RecordingTracer();
+
+      await expect(
+        Promise.resolve(
+          tracing.withSpan("op", {}, async () => {
+            throw new TypeError("secret detail");
+          })
+        )
+      ).rejects.toThrow("secret detail");
+
+      expect(tracing.rootSpans[0]?.status).toEqual({ code: "error" });
+      expect(tracing.rootSpans[0]?.attributes).toMatchObject({
+        "error.type": "TypeError"
+      });
+    });
+
+    it("leaves status unset on success and on cancellation", () => {
+      const tracing = new RecordingTracer();
+
+      tracing.withSpan("ok", {}, () => undefined);
+      tracing
+        .openSpan("canceled", {}, (span) => span)
+        .fail({
+          name: "AbortError"
+        });
+
+      for (const span of tracing.rootSpans) {
+        expect(span.status).toBeUndefined();
+      }
+    });
+
     it("classifies a non-Error AbortError-named cause as canceled", () => {
       const tracing = new RecordingTracer();
 
