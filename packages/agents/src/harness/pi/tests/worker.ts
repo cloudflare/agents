@@ -12,6 +12,7 @@ import {
   createRegistry,
   defineTask,
   ConversationBusy,
+  ConversationIdle,
   Harness,
   type EntryRecord,
   type Extension,
@@ -31,7 +32,8 @@ import {
   PiHarness,
   type PiOperationResult,
   type PiReceipt,
-  type PiWhenBusy
+  type PiWhenBusy,
+  type PiWhenIdle
 } from "../index";
 
 const RELEASE_KEY = "test:gate:release";
@@ -365,14 +367,24 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   /**
    * `submit()`, with how it settled: a receipt, or the error's name and
-   * whether it is pi's `ConversationBusy`. Error classes do not survive RPC.
+   * whether it is pi's `ConversationBusy` or `ConversationIdle`. Error
+   * classes do not survive RPC.
    */
   async trySubmit(
     text: string,
-    options: { whenBusy?: PiWhenBusy; operationId?: string } = {}
+    options: {
+      whenBusy?: PiWhenBusy;
+      whenIdle?: PiWhenIdle;
+      operationId?: string;
+    } = {}
   ): Promise<
     | { receipt: PiReceipt }
-    | { error: string; conversationBusy: boolean; message: string }
+    | {
+        error: string;
+        conversationBusy: boolean;
+        conversationIdle: boolean;
+        message: string;
+      }
   > {
     try {
       return { receipt: await this.harness.submit(text, options) };
@@ -380,6 +392,7 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
       return {
         error: error instanceof Error ? error.name : String(error),
         conversationBusy: error instanceof ConversationBusy,
+        conversationIdle: error instanceof ConversationIdle,
         message: error instanceof Error ? error.message : String(error)
       };
     }

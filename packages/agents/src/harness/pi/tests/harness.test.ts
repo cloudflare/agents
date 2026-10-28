@@ -227,6 +227,36 @@ describe("PiHarness on pi-durable", () => {
     ]);
   });
 
+  it("steers a whenIdle: reject input into a run, and refuses it when idle", async () => {
+    const stub = fresh();
+    const idle = await stub.trySubmit("late", {
+      whenBusy: "steer",
+      whenIdle: "reject",
+      operationId: "op-late"
+    });
+    expect(idle).toMatchObject({
+      error: "ConversationIdle",
+      conversationIdle: true
+    });
+    expect(await stub.pending()).toEqual([]);
+    expect(await stub.messages()).toEqual([]);
+
+    const gate = await stub.submit("gate");
+    await stub.gateStarted(1);
+    // Nothing was saved, so the same operation id is admitted while busy.
+    const steered = await stub.trySubmit("late", {
+      whenBusy: "steer",
+      whenIdle: "reject",
+      operationId: "op-late"
+    });
+    expect(steered).toMatchObject({ receipt: { accepted: true } });
+    await stub.release();
+    await stub.wait(gate.operationId);
+    expect(await stub.wait("op-late")).toMatchObject({ status: "done" });
+    expect(await stub.messages()).toContain("late");
+    expect(await alarmCleared(stub)).toBe(true);
+  });
+
   it("refuses a whenBusy: reject input while a run is going, saving nothing", async () => {
     const stub = fresh();
     // Idle: admitted like any other input.

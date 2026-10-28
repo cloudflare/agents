@@ -463,6 +463,7 @@ export class PiHarness extends LifecycleCapability {
           type: "input",
           content: input,
           whenBusy: options.whenBusy ?? "followUp",
+          ...(options.whenIdle ? { whenIdle: options.whenIdle } : {}),
           requestId: operationId,
           ...(options.entry ? { entry: options.entry } : {})
         },
