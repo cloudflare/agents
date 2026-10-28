@@ -3056,8 +3056,11 @@ describe("MCPClientManager OAuth Integration", () => {
 
         await manager.establishConnection(id);
 
-        // Should fire 3 times: 1 from connectToServer (after init), 1 explicit in establishConnection, 1 from discoverIfConnected
-        expect(onStateChangedSpy).toHaveBeenCalledTimes(3);
+        // Fires 4 times: after init in connectToServer, from
+        // discoverIfConnected, when the scheduled reconnect sets the error,
+        // and explicitly in establishConnection.
+        expect(onStateChangedSpy).toHaveBeenCalledTimes(4);
+        expect(conn.connectionError).toBe("Discovery failed");
       })
     );
 

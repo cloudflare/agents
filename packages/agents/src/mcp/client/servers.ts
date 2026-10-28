@@ -444,15 +444,17 @@ export class ServerController {
       return;
     }
     const { gaveUpAfter } = this.jobs.scheduleReconnect(id, settlement.error);
-    // Show why while the reconnect waits, as a wake does.
-    this.ctx.connections[id].connectionError = settlement.error;
     if (gaveUpAfter !== undefined) {
       this.status.stop(
         id,
         "reconnect-exhausted",
         `Stopped reconnecting after ${gaveUpAfter} attempts: ${settlement.error}`
       );
+      return;
     }
+    // Show why while the reconnect waits, as a wake does, and tell clients.
+    this.ctx.connections[id].connectionError = settlement.error;
+    this.ctx.stateChanged();
   }
 
   private async connectWithRetry(
