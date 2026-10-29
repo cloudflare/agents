@@ -1,0 +1,47 @@
+.gardener/SKILL.md
+  s_9c404162980aee::t_36aa5f77a98f2e 6,32
+.gardener/gardener.json
+  s_9c404162980aee::t_0fe1d4dfd0f8ba 5
+.gardener/gardener.lock.json
+  s_9c404162980aee::t_abc6ba88b62a9c 6,9,901-994
+.gardener/tasks/resolved-check/TASK.md
+  s_9c404162980aee::t_ea7d401c208058 1-186
+.github/workflows/gardener-dependabot-merge.yml
+  s_9c404162980aee::t_c4ad6353667b60 37
+.github/workflows/gardener-fix-blocked.yml
+  s_9c404162980aee::t_ccee571cfac06a 38
+.github/workflows/gardener-fix-ready.yml
+  s_9c404162980aee::t_b653d20b925bb5 38
+.github/workflows/gardener-fix.yml
+  s_9c404162980aee::t_0c41c8c4f1620f 42
+.github/workflows/gardener-mention-reply.yml
+  s_9c404162980aee::t_6d31ca674f52ab 51
+.github/workflows/gardener-opencode-upgrade.yml
+  s_9c404162980aee::t_22b8affe3371d2 40
+.github/workflows/gardener-pi-upgrade.yml
+  s_9c404162980aee::t_87f5dbf294f2da 40
+.github/workflows/gardener-pr-review-fix.yml
+  s_9c404162980aee::t_adffcfa9cc1e4e 44
+.github/workflows/gardener-resolved-check.yml
+  s_9c404162980aee::t_9c00be38e8f57b 1-44
+.github/workflows/gardener-sync.yml
+  s_9c404162980aee::t_3c4250aa869786 30,40
+.github/workflows/gardener-triage.yml
+  s_9c404162980aee::t_5d65d5f9be13a6 42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3d298fd2cd2d1939150d5f60e23f788546e46fc4",
+  "prompts": {},
+  "sessions": {
+    "s_9c404162980aee": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a187d6-b96d-7910-965b-4c26a653aaab",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "scuffi <aferguson@cloudflare.com>"
+    }
+  }
+}
