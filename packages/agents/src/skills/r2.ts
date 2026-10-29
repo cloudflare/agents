@@ -1,13 +1,16 @@
 import { err, ok, type SkillResult } from "./result";
-import { encodeSkillResourceContent, type SkillResource } from "./resource";
 import {
-  indexSkillTree,
+  describeSkillResource,
+  encodeSkillResourceContent,
+  type SkillResource
+} from "./resource";
+import {
   SkillResourceNotFoundError,
   SkillSourceError,
   type SkillListing,
-  type SkillSource,
-  type SkillTreeFile
+  type SkillSource
 } from "./source";
+import { indexSkillTree, type SkillTreeFile } from "./tree";
 
 /** Options for {@link r2}. */
 export interface R2SkillSourceOptions {
@@ -77,17 +80,17 @@ export function r2(
   return {
     id,
     list,
+    // Reads go straight to the object. Relisting the bucket here would
+    // cost a full scan per file, and `run_skill_script` reads every file
+    // of a skill.
     async readResource(skill, path) {
-      const listed = await list();
-      if (!listed.ok) return listed;
-      const info = listed.value.skills
-        .find((entry) => entry.skill.name === skill)
-        ?.resources.find((resource) => resource.path === path);
-      if (!info) return err(new SkillResourceNotFoundError(skill, path));
-
+      if (allowed && !allowed.has(skill)) {
+        return err(new SkillResourceNotFoundError(skill, path));
+      }
       try {
         const object = await bucket.get(`${prefix}${skill}/${path}`);
         if (!object) return err(new SkillResourceNotFoundError(skill, path));
+        const info = describeSkillResource(path, object.size);
         const bytes = new Uint8Array(await object.arrayBuffer());
         const resource: SkillResource = {
           ...info,

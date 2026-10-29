@@ -44,7 +44,7 @@ export interface SkillWorkspaceAccess {
 
 /**
  * @internal Adapt a Workspace for skill scripts. Relative paths resolve
- * against `/workspace`.
+ * against `/workspace`, and paths outside `/workspace` are rejected.
  */
 export function createSkillWorkspaceAccess(
   workspace: SkillScriptWorkspace
@@ -89,16 +89,20 @@ export function createSkillWorkspaceAccess(
         if (isNotFound(error)) return [];
         throw error;
       }
+      // `find` walks real entries under the resolved base; keep the result
+      // inside the root even if the Workspace follows a symlink out of it.
       return Promise.all(
-        matches.map(async (match) =>
-          match.type === "dir"
-            ? { path: match.path, type: "directory", size: 0 }
-            : {
-                path: match.path,
-                type: "file",
-                size: (await fs.stat(match.path)).size
-              }
-        )
+        matches
+          .filter((match) => isInsideRoot(match.path))
+          .map(async (match) =>
+            match.type === "dir"
+              ? { path: match.path, type: "directory", size: 0 }
+              : {
+                  path: match.path,
+                  type: "file",
+                  size: (await fs.stat(match.path)).size
+                }
+          )
       );
     },
     async stat(path) {
@@ -126,10 +130,46 @@ export function createSkillWorkspaceAccess(
   return access;
 }
 
+function isInsideRoot(path: string): boolean {
+  return path === WORKSPACE_ROOT || path.startsWith(`${WORKSPACE_ROOT}/`);
+}
+
+/** A script asked for a path outside `/workspace`. */
+class SkillWorkspacePathError extends Error {
+  readonly _tag = "SkillWorkspacePathError" as const;
+
+  constructor(readonly path: string) {
+    super(
+      `Skill scripts can only access paths under ${WORKSPACE_ROOT}: ${path}`
+    );
+    this.name = "SkillWorkspacePathError";
+  }
+}
+
+/**
+ * Resolve a script-supplied path to a normalized absolute path under
+ * `/workspace`. Relative paths resolve against `/workspace`; `.` and `..`
+ * are applied before the check, so `../x` or `/workspace/../x` cannot reach
+ * the rest of the Workspace filesystem.
+ *
+ * @throws SkillWorkspacePathError when the path resolves outside
+ * `/workspace`. The host bridge reports it to the script as a failed call.
+ */
 function resolvePath(path: string): string {
-  if (path.startsWith("/")) return path;
-  const relative = path.replace(/^\.(\/|$)/, "");
-  return relative === "" ? WORKSPACE_ROOT : `${WORKSPACE_ROOT}/${relative}`;
+  if (path.includes("\0")) throw new SkillWorkspacePathError(path);
+  const absolute = path.startsWith("/") ? path : `${WORKSPACE_ROOT}/${path}`;
+  const parts: string[] = [];
+  for (const part of absolute.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  const resolved = `/${parts.join("/")}`;
+  if (!isInsideRoot(resolved)) throw new SkillWorkspacePathError(path);
+  return resolved;
 }
 
 function isNotFound(error: unknown): boolean {

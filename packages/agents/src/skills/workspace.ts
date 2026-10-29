@@ -5,11 +5,11 @@ import {
   type SkillResource
 } from "./resource";
 import {
-  indexSkillTree,
   SkillResourceNotFoundError,
   SkillSourceError,
   type SkillSource
 } from "./source";
+import { indexSkillTree } from "./tree";
 
 /**
  * The parts of a `@cloudflare/computer` Workspace a skill source reads. A

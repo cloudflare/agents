@@ -321,6 +321,69 @@ export {
     ).resolves.toBe("hello from workspace");
   });
 
+  it("keeps ctx.workspace inside /workspace", async () => {
+    const workspace = testWorkspace({ "README.md": "inside" });
+    await workspace.writeText("/secrets/token.txt", "outside");
+    const runner = skills.runner({
+      loader: env.LOADER,
+      workspaceInstance: workspace,
+      workspace: "read-write"
+    });
+    const run = (body: string) =>
+      runner.run({
+        skill: testSkill("escape", "Try to escape the workspace.", "Use JS."),
+        path: "scripts/escape.js",
+        input: {},
+        source: `export default async function run(input, ctx) {\n${body}\n}`
+      });
+
+    for (const path of [
+      "/secrets/token.txt",
+      "../secrets/token.txt",
+      "/workspace/../secrets/token.txt",
+      "./a/../../secrets/token.txt"
+    ]) {
+      await expect(
+        run(`return await ctx.workspace.readFile(${JSON.stringify(path)});`),
+        path
+      ).rejects.toThrow("can only access paths under /workspace");
+    }
+    await expect(
+      run('await ctx.workspace.writeFile("../secrets/token.txt", "x");')
+    ).rejects.toThrow("can only access paths under /workspace");
+    await expect(
+      run('return await ctx.workspace.glob("/secrets/*");')
+    ).rejects.toThrow("can only access paths under /workspace");
+    await expect(workspace.readText("/secrets/token.txt")).resolves.toBe(
+      "outside"
+    );
+
+    // Normalized paths that stay inside the root still work.
+    await expect(
+      run('return await ctx.workspace.readFile("./docs/../README.md");')
+    ).resolves.toBe("inside");
+  });
+
+  it("keeps python and bash workspace access inside /workspace", async () => {
+    const workspace = testWorkspace({});
+    await workspace.writeText("/secrets/token.txt", "outside");
+    const runner = skills.runner({
+      loader: env.LOADER,
+      workspaceInstance: workspace
+    });
+
+    const bash = await runner.run({
+      skill: testSkill("escape", "Try to escape the workspace.", "Use bash."),
+      path: "scripts/escape.sh",
+      input: {},
+      source: "workspace-read ../secrets/token.txt"
+    });
+    expect(JSON.stringify(bash)).not.toContain("outside");
+    expect(JSON.stringify(bash)).toContain(
+      "can only access paths under /workspace"
+    );
+  });
+
   it("returns sizes from ctx.workspace.glob, and nothing for a missing directory", async () => {
     const runner = skills.runner({
       loader: env.LOADER,

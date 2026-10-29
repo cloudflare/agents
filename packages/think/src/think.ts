@@ -6488,7 +6488,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
 
   /** Load the catalog from every source and log new diagnostics. */
   private async _loadSkillCatalog(): Promise<SkillCatalog> {
-    const catalog = await loadSkillCatalog(this._skillSources);
+    // `previous` keeps a source's last skills when it fails to list, so a
+    // transient outage (an R2 blip) does not drop them for a turn.
+    const catalog = await loadSkillCatalog(this._skillSources, {
+      previous: this._skillCatalog ?? undefined
+    });
     for (const diagnostic of catalog.diagnostics) {
       this._warnSkillsOnce(formatSkillDiagnostic(diagnostic));
     }

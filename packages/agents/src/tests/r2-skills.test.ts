@@ -15,6 +15,14 @@ async function seed(
   return prefix;
 }
 
+function resourceRef(skill: string, path: string) {
+  const name = skills.parseSkillName(skill);
+  const resource = skills.parseSkillResourcePath(path);
+  if (!name.ok) throw name.error;
+  if (!resource.ok) throw resource.error;
+  return [name.value, resource.value] as const;
+}
+
 const codeReview = `---
 name: code-review
 description: Review code when asked.
@@ -85,6 +93,32 @@ describe("R2 skill source", () => {
       mimeType: "image/png",
       content: "aGk="
     });
+  });
+
+  it("reads resources without listing the bucket again", async () => {
+    const prefix = await seed({ "code-review/SKILL.md": codeReview });
+    const source = skills.r2(bucket, {
+      prefix,
+      skills: ["code-review"],
+      refreshIntervalMs: 0
+    });
+    await source.list();
+    // Written after the listing; a direct read still finds it.
+    await bucket.put(`${prefix}code-review/references/late.md`, "late");
+    const read = await source.readResource(
+      ...resourceRef("code-review", "references/late.md")
+    );
+    expect(read.ok && read.value).toMatchObject({
+      kind: "reference",
+      encoding: "text",
+      size: 4,
+      content: "late"
+    });
+
+    const missing = await source.readResource(
+      ...resourceRef("code-review", "references/nope.md")
+    );
+    expect(missing.ok || missing.error._tag).toBe("SkillResourceNotFoundError");
   });
 
   it("reports skills that break the spec", async () => {

@@ -14,7 +14,7 @@ import {
   type SkillScriptWorkspace,
   type SkillWorkspaceAccess
 } from "./script-workspace";
-import { formatSkill } from "./skill";
+import { formatSkill } from "./markdown";
 
 // TODO: Prefer storing skills in a `@cloudflare/computer` Workspace and
 // running their scripts through the Workspace runtime (the agent's shell).

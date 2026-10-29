@@ -328,6 +328,74 @@ describe("skill catalog", () => {
     ]);
   });
 
+  it("keeps a failing source's last skills when given the previous catalog", async () => {
+    let failing = false;
+    const base = skills.manifest(testManifest);
+    const flaky: SkillSource = {
+      id: "flaky",
+      async list() {
+        if (failing) throw new Error("bucket unavailable");
+        return base.list();
+      },
+      readResource: (skill, path) => base.readResource(skill, path)
+    };
+
+    const first = await skills.loadSkillCatalog([flaky]);
+    failing = true;
+    const kept = await skills.loadSkillCatalog([flaky], { previous: first });
+    expect(kept.find("code-review")).toBeDefined();
+    expect(kept.fingerprint).toBe(first.fingerprint);
+    expect(kept.diagnostics).toMatchObject([
+      { _tag: "SourceFailed", sourceId: "flaky", keptPrevious: true }
+    ]);
+    const read = await kept.readResource({
+      path: "always-on/references/rules.md"
+    });
+    expect(read.ok && read.value.resource.content).toBe("Rules reference");
+
+    // The fallback carries forward across repeated failures.
+    const stillKept = await skills.loadSkillCatalog([flaky], {
+      previous: kept
+    });
+    expect(stillKept.find("code-review")).toBeDefined();
+
+    // Without a previous catalog the source is skipped.
+    const skipped = await skills.loadSkillCatalog([flaky]);
+    expect(skipped.skills).toEqual([]);
+    expect(skipped.diagnostics).toMatchObject([{ keptPrevious: false }]);
+  });
+
+  it("reads resources from the source that listed the skill when ids collide", async () => {
+    const first = skills.manifest({
+      id: "same-id",
+      skills: [
+        {
+          name: "first",
+          description: "First skill.",
+          body: "First.",
+          resources: [{ path: "references/a.md", content: "from first" }]
+        }
+      ]
+    });
+    const second = skills.manifest({
+      id: "same-id",
+      skills: [
+        {
+          name: "second",
+          description: "Second skill.",
+          body: "Second.",
+          resources: [{ path: "references/a.md", content: "from second" }]
+        }
+      ]
+    });
+    const catalog = await skills.loadSkillCatalog([first, second]);
+
+    const a = await catalog.readResource({ path: "first/references/a.md" });
+    const b = await catalog.readResource({ path: "second/references/a.md" });
+    expect(a.ok && a.value.resource.content).toBe("from first");
+    expect(b.ok && b.value.resource.content).toBe("from second");
+  });
+
   it("hides skills that disable model invocation", async () => {
     const catalog = await skills.loadSkillCatalog([
       skills.manifest({

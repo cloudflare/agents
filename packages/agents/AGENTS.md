@@ -174,7 +174,7 @@ src/
 
   skills/               # Agent Skills (https://agentskills.io)
     index.ts            # Package entry
-    skill.ts            # Spec-strict SKILL.md parser (parseSkill, SkillName)
+    skill.ts            # Skill type and spec frontmatter rules (SkillName, no yaml)
     resource.ts         # Resource paths, kinds, encodings
     result.ts           # SkillResult — expected failures as values
     source.ts           # SkillSource port, listings, shared directory indexer
@@ -182,6 +182,8 @@ src/
     r2.ts               # r2() source (read-only R2-backed skills)
     manifest.ts         # manifest() source (skills defined in code; fromManifest alias)
     catalog.ts          # loadSkillCatalog — merge sources, prompt, activation
+    markdown.ts         # parseSkill / formatSkill (SKILL.md text, loads yaml)
+    tree.ts             # Shared directory indexer for Workspace and R2
     tools/ai-sdk.ts     # createSkillTools — AI SDK tools (agents/skills/tools/ai-sdk)
     script.ts           # Script runner types
     script-workspace.ts # Workspace access for running scripts

@@ -1,13 +1,8 @@
 // Agent Skills (https://agentskills.io): parse `SKILL.md`, load skills from
 // a Computer Workspace, R2, or a manifest, and expose them to a model.
 
-export {
-  formatSkill,
-  isModelInvocable,
-  parseSkill,
-  parseSkillName,
-  SkillParseError
-} from "./skill";
+export { formatSkill, parseSkill } from "./markdown";
+export { isModelInvocable, parseSkillName, SkillParseError } from "./skill";
 export type {
   ParseSkillOptions,
   Skill,
@@ -49,6 +44,7 @@ export {
   UnknownSkillError
 } from "./catalog";
 export type {
+  LoadSkillCatalogOptions,
   SkillCatalog,
   SkillCatalogEntry,
   SkillCatalogResource,

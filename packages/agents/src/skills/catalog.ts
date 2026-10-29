@@ -9,6 +9,7 @@ import { isModelInvocable, type Skill, type SkillParseError } from "./skill";
 import {
   SkillResourceNotFoundError,
   SkillSourceError,
+  type SkillListing,
   type SkillSource
 } from "./source";
 
@@ -95,10 +96,14 @@ export type SkillDiagnostic =
       readonly error: SkillParseError;
     }
   | {
-      /** A source could not be listed and was skipped. */
+      /**
+       * A source could not be listed. With `previous`, its skills from the
+       * previous catalog are kept (`keptPrevious`); otherwise it is skipped.
+       */
       readonly _tag: "SourceFailed";
       readonly sourceId: string;
       readonly error: SkillSourceError;
+      readonly keptPrevious: boolean;
     }
   | {
       /** A later source listed a name an earlier source already provided. */
@@ -120,6 +125,26 @@ export class UnknownSkillError extends Error {
   }
 }
 
+/** Options for {@link loadSkillCatalog}. */
+export interface LoadSkillCatalogOptions {
+  /**
+   * The catalog this load replaces. When a source fails to list, its skills
+   * from `previous` are kept, so a transient outage does not remove working
+   * skills from the prompt and tools. Sources are matched by identity.
+   */
+  readonly previous?: SkillCatalog;
+}
+
+/**
+ * Successful listings behind each catalog, by source object. Lets a later
+ * load fall back to the last good listing of a failing source without
+ * putting listings on the public catalog shape.
+ */
+const catalogListings = new WeakMap<
+  SkillCatalog,
+  ReadonlyMap<SkillSource, SkillListing>
+>();
+
 /**
  * Load every source and merge them into a catalog.
  *
@@ -129,11 +154,16 @@ export class UnknownSkillError extends Error {
  * `disable-model-invocation: true` are left out.
  *
  * @param sources - Skill sources in priority order.
+ * @param options - Pass `previous` to keep a failing source's last skills.
  * @returns The merged catalog.
  */
 export async function loadSkillCatalog(
-  sources: readonly SkillSource[]
+  sources: readonly SkillSource[],
+  options: LoadSkillCatalogOptions = {}
 ): Promise<SkillCatalog> {
+  const previousListings = options.previous
+    ? catalogListings.get(options.previous)
+    : undefined;
   // Custom sources should return failures, but one that throws must still
   // not hide the others.
   const listings = await Promise.all(
@@ -149,19 +179,28 @@ export async function loadSkillCatalog(
 
   const diagnostics: SkillDiagnostic[] = [];
   const entries = new Map<string, SkillCatalogEntry>();
-  const sourcesById = new Map<string, SkillSource>();
+  // Resources are read from the source object that listed the skill, not
+  // looked up by id, because two sources may share an id.
+  const sourceBySkill = new Map<string, SkillSource>();
+  const goodListings = new Map<SkillSource, SkillListing>();
 
   for (const { source, listed } of listings) {
-    if (!listed.ok) {
+    let listing: SkillListing;
+    if (listed.ok) {
+      listing = listed.value;
+    } else {
+      const fallback = previousListings?.get(source);
       diagnostics.push({
         _tag: "SourceFailed",
         sourceId: source.id,
-        error: listed.error
+        error: listed.error,
+        keptPrevious: fallback !== undefined
       });
-      continue;
+      if (!fallback) continue;
+      listing = fallback;
     }
-    sourcesById.set(source.id, source);
-    for (const invalid of listed.value.invalid) {
+    goodListings.set(source, listing);
+    for (const invalid of listing.invalid) {
       diagnostics.push({
         _tag: "InvalidSkill",
         sourceId: source.id,
@@ -169,7 +208,7 @@ export async function loadSkillCatalog(
         error: invalid.error
       });
     }
-    for (const { skill, resources, location } of listed.value.skills) {
+    for (const { skill, resources, location } of listing.skills) {
       const existing = entries.get(skill.name);
       if (existing) {
         diagnostics.push({
@@ -186,6 +225,7 @@ export async function loadSkillCatalog(
         resources,
         ...(location === undefined ? {} : { location })
       });
+      sourceBySkill.set(skill.name, source);
     }
   }
 
@@ -197,7 +237,7 @@ export async function loadSkillCatalog(
   );
   const prompt = renderCatalogPrompt(skills);
 
-  return {
+  const catalog: SkillCatalog = {
     fingerprint: fingerprintOf(prompt ?? ""),
     skills,
     diagnostics,
@@ -213,7 +253,7 @@ export async function loadSkillCatalog(
       const target = resolveResourceTarget(visible, request);
       if (!target.ok) return target;
       const { entry, path } = target.value;
-      const source = sourcesById.get(entry.sourceId);
+      const source = sourceBySkill.get(entry.skill.name);
       if (!source) return err(new UnknownSkillError(entry.skill.name));
       const read = await source
         .readResource(entry.skill.name, path)
@@ -224,6 +264,8 @@ export async function loadSkillCatalog(
       return ok({ entry, resource: read.value });
     }
   };
+  catalogListings.set(catalog, goodListings);
+  return catalog;
 }
 
 /**
@@ -236,7 +278,7 @@ export function formatSkillDiagnostic(diagnostic: SkillDiagnostic): string {
     case "InvalidSkill":
       return `Skipped invalid skill ${diagnostic.location} from source "${diagnostic.sourceId}": ${diagnostic.error.message}`;
     case "SourceFailed":
-      return `${diagnostic.error.message}. Its skills were skipped.`;
+      return `${diagnostic.error.message}. ${diagnostic.keptPrevious ? "Its last listed skills were kept." : "Its skills were skipped."}`;
     case "DuplicateSkill":
       return `Duplicate skill "${diagnostic.name}" from source "${diagnostic.sourceId}" ignored; already provided by "${diagnostic.keptSourceId}".`;
   }
