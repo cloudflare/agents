@@ -121,6 +121,58 @@ describe("detached agent-tool delivery (#1752)", () => {
     expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(true);
   });
 
+  it("keeps retrying a late finish whose callback failed after a give-up (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-retry-${crypto.randomUUID()}`
+    );
+
+    agent.seedDetachedRunForTest(
+      "run-late-retry",
+      undefined,
+      undefined,
+      "onDetachedFinishFailsOnce"
+    );
+    // The child survives the give-up, then completes; its callback fails once.
+    await agent.deliverGiveUpForTest("run-late-retry", true);
+    await expect(
+      agent.deliverFinishCatchingForTest("run-late-retry", "completed", "late")
+    ).resolves.toBe("detached finish callback failed once");
+
+    // The finish is still undelivered, so the backbone must keep it.
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(true);
+    agent.expireDetachedFinishClaimForTest("run-late-retry");
+    await agent.deliverFinishForTest("run-late-retry", "completed", "late");
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
+    const delivered = (await agent.getDetachedDeliveryLog()).filter(
+      (e) => e.runId === "run-late-retry" && e.hook === "onDetachedDone"
+    );
+    expect(delivered.map((e) => e.status)).toEqual([
+      "interrupted",
+      "completed"
+    ]);
+  });
+
+  it("delivers the real result when the child finishes before the give-up cancel lands (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-race-${crypto.randomUUID()}`
+    );
+
+    const result =
+      await agent.giveUpRacingChildCompletionForTest("run-giveup-race");
+    expect(result.status).toBe("completed");
+    expect(result.log).toEqual([
+      {
+        hook: "onAgentToolFinish",
+        runId: "run-giveup-race",
+        status: "completed"
+      },
+      { hook: "onDetachedDone", runId: "run-giveup-race", status: "completed" }
+    ]);
+    expect(result.outstanding).toBe(false);
+  });
+
   it("gives up a silent detached run once its no-progress window elapses (reason: no-progress)", async () => {
     const agent = await getAgentByName(
       env.TestAgentToolReplayAgent,
