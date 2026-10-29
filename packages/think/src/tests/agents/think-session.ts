@@ -5159,8 +5159,11 @@ export class ThinkSessionTestAgent extends Think {
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const frozenPrompt = await this.context.freezeSystemPrompt();
-    return frozenPrompt || this.getSystemPrompt();
+    return this._buildBaseSystemPrompt();
+  }
+
+  async getContextReminder(): Promise<string | null> {
+    return this.context.reminder();
   }
 
   async addDynamicContext(label: string, description?: string): Promise<void> {
@@ -5227,6 +5230,10 @@ export class ThinkSystemPromptSkillsWarningAgent extends Think {
         ]
       })
     ];
+  }
+
+  async getAssembledSystemPrompt(): Promise<string> {
+    return this._buildBaseSystemPrompt();
   }
 
   async runChatTurnForWarningTest(): Promise<TestChatResult> {
@@ -5321,6 +5328,10 @@ export class ThinkWorkspaceSkillsAgent extends ThinkSessionTestAgent {
   async getTurnToolNames(): Promise<string[]> {
     return this._turnToolNames;
   }
+
+  async clearSkillHistory(): Promise<void> {
+    await this.clearMessages();
+  }
 }
 
 class ThinkClassifierTestAgent extends ThinkSessionTestAgent {
@@ -5389,8 +5400,11 @@ export class ThinkAsyncConfigSessionAgent extends Think {
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const frozenPrompt = await this.context.freezeSystemPrompt();
-    return frozenPrompt || this.getSystemPrompt();
+    return this._buildBaseSystemPrompt();
+  }
+
+  async getContextReminder(): Promise<string | null> {
+    return this.context.reminder();
   }
 }
 

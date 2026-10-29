@@ -10,7 +10,6 @@ import type {
   ThinkSystemPromptSkillsWarningAgent,
   ThinkDefaultSystemPromptSkillsAgent,
   ThinkInheritedSystemPromptSkillsAgent,
-  ThinkSystemPromptFieldSkillsAgent,
   ThinkWorkspaceSkillsAgent,
   ThinkMissingClassifierWarningAgent,
   ThinkClassifierMethodAgent,
@@ -1555,118 +1554,71 @@ describe("Think — context blocks", () => {
     expect(systemPrompt).toContain("[writable]");
   });
 
-  it("does not warn when a skills agent inherits the default getSystemPrompt", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("keeps Think's default prompt out when a skills agent does not override getSystemPrompt", async () => {
+    // Construct the intermediate class first. Agent's method wrapping mutates
+    // this prototype, which used to poison later override detection.
+    await (await freshSessionAgent("skills-default-parent")).getContextLabels();
 
-    try {
-      // Construct the intermediate class first. Agent's method wrapping mutates
-      // this prototype, which used to poison later override detection.
-      await (
-        await freshSessionAgent("skills-default-parent")
-      ).getContextLabels();
-
-      for (const name of ["skills-default-first", "skills-default-second"]) {
-        const agent = await getAgentByName(
-          env.ThinkDefaultSystemPromptSkillsAgent as unknown as DurableObjectNamespace<ThinkDefaultSystemPromptSkillsAgent>,
-          `${name}-${crypto.randomUUID()}`
-        );
-        await expect(agent.testChat("Hello")).resolves.toMatchObject({
-          done: true
-        });
-        await expect(agent.getAssembledSystemPrompt()).resolves.toContain(
-          "map-reading"
-        );
-      }
-
-      const fallbackWarnings = warn.mock.calls
-        .flat()
-        .filter(
-          (value) =>
-            typeof value === "string" &&
-            value.includes(
-              "getSystemPrompt() is only used as a fallback when no context blocks are configured"
-            )
-        );
-      expect(fallbackWarnings).toEqual([]);
-    } finally {
-      warn.mockRestore();
+    for (const name of ["skills-default-first", "skills-default-second"]) {
+      const agent = await getAgentByName(
+        env.ThinkDefaultSystemPromptSkillsAgent as unknown as DurableObjectNamespace<ThinkDefaultSystemPromptSkillsAgent>,
+        `${name}-${crypto.randomUUID()}`
+      );
+      await expect(agent.testChat("Hello")).resolves.toMatchObject({
+        done: true
+      });
+      const prompt = await agent.getAssembledSystemPrompt();
+      expect(prompt).toContain("map-reading");
+      expect(prompt).not.toContain("You are a careful, capable assistant");
     }
   });
 
-  it("warns when getSkills makes an overridden getSystemPrompt fallback-only", async () => {
+  it("puts an overridden getSystemPrompt above the skills block", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const agent = await getAgentByName(
       env.ThinkSystemPromptSkillsWarningAgent as unknown as DurableObjectNamespace<ThinkSystemPromptSkillsWarningAgent>,
-      // Unique per run: the warning fires once per instance, so a retry
-      // against a warm object would see no call.
-      `skills-system-prompt-warning-${crypto.randomUUID()}`
+      `skills-system-prompt-${crypto.randomUUID()}`
     );
 
     try {
       await expect(agent.runChatTurnForWarningTest()).resolves.toMatchObject({
         done: true
       });
-      await expect(agent.runChatTurnForWarningTest()).resolves.toMatchObject({
-        done: true
-      });
-      const fallbackWarnings = warn.mock.calls
-        .flat()
-        .filter(
-          (value) =>
-            typeof value === "string" &&
-            value.includes(
-              "getSystemPrompt() is only used as a fallback when no context blocks are configured"
-            )
-        );
-      expect(fallbackWarnings).toHaveLength(1);
+      const prompt = await agent.getAssembledSystemPrompt();
+      expect(prompt.indexOf("You are Robbie, a pirate.")).toBe(0);
+      expect(prompt).toContain("knot-tying: How to tie useful knots.");
+      expect(
+        warn.mock.calls
+          .flat()
+          .some(
+            (value) =>
+              typeof value === "string" && value.includes("getSystemPrompt()")
+          )
+      ).toBe(false);
     } finally {
       warn.mockRestore();
     }
   });
 
-  it("warns for an inherited getSystemPrompt override", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const agent = await getAgentByName(
-      env.ThinkInheritedSystemPromptSkillsAgent as unknown as DurableObjectNamespace<ThinkInheritedSystemPromptSkillsAgent>,
-      `skills-inherited-system-prompt-warning-${crypto.randomUUID()}`
-    );
-
-    try {
+  it("keeps an inherited or class-field getSystemPrompt alongside skills", async () => {
+    for (const [namespace, name] of [
+      [env.ThinkInheritedSystemPromptSkillsAgent, "skills-inherited"],
+      [env.ThinkSystemPromptFieldSkillsAgent, "skills-field"]
+    ] as const) {
+      const agent = await getAgentByName(
+        namespace as unknown as DurableObjectNamespace<ThinkInheritedSystemPromptSkillsAgent>,
+        `${name}-${crypto.randomUUID()}`
+      );
       await expect(agent.testChat("Hello")).resolves.toMatchObject({
         done: true
       });
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "getSystemPrompt() is only used as a fallback when no context blocks are configured"
-        )
-      );
-    } finally {
-      warn.mockRestore();
+      const prompt = await agent.getAssembledSystemPrompt();
+      expect(prompt.indexOf("You are an experienced cartographer.")).toBe(0);
+      expect(prompt).toContain("map-reading: How to read a map.");
     }
   });
 
-  it("warns for a getSystemPrompt class-field override", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const agent = await getAgentByName(
-      env.ThinkSystemPromptFieldSkillsAgent as unknown as DurableObjectNamespace<ThinkSystemPromptFieldSkillsAgent>,
-      `skills-field-system-prompt-warning-${crypto.randomUUID()}`
-    );
-
-    try {
-      await expect(agent.testChat("Hello")).resolves.toMatchObject({
-        done: true
-      });
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "getSystemPrompt() is only used as a fallback when no context blocks are configured"
-        )
-      );
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it("loads skills from files in the Workspace and follows edits", async () => {
+  it("loads skills from files in the Workspace and follows edits without rebuilding the prompt", async () => {
     const agent = await getAgentByName(
       env.ThinkWorkspaceSkillsAgent as unknown as DurableObjectNamespace<ThinkWorkspaceSkillsAgent>,
       `workspace-skills-${crypto.randomUUID()}`
@@ -1674,14 +1626,17 @@ describe("Think — context blocks", () => {
 
     // No skills yet: no catalog and no skill tools.
     await agent.testChat("Hello");
-    await expect(agent.getAssembledSystemPrompt()).resolves.not.toContain(
-      "Available skills"
-    );
+    const frozen = await agent.getAssembledSystemPrompt();
+    expect(frozen).toContain("No skills are available.");
     expect(await agent.getTurnToolNames()).not.toContain("activate_skill");
+    await expect(agent.getContextReminder()).resolves.toBeNull();
 
+    // A new skill reaches the model as a reminder; the frozen prompt (and
+    // the provider's prefix cache) stays the same.
     await agent.writeSkill("map-reading", "How to read a map.");
     await agent.testChat("Hello again");
-    await expect(agent.getAssembledSystemPrompt()).resolves.toContain(
+    await expect(agent.getAssembledSystemPrompt()).resolves.toBe(frozen);
+    await expect(agent.getContextReminder()).resolves.toContain(
       "- map-reading: How to read a map."
     );
     expect(await agent.getTurnToolNames()).toEqual(
@@ -1690,16 +1645,31 @@ describe("Think — context blocks", () => {
 
     await agent.writeSkill("map-reading", "How to read a nautical chart.");
     await agent.testChat("And again");
-    const edited = await agent.getAssembledSystemPrompt();
+    await expect(agent.getAssembledSystemPrompt()).resolves.toBe(frozen);
+    const edited = await agent.getContextReminder();
     expect(edited).toContain("- map-reading: How to read a nautical chart.");
     expect(edited).not.toContain("How to read a map.");
 
+    // Deleting the skill brings the catalog back to what the prompt froze.
     await agent.deleteSkill("map-reading");
     await agent.testChat("Last one");
-    await expect(agent.getAssembledSystemPrompt()).resolves.not.toContain(
-      "map-reading"
-    );
+    await expect(agent.getContextReminder()).resolves.toBeNull();
     expect(await agent.getTurnToolNames()).not.toContain("activate_skill");
+  });
+
+  it("folds a changed skills catalog into the prompt when history is cleared", async () => {
+    const agent = await getAgentByName(
+      env.ThinkWorkspaceSkillsAgent as unknown as DurableObjectNamespace<ThinkWorkspaceSkillsAgent>,
+      `workspace-skills-clear-${crypto.randomUUID()}`
+    );
+    await agent.testChat("Hello");
+    await agent.writeSkill("map-reading", "How to read a map.");
+    await agent.testChat("Hello again");
+    await agent.clearSkillHistory();
+    await expect(agent.getAssembledSystemPrompt()).resolves.toContain(
+      "- map-reading: How to read a map."
+    );
+    await expect(agent.getContextReminder()).resolves.toBeNull();
   });
 
   it("warns when reactive overflow recovery has no classifier", async () => {

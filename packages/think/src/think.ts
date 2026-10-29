@@ -12,7 +12,7 @@
  * Configuration overrides:
  *   - getModel()            — return a model id string (resolved via the
  *                             built-in workers-ai-provider) or a LanguageModel
- *   - getSystemPrompt()     — return the legacy fallback system prompt
+ *   - getSystemPrompt()     — instructions at the top of the system prompt
  *   - getTools()            — return the ToolSet for the agentic loop
  *   - maxSteps              — max tool-call rounds per turn (default: 10)
  *   - configureSession()    — compaction and search policy
@@ -2821,7 +2821,7 @@ export interface TurnInput {
  * Contains everything Think assembled — the hook can inspect and override.
  */
 export interface TurnContext {
-  /** Assembled system prompt (from context blocks or getSystemPrompt fallback). */
+  /** Assembled system prompt: an overridden `getSystemPrompt()`, then context blocks. */
   system: string;
   /**
    * Assembled model messages (truncated, pruned). When a `whenChanged:
@@ -5305,9 +5305,11 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   /**
-   * Return the fallback system prompt for the assistant.
-   * Ignored when context blocks are configured. Use `configureContext()` for
-   * always-on instructions that should coexist with context blocks or skills.
+   * Return the instructions at the top of the system prompt.
+   *
+   * An override always comes first, followed by the context blocks from
+   * `configureContext()`, skills, and extensions. Think's default text is
+   * used only when the agent overrides nothing and has no context blocks.
    */
   getSystemPrompt(): string {
     return [
@@ -5317,6 +5319,23 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       "When the task is complex, briefly state your approach and keep the user informed with concise progress updates. If you modify code, verify with the smallest relevant test, build, typecheck, lint, or runtime check available, and report any checks you could not run.",
       "Be direct and useful in your final response: summarize the outcome, mention important files or commands, and call out real blockers or risks."
     ].join("\n\n");
+  }
+
+  /**
+   * The base system prompt for a turn: an overridden `getSystemPrompt()`,
+   * then the frozen context blocks. Think's default `getSystemPrompt()` is
+   * only a fallback for an agent with no context blocks.
+   *
+   * @internal Exposed to subclasses for tests.
+   */
+  protected async _buildBaseSystemPrompt(): Promise<string> {
+    const blocks = await this.context.freezeSystemPrompt();
+    if (!isMethodOverridden(this, "getSystemPrompt")) {
+      return blocks || this.getSystemPrompt();
+    }
+    return [this.getSystemPrompt(), blocks]
+      .filter((part) => part.trim().length > 0)
+      .join("\n\n");
   }
 
   /** Return the tools available to the assistant. */
@@ -6462,23 +6481,23 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       const sources = await this.getSkills();
       if (sources.length === 0) return;
 
-      if (isMethodOverridden(this, "getSystemPrompt")) {
-        this._warnSkillsOnce(
-          "getSystemPrompt() is only used as a fallback when no context blocks are configured. getSkills() registers a skills context block, so move always-on instructions into configureContext() instead."
-        );
-      }
-
       this._skillSources = sources;
       await this._loadSkillCatalog();
 
+      // `whenChanged: "remind"` keeps the frozen system prompt (and the
+      // provider's prefix cache) stable when skills change mid-conversation.
+      // The new catalog goes out as a reminder after the cached prefix, and
+      // is folded into the system prompt at the next rebuild (compaction or
+      // clearing history).
       await this.context.addBlock({
         label: SKILLS_CONTEXT_LABEL,
         description: "Think skills: available skill catalog",
+        whenChanged: "remind",
         provider: {
-          get: async () => this._skillCatalog?.prompt() ?? null
+          get: async () =>
+            this._skillCatalog?.prompt() ?? "No skills are available."
         }
       });
-      await this._refreshSkillsPromptIfChanged();
     } catch (error) {
       console.warn(
         `[think] Failed to initialize skills; continuing without them: ${error instanceof Error ? error.message : String(error)}`
@@ -6523,32 +6542,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return null;
   }
 
-  /**
-   * The persisted skills fingerprint, read from `think_config` once per
-   * object lifetime; `null` once read and absent. Saves the per-turn probe.
-   */
-  private _skillsFingerprint: string | null | undefined;
-
-  /** Rebuild the system prompt when the catalog text changed. */
-  private async _refreshSkillsPromptIfChanged(): Promise<void> {
-    const catalog = this._skillCatalog;
-    if (!catalog) return;
-    const previous = (this._skillsFingerprint ??=
-      this._configGet("skillsFingerprint") ?? null);
-    if (previous === catalog.fingerprint) return;
-    await this.context.refreshSystemPrompt();
-    this._configSet("skillsFingerprint", catalog.fingerprint);
-    this._skillsFingerprint = catalog.fingerprint;
-  }
-
   private async _refreshSkillsIfChanged(): Promise<void> {
     if (!this._skillCatalog) return;
 
     // Sources are live (a Workspace, R2); a transient failure must not break
-    // the turn. Keep the last good catalog on error.
+    // the turn. Keep the last good catalog on error. The skills block is a
+    // reminder block, so a changed catalog reaches the model without
+    // rebuilding the frozen system prompt.
     try {
       await this._loadSkillCatalog();
-      await this._refreshSkillsPromptIfChanged();
     } catch (error) {
       console.warn(
         `[think] Failed to refresh skills; using last known catalog: ${error instanceof Error ? error.message : String(error)}`
@@ -7490,8 +7492,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           : channelDefinition.instructions
         : undefined;
 
-    const frozenPrompt = await this.context.freezeSystemPrompt();
-    const rawBaseSystem = frozenPrompt || this.getSystemPrompt();
+    const rawBaseSystem = await this._buildBaseSystemPrompt();
     const baseSystem = channelInstructions
       ? `${channelInstructions}\n\n${rawBaseSystem}`
       : rawBaseSystem;

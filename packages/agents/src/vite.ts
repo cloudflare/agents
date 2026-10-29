@@ -39,6 +39,26 @@ export default TurndownService;
   };
 }
 
+const REMOVED_SKILLS_IMPORT_MESSAGE =
+  'The "agents:skills" import has been removed. Skills are now files: store them in a Computer Workspace ' +
+  "and return skills.workspace(this.workspace) from getSkills(), or load them with skills.r2(bucket) or " +
+  "skills.manifest({ id, skills }). See https://developers.cloudflare.com/agents/skills/";
+
+// `agents:skills` used to bundle a skills directory at build time. Fail with
+// a migration message instead of Vite's generic "failed to resolve import".
+function removedSkillsImportPlugin(): Plugin {
+  return {
+    name: "agents-removed-skills-import",
+    enforce: "pre",
+    resolveId(source) {
+      if (source === "agents:skills" || source.startsWith("agents:skills/")) {
+        this.error(REMOVED_SKILLS_IMPORT_MESSAGE);
+      }
+      return null;
+    }
+  };
+}
+
 export interface AgentsPluginOptions {
   /**
    * Replace `turndown` with a diagnostic stub so `just-bash` (workspace bash
@@ -62,6 +82,7 @@ export default function agents(options: AgentsPluginOptions = {}): Plugin[] {
   const { stubTurndown = true } = options;
   return [
     ...(stubTurndown ? [turndownStubPlugin()] : []),
+    removedSkillsImportPlugin(),
     babel({
       presets: [
         {

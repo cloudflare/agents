@@ -287,8 +287,10 @@ Skills are on-demand instructions, not always-on system prompt text. The model
 sees the catalog first, then calls `activate_skill` when a user task matches a
 skill description. Use a context block from `configureContext()` for behavior
 that should apply to every turn, especially when the agent also uses skills.
-`getSystemPrompt()` is a legacy fallback and is ignored once context blocks are
-configured.
+An overridden `getSystemPrompt()` stays at the top of the system prompt, above
+the context blocks and the skills catalog. When skills change mid-conversation,
+the frozen system prompt stays the same; the new catalog reaches the model as a
+reminder until the next compaction or history clear.
 
 ### Skill script runner
 
@@ -351,7 +353,7 @@ Script execution requires a Worker Loader binding:
 | Method / Property          | Default                            | Description                                                                                                                                                                                                                  |
 | -------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `getModel()`               | throws                             | Return the `LanguageModel` to use                                                                                                                                                                                            |
-| `getSystemPrompt()`        | careful assistant operating prompt | Legacy system prompt fallback used only when no Session context blocks are configured                                                                                                                                        |
+| `getSystemPrompt()`        | careful assistant operating prompt | Instructions at the top of the system prompt, above context blocks. The default is used only with no context blocks                                                                                                          |
 | `getTools()`               | `{}`                               | AI SDK `ToolSet` for the agentic loop                                                                                                                                                                                        |
 | `getMessengers()`          | `{}`                               | Messenger ingress and delivery declarations                                                                                                                                                                                  |
 | `getScheduledTasks()`      | `{}`                               | Code-declared recurring prompts                                                                                                                                                                                              |

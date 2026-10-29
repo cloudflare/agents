@@ -206,6 +206,40 @@ describe("skill catalog", () => {
     expect(skills.fromManifest).toBe(skills.manifest);
   });
 
+  it("accepts manifests written for fromManifest", async () => {
+    const catalog = await skills.loadSkillCatalog([
+      skills.fromManifest({
+        id: "legacy",
+        fingerprint: "v1",
+        skills: [
+          {
+            name: "legacy-skill",
+            description: "Written before manifest().",
+            body: "Legacy.",
+            version: "1",
+            metadata: { revision: 2 },
+            resources: [
+              { path: "examples.md", kind: "reference", content: "Example" },
+              {
+                path: "scripts/helper.js",
+                kind: "file",
+                precompiled: true,
+                size: 3,
+                content: "x"
+              }
+            ]
+          }
+        ]
+      })
+    ]);
+    const entry = catalog.find("legacy-skill");
+    expect(entry?.skill.metadata).toEqual({ revision: "2" });
+    expect(entry?.resources.map(({ path, kind }) => [path, kind])).toEqual([
+      ["examples.md", "reference"],
+      ["scripts/helper.js", "file"]
+    ]);
+  });
+
   it("has no prompt and a stable fingerprint when there are no skills", async () => {
     const first = await skills.loadSkillCatalog([]);
     const second = await skills.loadSkillCatalog([]);

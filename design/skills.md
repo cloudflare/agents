@@ -117,10 +117,13 @@ tools and text:
 ## Think
 
 `getSkills()` returns sources. Think loads the catalog on start and again
-before every turn, registers a `think_skills` context block that renders the
-current catalog, and refreshes the frozen system prompt when the fingerprint
-changes (persisted as `skillsFingerprint` in `think_config`). A source failure
-keeps the last catalog for that turn.
+before every turn, passing the previous catalog so a failing source keeps its
+last skills. The catalog renders in a `think_skills` context block declared
+`whenChanged: "remind"`: a changed catalog does not rebuild the frozen system
+prompt (which would invalidate the provider's prompt cache). It goes to the
+model as a reminder after the cached prefix, and is folded in at the next
+rebuild (compaction or clearing history). An overridden `getSystemPrompt()`
+renders above the context blocks, so registering skills never removes it.
 
 Think used to copy sources into the Workspace (`skillWorkspace`) and bundle
 skills at build time (`agents:skills` and the Vite plugin). Both are gone:

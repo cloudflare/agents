@@ -74,8 +74,7 @@ export interface AgentThinkSubmissionStatus {
 
 /**
  * agent-think's identity and operating contract as a durable, read-only
- * context block. Unlike getSystemPrompt(), this block remains present when
- * Think adds its own skills catalog context.
+ * context block, rendered next to Think's own skills catalog context.
  */
 export function agentThinkContext(
   getContext: () => RunContext | null

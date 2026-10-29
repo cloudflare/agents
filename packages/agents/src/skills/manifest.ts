@@ -3,7 +3,8 @@ import {
   describeSkillResource,
   parseSkillResourcePath,
   type SkillResource,
-  type SkillResourceInfo
+  type SkillResourceInfo,
+  type SkillResourceKind
 } from "./resource";
 import { parseSkillFrontmatter } from "./skill";
 import {
@@ -20,6 +21,11 @@ export interface SkillManifest {
   readonly id: string;
   /** The skills, in priority order. */
   readonly skills: readonly SkillManifestEntry[];
+  /**
+   * @deprecated Ignored. Catalogs fingerprint the prompt they render, so
+   * sources no longer carry a fingerprint.
+   */
+  readonly fingerprint?: string;
 }
 
 /** One skill in a {@link SkillManifest}, written as `SKILL.md` fields. */
@@ -34,12 +40,19 @@ export interface SkillManifestEntry {
   readonly license?: string;
   /** Environment requirements. */
   readonly compatibility?: string;
-  /** String key-value metadata. */
-  readonly metadata?: Readonly<Record<string, string>>;
+  /**
+   * String key-value metadata. Scalar values are converted to strings, as
+   * in `SKILL.md`; nested values make the entry invalid.
+   */
+  readonly metadata?: Readonly<Record<string, unknown>>;
   /** Space-separated pre-approved tools. */
   readonly allowedTools?: string;
   /** Files bundled with the skill. */
   readonly resources?: readonly SkillManifestResource[];
+  /** @deprecated Ignored. */
+  readonly version?: string;
+  /** @deprecated Ignored; the entry fields define the skill. */
+  readonly rawContent?: string;
 }
 
 /** A file in a {@link SkillManifestEntry}. */
@@ -52,6 +65,12 @@ export interface SkillManifestResource {
   readonly encoding?: "text" | "base64";
   /** Overrides the MIME type inferred from the file extension. */
   readonly mimeType?: string;
+  /** Overrides the kind inferred from the top-level directory. */
+  readonly kind?: SkillResourceKind;
+  /** @deprecated Ignored; the size is the content's length. */
+  readonly size?: number;
+  /** @deprecated Ignored; scripts are always run as stored. */
+  readonly precompiled?: boolean;
 }
 
 /**
@@ -98,6 +117,7 @@ export function manifest(definition: SkillManifest): SkillSource {
       const inferred = describeSkillResource(path.value);
       const info: SkillResourceInfo = {
         ...inferred,
+        kind: resource.kind ?? inferred.kind,
         encoding: resource.encoding ?? inferred.encoding,
         ...(resource.mimeType === undefined
           ? {}

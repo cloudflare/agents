@@ -55,7 +55,7 @@ For each model run Think:
 1. Optionally waits for MCP connections (`waitForMcpConnections`).
 2. Merges tools, later sources overriding earlier ones on name collisions: workspace tools (`createAITools` from `@cloudflare/computer`, with no options), `fetchTools`, `getTools()`, compiled `getActions()`, extension tools, context tools, skill tools, MCP tools (when `includeMcpTools`), and client tool schemas.
 3. Applies the active channel's tool filter and instructions from `configureChannels()`.
-4. Builds the system prompt from the frozen context-block prompt, falling back to `getSystemPrompt()` when no context blocks are configured.
+4. Builds the system prompt from an overridden `getSystemPrompt()` followed by the frozen context-block prompt. Think's default `getSystemPrompt()` is used only when no context block renders.
 5. Assembles model messages from the Session path, with compaction overlays applied.
 6. Calls `beforeTurn(ctx)`, then extension `beforeTurn` hooks. The returned `TurnConfig` can replace the model, system prompt, or messages and add tools.
 7. Runs `streamText` with `stopWhen: stepCountIs(maxSteps)` (default 10), threading `beforeStep`, `beforeToolCall`, `afterToolCall`, `onStepFinish`, and `onChunk`.

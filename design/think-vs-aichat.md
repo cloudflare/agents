@@ -15,7 +15,7 @@ Related:
 
 **AIChatAgent is a protocol adapter.** You override `onChatMessage(onFinish, options) → Response | undefined` and are responsible for calling `streamText`, wiring tools, converting messages, and building the system prompt. AIChatAgent handles the plumbing: persistence, streaming, abort, resume, recovery, and client sync.
 
-**Think is an opinionated framework.** `getModel()` returns the model, `configureContext()` (or the `getSystemPrompt()` fallback) sets the prompt, and `getTools()` returns tools. Think runs the loop. There is no `onChatMessage` to override; you change behavior through hooks such as `beforeTurn`, `beforeStep`, and `beforeToolCall`, which fire on every entry path.
+**Think is an opinionated framework.** `getModel()` returns the model, `getSystemPrompt()` and `configureContext()` set the prompt, and `getTools()` returns tools. Think runs the loop. There is no `onChatMessage` to override; you change behavior through hooks such as `beforeTurn`, `beforeStep`, and `beforeToolCall`, which fire on every entry path.
 
 ---
 
@@ -27,7 +27,7 @@ Related:
 | ------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | **Minimal subclass**      | ~15 lines (wire `streamText`, tools, messages, prompt, response) | 3 lines (`getModel()` returning a model id string)                                    |
 | **Inference**             | `onChatMessage(onFinish, options) → Response \| undefined`       | Framework-owned; `beforeTurn` returns a `TurnConfig` to adjust it                     |
-| **System prompt**         | Inline in your `onChatMessage`                                   | `configureContext()` blocks, or `getSystemPrompt()` as a fallback                     |
+| **System prompt**         | Inline in your `onChatMessage`                                   | `getSystemPrompt()` on top, then `configureContext()` blocks                          |
 | **Tools**                 | Inline in your `onChatMessage`                                   | `getTools()` merged with workspace, action, extension, context, MCP, and client tools |
 | **Continuation flag**     | `options.continuation`                                           | `ctx.continuation` on `TurnContext`                                                   |
 | **Post-turn hook**        | `onChatResponse(result)`                                         | `onChatResponse(result)`                                                              |

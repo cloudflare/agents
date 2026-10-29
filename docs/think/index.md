@@ -397,7 +397,7 @@ path.
 | `getModel()`               | throws                           | Return a model id `string` (resolved via the bundled `workers-ai-provider` off `getAIBinding()` — a `@cf/...` id hits Workers AI, a `"provider/model"` slug routes through AI Gateway) or a `LanguageModel`                                                                                                                                                                                                                                                                                                                 |
 | `getGateway(model)`        | `undefined`                      | AI Gateway options (`id`, `metadata`, cache settings) for a string model — see [AI Gateway options](#ai-gateway-options)                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `getAIBinding()`           | `this.env.AI`                    | Workers AI binding used to resolve string models from `getModel()`                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `getSystemPrompt()`        | `"You are a helpful assistant."` | System prompt (fallback when no context blocks)                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `getSystemPrompt()`        | `"You are a helpful assistant."` | Instructions at the top of the system prompt, above context blocks. The default is used only with no context blocks                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `getTools()`               | `{}`                             | AI SDK `ToolSet` for the agentic loop                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `getScheduledTasks()`      | `{}`                             | Code-declared recurring prompts or handlers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `getScheduledTasksScope()` | `"root"`                         | Which instances arm the declared tasks — `"root"` (top-level agent only) or `"all"` (sub-agents too)                                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -544,11 +544,16 @@ Skills are not always-on system prompt text. Use a context block from
 for task-specific procedures, references, scripts, templates, and assets that
 should be loaded only when relevant.
 
-Skills register a context block of their own, and `getSystemPrompt()` is only a
-fallback for agents with no context blocks. Once `getSkills()` returns a source,
-an overridden `getSystemPrompt()` is no longer part of the prompt, and Think
-logs a one-time warning suggesting you move that text into `configureContext()`.
-Agents that keep the default `getSystemPrompt()` do not see the warning.
+Skills register a context block of their own. An overridden `getSystemPrompt()`
+stays at the top of the system prompt, above every context block, so adding
+skills never removes it.
+
+The skills block is a `whenChanged: "remind"` block. When a skill is added,
+edited, or removed mid-conversation, the frozen system prompt stays the same,
+so the model provider's prompt cache stays warm. The new catalog goes to the
+model as a reminder after the cached prefix on the next turn, and Think folds
+it into the system prompt at the next rebuild: compaction, or clearing the
+history.
 
 ### Skill script runner
 
