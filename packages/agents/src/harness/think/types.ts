@@ -418,6 +418,8 @@ export type ThinkHarnessOptions<TOOLS extends ToolSet = ToolSet> = {
    * harness uses it. Its prompt follows `system`, its tools join `tools`,
    * and the harness records on each turn's user message the prompt and
    * changes that turn was sent with (see `Context` in `agents/context`).
+   *
+   * @experimental May change before stabilizing.
    */
   readonly context?: (
     session: Session,

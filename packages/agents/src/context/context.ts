@@ -36,6 +36,8 @@ import { AgentContextProvider, type SqlProvider } from "./sqlite-provider";
  * messages from clients should treat it as server-owned (for example, list
  * it in `Sessions` `reservedMetadataKeys`), so a client cannot forge a
  * prompt.
+ *
+ * @experimental May change before stabilizing.
  */
 export const CONTEXT_METADATA_KEY = "cf_agents_context";
 
@@ -124,7 +126,7 @@ export interface BuiltContext extends PreparedContext {
  * Call {@link build} at the start of each turn, after the user message is
  * stored, and send what it returns. Use {@link project} for any later
  * request in the same turn. Block reads and writes, and the model's tools,
- * work as they do on `ContextBlocks`.
+ * are those of `ContextBlocks`.
  *
  * @experimental The API surface may change before stabilizing.
  */
@@ -147,11 +149,9 @@ export class Context {
         ? (label: string) =>
             new AgentContextProvider(storageSql(storage), key(label))
         : undefined);
-    this.#blocks = new ContextBlocks(
-      [...(options.blocks ?? [])],
-      undefined,
+    this.#blocks = new ContextBlocks([...(options.blocks ?? [])], {
       defaultProvider
-    );
+    });
     const stateStore = defaultProvider?.(STATE_LABEL);
     this.#stateStore = isWritableProvider(stateStore) ? stateStore : undefined;
   }

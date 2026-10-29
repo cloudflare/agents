@@ -111,7 +111,7 @@ A model write needs no reminder: the tool call that made it is in the transcript
 
 ## Without a session
 
-`ContextBlocks` is the same set of blocks with no session. It keeps the frozen prompt in memory, or in a `promptStore` you pass, and is what `Context` is built on.
+`ContextBlocks` is the blocks and their tools with no session and no prompt state: `renderSystemPrompt()` renders the blocks as they stand now and stores nothing. `Context` is built on it. A host that needs the prompt to stay the same across turns should use `Context`, which records it in the session.
 
 ## Harnesses
 

@@ -341,7 +341,7 @@ Script execution requires a Worker Loader binding:
 | --------------------------------------- | ------------------------------------------------------------- |
 | `@cloudflare/think`                     | `Think`, `Session` — main class + re-exports                  |
 | `agents/sessions`                       | `Sessions`, `Session`, `createCompactFunction`, attachments   |
-| `agents/context`                        | `ContextBlocks`, providers, `ContextConfig` — prompt assembly |
+| `agents/context`                        | `Context`, providers, `ContextConfig` — prompt context        |
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
 | `@cloudflare/think/tools/fetch`         | `createFetchTools()` — opt-in allowlisted HTTP reads          |

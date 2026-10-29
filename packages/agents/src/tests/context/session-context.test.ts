@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  AgentSearchProvider,
   CONTEXT_METADATA_KEY,
   Context,
-  type ContextConfig
+  SEARCH_CONTEXT_TOOL,
+  SET_CONTEXT_TOOL,
+  type ContextConfig,
+  type SqlProvider
 } from "../../context";
 import { Sessions, type Session, type SessionMessage } from "../../sessions";
 import { withCapabilityHarness } from "../shared/capability-harness";
@@ -12,6 +16,28 @@ import { withCapabilityHarness } from "../shared/capability-harness";
  * prompt the model was sent and the changes delivered after it, and each
  * request is a projection of that record.
  */
+
+/** A context tool's executor, called as the model would call it. */
+type ToolFn = { execute: (input: Record<string, unknown>) => Promise<string> };
+
+async function callTool(
+  context: Context,
+  name: string,
+  input: Record<string, unknown>
+): Promise<string> {
+  const tools = await context.tools();
+  return (tools[name] as unknown as ToolFn).execute(input);
+}
+
+/** The tagged-template SQL the search provider takes, over DO storage. */
+function storageSql(storage: DurableObjectStorage): SqlProvider {
+  return {
+    sql: <T>(
+      strings: TemplateStringsArray,
+      ...values: (string | number | boolean | null)[]
+    ) => [...storage.sql.exec(strings.join("?"), ...values)] as T[]
+  };
+}
 
 function user(id: string, text: string): SessionMessage {
   return { id, role: "user", parts: [{ type: "text", text }] };
@@ -251,6 +277,74 @@ describe("Context", () => {
       expect(JSON.stringify((await session.getMessage("u1"))?.metadata)).toBe(
         recorded
       );
+    });
+  });
+
+  it("lets the model index and search a searchable block", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        {
+          label: "notes",
+          description: "Things worth looking up later",
+          provider: new AgentSearchProvider(storageSql(storage))
+        }
+      ]);
+      await session.appendMessage(user("u1", "remember this"));
+      const first = await context.build();
+      expect(first.system).toContain(
+        "NOTES (Things worth looking up later) [searchable]"
+      );
+
+      expect(
+        await callTool(context, SET_CONTEXT_TOOL, {
+          label: "notes",
+          content: "Durable Objects keep SQLite next to compute.",
+          metadata: { title: "storage" }
+        })
+      ).toBe('Indexed "storage" in notes.');
+      expect(
+        await callTool(context, SEARCH_CONTEXT_TOOL, {
+          label: "notes",
+          query: "SQLite"
+        })
+      ).toContain("Durable Objects keep SQLite next to compute.");
+      expect(
+        await callTool(context, SEARCH_CONTEXT_TOOL, {
+          label: "notes",
+          query: "Kubernetes"
+        })
+      ).toBe("No results found.");
+
+      expect(await context.refreshSystemPrompt()).toContain(
+        "1 entries indexed."
+      );
+    });
+  });
+
+  it("refuses writes to read-only blocks and past a block's token budget", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s), [
+        { label: "memory", description: "Learned facts", maxTokens: 5 }
+      ]);
+      await session.appendMessage(user("u1", "hello"));
+      await context.build();
+
+      await expect(context.setBlock("soul", "Be rude.")).rejects.toThrow(
+        /readonly/
+      );
+      expect(
+        await callTool(context, SET_CONTEXT_TOOL, {
+          label: "memory",
+          content: "a fact far too long for a five token budget to hold"
+        })
+      ).toMatch(/^Error: .*exceeds maxTokens/);
+      expect(
+        await callTool(context, SET_CONTEXT_TOOL, {
+          label: "memory",
+          content: "tea"
+        })
+      ).toMatch(/^Written to memory/);
+      expect(context.getBlock("memory")?.content).toBe("tea");
     });
   });
 
