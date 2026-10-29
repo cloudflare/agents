@@ -163,8 +163,6 @@ export class ThinkAgent extends ThinkBase {
   override storeMessages = true;
   override storeTools = true;
 
-  override skillWorkspace = { root: "/workspace/.agents/skills" };
-
   readonly #workspaceAgent: DurableObjectStub<WorkspaceAgent>;
   #workspaceReady: Promise<RemoteWorkspace> | null = null;
   #context: RunContext | null = null;

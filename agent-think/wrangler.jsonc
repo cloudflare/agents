@@ -61,7 +61,7 @@
     ]
   },
 
-  // Skills mounted read-only into every Workspace at /workspace/.agents.
+  // Skills served to the model through Think's R2 skill source.
   // Seed with `npm run seed:r2` (uploads skills/**/SKILL.md under `.agents/`).
   "r2_buckets": [
     {

@@ -3,17 +3,23 @@ import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
 import type { ToolProvider } from "@cloudflare/codemode";
 import { Bash, defineCommand } from "just-bash";
 import type { ToolSet } from "ai";
+import { extensionOf, parseSkillResourcePath } from "./resource";
 import type {
+  SkillScriptContext,
   SkillScriptRequest,
-  SkillScriptRunner,
-  SkillScriptContext
-} from "./types";
-import { validateSkillResourcePath } from "./types";
+  SkillScriptRunner
+} from "./script";
 import {
   createSkillWorkspaceAccess,
-  type SkillWorkspace,
+  type SkillScriptWorkspace,
   type SkillWorkspaceAccess
-} from "./workspace";
+} from "./script-workspace";
+import { formatSkill } from "./skill";
+
+// TODO: Prefer storing skills in a `@cloudflare/computer` Workspace and
+// running their scripts through the Workspace runtime (the agent's shell).
+// This runner stays for skills served from R2 or a manifest until Computer
+// covers those cases.
 
 /**
  * Options for {@link runner}.
@@ -26,7 +32,7 @@ export interface WorkerSkillScriptRunnerOptions {
   timeout?: number;
   network?: boolean;
   workspace?: "none" | "read" | "read-write";
-  workspaceInstance?: SkillWorkspace;
+  workspaceInstance?: SkillScriptWorkspace;
   tools?: ToolSet | (() => ToolSet | Promise<ToolSet>);
 }
 
@@ -50,12 +56,6 @@ const SUPPORTED_SCRIPT_EXTENSIONS = new Set([
 // Logged once per isolate the first time a skill script actually runs.
 let runnerExperimentalWarned = false;
 
-function extensionOf(path: string): string {
-  const file = path.split("/").at(-1) ?? path;
-  const index = file.lastIndexOf(".");
-  return index === -1 ? "" : file.slice(index).toLowerCase();
-}
-
 function effectiveTimeout(options: WorkerSkillScriptRunnerOptions): number {
   return options.timeout ?? DEFAULT_SCRIPT_TIMEOUT_MS;
 }
@@ -67,7 +67,7 @@ function effectiveWorkspaceAccess(
   return options.workspaceInstance ? "read" : "none";
 }
 
-export function validateSkillScriptPath(path: string):
+function parseSkillScriptPath(path: string):
   | {
       ok: true;
       runtime: SkillScriptRuntime;
@@ -83,11 +83,7 @@ export function validateSkillScriptPath(path: string):
     };
   }
 
-  if (
-    path.startsWith("/") ||
-    path.includes("\0") ||
-    path.split("/").some((part) => part === "" || part === "." || part === "..")
-  ) {
+  if (!parseSkillResourcePath(path).ok) {
     return {
       ok: false,
       error: `Skill script path must be a normalized relative path under "scripts/": ${path}`
@@ -116,8 +112,8 @@ export function validateSkillScriptPath(path: string):
 
 function validateMountedResourcePaths(request: SkillScriptRequest): void {
   for (const resource of request.resources ?? []) {
-    const pathError = validateSkillResourcePath(resource.path);
-    if (pathError) throw new Error(pathError);
+    const path = parseSkillResourcePath(resource.path);
+    if (!path.ok) throw path.error;
   }
 }
 
@@ -126,12 +122,14 @@ function skillScriptContext(request: SkillScriptRequest): SkillScriptContext {
     skill: {
       name: request.skill.name,
       description: request.skill.description,
-      compatibility: request.skill.compatibility,
-      license: request.skill.license,
-      allowedTools: request.skill.allowedTools,
+      ...(request.skill.license === undefined
+        ? {}
+        : { license: request.skill.license }),
+      ...(request.skill.compatibility === undefined
+        ? {}
+        : { compatibility: request.skill.compatibility }),
       metadata: request.skill.metadata,
-      sourceId: request.skill.sourceId,
-      version: request.skill.version
+      allowedTools: request.skill.allowedTools
     }
   };
 }
@@ -188,14 +186,14 @@ function mountedFiles(request: SkillScriptRequest): Record<
       encoding: "text"
     },
     "/skill/SKILL.md": {
-      content: request.skill.rawContent ?? request.skill.body,
+      content: formatSkill(request.skill),
       encoding: "text"
     }
   };
 
   for (const resource of request.resources ?? []) {
-    const pathError = validateSkillResourcePath(resource.path);
-    if (pathError) throw new Error(pathError);
+    const path = parseSkillResourcePath(resource.path);
+    if (!path.ok) throw path.error;
     files[`/skill/${resource.path}`] = {
       content: resource.content,
       encoding: resource.encoding ?? "text"
@@ -216,13 +214,13 @@ function bashFiles(
     "/input.json": JSON.stringify(request.input),
     "/context.json": JSON.stringify(skillScriptContext(request)),
     "/skill-script.sh": request.source,
-    "/skill/SKILL.md": request.skill.rawContent ?? request.skill.body,
+    "/skill/SKILL.md": formatSkill(request.skill),
     [`/skill/${request.path}`]: request.source
   };
 
   for (const resource of request.resources ?? []) {
-    const pathError = validateSkillResourcePath(resource.path);
-    if (pathError) throw new Error(pathError);
+    const path = parseSkillResourcePath(resource.path);
+    if (!path.ok) throw path.error;
     files[`/skill/${resource.path}`] =
       (resource.encoding ?? "text") === "base64"
         ? base64ToBytes(resource.content)
@@ -318,46 +316,29 @@ function rewriteBundledSource(source: string): string {
   return stripped;
 }
 
-async function prepareJavaScriptSource(
+const RELATIVE_IMPORT =
+  /(?:\bimport\s[^;]*?\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)["']\.\.?\//;
+
+/**
+ * Skill scripts run directly in the sandbox; there is no in-Worker bundler.
+ * A script must be one self-contained JavaScript module: TypeScript and
+ * scripts that import sibling files must be compiled before they are stored.
+ * esbuild's `export { run as default }` output is normalized into the
+ * `__skillRun` binding the wrapper expects.
+ */
+function prepareJavaScriptSource(
   request: SkillScriptRequest,
   runtime: "javascript" | "typescript"
-): Promise<string> {
-  // Skill scripts run directly in the sandbox; the runtime ships no in-Worker
-  // bundler. Build-time compiled scripts (Agents Vite plugin / `compileSkillScript`
-  // from "agents/skills/compile") arrive as self-contained ESM. Normalize
-  // esbuild's `export { run as default }` (or a raw `export default`) into the
-  // `__skillRun` binding the wrapper expects.
-  const entryPrecompiled = (request.resources ?? []).some(
-    (resource) =>
-      resource.path === request.path && resource.precompiled === true
-  );
-  if (entryPrecompiled) return rewriteBundledSource(request.source);
-
-  // Count sibling script files to detect skills that span multiple modules.
-  let scriptFileCount = 1;
-  for (const resource of request.resources ?? []) {
-    if (resource.path === request.path) continue;
-    const extension = extensionOf(resource.path);
-    if (
-      resource.kind === "script" &&
-      (resource.encoding ?? "text") === "text" &&
-      [".js", ".mjs", ".ts", ".tsx"].includes(extension)
-    ) {
-      scriptFileCount++;
-    }
-  }
-
-  // Plain single-file JavaScript runs as-is. Anything that needs compiling
-  // (TypeScript, or a skill split across multiple modules) must be bundled
-  // ahead of time — there is no runtime bundler to fall back to.
-  if (runtime === "javascript" && scriptFileCount === 1) {
-    return request.source;
+): string {
+  if (runtime === "javascript" && !RELATIVE_IMPORT.test(request.source)) {
+    return /^\s*export\s+default\s+/m.test(request.source)
+      ? request.source
+      : rewriteBundledSource(request.source);
   }
 
   throw new Error(
     `Skill script "${request.path}" must be compiled to a self-contained JavaScript module before it can run. ` +
-      "Bundled skills are compiled automatically by the Agents Vite plugin. Skills served from R2 or other dynamic " +
-      'sources must be bundled ahead of time (e.g. with `compileSkillScript` from "agents/skills/compile") before upload.'
+      "Bundle TypeScript or multi-file scripts (for example with esbuild) before storing the skill."
   );
 }
 
@@ -413,7 +394,7 @@ class SkillScriptHostBridge extends RpcTarget {
 
   constructor(
     tools: ToolSet | undefined,
-    workspace: SkillWorkspace | undefined,
+    workspace: SkillScriptWorkspace | undefined,
     workspaceAccess: WorkspaceAccess
   ) {
     super();
@@ -1013,7 +994,7 @@ async function runJavaScriptScript(
     );
   }
 
-  const source = await prepareJavaScriptSource(request, runtime);
+  const source = prepareJavaScriptSource(request, runtime);
   const executor = new DynamicWorkerExecutor({
     loader: options.loader,
     timeout: effectiveTimeout(options),
@@ -1070,7 +1051,7 @@ export function runner(
         typeof options.tools === "function"
           ? await options.tools()
           : options.tools;
-      const validation = validateSkillScriptPath(request.path);
+      const validation = parseSkillScriptPath(request.path);
       if (!validation.ok) throw new Error(validation.error);
       validateMountedResourcePaths(request);
 

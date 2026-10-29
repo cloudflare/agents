@@ -118,13 +118,13 @@ Think speaks the same protocol as `AIChatAgent`; the constants are `CHAT_MESSAGE
 
 ### One conversation per instance
 
-A Think instance holds one conversation on the default Sessions handle. Multi-chat products compose Durable Objects: a per-user directory owns the chat list and shared resources (workspace, MCP), and each conversation is its own Think instance. `examples/assistant` implements this with facet children; [rfc-user-chat-durable-objects.md](./rfc-user-chat-durable-objects.md) records the accepted move to top-level chat Durable Objects. The user guide is [`docs/think/multi-chat.md`](../docs/think/multi-chat.md).
+A Think instance holds one conversation on the default Sessions handle. Multi-chat products compose Durable Objects: a per-user directory owns the chat list and shared resources (workspace, MCP), and each conversation is its own Think instance. The former `examples/assistant` implemented this with facet children; [rfc-user-chat-durable-objects.md](./rfc-user-chat-durable-objects.md) records the accepted move to top-level chat Durable Objects. The user guide is [`docs/think/multi-chat.md`](../docs/think/multi-chat.md).
 
 ## Tools
 
 ### Workspace
 
-`this.workspace` is typed `ThinkWorkspace`, which needs only `workspace.fs`. By default it is a `Workspace` from `@cloudflare/computer` over the object's SQLite, with no execution backends; a subclass can assign its own, for example one with backends, or a client from `getWorkspace(parentStub)` for a parent-owned workspace. Think's internals (media eviction, skills projection, fetch spill, extension host functions) go through one adapter over `workspace.fs`, and Think writes its own files under `/workspace`. Computer's workspace tools (`read`, `ls`, `find`, `grep`, `write`, `edit`, `delete`, plus `exec` when the Workspace has backends and `publish` when it has assets) are merged into every turn. There is no Think option for them: a same-name tool from `getTools()` replaces a built-in, and `activeTools` from `beforeTurn` hides tools for a turn. Every Think agent implements `__getWorkspaceStub()`, so `getWorkspace(stub)` and the Worker shell backend can reach a Workspace it owns.
+`this.workspace` is typed `ThinkWorkspace`, which needs only `workspace.fs`. By default it is a `Workspace` from `@cloudflare/computer` over the object's SQLite, with no execution backends; a subclass can assign its own, for example one with backends, or a client from `getWorkspace(parentStub)` for a parent-owned workspace. Think's internals (media eviction, fetch spill, extension host functions) go through one adapter over `workspace.fs`, and Think writes its own files under `/workspace`. Computer's workspace tools (`read`, `ls`, `find`, `grep`, `write`, `edit`, `delete`, plus `exec` when the Workspace has backends and `publish` when it has assets) are merged into every turn. There is no Think option for them: a same-name tool from `getTools()` replaces a built-in, and `activeTools` from `beforeTurn` hides tools for a turn. Every Think agent implements `__getWorkspaceStub()`, so `getWorkspace(stub)` and the Worker shell backend can reach a Workspace it owns.
 
 ### Code execution (`@cloudflare/think/tools/execute`)
 
@@ -163,7 +163,7 @@ These have their own user docs under `docs/think/`:
 - **Channels and messengers**: per-surface policy (`configureChannels()`) and Chat SDK webhook ingress with durable reply delivery.
 - **Scheduled tasks**: `getScheduledTasks()` reconciled into `cf_think_scheduled_tasks` on startup, on the root agent only unless `getScheduledTasksScope()` returns `"all"`.
 - **Agent tools**: running Think or `AIChatAgent` children as tools, with run state in `cf_agent_tool_child_runs` and `cf_agent_tool_milestones`. See [agent-tools.md](./agent-tools.md).
-- **Skills**: `getSkills()` and `getSkillScriptRunner()` over `agents/skills`. See [skills.md](./skills.md).
+- **Skills**: `getSkills()` and `getSkillScriptRunner()` over `agents/skills`; `skills.workspace(this.workspace)` reads skills from Workspace files. See [skills.md](./skills.md).
 
 ### Reply attachments (`ctx.attachReply`)
 

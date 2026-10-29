@@ -234,5 +234,5 @@ class MyAgent extends Think<Env> {
 ## Open directions
 
 - **Think-specific client features.** Branch navigation, compaction status, and context-block display have server APIs but no dedicated client helpers yet.
-- **Multi-chat helpers.** Both classes use the same composition for many chats per user. `useChats()` and the directory remain example code (`examples/assistant`, `examples/next/routing`); see [rfc-user-chat-durable-objects.md](./rfc-user-chat-durable-objects.md) and [`docs/think/multi-chat.md`](../docs/think/multi-chat.md).
+- **Multi-chat helpers.** Both classes use the same composition for many chats per user. `useChats()` and the directory remain example code (`examples/next/routing`, and the former `examples/assistant`); see [rfc-user-chat-durable-objects.md](./rfc-user-chat-durable-objects.md) and [`docs/think/multi-chat.md`](../docs/think/multi-chat.md).
 - **More shared layer.** Capabilities that both classes need move into `agents/chat` rather than into one class.

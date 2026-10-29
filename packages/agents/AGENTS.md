@@ -35,8 +35,8 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/ai-chat-agent`                    | `src/ai-chat-agent.ts`                        | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                                                                                           |
 | `agents/ai-react`                         | `src/ai-react.tsx`                            | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                                                                                          |
 | `agents/tsconfig`                         | `agents.tsconfig.json`                        | Shared TypeScript config for all projects in the repo                                                                                         |
-| `agents/vite`                             | `src/vite.ts`                                 | Vite plugin — decorator transforms and the `agents:skills` import transform                                                                   |
-| `agents/skills`                           | `src/skills/index.ts`                         | Framework-agnostic Agent Skills engine — sources, `SkillRegistry`, runner                                                                     |
+| `agents/vite`                             | `src/vite.ts`                                 | Vite plugin — TC39 decorator transforms and the `turndown` stub                                                                               |
+| `agents/skills`                           | `src/skills/index.ts`                         | Agent Skills — `SKILL.md` parser, Workspace/R2/manifest sources, catalog, runner                                                              |
 | `agents/experimental/webmcp`              | `src/experimental/webmcp.ts`                  | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`                                                                       |
 | `agents/browser`                          | `src/browser/index.ts`                        | `Browser`, `browserRun()`, `BrowserSession`, CDP helpers, Quick Action primitives, deprecated `BrowserConnector` (needs codemode)             |
 | `agents/browser/ai`                       | `src/browser/ai.ts`                           | Deprecated AI SDK tools — `createBrowserTools` (codemode) + `createQuickActionTools`                                                          |
@@ -67,7 +67,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/experimental/channels/web/client` | `src/experimental/channels/web/client.ts`     | Browser client for the Web Channel                                                                                                            |
 | `agents/experimental/channels/web/ai-sdk` | `src/experimental/channels/web/ai-sdk.ts`     | AI SDK ChatTransport over the Web Channel                                                                                                     |
 
-The `agents:skills` virtual-module types ship from `skills-module.d.ts` (referenced from the built `dist/index.d.ts`); `@cloudflare/think` consumes `agents/skills` and `@cloudflare/ai-chat` can too.
+`@cloudflare/think` and the pi harness (`agents/harness/pi`) consume `agents/skills`.
 
 ## Source layout
 
@@ -171,13 +171,19 @@ src/
       models/           #   language.ts, fallback.ts, image.ts
       wires/            #   chat-completions.ts, responses.ts, anthropic.ts, shared.ts (pi's own converters)
 
-  skills/               # Framework-agnostic Agent Skills engine
-    index.ts            # Barrel — sources, registry, runner, types
-    types.ts            # SkillSource, SkillRegistrySnapshot, SkillRunContext, etc.
-    frontmatter.ts      # SKILL.md YAML frontmatter parser
-    registry.ts         # SkillRegistry — catalog prompt + activation tools
-    manifest.ts         # fromManifest() source (bundled skills)
+  skills/               # Agent Skills (https://agentskills.io)
+    index.ts            # Package entry
+    skill.ts            # Spec-strict SKILL.md parser (parseSkill, SkillName)
+    resource.ts         # Resource paths, kinds, encodings
+    result.ts           # SkillResult — expected failures as values
+    source.ts           # SkillSource port, listings, shared directory indexer
+    workspace.ts        # workspace() source (Computer Workspace, read live)
     r2.ts               # r2() source (read-only R2-backed skills)
+    manifest.ts         # manifest() source (skills defined in code; fromManifest alias)
+    catalog.ts          # loadSkillCatalog — merge sources, prompt, activation
+    ai-sdk.ts           # createSkillTools — AI SDK tools for a catalog
+    script.ts           # Script runner types
+    script-workspace.ts # Workspace access for running scripts
     runner.ts           # Experimental script runner + single capability bridge
 
   experimental/         # Experimental features (published but unstable)
@@ -300,8 +306,7 @@ checks are serial and stay outside the default test target.
 pnpm run test:node      # or: pnpm exec vitest --project node
 ```
 
-Plain Node.js tests for package entry-point bundle isolation and the Vite skills
-plugin.
+Plain Node.js tests for package entry-point bundle isolation.
 
 ### WebMCP tests (`src/webmcp-tests/`)
 

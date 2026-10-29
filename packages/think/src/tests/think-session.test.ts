@@ -11,6 +11,7 @@ import type {
   ThinkDefaultSystemPromptSkillsAgent,
   ThinkInheritedSystemPromptSkillsAgent,
   ThinkSystemPromptFieldSkillsAgent,
+  ThinkWorkspaceSkillsAgent,
   ThinkMissingClassifierWarningAgent,
   ThinkClassifierMethodAgent,
   ThinkInheritedClassifierAgent,
@@ -1663,6 +1664,42 @@ describe("Think — context blocks", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("loads skills from files in the Workspace and follows edits", async () => {
+    const agent = await getAgentByName(
+      env.ThinkWorkspaceSkillsAgent as unknown as DurableObjectNamespace<ThinkWorkspaceSkillsAgent>,
+      `workspace-skills-${crypto.randomUUID()}`
+    );
+
+    // No skills yet: no catalog and no skill tools.
+    await agent.testChat("Hello");
+    await expect(agent.getAssembledSystemPrompt()).resolves.not.toContain(
+      "Available skills"
+    );
+    expect(await agent.getTurnToolNames()).not.toContain("activate_skill");
+
+    await agent.writeSkill("map-reading", "How to read a map.");
+    await agent.testChat("Hello again");
+    await expect(agent.getAssembledSystemPrompt()).resolves.toContain(
+      "- map-reading: How to read a map."
+    );
+    expect(await agent.getTurnToolNames()).toEqual(
+      expect.arrayContaining(["activate_skill", "read_skill_resource"])
+    );
+
+    await agent.writeSkill("map-reading", "How to read a nautical chart.");
+    await agent.testChat("And again");
+    const edited = await agent.getAssembledSystemPrompt();
+    expect(edited).toContain("- map-reading: How to read a nautical chart.");
+    expect(edited).not.toContain("How to read a map.");
+
+    await agent.deleteSkill("map-reading");
+    await agent.testChat("Last one");
+    await expect(agent.getAssembledSystemPrompt()).resolves.not.toContain(
+      "map-reading"
+    );
+    expect(await agent.getTurnToolNames()).not.toContain("activate_skill");
   });
 
   it("warns when reactive overflow recovery has no classifier", async () => {
