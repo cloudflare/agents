@@ -22,6 +22,10 @@ export interface SkillToolsOptions {
  * Build AI SDK tools for a catalog: `activate_skill`, `read_skill_resource`,
  * and, with a script runner, `run_skill_script`.
  *
+ * Failures are thrown, so the AI SDK returns them to the model as tool
+ * errors. Activating a skill whose `SKILL.md` failed validation fails with
+ * the validation error.
+ *
  * @param catalog - The catalog to expose. Build tools again after reloading it.
  * @param options - Optional script runner.
  * @returns The tools, or an empty set when the catalog has no skills.
@@ -30,7 +34,12 @@ export function createSkillTools(
   catalog: SkillCatalog,
   options: SkillToolsOptions = {}
 ): ToolSet {
-  const names = catalog.skills.map((entry) => entry.skill.name);
+  // Invalid skills are offered too, so activating one reports why it is
+  // broken instead of the model being unable to name it.
+  const names = [
+    ...catalog.skills.map((entry) => entry.skill.name),
+    ...catalog.invalid.map((entry) => entry.name)
+  ];
   const [first, ...rest] = names;
   if (first === undefined) return {};
   const nameSchema = z.enum([first, ...rest]);
@@ -42,7 +51,9 @@ export function createSkillTools(
       inputSchema: z.object({ name: nameSchema }),
       execute: async ({ name }) => {
         const activated = catalog.activate(name);
-        return activated.ok ? activated.value : activated.error.message;
+        // Thrown errors reach the model as a tool error, with this message.
+        if (!activated.ok) throw activated.error;
+        return activated.value;
       }
     }),
     read_skill_resource: tool({
@@ -56,7 +67,8 @@ export function createSkillTools(
         const read = await catalog.readResource(
           name === undefined ? { path } : { name, path }
         );
-        return read.ok ? renderSkillResource(read.value) : read.error.message;
+        if (!read.ok) throw read.error;
+        return renderSkillResource(read.value);
       }
     })
   };
@@ -73,13 +85,13 @@ export function createSkillTools(
       }),
       execute: async ({ name, path, input }) => {
         const script = await catalog.readResource({ name, path });
-        if (!script.ok) return script.error.message;
+        if (!script.ok) throw script.error;
         const { entry, resource } = script.value;
         if (resource.kind !== "script") {
-          return `Resource is not a script: ${name}/${path}`;
+          throw new Error(`Resource is not a script: ${name}/${path}`);
         }
         if (resource.encoding !== "text") {
-          return `Script resource must be text: ${name}/${path}`;
+          throw new Error(`Script resource must be text: ${name}/${path}`);
         }
 
         const files: SkillScriptFile[] = [];
@@ -104,7 +116,10 @@ export function createSkillTools(
             resources: files
           });
         } catch (error) {
-          return `Skill script failed: ${error instanceof Error ? error.message : String(error)}`;
+          throw new Error(
+            `Skill script failed: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error }
+          );
         }
       }
     });

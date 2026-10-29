@@ -24,8 +24,14 @@ import {
 export interface SkillCatalog {
   /** Changes whenever {@link prompt} would change. */
   readonly fingerprint: string;
-  /** Skills the model may activate, in source priority order. */
+  /** Valid skills the model may activate, in source priority order. */
   readonly skills: readonly SkillCatalogEntry[];
+  /**
+   * Skills whose `SKILL.md` failed validation. They are listed in the
+   * prompt and accepted by the tools, so activating one returns its
+   * validation error and the model (or the skill's author) can fix it.
+   */
+  readonly invalid: readonly InvalidSkillCatalogEntry[];
   /** Problems found while loading: invalid skills, failed sources, duplicates. */
   readonly diagnostics: readonly SkillDiagnostic[];
   /**
@@ -45,8 +51,12 @@ export interface SkillCatalog {
    * Render a skill's instructions and resource list for the model.
    *
    * @param name - Skill name.
+   * @returns The instructions, `InvalidSkillError` when the skill's
+   * `SKILL.md` failed validation, or `UnknownSkillError`.
    */
-  activate(name: string): SkillResult<string, UnknownSkillError>;
+  activate(
+    name: string
+  ): SkillResult<string, UnknownSkillError | InvalidSkillError>;
   /**
    * Read a bundled file.
    *
@@ -71,6 +81,18 @@ export interface SkillCatalogEntry {
   readonly location?: string;
 }
 
+/** A skill whose `SKILL.md` failed validation. */
+export interface InvalidSkillCatalogEntry {
+  /** The name the skill is offered under, usually its directory. */
+  readonly name: string;
+  /** Id of the source that listed it. */
+  readonly sourceId: string;
+  /** Where the broken `SKILL.md` lives. */
+  readonly location: string;
+  /** Every rule it broke. */
+  readonly error: SkillParseError;
+}
+
 /** A resource read through a {@link SkillCatalog}. */
 export interface SkillCatalogResource {
   /** The skill that owns the resource. */
@@ -82,6 +104,7 @@ export interface SkillCatalogResource {
 /** Why {@link SkillCatalog.readResource} failed. */
 export type SkillResourceError =
   | UnknownSkillError
+  | InvalidSkillError
   | InvalidSkillResourcePathError
   | SkillResourceNotFoundError
   | SkillSourceError;
@@ -89,7 +112,10 @@ export type SkillResourceError =
 /** A problem found while loading a catalog. Never fatal. */
 export type SkillDiagnostic =
   | {
-      /** A `SKILL.md` broke a spec rule and was skipped. */
+      /**
+       * A `SKILL.md` failed validation. It is still offered to the model,
+       * which gets the error when it activates the skill.
+       */
       readonly _tag: "InvalidSkill";
       readonly sourceId: string;
       readonly location: string;
@@ -104,13 +130,6 @@ export type SkillDiagnostic =
       readonly sourceId: string;
       readonly error: SkillSourceError;
       readonly keptPrevious: boolean;
-    }
-  | {
-      /** A skill breaks a spec rule but was loaded anyway. */
-      readonly _tag: "SkillWarning";
-      readonly sourceId: string;
-      readonly name: string;
-      readonly error: SkillParseError;
     }
   | {
       /** A later source listed a name an earlier source already provided. */
@@ -129,6 +148,29 @@ export class UnknownSkillError extends Error {
   constructor(readonly skill: string) {
     super(`Skill not found: ${skill}`);
     this.name = "UnknownSkillError";
+  }
+}
+
+/** A skill's `SKILL.md` failed validation, so it cannot be used. */
+export class InvalidSkillError extends Error {
+  /** Stable tag for narrowing. */
+  readonly _tag = "InvalidSkillError" as const;
+
+  /**
+   * @param skill - The skill's name.
+   * @param location - Where its `SKILL.md` lives.
+   * @param cause - The validation error, with every broken rule.
+   */
+  constructor(
+    readonly skill: string,
+    readonly location: string,
+    readonly cause: SkillParseError
+  ) {
+    super(
+      `Skill "${skill}" failed validation, so it cannot be used. Fix ${location}: ${cause.message}`,
+      { cause }
+    );
+    this.name = "InvalidSkillError";
   }
 }
 
@@ -155,9 +197,11 @@ const catalogListings = new WeakMap<
 /**
  * Load every source and merge them into a catalog.
  *
- * Sources apply in order: the first source to list a name wins. A failing
- * source or an invalid skill becomes a diagnostic instead of an error, so
- * one bad source never hides the others. Skills that set
+ * Sources apply in order: the first source to list a name wins, whether
+ * its skill is valid or not. A failing source becomes a diagnostic instead
+ * of an error, so one bad source never hides the others. A skill whose
+ * `SKILL.md` fails validation stays in the catalog as `invalid`: activating
+ * it returns the validation error. Skills that set
  * `disable-model-invocation: true` are left out.
  *
  * @param sources - Skill sources in priority order.
@@ -186,6 +230,24 @@ export async function loadSkillCatalog(
 
   const diagnostics: SkillDiagnostic[] = [];
   const entries = new Map<string, SkillCatalogEntry>();
+  const broken = new Map<string, InvalidSkillCatalogEntry>();
+  // A name is claimed by the first source that lists it, valid or not: a
+  // broken override should surface its error, not fall back silently.
+  const claimedBy = new Map<string, string>();
+  function claim(name: string, sourceId: string): boolean {
+    const existing = claimedBy.get(name);
+    if (existing !== undefined) {
+      diagnostics.push({
+        _tag: "DuplicateSkill",
+        name,
+        sourceId,
+        keptSourceId: existing
+      });
+      return false;
+    }
+    claimedBy.set(name, sourceId);
+    return true;
+  }
   // Resources are read from the source object that listed the skill, not
   // looked up by id, because two sources may share an id.
   const sourceBySkill = new Map<string, SkillSource>();
@@ -207,25 +269,8 @@ export async function loadSkillCatalog(
       listing = fallback;
     }
     goodListings.set(source, listing);
-    for (const invalid of listing.invalid) {
-      diagnostics.push({
-        _tag: "InvalidSkill",
-        sourceId: source.id,
-        location: invalid.location,
-        error: invalid.error
-      });
-    }
-    for (const { skill, resources, location, warnings } of listing.skills) {
-      const existing = entries.get(skill.name);
-      if (existing) {
-        diagnostics.push({
-          _tag: "DuplicateSkill",
-          name: skill.name,
-          sourceId: source.id,
-          keptSourceId: existing.sourceId
-        });
-        continue;
-      }
+    for (const { skill, resources, location } of listing.skills) {
+      if (!claim(skill.name, source.id)) continue;
       entries.set(skill.name, {
         skill,
         sourceId: source.id,
@@ -233,16 +278,22 @@ export async function loadSkillCatalog(
         ...(location === undefined ? {} : { location })
       });
       sourceBySkill.set(skill.name, source);
-      // Only for the copy the catalog keeps: a skipped duplicate already has
-      // its own diagnostic, and "was loaded" would be false for it.
-      for (const warning of warnings ?? []) {
-        diagnostics.push({
-          _tag: "SkillWarning",
-          sourceId: source.id,
-          name: skill.name,
-          error: warning
-        });
-      }
+    }
+    for (const invalid of listing.invalid) {
+      diagnostics.push({
+        _tag: "InvalidSkill",
+        sourceId: source.id,
+        location: invalid.location,
+        error: invalid.error
+      });
+      const name = invalid.name;
+      if (!isOfferableName(name) || !claim(name, source.id)) continue;
+      broken.set(name, {
+        name,
+        sourceId: source.id,
+        location: invalid.location,
+        error: invalid.error
+      });
     }
   }
 
@@ -252,22 +303,28 @@ export async function loadSkillCatalog(
   const visible = new Map<string, SkillCatalogEntry>(
     skills.map((entry) => [entry.skill.name, entry])
   );
-  const prompt = renderCatalogPrompt(skills);
+  const invalid = [...broken.values()];
+  const prompt = renderCatalogPrompt(skills, invalid);
 
   const catalog: SkillCatalog = {
     fingerprint: fingerprintOf(prompt ?? ""),
     skills,
+    invalid,
     diagnostics,
     prompt: () => prompt,
     find: (name) => visible.get(name),
     activate(name) {
       const entry = visible.get(name);
-      return entry
-        ? ok(renderSkillActivation(entry))
-        : err(new UnknownSkillError(name));
+      if (entry) return ok(renderSkillActivation(entry));
+      const failed = broken.get(name);
+      return err(
+        failed
+          ? new InvalidSkillError(failed.name, failed.location, failed.error)
+          : new UnknownSkillError(name)
+      );
     },
     async readResource(request) {
-      const target = resolveResourceTarget(visible, request);
+      const target = resolveResourceTarget(visible, broken, request);
       if (!target.ok) return target;
       const { entry, path } = target.value;
       const source = sourceBySkill.get(entry.skill.name);
@@ -293,9 +350,7 @@ export async function loadSkillCatalog(
 export function formatSkillDiagnostic(diagnostic: SkillDiagnostic): string {
   switch (diagnostic._tag) {
     case "InvalidSkill":
-      return `Skipped invalid skill ${diagnostic.location} from source "${diagnostic.sourceId}": ${diagnostic.error.message}`;
-    case "SkillWarning":
-      return `Skill "${diagnostic.name}" from source "${diagnostic.sourceId}" breaks the Agent Skills spec but was loaded: ${diagnostic.error.message}`;
+      return `Invalid skill ${diagnostic.location} from source "${diagnostic.sourceId}": ${diagnostic.error.message}`;
     case "SourceFailed":
       return `${diagnostic.error.message}. ${diagnostic.keptPrevious ? "Its last listed skills were kept." : "Its skills were skipped."}`;
     case "DuplicateSkill":
@@ -324,17 +379,38 @@ export function renderSkillResource(read: SkillCatalogResource): string {
 }
 
 function renderCatalogPrompt(
-  skills: readonly SkillCatalogEntry[]
+  skills: readonly SkillCatalogEntry[],
+  invalid: readonly InvalidSkillCatalogEntry[]
 ): string | null {
-  if (skills.length === 0) return null;
-  return [
+  if (skills.length === 0 && invalid.length === 0) return null;
+  const lines = [
     "Available skills. When a task matches a skill, use activate_skill with its name before proceeding.",
     "",
     ...skills.map(
       ({ skill }) =>
         `- ${skill.name}: ${skill.description.replace(/\s+/g, " ")}`
     )
-  ].join("\n");
+  ];
+  if (invalid.length > 0) {
+    lines.push(
+      "",
+      "These skills failed validation. activate_skill returns the error; fix the SKILL.md before using them.",
+      "",
+      ...invalid.map(({ name, location }) => `- ${name} (${location})`)
+    );
+  }
+  return lines.join("\n");
+}
+
+/** Names usable as tool enum values and qualified-path prefixes. */
+function isOfferableName(name: string | undefined): name is string {
+  return (
+    name !== undefined &&
+    name.length > 0 &&
+    !name.includes("/") &&
+    name !== "." &&
+    name !== ".."
+  );
 }
 
 function renderSkillActivation(entry: SkillCatalogEntry): string {
@@ -367,13 +443,17 @@ function renderSkillActivation(entry: SkillCatalogEntry): string {
 
 function resolveResourceTarget(
   skills: ReadonlyMap<string, SkillCatalogEntry>,
+  broken: ReadonlyMap<string, InvalidSkillCatalogEntry>,
   request: { readonly name?: string; readonly path: string }
 ): SkillResult<
   {
     entry: SkillCatalogEntry;
     path: SkillResourceInfo["path"];
   },
-  UnknownSkillError | InvalidSkillResourcePathError | SkillResourceNotFoundError
+  | UnknownSkillError
+  | InvalidSkillError
+  | InvalidSkillResourcePathError
+  | SkillResourceNotFoundError
 > {
   let name = request.name;
   let relative = request.path;
@@ -384,7 +464,14 @@ function resolveResourceTarget(
     relative = relative.slice(slash + 1);
   }
   const entry = skills.get(name);
-  if (!entry) return err(new UnknownSkillError(name));
+  if (!entry) {
+    const failed = broken.get(name);
+    return err(
+      failed
+        ? new InvalidSkillError(failed.name, failed.location, failed.error)
+        : new UnknownSkillError(name)
+    );
+  }
   const path = parseSkillResourcePath(relative);
   if (!path.ok) return path;
   // Only files the source listed are readable, whatever the source's store

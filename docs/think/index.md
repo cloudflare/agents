@@ -515,18 +515,18 @@ and later duplicates are skipped with a logged warning. `skills.r2()` reuses
 a bucket listing for 60 seconds by default; set `refreshIntervalMs` to change
 that.
 
-Every `SKILL.md` is checked against the
-[spec](https://agentskills.io/specification). Sources load skills leniently,
-as the spec's guide for agents recommends: a skill whose `name` is not 1-64
-lowercase letters, digits, and hyphens, does not match its directory, or
-whose `description` or `compatibility` is too long still loads, and Think logs
-a warning. A skill with no `description`, a `name` that is not a safe single
-path segment, or frontmatter that is not YAML is skipped and logged. Lenient
-parsing also reads frontmatter whose values contain an unquoted `: `.
-`skills.parseSkill()` is strict by default, so use it to check a skill before
-publishing it. Frontmatter keys the spec does not define are kept in
-`skill.extraFields`. A skill with `disable-model-invocation: true` is not
-shown to the model.
+Every `SKILL.md` is checked strictly against the
+[spec](https://agentskills.io/specification) each time a source is read:
+`name` must be 1-64 lowercase letters, digits, and hyphens and match its
+directory; `description` is required and at most 1024 characters;
+`compatibility`, `metadata`, and `allowed-tools` are checked when present. A
+skill that fails stays in the catalog under its directory name, in a "failed
+validation" list. Activating it, or reading one of its files, fails the tool
+call with the validation error, which lists every broken rule, so the model
+or the skill's author can fix the file. Validate skills when you write them
+with `skills.parseSkill(markdown, { directory })`. Frontmatter keys the spec
+does not define are kept in `skill.extraFields`. A skill with
+`disable-model-invocation: true` is not shown to the model.
 
 The parser, sources, and catalog live in `agents/skills` and work without
 Think: `skills.parseSkill()` parses a `SKILL.md`, `skills.loadSkillCatalog()`

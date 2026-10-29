@@ -9,7 +9,6 @@ import {
   SkillSourceError,
   type SkillSource
 } from "./source";
-import type { SkillName } from "./skill";
 import { indexSkillTree } from "./tree";
 
 /**
@@ -65,9 +64,6 @@ export function workspace(
   const root = parseRoot(options.root ?? DEFAULT_WORKSPACE_SKILLS_ROOT);
   const id = options.id ?? `workspace:${root}`;
   const { fs } = target;
-  // Skill name -> directory from the last listing. Lenient names can differ
-  // from their directory, and resources live in the directory.
-  let directories: ReadonlyMap<SkillName, string> = new Map();
 
   async function readBytes(path: string): Promise<Uint8Array | null> {
     try {
@@ -94,16 +90,16 @@ export function workspace(
         const files = entries
           .filter((entry) => entry.type === "file")
           .map((entry) => ({ path: entry.path.slice(root.length + 1) }));
-        const tree = await indexSkillTree(
-          files,
-          async (path) => {
-            const bytes = await readBytes(`${root}/${path}`);
-            return bytes === null ? null : new TextDecoder().decode(bytes);
-          },
-          (directory) => `${root}/${directory}`
+        return ok(
+          await indexSkillTree(
+            files,
+            async (path) => {
+              const bytes = await readBytes(`${root}/${path}`);
+              return bytes === null ? null : new TextDecoder().decode(bytes);
+            },
+            (directory) => `${root}/${directory}`
+          )
         );
-        directories = tree.directories;
-        return ok(tree.listing);
       } catch (cause) {
         return err(new SkillSourceError(id, "list", cause));
       }
@@ -111,8 +107,8 @@ export function workspace(
     async readResource(skill, path) {
       const info = describeSkillResource(path);
       try {
-        const directory = directories.get(skill) ?? skill;
-        const bytes = await readBytes(`${root}/${directory}/${path}`);
+        // A valid skill's name is its directory.
+        const bytes = await readBytes(`${root}/${skill}/${path}`);
         if (bytes === null) {
           return err(new SkillResourceNotFoundError(skill, path));
         }

@@ -1,11 +1,10 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { err, ok, type SkillResult } from "./result";
+import { err, type SkillResult } from "./result";
 import {
   parseSkillFrontmatter,
   SkillParseError,
   type ParseSkillOptions,
-  type Skill,
-  type SkillParseResult
+  type Skill
 } from "./skill";
 
 /**
@@ -19,22 +18,20 @@ const FRONTMATTER =
   /^\uFEFF?---[ \t]*\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n([\s\S]*))?$/;
 
 /**
- * Parse a `SKILL.md` file.
+ * Parse a `SKILL.md` file against the Agent Skills spec.
  *
- * Strict by default: any broken rule fails the parse. Pass
- * `mode: "lenient"` to load the skill anyway and get the broken rules as
- * `warnings`, as skill sources do. Lenient parsing also retries frontmatter
- * that only fails because of unquoted values containing `: ` (for example
- * `description: Use when: the user asks`), which many clients accept.
+ * Any broken rule fails the parse; the error's `issues` lists all of them.
+ * Call this when a skill is written, to reject it before it is stored.
+ * Sources call it again on every read.
  *
  * @param markdown - The full file: YAML frontmatter, then Markdown.
- * @param options - `directory` to check the name against, and `mode`.
- * @returns The parsed skill and warnings, or a `SkillParseError`.
+ * @param options - Pass `directory` to require that `name` matches it.
+ * @returns The parsed skill, or a `SkillParseError`.
  */
 export function parseSkill(
   markdown: string,
   options: ParseSkillOptions = {}
-): SkillParseResult {
+): SkillResult<Skill, SkillParseError> {
   const match = FRONTMATTER.exec(markdown);
   if (!match) {
     return err(
@@ -45,39 +42,9 @@ export function parseSkill(
     );
   }
 
-  const yaml = match[1] ?? "";
-  const body = match[2] ?? "";
-  const parsed = parseFrontmatterYaml(yaml);
-  if (parsed.ok) {
-    return parseSkillFrontmatter(parsed.value ?? {}, body, options);
-  }
-  if (options.mode === "lenient") {
-    const repaired = parseFrontmatterYaml(quoteColonValues(yaml));
-    if (repaired.ok) {
-      const result = parseSkillFrontmatter(repaired.value ?? {}, body, options);
-      return result.ok
-        ? {
-            ...result,
-            warnings: [
-              new SkillParseError(
-                "invalid-yaml",
-                "SKILL.md frontmatter is not valid YAML; it was read after quoting values that contain `: `.",
-                { cause: parsed.error.cause }
-              ),
-              ...result.warnings
-            ]
-          }
-        : result;
-    }
-  }
-  return parsed;
-}
-
-function parseFrontmatterYaml(
-  yaml: string
-): SkillResult<unknown, SkillParseError> {
+  let data: unknown;
   try {
-    return ok(parseYaml(yaml));
+    data = parseYaml(match[1] ?? "");
   } catch (cause) {
     return err(
       new SkillParseError(
@@ -87,25 +54,7 @@ function parseFrontmatterYaml(
       )
     );
   }
-}
-
-/**
- * Quote top-level `key: value` lines whose value contains `: `, the most
- * common way hand-written frontmatter breaks YAML. Values that are already
- * quoted, block scalars, or flow collections are left alone.
- */
-function quoteColonValues(yaml: string): string {
-  return yaml
-    .split(/\r?\n/)
-    .map((line) => {
-      const match = /^([A-Za-z0-9_-]+):[ \t]+(.+)$/.exec(line);
-      if (!match) return line;
-      const [, key, value] = match;
-      if (value === undefined || !value.includes(": ")) return line;
-      if (/^["'|>[{&*!]/.test(value)) return line;
-      return `${key}: ${JSON.stringify(value.trim())}`;
-    })
-    .join("\n");
+  return parseSkillFrontmatter(data ?? {}, match[2] ?? "", options);
 }
 
 /**

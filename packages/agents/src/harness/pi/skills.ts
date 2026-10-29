@@ -16,13 +16,23 @@ function textResult(text: string): ToolExecutionResult {
   return { output: [{ type: "text", text }] };
 }
 
+/** A failed tool call: pi sends it to the model as an error result. */
+function errorResult(error: Error): ToolExecutionResult {
+  return { output: [{ type: "text", text: error.message }], isError: true };
+}
+
 /**
  * Model-facing tools for a catalog: `activate_skill` and
  * `read_skill_resource`. These match the tools `@cloudflare/think` offers, so
  * a skill behaves the same in both frameworks.
  */
 function skillTools(catalog: SkillCatalog): ToolRegistration[] {
-  const names = catalog.skills.map((entry) => entry.skill.name);
+  // Invalid skills are offered too, so activating one reports why it is
+  // broken.
+  const names = [
+    ...catalog.skills.map((entry) => entry.skill.name),
+    ...catalog.invalid.map((entry) => entry.name)
+  ];
   if (names.length === 0) return [];
   const nameSchema = Type.Union(names.map((name) => Type.Literal(name)));
 
@@ -35,9 +45,9 @@ function skillTools(catalog: SkillCatalog): ToolRegistration[] {
     replay: "safe",
     async execute(input) {
       const activated = catalog.activate(input.name);
-      return textResult(
-        activated.ok ? activated.value : activated.error.message
-      );
+      return activated.ok
+        ? textResult(activated.value)
+        : errorResult(activated.error);
     }
   };
 
@@ -57,9 +67,9 @@ function skillTools(catalog: SkillCatalog): ToolRegistration[] {
           ? { path: input.path }
           : { name: input.name, path: input.path }
       );
-      return textResult(
-        read.ok ? renderSkillResource(read.value) : read.error.message
-      );
+      return read.ok
+        ? textResult(renderSkillResource(read.value))
+        : errorResult(read.error);
     }
   };
 

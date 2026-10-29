@@ -10,7 +10,6 @@ import {
   type SkillListing,
   type SkillSource
 } from "./source";
-import type { SkillName } from "./skill";
 import { indexSkillTree, type SkillTreeFile } from "./tree";
 
 /** Options for {@link r2}. */
@@ -46,11 +45,7 @@ export function r2(
   const id = options.id ?? `r2:${prefix || "/"}`;
   const allowed = options.skills?.length ? new Set(options.skills) : null;
   const refreshIntervalMs = options.refreshIntervalMs ?? 60_000;
-  let cached: {
-    listing: SkillListing;
-    directories: ReadonlyMap<SkillName, string>;
-    at: number;
-  } | null = null;
+  let cached: { listing: SkillListing; at: number } | null = null;
 
   async function list(): Promise<SkillResult<SkillListing, SkillSourceError>> {
     if (cached && Date.now() - cached.at < refreshIntervalMs) {
@@ -63,22 +58,21 @@ export function r2(
           size: object.size
         })
       );
-      const { listing, directories } = await indexSkillTree(
-        files,
-        async (path) => {
-          const object = await bucket.get(`${prefix}${path}`);
-          return object ? object.text() : null;
-        }
-      );
+      const listing = await indexSkillTree(files, async (path) => {
+        const object = await bucket.get(`${prefix}${path}`);
+        return object ? object.text() : null;
+      });
       const filtered: SkillListing = allowed
         ? {
             skills: listing.skills.filter(({ skill }) =>
               allowed.has(skill.name)
             ),
-            invalid: listing.invalid
+            invalid: listing.invalid.filter(
+              (skill) => skill.name === undefined || allowed.has(skill.name)
+            )
           }
         : listing;
-      cached = { listing: filtered, directories, at: Date.now() };
+      cached = { listing: filtered, at: Date.now() };
       return ok(filtered);
     } catch (cause) {
       return err(new SkillSourceError(id, "list", cause));
@@ -96,9 +90,8 @@ export function r2(
         return err(new SkillResourceNotFoundError(skill, path));
       }
       try {
-        // Lenient names can differ from their directory.
-        const directory = cached?.directories.get(skill) ?? skill;
-        const object = await bucket.get(`${prefix}${directory}/${path}`);
+        // A valid skill's name is its directory.
+        const object = await bucket.get(`${prefix}${skill}/${path}`);
         if (!object) return err(new SkillResourceNotFoundError(skill, path));
         const info = describeSkillResource(path, object.size);
         const bytes = new Uint8Array(await object.arrayBuffer());

@@ -56,16 +56,15 @@ export interface ListedSkill {
    * source stores skills there. Agents with a shell can run scripts from it.
    */
   readonly location?: string;
-  /**
-   * Spec rules the skill breaks but was loaded anyway, for example a name
-   * that does not match its directory. Sources parse leniently, as the
-   * spec's guide for agents recommends.
-   */
-  readonly warnings?: readonly SkillParseError[];
 }
 
 /** A skill that failed to parse. */
 export interface InvalidSkill {
+  /**
+   * The name the skill is known by, usually its directory. The catalog
+   * offers it to the model so activating it returns the validation error.
+   */
+  readonly name?: string;
   /** Where the broken skill lives, such as `my-skill/SKILL.md`. */
   readonly location: string;
   /** Which spec rule it broke. */

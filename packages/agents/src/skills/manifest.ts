@@ -76,9 +76,8 @@ export interface SkillManifestResource {
 /**
  * Create a source from skills defined in code.
  *
- * Entries pass the same lenient checks as `SKILL.md` files from other
- * sources: broken spec rules become warnings, and entries without a usable
- * name or description are reported as invalid. Useful for tests and for small fixed skill sets
+ * Entries pass the same checks as `SKILL.md` files. An entry that breaks
+ * a rule is listed as invalid, and activating it returns the error. Useful for tests and for small fixed skill sets
  * that do not need a Workspace or bucket.
  *
  * @param definition - The skills to serve.
@@ -99,11 +98,11 @@ export function manifest(definition: SkillManifest): SkillSource {
         metadata: entry.metadata,
         "allowed-tools": entry.allowedTools
       },
-      entry.body,
-      { mode: "lenient" }
+      entry.body
     );
     if (!parsed.ok) {
       invalid.push({
+        name: entry.name,
         location: `${definition.id}:${entry.name}`,
         error: parsed.error
       });
@@ -130,11 +129,7 @@ export function manifest(definition: SkillManifest): SkillSource {
     }
     resources.sort((a, b) => a.path.localeCompare(b.path));
     contents.set(parsed.value.name, files);
-    skills.push({
-      skill: parsed.value,
-      resources,
-      ...(parsed.warnings.length === 0 ? {} : { warnings: parsed.warnings })
-    });
+    skills.push({ skill: parsed.value, resources });
   }
 
   const listing: SkillListing = { skills, invalid };
