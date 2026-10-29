@@ -13,6 +13,9 @@
     "agents": "./dist/cli.js"
   },
   "version": "0.31.0",
+  "sideEffects": [
+    "./dist/cli.js"
+  ],
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
