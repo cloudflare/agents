@@ -222,7 +222,6 @@ export class ThinkPromptCacheTestAgent extends Think {
     last: string;
   }> {
     this._environment = "Monday";
-    await this.context.freezeSystemPrompt();
     const self = this as unknown as {
       _upsertMessageInHistory(msg: UIMessage, parentId?: string): Promise<void>;
     };
@@ -231,6 +230,8 @@ export class ThinkPromptCacheTestAgent extends Think {
       role: "user",
       parts: [{ type: "text", text: "Say hello." }]
     });
+    // The turn that answered u1 recorded its prompt, with Monday, on u1.
+    await this.context.prepare();
     await self._upsertMessageInHistory(
       {
         id: "a1",

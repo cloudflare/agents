@@ -5,14 +5,17 @@
  * out, so that a subclass written against the pre-Sessions Think API keeps
  * compiling and running unchanged:
  *
- *   - `withContext()` and `withCachedPrompt()`, queued during
- *     `configureSession()` so Think can declare them on the handle after the
- *     blocks `configureContext()` returns;
- *   - `onCompactionError()`;
+ *   - the context builder methods (`withContext`, `withCachedPrompt`) that
+ *     used to live on the session, now queued and folded into
+ *     `Think.configureContext()`;
+ *   - the context accessors (`addContext`, `getContextBlock`,
+ *     `refreshSystemPrompt`, `tools`, ...), now forwarded to `Think.context`;
  *   - the positional `appendMessage(message, parentId)` and
  *     `getHistory(leafId)` forms alongside the options-object forms.
  *
- * Everything else, context accessors included, delegates to the handle.
+ * Storage calls delegate to the real handle; the context forwards are
+ * deprecated and exist only so an upgrade is a no-op. New code should read
+ * `this.context` directly and declare blocks in `configureContext()`.
  *
  * The wrapper is explicit forwarding rather than a subclass or Proxy because
  * `Session` keeps its state in `#private` fields, which neither survives.
@@ -29,15 +32,20 @@ import type {
   RecentHistoryResult,
   SearchResult,
   Session,
-  SessionContextOptions,
   SessionMessage,
   SessionRowStat,
   StoredCompaction,
   WriteOptions
 } from "agents/sessions";
-import type { ContextBlock, WritableContextProvider } from "agents/context";
+import type {
+  ContextBlock,
+  Context,
+  ContextConfig,
+  WritableContextProvider
+} from "agents/context";
 
-export type { SessionContextOptions };
+/** Options for a block declared through `withContext()` / `addContext()`. */
+export type SessionContextOptions = Omit<ContextConfig, "label">;
 
 /** Receives an error thrown by the registered compaction function. */
 export type CompactionErrorHandler = (error: unknown) => void | Promise<void>;
@@ -53,23 +61,15 @@ export interface CompactAfterOptions {
 
 export class ThinkSession {
   readonly #handle: Session;
-  /** Why context is unavailable on this host, when it is. */
-  readonly #contextUnsupported: string | undefined;
+  readonly #context: () => Context;
   /** Blocks queued by `withContext()`; `null` once startup consumed them. */
-  #pendingContext: (SessionContextOptions & { label: string })[] | null = [];
-  #promptStore: WritableContextProvider | undefined;
+  #pendingContext: ContextConfig[] | null = [];
   #compactionErrorHandler: CompactionErrorHandler | null = null;
 
   /** @internal Constructed by Think during `onStart`. */
-  constructor(handle: Session, options: { contextUnsupported?: string } = {}) {
+  constructor(handle: Session, context: () => Context) {
     this.#handle = handle;
-    this.#contextUnsupported = options.contextUnsupported;
-  }
-
-  /** The handle, for context calls; throws on a host without context. */
-  #context(): Session {
-    if (this.#contextUnsupported) throw new Error(this.#contextUnsupported);
-    return this.#handle;
+    this.#context = context;
   }
 
   get sessionId(): string {
@@ -77,31 +77,26 @@ export class ThinkSession {
   }
 
   /** @internal Blocks declared through `withContext()` during configuration. */
-  internal_takePendingContext(): (SessionContextOptions & {
-    label: string;
-  })[] {
+  internal_takePendingContext(): ContextConfig[] {
     const pending = this.#pendingContext ?? [];
     this.#pendingContext = null;
     return pending;
   }
 
-  /** @internal A custom frozen-prompt store passed to `withCachedPrompt()`. */
-  internal_promptStore(): WritableContextProvider | undefined {
-    return this.#promptStore;
-  }
-
   // ── Builder (configureSession) ────────────────────────────────────────────
 
   /**
-   * Declare a prompt context block. Equivalent to returning it from
-   * `configureContext()`, and rendered after those blocks. Only callable
-   * inside `configureSession()`; after startup use `addContext()`.
+   * Declare a prompt context block.
+   *
+   * @deprecated Return the block from `configureContext()` instead. Only
+   * callable inside `configureSession()`; after startup use
+   * `this.context.addBlock()`.
    */
   withContext(label: string, options: SessionContextOptions = {}): this {
     if (!this.#pendingContext) {
       throw new Error(
         "withContext() is only available inside configureSession(). " +
-          "After startup, add a block with this.session.addContext()."
+          "After startup, add a block with this.context.addBlock()."
       );
     }
     this.#pendingContext.push({ label, ...options });
@@ -109,12 +104,12 @@ export class ThinkSession {
   }
 
   /**
-   * Store the frozen system prompt in `provider` instead of this agent's
-   * SQLite. The prompt is always stored; without an argument this does
-   * nothing.
+   * Persist the frozen system prompt.
+   *
+   * @deprecated The transcript records the prompt each turn was sent with,
+   * so there is nothing to store and this is a no-op.
    */
-  withCachedPrompt(provider?: WritableContextProvider): this {
-    if (provider) this.#promptStore = provider;
+  withCachedPrompt(_provider?: WritableContextProvider): this {
     return this;
   }
 
@@ -283,47 +278,55 @@ export class ThinkSession {
     return this.#handle.compact(leafId);
   }
 
-  // ── Context ──────────────────────────────────────────────────────────────
+  // ── Context forwards ─────────────────────────────────────────────────────
+  //
+  // Prompt context lives on `Think.context` now. These forwards keep the
+  // pre-Sessions call sites working and will be removed in a later minor.
 
+  /** @deprecated Use `this.context.addBlock({ label, ...options })`. */
   addContext(
     label: string,
     options: SessionContextOptions = {}
   ): Promise<ContextBlock> {
-    return this.#context().addContext(label, options);
+    return this.#context().addBlock({ label, ...options });
   }
 
+  /** @deprecated Use `this.context.removeBlock(label)`. */
   removeContext(label: string): boolean {
-    return this.#context().removeContext(label);
+    return this.#context().removeBlock(label);
   }
 
+  /** @deprecated Use `this.context.getBlock(label)`. */
   getContextBlock(label: string): ContextBlock | null {
-    return this.#context().getContextBlock(label);
+    return this.#context().getBlock(label);
   }
 
+  /** @deprecated Use `this.context.getBlocks()`. */
   getContextBlocks(): ContextBlock[] {
-    return this.#context().getContextBlocks();
+    return this.#context().getBlocks();
   }
 
+  /** @deprecated Use `this.context.setBlock(label, content)`. */
   replaceContextBlock(label: string, content: string): Promise<ContextBlock> {
-    return this.#context().replaceContextBlock(label, content);
+    return this.#context().setBlock(label, content);
   }
 
+  /** @deprecated Use `this.context.appendToBlock(label, content)`. */
   appendContextBlock(label: string, content: string): Promise<ContextBlock> {
-    return this.#context().appendContextBlock(label, content);
+    return this.#context().appendToBlock(label, content);
   }
 
+  /** @deprecated Use `this.context.freezeSystemPrompt()`. */
   freezeSystemPrompt(): Promise<string> {
     return this.#context().freezeSystemPrompt();
   }
 
+  /** @deprecated Use `this.context.refreshSystemPrompt()`. */
   refreshSystemPrompt(): Promise<string> {
     return this.#context().refreshSystemPrompt();
   }
 
-  contextReminder(): Promise<string | null> {
-    return this.#context().contextReminder();
-  }
-
+  /** @deprecated Use `this.context.tools()`. */
   tools(): Promise<ToolSet> {
     return this.#context().tools();
   }

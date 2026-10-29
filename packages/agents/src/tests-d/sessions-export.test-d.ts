@@ -1,18 +1,11 @@
 import type { UIMessage } from "ai";
 import { DurableObject } from "cloudflare:workers";
-import {
-  ContextBlocks,
-  SEARCH_CONTEXT_TOOL,
-  SET_CONTEXT_TOOL,
-  type ContextBlock,
-  type ContextProvider
-} from "../context";
+import { ContextBlocks, type ContextProvider } from "../context";
 import { Lifecycle, type DurableObjectCapability } from "../lifecycle";
 import {
   Sessions,
   createCompactFunction,
   type AppendResult,
-  type SessionContextOptions,
   type SessionMessage,
   type SessionRowStat
 } from "../sessions";
@@ -46,29 +39,6 @@ const session = object.sessions
   .onCompaction(createCompactFunction({ summarize: async () => "summary" }))
   .compactAfter(100_000);
 session.sessionId satisfies string;
-
-// Context declared on the session, the pre-capability shape.
-const withBlocks = object.sessions
-  .session("with-context")
-  .withContext("soul", { provider: soul })
-  .withContext("memory", { description: "Learned facts", maxTokens: 1_100 })
-  .withContext("notes", { searchable: true, whenChanged: "wait" })
-  .withCachedPrompt();
-withBlocks.freezeSystemPrompt() satisfies Promise<string>;
-withBlocks.refreshSystemPrompt() satisfies Promise<string>;
-withBlocks.contextReminder() satisfies Promise<string | null>;
-withBlocks.tools() satisfies Promise<Record<string, unknown>>;
-withBlocks.addContext("late") satisfies Promise<ContextBlock>;
-withBlocks.removeContext("late") satisfies boolean;
-withBlocks.getContextBlock("memory") satisfies ContextBlock | null;
-withBlocks.replaceContextBlock("memory", "x") satisfies Promise<ContextBlock>;
-withBlocks.appendContextBlock("memory", "y") satisfies Promise<ContextBlock>;
-withBlocks.context satisfies ContextBlocks;
-({ searchable: true }) satisfies SessionContextOptions;
-// @ts-expect-error A block label is the first argument, not an option.
-({ label: "soul" }) satisfies SessionContextOptions;
-SET_CONTEXT_TOOL satisfies "set_context";
-SEARCH_CONTEXT_TOOL satisfies "search_context";
 
 const message: SessionMessage = {
   id: "message-1",

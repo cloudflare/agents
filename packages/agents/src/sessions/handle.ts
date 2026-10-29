@@ -3,25 +3,11 @@
  * session-scoped compaction policy and orchestrates every public write:
  * sanitize → strip reserved client metadata → durable write → change feed.
  *
- * The handle also carries the session's prompt context: labelled blocks
- * declared with `withContext()`, rendered into a frozen system prompt that
- * is stored next to the messages. The frozen prompt and compaction overlays
- * exist for the same reason, a stable cached prefix, so the session refreshes
- * the prompt itself when it compacts or clears.
+ * The handle stores messages. Prompt assembly (context blocks, frozen
+ * prompts, skills) lives in `agents/context` and composes with this handle
+ * rather than living inside it.
  */
 
-import type { ToolSet } from "ai";
-import {
-  ContextBlocks,
-  type ContextBlock,
-  type ContextConfig,
-  type WritableContextProvider
-} from "../context/blocks";
-import { AgentSearchProvider } from "../context/search";
-import {
-  AgentContextProvider,
-  type SqlProvider
-} from "../context/sqlite-provider";
 import type { CompactResult } from "./compaction-helpers";
 import { COMPACTION_PREFIX, isCompactionMessage } from "./compaction-helpers";
 import type { SessionsCore } from "./core";
@@ -45,17 +31,6 @@ export type CompactionFunction = (
   messages: SessionMessage[]
 ) => Promise<CompactResult | null>;
 
-/** Options for a block declared with `withContext()` or `addContext()`. */
-export type SessionContextOptions = Omit<ContextConfig, "label"> & {
-  /**
-   * Back the block with a full-text index in this object's SQLite. The
-   * prompt shows an entry count; the model reads entries with
-   * `search_context` and writes them with `set_context`. Cannot be combined
-   * with `provider`.
-   */
-  searchable?: boolean;
-};
-
 export class Session {
   readonly sessionId: string;
   readonly #core: SessionsCore;
@@ -63,12 +38,6 @@ export class Session {
 
   #compactionFn: CompactionFunction | null = null;
   #tokenThreshold: number | undefined;
-
-  /** Blocks declared with `withContext()`, by label, as declared. */
-  readonly #declaredContext = new Map<string, SessionContextOptions>();
-  #promptStore: WritableContextProvider | undefined;
-  /** Built on first use; declarations are closed from then on. */
-  #context: ContextBlocks | undefined;
 
   /** @internal Constructed by the Sessions capability only. */
   constructor(
@@ -97,165 +66,6 @@ export class Session {
   compactAfter(tokenThreshold: number): this {
     this.#tokenThreshold = tokenThreshold;
     return this;
-  }
-
-  /**
-   * Declare a prompt context block. The block renders as a section of the
-   * system prompt; its provider decides whether the model can write or
-   * search it. A block without a provider is stored in this object's SQLite
-   * and is writable.
-   *
-   * Declare blocks before the context is first used (a field initializer is
-   * the usual place). Redeclaring a label with the same options does
-   * nothing; with different options it throws. After first use, add blocks
-   * with `addContext()`.
-   */
-  withContext(label: string, options: SessionContextOptions = {}): this {
-    const existing = this.#declaredContext.get(label);
-    if (existing) {
-      if (sameContextOptions(existing, options)) return this;
-      throw new Error(
-        `Context block "${label}" is already declared on this session with different options`
-      );
-    }
-    if (this.#context) {
-      throw new Error(
-        `withContext("${label}") must run before the context is first used. Use addContext() to add a block afterwards.`
-      );
-    }
-    this.#declaredContext.set(label, options);
-    return this;
-  }
-
-  /**
-   * Store the frozen system prompt in `store` instead of this object's
-   * SQLite. The prompt is always stored; this only changes where.
-   */
-  withCachedPrompt(store?: WritableContextProvider): this {
-    if (!store) return this;
-    if (this.#context) {
-      throw new Error(
-        "withCachedPrompt() must run before the context is first used."
-      );
-    }
-    this.#promptStore = store;
-    return this;
-  }
-
-  // ── Context ──────────────────────────────────────────────────────────────
-
-  /**
-   * The engine behind this session's context blocks. The methods below
-   * cover everyday use; reach for this to load blocks eagerly or for
-   * lower-level access. Building it closes `withContext()`.
-   */
-  get context(): ContextBlocks {
-    this.#context ??= new ContextBlocks(
-      Array.from(this.#declaredContext, ([label, options]) =>
-        this.#contextConfig(label, options)
-      ),
-      this.#promptStore ?? this.#contextStore("_system_prompt"),
-      (label) => this.#contextStore(label)
-    );
-    return this.#context;
-  }
-
-  /**
-   * Add a block after the context is in use, as skills and extensions do.
-   * The frozen prompt does not change until `refreshSystemPrompt()`.
-   */
-  async addContext(
-    label: string,
-    options: SessionContextOptions = {}
-  ): Promise<ContextBlock> {
-    await this.#ready();
-    return this.context.addBlock(this.#contextConfig(label, options));
-  }
-
-  /**
-   * Remove a block. Returns false when no such block exists. The frozen
-   * prompt does not change until `refreshSystemPrompt()`.
-   */
-  removeContext(label: string): boolean {
-    return this.context.removeBlock(label);
-  }
-
-  /** A loaded block by label, or null before the blocks load. */
-  getContextBlock(label: string): ContextBlock | null {
-    return this.context.getBlock(label);
-  }
-
-  /** Every loaded block. Empty before the blocks load. */
-  getContextBlocks(): ContextBlock[] {
-    return this.context.getBlocks();
-  }
-
-  /** Overwrite a writable block. The frozen prompt is unchanged. */
-  async replaceContextBlock(
-    label: string,
-    content: string
-  ): Promise<ContextBlock> {
-    await this.#ready();
-    return this.context.setBlock(label, content);
-  }
-
-  /** Append to a writable block. The frozen prompt is unchanged. */
-  async appendContextBlock(
-    label: string,
-    content: string
-  ): Promise<ContextBlock> {
-    await this.#ready();
-    return this.context.appendToBlock(label, content);
-  }
-
-  /**
-   * The system prompt for this session. The first call renders the blocks
-   * and stores the result; later calls, including after an eviction, return
-   * the stored string so the model provider's prefix cache stays warm.
-   */
-  async freezeSystemPrompt(): Promise<string> {
-    await this.#ready();
-    return this.context.freezeSystemPrompt();
-  }
-
-  /**
-   * Re-read every block, re-render the prompt, and store it. Compaction and
-   * `clearMessages()` call this for you.
-   */
-  async refreshSystemPrompt(): Promise<string> {
-    await this.#ready();
-    return this.context.refreshSystemPrompt();
-  }
-
-  /**
-   * Current values of `whenChanged: "remind"` blocks that no longer match
-   * the frozen prompt, for the host to send after the cached prefix. Null
-   * when nothing changed.
-   */
-  async contextReminder(): Promise<string | null> {
-    await this.#ready();
-    return this.context.reminder();
-  }
-
-  /**
-   * AI SDK tools for the blocks: `set_context` when any block is writable,
-   * `search_context` when any is searchable (`SET_CONTEXT_TOOL` and
-   * `SEARCH_CONTEXT_TOOL` in `agents/context`).
-   */
-  async tools(): Promise<ToolSet> {
-    await this.#ready();
-    return this.context.tools();
-  }
-
-  /**
-   * @internal Drop every declaration and the built engine, so a host whose
-   * startup re-runs on the same instance can declare its blocks again.
-   * Stored block content and the stored prompt are untouched.
-   */
-  internal_resetContext(): void {
-    this.#declaredContext.clear();
-    this.#promptStore = undefined;
-    this.#context = undefined;
   }
 
   // ── Change feed ──────────────────────────────────────────────────────────
@@ -583,7 +393,6 @@ export class Session {
   async clearMessages(): Promise<void> {
     await this.#ready();
     this.#core.clearMessages(this.sessionId);
-    await this.#refreshContextAfter("clear");
     await this.#core.notify({ type: "clear", sessionId: this.sessionId });
   }
 
@@ -668,82 +477,11 @@ export class Session {
       fromId,
       result.toMessageId
     );
-    await this.#refreshContextAfter("compaction");
     await this.#core.notify({ type: "compact", sessionId: this.sessionId });
     return { ...result, fromMessageId: fromId };
   }
 
   // ── Internal ─────────────────────────────────────────────────────────────
-
-  /**
-   * SQLite for context providers, in the tagged-template shape they take.
-   * Reached lazily, like every other Sessions service.
-   */
-  get #sql(): SqlProvider {
-    const io = this.#core.io;
-    return {
-      sql: <T>(
-        strings: TemplateStringsArray,
-        ...values: (string | number | boolean | null)[]
-      ) =>
-        io.sql<T>(
-          strings.join("?"),
-          values.map((value) =>
-            typeof value === "boolean" ? Number(value) : value
-          )
-        )
-    };
-  }
-
-  /**
-   * Storage key for a block of this session. The default session uses the
-   * bare label; others suffix the session id, so sessions in one object
-   * keep separate blocks and prompts.
-   */
-  #contextKey(label: string): string {
-    return this.sessionId ? `${label}_${this.sessionId}` : label;
-  }
-
-  #contextStore(label: string): WritableContextProvider {
-    return new AgentContextProvider(this.#sql, this.#contextKey(label));
-  }
-
-  #contextConfig(label: string, options: SessionContextOptions): ContextConfig {
-    const { searchable, ...config } = options;
-    if (!searchable) return { label, ...config };
-    if (config.provider) {
-      throw new Error(
-        `Context block "${label}" sets both searchable and provider; choose one`
-      );
-    }
-    return {
-      label,
-      ...config,
-      provider: new AgentSearchProvider(this.#sql, this.#contextKey(label))
-    };
-  }
-
-  /**
-   * Rebuild the frozen prompt after a change that alters what the model has
-   * seen. A session that never declared or used context has nothing to
-   * rebuild. A failure leaves the stored prompt in place and is reported,
-   * because the change that triggered it is already committed.
-   */
-  async #refreshContextAfter(change: "compaction" | "clear"): Promise<void> {
-    if (!this.#context && this.#declaredContext.size === 0) return;
-    try {
-      await this.context.refreshSystemPrompt();
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      console.warn(
-        `[Sessions] refreshing the system prompt after ${change} failed: ${detail}`
-      );
-      this.#core.io.emit("session:error", {
-        sessionId: this.sessionId,
-        error: detail
-      });
-    }
-  }
 
   /**
    * The shared write pipeline: sanitize provider metadata and strip reserved
@@ -781,21 +519,4 @@ export class Session {
       });
     }
   }
-}
-
-/**
- * Whether two declarations of one label agree. Providers compare by
- * identity: two inline objects are two different providers.
- */
-function sameContextOptions(
-  a: SessionContextOptions,
-  b: SessionContextOptions
-): boolean {
-  return (
-    a.provider === b.provider &&
-    a.description === b.description &&
-    a.maxTokens === b.maxTokens &&
-    a.whenChanged === b.whenChanged &&
-    Boolean(a.searchable) === Boolean(b.searchable)
-  );
 }

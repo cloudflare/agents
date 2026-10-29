@@ -280,7 +280,13 @@ import {
   type SessionMessage
 } from "agents/sessions";
 import { ThinkSession } from "./session";
-import type { ContextBlocks, ContextConfig } from "agents/context";
+import {
+  AgentContextProvider,
+  CONTEXT_METADATA_KEY,
+  Context,
+  type ContextConfig,
+  type WritableContextProvider
+} from "agents/context";
 
 /**
  * The shortest recent-message span the model sees at FULL fidelity each turn
@@ -1526,7 +1532,7 @@ function ensureValidContinueCheckpoint(
 }
 
 /**
- * Carry a context reminder (`ContextBlocks.reminder()`) after the cached
+ * Carry a context reminder (`Context.prepare()`) after the cached
  * prefix without persisting it. It joins the final user message when there is
  * one, since not every provider accepts two user messages in a row. A request
  * ending in a partial assistant message gets the continue checkpoint here,
@@ -2500,7 +2506,12 @@ function submissionRunItemId(submissionId: string): string {
  * `_stampChannel`) and trusted by hooks and recovery. They are stripped from
  * client-supplied messages at intake so a client can never forge them.
  */
-const RESERVED_MESSAGE_METADATA_KEYS = ["channel", "turnMetadata"] as const;
+const RESERVED_MESSAGE_METADATA_KEYS = [
+  "channel",
+  "turnMetadata",
+  // The prompt record context keeps on a message.
+  CONTEXT_METADATA_KEY
+] as const;
 
 const cachedMessageEncoder = new TextEncoder();
 
@@ -3686,21 +3697,30 @@ export class Think<
    */
   session!: ThinkSession;
 
-  /** The default session's context blocks, once startup has declared them. */
-  #contextBlocks: ContextBlocks | undefined;
+  /** Prompt context blocks for this agent, built from `configureContext()`. */
+  #contextBlocks: Context | undefined;
 
   /**
-   * The agent's context blocks: the default session's, declared by
-   * `configureContext()` and `configureSession()`. Available once the
-   * Lifecycle has started.
+   * The agent's context blocks, bound to the default session: the
+   * transcript records the prompt each turn was sent with. Available once
+   * the Lifecycle has started.
    */
-  protected get context(): ContextBlocks {
+  protected get context(): Context {
     if (!this.#contextBlocks) {
       throw new Error(
         "Context is not initialized yet; it is available after onStart()."
       );
     }
     return this.#contextBlocks;
+  }
+
+  /** Durable SQLite storage for one context block of this agent. */
+  #contextProvider(label: string): WritableContextProvider {
+    const sessionId = this.session?.sessionId ?? "";
+    return new AgentContextProvider(
+      this,
+      sessionId ? `${label}_${sessionId}` : label
+    );
   }
 
   /** Cached messages, kept in sync with session storage. */
@@ -3845,24 +3865,24 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             this.workspace = new Workspace({ storage: this.ctx.storage });
           }
 
-          // 2. Session configuration: compaction from `configureSession()`,
-          //    then context blocks on the session handle, those from
-          //    `configureContext()` first and the `withContext()` chain
-          //    after them. The handle stores blocks and the frozen prompt and
-          //    refreshes the prompt when it compacts or clears.
-          const handle = this.sessions.session();
-          // A startup that re-runs on this instance declares everything
-          // again; extensions and skills re-add their blocks below.
-          handle.internal_resetContext();
-          this.session = await this.configureSession(new ThinkSession(handle));
-          handle.withCachedPrompt(this.session.internal_promptStore());
-          for (const { label, ...options } of [
-            ...(await this.configureContext()),
-            ...this.session.internal_takePendingContext()
-          ]) {
-            handle.withContext(label, options);
-          }
-          this.#contextBlocks = handle.context;
+          // 2. Session configuration (builder phase: compaction, and the
+          //    pre-Sessions `withContext()` chain, folded into the blocks
+          //    `configureContext()` declares).
+          this.session = await this.configureSession(
+            new ThinkSession(this.sessions.session(), () => this.context)
+          );
+          // The prompt is recorded in the transcript now, so a custom
+          // prompt store from `withCachedPrompt()` has nothing to hold.
+          this.#contextBlocks = new Context(
+            this.sessions.session(this.session.sessionId),
+            {
+              blocks: [
+                ...(await this.configureContext()),
+                ...this.session.internal_takePendingContext()
+              ],
+              defaultProvider: (label) => this.#contextProvider(label)
+            }
+          );
           // Load blocks now rather than on the first turn, as Think always
           // has: the synchronous accessors (`this.context.getBlock()` and the
           // pre-Sessions `session.getContextBlock()`) are expected to answer
@@ -3901,8 +3921,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                     await this._syncMessages();
                     return true;
                   case "compact":
-                    // The session has already refreshed the system prompt.
                     await this._syncMessages();
+                    await this.#contextBlocks?.refreshSystemPrompt();
                     return true;
                   default:
                     return false;
@@ -4742,9 +4762,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   private async _clearHistory(): Promise<void> {
-    // Clearing also rebuilds the system prompt: the transcript carried the
-    // skill-load record, so a cleared session starts with no skills loaded.
     await this.session.clearMessages();
+    // The transcript carried the skill-load record, so a cleared session
+    // starts with no skills loaded and a prompt rebuilt without them.
+    await this.#contextBlocks?.refreshSystemPrompt();
     // Drop any pending terminal record (#1645) so a stale exhaustion can't
     // replay onto a freshly-cleared (empty) conversation on reconnect. Covers
     // both the WS `chat-clear` path and the programmatic `clearMessages()` API.
@@ -5318,8 +5339,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    *
    * @internal Exposed to subclasses for tests.
    */
-  protected async _buildBaseSystemPrompt(): Promise<string> {
-    const blocks = await this.context.freezeSystemPrompt();
+  protected async _buildBaseSystemPrompt(
+    blocksPrompt?: string
+  ): Promise<string> {
+    const blocks = blocksPrompt ?? (await this.context.freezeSystemPrompt());
     if (!isMethodOverridden(this, "getSystemPrompt")) {
       return blocks || this.getSystemPrompt();
     }
@@ -6398,10 +6421,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _warnedMissingClassifier = false;
 
   /**
-   * Configure the session. Called once during `onStart`. Override to set
-   * the compaction policy and, with `withContext()`, prompt context blocks.
-   * Blocks declared here render after the ones
-   * {@link Think.configureContext} returns.
+   * Configure conversation storage. Called once during `onStart`. Override to
+   * set the compaction policy; prompt context is declared by
+   * {@link Think.configureContext} instead.
+   *
+   * The handle still accepts the pre-Sessions `withContext()` and
+   * `withCachedPrompt()` chain, so an existing override keeps working; those
+   * blocks are appended after the ones `configureContext()` returns.
    *
    * @example
    * ```typescript
@@ -7089,7 +7115,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private async _assembleModelMessages(
     tools: ToolSet
   ): Promise<Awaited<ReturnType<typeof convertToModelMessages>>> {
-    const history = await this._turnHistory();
+    // The projection renders each recorded context change after the user
+    // message it was delivered with, so earlier turns are sent unchanged.
+    // SAFETY: the projection only adds text parts to stored UI messages.
+    const history = this.context.project(
+      await this._turnHistory()
+    ) as UIMessage[];
     const providerSafeHistory = history.map(
       toProviderSafeExecutionOutcomeMessage
     );
@@ -7479,13 +7510,20 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           : channelDefinition.instructions
         : undefined;
 
-    const rawBaseSystem = await this._buildBaseSystemPrompt();
+    // Start the turn's context: the prompt the transcript was sent with,
+    // and, recorded on the user message that ends the history, any remind
+    // block that changed since. `_assembleModelMessages` projects that
+    // record; a reminder comes back only when it could not be recorded.
+    const prepared = await this.context.prepare({
+      messages: await this._turnHistory()
+    });
+    const rawBaseSystem = await this._buildBaseSystemPrompt(prepared.system);
     const baseSystem = channelInstructions
       ? `${channelInstructions}\n\n${rawBaseSystem}`
       : rawBaseSystem;
     const system = this._systemPromptForTurn(baseSystem, tools);
 
-    this._turnContextReminder = await this.context.reminder();
+    this._turnContextReminder = prepared.reminder;
     const messages = withContextReminder(
       await this._assembleModelMessages(tools),
       this._turnContextReminder

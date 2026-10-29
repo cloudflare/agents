@@ -7,6 +7,7 @@ import type {
   SessionEvent,
   ToolAnswer
 } from "../../../experimental/channels/harness";
+import { Context } from "../../../context";
 import { Lifecycle } from "../../../lifecycle";
 import { openHarnessStore } from "../../store/store";
 import { Streams } from "../../../streams/streams";
@@ -29,6 +30,9 @@ const GATE_RUNS_KEY = "test:gate:runs";
 const RELEASE_KEY = "test:gate:release";
 const DANGEROUS_RUNS_KEY = "test:dangerous:runs";
 const SYSTEM_KEY = "test:system";
+const ENVIRONMENT_KEY = "test:environment";
+/** The session that has context blocks. */
+const CONTEXT_SESSION = "with-context";
 const BLOCK_KEY = "test:block";
 const ENDED_KEY = "test:ended";
 
@@ -199,6 +203,24 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         this.ctx.storage.kv.put(ENDED_KEY, [...ended, status]);
       }
     },
+    context: (session, id) =>
+      id === CONTEXT_SESSION
+        ? new Context(session, {
+            storage: this.ctx.storage,
+            blocks: [
+              { label: "soul", provider: { get: async () => "Be kind." } },
+              { label: "memory", description: "Learned facts" },
+              {
+                label: "environment",
+                provider: {
+                  get: async () =>
+                    `Today is ${this.ctx.storage.kv.get<string>(ENVIRONMENT_KEY) ?? "Monday"}.`
+                },
+                whenChanged: "remind"
+              }
+            ]
+          })
+        : undefined,
     configureSession: (session, id) => {
       this.#handles.set(id, session);
       session.onCompaction(async (history) => {
@@ -239,7 +261,15 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     } else {
       const text = contentText(last?.content);
       const multiply = /^multiply (\d+)$/.exec(text);
-      if (multiply) {
+      const remember = /^remember (.+)$/.exec(text);
+      if (remember) {
+        parts = callReply([
+          {
+            name: "set_context",
+            input: { label: "memory", content: remember[1] }
+          }
+        ]);
+      } else if (multiply) {
         parts = callReply([
           { name: "multiply", input: { value: Number(multiply[1]) } }
         ]);
@@ -725,6 +755,28 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   setSystem(system: string): void {
     this.ctx.storage.kv.put(SYSTEM_KEY, system);
+  }
+
+  setEnvironment(value: string): void {
+    this.ctx.storage.kv.put(ENVIRONMENT_KEY, value);
+  }
+
+  /** A context block's stored content in the context session. */
+  contextBlock(label: string): string | null {
+    const rows = this.ctx.storage.sql
+      .exec<{ content: string }>(
+        "SELECT content FROM cf_agents_context_blocks WHERE label = ?",
+        `${label}_${CONTEXT_SESSION}`
+      )
+      .toArray();
+    return rows[0]?.content ?? null;
+  }
+
+  /** Every model call's prompt, as `lastPromptText` renders one. */
+  promptTexts(): string[] {
+    return this.prompts.map((prompt) =>
+      prompt.map((m) => `${m.role}:${contentText(m.content)}`).join("|")
+    );
   }
 
   setBlock(rule: string): void {

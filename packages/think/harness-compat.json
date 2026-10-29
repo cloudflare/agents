@@ -1,8 +1,8 @@
 {
-  "total": 1225,
-  "passed": 427,
-  "needThink": 991,
-  "needThinkPassed": 193,
+  "total": 1203,
+  "passed": 405,
+  "needThink": 1005,
+  "needThinkPassed": 207,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -39,10 +39,6 @@
     "assistant-message-metadata.test.ts": {
       "total": 9,
       "passed": 1
-    },
-    "assistant-tools.test.ts": {
-      "total": 34,
-      "passed": 34
     },
     "attachment-consumption.test.ts": {
       "total": 4,
@@ -98,7 +94,7 @@
     },
     "execute-tool.test.ts": {
       "total": 6,
-      "passed": 3
+      "passed": 1
     },
     "extension-manager.test.ts": {
       "total": 34,
@@ -106,7 +102,7 @@
     },
     "fetch-tools.test.ts": {
       "total": 51,
-      "passed": 50
+      "passed": 48
     },
     "fiber.test.ts": {
       "total": 7,
@@ -114,7 +110,7 @@
     },
     "hooks.test.ts": {
       "total": 140,
-      "passed": 28
+      "passed": 37
     },
     "hydration-budget.test.ts": {
       "total": 9,
@@ -158,7 +154,7 @@
     },
     "prompt-cache.test.ts": {
       "total": 10,
-      "passed": 3
+      "passed": 4
     },
     "run-turn-recovery.test.ts": {
       "total": 10,
@@ -169,7 +165,7 @@
       "passed": 13
     },
     "scheduled-tasks.test.ts": {
-      "total": 17,
+      "total": 18,
       "passed": 1
     },
     "stream-cleanup.test.ts": {
@@ -197,8 +193,8 @@
       "passed": 1
     },
     "think-session.test.ts": {
-      "total": 276,
-      "passed": 65
+      "total": 279,
+      "passed": 70
     },
     "turn-metadata.test.ts": {
       "total": 4,
@@ -207,6 +203,10 @@
     "workflows.test.ts": {
       "total": 3,
       "passed": 3
+    },
+    "workspace-tools.test.ts": {
+      "total": 8,
+      "passed": 1
     },
     "ws-web-channel.test.ts": {
       "total": 10,
@@ -242,40 +242,6 @@
     "assistant-agent.test.ts > Think — streaming flow > persists assistant message after streaming",
     "assistant-agent.test.ts > Think — streaming flow > sends a chat request and receives streamed response",
     "assistant-message-metadata.test.ts > Think — server-authored assistant-message metadata > stamps no metadata keys when no writer is configured (opt-in)",
-    "assistant-tools.test.ts > assistant tools — bash > does not overwrite workspace files skipped during mounting",
-    "assistant-tools.test.ts > assistant tools — bash > does not persist synthetic shell paths (/bin, /usr, …) to the workspace",
-    "assistant-tools.test.ts > assistant tools — bash > mounts workspace directories beyond the first readDir page",
-    "assistant-tools.test.ts > assistant tools — bash > persists empty directory creates and deletes",
-    "assistant-tools.test.ts > assistant tools — bash > returns non-zero bash exits with output",
-    "assistant-tools.test.ts > assistant tools — bash > returns structured output for bash timeouts",
-    "assistant-tools.test.ts > assistant tools — bash > runs bash against workspace files and persists changes",
-    "assistant-tools.test.ts > assistant tools — edit > creates new file with empty old_string",
-    "assistant-tools.test.ts > assistant tools — edit > fuzzy matches on whitespace differences",
-    "assistant-tools.test.ts > assistant tools — edit > replaces exact match",
-    "assistant-tools.test.ts > assistant tools — edit > returns error for ambiguous fuzzy match",
-    "assistant-tools.test.ts > assistant tools — edit > returns error for missing file",
-    "assistant-tools.test.ts > assistant tools — edit > returns error when old_string has multiple matches",
-    "assistant-tools.test.ts > assistant tools — edit > returns error when old_string not found",
-    "assistant-tools.test.ts > assistant tools — find > finds files by glob pattern",
-    "assistant-tools.test.ts > assistant tools — grep > returns context lines when requested",
-    "assistant-tools.test.ts > assistant tools — grep > searches file contents with regex",
-    "assistant-tools.test.ts > assistant tools — grep > searches with fixed string",
-    "assistant-tools.test.ts > assistant tools — grep > skips files larger than 1 MB",
-    "assistant-tools.test.ts > assistant tools — grep > supports case-sensitive search",
-    "assistant-tools.test.ts > assistant tools — list > lists files and directories",
-    "assistant-tools.test.ts > assistant tools — read > does not line-number unknown binary files",
-    "assistant-tools.test.ts > assistant tools — read > reads a file with line numbers",
-    "assistant-tools.test.ts > assistant tools — read > returns compact image metadata and image-data model content",
-    "assistant-tools.test.ts > assistant tools — read > returns error for directory",
-    "assistant-tools.test.ts > assistant tools — read > returns error for missing file",
-    "assistant-tools.test.ts > assistant tools — read > returns file-data model output for PDFs",
-    "assistant-tools.test.ts > assistant tools — read > sniffs gif image bytes when MIME is generic",
-    "assistant-tools.test.ts > assistant tools — read > sniffs jpeg image bytes when MIME is generic",
-    "assistant-tools.test.ts > assistant tools — read > sniffs png image bytes when MIME is generic",
-    "assistant-tools.test.ts > assistant tools — read > sniffs webp image bytes when MIME is generic",
-    "assistant-tools.test.ts > assistant tools — read > supports offset and limit",
-    "assistant-tools.test.ts > assistant tools — write > creates parent directories",
-    "assistant-tools.test.ts > assistant tools — write > writes a file and reports stats",
     "browser-tools.test.ts > createBrowserTools > accepts cdpUrl instead of browser binding (Quick Actions skipped without a binding)",
     "browser-tools.test.ts > createBrowserTools > accepts optional timeout and session mode",
     "browser-tools.test.ts > createBrowserTools > exposes the runtime handle and connector via createBrowserRuntime",
@@ -329,9 +295,7 @@
     "cold-rpc-initialization.test.ts > native RPC initialization > initializes Think before the first subclass RPC method executes",
     "connection-state.test.ts > preserves onConnect state for the first Think root client message",
     "connection-state.test.ts > preserves onConnect state for the first Think sub-agent client message",
-    "execute-tool.test.ts > execute tool on the codemode runtime > maps needsApproval AI SDK tools to requiresApproval — the call pauses durably",
-    "execute-tool.test.ts > execute tool on the codemode runtime > runs sandbox code against tools.* (ToolSetConnector)",
-    "execute-tool.test.ts > execute tool on the codemode runtime > surfaces sandbox errors as error outcomes with an executionId",
+    "execute-tool.test.ts > execute tool on the codemode runtime > one-liner: createExecuteTool(agent) runs without state.* and records on this.codemode",
     "extension-manager.test.ts > ExtensionManager > getTools > should merge tools from multiple extensions",
     "extension-manager.test.ts > ExtensionManager > getTools > should prefix tool names with extension name",
     "extension-manager.test.ts > ExtensionManager > getTools > should return AI SDK tools from loaded extensions",
@@ -383,8 +347,6 @@
     "fetch-tools.test.ts > fetch — redirects > follows same-origin redirects through the binding",
     "fetch-tools.test.ts > fetch — size limits > returns too_large for JSON that exceeds the byte cap",
     "fetch-tools.test.ts > fetch — size limits > truncates oversized text and flags truncated",
-    "fetch-tools.test.ts > fetch — workspace spill > writes binary bodies via writeFileBytes when spill is enabled in auto",
-    "fetch-tools.test.ts > fetch — workspace spill > writes text bodies to the workspace in workspace mode",
     "fetch-tools.test.ts > fetch_<binding> — responses > parses JSON bodies",
     "fetch-tools.test.ts > fetch_<binding> — responses > rejects binary content in auto mode without spill",
     "fetch-tools.test.ts > fetch_<binding> — responses > rejects paths outside the binding allowlist",
@@ -441,7 +403,16 @@
     "hooks.test.ts > Think — beforeTurn hook > keeps the default gateway when getGateway returns undefined",
     "hooks.test.ts > Think — beforeTurn hook > returns a LanguageModel object unchanged",
     "hooks.test.ts > Think — beforeTurn hook > routes @hf/ ids to Workers AI like @cf/ ids",
+    "hooks.test.ts > Think — dynamic context > addContext block appears in system prompt after refresh",
+    "hooks.test.ts > Think — dynamic context > addContext coexists with configureSession blocks",
+    "hooks.test.ts > Think — dynamic context > addContext registers a new block",
+    "hooks.test.ts > Think — dynamic context > dynamic block content can be written via setContextBlock",
+    "hooks.test.ts > Think — dynamic context > dynamic block is writable by default",
     "hooks.test.ts > Think — dynamic context > dynamic block visible in chat turn tools",
+    "hooks.test.ts > Think — dynamic context > removeContext removes the block",
+    "hooks.test.ts > Think — dynamic context > removeContext returns false for non-existent block",
+    "hooks.test.ts > Think — dynamic context > removed block disappears from system prompt after refresh",
+    "hooks.test.ts > Think — dynamic context > session tools include set_context after adding writable block",
     "hooks.test.ts > Think — hook convergence > beforeTurn fires from chat() RPC path",
     "hooks.test.ts > Think — hook convergence > beforeTurn fires from saveMessages path",
     "hooks.test.ts > Think — maxSteps property > respects maxSteps override on class",
@@ -544,6 +515,7 @@
     "prompt-cache.test.ts > prompt-cache prefix stability (#2200) > extends the previous request every turn with no reduction",
     "prompt-cache.test.ts > prompt-cache prefix stability (#2200) > never rewrites the prefix when truncationStep is Infinity",
     "prompt-cache.test.ts > prompt-cache prefix stability (#2200) > rewrites the prefix once per compaction",
+    "prompt-cache.test.ts > prompt-cache prefix stability (#2200) > sends a changed remind block once, where it was delivered, until a refresh promotes it (#2089)",
     "run-turn-recovery.test.ts > recovery × runTurn > wraps a runTurn turn in a recovery fiber and cleans it up",
     "run-turn.test.ts > Think — runTurn > concurrent non-nested wait enqueues behind an active turn",
     "run-turn.test.ts > Think — runTurn > emits no chat:turn metadata for skipped empty wait input",
@@ -587,6 +559,7 @@
     "think-session.test.ts > Think — addMessages > keeps the live view correct when an explicit parentId branches",
     "think-session.test.ts > Think — addMessages > persists durably and coherently when called mid-turn",
     "think-session.test.ts > Think — addMessages > updates in place in upsert mode",
+    "think-session.test.ts > Think — async configureSession > should have working context blocks from async config",
     "think-session.test.ts > Think — async configureSession > should initialize and chat with async configureSession",
     "think-session.test.ts > Think — async configureSession > should support multiple turns after async init",
     "think-session.test.ts > Think — body persistence > should default to undefined when no body set",
@@ -595,6 +568,10 @@
     "think-session.test.ts > Think — chatRecovery > saveMessages with recovery wraps in fiber and cleans up",
     "think-session.test.ts > Think — context blocks > does not warn when classifyChatError is overridden",
     "think-session.test.ts > Think — context blocks > should configure session with context blocks",
+    "think-session.test.ts > Think — context blocks > should freeze system prompt from context blocks",
+    "think-session.test.ts > Think — context blocks > should persist context block content across turns",
+    "think-session.test.ts > Think — context blocks > should render empty writable blocks in system prompt",
+    "think-session.test.ts > Think — context blocks > should use context blocks in system prompt assembly even when called directly",
     "think-session.test.ts > Think — continueLastTurn > should set continuation: true on continueLastTurn",
     "think-session.test.ts > Think — core > should accumulate messages across multiple turns",
     "think-session.test.ts > Think — core > should broadcast RPC chat message updates to connected clients",
@@ -611,11 +588,11 @@
     "think-session.test.ts > Think — error handling > never schedules live recovery for a Durable Object 'storage-reset' (inStream: false)",
     "think-session.test.ts > Think — error handling > should persist partial assistant message on error",
     "think-session.test.ts > Think — error handling > surfaces the stall as a terminal error when onChatRecovery throws",
-    "think-session.test.ts > Think — getConfig inside configureSession > should not throw when getConfig() is called in configureSession on first start",
     "think-session.test.ts > Think — onChatRecovery > does not duplicate an already-persisted completed stream on recovery",
     "think-session.test.ts > Think — onChatRecovery > { continue: false } persists but does not schedule continuation",
     "think-session.test.ts > Think — onChatRecovery > { persist: false, continue: false } skips both",
     "think-session.test.ts > Think — pre-Sessions session API keeps working > accepts the positional appendMessage / getHistory / getRecentHistory forms",
+    "think-session.test.ts > Think — pre-Sessions session API keeps working > folds withContext() blocks into the prompt and serves the context forwards",
     "think-session.test.ts > Think — pre-Sessions session API keeps working > routes a failing compaction function through onCompactionError()",
     "think-session.test.ts > Think — row size enforcement > should compact large tool outputs",
     "think-session.test.ts > Think — row size enforcement > should pass through small messages unchanged",
@@ -640,6 +617,7 @@
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > disposes submitMessages and waitForEvent results after copying serializable data",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > disposes the submitMessages result before cancelling a timed-out prompt",
     "workflows.test.ts > ThinkWorkflow > prompt step RPC disposal > keeps the waitForEvent result alive while validating nested output",
+    "workspace-tools.test.ts > Think workspace tools > lets a same-name tool from getTools() replace a built-in",
     "ws-web-channel.test.ts > Think — WebSocket chat runs on the web channel (#2255) > still runs server-driven turns without a channel by default"
   ]
 }

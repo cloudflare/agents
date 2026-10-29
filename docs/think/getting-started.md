@@ -233,7 +233,7 @@ Now the model sees a `MEMORY` section in its system prompt and gets a `set_conte
 
 When you declare context blocks, the system prompt is built from those blocks, with an overridden `getSystemPrompt()` at the top. The `"soul"` block above acts as the system identity: it is read-only and always appears first. The `"memory"` block is writable, and the model updates it when it learns something useful. The frozen system prompt is always persisted, so a cold wake reuses the exact prompt string the model already cached.
 
-The blocks are available through `this.session` once the Lifecycle has started. See the [Context documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) for providers, tools, and frozen-prompt behavior, and the [Sessions documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for compaction, search, and multi-session support.
+The assembled blocks are available as `this.context` once the Lifecycle has started. See the [Context documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) for providers, tools, and frozen-prompt behavior, and the [Sessions documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for compaction, search, and multi-session support.
 
 ## 7. Add custom tools
 

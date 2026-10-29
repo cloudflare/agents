@@ -611,6 +611,56 @@ describe("ThinkHarness untrusted input", () => {
   });
 });
 
+describe("ThinkHarness context", () => {
+  const session = "with-context";
+
+  it("sends the session's context prompt after the system option", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    const prompt = await stub.lastPromptText();
+    expect(prompt).toMatch(/^system:You are a test\.\n\n/);
+    expect(prompt).toContain("Be kind.");
+    expect(prompt).toContain("MEMORY (Learned facts) [writable]");
+    expect(prompt).toContain("Today is Monday.");
+    expect(prompt.endsWith("|user:hello")).toBe(true);
+  });
+
+  it("leaves a session without context alone", async () => {
+    const stub = fresh();
+    await stub.prompt("hello");
+    expect(await stub.lastPromptText()).toBe(
+      "system:You are a test.|user:hello"
+    );
+  });
+
+  it("delivers a changed remind block once and keeps every request a prefix of the next", async () => {
+    const stub = fresh();
+    await stub.prompt("hello", session);
+    await stub.setEnvironment("Tuesday");
+    await stub.prompt("again", session);
+    await stub.prompt("thanks", session);
+
+    const [first, second, third] = await stub.promptTexts();
+    const system = (prompt: string) => prompt.split("|")[0];
+    expect(system(second)).toBe(system(first));
+    expect(system(third)).toBe(system(first));
+    expect(system(first)).toContain("Monday");
+    // Delivered after the user message that noticed it, and recorded there.
+    expect(second).toMatch(/\|user:again[^|]*Tuesday/);
+    expect(third.startsWith(second)).toBe(true);
+    expect(third.endsWith("|user:thanks")).toBe(true);
+    // The transcript keeps the user's own words.
+    expect(await stub.messages(session)).toContain("user: again");
+  });
+
+  it("offers set_context, which writes the block", async () => {
+    const stub = fresh();
+    const result = await stub.prompt("remember likes tea", session);
+    expect(text(result)).toMatch(/^tool said: Written to memory/);
+    expect(await stub.contextBlock("memory")).toBe("likes tea");
+  });
+});
+
 describe("ThinkHarness sessions", () => {
   it("keeps sessions apart and lists them", async () => {
     const stub = fresh();

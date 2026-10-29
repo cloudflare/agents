@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**193 of the 991 tests that construct Think pass (19%).** Across the whole suite, 427 of 1225.
+**207 of the 1005 tests that construct Think pass (20%).** Across the whole suite, 405 of 1203.
 
 | File                                   | Passing  |      |
 | -------------------------------------- | -------- | ---- |
@@ -26,7 +26,6 @@ supported by the harness-backed Think yet".
 | `assistant-agent-loop.test.ts`         | 8 / 26   | 30%  |
 | `assistant-agent.test.ts`              | 5 / 5    | 100% |
 | `assistant-message-metadata.test.ts`   | 1 / 9    | 11%  |
-| `assistant-tools.test.ts`              | 34 / 34  | 100% |
 | `attachment-consumption.test.ts`       | 0 / 4    | 0%   |
 | `browser-tools.test.ts`                | 6 / 6    | 100% |
 | `channel-policy.test.ts`               | 2 / 3    | 66%  |
@@ -40,11 +39,11 @@ supported by the harness-backed Think yet".
 | `errored-stream-replay.test.ts`        | 0 / 1    | 0%   |
 | `eviction-recovery.test.ts`            | 0 / 1    | 0%   |
 | `execute-hitl.test.ts`                 | 0 / 12   | 0%   |
-| `execute-tool.test.ts`                 | 3 / 6    | 50%  |
+| `execute-tool.test.ts`                 | 1 / 6    | 16%  |
 | `extension-manager.test.ts`            | 34 / 34  | 100% |
-| `fetch-tools.test.ts`                  | 50 / 51  | 98%  |
+| `fetch-tools.test.ts`                  | 48 / 51  | 94%  |
 | `fiber.test.ts`                        | 7 / 7    | 100% |
-| `hooks.test.ts`                        | 28 / 140 | 20%  |
+| `hooks.test.ts`                        | 37 / 140 | 26%  |
 | `hydration-budget.test.ts`             | 1 / 9    | 11%  |
 | `max-concurrent-agent-tools.test.ts`   | 1 / 5    | 20%  |
 | `mcp-tool-materialization.test.ts`     | 0 / 2    | 0%   |
@@ -55,17 +54,18 @@ supported by the harness-backed Think yet".
 | `onconnect-broadcast.test.ts`          | 1 / 13   | 7%   |
 | `onstart-degraded.test.ts`             | 1 / 5    | 20%  |
 | `origin-message-ids.test.ts`           | 0 / 8    | 0%   |
-| `prompt-cache.test.ts`                 | 3 / 10   | 30%  |
+| `prompt-cache.test.ts`                 | 4 / 10   | 40%  |
 | `run-turn-recovery.test.ts`            | 1 / 10   | 10%  |
 | `run-turn.test.ts`                     | 13 / 34  | 38%  |
-| `scheduled-tasks.test.ts`              | 1 / 17   | 5%   |
+| `scheduled-tasks.test.ts`              | 1 / 18   | 5%   |
 | `stream-cleanup.test.ts`               | 0 / 5    | 0%   |
 | `streaming-message-id.test.ts`         | 1 / 1    | 100% |
 | `submissions.test.ts`                  | 8 / 92   | 8%   |
 | `telegram-messenger.test.ts`           | 2 / 2    | 100% |
 | `terminal-frame-order.test.ts`         | 0 / 3    | 0%   |
 | `think-eviction.test.ts`               | 1 / 4    | 25%  |
-| `think-session.test.ts`                | 65 / 276 | 23%  |
+| `think-session.test.ts`                | 70 / 279 | 25%  |
 | `turn-metadata.test.ts`                | 1 / 4    | 25%  |
 | `workflows.test.ts`                    | 3 / 3    | 100% |
+| `workspace-tools.test.ts`              | 1 / 8    | 12%  |
 | `ws-web-channel.test.ts`               | 1 / 10   | 10%  |

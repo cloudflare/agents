@@ -23,6 +23,7 @@ import type {
   ToolAnswer
 } from "../../experimental/channels/harness";
 import type { Session } from "../../sessions/handle";
+import type { Context } from "../../context/context";
 
 /**
  * A session id. The root session is `""`, the Sessions capability's default
@@ -212,7 +213,10 @@ export type ThinkTurnContext = ThinkHookContext & {
   readonly continuation: boolean;
   /** The transcript the model will see, with compaction applied. */
   readonly messages: readonly UIMessage[];
-  /** The system prompt from the options, if any. */
+  /**
+   * The system prompt: the `system` option followed by the session's
+   * context prompt (see the `context` option), if either is set.
+   */
   readonly system: string | undefined;
   /** Names of the tools on offer. */
   readonly tools: readonly string[];
@@ -409,5 +413,15 @@ export type ThinkHarnessOptions<TOOLS extends ToolSet = ToolSet> = {
    * uses it, for example its compaction function and threshold.
    */
   readonly configureSession?: (session: Session, id: ThinkSessionId) => void;
+  /**
+   * The context for a session, built on its handle the first time the
+   * harness uses it. Its prompt follows `system`, its tools join `tools`,
+   * and the harness records on each turn's user message the prompt and
+   * changes that turn was sent with (see `Context` in `agents/context`).
+   */
+  readonly context?: (
+    session: Session,
+    id: ThinkSessionId
+  ) => Context | undefined;
   readonly hooks?: ThinkHarnessHooks;
 };

@@ -70,6 +70,11 @@ function rendersInPrompt(block: ContextBlock, remind: boolean): boolean {
   return !!block.content || block.writable || block.isSearchable || remind;
 }
 
+/** The text that introduces changed blocks sent after the cached prefix. */
+export function renderReminder(sections: readonly string[]): string {
+  return [REMINDER_PREAMBLE, ...sections].join("\n\n");
+}
+
 function renderSection(block: ContextBlock): string {
   let header = block.label.toUpperCase();
   if (block.description) header += ` (${block.description})`;
@@ -416,6 +421,46 @@ export class ContextBlocks {
       .join("\n\n");
   }
 
+  /**
+   * @internal Every block's prompt section in declaration order, as
+   * `[label, section]` pairs; a block left out of the prompt has an empty
+   * section. Read from the loaded blocks.
+   */
+  async internal_sections(): Promise<Array<[string, string]>> {
+    if (!this.loaded) await this.load();
+    const remind = this.remindLabels();
+    return Array.from(this.blocks.values(), (block) => [
+      block.label,
+      rendersInPrompt(block, remind.has(block.label))
+        ? renderSection(block)
+        : ""
+    ]);
+  }
+
+  /**
+   * @internal Re-read the `whenChanged: "remind"` blocks from their
+   * providers and return their current sections.
+   */
+  async internal_remindSections(): Promise<Array<[string, string]>> {
+    if (!this.loaded) await this.load();
+    const sections: Array<[string, string]> = [];
+    for (const config of this.configs) {
+      if (config.whenChanged !== "remind") continue;
+      const block = await this.readBlock(config);
+      this.blocks.set(config.label, block);
+      sections.push([config.label, renderSection(block)]);
+    }
+    return sections;
+  }
+
+  private remindLabels(): Set<string> {
+    return new Set(
+      this.configs
+        .filter((config) => config.whenChanged === "remind")
+        .map((config) => config.label)
+    );
+  }
+
   // ── Public API ──────────────────────────────────────────────────
 
   /**
@@ -477,7 +522,7 @@ export class ContextBlocks {
       }
     }
     if (sections.length === 0) return null;
-    return [REMINDER_PREAMBLE, ...sections].join("\n\n");
+    return renderReminder(sections);
   }
 
   /**

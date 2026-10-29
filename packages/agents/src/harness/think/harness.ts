@@ -40,6 +40,7 @@ import type {
 } from "../../experimental/channels/harness";
 import type { CompactResult } from "../../sessions/compaction-helpers";
 import type { Session } from "../../sessions/handle";
+import type { Context } from "../../context/context";
 import type { SearchResult, SessionMessage } from "../../sessions/types";
 import type { StreamJson } from "../../streams/types";
 import {
@@ -377,6 +378,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   readonly #live = new Map<ThinkSessionId, LiveRun>();
   readonly #waiters = new Map<string, Set<() => void>>();
   readonly #configured = new Set<ThinkSessionId>();
+  /** Each session's context, from the `context` option, built on first use. */
+  readonly #contexts = new Map<ThinkSessionId, Context | undefined>();
   /**
    * In-flight model output. Only the harness reads it, so the harness owns
    * it rather than asking the host to install a Streams capability. It
@@ -1131,14 +1134,41 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const history = asUIMessages(
       await handle.getHistory({ leafId: existing ? existing.id : op.parentId })
     );
-    const system = await resolve(this.#options.system, session);
+    // The session's context blocks follow the `system` option. The first
+    // call of an operation starts the turn, recording on the user message
+    // the prompt it is sent with and any remind block that changed; every
+    // call sends the transcript as a projection of those records, so
+    // earlier turns go out unchanged and the prefix cache holds. A reminder
+    // that could not be recorded (a continuation) waits for the next turn.
+    const context = this.#context(session);
+    let contextSystem = "";
+    let request = history;
+    if (context) {
+      let recorded = history;
+      if (existing === undefined && op.steps === 0) {
+        const prepared = await context.prepare({ messages: history });
+        contextSystem = prepared.system;
+        if (prepared.recorded) {
+          recorded = asUIMessages(
+            await handle.getHistory({ leafId: op.parentId })
+          );
+        }
+      } else {
+        contextSystem = await context.freezeSystemPrompt({ messages: history });
+      }
+      request = asUIMessages(context.project(recorded));
+    }
+    const system = joinSystem(
+      await resolve(this.#options.system, session),
+      contextSystem
+    );
     const config =
       (await hooks?.beforeTurn?.({
         session,
         operationId,
         step: op.steps,
         continuation: existing !== undefined,
-        messages: history,
+        messages: request,
         system,
         tools: Object.keys(tools)
       })) ?? {};
@@ -1148,7 +1178,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const effectiveSystem = config.system ?? system;
     const messages: ModelMessage[] =
       config.messages ??
-      (await convertToModelMessages(history, {
+      (await convertToModelMessages(request, {
         tools,
         ignoreIncompleteToolCalls: true
       }));
@@ -1805,6 +1835,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return this.#handle(session).compact();
   }
 
+  /** A session's context, from the `context` option. */
+  #context(session: ThinkSessionId): Context | undefined {
+    if (!this.#contexts.has(session)) {
+      this.#contexts.set(
+        session,
+        this.#options.context?.(this.#handle(session), session)
+      );
+    }
+    return this.#contexts.get(session);
+  }
+
   #handle(session: ThinkSessionId): Session {
     this.#bindOwned();
     const handle = this.#sessions.session(session);
@@ -1822,7 +1863,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   async #tools(session: ThinkSessionId): Promise<ToolSet> {
-    const tools = (await resolve(this.#options.tools, session)) ?? {};
+    // Context tools (`set_context`, `search_context`) come first, so a tool
+    // from the options with the same name replaces one.
+    const tools = {
+      ...((await this.#context(session)?.tools()) ?? {}),
+      ...((await resolve(this.#options.tools, session)) ?? {})
+    };
     const client = createToolsFromClientSchemas(
       this.#tables().clientTools(session)
     );
@@ -2271,4 +2317,13 @@ export class ThinkSessions implements HarnessSessions {
   list(): Promise<ThinkSessionInfo[]> {
     return this.#harness.listSessions();
   }
+}
+
+/** The `system` option and the context prompt, either of which may be empty. */
+function joinSystem(
+  system: string | undefined,
+  context: string
+): string | undefined {
+  if (!context) return system;
+  return system ? `${system}\n\n${context}` : context;
 }
