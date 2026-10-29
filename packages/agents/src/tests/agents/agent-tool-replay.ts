@@ -62,6 +62,7 @@ type AgentToolInternals = {
     options?: { sequence?: number; serialize?: boolean },
     completedAt?: number
   ): Promise<void>;
+  _hasOutstandingDetachedRuns(): boolean;
   _armDetachedBackbone(options?: { resetCadence?: boolean }): Promise<void>;
 };
 
@@ -386,14 +387,21 @@ export class TestAgentToolReplayAgent extends Agent {
     }
   }
 
-  async deliverGiveUpForTest(runId: string): Promise<void> {
+  hasOutstandingDetachedRunsForTest(): boolean {
+    return this._agentTool._hasOutstandingDetachedRuns();
+  }
+
+  async deliverGiveUpForTest(
+    runId: string,
+    childStillRunning = true
+  ): Promise<void> {
     await this._agentTool._deliverDetachedTerminal(runId, "give_up", {
       runId,
       agentType: "Child",
       status: "interrupted",
       error: "detached run exceeded its budget before completing",
       reason: "budget-exceeded",
-      childStillRunning: true
+      childStillRunning
     });
   }
 

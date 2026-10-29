@@ -104,6 +104,23 @@ describe("detached agent-tool delivery (#1752)", () => {
     expect(giveUps).toHaveLength(1);
   });
 
+  it("treats a given-up run as settled only when its child was torn down (#2768)", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `detached-giveup-settled-${crypto.randomUUID()}`
+    );
+
+    agent.seedDetachedRunForTest("run-torn-down");
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(true);
+    await agent.deliverGiveUpForTest("run-torn-down", false);
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(false);
+
+    // A child that may still be running can deliver a late finish.
+    agent.seedDetachedRunForTest("run-still-running");
+    await agent.deliverGiveUpForTest("run-still-running", true);
+    expect(await agent.hasOutstandingDetachedRunsForTest()).toBe(true);
+  });
+
   it("gives up a silent detached run once its no-progress window elapses (reason: no-progress)", async () => {
     const agent = await getAgentByName(
       env.TestAgentToolReplayAgent,

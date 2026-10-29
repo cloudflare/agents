@@ -6155,6 +6155,7 @@ export class Agent<
     const rows = this.sql<{ n: number }>`
       SELECT COUNT(*) AS n FROM cf_agent_tool_runs
       WHERE detached = 1 AND finish_delivered_at IS NULL
+        AND NOT (give_up_delivered_at IS NOT NULL AND child_still_running = 0)
     `;
     return (rows[0]?.n ?? 0) > 0;
   }
@@ -6507,6 +6508,7 @@ export class Agent<
              give_up_delivered_at
       FROM cf_agent_tool_runs
       WHERE detached = 1 AND finish_delivered_at IS NULL
+        AND NOT (give_up_delivered_at IS NOT NULL AND child_still_running = 0)
       ORDER BY started_at ASC
     `;
 
