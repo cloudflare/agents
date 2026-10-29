@@ -162,6 +162,13 @@ export function createOAuthMcpServer({
   };
   /** How many MCP requests the resource server refused with a 403. */
   let forbiddenResponses = 0;
+  /** How many MCP requests got a 503 because the server was down. */
+  let unavailableResponses = 0;
+
+  function unavailable(): Response {
+    unavailableResponses += 1;
+    return new Response("unavailable", { status: 503 });
+  }
   /** How many times a client tried to register, accepted or not. */
   let registrationAttempts = 0;
 
@@ -282,7 +289,7 @@ export function createOAuthMcpServer({
       return new Response("Not found", { status: 404 });
     }
     await waitIfHeld("mcp");
-    if (!options.up) return new Response("unavailable", { status: 503 });
+    if (!options.up) return unavailable();
     // This server keeps no sessions, so any session id is one it forgot.
     if (request.headers.has("mcp-session-id")) {
       return new Response("Session not found", { status: 404 });
@@ -342,7 +349,7 @@ export function createOAuthMcpServer({
    */
   async function sseServer(request: Request): Promise<Response> {
     await waitIfHeld("mcp");
-    if (!options.up) return new Response("unavailable", { status: 503 });
+    if (!options.up) return unavailable();
     const { pathname, searchParams } = new URL(request.url);
     const token = (request.headers.get("authorization") ?? "").replace(
       /^Bearer /,
@@ -625,6 +632,11 @@ export function createOAuthMcpServer({
       return forbiddenResponses;
     },
 
+    /** How many MCP requests got a 503 because the server was down. */
+    unavailableResponses(): number {
+      return unavailableResponses;
+    },
+
     /** How many requests are waiting at the hold right now. */
     waitingRequests(): number {
       return waiting;
@@ -655,6 +667,7 @@ export function createOAuthMcpServer({
       options.registrationStatus = undefined;
       options.rejectEveryToken = false;
       forbiddenResponses = 0;
+      unavailableResponses = 0;
       registrationAttempts = 0;
       releaseHeld();
       for (const session of sseSessions.values()) {

@@ -94,39 +94,31 @@ describe("MCPClientManager capability", () => {
     });
   });
 
-  describe("durable connection jobs", () => {
-    it("reconnects a server that went down from the job queue with backoff", async () => {
+  describe("failures and link expiry", () => {
+    it("keeps a server that was down on wake failed across restarts until it is reconnected", async () => {
       const authorized = await authorizedObject();
       server.options.up = false;
-      const stub = await restart(authorized.stub, authorized.name);
+      let stub = await restart(authorized.stub, authorized.name);
       await stub.settle();
 
       expect(await stub.connectionStatus("files")).toMatchObject({
         state: "failed"
       });
-      const [first] = await stub.mcpJobs();
-      expect(first).toMatchObject({
-        id: "connect:files",
-        fn: "connect",
-        payload: { serverId: "files", attempt: 1 }
-      });
-
-      // Still down when the alarm drives the job: the next attempt backs off.
-      await runDueJobs(stub);
-      const [second] = await stub.mcpJobs();
-      expect(second).toMatchObject({
-        id: "connect:files",
-        payload: { serverId: "files", attempt: 2 }
-      });
-      expect(second.time).toBeGreaterThan(Date.now() + 30_000);
-
-      // Back up: the next drive connects and the job is gone.
-      server.options.up = true;
-      await runDueJobs(stub);
-      expect(await stub.connectionStatus("files")).toMatchObject({
-        state: "ready"
-      });
       expect(await stub.mcpJobs()).toEqual([]);
+
+      // Back up, but nothing retries a failed server, on a wake or otherwise.
+      server.options.up = true;
+      stub = await restart(stub, authorized.name);
+      await stub.settle();
+      expect(await stub.connectionStatus("files")).toMatchObject({
+        state: "failed"
+      });
+
+      await stub.reconnect("files");
+      expect(await stub.connectionStatus("files")).toEqual({
+        state: "ready",
+        error: null
+      });
     });
 
     it("fails an authorization link that expires unused, and keeps it failed after a restart", async () => {

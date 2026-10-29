@@ -92,9 +92,10 @@ transport against an OAuth-protected MCP server served through msw, with
 callbacks routed through the worker, Lifecycle jobs driven by alarms, and
 object restarts between steps. It covers mid-session step-up, refused
 refreshes, the step-up round limit, removal and re-registration races,
-durable reconnects and authorization link expiry.
+connection failures that stay failed until reconnected, and authorization
+link expiry.
 `packages/agents/src/tests/mcp/client-capability.test.ts` covers the same
-reconnect and expiry jobs for a standalone `MCPClientManager` on a plain
+failures and link expiry for a standalone `MCPClientManager` on a plain
 Lifecycle object.
 
 ### Accepted coverage gaps

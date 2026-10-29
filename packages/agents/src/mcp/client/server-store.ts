@@ -22,28 +22,19 @@ type ServerRenameResult = "renamed" | "missing" | "collision";
  * so a later wake shows the same failure instead of trying again; only an
  * explicit reconnect clears it.
  */
-/**
- * Recorded failures only a person can resolve: authorization was refused or
- * denied, the step-up limit was reached, or reconnecting gave up. Adding the
- * server again does not retry these; `reconnectMcpServer()` does.
- */
-export function needsPerson(failure: StoredServerFailure): boolean {
-  return failure.reason !== "authorization-expired";
-}
-
 export type StoredServerFailure = {
   /**
+   * `connect-failed`: connecting failed after its quick attempts.
+   * `authorization-failed`: authorization was refused or denied.
    * `authorization-expired`: the authorization link expired before the user
    * completed it. `authorization-exhausted`: the server kept asking for the
-   * same authorization after the retry limit. `authorization-failed`:
-   * authorization was refused in a way retrying cannot change.
-   * `reconnect-exhausted`: automatic reconnects gave up.
+   * same authorization past the step-up limit.
    */
   readonly reason:
-    | "authorization-expired"
-    | "authorization-exhausted"
+    | "connect-failed"
     | "authorization-failed"
-    | "reconnect-exhausted";
+    | "authorization-expired"
+    | "authorization-exhausted";
   /** Human-readable message, shown as the connection error. */
   readonly message: string;
   /** When the failure was recorded, in epoch milliseconds. */

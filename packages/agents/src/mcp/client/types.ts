@@ -3,7 +3,6 @@ import type { RetryOptions } from "../../retries";
 import type { McpClientOptions } from "../types";
 import type { MCPConnectionState, MCPTransportOptions } from "./connection";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
-import type { MCPReconnectOptions } from "./jobs";
 import type { PersistedMcpServerOptions } from "./storage";
 
 export type MCPServerOptions = PersistedMcpServerOptions;
@@ -108,9 +107,6 @@ export type MCPClientManagerOptions = {
 
   /** Construct the OAuth provider used for a persisted HTTP server. */
   readonly createAuthProvider?: (callbackUrl: string) => AgentMcpOAuthProvider;
-
-  /** Backoff and give-up limits for durable reconnects after failures. */
-  readonly reconnect?: MCPReconnectOptions;
 };
 
 /**

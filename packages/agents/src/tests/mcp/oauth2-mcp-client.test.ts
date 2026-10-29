@@ -475,7 +475,7 @@ describe("OAuth2 MCP Client - addMcpServer connection states", () => {
     ).toEqual({ id: serverId, state: "authenticating", authUrl });
   });
 
-  it("reconnects a failed server when it is added again", async () => {
+  it("reports a failed server added again without retrying it, and reconnects it on request", async () => {
     const agentName = `test-add-mcp-server-failed-retry-${nanoid(8)}`;
     const agentStub = env.TestOAuthAgent.getByName(agentName);
     const serverId = nanoid(8);
@@ -494,9 +494,18 @@ describe("OAuth2 MCP Client - addMcpServer connection states", () => {
     await agentStub.setMcpConnectionState(serverId, "failed");
 
     expect(
-      await agentStub.testAddMcpServer("test-oauth-server", serverUrl)
-    ).toEqual({ id: serverId, state: "ready", authUrl: undefined });
-    expect(await agentStub.testGetMcpServerState(serverId)).toBe("ready");
+      await agentStub.testAddMcpServerExpectingError(
+        "test-oauth-server",
+        serverUrl
+      )
+    ).toContain("reconnectMcpServer");
+    expect(await agentStub.testGetMcpServerState(serverId)).toBe("failed");
+
+    expect(await agentStub.testReconnectMcpServer(serverId)).toEqual({
+      id: serverId,
+      state: "ready",
+      authUrl: undefined
+    });
   });
 
   it("discovers a connected server instead of reporting it ready", async () => {

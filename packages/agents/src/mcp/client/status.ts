@@ -15,9 +15,9 @@ export class ServerStatus {
   ) {}
 
   /**
-   * Stop a server for a reason automatic attempts cannot fix, and record it
-   * so later wakes show the same failure. Clears its pending link and jobs.
-   * Only an explicit reconnect clears the failure.
+   * Mark a server failed and record why, so later wakes show the same
+   * failure instead of trying again. Clears its pending link. Only an
+   * explicit reconnect clears the failure.
    */
   stop(
     serverId: string,
@@ -26,7 +26,7 @@ export class ServerStatus {
   ): void {
     this.ctx.store.clearAuthUrl(serverId);
     this.ctx.store.setFailure(serverId, { reason, message, at: Date.now() });
-    this.jobs.cancelAll(serverId);
+    this.jobs.cancelLinkExpiry(serverId);
     const conn = this.ctx.connections[serverId];
     if (conn) {
       conn.connectionState = MCPConnectionState.FAILED;
@@ -35,12 +35,11 @@ export class ServerStatus {
     this.ctx.stateChanged();
   }
 
-  /** A server reached ready: forget its failures and pending reconnect. */
+  /** A server reached ready: forget its failure. */
   ready(serverId: string): void {
     this.ctx.store.clearFailure(serverId);
     const conn = this.ctx.connections[serverId];
     if (conn) conn.connectionError = null;
-    this.jobs.cancelReconnect(serverId);
   }
 
   /** Save the connection's resumable session with its row, or clear it. */

@@ -172,7 +172,6 @@ export class AuthorizationController {
     this.ctx.store.setAuthorizationRounds(id, round.rounds);
     this.ctx.store.clearFailure(id);
     conn.connectionState = MCPConnectionState.AUTHENTICATING;
-    this.jobs.cancelReconnect(id);
     this.jobs.armLinkExpiry(id, authUrl);
     this.ctx.observability.fire({
       type: "mcp:client:authorize",

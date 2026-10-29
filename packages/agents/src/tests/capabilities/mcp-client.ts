@@ -98,6 +98,16 @@ export class PlainMcpClientObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
+   * Connect a registered server again, as a standalone manager does on
+   * request: connect, then discover.
+   */
+  async reconnect(id: string): Promise<void> {
+    await this.lifecycle.start();
+    const result = await this.mcp.connectToServer(id);
+    if (result.state === "connected") await this.mcp.discoverIfConnected(id);
+  }
+
+  /**
    * Register a server as if a session with it had been saved, so the next
    * wake resumes that session instead of starting a new one.
    */

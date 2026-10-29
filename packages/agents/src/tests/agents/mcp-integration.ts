@@ -3,7 +3,6 @@ import { MCPAuthorizationRequiredError } from "../../mcp/client/errors";
 import {
   ageAuthorizationLink,
   ageAuthorizationRounds,
-  ageReconnectFailures,
   backdateMcpJobs,
   expireOAuthStates,
   mcpJobs,
@@ -249,10 +248,6 @@ export class McpIntegrationAgent extends Agent {
 
   backdateMcpJobs(): void {
     backdateMcpJobs(this.ctx.storage);
-  }
-
-  ageReconnectFailures(serverId: string, ms: number): void {
-    ageReconnectFailures(this.ctx.storage, serverId, ms);
   }
 
   ageAuthorizationLink(serverId: string, ms: number): void {

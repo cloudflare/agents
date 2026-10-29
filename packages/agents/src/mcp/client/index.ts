@@ -6,7 +6,7 @@
  *   failure
  * - `authorization.ts`: authorization links, OAuth callbacks, and
  *   re-authorization during requests
- * - `jobs.ts`: the durable reconnect and link-expiry jobs
+ * - `jobs.ts`: the durable link-expiry job
  */
 export { MCPClientManager } from "./manager";
 export { getNamespacedData } from "./catalog";
@@ -39,7 +39,6 @@ export {
   MCPConnectionNotFoundError
 } from "./errors";
 export type { MCPAITool, MCPAIToolSet } from "./ai-tools";
-export type { MCPReconnectOptions } from "./jobs";
 export type {
   MCPClientOAuthCallbackConfig,
   MCPClientOAuthResult

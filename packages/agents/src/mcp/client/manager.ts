@@ -31,14 +31,7 @@ import {
   type CallToolSchemaOrOptions,
   type LegacyCallToolResultSchema
 } from "./invoker";
-import {
-  AUTH_EXPIRY_JOB,
-  CONNECT_JOB,
-  makeReconnectPolicy,
-  McpJobs,
-  parseAuthExpiryJobPayload,
-  parseConnectJobPayload
-} from "./jobs";
+import { AUTH_EXPIRY_JOB, McpJobs, parseAuthExpiryJobPayload } from "./jobs";
 import { legacyConnect, type LegacyConnectOptions } from "./legacy-connect";
 import {
   type MCPClientOAuthCallbackConfig,
@@ -76,7 +69,7 @@ const CURRENT_MCP_SCHEMA_VERSION = 1;
  *   happens after a failure
  * - {@link AuthorizationController}: authorization links, OAuth callbacks
  *   and re-authorization during requests
- * - {@link McpJobs}: the durable reconnect and link-expiry jobs
+ * - {@link McpJobs}: the durable link-expiry job
  */
 export class MCPClientManager extends LifecycleCapability {
   public mcpConnections: Record<string, MCPClientConnection> = {};
@@ -144,10 +137,7 @@ export class MCPClientManager extends LifecycleCapability {
       stateChanged: () =>
         this._lanes.outside(() => this._onServerStateChanged.fire())
     };
-    this.jobs = new McpJobs(
-      () => this.lifecycle.jobs,
-      makeReconnectPolicy(options.reconnect)
-    );
+    this.jobs = new McpJobs(() => this.lifecycle.jobs);
     this.status = new ServerStatus(ctx, this.jobs);
     this.elicitation = new ElicitationHandlers(ctx);
     this.authorization = new AuthorizationController(
@@ -211,30 +201,21 @@ export class MCPClientManager extends LifecycleCapability {
     );
   }
 
-  /** Run one of this manager's durable jobs: a reconnect or a link expiry. */
+  /** Run one of this manager's durable jobs: a link expiry. */
   async onJob(
     context: LifecycleJobContext
   ): Promise<LifecycleJobOutcome | void> {
     const { job } = context;
-    switch (job.fn) {
-      case CONNECT_JOB: {
-        const payload = parseConnectJobPayload(job.payload);
-        if (payload && !this.jobs.isRescheduled(job)) {
-          await this.servers.runReconnect(payload.serverId);
-        }
-        return;
-      }
-      case AUTH_EXPIRY_JOB: {
-        const payload = parseAuthExpiryJobPayload(job.payload);
-        if (!payload) return;
-        const rescheduleAt = await this.authorization.runLinkExpiry(payload);
-        return rescheduleAt ? { rescheduleAt } : undefined;
-      }
-      default:
-        console.warn(
-          `[MCPClientManager] Dropping job ${job.id} with unknown fn "${job.fn}"`
-        );
+    if (job.fn !== AUTH_EXPIRY_JOB) {
+      console.warn(
+        `[MCPClientManager] Dropping job ${job.id} with unknown fn "${job.fn}"`
+      );
+      return;
     }
+    const payload = parseAuthExpiryJobPayload(job.payload);
+    if (!payload) return;
+    const rescheduleAt = await this.authorization.runLinkExpiry(payload);
+    return rescheduleAt ? { rescheduleAt } : undefined;
   }
 
   // Servers
@@ -306,7 +287,7 @@ export class MCPClientManager extends LifecycleCapability {
 
   /**
    * @internal Connect a registered server and discover its capabilities, as
-   * one unit of lane work. A failure schedules a durable reconnect.
+   * one unit of lane work. A failure is recorded.
    */
   connectAndDiscover(id: string): Promise<MCPServerSettlement> {
     return this.servers.connectAndDiscover(id);
@@ -314,8 +295,8 @@ export class MCPClientManager extends LifecycleCapability {
 
   /**
    * @internal Bring an already-registered server to a settled state once the
-   * work queued for it has run, for `addMcpServer()`. Reconnects a server
-   * that is not connected, except one only a person can fix.
+   * work queued for it has run, for `addMcpServer()`. Never retries a failed
+   * server.
    */
   settleServer(id: string): Promise<MCPServerSettlement> {
     return this.servers.settle(id);
@@ -323,7 +304,7 @@ export class MCPClientManager extends LifecycleCapability {
 
   /**
    * @internal Try a server again because someone asked: forget a recorded
-   * failure and the step-up budget, drop pending jobs, and connect now.
+   * failure, its link and the step-up budget, and connect now.
    */
   reconnectServer(id: string): Promise<MCPServerSettlement> {
     return this.servers.reconnect(id);

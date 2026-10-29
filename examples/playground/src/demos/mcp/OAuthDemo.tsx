@@ -133,7 +133,7 @@ export function McpOAuthDemo() {
               { state: "ready", desc: "Connected and ready to use" },
               {
                 state: "failed",
-                desc: "Retrying in the background, or stopped with a reason until reconnectMcpServer()"
+                desc: "Failed with a reason until reconnectMcpServer()"
               }
             ].map(({ state, desc }) => (
               <div
