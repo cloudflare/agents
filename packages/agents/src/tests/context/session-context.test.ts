@@ -200,7 +200,7 @@ describe("Context", () => {
     });
   });
 
-  it("keeps the snapshot that compaction hid, until a refresh", async () => {
+  it("keeps the prompt when compaction hides its snapshot, until a refresh", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>
         install(s)
@@ -212,7 +212,10 @@ describe("Context", () => {
       await session.addCompaction("earlier turns", "u1", "a1");
 
       setDate("Friday");
-      expect((await context.build()).system).toBe(first.system);
+      const after = await context.build();
+      expect(after.system).toBe(first.system);
+      // The change still reaches the model, after u2.
+      expect(texts(after.messages.at(-1))[1]).toContain("Today is Friday.");
 
       await context.refreshSystemPrompt();
       await session.appendMessage(assistant("a2", "ok"));
@@ -253,6 +256,51 @@ describe("Context", () => {
       const prepared = await context.prepare({ messages: window });
       expect(prepared.system).toBe(first.system);
       expect((await session.getMessage("u2"))?.metadata).toBeUndefined();
+    });
+  });
+
+  it("gives a regenerated earlier turn the prompt its own branch was sent with", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context, setDate } = await setup(storage, (s) =>
+        install(s)
+      );
+      await session.appendMessage(user("u1", "hello"));
+      const monday = await context.build();
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "plan my week"));
+      await context.build();
+      await session.appendMessage(assistant("a2", "here is a plan"));
+
+      setDate("Friday");
+      await context.refreshSystemPrompt();
+      await session.appendMessage(user("u3", "and now?"));
+      const friday = await context.build();
+      expect(friday.system).toContain("Today is Friday.");
+
+      // Regenerate a2 from a window that holds only u2: the snapshot from
+      // u3 came later, so u2 keeps the prompt it was first sent with.
+      const regenerated = await context.prepare({
+        messages: [(await session.getMessage("u2"))!]
+      });
+      expect(regenerated.system).toBe(monday.system);
+    });
+  });
+
+  it("reserves the label of its own state", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const sessions = new Sessions();
+      install(sessions);
+      expect(
+        () =>
+          new Context(sessions.session(), {
+            storage,
+            blocks: [{ label: "_context_state" }]
+          })
+      ).toThrow(/reserved/);
+      const { context } = await setup(storage, () => {});
+      await expect(
+        context.addBlock({ label: "_context_state" })
+      ).rejects.toThrow(/reserved/);
     });
   });
 

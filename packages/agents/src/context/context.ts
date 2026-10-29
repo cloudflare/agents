@@ -44,12 +44,23 @@ export const CONTEXT_METADATA_KEY = "cf_agents_context";
 /** One block's prompt section: its label and its rendered text. */
 type Section = readonly [label: string, text: string];
 
-/** What a message records about the context the model was sent with it. */
+/**
+ * What a message records about the context the model was sent with it.
+ * Each record is self-contained: with the snapshot it names, it says
+ * everything the model had been shown by that message.
+ */
 type ContextRecord = {
   /** The system prompt from this message on, as ordered sections. */
   readonly system?: readonly Section[];
   /** Blocks that changed, delivered after this message's own content. */
   readonly changes?: readonly Section[];
+  /** For a change record: the message that holds its snapshot. */
+  readonly base?: string;
+  /**
+   * For a change record: every section delivered since that snapshot,
+   * these changes included, by label.
+   */
+  readonly delivered?: readonly Section[];
 };
 
 /** The session operations Context uses. A Sessions `Session` handle fits. */
@@ -59,18 +70,24 @@ export interface ContextSession {
   getMessage(id: string): Promise<SessionMessage | null>;
   /** The answers to a message: its children in the transcript tree. */
   getBranches(messageId: string): Promise<SessionMessage[]>;
+  /** The ids on the path from the root to `leafId`, root first. */
+  getHistoryRowStats(leafId?: string | null): Promise<{ id: string }[]>;
   updateMessage(message: SessionMessage): Promise<SessionMessage | null>;
 }
 
 /**
- * What Context keeps beside the transcript: where the latest snapshot is,
- * for a history read that starts after it, and a refresh that has not been
- * recorded yet.
+ * What Context keeps beside the transcript: which messages hold records,
+ * so a history read that starts after them still finds them, and a
+ * refresh that has not been recorded yet.
  */
 type ContextState = {
-  readonly snapshot?: string;
+  /** Messages that hold a record, oldest first. */
+  readonly records?: readonly string[];
   readonly refresh?: boolean;
 };
+
+/** How many recording messages the state remembers. */
+const MAX_RECORDS = 256;
 
 /** Block label of the stored {@link ContextState}. */
 const STATE_LABEL = "_context_state";
@@ -140,6 +157,7 @@ export class Context {
 
   constructor(session: ContextSession, options: ContextOptions = {}) {
     this.#session = session;
+    for (const block of options.blocks ?? []) assertLabel(block.label);
     const key = (label: string) =>
       session.sessionId ? `${label}_${session.sessionId}` : label;
     const storage = options.storage;
@@ -209,7 +227,7 @@ export class Context {
       const sections = await this.#blocks.internal_sections();
       if (recordable) {
         await this.#record(tail, { system: sections });
-        await this.#writeState({ snapshot: tail.id });
+        await this.#writeState({ records: remember(state, tail.id) });
       }
       return {
         system: renderSystem(sections),
@@ -224,7 +242,17 @@ export class Context {
       return { system, reminder: null, recorded: false };
     }
     if (recordable) {
-      await this.#record(tail, { changes });
+      // The record names its snapshot and carries everything delivered
+      // since, so it alone answers what the model has seen.
+      const delivered_ = new Map(delivered.values);
+      for (const [label, text] of changes) delivered_.set(label, text);
+      const base = delivered.base === tail.id ? undefined : delivered.base;
+      await this.#record(tail, {
+        changes,
+        ...(base && { base }),
+        delivered: [...delivered_]
+      });
+      await this.#writeState({ ...state, records: remember(state, tail.id) });
       return { system, reminder: null, recorded: true };
     }
     return {
@@ -345,7 +373,8 @@ export class Context {
   }
 
   /** Add a block. It enters the prompt at the next refresh. */
-  addBlock(config: ContextConfig): Promise<ContextBlock> {
+  async addBlock(config: ContextConfig): Promise<ContextBlock> {
+    assertLabel(config.label);
     return this.#blocks.addBlock(config);
   }
 
@@ -368,20 +397,51 @@ export class Context {
   }
 
   /**
-   * The context a history was delivered with. When the history starts
-   * after the latest snapshot (a host's bounded window), the stored pointer
-   * finds it.
+   * The context the model had been shown by the history's last message:
+   * the newest record on the path from the root to it. The path is the
+   * stored one, compacted messages included, so the answer does not depend
+   * on how much history the host passes in or on what compaction hides.
    */
   async #delivered(
     history: readonly SessionMessage[],
     state: ContextState
   ): Promise<Delivered> {
-    const delivered = deliveredContext(history);
-    if (delivered.system || !state.snapshot) return delivered;
-    const message = await this.#session.getMessage(state.snapshot);
-    const system = message ? recordOf(message)?.system : undefined;
-    if (!system) return delivered;
-    return deliveredContext([message as SessionMessage, ...history]);
+    const leaf = history.at(-1);
+    if (!leaf) return { system: null, values: new Map() };
+    const loaded = new Map(history.map((message) => [message.id, message]));
+    const known = new Set(state.records ?? []);
+    for (const message of history) {
+      if (recordOf(message)) known.add(message.id);
+    }
+    const load = async (id: string) =>
+      loaded.get(id) ?? (await this.#session.getMessage(id)) ?? undefined;
+
+    const path = await this.#session.getHistoryRowStats(leaf.id);
+    if (path.length === 0) return deliveredContext(history);
+    for (let index = path.length - 1; index >= 0; index--) {
+      const id = path[index].id;
+      if (!known.has(id)) continue;
+      const message = await load(id);
+      const record = message && recordOf(message);
+      if (!record) continue;
+      if (record.system) {
+        const values = new Map<string, string>(record.system);
+        for (const [label, text] of record.changes ?? []) {
+          values.set(label, text);
+        }
+        return { system: record.system, values, base: id };
+      }
+      const baseId = record.base;
+      const base = baseId ? await load(baseId) : undefined;
+      const system = base ? recordOf(base)?.system : undefined;
+      if (!system || !baseId) continue;
+      return {
+        system,
+        values: new Map([...system, ...(record.delivered ?? [])]),
+        base: baseId
+      };
+    }
+    return { system: null, values: new Map() };
   }
 
   async #readState(): Promise<ContextState> {
@@ -419,6 +479,7 @@ export class Context {
       ? { system: record.system }
       : {
           ...existing,
+          ...record,
           changes: mergeSections(existing.changes ?? [], record.changes ?? [])
         };
     await this.#session.updateMessage({
@@ -435,6 +496,8 @@ export class Context {
 type Delivered = {
   system: readonly Section[] | null;
   values: Map<string, string>;
+  /** The message that holds the snapshot. */
+  base?: string;
 };
 
 function deliveredContext(history: readonly SessionMessage[]): Delivered {
@@ -506,4 +569,20 @@ function storageSql(storage: DurableObjectStorage): SqlProvider {
         )
       ] as T[]
   };
+}
+
+/** Block labels Context keeps for its own state. */
+function assertLabel(label: string): void {
+  if (label === STATE_LABEL) {
+    throw new Error(
+      `Context block label "${STATE_LABEL}" is reserved for Context's own state`
+    );
+  }
+}
+
+/** The state's recording messages with one more, newest last, bounded. */
+function remember(state: ContextState, id: string): string[] {
+  return [...(state.records ?? []).filter((known) => known !== id), id].slice(
+    -MAX_RECORDS
+  );
 }

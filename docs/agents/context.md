@@ -75,7 +75,7 @@ Block values themselves stay in their providers. A host that accepts messages fr
 
 `refreshSystemPrompt()` reloads every block and returns the new prompt. The next turn that ends with a user message records it as the new snapshot. That is the one deliberate cache bust, so refresh where the cache is already gone, such as after compaction.
 
-Beside the transcript, `Context` keeps one small state row in the block storage (label `_context_state`): a pending refresh, so it survives eviction, and which message holds the latest snapshot, so a host that reads a bounded window of history, or a branch where compaction hid that message, still opens with the same prompt. Without `storage` or `defaultProvider` that state lives in memory.
+Beside the transcript, `Context` keeps one small state row in the block storage (label `_context_state`, which a block cannot use): a pending refresh, so it survives eviction, and which messages hold records, so a host that reads a bounded window of history sees exactly what the full history would, never a prompt from a later turn or another branch. Records are looked up on the stored path, so compaction does not change the prompt: refresh after compacting to fold changes into it, as Think does. Without `storage` or `defaultProvider` that state lives in memory.
 
 A user message that already has an answer is a branch point, for example when a reply is regenerated. `Context` never records on it, because that would change what its earlier answers were sent; the change comes back as `reminder` for that request instead.
 
