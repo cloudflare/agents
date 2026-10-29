@@ -121,7 +121,7 @@ describe("R2 skill source", () => {
     expect(missing.ok || missing.error._tag).toBe("SkillResourceNotFoundError");
   });
 
-  it("lists skills that break the spec as invalid, by directory", async () => {
+  it("loads skills that break the spec, with warnings", async () => {
     const prefix = await seed({
       "Code-Review/SKILL.md": codeReview.replace(
         "name: code-review",
@@ -129,18 +129,18 @@ describe("R2 skill source", () => {
       ),
       "other/SKILL.md": codeReview
     });
-    const listed = await skills.r2(bucket, { prefix }).list();
+    const source = skills.r2(bucket, { prefix });
+    const listed = await source.list();
     if (!listed.ok) throw listed.error;
-    expect(listed.value.skills).toEqual([]);
+    expect(listed.value.invalid).toEqual([]);
     expect(
-      listed.value.invalid.map(({ name, location, error }) => [
-        name,
-        location,
-        error.code
+      listed.value.skills.map(({ skill, warnings }) => [
+        skill.name,
+        warnings?.map((warning) => warning.code)
       ])
     ).toEqual([
-      ["Code-Review", "Code-Review/SKILL.md", "invalid-name"],
-      ["other", "other/SKILL.md", "name-mismatch"]
+      ["Code-Review", ["invalid-name"]],
+      ["code-review", ["name-mismatch"]]
     ]);
   });
 

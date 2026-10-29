@@ -27,12 +27,7 @@ function errorResult(error: Error): ToolExecutionResult {
  * a skill behaves the same in both frameworks.
  */
 function skillTools(catalog: SkillCatalog): ToolRegistration[] {
-  // Invalid skills are offered too, so activating one reports why it is
-  // broken.
-  const names = [
-    ...catalog.skills.map((entry) => entry.skill.name),
-    ...catalog.invalid.map((entry) => entry.name)
-  ];
+  const names = catalog.skills.map((entry) => entry.skill.name);
   if (names.length === 0) return [];
   const nameSchema = Type.Union(names.map((name) => Type.Literal(name)));
 

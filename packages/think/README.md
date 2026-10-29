@@ -267,12 +267,14 @@ same layout from a bucket, and `skills.manifest(...)` defines skills in
 code. Sources are applied in order: the first to provide a skill name wins, and
 duplicate or failing sources are skipped with a logged warning.
 
-Each `SKILL.md` is checked strictly against the
-[spec](https://agentskills.io/specification) whenever a source is read. A
-skill that fails stays listed under its directory name, and activating it
-fails the tool call with the validation error, listing every broken rule.
-Validate skills when they are written with `skills.parseSkill()`. Unknown
-frontmatter keys are kept in `skill.extraFields`.
+Each `SKILL.md` is checked against the
+[spec](https://agentskills.io/specification) and loaded the way the spec's
+guide for agents recommends: a skill whose `name` breaks the format or does
+not match its directory still loads, with a logged warning. Skills with no
+`description` or unreadable frontmatter are skipped and logged. To check a
+skill before writing it, parse it with `skills.parseSkill()` and require
+`warnings` to be empty. Unknown frontmatter keys are kept in
+`skill.extraFields`.
 
 Text resources are returned directly; binary assets are returned as base64.
 `read_skill_resource` accepts `{ name, path }` or a qualified path such as

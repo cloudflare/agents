@@ -8,7 +8,7 @@ export type {
   Skill,
   SkillName,
   SkillParseErrorCode,
-  SkillParseIssue
+  SkillParseResult
 } from "./skill";
 export {
   InvalidSkillResourcePathError,
@@ -40,13 +40,11 @@ export type {
 } from "./manifest";
 export {
   formatSkillDiagnostic,
-  InvalidSkillError,
   loadSkillCatalog,
   renderSkillResource,
   UnknownSkillError
 } from "./catalog";
 export type {
-  InvalidSkillCatalogEntry,
   LoadSkillCatalogOptions,
   SkillCatalog,
   SkillCatalogEntry,

@@ -5,7 +5,14 @@ import {
   parseSkillResourcePath,
   type SkillResourceInfo
 } from "./resource";
+import type { SkillName } from "./skill";
 import type { InvalidSkill, ListedSkill, SkillListing } from "./source";
+
+/** @internal A listing plus the directory each skill name was read from. */
+export interface SkillTree {
+  readonly listing: SkillListing;
+  readonly directories: ReadonlyMap<SkillName, string>;
+}
 
 /** @internal One file in a tree of skill directories. */
 export interface SkillTreeFile {
@@ -31,7 +38,7 @@ export async function indexSkillTree(
   files: readonly SkillTreeFile[],
   readSkillFile: (path: string) => Promise<string | null>,
   location?: (directory: string) => string
-): Promise<SkillListing> {
+): Promise<SkillTree> {
   const byDirectory = new Map<string, SkillTreeFile[]>();
   for (const file of files) {
     const slash = file.path.indexOf("/");
@@ -44,6 +51,7 @@ export async function indexSkillTree(
 
   const skills: ListedSkill[] = [];
   const invalid: InvalidSkill[] = [];
+  const directories = new Map<SkillName, string>();
   for (const directory of [...byDirectory.keys()].sort()) {
     const entries = byDirectory.get(directory) ?? [];
     const skillPath = `${directory}/SKILL.md`;
@@ -53,11 +61,7 @@ export async function indexSkillTree(
     if (markdown === null) continue;
     const parsed = parseSkill(markdown, { directory });
     if (!parsed.ok) {
-      invalid.push({
-        name: directory,
-        location: skillPath,
-        error: parsed.error
-      });
+      invalid.push({ location: skillPath, error: parsed.error });
       continue;
     }
 
@@ -75,9 +79,15 @@ export async function indexSkillTree(
     skills.push({
       skill: parsed.value,
       resources,
-      ...(location === undefined ? {} : { location: location(directory) })
+      ...(location === undefined ? {} : { location: location(directory) }),
+      ...(parsed.warnings.length === 0 ? {} : { warnings: parsed.warnings })
     });
+    // A name may differ from its directory (a warning); resource reads need the
+    // directory. The first directory to claim a name wins, as in the catalog.
+    if (!directories.has(parsed.value.name)) {
+      directories.set(parsed.value.name, directory);
+    }
   }
 
-  return { skills, invalid };
+  return { listing: { skills, invalid }, directories };
 }

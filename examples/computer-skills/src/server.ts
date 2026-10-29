@@ -121,6 +121,10 @@ export class SkillsAgent extends Think<Env> {
     const markdown = `---\nname: ${input.name}\ndescription: ${JSON.stringify(input.description)}\n---\n\n${input.instructions}\n`;
     const parsed = skills.parseSkill(markdown, { directory: input.name });
     if (!parsed.ok) return { ok: false, error: parsed.error.message };
+    // Sources load skills that break the spec with warnings; reject them
+    // here, when the skill is written.
+    const [warning] = parsed.warnings;
+    if (warning) return { ok: false, error: warning.message };
 
     const directory = `${SKILLS_ROOT}/${parsed.value.name}`;
     await this.workspace.fs.mkdir(directory, { recursive: true });
@@ -131,9 +135,14 @@ export class SkillsAgent extends Think<Env> {
   /** Delete a skill folder from the Workspace. */
   @callable()
   async removeSkill(name: string): Promise<void> {
-    const parsed = skills.parseSkillName(name);
-    if (!parsed.ok) return;
-    await this.workspace.fs.rm(`${SKILLS_ROOT}/${parsed.value}`, {
+    // Skills written by hand may live in a folder that differs from their
+    // name; delete the folder the listing found.
+    const listed = await this.skillSource.list();
+    const location = listed.ok
+      ? listed.value.skills.find(({ skill }) => skill.name === name)?.location
+      : undefined;
+    if (!location) return;
+    await this.workspace.fs.rm(location, {
       recursive: true,
       force: true
     });

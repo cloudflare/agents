@@ -27,10 +27,10 @@ copy to keep in sync. Other stores (R2, code) follow the same layout.
 
 `parseSkill(markdown, { directory })` in `agents/skills/markdown.ts` is the
 one parser (frontmatter rules live in `skill.ts`, which does not load
-`yaml`). It returns `{ ok: true, value }` or `{ ok: false, error }`; it never
-throws and never returns `null`. There is one mode: strict.
+`yaml`). It returns `{ ok: true, value, warnings }` or `{ ok: false, error }`;
+it never throws and never returns `null`.
 
-Rules:
+Spec rules:
 
 - `name`: 1-64 characters after NFKC normalization, lowercase letters, digits,
   and hyphens; no leading, trailing, or consecutive hyphens; must equal the
@@ -43,28 +43,29 @@ Rules:
 - `allowed-tools`: a space-separated string (a YAML list is also accepted),
   parsed into `allowedTools: string[]`.
 
-Every field is checked, and `SkillParseError.issues` lists every broken rule
-(`code` is the first), so whoever fixes the file can do it in one pass.
+The parser follows the spec's
+[guide for agents](https://agentskills.io/client-implementation/adding-skills-support):
+skills written for other clients often break a rule, so a broken rule is a
+warning and the skill still loads. Invalid optional fields are dropped, a
+missing `name` falls back to the directory, and frontmatter that only fails
+because of an unquoted `: ` in a value is read again with those values
+quoted. Sources attach the warnings to the listed skill, and the catalog
+reports them as `SkillWarning` diagnostics (only for the copy it keeps), which
+Think logs.
 
-Skills are validated twice:
+The parse fails only for a skill that cannot be used: no frontmatter, YAML
+that still does not parse, no `description`, or a `name` that is not a safe
+single path segment (no `/`, `\`, NUL, control characters, `.`, or `..`).
+Those skills are skipped and reported as `InvalidSkill` diagnostics; as the
+guide recommends, they are not shown to the model. Every `SkillName` is safe
+to use as a directory, an enum value, and the first segment of a qualified
+resource path. Because a name can differ from its directory, the Workspace
+and R2 sources remember which directory each name came from and read
+resources from there.
 
-1. **On write.** Whoever writes a skill (a user, the agent, an upload
-   handler) should call `parseSkill()` and reject the file before storing
-   it. The examples' "add skill" handlers do.
-2. **On read.** Every source parses every `SKILL.md` strictly on every
-   listing. A skill that fails is listed as `invalid`, under its directory
-   name. The catalog keeps it: it appears in the prompt under "These skills
-   failed validation", the tool name enum accepts it, and `activate_skill`
-   or `read_skill_resource` on it fails the tool call with an
-   `InvalidSkillError` whose message includes the location and every broken
-   rule. AI SDK tools throw (the SDK reports a tool error); the pi tools
-   return `isError: true`. A model that wrote a broken skill sees why on its
-   next activation and can fix the file.
-
-The spec's guide for agents suggests loading malformed skills with warnings
-instead. We chose not to: a skill either follows the spec or fails loudly in
-the place the model will look, and authors fix files instead of agents
-guessing at intent.
+There is no separate strict mode. A skill follows the spec when it parses
+with no warnings, so authoring tools (and the examples' "add skill"
+handlers) reject a skill whose `warnings` are not empty before storing it.
 
 Frontmatter keys the spec does not define are kept in `extraFields` rather
 than rejected. Clients add their own (`disable-model-invocation`,
@@ -194,11 +195,11 @@ tracked a projection fingerprint. The sources stayed authoritative, so a skill
 written only in the Workspace was never discovered. Reading the Workspace
 directly removes the two-copy problem.
 
-### Lenient loading with warnings
+### Strict parsing on read
 
-The spec's guide for agents recommends loading a skill whose name breaks the
-format or does not match its folder, and warning. That keeps skills written
-for other agents working, but the warnings land in logs nobody reads, and
-the same file behaves differently depending on the reader. Strict parsing on
-read, with the error returned to the model as a tool error, keeps one
-definition of a valid skill and puts the failure where it gets fixed.
+Rejecting every skill that breaks a rule (and returning the validation error
+when the model activates it) makes mistakes loud, but skills written for
+other agents often have names that are not lowercase or do not match their
+folder, and they would stop working. We follow the spec's guide instead:
+load with warnings, and validate strictly (no warnings) when a skill is
+written.

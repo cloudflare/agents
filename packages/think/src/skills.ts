@@ -13,7 +13,6 @@ export {
   formatSkill,
   formatSkillDiagnostic,
   fromManifest,
-  InvalidSkillError,
   InvalidSkillResourcePathError,
   isModelInvocable,
   loadSkillCatalog,
@@ -31,7 +30,6 @@ export {
 } from "agents/skills";
 export type {
   InvalidSkill,
-  InvalidSkillCatalogEntry,
   ListedSkill,
   LoadSkillCatalogOptions,
   ParseSkillOptions,
@@ -47,7 +45,7 @@ export type {
   SkillManifestResource,
   SkillName,
   SkillParseErrorCode,
-  SkillParseIssue,
+  SkillParseResult,
   SkillResource,
   SkillResourceError,
   SkillResourceInfo,

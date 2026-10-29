@@ -110,6 +110,10 @@ export class SkillsAgent extends Think<Env> {
     const markdown = `---\nname: ${input.name}\ndescription: ${JSON.stringify(input.description)}\n---\n\n${input.instructions}\n`;
     const parsed = skills.parseSkill(markdown, { directory: input.name });
     if (!parsed.ok) return { ok: false, error: parsed.error.message };
+    // Sources load skills that break the spec with warnings; reject them
+    // here, when the skill is written.
+    const [warning] = parsed.warnings;
+    if (warning) return { ok: false, error: warning.message };
 
     await this.env.SKILLS_BUCKET.put(
       `${PREFIX}${parsed.value.name}/SKILL.md`,

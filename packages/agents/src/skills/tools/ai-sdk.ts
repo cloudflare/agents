@@ -22,9 +22,8 @@ export interface SkillToolsOptions {
  * Build AI SDK tools for a catalog: `activate_skill`, `read_skill_resource`,
  * and, with a script runner, `run_skill_script`.
  *
- * Failures are thrown, so the AI SDK returns them to the model as tool
- * errors. Activating a skill whose `SKILL.md` failed validation fails with
- * the validation error.
+ * Failures (an unknown skill, a missing file) are thrown, so the AI SDK
+ * returns them to the model as tool errors.
  *
  * @param catalog - The catalog to expose. Build tools again after reloading it.
  * @param options - Optional script runner.
@@ -34,12 +33,7 @@ export function createSkillTools(
   catalog: SkillCatalog,
   options: SkillToolsOptions = {}
 ): ToolSet {
-  // Invalid skills are offered too, so activating one reports why it is
-  // broken instead of the model being unable to name it.
-  const names = [
-    ...catalog.skills.map((entry) => entry.skill.name),
-    ...catalog.invalid.map((entry) => entry.name)
-  ];
+  const names = catalog.skills.map((entry) => entry.skill.name);
   const [first, ...rest] = names;
   if (first === undefined) return {};
   const nameSchema = z.enum([first, ...rest]);

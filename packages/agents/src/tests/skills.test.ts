@@ -24,6 +24,7 @@ function skillFile(
   return `---\n${lines.join("\n")}\n---\n${body}`;
 }
 
+/** The parse error's code, or the first warning's code when it loads. */
 function parseError(
   markdown: string,
   options: string | skills.ParseSkillOptions = {}
@@ -32,8 +33,10 @@ function parseError(
     markdown,
     typeof options === "string" ? { directory: options } : options
   );
-  if (parsed.ok) throw new Error("expected a parse error");
-  return parsed.error.code;
+  if (!parsed.ok) return parsed.error.code;
+  const [warning] = parsed.warnings;
+  if (!warning) throw new Error("expected a parse error or warning");
+  return warning.code;
 }
 
 const testManifest: SkillManifest = {
@@ -176,38 +179,99 @@ Review carefully.`);
     ).toBe("invalid-allowed-tools");
   });
 
-  it("lists every broken rule in the error", () => {
+  it("loads spec violations and reports them as warnings", () => {
     const parsed = skills.parseSkill(
-      skillFile({
-        name: "Code_Review",
-        description: "x".repeat(1100),
-        compatibility: "y".repeat(501)
-      }),
+      skillFile({ name: "Code_Review", description: "x".repeat(1100) }),
       { directory: "review" }
     );
-    if (parsed.ok) throw new Error("expected a parse error");
-    expect(parsed.error.code).toBe("invalid-name");
-    expect(parsed.error.issues.map((issue) => issue.code)).toEqual([
+    if (!parsed.ok) throw parsed.error;
+    expect(parsed.value.name).toBe("Code_Review");
+    expect(parsed.warnings.map((warning) => warning.code)).toEqual([
       "invalid-name",
       "name-mismatch",
-      "invalid-description",
-      "invalid-compatibility"
+      "invalid-description"
     ]);
-    expect(parsed.error.message).toMatch(/^SKILL\.md breaks 4 rules: /);
+
+    const clean = skills.parseSkill(
+      skillFile({ name: "code-review", description: "A skill." }),
+      { directory: "code-review" }
+    );
+    expect(clean.ok && clean.warnings).toEqual([]);
   });
 
-  it("rejects padded names", () => {
-    expect(parseError('---\nname: " foo "\ndescription: Example\n---\n')).toBe(
-      "invalid-name"
+  it("trims padded names and reports them", () => {
+    const markdown = '---\nname: " foo "\ndescription: Example\n---\n';
+    expect(parseError(markdown)).toBe("invalid-name");
+    const parsed = skills.parseSkill(markdown);
+    if (!parsed.ok) throw parsed.error;
+    expect(parsed.value.name).toBe("foo");
+    expect(parsed.warnings.map((warning) => warning.message)).toEqual([
+      'Invalid skill name " foo ": it must not start or end with whitespace.'
+    ]);
+  });
+
+  it("reports both a bad name format and a directory mismatch", () => {
+    const parsed = skills.parseSkill(
+      skillFile({ name: "Code_Review", description: "A skill." }),
+      { directory: "review" }
+    );
+    if (!parsed.ok) throw parsed.error;
+    expect(parsed.warnings.map((warning) => warning.code)).toEqual([
+      "invalid-name",
+      "name-mismatch"
+    ]);
+  });
+
+  it("uses the directory when a skill has no name", () => {
+    const parsed = skills.parseSkill(skillFile({ description: "A skill." }), {
+      directory: "notes"
+    });
+    if (!parsed.ok) throw parsed.error;
+    expect(parsed.value.name).toBe("notes");
+    expect(parsed.warnings).toHaveLength(1);
+  });
+
+  it("rejects unsafe names and missing descriptions", () => {
+    for (const name of ["a/b", "..", "tab\there", "back\\slash"]) {
+      expect(
+        parseError(
+          skillFile({ name: JSON.stringify(name), description: "x" }),
+          {}
+        ),
+        name
+      ).toBe("invalid-name");
+    }
+    expect(parseError(skillFile({ name: "ok" }), {})).toBe(
+      "invalid-description"
     );
   });
 
-  it("rejects unquoted colons that break the YAML", () => {
-    expect(
-      parseError(
-        "---\nname: pdf\ndescription: Use this skill when: the user asks about PDFs\n---\nBody"
-      )
-    ).toBe("invalid-yaml");
+  it("repairs unquoted colons", () => {
+    const markdown =
+      "---\nname: pdf\ndescription: Use this skill when: the user asks about PDFs\n---\nBody";
+    expect(parseError(markdown)).toBe("invalid-yaml");
+    const parsed = skills.parseSkill(markdown);
+    if (!parsed.ok) throw parsed.error;
+    expect(parsed.value.description).toBe(
+      "Use this skill when: the user asks about PDFs"
+    );
+    expect(parsed.warnings.map((warning) => warning.code)).toEqual([
+      "invalid-yaml"
+    ]);
+  });
+
+  it("drops invalid optional fields", () => {
+    const parsed = skills.parseSkill(
+      "---\nname: tools\ndescription: A skill.\nallowed-tools: 3\nmetadata:\n  ok: yes\n  nested:\n    a: b\n---\n",
+      {}
+    );
+    if (!parsed.ok) throw parsed.error;
+    expect(parsed.value.allowedTools).toEqual([]);
+    expect(parsed.value.metadata).toEqual({ ok: "yes" });
+    expect(parsed.warnings.map((warning) => warning.code).sort()).toEqual([
+      "invalid-allowed-tools",
+      "invalid-metadata"
+    ]);
   });
 
   it("rejects resource paths that escape the skill", () => {
@@ -339,51 +403,21 @@ describe("skill catalog", () => {
     );
   });
 
-  it("offers invalid skills so activating them returns the validation error", async () => {
+  it("only warns about the copy of a duplicate that the catalog keeps", async () => {
     const catalog = await skills.loadSkillCatalog([
+      skills.manifest(testManifest),
       skills.manifest({
-        id: "mixed",
+        id: "malformed",
         skills: [
-          { name: "Bad_Name", description: "Broken.", body: "" },
-          ...testManifest.skills
+          {
+            name: "code-review",
+            description: "x".repeat(1100),
+            body: "Duplicate."
+          }
         ]
       })
     ]);
-
-    expect(catalog.find("code-review")).toBeDefined();
-    expect(catalog.invalid).toMatchObject([
-      { name: "Bad_Name", location: "mixed:Bad_Name" }
-    ]);
-    expect(catalog.prompt()).toContain(
-      "These skills failed validation. activate_skill returns the error"
-    );
-    expect(catalog.prompt()).toContain("- Bad_Name (mixed:Bad_Name)");
-
-    const activated = catalog.activate("Bad_Name");
-    expect(activated.ok).toBe(false);
-    if (activated.ok) return;
-    expect(activated.error._tag).toBe("InvalidSkillError");
-    expect(activated.error.message).toBe(
-      'Skill "Bad_Name" failed validation, so it cannot be used. Fix mixed:Bad_Name: Invalid skill name "Bad_Name": it must be lowercase.'
-    );
-    const read = await catalog.readResource({
-      path: "Bad_Name/references/x.md"
-    });
-    expect(read.ok || read.error._tag).toBe("InvalidSkillError");
-  });
-
-  it("lets a broken skill in an earlier source shadow a valid one", async () => {
-    const catalog = await skills.loadSkillCatalog([
-      skills.manifest({
-        id: "override",
-        skills: [{ name: "code-review", description: "", body: "Broken." }]
-      }),
-      skills.manifest(testManifest)
-    ]);
-    expect(catalog.find("code-review")).toBeUndefined();
-    expect(catalog.activate("code-review").ok).toBe(false);
     expect(catalog.diagnostics.map((diagnostic) => diagnostic._tag)).toEqual([
-      "InvalidSkill",
       "DuplicateSkill"
     ]);
   });
@@ -431,6 +465,7 @@ describe("skill catalog", () => {
       skills.manifest({
         id: "mixed",
         skills: [
+          { name: "Bad Name", description: "Loaded anyway.", body: "" },
           { name: "no-description", description: "", body: "" },
           ...testManifest.skills
         ]
@@ -438,13 +473,15 @@ describe("skill catalog", () => {
     ]);
 
     expect(catalog.find("code-review")).toBeDefined();
+    expect(catalog.find("Bad Name")).toBeDefined();
     expect(
       catalog.diagnostics.map((diagnostic) =>
         skills.formatSkillDiagnostic(diagnostic)
       )
     ).toEqual([
       'Skill source "throwing" failed to list skills: list exploded. Its skills were skipped.',
-      'Invalid skill mixed:no-description from source "mixed": SKILL.md frontmatter must set `description` to a non-empty string.'
+      'Skipped invalid skill mixed:no-description from source "mixed": SKILL.md frontmatter must set `description` to a non-empty string.',
+      'Skill "Bad Name" from source "mixed" breaks the Agent Skills spec but was loaded: Invalid skill name "Bad Name": it must be lowercase.'
     ]);
   });
 
@@ -607,22 +644,6 @@ describe("AI SDK skill tools", () => {
       })
     ).rejects.toThrow("Resource not found: code-review/scripts/missing.js");
   });
-
-  it("returns validation errors as tool errors", async () => {
-    const tools = createSkillTools(
-      await skills.loadSkillCatalog([
-        skills.manifest({
-          id: "broken",
-          skills: [{ name: "broken", description: "", body: "" }]
-        })
-      ])
-    );
-    await expect(
-      executable(tools.activate_skill).execute({ name: "broken" })
-    ).rejects.toThrow(
-      'Skill "broken" failed validation, so it cannot be used. Fix broken:broken: SKILL.md frontmatter must set `description` to a non-empty string.'
-    );
-  });
 });
 
 describe("workspace skill source", () => {
@@ -697,12 +718,39 @@ describe("workspace skill source", () => {
     expect(deleted.fingerprint).toBe(empty.fingerprint);
   });
 
-  it("offers Workspace skills that fail validation under their directory", async () => {
+  it("loads a skill whose name does not match its directory, with a warning", async () => {
     const workspace = new MemorySkillWorkspace({
       [`${root}/review/SKILL.md`]: skillFile({
         name: "code-review",
         description: "Mismatched directory."
       }),
+      [`${root}/review/references/checklist.md`]: "Check tests."
+    });
+    const source = skills.workspace(workspace);
+    const listed = await source.list();
+    if (!listed.ok) throw listed.error;
+    expect(listed.value.invalid).toEqual([]);
+    expect(listed.value.skills).toMatchObject([
+      {
+        skill: { name: "code-review" },
+        location: `${root}/review`,
+        warnings: [{ code: "name-mismatch" }]
+      }
+    ]);
+
+    // Resources are read from the directory, not the name.
+    const catalog = await skills.loadSkillCatalog([source]);
+    const read = await catalog.readResource({
+      path: "code-review/references/checklist.md"
+    });
+    expect(read.ok && read.value.resource.content).toBe("Check tests.");
+    expect(catalog.diagnostics).toMatchObject([
+      { _tag: "SkillWarning", name: "code-review" }
+    ]);
+  });
+
+  it("skips Workspace skills without a description or with unreadable frontmatter", async () => {
+    const workspace = new MemorySkillWorkspace({
       [`${root}/empty/SKILL.md`]: "---\nname: empty\n---\nNo description.",
       [`${root}/broken/SKILL.md`]: "---\nname: [broken\n---\n"
     });
@@ -710,24 +758,11 @@ describe("workspace skill source", () => {
     if (!listed.ok) throw listed.error;
     expect(listed.value.skills).toEqual([]);
     expect(
-      listed.value.invalid.map(({ name, location, error }) => [
-        name,
-        location,
-        error.code
-      ])
+      listed.value.invalid.map(({ location, error }) => [location, error.code])
     ).toEqual([
-      ["broken", "broken/SKILL.md", "invalid-yaml"],
-      ["empty", "empty/SKILL.md", "invalid-description"],
-      ["review", "review/SKILL.md", "name-mismatch"]
+      ["broken/SKILL.md", "invalid-yaml"],
+      ["empty/SKILL.md", "invalid-description"]
     ]);
-
-    const catalog = await skills.loadSkillCatalog([
-      skills.workspace(workspace)
-    ]);
-    const activated = catalog.activate("review");
-    expect(!activated.ok && activated.error.message).toContain(
-      'Fix review/SKILL.md: Skill name "code-review" must match its directory "review".'
-    );
   });
 
   it("supports a custom root", async () => {
