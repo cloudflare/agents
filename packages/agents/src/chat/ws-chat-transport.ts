@@ -185,21 +185,26 @@ export class WebSocketChatTransport<
   }
 
   /**
-   * Explicitly cancel the active server turn, if any.
+   * Explicitly cancel the active and accepted pending server turns, if any.
    * This is separate from generic client-side abort/cancel lifecycle so
    * clients can detach locally without stopping server work.
    */
   cancelActiveServerTurn(): boolean {
-    const requestId = this._pendingServerTurnId ?? this._activeServerTurnId;
-    let cancelledRequest = false;
-
-    if (requestId) {
-      this.sendCancelFrame(requestId);
-      if (this._pendingServerTurnId) this.cancelPendingResume();
-      this._cancelAttachedStream?.();
-      this.clearActiveServerTurn(requestId);
-      cancelledRequest = true;
+    // Stop cancels every turn this transport knows about. A pending queued
+    // turn may differ from the turn owning the attached stream.
+    const pendingId = this._pendingServerTurnId;
+    const activeId = this._activeServerTurnId;
+    const requestIds = new Set([pendingId, activeId]);
+    requestIds.delete(null);
+    for (const requestId of requestIds) {
+      if (requestId) this.sendCancelFrame(requestId);
     }
+    if (pendingId) this.cancelPendingResume();
+    if (activeId) {
+      this._cancelAttachedStream?.();
+      this.clearActiveServerTurn(activeId);
+    }
+    const cancelledRequest = requestIds.size > 0;
 
     const cancelledToolContinuation = this.abortActiveToolContinuation();
     return cancelledRequest || cancelledToolContinuation;
