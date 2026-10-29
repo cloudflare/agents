@@ -53,11 +53,13 @@ export const CLOUDFLARE_PROVIDER_ID = "cloudflare";
  * (make the model). Its `sdk` step can only load packages it bundles; any
  * other is handed to an npm installer that cannot run in workerd, and an
  * external plugin's `sdk` hook runs after that installer. So the provider
- * names `@ai-sdk/vercel`, which OpenCode bundles and loads in-process, and
- * this plugin's `language` hook replaces the model it would make. The
- * Vercel client is built but never called: its base URL does not resolve.
+ * names `gitlab-ai-provider`, which OpenCode bundles and loads in-process
+ * for any provider that names it (OpenCode 2.2.1 stopped bundling
+ * `@ai-sdk/vercel`, the package used before), and this plugin's `language`
+ * hook replaces the model it would make. The GitLab client is built but
+ * never called.
  */
-const CARRIER_PACKAGE = "aisdk:@ai-sdk/vercel";
+const CARRIER_PACKAGE = "aisdk:gitlab-ai-provider";
 const UNREACHABLE_BASE_URL = "https://workers-ai.binding.invalid/v1";
 
 /**
