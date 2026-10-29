@@ -12,7 +12,7 @@
   "bin": {
     "agents": "./dist/cli.js"
   },
-  "version": "0.31.0",
+  "version": "0.32.0",
   "sideEffects": [
     "./dist/cli.js"
   ],
