@@ -1,5 +1,7 @@
 # codemode-mcp-openapi
 
+> **Legacy, with no replacement.** `openApiMcpServer` is part of the feature-frozen Code Mode API. See [The legacy Code Mode API](https://github.com/cloudflare/agents/blob/main/docs/codemode/legacy.md).
+
 Demonstrates how to turn any OpenAPI spec into a pair of MCP tools (`search` + `execute`) using `openApiMcpServer`.
 
 > `@cloudflare/codemode` currently produces an MCP SDK v1 server, so this example intentionally uses the retained `createLegacyMcpHandler` API until Codemode's in-memory MCP bridge migrates separately.
@@ -135,4 +137,4 @@ async () => {
 ## Related
 
 - [codemode-mcp](../codemode-mcp/) — wrapping an existing MCP server instead of an OpenAPI spec
-- [`@cloudflare/codemode` docs](../../packages/codemode/README.md)
+- [Legacy Code Mode API reference](../../docs/codemode/legacy-reference.md)

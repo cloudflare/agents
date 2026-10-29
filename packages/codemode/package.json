@@ -1,7 +1,7 @@
 {
   "name": "@cloudflare/codemode",
   "version": "0.5.5",
-  "description": "Code Mode: use LLMs to generate executable code that performs tool calls",
+  "description": "Run JavaScript in a Dynamic Worker against your own files and host modules. Also ships the legacy Code Mode API, feature-frozen.",
   "repository": {
     "directory": "packages/codemode",
     "type": "git",
@@ -76,7 +76,7 @@
   },
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "test": "vitest run && vitest run --config vitest.runtime.config.ts && vitest run --config vitest.browser.config.ts",
+    "test": "vitest run --config vitest.backend.config.ts && vitest run && vitest run --config vitest.runtime.config.ts && vitest run --config vitest.browser.config.ts",
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
     "test:e2e:llm": "playwright test --config e2e/playwright.llm.config.ts",
     "test:watch": "vitest",
@@ -92,6 +92,7 @@
   "author": "Cloudflare Inc.",
   "license": "MIT",
   "type": "module",
+  "sideEffects": false,
   "files": [
     "dist",
     "docs",

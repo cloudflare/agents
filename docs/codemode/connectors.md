@@ -1,5 +1,7 @@
 # Connectors
 
+> **Legacy, feature-frozen.** Connectors keep working and won't change, but they are no longer maintained. In new code, a connector is a host module (`ws:<name>`) on `WorkerJavaScriptBackend`. See [The legacy Code Mode API](./legacy.md#a-connector).
+
 Connectors are class-based integrations that bridge external services into the codemode sandbox.
 
 **Why this exists:** there should be one way to add a capability. Whether the source is an MCP server, an OpenAPI spec, an AI SDK toolset, or your own service, the answer is the same — wrap it in a connector class, put it in a runtime, and the model sees it as a typed global (`github.list_pull_requests(...)`). The model-facing protocol never changes; only the class you subclass does.

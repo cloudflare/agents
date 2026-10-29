@@ -1,5 +1,7 @@
 # Approvals
 
+> **Legacy, feature-frozen.** Approvals keep working and won't change, but they are no longer maintained. `WorkerJavaScriptBackend` has no durable approvals yet, and rollback has no replacement. See [The legacy Code Mode API](./legacy.md#approvals).
+
 A tool with `requiresApproval: true` pauses the run when the model's code calls it (the run aborts), the action is recorded as pending, and the user is asked to approve. On approval the execution **continues via replay** — see [Runtime](./runtime.md) for the mechanism.
 
 ## Marking tools

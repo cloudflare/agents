@@ -1,5 +1,7 @@
 # Vite Plugin
 
+> **Legacy, feature-frozen, with no replacement.** `WorkerJavaScriptBackend` has no facet class to export, so it doesn't need the plugin. See [The legacy Code Mode API](./legacy.md).
+
 The `@cloudflare/codemode/vite` plugin exports the `CodemodeRuntime` facet class from your Worker entry module.
 
 **Why this exists:** `createCodemodeRuntime()` stores execution state in a Durable Object facet. The Workers runtime requires facet classes to be available through `ctx.exports`, so the Worker entry module must export `CodemodeRuntime`. The plugin adds that export for you.
