@@ -102,6 +102,8 @@ export type WebSocketChatTransportOptions<
    * reconnect transcript replay. `messageId` is the submitted user message's id.
    */
   onRequestBuffered?: (messageId: string | undefined) => void;
+  /** Called when an accepted pre-stream turn is discovered or the probe settles. */
+  onPendingServerTurnChange?: (requestId: string | null) => void;
 };
 
 /**
@@ -122,6 +124,9 @@ export class WebSocketChatTransport<
   private cancelOnClientAbort: boolean;
   private onRequestBuffered?: WebSocketChatTransportOptions<ChatMessage>["onRequestBuffered"];
 
+  private onPendingServerTurnChange?: WebSocketChatTransportOptions<ChatMessage>["onPendingServerTurnChange"];
+  private _pendingServerTurnId: string | null = null;
+
   // Pending resume resolver — set by reconnectToStream, called by
   // handleStreamResuming when onAgentMessage sees CF_AGENT_STREAM_RESUMING.
   private _resumeResolver: ((data: { id: string }) => void) | null = null;
@@ -139,7 +144,7 @@ export class WebSocketChatTransport<
   // awaiting, called by handleStreamPending when onAgentMessage sees
   // CF_AGENT_STREAM_PENDING. Extends the path's probe timeout so a slow
   // pre-stream window (queue / MCP / model latency) does not resolve early.
-  private _onStreamPending: (() => void) | null = null;
+  private _onStreamPending: ((data: { id?: string }) => void) | null = null;
   // Retransmits the current handshake on a replacement socket without starting
   // a second AI SDK resume request. Set only while a resolver is active.
   private _retryResumeProbe: (() => void) | null = null;
@@ -161,6 +166,7 @@ export class WebSocketChatTransport<
     this.activeRequestIds = options.activeRequestIds;
     this.cancelOnClientAbort = options.cancelOnClientAbort ?? false;
     this.onRequestBuffered = options.onRequestBuffered;
+    this.onPendingServerTurnChange = options.onPendingServerTurnChange;
   }
 
   /**
@@ -184,11 +190,12 @@ export class WebSocketChatTransport<
    * clients can detach locally without stopping server work.
    */
   cancelActiveServerTurn(): boolean {
-    const requestId = this._activeServerTurnId;
+    const requestId = this._pendingServerTurnId ?? this._activeServerTurnId;
     let cancelledRequest = false;
 
     if (requestId) {
       this.sendCancelFrame(requestId);
+      if (this._pendingServerTurnId) this.cancelPendingResume();
       this._cancelAttachedStream?.();
       this.clearActiveServerTurn(requestId);
       cancelledRequest = true;
@@ -205,6 +212,17 @@ export class WebSocketChatTransport<
    */
   get activeServerTurnId(): string | null {
     return this._activeServerTurnId;
+  }
+
+  /** Accepted turn discovered by a resume probe, before a stream is attached. */
+  get pendingServerTurnId(): string | null {
+    return this._pendingServerTurnId;
+  }
+
+  private setPendingServerTurn(requestId: string | null) {
+    if (this._pendingServerTurnId === requestId) return;
+    this._pendingServerTurnId = requestId;
+    this.onPendingServerTurnChange?.(requestId);
   }
 
   private sendCancelFrame(requestId: string) {
@@ -319,9 +337,9 @@ export class WebSocketChatTransport<
    * eventual STREAM_RESUMING / STREAM_RESUME_NONE instead of resolving null
    * after the short window). Returns true if a waiting path consumed it.
    */
-  handleStreamPending(): boolean {
+  handleStreamPending(data: { id?: string } = {}): boolean {
     if (!this._onStreamPending) return false;
-    this._onStreamPending();
+    this._onStreamPending(data);
     return true;
   }
 
@@ -533,14 +551,15 @@ export class WebSocketChatTransport<
     return stream;
   }
 
-  async reconnectToStream(_options: {
+  async reconnectToStream(options: {
     chatId: string;
+    abortSignal?: AbortSignal;
   }): Promise<ReadableStream<UIMessageChunk> | null> {
     // A transport has one handshake slot. Returning null for an unexpected
     // concurrent caller is safer than overwriting callbacks owned by the first
     // AI SDK request (StrictMode/manual overlap); the hook serializes its normal
     // mount, tool, public, and reconnect entry points.
-    if (this.isAwaitingResume()) return null;
+    if (options.abortSignal?.aborted || this.isAwaitingResume()) return null;
 
     if (this._expectToolContinuation) {
       this._expectToolContinuation = false;
@@ -560,7 +579,7 @@ export class WebSocketChatTransport<
       let resumeResolver: ((data: { id: string }) => void) | null = null;
       let resumeNoneResolver: ((data: { probeId?: string }) => boolean) | null =
         null;
-      let onStreamPending: (() => void) | null = null;
+      let onStreamPending: ((data: { id?: string }) => void) | null = null;
       let retryResumeProbe: (() => void) | null = null;
 
       const clearOwnedCallbacks = () => {
@@ -585,9 +604,13 @@ export class WebSocketChatTransport<
         if (resolved) return;
         resolved = true;
         clearOwnedCallbacks();
+        this.setPendingServerTurn(null);
+        options.abortSignal?.removeEventListener("abort", onAbort);
         if (timeout) clearTimeout(timeout);
         resolve(value);
       };
+
+      const onAbort = () => done(null);
 
       const armTimeout = (delay: number) => {
         if (timeout) clearTimeout(timeout);
@@ -596,8 +619,9 @@ export class WebSocketChatTransport<
 
       // Keep-waiting (#1784): the server says a turn is accepted but its stream
       // has not started. Extend this operation's own timeout only.
-      onStreamPending = () => {
+      onStreamPending = (data) => {
         if (resolved) return;
+        if (data.id) this.setPendingServerTurn(data.id);
         armTimeout(RESUME_PENDING_TIMEOUT_MS);
       };
 
@@ -643,6 +667,7 @@ export class WebSocketChatTransport<
       this._resumeNoneResolver = resumeNoneResolver;
       this._resumeResolver = resumeResolver;
       this._retryResumeProbe = retryResumeProbe;
+      options.abortSignal?.addEventListener("abort", onAbort, { once: true });
       retryResumeProbe();
     });
   }
