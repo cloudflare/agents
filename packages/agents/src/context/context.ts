@@ -19,6 +19,10 @@
  */
 
 import type { ToolSet } from "ai";
+import {
+  COMPACTION_PREFIX,
+  isCompactionMessage
+} from "../sessions/compaction-helpers";
 import type { SessionMessage } from "../sessions/types";
 import {
   ContextBlocks,
@@ -61,6 +65,13 @@ type ContextRecord = {
    * these changes included, by label.
    */
   readonly delivered?: readonly Section[];
+  /**
+   * For a turn that delivered nothing new: the message that holds the
+   * record in force. Every turn's user message carries a record or a
+   * pointer, so the context any message was sent with is one or two reads
+   * away.
+   */
+  readonly ref?: string;
 };
 
 /** The session operations Context uses. A Sessions `Session` handle fits. */
@@ -70,24 +81,25 @@ export interface ContextSession {
   getMessage(id: string): Promise<SessionMessage | null>;
   /** The answers to a message: its children in the transcript tree. */
   getBranches(messageId: string): Promise<SessionMessage[]>;
-  /** The ids on the path from the root to `leafId`, root first. */
-  getHistoryRowStats(leafId?: string | null): Promise<{ id: string }[]>;
+  /**
+   * The stored path from the root to `leafId`, root first, compacted
+   * messages included.
+   */
+  getHistoryRowStats(
+    leafId?: string | null
+  ): Promise<{ id: string; role: string }[]>;
+  /** The session's compactions: which stored message each one ends at. */
+  getCompactions(): Promise<{ id: string; toMessageId: string }[]>;
   updateMessage(message: SessionMessage): Promise<SessionMessage | null>;
 }
 
 /**
- * What Context keeps beside the transcript: which messages hold records,
- * so a history read that starts after them still finds them, and a
- * refresh that has not been recorded yet.
+ * What Context keeps beside the transcript: a refresh that has not been
+ * recorded yet.
  */
 type ContextState = {
-  /** Messages that hold a record, oldest first. */
-  readonly records?: readonly string[];
   readonly refresh?: boolean;
 };
-
-/** How many recording messages the state remembers. */
-const MAX_RECORDS = 256;
 
 /** Block label of the stored {@link ContextState}. */
 const STATE_LABEL = "_context_state";
@@ -228,7 +240,7 @@ export class Context {
       const sections = await this.#blocks.internal_sections();
       if (recordable) {
         await this.#record(tail, { system: sections });
-        await this.#writeState({ records: remember(state, tail.id) });
+        await this.#writeState({});
       }
       return {
         system: renderSystem(sections),
@@ -240,7 +252,14 @@ export class Context {
     const changes = await this.#changes(delivered.values);
     const system = renderSystem(delivered.system);
     if (changes.length === 0) {
-      return { system, reminder: null, recorded: false };
+      // Point this turn at the record in force, so a later read that
+      // starts here finds it without walking back further.
+      const pointed =
+        recordable &&
+        delivered.record !== undefined &&
+        delivered.record !== tail.id;
+      if (pointed) await this.#record(tail, { ref: delivered.record });
+      return { system, reminder: null, recorded: pointed };
     }
     if (recordable) {
       // The record names its snapshot and carries everything delivered
@@ -253,7 +272,6 @@ export class Context {
         ...(base && { base }),
         delivered: [...delivered_]
       });
-      await this.#writeState({ ...state, records: remember(state, tail.id) });
       return { system, reminder: null, recorded: true };
     }
     return {
@@ -399,38 +417,53 @@ export class Context {
 
   /**
    * The context the model had been shown by the history's last message:
-   * the newest record on the path from the root to it. The path is the
-   * stored one, compacted messages included, so the answer does not depend
-   * on how much history the host passes in or on what compaction hides.
+   * the newest record on the stored path from the root to it. The stored
+   * path includes compacted messages, so the answer does not depend on how
+   * much history the host passes in or on what compaction hides. Every
+   * turn's user message carries a record or a pointer to one, so the walk
+   * reads a user message or two.
    */
   async #delivered(
     history: readonly SessionMessage[],
-    state: ContextState
+    _state: ContextState
   ): Promise<Delivered> {
-    const leaf = history.at(-1);
-    if (!leaf) return { system: null, values: new Map() };
+    const none: Delivered = { system: null, values: new Map() };
+    const last = history.at(-1);
+    if (!last) return none;
     const loaded = new Map(history.map((message) => [message.id, message]));
-    const known = new Set(state.records ?? []);
-    for (const message of history) {
-      if (recordOf(message)) known.add(message.id);
-    }
     const load = async (id: string) =>
       loaded.get(id) ?? (await this.#session.getMessage(id)) ?? undefined;
 
-    const path = await this.#session.getHistoryRowStats(leaf.id);
+    // A compaction that reaches the end of the history ends on a stored
+    // message; walk from there.
+    let leaf = last.id;
+    if (isCompactionMessage(last)) {
+      const id = last.id.slice(COMPACTION_PREFIX.length);
+      const compaction = (await this.#session.getCompactions()).find(
+        (candidate) => candidate.id === id
+      );
+      if (!compaction) return deliveredContext(history);
+      leaf = compaction.toMessageId;
+    }
+
+    const path = await this.#session.getHistoryRowStats(leaf);
     if (path.length === 0) return deliveredContext(history);
     for (let index = path.length - 1; index >= 0; index--) {
-      const id = path[index].id;
-      if (!known.has(id)) continue;
-      const message = await load(id);
-      const record = message && recordOf(message);
+      if (path[index].role !== "user") continue;
+      const message = await load(path[index].id);
+      const found = message && recordOf(message);
+      if (!found) continue;
+      // A pointer names the message whose record is in force.
+      const id = found.ref ?? path[index].id;
+      const target = found.ref ? await load(found.ref) : message;
+      const record = target && recordOf(target);
       if (!record) continue;
       if (record.system) {
         const values = new Map<string, string>(record.system);
         for (const [label, text] of record.changes ?? []) {
           values.set(label, text);
         }
-        return { system: record.system, values, base: id };
+        return { system: record.system, values, base: id, record: id };
       }
       const baseId = record.base;
       const base = baseId ? await load(baseId) : undefined;
@@ -439,10 +472,11 @@ export class Context {
       return {
         system,
         values: new Map([...system, ...(record.delivered ?? [])]),
-        base: baseId
+        base: baseId,
+        record: id
       };
     }
-    return { system: null, values: new Map() };
+    return none;
   }
 
   async #readState(): Promise<ContextState> {
@@ -476,13 +510,20 @@ export class Context {
     const stored = (await this.#session.getMessage(message.id)) ?? message;
     const metadata = isObject(stored.metadata) ? stored.metadata : {};
     const existing = recordOf(stored) ?? {};
-    const merged: ContextRecord = record.system
-      ? { system: record.system }
-      : {
-          ...existing,
-          ...record,
-          changes: mergeSections(existing.changes ?? [], record.changes ?? [])
-        };
+    let merged: ContextRecord;
+    if (record.system) merged = { system: record.system };
+    else if (record.ref) {
+      // A pointer never replaces a record already on the message.
+      if (existing.system || existing.changes) return;
+      merged = { ref: record.ref };
+    } else {
+      const { ref: _ref, ...kept } = existing;
+      merged = {
+        ...kept,
+        ...record,
+        changes: mergeSections(existing.changes ?? [], record.changes ?? [])
+      };
+    }
     await this.#session.updateMessage({
       ...stored,
       metadata: { ...metadata, [CONTEXT_METADATA_KEY]: merged }
@@ -499,6 +540,8 @@ type Delivered = {
   values: Map<string, string>;
   /** The message that holds the snapshot. */
   base?: string;
+  /** The message that holds the record in force. */
+  record?: string;
 };
 
 function deliveredContext(history: readonly SessionMessage[]): Delivered {
@@ -579,11 +622,4 @@ function assertLabel(label: string): void {
       `Context block label "${STATE_LABEL}" is reserved for Context's own state`
     );
   }
-}
-
-/** The state's recording messages with one more, newest last, bounded. */
-function remember(state: ContextState, id: string): string[] {
-  return [...(state.records ?? []).filter((known) => known !== id), id].slice(
-    -MAX_RECORDS
-  );
 }

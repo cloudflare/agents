@@ -96,8 +96,10 @@ describe("Context", () => {
       await session.appendMessage(user("u2", "again"));
       const second = await context.build();
       expect(second.system).toBe(first.system);
-      // Only the first user message carries a record.
-      expect((await session.getMessage("u2"))?.metadata).toBeUndefined();
+      // Only u1 holds the snapshot; u2 points back to it.
+      expect((await session.getMessage("u2"))?.metadata).toEqual({
+        [CONTEXT_METADATA_KEY]: { ref: "u1" }
+      });
     });
   });
 
@@ -255,7 +257,6 @@ describe("Context", () => {
       const window = (await session.getHistory()).slice(-1);
       const prepared = await context.prepare({ messages: window });
       expect(prepared.system).toBe(first.system);
-      expect((await session.getMessage("u2"))?.metadata).toBeUndefined();
     });
   });
 
@@ -301,6 +302,48 @@ describe("Context", () => {
       await expect(
         context.addBlock({ label: "_context_state" })
       ).rejects.toThrow(/reserved/);
+    });
+  });
+
+  it("gives an old turn its own prompt however many changes came after it", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context, setDate } = await setup(storage, (s) =>
+        install(s)
+      );
+      await session.appendMessage(user("u1", "hello"));
+      const monday = await context.build();
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "plan my week"));
+      await context.build();
+      await session.appendMessage(assistant("a2", "a plan"));
+      // Many later turns, each delivering a change.
+      for (let turn = 0; turn < 300; turn++) {
+        setDate(`day ${turn}`);
+        await session.appendMessage(user(`q${turn}`, "and now?"));
+        await context.build();
+        await session.appendMessage(assistant(`r${turn}`, "noted"));
+      }
+
+      const regenerated = await context.prepare({
+        messages: [(await session.getMessage("u2"))!]
+      });
+      expect(regenerated.system).toBe(monday.system);
+    });
+  });
+
+  it("keeps the prompt when compaction reaches the last message", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context, setDate } = await setup(storage, (s) =>
+        install(s)
+      );
+      await session.appendMessage(user("u1", "hello"));
+      const monday = await context.build();
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.addCompaction("everything so far", "u1", "a1");
+
+      setDate("Friday");
+      expect(await context.freezeSystemPrompt()).toBe(monday.system);
+      expect(await context.reminder()).toContain("Today is Friday.");
     });
   });
 

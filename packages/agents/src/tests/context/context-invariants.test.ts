@@ -112,10 +112,12 @@ async function run(seed: number): Promise<void> {
         const path = await session.getHistory();
         const stored = path.filter((m) => !m.id.startsWith("compaction_"));
         if (stored.length >= 4) {
+          // Sometimes the compaction reaches the last message.
+          const end = next() < 0.3 ? 1 : 3;
           await session.addCompaction(
             "summary",
             stored[0].id,
-            stored[stored.length - 3].id
+            stored[stored.length - end].id
           );
         }
       }
@@ -235,10 +237,12 @@ async function runPrefix(seed: number): Promise<void> {
         const path = await session.getHistory();
         const stored = path.filter((m) => !m.id.startsWith("compaction_"));
         if (stored.length >= 4) {
+          // Sometimes the compaction reaches the last message.
+          const end = next() < 0.3 ? 1 : 3;
           await session.addCompaction(
             "summary",
             stored[0].id,
-            stored[stored.length - 3].id
+            stored[stored.length - end].id
           );
           busted = "compaction";
         }
