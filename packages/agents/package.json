@@ -83,7 +83,7 @@
     "@modelcontextprotocol/server": "2.4.0",
     "@opencode/plugin": "^2.0.24",
     "@opencode/sdk": "^2.0.24",
-    "@tanstack/ai": ">=0.10.2 <1.0.0",
+    "@tanstack/ai": ">=0.10.2 <2.0.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
     "ai": "^6.0.0 || ^7.0.0",

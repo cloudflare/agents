@@ -207,9 +207,11 @@ describe("TanStack AI adapter", () => {
   });
 
   it("throws so TanStack AI reports an error result", async () => {
-    const error = await tanstackWebFetchTool({ source: failingSource })
-      .execute?.({ url: "https://example.com/doc" })
-      .catch((e: unknown) => e);
+    const error = await Promise.resolve(
+      tanstackWebFetchTool({ source: failingSource }).execute?.({
+        url: "https://example.com/doc"
+      })
+    ).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(WebFetchError);
     expect(error).toMatchObject({
       code: "web_fetch_unavailable",
