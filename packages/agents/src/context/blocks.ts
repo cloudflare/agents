@@ -48,6 +48,12 @@ function contextEntryKey(metadataTitle: string | undefined, content: string) {
   return `${slug}-${stableHash(content)}`;
 }
 
+/** Name of the tool that writes a writable or searchable block. */
+export const SET_CONTEXT_TOOL = "set_context";
+
+/** Name of the tool that searches a searchable block. */
+export const SEARCH_CONTEXT_TOOL = "search_context";
+
 const SECTION_RULE = "═".repeat(46);
 
 const REMINDER_PREAMBLE =
@@ -549,7 +555,7 @@ export class ContextBlocks {
             "entries. Metadata is optional."
           : "";
 
-      toolSet.set_context = {
+      toolSet[SET_CONTEXT_TOOL] = {
         description: `Write to a context block. Available blocks:\n${blockDescriptions.join("\n")}\n\nWrites are durable and persist across sessions.${metadataHint}`,
         inputSchema: z.fromJSONSchema({
           type: "object" as const,
@@ -595,7 +601,7 @@ export class ContextBlocks {
     // ── search_context ────────────────────────────────────────────
 
     if (searchLabels.length > 0) {
-      toolSet.search_context = {
+      toolSet[SEARCH_CONTEXT_TOOL] = {
         description:
           "Search for information in a searchable context block. " +
           "ONLY these blocks are searchable: " +

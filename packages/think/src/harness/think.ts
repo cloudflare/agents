@@ -217,10 +217,9 @@ export class Think<
     const onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
       this.session = await this.configureSession(
-        new ThinkSession(await this.#rootHandle(), () => {
-          throw new Error(
+        new ThinkSession(await this.#rootHandle(), {
+          contextUnsupported:
             "Context blocks are not supported by the harness-backed Think yet"
-          );
         })
       );
       this.harness.observe((session, event) => {

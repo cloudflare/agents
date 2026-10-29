@@ -6,7 +6,7 @@
 
 **Sessions stores messages. It is not a file store.** Media you attach to a message is kept out of the message row and stored separately, addressed by content, and put back verbatim when you read. That keeps a message row small however large its attachments are — but it does not reclaim database space, because the payload lives in the same Durable Object. A Durable Object's 10 GB ceiling is therefore the real bound on how much media one conversation can hold: roughly 39,000 200 KB images, measured. An application that handles files should keep them in a file store and put a reference in the message. Think does exactly that with its [Workspace](../think/index.md), which spills to R2.
 
-Prompt assembly lives in [`agents/context`](./context.md) and composes with a session handle rather than living inside it.
+A session handle also carries the session's prompt [context](./context.md): blocks declared with `withContext()`, rendered into a frozen system prompt that is stored next to the messages.
 
 `Think` and `AIChatAgent` use this capability for message persistence. You can also install it on a plain Durable Object.
 
@@ -242,6 +242,8 @@ await session.addCompaction(summary, fromMessageId, toMessageId);
 
 Sessions stamps each message with a token estimate when the row is written. `compactAfter()` gates on that O(1) aggregate and never reads the transcript to decide whether to compact. Auto-compaction failures are non-fatal: they log, emit `session:error`, and leave the transcript alone.
 
+When the session has [context](./context.md) blocks, `compact()` and `clearMessages()` refresh its frozen system prompt. A stored overlay from `addCompaction()` does not.
+
 To trim a transcript before handing it to a model, `truncateOlderMessages` is exported from [`agents/chat`](./chat-agents.md), not from `agents/sessions`. If your tools define `toModelOutput`, a truncated tool output may no longer match the tool's output schema. In that case, pass `toolOutputs: false` to `truncateOlderMessages` and call `truncateOlderToolResults` on the result of `convertToModelMessages`, which truncates what the model reads after `toModelOutput` has run. Provider-executed tool outputs are never truncated.
 
 With the default `keepRecent`, the truncation cutoff moves forward by one message whenever a message is added, so every turn rewrites a message near the end of the prompt and invalidates the provider's prompt cache from that point. To keep the prefix stable, move the cutoff in steps and pass the same `keepRecent` to both functions:
@@ -403,7 +405,7 @@ For user-facing chat applications, prefer one Durable Object per conversation. T
 
 `Think` and `AIChatAgent` use Sessions internally.
 
-- Think uses branches, compaction, search, and the change feed. Its prompt context comes from [`agents/context`](./context.md). Aged media leaves the conversation through Think's own media eviction, which is a context-window technique and unrelated to how Sessions stores a row.
+- Think uses branches, compaction, search, and the change feed. Its prompt context is declared on the default session (see [Context](./context.md)). Aged media leaves the conversation through Think's own media eviction, which is a context-window technique and unrelated to how Sessions stores a row.
 - AIChatAgent uses the default handle as a linear chain. Its existing destructive regeneration, mutable `messages` array, retention option, and wire protocol remain unchanged.
 
 Existing `assistant_*` Session tables and `cf_ai_chat_agent_messages` are lifted automatically, then dropped once every row is verified copied.

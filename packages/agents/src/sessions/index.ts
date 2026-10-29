@@ -6,7 +6,11 @@
  */
 
 export { Sessions } from "./sessions";
-export { Session, type CompactionFunction } from "./handle";
+export {
+  Session,
+  type CompactionFunction,
+  type SessionContextOptions
+} from "./handle";
 export type { SessionMirrorOptions } from "./mirror";
 export {
   COMPACTION_PREFIX,

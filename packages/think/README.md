@@ -337,17 +337,17 @@ Script execution requires a Worker Loader binding:
 
 ## Exports
 
-| Export                                  | Description                                                   |
-| --------------------------------------- | ------------------------------------------------------------- |
-| `@cloudflare/think`                     | `Think`, `Session` — main class + re-exports                  |
-| `agents/sessions`                       | `Sessions`, `Session`, `createCompactFunction`, attachments   |
-| `agents/context`                        | `ContextBlocks`, providers, `ContextConfig` — prompt assembly |
-| `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
-| `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
-| `@cloudflare/think/tools/fetch`         | `createFetchTools()` — opt-in allowlisted HTTP reads          |
-| `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
-| `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
-| `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
+| Export                                  | Description                                                     |
+| --------------------------------------- | --------------------------------------------------------------- |
+| `@cloudflare/think`                     | `Think`, `Session` — main class + re-exports                    |
+| `agents/sessions`                       | `Sessions`, `Session`, `createCompactFunction`, attachments     |
+| `agents/context`                        | Context providers, `ContextConfig`, tool names, `ContextBlocks` |
+| `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery     |
+| `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers                |
+| `@cloudflare/think/tools/fetch`         | `createFetchTools()` — opt-in allowlisted HTTP reads            |
+| `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode   |
+| `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading         |
+| `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime    |
 
 ## Think
 
@@ -760,12 +760,12 @@ Tool approval flows are also supported via `CF_AGENT_TOOL_APPROVAL`.
 
 ### Session and context
 
-Think splits conversation storage from prompt assembly. `agents/sessions` stores
-messages; `agents/context` builds the system prompt. Think wires both during
-`onStart`.
+Think keeps the conversation and its prompt context on one session handle. The
+session stores messages, and the context blocks declared on it build the system
+prompt. Think sets both up during `onStart`.
 
-`configureSession()` configures the default session handle: compaction and
-search.
+`configureSession()` configures the default session handle: compaction, and
+context blocks with `withContext()`.
 
 ```ts
 import { createCompactFunction, type Session } from "agents/sessions";
@@ -786,7 +786,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-`configureContext()` declares the prompt blocks:
+`configureContext()` is another way to declare context blocks. Blocks it returns render before blocks from `withContext()`:
 
 ```ts
 import type { ContextConfig } from "agents/context";
@@ -812,7 +812,7 @@ for providers, tools, and frozen-prompt behavior.
 
 ### Upgrading from 0.17
 
-A subclass written against 0.17 keeps compiling and running. `configureSession(session)` still accepts the `withContext()` / `withCachedPrompt()` chain, and `this.session` still carries the context methods (`addContext`, `getContextBlock`, `replaceContextBlock`, `refreshSystemPrompt`, `freezeSystemPrompt`, `tools()`), which now forward to `this.context`. They are deprecated; move blocks into `configureContext()` and read `this.context` at your own pace. Blocks from both hooks are merged, `configureContext()` first.
+A subclass written against 0.17 keeps compiling and running. `configureSession(session)` accepts the `withContext()` / `withCachedPrompt()` chain, and `this.session` carries the context methods (`addContext`, `getContextBlock`, `replaceContextBlock`, `refreshSystemPrompt`, `freezeSystemPrompt`, `tools()`). Block contents and the stored prompt stay where they were.
 
 Two things do change on upgrade:
 
@@ -828,11 +828,11 @@ Annotate a `configureSession` override with `Session` imported from `@cloudflare
 Blocks can be added at runtime, for example by extensions:
 
 ```ts
-await this.context.addBlock({ label: "notes", description: "User notes" });
-await this.context.refreshSystemPrompt(); // rebuild the prompt
+await this.session.addContext("notes", { description: "User notes" });
+await this.session.refreshSystemPrompt(); // rebuild the prompt
 
-this.context.removeBlock("notes");
-await this.context.refreshSystemPrompt();
+this.session.removeContext("notes");
+await this.session.refreshSystemPrompt();
 ```
 
 #### Message storage

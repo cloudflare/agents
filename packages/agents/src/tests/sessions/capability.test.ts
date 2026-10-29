@@ -1479,8 +1479,8 @@ describe("Sessions capability", () => {
         expect(instance.tableNames()).not.toContain(
           "cf_agents_session_attachments"
         );
-        // Context blocks belong to `agents/context`, which creates the table
-        // lazily. Sessions must not create it.
+        // The context table is created when a session first uses context,
+        // never by startup or message storage.
         expect(instance.tableNames()).not.toContain("cf_agents_context_blocks");
       });
     });

@@ -905,9 +905,9 @@ You do not need new machinery to gate egress per call: `beforeToolCall` can `blo
 
 ## Session and context
 
-Think splits conversation storage from prompt assembly. [`agents/sessions`](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) stores messages; [`agents/context`](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) builds the system prompt. Think wires both during `onStart`.
+Think keeps the conversation and its prompt context on one [session](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) handle. The session stores messages, and the [context](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) blocks declared on it build the system prompt. Think sets both up during `onStart`.
 
-`configureSession()` configures the default session handle: compaction and search.
+`configureSession()` configures the default session handle: compaction, and context blocks with `withContext()`.
 
 ```typescript
 import { Think, Session } from "@cloudflare/think";
@@ -931,7 +931,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-`configureContext()` declares the prompt blocks:
+`configureContext()` is another way to declare context blocks. Blocks it returns render before blocks from `withContext()`:
 
 ```typescript
 import type { ContextConfig } from "agents/context";
@@ -948,11 +948,11 @@ export class MyAgent extends Think<Env> {
 
 A block declared without a `provider` is auto-wired to durable per-agent SQLite, so `memory` above is writable through the `set_context` tool with no extra wiring. The frozen system prompt is always persisted, so there is nothing to opt into: a cold wake reuses the exact prompt string the model already cached.
 
-The assembled blocks are available as `this.context` once the Lifecycle has started.
+The blocks are available through `this.session` (`getContextBlock()`, `addContext()`, `refreshSystemPrompt()`) once the Lifecycle has started.
 
 ### Upgrading from 0.17
 
-A subclass written against 0.17 keeps compiling and running. `configureSession(session)` still accepts the `withContext()` / `withCachedPrompt()` chain, and `this.session` still carries the context methods (`addContext`, `getContextBlock`, `replaceContextBlock`, `refreshSystemPrompt`, `freezeSystemPrompt`, `tools()`), which now forward to `this.context`. They are deprecated; move blocks into `configureContext()` and read `this.context` at your own pace. Blocks from both hooks are merged, `configureContext()` first.
+A subclass written against 0.17 keeps compiling and running. `configureSession(session)` accepts the `withContext()` / `withCachedPrompt()` chain, and `this.session` carries the context methods (`addContext`, `getContextBlock`, `replaceContextBlock`, `refreshSystemPrompt`, `freezeSystemPrompt`, `tools()`). Block contents and the stored prompt stay where they were.
 
 Two things do change on upgrade:
 

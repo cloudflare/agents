@@ -280,12 +280,7 @@ import {
   type SessionMessage
 } from "agents/sessions";
 import { ThinkSession } from "./session";
-import {
-  AgentContextProvider,
-  ContextBlocks,
-  type ContextConfig,
-  type WritableContextProvider
-} from "agents/context";
+import type { ContextBlocks, ContextConfig } from "agents/context";
 
 /**
  * The shortest recent-message span the model sees at FULL fidelity each turn
@@ -3691,11 +3686,13 @@ export class Think<
    */
   session!: ThinkSession;
 
-  /** Prompt context blocks for this agent, built from `configureContext()`. */
+  /** The default session's context blocks, once startup has declared them. */
   #contextBlocks: ContextBlocks | undefined;
 
   /**
-   * The agent's context blocks. Available once the Lifecycle has started.
+   * The agent's context blocks: the default session's, declared by
+   * `configureContext()` and `configureSession()`. Available once the
+   * Lifecycle has started.
    */
   protected get context(): ContextBlocks {
     if (!this.#contextBlocks) {
@@ -3704,15 +3701,6 @@ export class Think<
       );
     }
     return this.#contextBlocks;
-  }
-
-  /** Durable SQLite storage for one context block of this agent. */
-  #contextProvider(label: string): WritableContextProvider {
-    const sessionId = this.session?.sessionId ?? "";
-    return new AgentContextProvider(
-      this,
-      sessionId ? `${label}_${sessionId}` : label
-    );
   }
 
   /** Cached messages, kept in sync with session storage. */
@@ -3857,21 +3845,24 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
             this.workspace = new Workspace({ storage: this.ctx.storage });
           }
 
-          // 2. Session configuration (builder phase: compaction, and the
-          //    pre-Sessions `withContext()` chain, folded into the blocks
-          //    `configureContext()` declares).
-          this.session = await this.configureSession(
-            new ThinkSession(this.sessions.session(), () => this.context)
-          );
-          this.#contextBlocks = new ContextBlocks(
-            [
-              ...(await this.configureContext()),
-              ...this.session.internal_takePendingContext()
-            ],
-            this.session.internal_promptStore() ??
-              this.#contextProvider("_system_prompt"),
-            (label) => this.#contextProvider(label)
-          );
+          // 2. Session configuration: compaction from `configureSession()`,
+          //    then context blocks on the session handle, those from
+          //    `configureContext()` first and the `withContext()` chain
+          //    after them. The handle stores blocks and the frozen prompt and
+          //    refreshes the prompt when it compacts or clears.
+          const handle = this.sessions.session();
+          // A startup that re-runs on this instance declares everything
+          // again; extensions and skills re-add their blocks below.
+          handle.internal_resetContext();
+          this.session = await this.configureSession(new ThinkSession(handle));
+          handle.withCachedPrompt(this.session.internal_promptStore());
+          for (const { label, ...options } of [
+            ...(await this.configureContext()),
+            ...this.session.internal_takePendingContext()
+          ]) {
+            handle.withContext(label, options);
+          }
+          this.#contextBlocks = handle.context;
           // Load blocks now rather than on the first turn, as Think always
           // has: the synchronous accessors (`this.context.getBlock()` and the
           // pre-Sessions `session.getContextBlock()`) are expected to answer
@@ -3910,8 +3901,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                     await this._syncMessages();
                     return true;
                   case "compact":
+                    // The session has already refreshed the system prompt.
                     await this._syncMessages();
-                    await this.#contextBlocks?.refreshSystemPrompt();
                     return true;
                   default:
                     return false;
@@ -4751,10 +4742,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   private async _clearHistory(): Promise<void> {
+    // Clearing also rebuilds the system prompt: the transcript carried the
+    // skill-load record, so a cleared session starts with no skills loaded.
     await this.session.clearMessages();
-    // The transcript carried the skill-load record, so a cleared session
-    // starts with no skills loaded and a prompt rebuilt without them.
-    await this.#contextBlocks?.refreshSystemPrompt();
     // Drop any pending terminal record (#1645) so a stale exhaustion can't
     // replay onto a freshly-cleared (empty) conversation on reconnect. Covers
     // both the WS `chat-clear` path and the programmatic `clearMessages()` API.
@@ -6408,13 +6398,10 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   private _warnedMissingClassifier = false;
 
   /**
-   * Configure conversation storage. Called once during `onStart`. Override to
-   * set the compaction policy; prompt context is declared by
-   * {@link Think.configureContext} instead.
-   *
-   * The handle still accepts the pre-Sessions `withContext()` and
-   * `withCachedPrompt()` chain, so an existing override keeps working; those
-   * blocks are appended after the ones `configureContext()` returns.
+   * Configure the session. Called once during `onStart`. Override to set
+   * the compaction policy and, with `withContext()`, prompt context blocks.
+   * Blocks declared here render after the ones
+   * {@link Think.configureContext} returns.
    *
    * @example
    * ```typescript
