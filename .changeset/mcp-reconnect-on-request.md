@@ -2,4 +2,4 @@
 "agents": minor
 ---
 
-MCP client: `addMcpServer()` no longer reconnects a server that is already registered, so calling it from `onStart` or `onConnect` cannot undo a recorded failure or skip the reconnect backoff; new `reconnectMcpServer(id)` retries on request. Denied callbacks, rejected client registration and a `401` right after a completed authorization now stop instead of retrying or showing a dead link. See [Reconnecting on request](https://github.com/cloudflare/agents/blob/main/docs/agents/mcp-client.md#reconnecting-on-request).
+MCP client: new `reconnectMcpServer(id)` retries a failed server; `addMcpServer()` reconnects a registered server that is not connected, except one stopped for a reason only a person can fix. See [Reconnecting on request](https://github.com/cloudflare/agents/blob/main/docs/agents/mcp-client.md#reconnecting-on-request).

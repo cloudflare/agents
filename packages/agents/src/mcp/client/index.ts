@@ -76,7 +76,7 @@ import {
   requestedScope,
   startRound
 } from "./authorization-rounds";
-import type { StoredServerFailure } from "./server-store";
+import { needsPerson, type StoredServerFailure } from "./server-store";
 import {
   AUTH_EXPIRY_JOB,
   AUTHORIZATION_EXPIRED_MESSAGE,
@@ -619,6 +619,13 @@ export class MCPClientManager extends LifecycleCapability {
     const conn = this.mcpConnections[serverId];
     if (conn) conn.connectionError = null;
     this.cancelJob(connectJobId(serverId));
+  }
+
+  /** The reconnect waiting for a server, when one is scheduled. */
+  private pendingReconnect(serverId: string) {
+    return parseConnectJobPayload(
+      this.lifecycle.jobs.get(connectJobId(serverId))?.payload
+    );
   }
 
   /**
@@ -1197,10 +1204,12 @@ export class MCPClientManager extends LifecycleCapability {
 
   /**
    * @internal Bring an already-registered server to a settled state once the
-   * work queued for it has run: a ready server stays ready, a flow whose
-   * link still works keeps waiting, a server left connected is discovered,
-   * one never connected is connected, and a failed server is reported as
-   * failed. Retrying a failed server is {@link reconnectServer}'s job.
+   * work queued for it has run, for `addMcpServer()`: a ready server stays
+   * ready, a link that still works keeps waiting, a dead link is replaced,
+   * a connected server is discovered, and a server that is not connected is
+   * connected, at most once per first backoff step. A server stopped for a
+   * reason only a person can fix is reported as failed; retrying it is
+   * {@link reconnectServer}'s job.
    */
   settleServer(id: string): Promise<MCPServerSettlement> {
     return this.removedIfCancelled(this._settleServer(id));
@@ -1245,15 +1254,33 @@ export class MCPClientManager extends LifecycleCapability {
       switch (conn.connectionState) {
         case MCPConnectionState.READY:
           return { state: MCPConnectionState.READY };
-        case MCPConnectionState.FAILED:
-          // Report it; only reconnectServer() tries again. Apps call
-          // addMcpServer() from onStart and onConnect, so retrying here
-          // would undo every recorded failure and the reconnect backoff.
-          return {
-            state: MCPConnectionState.FAILED,
-            phase: "connect",
-            error: conn.connectionError ?? "Connection failed"
-          };
+        case MCPConnectionState.FAILED: {
+          // Apps call addMcpServer() from onStart, onConnect and request
+          // handlers. Retry what can pass, at most once per first backoff
+          // step, and leave what only a person can fix to reconnectServer().
+          const failure = this._servers.failure(id);
+          const error = conn.connectionError ?? "Connection failed";
+          if (failure && needsPerson(failure)) {
+            return {
+              state: MCPConnectionState.FAILED,
+              phase: "connect",
+              error: `${error} Call reconnectMcpServer("${id}") to try again.`
+            };
+          }
+          const lastFailedAt =
+            failure?.at ?? this.pendingReconnect(id)?.failedAt;
+          if (
+            lastFailedAt !== undefined &&
+            Date.now() - lastFailedAt < this._reconnect.delaysMs[0]
+          ) {
+            return {
+              state: MCPConnectionState.FAILED,
+              phase: "connect",
+              error
+            };
+          }
+          return this.connectAndDiscover(id);
+        }
         case MCPConnectionState.CONNECTED: {
           const settlement = await this._settleDiscovery(id);
           if (settlement.state === MCPConnectionState.FAILED) {
@@ -1273,18 +1300,8 @@ export class MCPClientManager extends LifecycleCapability {
           if (authUrl) {
             return { state: MCPConnectionState.AUTHENTICATING, authUrl };
           }
-          // The link expired unused: record it rather than mint a new one
-          // nobody asked for.
-          this.recordFailure(
-            id,
-            "authorization-expired",
-            AUTHORIZATION_EXPIRED_MESSAGE
-          );
-          return {
-            state: MCPConnectionState.FAILED,
-            phase: "connect",
-            error: AUTHORIZATION_EXPIRED_MESSAGE
-          };
+          // The link can no longer complete: start a fresh flow.
+          return this.connectAndDiscover(id);
         }
         case MCPConnectionState.CONNECTING:
         case MCPConnectionState.DISCOVERING:

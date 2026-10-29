@@ -91,11 +91,14 @@ describe("MCP durable reconnects in an Agent", () => {
     expect((await agent.server(id))?.state).toBe("failed");
     expect(server.mcpMethods.length).toBe(methodsBefore);
 
-    // Adding it again, as an app does from onStart, reports the failure.
+    // Adding it again, as an app does from onStart, reports why it stopped
+    // and how to try again, without asking the server.
     const added = await agent.connectServer(MCP_URL, {
       callbackHost: CLIENT_ORIGIN
     });
     expect(added).toMatchObject({ state: "error" });
+    if (added.state !== "error") throw new Error("unreachable");
+    expect(added.message).toContain("reconnectMcpServer");
     expect(server.mcpMethods.length).toBe(methodsBefore);
 
     expect(await agent.reconnect(id)).toMatchObject({ id, state: "ready" });
@@ -338,7 +341,35 @@ describe("MCP refused authorization in an Agent", () => {
 });
 
 describe("MCP servers an app adds again", () => {
-  it("does not skip a scheduled reconnect when the server is added again", async () => {
+  it("reconnects a server that has been down a while when it is added again", async () => {
+    const { agent, id } = await serverDownAfterWake();
+    server.options.up = true;
+    await agent.ageReconnectFailures(id, 31_000);
+
+    expect(
+      await agent.connectServer(MCP_URL, { callbackHost: CLIENT_ORIGIN })
+    ).toMatchObject({ id, state: "ready" });
+    expect(await agent.mcpJobs()).toEqual([]);
+  });
+
+  it("replaces a link that can no longer complete when the server is added again", async () => {
+    const agent = await newAgent();
+    const first = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN
+    });
+    if (first.state !== "authenticating") throw new Error("expected a link");
+
+    // The link's state expires before its expiry job has run.
+    await agent.expireOAuthStates();
+    const again = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN
+    });
+    expect(again.state).toBe("authenticating");
+    if (again.state !== "authenticating") throw new Error("unreachable");
+    expect(again.authUrl).not.toBe(first.authUrl);
+  });
+
+  it("waits out the first backoff step before adding the server again retries it", async () => {
     const { agent, id } = await serverDownAfterWake();
     server.options.up = true;
     const methodsBefore = server.mcpMethods.length;

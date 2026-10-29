@@ -197,9 +197,13 @@ After 24 hours without a successful connection, the manager stops and records th
 
 #### Reconnecting on request
 
-Calling `addMcpServer()` for a server that is already registered never reconnects it. It returns the server's current state: `ready`, `authenticating` with the link still waiting for the user, or it throws with the current error while the server is `failed`. That makes it safe to call from `onStart`, `onConnect` or `onRequest` without undoing a recorded failure or skipping the reconnect backoff.
+Calling `addMcpServer()` for a server that is already registered reconnects it if it isn't connected, so calling it from `onStart`, `onConnect` or `onRequest` brings a server back once it can be reached:
 
-To try a failed server again because the user asked, for example from a "Reconnect" button, call `reconnectMcpServer(id)`. It forgets why the server stopped (reconnects gave up, authorization was refused, expired or hit the step-up limit), drops pending reconnects and connects now. It returns the same result as `addMcpServer()`, including a fresh `authUrl` when the user needs to authorize again.
+- `ready`, or a link still waiting for the user: returned as is.
+- `failed` from something that can pass (network, `5xx`, timeout) or a link that expired unused: connects now and returns the result, including a fresh `authUrl`. It tries at most once per first backoff step (30 seconds by default); a call sooner than that throws the current error.
+- `failed` for a reason only a person can fix (authorization was refused or denied, the step-up limit was reached, or reconnecting gave up after 24 hours): throws that reason without trying again.
+
+To try any failed server again because the user asked, for example from a "Reconnect" button, call `reconnectMcpServer(id)`. It forgets why the server stopped, drops pending reconnects and connects now, with no rate limit. It returns the same result as `addMcpServer()`, including a fresh `authUrl` when the user needs to authorize again.
 
 ```typescript
 import { Agent, callable } from "agents";
@@ -293,7 +297,7 @@ type AddMcpServerResult =
 - **`ready`** - Server connected and tools discovered
 - **`authenticating`** - Server requires OAuth; redirect user to `authUrl`. This includes servers that accept the MCP handshake without a token but require one to list tools, prompts or resources.
 
-Calling `addMcpServer()` again for a server that is already registered returns its current state. If the server is still connecting (for example while it is restored after the agent wakes), the call waits for that attempt and returns its result.
+Calling `addMcpServer()` again for a server that is already registered returns its current state, and reconnects it when it isn't connected (see [Reconnecting on request](#reconnecting-on-request)). If the server is still connecting (for example while it is restored after the agent wakes), the call waits for that attempt and returns its result.
 
 ## OAuth Authentication
 

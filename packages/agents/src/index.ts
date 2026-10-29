@@ -10044,9 +10044,10 @@ export class Agent<
    * why it stopped (gave up reconnecting, authorization refused or expired,
    * step-up limit reached), drops pending reconnects and connects now.
    *
-   * `addMcpServer()` never does this for a server that is already
-   * registered, so calling it from `onStart` or `onConnect` cannot undo a
-   * recorded failure or skip the reconnect backoff.
+   * `addMcpServer()` also reconnects a server that is not connected, but
+   * leaves alone one stopped for a reason only a person can fix
+   * (authorization refused or denied, the step-up limit, or reconnecting
+   * gave up). This retries any failed server, with no rate limit.
    *
    * @returns The same result as `addMcpServer()`: `ready`, or
    * `authenticating` with a new `authUrl`. Throws when the attempt fails.

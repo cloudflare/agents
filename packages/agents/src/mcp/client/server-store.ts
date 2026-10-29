@@ -22,6 +22,15 @@ export type ServerRenameResult = "renamed" | "missing" | "collision";
  * so a later wake shows the same failure instead of trying again; only an
  * explicit reconnect clears it.
  */
+/**
+ * Recorded failures only a person can resolve: authorization was refused or
+ * denied, the step-up limit was reached, or reconnecting gave up. Adding the
+ * server again does not retry these; `reconnectMcpServer()` does.
+ */
+export function needsPerson(failure: StoredServerFailure): boolean {
+  return failure.reason !== "authorization-expired";
+}
+
 export type StoredServerFailure = {
   /**
    * `authorization-expired`: the authorization link expired before the user

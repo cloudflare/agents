@@ -334,7 +334,7 @@ describe("OAuth2 MCP Client - addMcpServer on restored connections", () => {
     );
   });
 
-  it("records a persisted auth URL with expired state, and reconnects on request", async () => {
+  it("replaces a persisted auth URL whose state expired", async () => {
     const agentName = `test-stale-oauth-url-${nanoid(8)}`;
     const agentStub = env.TestOAuthAgent.getByName(agentName);
     const serverId = nanoid(8);
@@ -363,19 +363,15 @@ describe("OAuth2 MCP Client - addMcpServer on restored connections", () => {
     await agentStub.configureMcpReconnect(serverId, "authenticating", freshUrl);
 
     expect(
-      await agentStub.testAddMcpServerExpectingError(
-        "test-oauth-server",
-        serverUrl
-      )
-    ).toContain("Authorization expired");
-    expect(await agentStub.testReconnectMcpServer(serverId)).toEqual({
+      await agentStub.testAddMcpServer("test-oauth-server", serverUrl)
+    ).toEqual({
       id: serverId,
       state: "authenticating",
       authUrl: freshUrl
     });
   });
 
-  it("never returns unusable persisted auth URLs, and reconnects on request", async () => {
+  it("replaces unusable persisted auth URLs instead of returning them", async () => {
     const unusableAuthUrls = [
       "::::",
       "/oauth/authorize",
@@ -411,12 +407,8 @@ describe("OAuth2 MCP Client - addMcpServer on restored connections", () => {
       );
 
       expect(
-        await agentStub.testAddMcpServerExpectingError(
-          "test-oauth-server",
-          serverUrl
-        )
-      ).toContain("Authorization expired");
-      expect(await agentStub.testReconnectMcpServer(serverId)).toEqual({
+        await agentStub.testAddMcpServer("test-oauth-server", serverUrl)
+      ).toEqual({
         id: serverId,
         state: "authenticating",
         authUrl: freshAuthUrl
@@ -483,7 +475,7 @@ describe("OAuth2 MCP Client - addMcpServer connection states", () => {
     ).toEqual({ id: serverId, state: "authenticating", authUrl });
   });
 
-  it("reports a failed server from addMcpServer and reconnects it on request", async () => {
+  it("reconnects a failed server when it is added again", async () => {
     const agentName = `test-add-mcp-server-failed-retry-${nanoid(8)}`;
     const agentStub = env.TestOAuthAgent.getByName(agentName);
     const serverId = nanoid(8);
@@ -502,18 +494,8 @@ describe("OAuth2 MCP Client - addMcpServer connection states", () => {
     await agentStub.setMcpConnectionState(serverId, "failed");
 
     expect(
-      await agentStub.testAddMcpServerExpectingError(
-        "test-oauth-server",
-        serverUrl
-      )
-    ).toContain("Failed to connect");
-    expect(await agentStub.testGetMcpServerState(serverId)).toBe("failed");
-
-    expect(await agentStub.testReconnectMcpServer(serverId)).toEqual({
-      id: serverId,
-      state: "ready",
-      authUrl: undefined
-    });
+      await agentStub.testAddMcpServer("test-oauth-server", serverUrl)
+    ).toEqual({ id: serverId, state: "ready", authUrl: undefined });
     expect(await agentStub.testGetMcpServerState(serverId)).toBe("ready");
   });
 

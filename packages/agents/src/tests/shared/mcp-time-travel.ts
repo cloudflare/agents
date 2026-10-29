@@ -38,8 +38,8 @@ export function backdateMcpJobs(storage: DurableObjectStorage): void {
 }
 
 /**
- * Move the start of a server's current run of reconnect failures back by
- * `ms`, as if it had been failing that long.
+ * Move a server's current run of reconnect failures back by `ms`, as if it
+ * had been failing that long and its latest attempt were that much older.
  */
 export function ageReconnectFailures(
   storage: DurableObjectStorage,
@@ -54,8 +54,12 @@ export function ageReconnectFailures(
     )
     .toArray();
   if (!row) throw new Error(`No reconnect job for ${serverId}`);
-  const payload = JSON.parse(row.payload) as { firstFailureAt: number };
+  const payload = JSON.parse(row.payload) as {
+    firstFailureAt: number;
+    failedAt?: number;
+  };
   payload.firstFailureAt -= ms;
+  if (payload.failedAt !== undefined) payload.failedAt -= ms;
   storage.sql.exec(
     "UPDATE cf_agents_jobs SET payload = ? WHERE capability = 'mcp' AND id = ?",
     JSON.stringify(payload),

@@ -92,6 +92,8 @@ export type ConnectJobPayload = {
   readonly attempt: number;
   /** When the first attempt of this run of failures failed, in epoch ms. */
   readonly firstFailureAt: number;
+  /** When the latest attempt failed, in epoch ms. */
+  readonly failedAt: number;
   /** The latest attempt's error, shown while the next attempt waits. */
   readonly error: string;
 };
@@ -125,6 +127,10 @@ export function parseConnectJobPayload(
     serverId: value.serverId,
     attempt: value.attempt,
     firstFailureAt: value.firstFailureAt,
+    failedAt:
+      typeof value.failedAt === "number"
+        ? value.failedAt
+        : value.firstFailureAt,
     error: typeof value.error === "string" ? value.error : "Connection failed"
   };
 }
@@ -184,6 +190,6 @@ export function nextReconnect(
   return {
     _tag: "retry",
     time: now + delay,
-    payload: { serverId, attempt, firstFailureAt, error }
+    payload: { serverId, attempt, firstFailureAt, failedAt: now, error }
   };
 }
