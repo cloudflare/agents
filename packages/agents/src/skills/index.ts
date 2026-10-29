@@ -55,8 +55,6 @@ export type {
   SkillDiagnostic,
   SkillResourceError
 } from "./catalog";
-export { createSkillTools } from "./ai-sdk";
-export type { SkillToolsOptions } from "./ai-sdk";
 export { runner } from "./runner";
 export type { WorkerSkillScriptRunnerOptions } from "./runner";
 export type {

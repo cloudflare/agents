@@ -1,7 +1,16 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
-import { renderSkillResource, type SkillCatalog } from "./catalog";
-import type { SkillScriptFile, SkillScriptRunner } from "./script";
+import { renderSkillResource, type SkillCatalog } from "../catalog";
+import type { SkillScriptFile, SkillScriptRunner } from "../script";
+
+/**
+ * AI SDK tools for Agent Skills, exported as `agents/skills/tools/ai-sdk`.
+ *
+ * Kept out of the `agents/skills` entry so the parser and sources do not
+ * pull in `ai` or `zod`.
+ *
+ * @module
+ */
 
 /** Options for {@link createSkillTools}. */
 export interface SkillToolsOptions {

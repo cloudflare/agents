@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as skills from "../skills";
+import { createSkillTools } from "../skills/tools/ai-sdk";
 import type { SkillManifest, SkillSource } from "../skills";
 import { MemorySkillWorkspace } from "./memory-skill-workspace";
 
@@ -348,7 +349,7 @@ describe("skill catalog", () => {
 
 describe("AI SDK skill tools", () => {
   it("exposes activation and resource tools", async () => {
-    const tools = skills.createSkillTools(
+    const tools = createSkillTools(
       await skills.loadSkillCatalog([skills.manifest(testManifest)])
     );
     expect(Object.keys(tools).sort()).toEqual([
@@ -367,13 +368,11 @@ describe("AI SDK skill tools", () => {
   });
 
   it("has no tools for an empty catalog", async () => {
-    expect(skills.createSkillTools(await skills.loadSkillCatalog([]))).toEqual(
-      {}
-    );
+    expect(createSkillTools(await skills.loadSkillCatalog([]))).toEqual({});
   });
 
   it("runs scripts with the skill's files when a runner is configured", async () => {
-    const tools = skills.createSkillTools(
+    const tools = createSkillTools(
       await skills.loadSkillCatalog([skills.manifest(testManifest)]),
       {
         scriptRunner: {

@@ -37,6 +37,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/tsconfig`                         | `agents.tsconfig.json`                        | Shared TypeScript config for all projects in the repo                                                                                         |
 | `agents/vite`                             | `src/vite.ts`                                 | Vite plugin — TC39 decorator transforms and the `turndown` stub                                                                               |
 | `agents/skills`                           | `src/skills/index.ts`                         | Agent Skills — `SKILL.md` parser, Workspace/R2/manifest sources, catalog, runner                                                              |
+| `agents/skills/tools/ai-sdk`              | `src/skills/tools/ai-sdk.ts`                  | AI SDK tools for a skill catalog — `createSkillTools`                                                                                         |
 | `agents/experimental/webmcp`              | `src/experimental/webmcp.ts`                  | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`                                                                       |
 | `agents/browser`                          | `src/browser/index.ts`                        | `Browser`, `browserRun()`, `BrowserSession`, CDP helpers, Quick Action primitives, deprecated `BrowserConnector` (needs codemode)             |
 | `agents/browser/ai`                       | `src/browser/ai.ts`                           | Deprecated AI SDK tools — `createBrowserTools` (codemode) + `createQuickActionTools`                                                          |
@@ -181,7 +182,7 @@ src/
     r2.ts               # r2() source (read-only R2-backed skills)
     manifest.ts         # manifest() source (skills defined in code; fromManifest alias)
     catalog.ts          # loadSkillCatalog — merge sources, prompt, activation
-    ai-sdk.ts           # createSkillTools — AI SDK tools for a catalog
+    tools/ai-sdk.ts     # createSkillTools — AI SDK tools (agents/skills/tools/ai-sdk)
     script.ts           # Script runner types
     script-workspace.ts # Workspace access for running scripts
     runner.ts           # Experimental script runner + single capability bridge

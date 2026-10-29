@@ -526,7 +526,8 @@ spec does not define are kept in `skill.extraFields`. A skill with
 
 The parser, sources, and catalog live in `agents/skills` and work without
 Think: `skills.parseSkill()` parses a `SKILL.md`, `skills.loadSkillCatalog()`
-merges sources, and `skills.createSkillTools()` builds the AI SDK tools.
+merges sources, and `createSkillTools()` from `agents/skills/tools/ai-sdk`
+builds the AI SDK tools.
 `@cloudflare/think` re-exports the module as `skills` and wires `getSkills()`
 into every turn.
 

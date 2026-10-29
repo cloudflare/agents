@@ -108,7 +108,8 @@ the catalog the model sees changes.
 Framework adapters wrap a catalog, so every framework shows the model the same
 tools and text:
 
-- `createSkillTools(catalog, { scriptRunner })`: AI SDK `activate_skill`,
+- `createSkillTools(catalog, { scriptRunner })` from
+  `agents/skills/tools/ai-sdk`: AI SDK `activate_skill`,
   `read_skill_resource`, and `run_skill_script`. Used by Think.
 - `skills(sources)` in `agents/harness/pi`: the same tools as a pi-durable
   extension.
