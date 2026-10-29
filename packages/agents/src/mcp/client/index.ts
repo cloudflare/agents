@@ -6,7 +6,6 @@
  *   failure
  * - `authorization.ts`: authorization links, OAuth callbacks, and
  *   re-authorization during requests
- * - `jobs.ts`: the durable link-expiry job
  */
 export { MCPClientManager } from "./manager";
 export { getNamespacedData } from "./catalog";

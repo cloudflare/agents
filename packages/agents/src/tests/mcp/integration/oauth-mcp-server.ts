@@ -158,7 +158,9 @@ export function createOAuthMcpServer({
      * Answer every MCP request with 401, even with a token this server's
      * authorization server issued, as a server with the wrong audience does.
      */
-    rejectEveryToken: false
+    rejectEveryToken: false,
+    /** Answer this MCP method with a 500 the next time it is called. */
+    failNext: undefined as string | undefined
   };
   /** How many MCP requests the resource server refused with a 403. */
   let forbiddenResponses = 0;
@@ -321,6 +323,11 @@ export function createOAuthMcpServer({
     if (options.forbidden) {
       forbiddenResponses += 1;
       return new Response("Forbidden", { status: 403 });
+    }
+
+    if (method && method === options.failNext) {
+      options.failNext = undefined;
+      return new Response("internal error", { status: 500 });
     }
 
     if (options.legacyOnly && method === "server/discover") {
@@ -666,6 +673,7 @@ export function createOAuthMcpServer({
       options.staticToken = undefined;
       options.registrationStatus = undefined;
       options.rejectEveryToken = false;
+      options.failNext = undefined;
       forbiddenResponses = 0;
       unavailableResponses = 0;
       registrationAttempts = 0;

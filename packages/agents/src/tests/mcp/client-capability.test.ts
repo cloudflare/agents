@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { evictDurableObject, runDurableObjectAlarm } from "cloudflare:test";
+import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { PlainMcpClientObject } from "../capabilities/mcp-client";
 import { useOAuthMcpServer } from "./integration/harness";
@@ -36,13 +36,6 @@ async function authorizedObject(): Promise<{ stub: Plain; name: string }> {
 async function restart(stub: Plain, name: string): Promise<Plain> {
   await stub.restart().catch(() => {});
   return env.PlainMcpClientObject.getByName(name);
-}
-
-/** Make the manager's jobs due and run the object's alarm. */
-async function runDueJobs(stub: Plain): Promise<void> {
-  await stub.backdateMcpJobs();
-  await runDurableObjectAlarm(stub);
-  await stub.settle();
 }
 
 describe("MCPClientManager capability", () => {
@@ -94,7 +87,7 @@ describe("MCPClientManager capability", () => {
     });
   });
 
-  describe("failures and link expiry", () => {
+  describe("failures and links", () => {
     it("keeps a server that was down on wake failed across restarts until it is reconnected", async () => {
       const authorized = await authorizedObject();
       server.options.up = false;
@@ -104,7 +97,6 @@ describe("MCPClientManager capability", () => {
       expect(await stub.connectionStatus("files")).toMatchObject({
         state: "failed"
       });
-      expect(await stub.mcpJobs()).toEqual([]);
 
       // Back up, but nothing retries a failed server, on a wake or otherwise.
       server.options.up = true;
@@ -121,33 +113,19 @@ describe("MCPClientManager capability", () => {
       });
     });
 
-    it("fails an authorization link that expires unused, and keeps it failed after a restart", async () => {
+    it("keeps a waiting server's link across restarts, even after it stopped working", async () => {
       const name = crypto.randomUUID();
       const stub = env.PlainMcpClientObject.getByName(name);
       const started = await stub.addServer("files", MCP_URL, CALLBACK_URL);
       expect(started.state).toBe("authenticating");
-      expect(await stub.mcpJobs()).toMatchObject([
-        {
-          id: "auth-expiry:files",
-          fn: "auth-expiry",
-          payload: { serverId: "files", authUrl: started.authUrl }
-        }
-      ]);
 
       await stub.expireOAuthStates();
-      await runDueJobs(stub);
-
-      const expired = await stub.connectionStatus("files");
-      expect(expired?.state).toBe("failed");
-      expect(expired?.error).toContain("Authorization expired");
-      expect(await stub.mcpJobs()).toEqual([]);
-
       const restarted = await restart(stub, name);
       const response = await restarted.fetch(
         new Request("https://example.com")
       );
       expect(await response.json()).toMatchObject({
-        states: { files: "failed" }
+        states: { files: "authenticating" }
       });
     });
   });
@@ -165,8 +143,5 @@ describe("MCPClientManager capability", () => {
     expect(await restarted.connectionStatus("files")).toMatchObject({
       state: "authenticating"
     });
-    expect(await restarted.mcpJobs()).toMatchObject([
-      { id: "auth-expiry:files" }
-    ]);
   });
 });

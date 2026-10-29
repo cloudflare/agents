@@ -26,14 +26,12 @@ export type StoredServerFailure = {
   /**
    * `connect-failed`: connecting failed after its quick attempts.
    * `authorization-failed`: authorization was refused or denied.
-   * `authorization-expired`: the authorization link expired before the user
-   * completed it. `authorization-exhausted`: the server kept asking for the
-   * same authorization past the step-up limit.
+   * `authorization-exhausted`: the server kept asking for the same
+   * authorization past the step-up limit.
    */
   readonly reason:
     | "connect-failed"
     | "authorization-failed"
-    | "authorization-expired"
     | "authorization-exhausted";
   /** Human-readable message, shown as the connection error. */
   readonly message: string;

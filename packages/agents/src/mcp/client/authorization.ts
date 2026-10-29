@@ -18,29 +18,19 @@ import {
   toErrorMessage
 } from "./errors";
 import {
-  AUTHORIZATION_LINK_MAX_AGE_MS,
-  AUTHORIZATION_LINK_TTL_MS,
-  type AuthExpiryJobPayload,
-  type McpJobs
-} from "./jobs";
-import {
   consumeStaleState,
   exchangeAuthorizationCode,
   isOAuthCallbackFor,
   isRedeemableState,
   type MCPClientOAuthCallbackConfig,
   parseOAuthCallback,
-  redeemableAuthUrl,
-  serverIdFromState
+  serverIdFromState,
+  usableAuthUrl
 } from "./oauth-callback";
 import { ServerLaneCancelledError } from "./server-lanes";
 import type { MCPServerRow } from "./storage";
 import type { ServerStatus } from "./status";
 import type { MCPOAuthCallbackResult } from "./types";
-
-/** Message shown on a server whose authorization link expired unused. */
-const AUTHORIZATION_EXPIRED_MESSAGE =
-  "Authorization expired before it was completed. Reconnect the server to start again.";
 
 /** What entering `authenticating` produced. */
 type AuthContinuation =
@@ -56,10 +46,12 @@ type AuthContinuation =
  * Everything about authorization links: building OAuth providers, putting a
  * server into `authenticating` with a link (within the step-up round
  * limit), completing OAuth callbacks, turning a request's 401 or step-up
- * into `MCPAuthorizationRequiredError`, and expiring links nobody completes.
+ * into `MCPAuthorizationRequiredError`.
  *
- * A link is shown only while it can still complete: one whose state was
- * redeemed, expired, or is older than a day is never shown again.
+ * A waiting server keeps the link it was given until someone reconnects it.
+ * Whether that link still works is up to the authorization server; the
+ * callback reports it when it does not. Only a link whose callback was
+ * already redeemed is never shown again.
  */
 export class AuthorizationController {
   /**
@@ -71,7 +63,6 @@ export class AuthorizationController {
 
   constructor(
     private readonly ctx: McpClientContext,
-    private readonly jobs: McpJobs,
     private readonly status: ServerStatus
   ) {}
 
@@ -172,7 +163,6 @@ export class AuthorizationController {
     this.ctx.store.setAuthorizationRounds(id, round.rounds);
     this.ctx.store.clearFailure(id);
     conn.connectionState = MCPConnectionState.AUTHENTICATING;
-    this.jobs.armLinkExpiry(id, authUrl);
     this.ctx.observability.fire({
       type: "mcp:client:authorize",
       payload: { serverId: id, authUrl, clientId },
@@ -193,45 +183,11 @@ export class AuthorizationController {
     }`;
   }
 
-  /** The link a waiting server can still complete, if any. */
-  async usableLink(
-    id: string,
-    conn: MCPClientConnection
-  ): Promise<string | undefined> {
-    const provider = conn.options.transport.authProvider;
+  /** The link a waiting server was given: the live one, else the stored one. */
+  pendingLink(id: string, conn: MCPClientConnection): string | undefined {
     return (
-      (await redeemableAuthUrl(id, provider?.authUrl, provider)) ??
-      (await redeemableAuthUrl(id, this.ctx.store.get(id)?.auth_url, provider))
-    );
-  }
-
-  /**
-   * On wake: keep a saved flow waiting while its link can still complete it,
-   * or record it as expired. A callback clears `auth_url` before it redeems
-   * the state, so a dead link here was never completed.
-   */
-  async resumeLink(
-    row: MCPServerRow,
-    conn: MCPClientConnection,
-    authUrl: string
-  ): Promise<void> {
-    const provider = conn.options.transport.authProvider;
-    if (await redeemableAuthUrl(row.id, authUrl, provider)) {
-      conn.connectionState = MCPConnectionState.AUTHENTICATING;
-      if (!this.jobs.hasLinkExpiry(row.id)) {
-        this.jobs.armLinkExpiry(row.id, authUrl);
-      }
-      return;
-    }
-    this.expire(row.id);
-  }
-
-  /** Record that a server's link expired unused. */
-  expire(id: string): void {
-    this.status.stop(
-      id,
-      "authorization-expired",
-      AUTHORIZATION_EXPIRED_MESSAGE
+      usableAuthUrl(conn.options.transport.authProvider?.authUrl) ??
+      usableAuthUrl(this.ctx.store.get(id)?.auth_url)
     );
   }
 
@@ -239,30 +195,6 @@ export class AuthorizationController {
   forget(id: string): void {
     this.ctx.store.clearAuthUrl(id);
     this.ctx.store.setAuthorizationRounds(id, undefined);
-    this.jobs.cancelLinkExpiry(id);
-  }
-
-  /**
-   * The `auth-expiry` job: end a flow whose link can no longer complete or
-   * is over a day old. A link a custom provider would still redeem is
-   * checked again later.
-   */
-  async runLinkExpiry(payload: AuthExpiryJobPayload): Promise<number | void> {
-    const { serverId, authUrl, savedAt } = payload;
-    const row = this.ctx.store.get(serverId);
-    if (!row || row.auth_url !== authUrl) return;
-    const provider =
-      this.ctx.connections[serverId]?.options.transport.authProvider ??
-      this.providerFromRow(row);
-    const young = Date.now() - savedAt < AUTHORIZATION_LINK_MAX_AGE_MS;
-    if (young && provider && (await isLive(serverId, authUrl, provider))) {
-      return Date.now() + AUTHORIZATION_LINK_TTL_MS;
-    }
-    await this.ctx.lanes.run(serverId, async () => {
-      if (this.ctx.store.get(serverId)?.auth_url === authUrl) {
-        this.expire(serverId);
-      }
-    });
   }
 
   private isSpent(id: string, authUrl: string): boolean {
@@ -478,7 +410,6 @@ export class AuthorizationController {
       // Forget the link before redeeming it. If the isolate dies during the
       // exchange, a later wake reconnects instead of restoring a spent link.
       this.ctx.store.clearAuthUrl(serverId);
-      this.jobs.cancelLinkExpiry(serverId);
       this.spentStates.set(serverId, state);
       await provider.consumeState(state);
       await exchangeAuthorizationCode(serverId, conn, provider, state, params);
@@ -543,7 +474,6 @@ export class AuthorizationController {
     conn: MCPClientConnection
   ): MCPOAuthCallbackResult {
     this.ctx.store.clearAuthUrl(serverId);
-    this.jobs.cancelLinkExpiry(serverId);
     conn.connectionError = null;
     return { serverId, authSuccess: true };
   }

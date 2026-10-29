@@ -142,30 +142,20 @@ export async function isRedeemableState(
 }
 
 /**
- * `authUrl` when it can still complete an OAuth flow: an absolute http(s)
- * URL whose `state` nonce the provider will redeem. A URL without a `state`
- * parameter is returned as is, since there is nothing to check it against.
- * Undefined for a missing provider, a malformed URL, or a state that expired
- * or was already redeemed.
+ * `authUrl` when it is an absolute http(s) URL, so a corrupted stored value
+ * is never handed to a client. Whether the link still works is up to the
+ * authorization server and the callback, not this check.
  */
-export async function redeemableAuthUrl(
-  serverId: string,
-  authUrl: string | null | undefined,
-  authProvider: AgentMcpOAuthProvider | undefined
-): Promise<string | undefined> {
-  if (!authUrl || !authProvider) return undefined;
-  let url: URL;
+export function usableAuthUrl(
+  authUrl: string | null | undefined
+): string | undefined {
+  if (!authUrl) return undefined;
   try {
-    url = new URL(authUrl);
+    const { protocol } = new URL(authUrl);
+    return protocol === "http:" || protocol === "https:" ? authUrl : undefined;
   } catch {
     return undefined;
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-  const state = url.searchParams.get("state");
-  if (!state) return authUrl;
-  return (await isRedeemableState(serverId, authProvider, state))
-    ? authUrl
-    : undefined;
 }
 
 /**

@@ -1,6 +1,6 @@
 import type { DiscoverResult } from "@modelcontextprotocol/client";
 import { DisposableStore } from "../../core/events";
-import { type RetryOptions, tryN } from "../../retries";
+import { tryN } from "../../retries";
 import { RPC_DO_PREFIX } from "../rpc";
 import type { McpClientOptions, TransportType } from "../types";
 import type { AuthorizationController } from "./authorization";
@@ -14,7 +14,6 @@ import type { McpClientContext } from "./context";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 import type { ElicitationHandlers } from "./elicitation";
 import { toErrorMessage } from "./errors";
-import type { McpJobs } from "./jobs";
 import { resolveRpcTransport } from "./rpc";
 import { ServerLaneCancelledError } from "./server-lanes";
 import type { ServerStatus } from "./status";
@@ -58,7 +57,6 @@ export class ServerController {
 
   constructor(
     private readonly ctx: McpClientContext,
-    private readonly jobs: McpJobs,
     private readonly status: ServerStatus,
     private readonly authorization: AuthorizationController,
     private readonly elicitation: ElicitationHandlers,
@@ -344,37 +342,66 @@ export class ServerController {
 
   /**
    * Connect and discover as one unit of lane work, then act on the outcome
-   * through {@link afterFailure}. Connecting makes a few quick attempts with
-   * the server's retry options (3 by default) before it counts as failed.
+   * through {@link afterFailure}. Each attempt is a connect plus discovery;
+   * a failed one is retried in place with the server's retry options (3
+   * attempts by default) before the server counts as failed. A refusal gets
+   * the same answer every time, so it is not retried.
    */
   private bringUp(id: string): Promise<MCPServerSettlement> {
     return this.ctx.lanes.run(id, async (): Promise<MCPServerSettlement> => {
-      let connected: MCPConnectionResult;
+      const retry = this.ctx.store.options(id)?.retry;
+      let settlement: MCPServerSettlement;
       try {
-        connected = await this.connectWithRetry(
-          id,
-          this.ctx.store.options(id)?.retry
+        settlement = await tryN(
+          retry?.maxAttempts ?? 3,
+          async () => {
+            const attempt = await this.attempt(id);
+            if (
+              attempt.state === MCPConnectionState.FAILED &&
+              !attempt.refused &&
+              this.ctx.connections[id]
+            ) {
+              throw new AttemptFailedError(attempt);
+            }
+            return attempt;
+          },
+          {
+            baseDelayMs: retry?.baseDelayMs ?? 500,
+            maxDelayMs: retry?.maxDelayMs ?? 5000
+          }
         );
       } catch (error) {
-        connected = {
-          state: MCPConnectionState.FAILED,
-          error: toErrorMessage(error)
-        };
+        if (!(error instanceof AttemptFailedError)) throw error;
+        settlement = error.settlement;
       }
-      const settlement: MCPServerSettlement =
-        connected.state === MCPConnectionState.CONNECTED
-          ? await this.settleDiscovery(id)
-          : connected.state === MCPConnectionState.AUTHENTICATING
-            ? {
-                state: MCPConnectionState.AUTHENTICATING,
-                authUrl: connected.authUrl
-              }
-            : this.failed(id, "connect", connected.error);
       if (settlement.state === MCPConnectionState.FAILED) {
         this.afterFailure(id, settlement);
       }
       return settlement;
     });
+  }
+
+  /** One connect plus discovery. */
+  private async attempt(id: string): Promise<MCPServerSettlement> {
+    let connected: MCPConnectionResult;
+    try {
+      connected = await this.entry.connectToServer(id);
+    } catch (error) {
+      connected = {
+        state: MCPConnectionState.FAILED,
+        error: toErrorMessage(error)
+      };
+    }
+    if (connected.state === MCPConnectionState.CONNECTED) {
+      return this.settleDiscovery(id);
+    }
+    if (connected.state === MCPConnectionState.AUTHENTICATING) {
+      return {
+        state: MCPConnectionState.AUTHENTICATING,
+        authUrl: connected.authUrl
+      };
+    }
+    return this.failed(id, "connect", connected.error);
   }
 
   private async settleDiscovery(id: string): Promise<MCPServerSettlement> {
@@ -442,35 +469,6 @@ export class ServerController {
     this.status.stop(id, "connect-failed", settlement.error);
   }
 
-  private async connectWithRetry(
-    id: string,
-    retry?: RetryOptions
-  ): Promise<MCPConnectionResult> {
-    try {
-      return await tryN(
-        retry?.maxAttempts ?? 3,
-        async () => {
-          const result = await this.entry.connectToServer(id);
-          // A refusal gets the same answer on every attempt.
-          if (
-            result.state === MCPConnectionState.FAILED &&
-            !this.ctx.connections[id]?.accessRefused
-          ) {
-            throw new ConnectRetryError(result);
-          }
-          return result;
-        },
-        {
-          baseDelayMs: retry?.baseDelayMs ?? 500,
-          maxDelayMs: retry?.maxDelayMs ?? 5000
-        }
-      );
-    } catch (error) {
-      if (error instanceof ConnectRetryError) return error.result;
-      throw error;
-    }
-  }
-
   // What the manager and the Agent call
 
   /** Connect and discover a registered server. */
@@ -480,10 +478,9 @@ export class ServerController {
 
   /**
    * Bring a registered server to a settled state once the work queued for
-   * it has run, for `addMcpServer()`: a ready server stays ready, a link
-   * that still works keeps waiting, a dead or expired link is replaced with
-   * a fresh flow, a connected server is discovered, one never connected is
-   * connected. Any other failed server is reported as failed and never
+   * it has run, for `addMcpServer()`: a ready server stays ready, a waiting
+   * server returns its link, a connected server is discovered, one never
+   * connected is connected. A failed server is reported as failed and never
    * retried here; that is reconnect()'s job.
    */
   settle(id: string): Promise<MCPServerSettlement> {
@@ -495,14 +492,7 @@ export class ServerController {
           case MCPConnectionState.READY:
             return { state: MCPConnectionState.READY };
           case MCPConnectionState.FAILED:
-            // An expired link gets a fresh flow, as a dead link does below.
-            if (
-              this.ctx.store.failure(id)?.reason === "authorization-expired"
-            ) {
-              this.ctx.store.clearFailure(id);
-              return this.connectAndDiscover(id);
-            }
-            // Any other failure is reported, never retried here: apps call
+            // A failure is reported, never retried here: apps call
             // addMcpServer() from onStart, onConnect and request handlers.
             return {
               state: MCPConnectionState.FAILED,
@@ -517,12 +507,12 @@ export class ServerController {
             return settlement;
           }
           case MCPConnectionState.AUTHENTICATING: {
-            const authUrl = await this.authorization.usableLink(id, conn);
+            // The link it was given, until someone reconnects it.
+            const authUrl = this.authorization.pendingLink(id, conn);
             if (authUrl) {
               return { state: MCPConnectionState.AUTHENTICATING, authUrl };
             }
-            // The link can no longer complete: start a fresh flow, as
-            // addMcpServer() always has.
+            // No usable link is stored (corrupted storage): start a flow.
             return this.connectAndDiscover(id);
           }
           case MCPConnectionState.CONNECTING:
@@ -617,8 +607,9 @@ export class ServerController {
       });
 
       if (this.showRecordedFailure(server, conn)) continue;
+      // A flow in progress keeps waiting for its callback.
       if (server.auth_url) {
-        await this.authorization.resumeLink(server, conn, server.auth_url);
+        conn.connectionState = MCPConnectionState.AUTHENTICATING;
         continue;
       }
       this.connectInBackground(server.id);
@@ -762,14 +753,13 @@ export class ServerController {
     }
     if (conn) await this.close(id).catch(() => {});
     if (authProvider) await this.authorization.clearStorage(id, authProvider);
-    this.jobs.cancelLinkExpiry(id);
     this.ctx.store.remove(id);
     this.ctx.stateChanged();
   }
 
   /**
    * Rename a server's id everywhere it is a key: its row, its connection,
-   * its provider, its OAuth storage keys and its pending link expiry. A no-op when
+   * its provider and its OAuth storage keys. A no-op when
    * the ids match; throws when `newId` is taken.
    */
   async migrate(
@@ -796,7 +786,6 @@ export class ServerController {
       `/${clientName}/${newId}/`
     );
     this.renameConnection(oldId, newId);
-    this.jobs.move(oldId, newId);
     this.ctx.stateChanged();
   }
 
@@ -898,9 +887,9 @@ function discoverResult(
   };
 }
 
-/** Converts a resolved connection failure into a retry signal. */
-class ConnectRetryError extends Error {
-  constructor(readonly result: MCPConnectionResult) {
+/** Carries a failed attempt out of `tryN` so it is retried. */
+class AttemptFailedError extends Error {
+  constructor(readonly settlement: MCPServerSettlement) {
     super("MCP connection attempt failed");
   }
 }

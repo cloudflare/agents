@@ -1,12 +1,8 @@
 import { Agent } from "../../index.ts";
 import { MCPAuthorizationRequiredError } from "../../mcp/client/errors";
 import {
-  ageAuthorizationLink,
   ageAuthorizationRounds,
-  backdateMcpJobs,
-  expireOAuthStates,
-  mcpJobs,
-  type McpJobRow
+  expireOAuthStates
 } from "../shared/mcp-time-travel";
 
 /** Where the OAuth callback sends the browser, by outcome. */
@@ -240,18 +236,6 @@ export class McpIntegrationAgent extends Agent {
    */
   restart(): void {
     this.ctx.abort("restarted by test");
-  }
-
-  mcpJobs(): McpJobRow[] {
-    return mcpJobs(this.ctx.storage);
-  }
-
-  backdateMcpJobs(): void {
-    backdateMcpJobs(this.ctx.storage);
-  }
-
-  ageAuthorizationLink(serverId: string, ms: number): void {
-    ageAuthorizationLink(this.ctx.storage, serverId, ms);
   }
 
   ageAuthorizationRounds(serverId: string, ms: number): void {

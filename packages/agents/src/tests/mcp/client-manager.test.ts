@@ -3038,7 +3038,8 @@ describe("MCPClientManager OAuth Integration", () => {
           name: "Test Server",
           callbackUrl: "http://localhost:3000/callback",
           client: {},
-          transport: { type: "auto" }
+          transport: { type: "auto" },
+          retry: { maxAttempts: 1 }
         });
 
         const conn = manager.mcpConnections[id];
@@ -3057,8 +3058,8 @@ describe("MCPClientManager OAuth Integration", () => {
         await manager.establishConnection(id);
 
         // Fires 4 times: after init in connectToServer, from
-        // discoverIfConnected, when the scheduled reconnect sets the error,
-        // and explicitly in establishConnection.
+        // discoverIfConnected, when the failure is recorded, and explicitly
+        // in establishConnection.
         expect(onStateChangedSpy).toHaveBeenCalledTimes(4);
         expect(conn.connectionError).toBe("Discovery failed");
       })

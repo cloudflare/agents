@@ -113,7 +113,6 @@ src/
       manager.ts        # MCPClientManager: public API and Lifecycle hooks, delegates to:
       servers.ts        #   each server's connection life; decides retry or stop after a failure
       authorization.ts  #   links, OAuth callbacks, re-authorization during requests
-      jobs.ts           #   durable link-expiry job
       connection.ts
       rpc.ts            # Persisted RPC binding restoration
       storage.ts

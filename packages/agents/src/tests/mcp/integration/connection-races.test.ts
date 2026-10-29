@@ -33,7 +33,6 @@ describe("MCP connection work in an Agent", () => {
 
     expect(await agent.serverIds()).toEqual([]);
     expect(await agent.toolNames()).toEqual([]);
-    expect(await agent.mcpJobs()).toEqual([]);
   });
 
   it("cancels an add queued behind the wake's restore when the server is removed", async () => {

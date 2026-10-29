@@ -10,10 +10,6 @@ import type {
 import { Emitter, type Event } from "../../core/events";
 import { LifecycleCapability } from "../../lifecycle/capability";
 import type { CapabilityRequestContext } from "../../lifecycle/capability-runner";
-import type {
-  LifecycleJobContext,
-  LifecycleJobOutcome
-} from "../../lifecycle/job-queue";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
 import { RPC_DO_PREFIX } from "../rpc";
 import { MCPAIToolConverter, type MCPAIToolSet } from "./ai-tools";
@@ -31,7 +27,6 @@ import {
   type CallToolSchemaOrOptions,
   type LegacyCallToolResultSchema
 } from "./invoker";
-import { AUTH_EXPIRY_JOB, McpJobs, parseAuthExpiryJobPayload } from "./jobs";
 import { legacyConnect, type LegacyConnectOptions } from "./legacy-connect";
 import {
   type MCPClientOAuthCallbackConfig,
@@ -69,7 +64,6 @@ const CURRENT_MCP_SCHEMA_VERSION = 1;
  *   happens after a failure
  * - {@link AuthorizationController}: authorization links, OAuth callbacks
  *   and re-authorization during requests
- * - {@link McpJobs}: the durable link-expiry job
  */
 export class MCPClientManager extends LifecycleCapability {
   public mcpConnections: Record<string, MCPClientConnection> = {};
@@ -95,7 +89,6 @@ export class MCPClientManager extends LifecycleCapability {
   private didWarnAboutUnstableGetAITools = false;
 
   private readonly ctx: McpClientContext;
-  private readonly jobs: McpJobs;
   private readonly status: ServerStatus;
   private readonly elicitation: ElicitationHandlers;
   private readonly authorization: AuthorizationController;
@@ -137,17 +130,11 @@ export class MCPClientManager extends LifecycleCapability {
       stateChanged: () =>
         this._lanes.outside(() => this._onServerStateChanged.fire())
     };
-    this.jobs = new McpJobs(() => this.lifecycle.jobs);
-    this.status = new ServerStatus(ctx, this.jobs);
+    this.status = new ServerStatus(ctx);
     this.elicitation = new ElicitationHandlers(ctx);
-    this.authorization = new AuthorizationController(
-      ctx,
-      this.jobs,
-      this.status
-    );
+    this.authorization = new AuthorizationController(ctx, this.status);
     this.servers = new ServerController(
       ctx,
-      this.jobs,
       this.status,
       this.authorization,
       this.elicitation,
@@ -199,23 +186,6 @@ export class MCPClientManager extends LifecycleCapability {
       request,
       this.getOAuthCallbackConfig()
     );
-  }
-
-  /** Run one of this manager's durable jobs: a link expiry. */
-  async onJob(
-    context: LifecycleJobContext
-  ): Promise<LifecycleJobOutcome | void> {
-    const { job } = context;
-    if (job.fn !== AUTH_EXPIRY_JOB) {
-      console.warn(
-        `[MCPClientManager] Dropping job ${job.id} with unknown fn "${job.fn}"`
-      );
-      return;
-    }
-    const payload = parseAuthExpiryJobPayload(job.payload);
-    if (!payload) return;
-    const rescheduleAt = await this.authorization.runLinkExpiry(payload);
-    return rescheduleAt ? { rescheduleAt } : undefined;
   }
 
   // Servers
@@ -353,7 +323,7 @@ export class MCPClientManager extends LifecycleCapability {
   /**
    * Rename a server's id, in-place, across every place the id is used as a
    * key: its row, its connection, its provider, its OAuth storage keys under
-   * `/{clientName}/{oldId}/...`, and its pending jobs. Used to migrate a
+   * `/{clientName}/{oldId}/...`. Used to migrate a
    * server registered under an auto-generated id to a caller-supplied
    * stable id (see `Agent.addMcpServer`'s `{ id }` option).
    *

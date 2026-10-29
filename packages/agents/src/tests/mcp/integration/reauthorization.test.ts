@@ -474,7 +474,6 @@ describe("MCP OAuth callbacks in an Agent", () => {
       auth_url: null
     });
     expect(server.registeredClients).toHaveLength(clients);
-    expect(await woken.mcpJobs()).toEqual([]);
 
     const again = await woken.reconnect(added.id);
     expect(again.state).toBe("authenticating");
@@ -539,6 +538,5 @@ describe("MCP OAuth callbacks in an Agent", () => {
     const view = await agent.server(added.id);
     expect(view?.state).toBe("failed");
     expect(view?.error).toContain("still answers 401");
-    expect(await agent.mcpJobs()).toEqual([]);
   });
 });

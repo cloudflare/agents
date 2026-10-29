@@ -2,12 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../lifecycle";
 import { MCPClientManager } from "../../mcp/client";
 import { MCPConnectionState } from "../../mcp/client/connection";
-import {
-  backdateMcpJobs,
-  expireOAuthStates,
-  mcpJobs,
-  type McpJobRow
-} from "../shared/mcp-time-travel";
+import { expireOAuthStates } from "../shared/mcp-time-travel";
 
 /**
  * A plain Lifecycle Object with the MCP client manager installed, used to
@@ -142,14 +137,6 @@ export class PlainMcpClientObject extends DurableObject<Cloudflare.Env> {
    */
   restart(): void {
     this.ctx.abort("restarted by test");
-  }
-
-  mcpJobs(): McpJobRow[] {
-    return mcpJobs(this.ctx.storage);
-  }
-
-  backdateMcpJobs(): void {
-    backdateMcpJobs(this.ctx.storage);
   }
 
   expireOAuthStates(): Promise<void> {

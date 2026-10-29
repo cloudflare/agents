@@ -52,7 +52,7 @@ if (result.state === "authenticating") {
   {
     title: "Re-authorization and reconnecting",
     description:
-      "A tool call can need the user again: a scope step-up, or a token that can no longer be refreshed. A server that stopped (authorization refused or expired, reconnects gave up) stays failed until someone reconnects it.",
+      "A tool call can need the user again: a scope step-up, or a token that can no longer be refreshed. A server that failed (unreachable, or authorization refused) stays failed until someone reconnects it.",
     code: `import { MCPAuthorizationRequiredError } from "agents/mcp/client";
 
 try {
@@ -183,8 +183,7 @@ const agent = useAgent({
             <strong className="text-kumo-default">Token Storage:</strong> OAuth
             tokens are stored in the agent's Durable Object storage, refreshed
             as needed, and reused after a restart. When a refresh is refused the
-            server asks the user again; a link nobody completes expires after 10
-            minutes.
+            server asks the user again. Reconnect for a new link.
           </Text>
         </Surface>
       </div>

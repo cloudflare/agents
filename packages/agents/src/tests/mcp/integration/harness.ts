@@ -141,6 +141,7 @@ export async function connectAuthorized(
     name?: string;
     url?: string;
     transport?: "auto" | "streamable-http" | "sse";
+    maxAttempts?: number;
   } = {}
 ): Promise<string> {
   const { url = server.url, ...rest } = options;

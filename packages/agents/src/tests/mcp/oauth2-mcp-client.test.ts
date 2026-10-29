@@ -334,7 +334,7 @@ describe("OAuth2 MCP Client - addMcpServer on restored connections", () => {
     );
   });
 
-  it("replaces a persisted auth URL whose state expired", async () => {
+  it("returns a persisted auth URL as is, even after its state expired", async () => {
     const agentName = `test-stale-oauth-url-${nanoid(8)}`;
     const agentStub = env.TestOAuthAgent.getByName(agentName);
     const serverId = nanoid(8);
@@ -362,9 +362,16 @@ describe("OAuth2 MCP Client - addMcpServer on restored connections", () => {
     await agentStub.seedPersistedOAuthState(serverId, nonce, 11 * 60 * 1000);
     await agentStub.configureMcpReconnect(serverId, "authenticating", freshUrl);
 
+    // Whether the link still works is the authorization server's call; the
+    // user gets a new one by reconnecting.
     expect(
       await agentStub.testAddMcpServer("test-oauth-server", serverUrl)
     ).toEqual({
+      id: serverId,
+      state: "authenticating",
+      authUrl: staleUrl
+    });
+    expect(await agentStub.testReconnectMcpServer(serverId)).toEqual({
       id: serverId,
       state: "authenticating",
       authUrl: freshUrl

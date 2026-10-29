@@ -110,9 +110,9 @@ export class MyAgent extends Agent {
   }
 
   /**
-   * The "Reconnect" button: try a failed server again. It forgets why the
-   * server stopped (reconnects gave up, authorization was refused or
-   * expired) and connects now, showing a new link if it needs one.
+   * The "Reconnect" button: try a server again. It forgets why the server
+   * failed and its pending link, and connects now, showing a new link if it
+   * needs one.
    */
   @callable()
   async reconnectServer(serverId: string) {

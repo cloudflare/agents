@@ -1,6 +1,5 @@
 import { MCPConnectionState, type MCPClientConnection } from "./connection";
 import type { McpClientContext } from "./context";
-import type { McpJobs } from "./jobs";
 import type { StoredServerFailure } from "./server-store";
 
 /**
@@ -9,10 +8,7 @@ import type { StoredServerFailure } from "./server-store";
  * saved with its row.
  */
 export class ServerStatus {
-  constructor(
-    private readonly ctx: McpClientContext,
-    private readonly jobs: McpJobs
-  ) {}
+  constructor(private readonly ctx: McpClientContext) {}
 
   /**
    * Mark a server failed and record why, so later wakes show the same
@@ -26,7 +22,6 @@ export class ServerStatus {
   ): void {
     this.ctx.store.clearAuthUrl(serverId);
     this.ctx.store.setFailure(serverId, { reason, message, at: Date.now() });
-    this.jobs.cancelLinkExpiry(serverId);
     const conn = this.ctx.connections[serverId];
     if (conn) {
       conn.connectionState = MCPConnectionState.FAILED;

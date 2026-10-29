@@ -209,9 +209,9 @@ class MyAgent extends Agent<Env> {
 
 Calling `addMcpServer()` for a server that is already registered does not retry a failure:
 
-- `ready`, or a link still waiting for the user: returned as is.
-- A link that can no longer be completed, or one recorded as expired: starts a new authorization and returns the fresh `authUrl`.
-- Any other `failed` server: throws the recorded error, which names `reconnectMcpServer()`.
+- `ready`: returned as is.
+- `authenticating`: returns the link the server is waiting on.
+- `failed`: throws the recorded error, which names `reconnectMcpServer()`.
 
 ### Protocol negotiation and elicitation
 
@@ -348,7 +348,7 @@ For example: `https://my-worker.workers.dev/agents/my-agent/default/callback`
 
 OAuth tokens are securely stored in SQLite and persist across agent restarts.
 
-An authorization link stays valid for 10 minutes, or at most 24 hours with a custom OAuth provider that accepts its `state` for longer. If the user does not complete it in time, the server moves to `failed` with the error "Authorization expired before it was completed", its `auth_url` is cleared, and it stays failed across wakes. Call `reconnectMcpServer(id)` or `addMcpServer()` to get a fresh link. If a callback already redeemed the link and the agent restarted before it finished, the agent reconnects with the saved tokens instead.
+A server waiting for authorization keeps its link, across wakes too, until the user completes it or you call `reconnectMcpServer(id)`. Whether an old link still works is up to the authorization server and the OAuth provider (the default provider accepts a callback for 10 minutes). If the user completes a link that no longer works, the callback reports the error and the server keeps waiting; call `reconnectMcpServer(id)` to get a fresh link. If a callback already redeemed the link and the agent restarted before it finished, the agent reconnects with the saved tokens instead.
 
 ### Re-authorization during a session
 
