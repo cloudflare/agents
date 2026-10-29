@@ -1,8 +1,8 @@
 {
-  "total": 1203,
-  "passed": 405,
-  "needThink": 1005,
-  "needThinkPassed": 207,
+  "total": 1204,
+  "passed": 402,
+  "needThink": 1006,
+  "needThinkPassed": 204,
   "files": {
     "action-pause-recovery.test.ts": {
       "total": 3,
@@ -193,8 +193,8 @@
       "passed": 1
     },
     "think-session.test.ts": {
-      "total": 279,
-      "passed": 70
+      "total": 280,
+      "passed": 67
     },
     "turn-metadata.test.ts": {
       "total": 4,
@@ -559,7 +559,6 @@
     "think-session.test.ts > Think — addMessages > keeps the live view correct when an explicit parentId branches",
     "think-session.test.ts > Think — addMessages > persists durably and coherently when called mid-turn",
     "think-session.test.ts > Think — addMessages > updates in place in upsert mode",
-    "think-session.test.ts > Think — async configureSession > should have working context blocks from async config",
     "think-session.test.ts > Think — async configureSession > should initialize and chat with async configureSession",
     "think-session.test.ts > Think — async configureSession > should support multiple turns after async init",
     "think-session.test.ts > Think — body persistence > should default to undefined when no body set",
@@ -570,8 +569,6 @@
     "think-session.test.ts > Think — context blocks > should configure session with context blocks",
     "think-session.test.ts > Think — context blocks > should freeze system prompt from context blocks",
     "think-session.test.ts > Think — context blocks > should persist context block content across turns",
-    "think-session.test.ts > Think — context blocks > should render empty writable blocks in system prompt",
-    "think-session.test.ts > Think — context blocks > should use context blocks in system prompt assembly even when called directly",
     "think-session.test.ts > Think — continueLastTurn > should set continuation: true on continueLastTurn",
     "think-session.test.ts > Think — core > should accumulate messages across multiple turns",
     "think-session.test.ts > Think — core > should broadcast RPC chat message updates to connected clients",

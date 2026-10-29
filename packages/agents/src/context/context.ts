@@ -22,10 +22,12 @@ import type { ToolSet } from "ai";
 import type { SessionMessage } from "../sessions/types";
 import {
   ContextBlocks,
+  isWritableProvider,
   renderReminder,
   type ContextBlock,
   type ContextConfig,
-  type ContextProvider
+  type ContextProvider,
+  type WritableContextProvider
 } from "./blocks";
 import { AgentContextProvider, type SqlProvider } from "./sqlite-provider";
 
@@ -53,8 +55,23 @@ export interface ContextSession {
   readonly sessionId: string;
   getHistory(options?: { leafId?: string | null }): Promise<SessionMessage[]>;
   getMessage(id: string): Promise<SessionMessage | null>;
+  /** The answers to a message: its children in the transcript tree. */
+  getBranches(messageId: string): Promise<SessionMessage[]>;
   updateMessage(message: SessionMessage): Promise<SessionMessage | null>;
 }
+
+/**
+ * What Context keeps beside the transcript: where the latest snapshot is,
+ * for a history read that starts after it, and a refresh that has not been
+ * recorded yet.
+ */
+type ContextState = {
+  readonly snapshot?: string;
+  readonly refresh?: boolean;
+};
+
+/** Block label of the stored {@link ContextState}. */
+const STATE_LABEL = "_context_state";
 
 /** Options for {@link Context}. */
 export interface ContextOptions {
@@ -62,6 +79,9 @@ export interface ContextOptions {
   readonly blocks?: readonly ContextConfig[];
   /**
    * Storage for blocks declared without a provider. Overrides `storage`.
+   * Context also keeps a small state row here (label `_context_state`), so
+   * a pending refresh survives eviction; without storage it lives in
+   * memory.
    */
   readonly defaultProvider?: (label: string) => ContextProvider;
   /**
@@ -111,8 +131,10 @@ export interface BuiltContext extends PreparedContext {
 export class Context {
   readonly #session: ContextSession;
   readonly #blocks: ContextBlocks;
-  /** Set by `refreshSystemPrompt()`; the next recorded turn snapshots. */
-  #refresh = false;
+  /** Durable home of {@link ContextState}, when there is storage. */
+  readonly #stateStore: WritableContextProvider | undefined;
+  /** {@link ContextState} for a Context without storage. */
+  #memoryState: ContextState = {};
 
   constructor(session: ContextSession, options: ContextOptions = {}) {
     this.#session = session;
@@ -130,6 +152,8 @@ export class Context {
       undefined,
       defaultProvider
     );
+    const stateStore = defaultProvider?.(STATE_LABEL);
+    this.#stateStore = isWritableProvider(stateStore) ? stateStore : undefined;
   }
 
   // ── Turns ───────────────────────────────────────────────────────
@@ -169,17 +193,23 @@ export class Context {
     options: ContextReadOptions = {}
   ): Promise<PreparedContext & { readonly recorded: boolean }> {
     const history = await this.#history(options);
-    const delivered = deliveredContext(history);
+    const state = await this.#readState();
+    const delivered = await this.#delivered(history, state);
     const tail = history.at(-1);
-    const recordable = tail?.role === "user";
+    // Only a user message nothing has answered yet starts a new turn. One
+    // with answers is a branch point (a regeneration): recording on it would
+    // change what its earlier answers were sent.
+    const recordable =
+      tail?.role === "user" &&
+      (await this.#session.getBranches(tail.id)).length === 0;
 
-    if (!delivered.system || this.#refresh) {
+    if (!delivered.system || state.refresh) {
       // A new snapshot reads every block afresh, as a refresh does.
-      if (!this.#refresh) await this.#blocks.load();
+      if (!state.refresh) await this.#blocks.load();
       const sections = await this.#blocks.internal_sections();
       if (recordable) {
         await this.#record(tail, { system: sections });
-        this.#refresh = false;
+        await this.#writeState({ snapshot: tail.id });
       }
       return {
         system: renderSystem(sections),
@@ -251,8 +281,12 @@ export class Context {
    * the blocks rendered now when nothing has been recorded yet. Reads only.
    */
   async freezeSystemPrompt(options: ContextReadOptions = {}): Promise<string> {
-    const delivered = deliveredContext(await this.#history(options));
-    if (delivered.system && !this.#refresh) {
+    const state = await this.#readState();
+    const delivered = await this.#delivered(
+      await this.#history(options),
+      state
+    );
+    if (delivered.system && !state.refresh) {
       return renderSystem(delivered.system);
     }
     return renderSystem(await this.#blocks.internal_sections());
@@ -265,7 +299,7 @@ export class Context {
    */
   async refreshSystemPrompt(): Promise<string> {
     await this.#blocks.load();
-    this.#refresh = true;
+    await this.#writeState({ ...(await this.#readState()), refresh: true });
     return renderSystem(await this.#blocks.internal_sections());
   }
 
@@ -274,8 +308,12 @@ export class Context {
    * as a reminder, or `null`. Reads only; {@link prepare} delivers them.
    */
   async reminder(options: ContextReadOptions = {}): Promise<string | null> {
-    const delivered = deliveredContext(await this.#history(options));
-    if (!delivered.system || this.#refresh) return null;
+    const state = await this.#readState();
+    const delivered = await this.#delivered(
+      await this.#history(options),
+      state
+    );
+    if (!delivered.system || state.refresh) return null;
     const changes = await this.#changes(delivered.values);
     return changes.length > 0
       ? renderReminder(changes.map(([, text]) => text))
@@ -329,6 +367,43 @@ export class Context {
       : await this.#session.getHistory();
   }
 
+  /**
+   * The context a history was delivered with. When the history starts
+   * after the latest snapshot (a host's bounded window), the stored pointer
+   * finds it.
+   */
+  async #delivered(
+    history: readonly SessionMessage[],
+    state: ContextState
+  ): Promise<Delivered> {
+    const delivered = deliveredContext(history);
+    if (delivered.system || !state.snapshot) return delivered;
+    const message = await this.#session.getMessage(state.snapshot);
+    const system = message ? recordOf(message)?.system : undefined;
+    if (!system) return delivered;
+    return deliveredContext([message as SessionMessage, ...history]);
+  }
+
+  async #readState(): Promise<ContextState> {
+    if (!this.#stateStore) return this.#memoryState;
+    const raw = await this.#stateStore.get();
+    if (!raw) return {};
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return isObject(parsed) ? (parsed as ContextState) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  async #writeState(state: ContextState): Promise<void> {
+    if (!this.#stateStore) {
+      this.#memoryState = state;
+      return;
+    }
+    await this.#stateStore.set(JSON.stringify(state));
+  }
+
   /** Remind blocks whose section differs from the one last delivered. */
   async #changes(delivered: ReadonlyMap<string, string>): Promise<Section[]> {
     const current = await this.#blocks.internal_remindSections();
@@ -356,13 +431,13 @@ export class Context {
 /**
  * Replay a history's records: the latest snapshot, and each block's section
  * as last delivered (the snapshot, then any change recorded from there on).
- * A snapshot that compaction hid is simply absent, and the next turn takes
- * a new one.
  */
-function deliveredContext(history: readonly SessionMessage[]): {
+type Delivered = {
   system: readonly Section[] | null;
   values: Map<string, string>;
-} {
+};
+
+function deliveredContext(history: readonly SessionMessage[]): Delivered {
   let system: readonly Section[] | null = null;
   let start = 0;
   history.forEach((message, index) => {

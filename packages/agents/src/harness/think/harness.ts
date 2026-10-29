@@ -40,7 +40,7 @@ import type {
 } from "../../experimental/channels/harness";
 import type { CompactResult } from "../../sessions/compaction-helpers";
 import type { Session } from "../../sessions/handle";
-import type { Context } from "../../context/context";
+import { CONTEXT_METADATA_KEY, type Context } from "../../context/context";
 import type { SearchResult, SessionMessage } from "../../sessions/types";
 import type { StreamJson } from "../../streams/types";
 import {
@@ -416,9 +416,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     super("think-harness");
     this.#options = options;
     this.#sessions = new Sessions({
-      ...(options.reservedMetadataKeys && {
-        reservedMetadataKeys: options.reservedMetadataKeys
-      })
+      // Context's record is server-owned: a client cannot forge a prompt.
+      reservedMetadataKeys: [
+        CONTEXT_METADATA_KEY,
+        ...(options.reservedMetadataKeys ?? [])
+      ]
     });
     this.sessions = new ThinkSessions(this);
   }
@@ -1140,23 +1142,29 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // call sends the transcript as a projection of those records, so
     // earlier turns go out unchanged and the prefix cache holds. A reminder
     // that could not be recorded (a continuation) waits for the next turn.
+    // Every call prepares the session's context. The call that starts a
+    // turn records on its user message the prompt it is sent with and any
+    // remind block that changed; every call sends the transcript as a
+    // projection of those records, so earlier turns go out unchanged. A
+    // change that cannot be recorded (a continuation, or a regeneration
+    // from an answered message) rides on this request alone.
     const context = this.#context(session);
     let contextSystem = "";
     let request = history;
     if (context) {
-      let recorded = history;
-      if (existing === undefined && op.steps === 0) {
-        const prepared = await context.prepare({ messages: history });
-        contextSystem = prepared.system;
-        if (prepared.recorded) {
-          recorded = asUIMessages(
-            await handle.getHistory({ leafId: op.parentId })
-          );
-        }
-      } else {
-        contextSystem = await context.freezeSystemPrompt({ messages: history });
-      }
-      request = asUIMessages(context.project(recorded));
+      const prepared = await context.prepare({ messages: history });
+      contextSystem = prepared.system;
+      const recorded = prepared.recorded
+        ? asUIMessages(
+            await handle.getHistory({
+              leafId: existing ? existing.id : op.parentId
+            })
+          )
+        : history;
+      request = withReminder(
+        asUIMessages(context.project(recorded)),
+        prepared.reminder
+      );
     }
     const system = joinSystem(
       await resolve(this.#options.system, session),
@@ -2326,4 +2334,28 @@ function joinSystem(
 ): string | undefined {
   if (!context) return system;
   return system ? `${system}\n\n${context}` : context;
+}
+
+/**
+ * Carry a reminder that was not recorded on this request only: after the
+ * last user message's own content, or as a user message of its own after
+ * an assistant message.
+ */
+function withReminder(
+  messages: UIMessage[],
+  reminder: string | null
+): UIMessage[] {
+  if (!reminder) return messages;
+  const part = { type: "text" as const, text: reminder };
+  const last = messages.at(-1);
+  if (last?.role === "user") {
+    return [
+      ...messages.slice(0, -1),
+      { ...last, parts: [...last.parts, part] }
+    ];
+  }
+  return [
+    ...messages,
+    { id: `${CONTEXT_METADATA_KEY}_reminder`, role: "user", parts: [part] }
+  ];
 }

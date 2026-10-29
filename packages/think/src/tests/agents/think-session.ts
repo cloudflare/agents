@@ -5298,6 +5298,7 @@ export class ThinkSystemPromptFieldSkillsAgent extends ThinkSessionTestAgent {
 
 export class ThinkWorkspaceSkillsAgent extends ThinkSessionTestAgent {
   private _turnToolNames: string[] = [];
+  private _turnLastMessage = "";
 
   override getSkills() {
     return [skills.workspace(this.workspace)];
@@ -5305,6 +5306,12 @@ export class ThinkWorkspaceSkillsAgent extends ThinkSessionTestAgent {
 
   override beforeTurn(ctx: TurnContext): void {
     this._turnToolNames = Object.keys(ctx.tools).sort();
+    this._turnLastMessage = JSON.stringify(ctx.messages.at(-1) ?? null);
+  }
+
+  /** The last model message the latest turn sent, serialized. */
+  async getTurnLastMessage(): Promise<string> {
+    return this._turnLastMessage;
   }
 
   async writeSkill(name: string, description: string): Promise<void> {

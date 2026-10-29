@@ -174,7 +174,7 @@ describe("Context", () => {
     });
   });
 
-  it("takes a new snapshot when compaction hides the old one", async () => {
+  it("keeps the snapshot that compaction hid, until a refresh", async () => {
     await withCapabilityHarness(async ({ storage, install }) => {
       const { session, context, setDate } = await setup(storage, (s) =>
         install(s)
@@ -186,9 +186,71 @@ describe("Context", () => {
       await session.addCompaction("earlier turns", "u1", "a1");
 
       setDate("Friday");
-      const after = await context.build();
-      expect(after.system).not.toBe(first.system);
-      expect(after.system).toContain("Today is Friday.");
+      expect((await context.build()).system).toBe(first.system);
+
+      await context.refreshSystemPrompt();
+      await session.appendMessage(assistant("a2", "ok"));
+      await session.appendMessage(user("u3", "and now?"));
+      expect((await context.build()).system).toContain("Today is Friday.");
+    });
+  });
+
+  it("keeps a refresh across a cold wake", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const first = await setup(storage, (s) => install(s));
+      await first.session.appendMessage(user("u1", "hello"));
+      await first.context.build();
+      first.setDate("Sunday");
+      await first.context.refreshSystemPrompt();
+
+      // A new Context on the same storage, as after an eviction.
+      const woken = await setup(storage, (s) => install(s));
+      woken.setDate("Sunday");
+      await woken.session.appendMessage(assistant("a1", "hi"));
+      await woken.session.appendMessage(user("u2", "again"));
+      expect((await woken.context.build()).system).toContain(
+        "Today is Sunday."
+      );
+    });
+  });
+
+  it("finds the snapshot when the history starts after it", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context } = await setup(storage, (s) => install(s));
+      await session.appendMessage(user("u1", "hello"));
+      const first = await context.build();
+      await session.appendMessage(assistant("a1", "hi"));
+      await session.appendMessage(user("u2", "again"));
+
+      // A host's bounded window that no longer reaches u1.
+      const window = (await session.getHistory()).slice(-1);
+      const prepared = await context.prepare({ messages: window });
+      expect(prepared.system).toBe(first.system);
+      expect((await session.getMessage("u2"))?.metadata).toBeUndefined();
+    });
+  });
+
+  it("does not record on a user message that already has an answer", async () => {
+    await withCapabilityHarness(async ({ storage, install }) => {
+      const { session, context, setDate } = await setup(storage, (s) =>
+        install(s)
+      );
+      await session.appendMessage(user("u1", "hello"));
+      await context.build();
+      const recorded = JSON.stringify(
+        (await session.getMessage("u1"))?.metadata
+      );
+      await session.appendMessage(assistant("a1", "hi"));
+
+      // Regenerating a1 answers u1 again.
+      setDate("Tuesday");
+      const prepared = await context.prepare({
+        messages: [(await session.getMessage("u1"))!]
+      });
+      expect(prepared.reminder).toContain("Today is Tuesday.");
+      expect(JSON.stringify((await session.getMessage("u1"))?.metadata)).toBe(
+        recorded
+      );
     });
   });
 

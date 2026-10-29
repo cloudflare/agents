@@ -75,7 +75,9 @@ Block values themselves stay in their providers. A host that accepts messages fr
 
 `refreshSystemPrompt()` reloads every block and returns the new prompt. The next turn that ends with a user message records it as the new snapshot. That is the one deliberate cache bust, so refresh where the cache is already gone, such as after compaction.
 
-A snapshot that compaction hid is simply absent, and the next turn takes a new one.
+Beside the transcript, `Context` keeps one small state row in the block storage (label `_context_state`): a pending refresh, so it survives eviction, and which message holds the latest snapshot, so a host that reads a bounded window of history, or a branch where compaction hid that message, still opens with the same prompt. Without `storage` or `defaultProvider` that state lives in memory.
+
+A user message that already has an answer is a branch point, for example when a reply is regenerated. `Context` never records on it, because that would change what its earlier answers were sent; the change comes back as `reminder` for that request instead.
 
 `freezeSystemPrompt()` returns the prompt the history was sent with, and `reminder()` returns the pending changes. Both only read.
 
@@ -114,7 +116,7 @@ A model write needs no reminder: the tool call that made it is in the transcript
 ## Harnesses
 
 - **Think** builds a `Context` on its default session from `configureContext()` and the `withContext()` chain in `configureSession()`, records each turn, and refreshes after compaction. `this.context` is that `Context`.
-- **`ThinkHarness`** takes a `context` option: a function from a session's handle to a `Context`. Its prompt follows the `system` option, its tools join `tools`, and the harness records each operation's first model call.
+- **`ThinkHarness`** takes a `context` option: a function from a session's handle to a `Context`. Its prompt follows the `system` option, its tools join `tools`, and every model call prepares it: the call that starts a turn records, and a change that cannot be recorded, during a continuation or a regeneration, rides on that request alone. The harness treats `cf_agents_context` as server-owned, so client input cannot carry a record.
 
 ## Related
 
