@@ -39,6 +39,40 @@ describe("accepted pre-stream resume turns", () => {
     expect(transport.handleStreamPending({ id: "late" })).toBe(false);
   });
 
+  it("cancels both an attached turn and an unrelated queued turn", async () => {
+    const { agent, transport } = setup();
+    const firstProbe = transport.reconnectToStream({ chatId: "chat" });
+    transport.handleStreamResuming({ id: "active" });
+    const stream = await firstProbe;
+    const reader = stream!.getReader();
+    const pendingProbe = transport.reconnectToStream({ chatId: "chat" });
+    transport.handleStreamPending({ id: "queued" });
+    agent.send.mockClear();
+
+    expect(transport.cancelActiveServerTurn()).toBe(true);
+    expect(
+      agent.send.mock.calls.map(([frame]) => JSON.parse(frame).id)
+    ).toEqual(["queued", "active"]);
+    await expect(pendingProbe).resolves.toBeNull();
+    await expect(reader.read()).rejects.toMatchObject({ name: "AbortError" });
+    expect(transport.activeServerTurnId).toBeNull();
+    expect(transport.pendingServerTurnId).toBeNull();
+    expect(transport.cancelActiveServerTurn()).toBe(false);
+  });
+
+  it("sends only one cancel when the pending and active IDs match", async () => {
+    const { agent, transport } = setup();
+    const firstProbe = transport.reconnectToStream({ chatId: "chat" });
+    transport.handleStreamResuming({ id: "turn" });
+    await firstProbe;
+    const pendingProbe = transport.reconnectToStream({ chatId: "chat" });
+    transport.handleStreamPending({ id: "turn" });
+    agent.send.mockClear();
+    transport.cancelActiveServerTurn();
+    await pendingProbe;
+    expect(agent.send).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["none", "timeout", "reset", "abort"])(
     "clears pending activity on %s without cancelling server work",
     async (settlement) => {
