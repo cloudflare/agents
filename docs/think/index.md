@@ -516,13 +516,17 @@ a bucket listing for 60 seconds by default; set `refreshIntervalMs` to change
 that.
 
 Every `SKILL.md` is checked against the
-[spec](https://agentskills.io/specification). `name` must be 1-64 lowercase
-letters, digits, and hyphens and must match the skill's directory;
-`description` is required and at most 1024 characters; `compatibility`,
-`metadata`, and `allowed-tools` are checked when present. A skill that breaks
-a rule is skipped and logged, and the rest still load. Frontmatter keys the
-spec does not define are kept in `skill.extraFields`. A skill with
-`disable-model-invocation: true` is not shown to the model.
+[spec](https://agentskills.io/specification). Sources load skills leniently,
+as the spec's guide for agents recommends: a skill whose `name` is not 1-64
+lowercase letters, digits, and hyphens, does not match its directory, or
+whose `description` or `compatibility` is too long still loads, and Think logs
+a warning. A skill with no `description`, a `name` that is not a safe single
+path segment, or frontmatter that is not YAML is skipped and logged. Lenient
+parsing also reads frontmatter whose values contain an unquoted `: `.
+`skills.parseSkill()` is strict by default, so use it to check a skill before
+publishing it. Frontmatter keys the spec does not define are kept in
+`skill.extraFields`. A skill with `disable-model-invocation: true` is not
+shown to the model.
 
 The parser, sources, and catalog live in `agents/skills` and work without
 Think: `skills.parseSkill()` parses a `SKILL.md`, `skills.loadSkillCatalog()`
@@ -573,6 +577,9 @@ getSkillScriptRunner() {
   return skills.runner({ loader: this.env.LOADER });
 }
 ```
+
+Outside Think, import it from `agents/skills/runner`. It is a separate entry
+point because it loads `just-bash` and `@cloudflare/codemode`.
 
 The runner runs JavaScript, Python, and Bash scripts under `scripts/`. Python
 runs as Python Dynamic Workers and Bash runs through `just-bash`. There is no

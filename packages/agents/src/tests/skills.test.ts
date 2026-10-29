@@ -24,10 +24,13 @@ function skillFile(
   return `---\n${lines.join("\n")}\n---\n${body}`;
 }
 
-function parseError(markdown: string, directory?: string): string {
+function parseError(
+  markdown: string,
+  options: string | skills.ParseSkillOptions = {}
+): string {
   const parsed = skills.parseSkill(
     markdown,
-    directory === undefined ? {} : { directory }
+    typeof options === "string" ? { directory: options } : options
   );
   if (parsed.ok) throw new Error("expected a parse error");
   return parsed.error.code;
@@ -171,6 +174,79 @@ Review carefully.`);
         "---\nname: tools\ndescription: A skill.\nallowed-tools: 3\n---\n"
       )
     ).toBe("invalid-allowed-tools");
+  });
+
+  it("loads spec violations in lenient mode and reports them as warnings", () => {
+    const parsed = skills.parseSkill(
+      skillFile({ name: "Code_Review", description: "x".repeat(1100) }),
+      { directory: "review", mode: "lenient" }
+    );
+    if (!parsed.ok) throw parsed.error;
+    expect(parsed.value.name).toBe("Code_Review");
+    expect(parsed.warnings.map((warning) => warning.code)).toEqual([
+      "invalid-name",
+      "invalid-description"
+    ]);
+
+    const strict = skills.parseSkill(
+      skillFile({ name: "Code_Review", description: "A skill." })
+    );
+    expect(strict.ok).toBe(false);
+  });
+
+  it("uses the directory when a lenient skill has no name", () => {
+    const parsed = skills.parseSkill(skillFile({ description: "A skill." }), {
+      directory: "notes",
+      mode: "lenient"
+    });
+    if (!parsed.ok) throw parsed.error;
+    expect(parsed.value.name).toBe("notes");
+    expect(parsed.warnings).toHaveLength(1);
+  });
+
+  it("still rejects unsafe names and missing descriptions in lenient mode", () => {
+    for (const name of ["a/b", "..", "tab\there", "back\\slash"]) {
+      expect(
+        parseError(
+          skillFile({ name: JSON.stringify(name), description: "x" }),
+          {
+            mode: "lenient"
+          }
+        ),
+        name
+      ).toBe("invalid-name");
+    }
+    expect(parseError(skillFile({ name: "ok" }), { mode: "lenient" })).toBe(
+      "invalid-description"
+    );
+  });
+
+  it("repairs unquoted colons in lenient mode", () => {
+    const markdown =
+      "---\nname: pdf\ndescription: Use this skill when: the user asks about PDFs\n---\nBody";
+    expect(parseError(markdown)).toBe("invalid-yaml");
+    const parsed = skills.parseSkill(markdown, { mode: "lenient" });
+    if (!parsed.ok) throw parsed.error;
+    expect(parsed.value.description).toBe(
+      "Use this skill when: the user asks about PDFs"
+    );
+    expect(parsed.warnings.map((warning) => warning.code)).toEqual([
+      "invalid-yaml"
+    ]);
+  });
+
+  it("drops invalid optional fields in lenient mode", () => {
+    const parsed = skills.parseSkill(
+      "---\nname: tools\ndescription: A skill.\nallowed-tools: 3\nmetadata:\n  ok: yes\n  nested:\n    a: b\n---\n",
+      { mode: "lenient" }
+    );
+    if (!parsed.ok) throw parsed.error;
+    expect(parsed.value.allowedTools).toEqual([]);
+    expect(parsed.value.metadata).toEqual({ ok: "yes" });
+    expect(parsed.warnings.map((warning) => warning.code).sort()).toEqual([
+      "invalid-allowed-tools",
+      "invalid-metadata"
+    ]);
   });
 
   it("rejects resource paths that escape the skill", () => {
@@ -345,20 +421,23 @@ describe("skill catalog", () => {
       skills.manifest({
         id: "mixed",
         skills: [
-          { name: "Bad Name", description: "Broken.", body: "" },
+          { name: "Bad Name", description: "Loaded anyway.", body: "" },
+          { name: "no-description", description: "", body: "" },
           ...testManifest.skills
         ]
       })
     ]);
 
     expect(catalog.find("code-review")).toBeDefined();
+    expect(catalog.find("Bad Name")).toBeDefined();
     expect(
       catalog.diagnostics.map((diagnostic) =>
         skills.formatSkillDiagnostic(diagnostic)
       )
     ).toEqual([
       'Skill source "throwing" failed to list skills: list exploded. Its skills were skipped.',
-      'Skipped invalid skill mixed:Bad Name from source "mixed": Invalid skill name "Bad Name": it must be lowercase.'
+      'Skipped invalid skill mixed:no-description from source "mixed": SKILL.md frontmatter must set `description` to a non-empty string.',
+      'Skill "Bad Name" from source "mixed" breaks the Agent Skills spec but was loaded: Invalid skill name "Bad Name": it must be lowercase.'
     ]);
   });
 
@@ -593,18 +672,50 @@ describe("workspace skill source", () => {
     expect(deleted.fingerprint).toBe(empty.fingerprint);
   });
 
-  it("reports skills that break the spec", async () => {
+  it("loads a skill whose name does not match its directory, with a warning", async () => {
     const workspace = new MemorySkillWorkspace({
       [`${root}/review/SKILL.md`]: skillFile({
         name: "code-review",
         description: "Mismatched directory."
-      })
+      }),
+      [`${root}/review/references/checklist.md`]: "Check tests."
+    });
+    const source = skills.workspace(workspace);
+    const listed = await source.list();
+    if (!listed.ok) throw listed.error;
+    expect(listed.value.invalid).toEqual([]);
+    expect(listed.value.skills).toMatchObject([
+      {
+        skill: { name: "code-review" },
+        location: `${root}/review`,
+        warnings: [{ code: "name-mismatch" }]
+      }
+    ]);
+
+    // Resources are read from the directory, not the name.
+    const catalog = await skills.loadSkillCatalog([source]);
+    const read = await catalog.readResource({
+      path: "code-review/references/checklist.md"
+    });
+    expect(read.ok && read.value.resource.content).toBe("Check tests.");
+    expect(catalog.diagnostics).toMatchObject([
+      { _tag: "SkillWarning", name: "code-review" }
+    ]);
+  });
+
+  it("skips Workspace skills without a description or with unreadable frontmatter", async () => {
+    const workspace = new MemorySkillWorkspace({
+      [`${root}/empty/SKILL.md`]: "---\nname: empty\n---\nNo description.",
+      [`${root}/broken/SKILL.md`]: "---\nname: [broken\n---\n"
     });
     const listed = await skills.workspace(workspace).list();
     if (!listed.ok) throw listed.error;
     expect(listed.value.skills).toEqual([]);
-    expect(listed.value.invalid).toMatchObject([
-      { location: "review/SKILL.md", error: { code: "name-mismatch" } }
+    expect(
+      listed.value.invalid.map(({ location, error }) => [location, error.code])
+    ).toEqual([
+      ["broken/SKILL.md", "invalid-yaml"],
+      ["empty/SKILL.md", "invalid-description"]
     ]);
   });
 

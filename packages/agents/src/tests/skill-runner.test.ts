@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { tool } from "ai";
 import { z } from "zod";
 import * as skills from "../skills";
+import { runner as createRunner } from "../skills/runner";
 import { MemorySkillWorkspace } from "./memory-skill-workspace";
 
 function testSkill(
@@ -23,7 +24,7 @@ function testWorkspace(files: Record<string, string>): MemorySkillWorkspace {
 
 describe("skill script runner", () => {
   it("runs function-style JavaScript scripts with input, context, and tools", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       tools: {
         shout: tool({
@@ -54,7 +55,7 @@ describe("skill script runner", () => {
   });
 
   it("surfaces script failures with console output", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -72,7 +73,7 @@ describe("skill script runner", () => {
   });
 
   it("requires a default-exported function for JS/TS scripts", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -87,7 +88,7 @@ describe("skill script runner", () => {
   });
 
   it("rejects an uncompiled multi-file/TypeScript script with a compile-required error", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -122,7 +123,7 @@ export default function run(input: { text: string }) {
   });
 
   it("rejects a JavaScript script that imports sibling files", async () => {
-    const runner = skills.runner({ loader: env.LOADER });
+    const runner = createRunner({ loader: env.LOADER });
 
     await expect(
       runner.run({
@@ -138,7 +139,7 @@ export default function run() {
   });
 
   it("runs a bundled script (esbuild `export { run as default }` form)", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -183,7 +184,7 @@ export {
   });
 
   it("runs a bundled script that also has named exports alongside the default", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -221,7 +222,7 @@ export {
   });
 
   it("exposes text bundled resources through ctx.files", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -251,7 +252,7 @@ export {
 
   it("returns output artifacts written through ctx.output", async () => {
     const workspace = testWorkspace({});
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       workspaceInstance: workspace
     });
@@ -281,7 +282,7 @@ export {
   });
 
   it("rejects oversized output artifacts", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -298,7 +299,7 @@ export {
   });
 
   it("reads workspace files through ctx.workspace by default", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       workspaceInstance: testWorkspace({
         "README.md": "hello from workspace"
@@ -324,7 +325,7 @@ export {
   it("keeps ctx.workspace inside /workspace", async () => {
     const workspace = testWorkspace({ "README.md": "inside" });
     await workspace.writeText("/secrets/token.txt", "outside");
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       workspaceInstance: workspace,
       workspace: "read-write"
@@ -367,7 +368,7 @@ export {
   it("keeps python and bash workspace access inside /workspace", async () => {
     const workspace = testWorkspace({});
     await workspace.writeText("/secrets/token.txt", "outside");
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       workspaceInstance: workspace
     });
@@ -385,7 +386,7 @@ export {
   });
 
   it("returns sizes from ctx.workspace.glob, and nothing for a missing directory", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       workspaceInstance: testWorkspace({
         "notes/a.md": "abc",
@@ -418,7 +419,7 @@ export {
   });
 
   it("normalizes ctx.workspace.stat to { type, size }", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       workspaceInstance: testWorkspace({
         "README.md": "hello from workspace"
@@ -443,7 +444,7 @@ export {
 
   it("requires read-write access for ctx.workspace writes", async () => {
     const readOnlyWorkspace = testWorkspace({});
-    const readOnlyRunner = skills.runner({
+    const readOnlyRunner = createRunner({
       loader: env.LOADER,
       workspaceInstance: readOnlyWorkspace
     });
@@ -464,7 +465,7 @@ export {
     ).rejects.toThrow("Workspace write access is not available");
 
     const writeWorkspace = testWorkspace({});
-    const writeRunner = skills.runner({
+    const writeRunner = createRunner({
       loader: env.LOADER,
       workspaceInstance: writeWorkspace,
       workspace: "read-write"
@@ -489,7 +490,7 @@ export {
   });
 
   it("denies ctx.workspace access when no workspace is provided", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -510,7 +511,7 @@ export {
   });
 
   it("runs bash skill scripts with input files and explicit tools", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       tools: {
         shout: tool({
@@ -549,7 +550,7 @@ tool shout '{"text":"hello"}'`,
   });
 
   it("mounts binary resources for bash scripts as decoded bytes", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -580,7 +581,7 @@ tool shout '{"text":"hello"}'`,
   });
 
   it("returns non-zero bash exits without throwing", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -603,7 +604,7 @@ tool shout '{"text":"hello"}'`,
   });
 
   it("rejects unsafe mounted resource paths", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -626,7 +627,7 @@ tool shout '{"text":"hello"}'`,
   });
 
   it("runs python skill scripts with input and context", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -652,7 +653,7 @@ tool shout '{"text":"hello"}'`,
   });
 
   it("runs python skill files as CLI-style scripts", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -691,7 +692,7 @@ print(template.replace("{{text}}", data["text"].upper()))`,
   });
 
   it("returns output files from python CLI-style scripts", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -733,7 +734,7 @@ print("done")`
   });
 
   it("returns output files from python function-style scripts", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -764,7 +765,7 @@ print("done")`
   });
 
   it("rejects oversized python output artifacts", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -784,7 +785,7 @@ print("done")`
   });
 
   it("runs python skill scripts with explicit tools", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       tools: {
         shout: tool({
@@ -814,7 +815,7 @@ print("done")`
   });
 
   it("allows python skill scripts to call tools by dynamic name", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       tools: {
         "format-title": tool({
@@ -843,7 +844,7 @@ print("done")`
   });
 
   it("allows python scripts to read from a provided workspace by default", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       workspaceInstance: testWorkspace({
         "README.md": "hello from workspace"
@@ -867,7 +868,7 @@ print("done")`
 
   it("does not expose python workspace writes for read-only workspace access", async () => {
     const workspace = testWorkspace({});
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       workspaceInstance: workspace
     });
@@ -891,7 +892,7 @@ print("done")`
   });
 
   it("surfaces python script failures", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER
     });
 
@@ -907,7 +908,7 @@ print("done")`
   });
 
   it("times out CPU-bound python CLI scripts", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       timeout: 50
     });
@@ -924,7 +925,7 @@ print("done")`
   });
 
   it("allows bash scripts to read from a provided workspace by default", async () => {
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       workspaceInstance: testWorkspace({
         "README.md": "hello from workspace"
@@ -951,7 +952,7 @@ print("done")`
 
   it("does not expose bash workspace writes for read-only workspace access", async () => {
     const workspace = testWorkspace({});
-    const runner = skills.runner({
+    const runner = createRunner({
       loader: env.LOADER,
       workspaceInstance: workspace
     });

@@ -5,12 +5,19 @@ import { err, ok, type SkillResult } from "./result";
  * text parsing lives in `./markdown` so code that only handles parsed
  * skills does not load the YAML parser.
  *
- * Follows https://agentskills.io/specification: the required `name` and
- * `description` fields and the optional `license`, `compatibility`,
- * `metadata`, and `allowed-tools` fields are checked against the spec's
- * constraints. Other frontmatter keys are kept in {@link Skill.extraFields}
- * rather than rejected, because clients commonly add their own (for example
- * `disable-model-invocation`).
+ * The rules come from https://agentskills.io/specification. They apply in
+ * one of two modes:
+ *
+ * - `strict` (the default for direct parsing) rejects a skill that breaks
+ *   any rule. Use it to check a skill before publishing or writing it.
+ * - `lenient` (what skill sources use) follows the spec's guide for agents
+ *   that load skills: it loads a skill whose name is too long, badly
+ *   formatted, or does not match its directory, and reports each problem
+ *   as a warning. A skill with no description, no usable name, or
+ *   unreadable frontmatter is still rejected.
+ *
+ * Frontmatter keys the spec does not define are kept in
+ * {@link Skill.extraFields} in both modes.
  *
  * @module
  */
@@ -18,13 +25,14 @@ import { err, ok, type SkillResult } from "./result";
 declare const skillNameBrand: unique symbol;
 
 /**
- * A skill name that satisfies the Agent Skills spec: 1-64 lowercase
- * alphanumeric characters and hyphens, with no leading, trailing, or
- * consecutive hyphens. Construct one with {@link parseSkillName}.
+ * A skill name the parser accepted. It is always a single safe path segment
+ * (no `/`, `\`, NUL, or control characters, and not `.` or `..`), so it can
+ * name a directory, a tool enum value, and a qualified resource path. A name
+ * from {@link parseSkillName} or a strict parse also follows the spec format.
  */
 export type SkillName = string & { readonly [skillNameBrand]: true };
 
-/** Why a `SKILL.md` or skill field failed to parse. */
+/** Why a `SKILL.md` or skill field broke a rule. */
 export type SkillParseErrorCode =
   | "missing-frontmatter"
   | "invalid-yaml"
@@ -37,7 +45,10 @@ export type SkillParseErrorCode =
   | "invalid-metadata"
   | "invalid-allowed-tools";
 
-/** A `SKILL.md` that does not follow the Agent Skills spec. */
+/**
+ * A `SKILL.md` that breaks an Agent Skills rule. Returned as the error of a
+ * failed parse, or as a warning when a lenient parse loads the skill anyway.
+ */
 export class SkillParseError extends Error {
   /** Stable tag for narrowing. */
   readonly _tag = "SkillParseError" as const;
@@ -59,13 +70,13 @@ export class SkillParseError extends Error {
 
 /** A parsed Agent Skill: its frontmatter and Markdown instructions. */
 export interface Skill {
-  /** Spec-valid name; matches the skill's directory when it has one. */
+  /** The skill's name. */
   readonly name: SkillName;
-  /** What the skill does and when to use it (1-1024 characters). */
+  /** What the skill does and when to use it. */
   readonly description: string;
   /** License name or a reference to a bundled license file. */
   readonly license?: string;
-  /** Environment requirements (1-500 characters). */
+  /** Environment requirements. */
   readonly compatibility?: string;
   /** String key-value metadata. Empty when the skill declares none. */
   readonly metadata: Readonly<Record<string, string>>;
@@ -77,19 +88,38 @@ export interface Skill {
   readonly body: string;
 }
 
+/** How strictly to apply the spec. See the module documentation. */
+export type SkillParseMode = "strict" | "lenient";
+
 /** Options for {@link parseSkill}. */
 export interface ParseSkillOptions {
   /**
-   * Name of the directory that holds this `SKILL.md`. When set, the skill's
-   * `name` must equal it, as the spec requires.
+   * Name of the directory that holds this `SKILL.md`. The spec requires the
+   * skill's `name` to match it. In lenient mode a missing `name` falls back
+   * to the directory.
    */
   readonly directory?: string;
+  /** Defaults to `"strict"`. Skill sources parse in `"lenient"` mode. */
+  readonly mode?: SkillParseMode;
 }
+
+/** The outcome of parsing a skill. */
+export type SkillParseResult =
+  | {
+      readonly ok: true;
+      /** The parsed skill. */
+      readonly value: Skill;
+      /** Rules the skill broke but was loaded anyway. Empty when strict. */
+      readonly warnings: readonly SkillParseError[];
+    }
+  | { readonly ok: false; readonly error: SkillParseError };
 
 const NAME_MAX_LENGTH = 64;
 const DESCRIPTION_MAX_LENGTH = 1024;
 const COMPATIBILITY_MAX_LENGTH = 500;
 const NAME_CHARACTERS = /^[\p{L}\p{N}-]+$/u;
+// oxlint-disable-next-line no-control-regex -- Rejects control characters in names.
+const UNSAFE_NAME_CHARACTERS = /[/\\\u0000-\u001f\u007f]/;
 const SPEC_FIELDS = new Set([
   "name",
   "description",
@@ -113,31 +143,24 @@ export function parseSkillName(
   input: string
 ): SkillResult<SkillName, SkillParseError> {
   const name = input.normalize("NFKC");
-  const invalid = (reason: string) =>
-    err(
+  const problem = specNameProblem(name);
+  if (problem !== null) {
+    return err(
       new SkillParseError(
         "invalid-name",
-        `Invalid skill name "${input}": ${reason}.`
+        `Invalid skill name "${input}": ${problem}.`
       )
     );
-
-  if (name.length === 0) return invalid("it must not be empty");
-  if ([...name].length > NAME_MAX_LENGTH) {
-    return invalid(`it must be at most ${NAME_MAX_LENGTH} characters`);
   }
-  if (name !== name.toLowerCase()) return invalid("it must be lowercase");
-  if (!NAME_CHARACTERS.test(name)) {
-    return invalid("it may only contain letters, digits, and hyphens");
-  }
-  if (name.startsWith("-") || name.endsWith("-")) {
-    return invalid("it must not start or end with a hyphen");
-  }
-  if (name.includes("--")) {
-    return invalid("it must not contain consecutive hyphens");
-  }
-  // SAFETY: every rule the SkillName brand promises was checked above.
+  // SAFETY: specNameProblem checked every rule the spec format requires,
+  // and the spec format is a subset of the safe-segment rule.
   return ok(name as SkillName);
 }
+
+/** A field value, plus the rule it broke when a lenient parse kept it. */
+type Field<T> =
+  | { readonly value: T; readonly problem?: SkillParseError }
+  | { readonly fatal: SkillParseError };
 
 /**
  * @internal Build a skill from already-decoded frontmatter. Sources that do
@@ -148,7 +171,7 @@ export function parseSkillFrontmatter(
   data: unknown,
   body: string,
   options: ParseSkillOptions = {}
-): SkillResult<Skill, SkillParseError> {
+): SkillParseResult {
   if (!isRecord(data)) {
     return err(
       new SkillParseError(
@@ -158,56 +181,59 @@ export function parseSkillFrontmatter(
     );
   }
 
-  if (typeof data.name !== "string") {
-    return err(
-      new SkillParseError(
-        "invalid-name",
-        "SKILL.md frontmatter must set `name` to a string."
-      )
-    );
-  }
-  const name = parseSkillName(data.name);
-  if (!name.ok) return name;
-  if (
-    options.directory !== undefined &&
-    options.directory.normalize("NFKC") !== name.value
-  ) {
-    return err(
-      new SkillParseError(
-        "name-mismatch",
-        `Skill name "${name.value}" must match its directory "${options.directory}".`
-      )
-    );
+  const lenient = options.mode === "lenient";
+  const warnings: SkillParseError[] = [];
+  let failure: SkillParseError | undefined;
+  function take<T>(field: Field<T>): T | undefined {
+    if ("fatal" in field) {
+      failure ??= field.fatal;
+      return undefined;
+    }
+    if (field.problem) {
+      if (lenient) warnings.push(field.problem);
+      else failure ??= field.problem;
+    }
+    return field.value;
   }
 
-  const description = parseDescription(data.description);
-  if (!description.ok) return description;
-  const license = parseLicense(data.license);
-  if (!license.ok) return license;
-  const compatibility = parseCompatibility(data.compatibility);
-  if (!compatibility.ok) return compatibility;
-  const metadata = parseMetadata(data.metadata);
-  if (!metadata.ok) return metadata;
-  const allowedTools = parseAllowedTools(data["allowed-tools"]);
-  if (!allowedTools.ok) return allowedTools;
+  const name = take(parseName(data.name, options.directory, lenient));
+  const description = take(parseDescription(data.description));
+  const license = take(parseLicense(data.license));
+  const compatibility = take(parseCompatibility(data.compatibility));
+  const metadata = take(parseMetadata(data.metadata));
+  const allowedTools = take(parseAllowedTools(data["allowed-tools"]));
+  if (
+    failure ||
+    name === undefined ||
+    description === undefined ||
+    metadata === undefined ||
+    allowedTools === undefined
+  ) {
+    return err(
+      failure ??
+        new SkillParseError("invalid-frontmatter", "Invalid frontmatter.")
+    );
+  }
 
   const extraFields: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
     if (!SPEC_FIELDS.has(key)) extraFields[key] = value;
   }
 
-  return ok({
-    name: name.value,
-    description: description.value,
-    ...(license.value === undefined ? {} : { license: license.value }),
-    ...(compatibility.value === undefined
-      ? {}
-      : { compatibility: compatibility.value }),
-    metadata: metadata.value,
-    allowedTools: allowedTools.value,
-    extraFields,
-    body
-  });
+  return {
+    ok: true,
+    value: {
+      name,
+      description,
+      ...(license === undefined ? {} : { license }),
+      ...(compatibility === undefined ? {} : { compatibility }),
+      metadata,
+      allowedTools,
+      extraFields,
+      body
+    },
+    warnings
+  };
 }
 
 /**
@@ -224,122 +250,204 @@ export function isModelInvocable(skill: Skill): boolean {
   );
 }
 
-function parseDescription(
-  value: unknown
-): SkillResult<string, SkillParseError> {
+/** Why a name breaks the spec format, or `null` when it follows it. */
+function specNameProblem(name: string): string | null {
+  if (name.length === 0) return "it must not be empty";
+  if ([...name].length > NAME_MAX_LENGTH) {
+    return `it must be at most ${NAME_MAX_LENGTH} characters`;
+  }
+  if (name !== name.toLowerCase()) return "it must be lowercase";
+  if (!NAME_CHARACTERS.test(name)) {
+    return "it may only contain letters, digits, and hyphens";
+  }
+  if (name.startsWith("-") || name.endsWith("-")) {
+    return "it must not start or end with a hyphen";
+  }
+  if (name.includes("--")) return "it must not contain consecutive hyphens";
+  return null;
+}
+
+/** Whether a name is usable as a directory, enum value, and path segment. */
+function isSafeName(name: string): boolean {
+  return (
+    name.length > 0 &&
+    name === name.trim() &&
+    name !== "." &&
+    name !== ".." &&
+    !UNSAFE_NAME_CHARACTERS.test(name)
+  );
+}
+
+function parseName(
+  value: unknown,
+  directory: string | undefined,
+  lenient: boolean
+): Field<SkillName> {
+  const fallback =
+    lenient && (value === undefined || value === null) && directory
+      ? directory
+      : undefined;
+  const raw = typeof value === "string" ? value.trim() : fallback;
+  if (raw === undefined) {
+    return {
+      fatal: new SkillParseError(
+        "invalid-name",
+        "SKILL.md frontmatter must set `name` to a string."
+      )
+    };
+  }
+  const name = raw.normalize("NFKC");
+  if (!isSafeName(name)) {
+    return {
+      fatal: new SkillParseError(
+        "invalid-name",
+        `Invalid skill name "${raw}": it must be a single path segment without slashes or control characters.`
+      )
+    };
+  }
+  // SAFETY: isSafeName checked the guarantees every SkillName carries. The
+  // spec format is reported below as a problem, which a strict parse turns
+  // into a failure.
+  const accepted = name as SkillName;
+
+  const problem = fallback
+    ? `SKILL.md frontmatter has no \`name\`; using its directory "${fallback}".`
+    : specNameProblem(name);
+  if (problem !== null) {
+    return {
+      value: accepted,
+      problem: new SkillParseError(
+        "invalid-name",
+        fallback ? problem : `Invalid skill name "${raw}": ${problem}.`
+      )
+    };
+  }
+  if (directory !== undefined && directory.normalize("NFKC") !== name) {
+    return {
+      value: accepted,
+      problem: new SkillParseError(
+        "name-mismatch",
+        `Skill name "${name}" must match its directory "${directory}".`
+      )
+    };
+  }
+  return { value: accepted };
+}
+
+function parseDescription(value: unknown): Field<string> {
   const description = typeof value === "string" ? value.trim() : "";
   if (description.length === 0) {
-    return err(
-      new SkillParseError(
+    return {
+      fatal: new SkillParseError(
         "invalid-description",
         "SKILL.md frontmatter must set `description` to a non-empty string."
       )
-    );
+    };
   }
   if ([...description].length > DESCRIPTION_MAX_LENGTH) {
-    return err(
-      new SkillParseError(
+    return {
+      value: description,
+      problem: new SkillParseError(
         "invalid-description",
         `Skill description must be at most ${DESCRIPTION_MAX_LENGTH} characters.`
       )
-    );
+    };
   }
-  return ok(description);
+  return { value: description };
 }
 
-function parseLicense(
-  value: unknown
-): SkillResult<string | undefined, SkillParseError> {
-  if (value === undefined || value === null) return ok(undefined);
+function parseLicense(value: unknown): Field<string | undefined> {
+  if (value === undefined || value === null) return { value: undefined };
   if (typeof value !== "string" || value.trim().length === 0) {
-    return err(
-      new SkillParseError(
+    return {
+      value: undefined,
+      problem: new SkillParseError(
         "invalid-license",
         "Skill `license` must be a non-empty string."
       )
-    );
+    };
   }
-  return ok(value.trim());
+  return { value: value.trim() };
 }
 
-function parseCompatibility(
-  value: unknown
-): SkillResult<string | undefined, SkillParseError> {
-  if (value === undefined || value === null) return ok(undefined);
+function parseCompatibility(value: unknown): Field<string | undefined> {
+  if (value === undefined || value === null) return { value: undefined };
   const compatibility = typeof value === "string" ? value.trim() : "";
   if (
     compatibility.length === 0 ||
     [...compatibility].length > COMPATIBILITY_MAX_LENGTH
   ) {
-    return err(
-      new SkillParseError(
+    return {
+      value: compatibility.length === 0 ? undefined : compatibility,
+      problem: new SkillParseError(
         "invalid-compatibility",
         `Skill \`compatibility\` must be 1-${COMPATIBILITY_MAX_LENGTH} characters.`
       )
-    );
+    };
   }
-  return ok(compatibility);
+  return { value: compatibility };
 }
 
 /**
  * The spec defines `metadata` as a string-to-string map. YAML turns
  * unquoted values such as `version: 1.0` into numbers, so scalar values are
- * converted to strings rather than rejected; nested values are an error.
+ * converted to strings rather than rejected. Nested values break the rule;
+ * a lenient parse drops them.
  */
 function parseMetadata(
   value: unknown
-): SkillResult<Readonly<Record<string, string>>, SkillParseError> {
-  if (value === undefined || value === null) return ok({});
+): Field<Readonly<Record<string, string>>> {
+  if (value === undefined || value === null) return { value: {} };
   if (!isRecord(value)) {
-    return err(
-      new SkillParseError(
+    return {
+      value: {},
+      problem: new SkillParseError(
         "invalid-metadata",
         "Skill `metadata` must be a mapping of string keys to string values."
       )
-    );
+    };
   }
   const metadata: Record<string, string> = {};
+  let problem: SkillParseError | undefined;
   for (const [key, entry] of Object.entries(value)) {
     if (
       typeof entry !== "string" &&
       typeof entry !== "number" &&
       typeof entry !== "boolean"
     ) {
-      return err(
-        new SkillParseError(
-          "invalid-metadata",
-          `Skill \`metadata.${key}\` must be a string.`
-        )
+      problem ??= new SkillParseError(
+        "invalid-metadata",
+        `Skill \`metadata.${key}\` must be a string.`
       );
+      continue;
     }
     metadata[key] = String(entry);
   }
-  return ok(metadata);
+  return problem ? { value: metadata, problem } : { value: metadata };
 }
 
 /**
  * The spec defines `allowed-tools` as a space-separated string. A YAML list
  * of strings is also accepted, since some clients write it that way.
  */
-function parseAllowedTools(
-  value: unknown
-): SkillResult<readonly string[], SkillParseError> {
-  if (value === undefined || value === null) return ok([]);
+function parseAllowedTools(value: unknown): Field<readonly string[]> {
+  if (value === undefined || value === null) return { value: [] };
   if (typeof value === "string") {
-    return ok(value.split(/\s+/).filter((tool) => tool.length > 0));
+    return { value: value.split(/\s+/).filter((tool) => tool.length > 0) };
   }
   if (
     Array.isArray(value) &&
     value.every((tool): tool is string => typeof tool === "string")
   ) {
-    return ok(value.map((tool) => tool.trim()).filter(Boolean));
+    return { value: value.map((tool) => tool.trim()).filter(Boolean) };
   }
-  return err(
-    new SkillParseError(
+  return {
+    value: [],
+    problem: new SkillParseError(
       "invalid-allowed-tools",
       "Skill `allowed-tools` must be a space-separated string."
     )
-  );
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

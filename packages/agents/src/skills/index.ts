@@ -7,7 +7,9 @@ export type {
   ParseSkillOptions,
   Skill,
   SkillName,
-  SkillParseErrorCode
+  SkillParseErrorCode,
+  SkillParseMode,
+  SkillParseResult
 } from "./skill";
 export {
   InvalidSkillResourcePathError,
@@ -51,8 +53,6 @@ export type {
   SkillDiagnostic,
   SkillResourceError
 } from "./catalog";
-export { runner } from "./runner";
-export type { WorkerSkillScriptRunnerOptions } from "./runner";
 export type {
   SkillRunContext,
   SkillScriptContext,

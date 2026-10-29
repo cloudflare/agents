@@ -126,7 +126,7 @@ import { wrapAISDK } from "agents/observability/ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
-import * as skills from "agents/skills";
+import * as skills from "./skills";
 import { formatSkillDiagnostic, loadSkillCatalog } from "agents/skills";
 import { createSkillTools } from "agents/skills/tools/ai-sdk";
 import type {

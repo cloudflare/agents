@@ -56,6 +56,12 @@ export interface ListedSkill {
    * source stores skills there. Agents with a shell can run scripts from it.
    */
   readonly location?: string;
+  /**
+   * Spec rules the skill breaks but was loaded anyway, for example a name
+   * that does not match its directory. Sources parse leniently, as the
+   * spec's guide for agents recommends.
+   */
+  readonly warnings?: readonly SkillParseError[];
 }
 
 /** A skill that failed to parse. */

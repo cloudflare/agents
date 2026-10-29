@@ -25,22 +25,43 @@ copy to keep in sync. Other stores (R2, code) follow the same layout.
 
 ## Parsing
 
-`parseSkill(markdown, { directory })` in `agents/skills/skill.ts` is the one
-parser. It returns `SkillResult<Skill, SkillParseError>`; it never throws and
-never returns `null`.
+`parseSkill(markdown, { directory, mode })` in `agents/skills/markdown.ts`
+is the one parser (frontmatter rules live in `skill.ts`, which does not load
+`yaml`). It returns `{ ok: true, value, warnings }` or `{ ok: false, error }`;
+it never throws and never returns `null`.
 
-Spec rules it enforces:
+Spec rules:
 
 - `name`: 1-64 characters after NFKC normalization, lowercase letters, digits,
   and hyphens; no leading, trailing, or consecutive hyphens; must equal the
-  directory name. Parsed names are branded `SkillName`.
+  directory name.
 - `description`: required, 1-1024 characters.
 - `compatibility`: 1-500 characters when present.
 - `license`: non-empty string when present.
 - `metadata`: a string-to-string map. Scalar values (`version: 1.0`) become
-  strings; nested values are an error.
+  strings; nested values break the rule.
 - `allowed-tools`: a space-separated string (a YAML list is also accepted),
   parsed into `allowedTools: string[]`.
+
+Two modes:
+
+- `strict` (default for direct calls) fails on any broken rule. It is the
+  validator: authoring tools and the examples' "add skill" use it.
+- `lenient` (every source) follows the spec's
+  [guide for agents](https://agentskills.io/client-implementation/adding-skills-support):
+  a skill that breaks a rule still loads, and each broken rule is returned as
+  a warning (catalog diagnostic `SkillWarning`). Invalid optional fields are
+  dropped. A missing `name` falls back to the directory. Frontmatter that
+  fails only because of unquoted `: ` in a value is re-read with those values
+  quoted.
+
+Both modes reject a skill with no `description`, frontmatter that is not a
+YAML mapping, or a `name` that is not a safe single path segment (no `/`,
+`\`, NUL, control characters, `.`, or `..`). Every `SkillName` is safe to use
+as a directory, an enum value, and the first segment of a qualified resource
+path. Because a lenient name can differ from its directory, the Workspace and
+R2 sources remember which directory each name came from and read resources
+from there.
 
 Frontmatter keys the spec does not define are kept in `extraFields` rather
 than rejected. Clients add their own (`disable-model-invocation`,
@@ -135,8 +156,11 @@ With a Workspace, scripts are files and the model runs them with the
 Workspace's `exec` tool from the skill's `location`. That is the preferred
 path.
 
-For skills that live elsewhere (R2, a manifest), `skills.runner()` enables
-`run_skill_script`. It is experimental and carries a TODO to move to
+For skills that live elsewhere (R2, a manifest), `runner()` from
+`agents/skills/runner` (re-exported by Think as `skills.runner`) enables
+`run_skill_script`. It is its own entry point because `just-bash` and
+`@cloudflare/codemode` do not tree-shake: kept in `agents/skills`, every
+import of the parser paid about 300 KiB gzipped. It is experimental and carries a TODO to move to
 Computer. Options are the permission boundary: no network and no tools by
 default, read-only workspace access when `workspaceInstance` is given, and a
 30 second timeout. One host bridge (`SkillScriptHostBridge`), built fresh per
@@ -167,9 +191,10 @@ tracked a projection fingerprint. The sources stayed authoritative, so a skill
 written only in the Workspace was never discovered. Reading the Workspace
 directly removes the two-copy problem.
 
-### Lenient parsing
+### Strict parsing everywhere
 
-The previous parser accepted any `name` and `description` and dropped the
-rest silently. Strict parsing with diagnostics keeps skills portable across
-clients and makes mistakes visible, while `extraFields` keeps client-specific
-keys working.
+Rejecting every skill that breaks a rule makes mistakes loud, but skills
+written for other agents often have names that do not match their folder or
+are not lowercase. The spec's own guide for agents recommends warning and
+loading those. Sources parse leniently with diagnostics; `parseSkill()`
+defaults to strict for validation.

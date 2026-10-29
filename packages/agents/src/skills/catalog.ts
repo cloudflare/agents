@@ -106,6 +106,13 @@ export type SkillDiagnostic =
       readonly keptPrevious: boolean;
     }
   | {
+      /** A skill breaks a spec rule but was loaded anyway. */
+      readonly _tag: "SkillWarning";
+      readonly sourceId: string;
+      readonly name: string;
+      readonly error: SkillParseError;
+    }
+  | {
       /** A later source listed a name an earlier source already provided. */
       readonly _tag: "DuplicateSkill";
       readonly name: string;
@@ -208,7 +215,15 @@ export async function loadSkillCatalog(
         error: invalid.error
       });
     }
-    for (const { skill, resources, location } of listing.skills) {
+    for (const { skill, resources, location, warnings } of listing.skills) {
+      for (const warning of warnings ?? []) {
+        diagnostics.push({
+          _tag: "SkillWarning",
+          sourceId: source.id,
+          name: skill.name,
+          error: warning
+        });
+      }
       const existing = entries.get(skill.name);
       if (existing) {
         diagnostics.push({
@@ -277,6 +292,8 @@ export function formatSkillDiagnostic(diagnostic: SkillDiagnostic): string {
   switch (diagnostic._tag) {
     case "InvalidSkill":
       return `Skipped invalid skill ${diagnostic.location} from source "${diagnostic.sourceId}": ${diagnostic.error.message}`;
+    case "SkillWarning":
+      return `Skill "${diagnostic.name}" from source "${diagnostic.sourceId}" breaks the Agent Skills spec but was loaded: ${diagnostic.error.message}`;
     case "SourceFailed":
       return `${diagnostic.error.message}. ${diagnostic.keptPrevious ? "Its last listed skills were kept." : "Its skills were skipped."}`;
     case "DuplicateSkill":

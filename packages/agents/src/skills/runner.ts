@@ -16,6 +16,9 @@ import {
 } from "./script-workspace";
 import { formatSkill } from "./markdown";
 
+// Exported as `agents/skills/runner`, apart from `agents/skills`, because
+// it loads `just-bash` and `@cloudflare/codemode`, which do not tree-shake.
+//
 // TODO: Prefer storing skills in a `@cloudflare/computer` Workspace and
 // running their scripts through the Workspace runtime (the agent's shell).
 // This runner stays for skills served from R2 or a manifest until Computer

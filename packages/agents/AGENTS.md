@@ -38,6 +38,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/vite`                             | `src/vite.ts`                                 | Vite plugin — TC39 decorator transforms and the `turndown` stub                                                                               |
 | `agents/skills`                           | `src/skills/index.ts`                         | Agent Skills — `SKILL.md` parser, Workspace/R2/manifest sources, catalog, runner                                                              |
 | `agents/skills/tools/ai-sdk`              | `src/skills/tools/ai-sdk.ts`                  | AI SDK tools for a skill catalog — `createSkillTools`                                                                                         |
+| `agents/skills/runner`                    | `src/skills/runner.ts`                        | Experimental skill script runner (`runner`); loads `just-bash` and codemode                                                                   |
 | `agents/experimental/webmcp`              | `src/experimental/webmcp.ts`                  | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`                                                                       |
 | `agents/browser`                          | `src/browser/index.ts`                        | `Browser`, `browserRun()`, `BrowserSession`, CDP helpers, Quick Action primitives, deprecated `BrowserConnector` (needs codemode)             |
 | `agents/browser/ai`                       | `src/browser/ai.ts`                           | Deprecated AI SDK tools — `createBrowserTools` (codemode) + `createQuickActionTools`                                                          |
@@ -187,7 +188,7 @@ src/
     tools/ai-sdk.ts     # createSkillTools — AI SDK tools (agents/skills/tools/ai-sdk)
     script.ts           # Script runner types
     script-workspace.ts # Workspace access for running scripts
-    runner.ts           # Experimental script runner + single capability bridge
+    runner.ts           # Experimental script runner (agents/skills/runner) + capability bridge
 
   experimental/         # Experimental features (published but unstable)
     webmcp.ts           # WebMCP adapter (browser-side, uses MCP SDK client)

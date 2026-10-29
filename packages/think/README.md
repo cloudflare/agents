@@ -268,10 +268,12 @@ code. Sources are applied in order: the first to provide a skill name wins, and
 duplicate or failing sources are skipped with a logged warning.
 
 Each `SKILL.md` is checked against the
-[spec](https://agentskills.io/specification): `name` must be lowercase letters,
-digits, and hyphens and match its directory, and `description` is required.
-Skills that break a rule are skipped and logged. Unknown frontmatter keys are
-kept in `skill.extraFields`.
+[spec](https://agentskills.io/specification). As the spec's guide for agents
+recommends, sources load a skill whose `name` breaks the format or does not
+match its directory, and log a warning. Skills with no `description` or
+unreadable frontmatter are skipped and logged. `skills.parseSkill()` is strict
+by default, for checking a skill before publishing it. Unknown frontmatter
+keys are kept in `skill.extraFields`.
 
 Text resources are returned directly; binary assets are returned as base64.
 `read_skill_resource` accepts `{ name, path }` or a qualified path such as

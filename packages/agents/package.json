@@ -541,6 +541,11 @@
       "types": "./dist/skills/tools/ai-sdk.d.ts",
       "import": "./dist/skills/tools/ai-sdk.js",
       "require": "./dist/skills/tools/ai-sdk.js"
+    },
+    "./skills/runner": {
+      "types": "./dist/skills/runner.d.ts",
+      "import": "./dist/skills/runner.js",
+      "require": "./dist/skills/runner.js"
     }
   },
   "publishConfig": {
