@@ -185,6 +185,7 @@ Review carefully.`);
     expect(parsed.value.name).toBe("Code_Review");
     expect(parsed.warnings.map((warning) => warning.code)).toEqual([
       "invalid-name",
+      "name-mismatch",
       "invalid-description"
     ]);
 
@@ -192,6 +193,29 @@ Review carefully.`);
       skillFile({ name: "Code_Review", description: "A skill." })
     );
     expect(strict.ok).toBe(false);
+  });
+
+  it("reports padded names: strict fails, lenient trims and warns", () => {
+    const markdown = '---\nname: " foo "\ndescription: Example\n---\n';
+    expect(parseError(markdown)).toBe("invalid-name");
+    const parsed = skills.parseSkill(markdown, { mode: "lenient" });
+    if (!parsed.ok) throw parsed.error;
+    expect(parsed.value.name).toBe("foo");
+    expect(parsed.warnings.map((warning) => warning.message)).toEqual([
+      'Invalid skill name " foo ": it must not start or end with whitespace.'
+    ]);
+  });
+
+  it("reports both a bad name format and a directory mismatch", () => {
+    const parsed = skills.parseSkill(
+      skillFile({ name: "Code_Review", description: "A skill." }),
+      { directory: "review", mode: "lenient" }
+    );
+    if (!parsed.ok) throw parsed.error;
+    expect(parsed.warnings.map((warning) => warning.code)).toEqual([
+      "invalid-name",
+      "name-mismatch"
+    ]);
   });
 
   it("uses the directory when a lenient skill has no name", () => {
@@ -376,6 +400,25 @@ describe("skill catalog", () => {
     expect(unlisted.ok || unlisted.error._tag).toBe(
       "SkillResourceNotFoundError"
     );
+  });
+
+  it("only warns about the copy of a duplicate that the catalog keeps", async () => {
+    const catalog = await skills.loadSkillCatalog([
+      skills.manifest(testManifest),
+      skills.manifest({
+        id: "malformed",
+        skills: [
+          {
+            name: "code-review",
+            description: "x".repeat(1100),
+            body: "Duplicate."
+          }
+        ]
+      })
+    ]);
+    expect(catalog.diagnostics.map((diagnostic) => diagnostic._tag)).toEqual([
+      "DuplicateSkill"
+    ]);
   });
 
   it("keeps the first source on duplicate names", async () => {

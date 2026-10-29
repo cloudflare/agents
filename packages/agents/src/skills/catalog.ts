@@ -216,14 +216,6 @@ export async function loadSkillCatalog(
       });
     }
     for (const { skill, resources, location, warnings } of listing.skills) {
-      for (const warning of warnings ?? []) {
-        diagnostics.push({
-          _tag: "SkillWarning",
-          sourceId: source.id,
-          name: skill.name,
-          error: warning
-        });
-      }
       const existing = entries.get(skill.name);
       if (existing) {
         diagnostics.push({
@@ -241,6 +233,16 @@ export async function loadSkillCatalog(
         ...(location === undefined ? {} : { location })
       });
       sourceBySkill.set(skill.name, source);
+      // Only for the copy the catalog keeps: a skipped duplicate already has
+      // its own diagnostic, and "was loaded" would be false for it.
+      for (const warning of warnings ?? []) {
+        diagnostics.push({
+          _tag: "SkillWarning",
+          sourceId: source.id,
+          name: skill.name,
+          error: warning
+        });
+      }
     }
   }
 

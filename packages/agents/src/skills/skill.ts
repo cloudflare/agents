@@ -157,9 +157,9 @@ export function parseSkillName(
   return ok(name as SkillName);
 }
 
-/** A field value, plus the rule it broke when a lenient parse kept it. */
+/** A field value, plus the rules it broke when a lenient parse kept it. */
 type Field<T> =
-  | { readonly value: T; readonly problem?: SkillParseError }
+  | { readonly value: T; readonly problems?: readonly SkillParseError[] }
   | { readonly fatal: SkillParseError };
 
 /**
@@ -189,9 +189,9 @@ export function parseSkillFrontmatter(
       failure ??= field.fatal;
       return undefined;
     }
-    if (field.problem) {
-      if (lenient) warnings.push(field.problem);
-      else failure ??= field.problem;
+    for (const problem of field.problems ?? []) {
+      if (lenient) warnings.push(problem);
+      else failure ??= problem;
     }
     return field.value;
   }
@@ -287,8 +287,8 @@ function parseName(
     lenient && (value === undefined || value === null) && directory
       ? directory
       : undefined;
-  const raw = typeof value === "string" ? value.trim() : fallback;
-  if (raw === undefined) {
+  const declared = typeof value === "string" ? value : fallback;
+  if (declared === undefined) {
     return {
       fatal: new SkillParseError(
         "invalid-name",
@@ -296,42 +296,56 @@ function parseName(
       )
     };
   }
-  const name = raw.normalize("NFKC");
+  // Padding is a format problem, not something to fix silently: strict
+  // fails on it, lenient trims it and warns.
+  const name = declared.trim().normalize("NFKC");
   if (!isSafeName(name)) {
     return {
       fatal: new SkillParseError(
         "invalid-name",
-        `Invalid skill name "${raw}": it must be a single path segment without slashes or control characters.`
+        `Invalid skill name "${declared}": it must be a single path segment without slashes or control characters.`
       )
     };
   }
-  // SAFETY: isSafeName checked the guarantees every SkillName carries. The
-  // spec format is reported below as a problem, which a strict parse turns
-  // into a failure.
+  // SAFETY: isSafeName checked the guarantees every SkillName carries. Spec
+  // format problems are reported below, and a strict parse fails on them.
   const accepted = name as SkillName;
 
-  const problem = fallback
-    ? `SKILL.md frontmatter has no \`name\`; using its directory "${fallback}".`
-    : specNameProblem(name);
-  if (problem !== null) {
-    return {
-      value: accepted,
-      problem: new SkillParseError(
+  const problems: SkillParseError[] = [];
+  if (fallback) {
+    problems.push(
+      new SkillParseError(
         "invalid-name",
-        fallback ? problem : `Invalid skill name "${raw}": ${problem}.`
+        `SKILL.md frontmatter has no \`name\`; using its directory "${fallback}".`
       )
-    };
+    );
+  } else {
+    const formatProblem =
+      declared !== declared.trim()
+        ? "it must not start or end with whitespace"
+        : specNameProblem(name);
+    if (formatProblem !== null) {
+      problems.push(
+        new SkillParseError(
+          "invalid-name",
+          `Invalid skill name "${declared}": ${formatProblem}.`
+        )
+      );
+    }
+    // Checked independently of the format, so a source reports every rule
+    // a name breaks.
+    if (directory !== undefined && directory.normalize("NFKC") !== name) {
+      problems.push(
+        new SkillParseError(
+          "name-mismatch",
+          `Skill name "${name}" must match its directory "${directory}".`
+        )
+      );
+    }
   }
-  if (directory !== undefined && directory.normalize("NFKC") !== name) {
-    return {
-      value: accepted,
-      problem: new SkillParseError(
-        "name-mismatch",
-        `Skill name "${name}" must match its directory "${directory}".`
-      )
-    };
-  }
-  return { value: accepted };
+  return problems.length === 0
+    ? { value: accepted }
+    : { value: accepted, problems };
 }
 
 function parseDescription(value: unknown): Field<string> {
@@ -347,10 +361,12 @@ function parseDescription(value: unknown): Field<string> {
   if ([...description].length > DESCRIPTION_MAX_LENGTH) {
     return {
       value: description,
-      problem: new SkillParseError(
-        "invalid-description",
-        `Skill description must be at most ${DESCRIPTION_MAX_LENGTH} characters.`
-      )
+      problems: [
+        new SkillParseError(
+          "invalid-description",
+          `Skill description must be at most ${DESCRIPTION_MAX_LENGTH} characters.`
+        )
+      ]
     };
   }
   return { value: description };
@@ -361,10 +377,12 @@ function parseLicense(value: unknown): Field<string | undefined> {
   if (typeof value !== "string" || value.trim().length === 0) {
     return {
       value: undefined,
-      problem: new SkillParseError(
-        "invalid-license",
-        "Skill `license` must be a non-empty string."
-      )
+      problems: [
+        new SkillParseError(
+          "invalid-license",
+          "Skill `license` must be a non-empty string."
+        )
+      ]
     };
   }
   return { value: value.trim() };
@@ -379,10 +397,12 @@ function parseCompatibility(value: unknown): Field<string | undefined> {
   ) {
     return {
       value: compatibility.length === 0 ? undefined : compatibility,
-      problem: new SkillParseError(
-        "invalid-compatibility",
-        `Skill \`compatibility\` must be 1-${COMPATIBILITY_MAX_LENGTH} characters.`
-      )
+      problems: [
+        new SkillParseError(
+          "invalid-compatibility",
+          `Skill \`compatibility\` must be 1-${COMPATIBILITY_MAX_LENGTH} characters.`
+        )
+      ]
     };
   }
   return { value: compatibility };
@@ -401,10 +421,12 @@ function parseMetadata(
   if (!isRecord(value)) {
     return {
       value: {},
-      problem: new SkillParseError(
-        "invalid-metadata",
-        "Skill `metadata` must be a mapping of string keys to string values."
-      )
+      problems: [
+        new SkillParseError(
+          "invalid-metadata",
+          "Skill `metadata` must be a mapping of string keys to string values."
+        )
+      ]
     };
   }
   const metadata: Record<string, string> = {};
@@ -423,7 +445,9 @@ function parseMetadata(
     }
     metadata[key] = String(entry);
   }
-  return problem ? { value: metadata, problem } : { value: metadata };
+  return problem
+    ? { value: metadata, problems: [problem] }
+    : { value: metadata };
 }
 
 /**
@@ -443,10 +467,12 @@ function parseAllowedTools(value: unknown): Field<readonly string[]> {
   }
   return {
     value: [],
-    problem: new SkillParseError(
-      "invalid-allowed-tools",
-      "Skill `allowed-tools` must be a space-separated string."
-    )
+    problems: [
+      new SkillParseError(
+        "invalid-allowed-tools",
+        "Skill `allowed-tools` must be a space-separated string."
+      )
+    ]
   };
 }
 
