@@ -13,24 +13,8 @@ export default defineConfig({
       name: "empty-httpapi-scalar",
       enforce: "pre",
       load: (id) =>
-        id.includes("/effect/dist/http-api/internal/httpApiScalar.js")
+        id.includes("/effect/dist/unstable/httpapi/internal/httpApiScalar.js")
           ? 'export const javascript = "";'
-          : null
-    },
-    {
-      // OpenCode inlines models.dev's catalog as one 8 MB string, too large
-      // for the message that carries a module into the test runtime. These
-      // tests turn catalog fetches off and use only the Cloudflare provider,
-      // so an empty catalog stands in.
-      name: "empty-models-dev-snapshot",
-      enforce: "pre",
-      transform: (code, id) =>
-        id.includes("/@opencode/core/dist/") &&
-        code.includes("// src/models-dev/snapshot.txt")
-          ? code.replace(
-              /(\/\/ src\/models-dev\/snapshot\.txt\nvar snapshot_default = )'.*';/,
-              "$1'{}';"
-            )
           : null
     },
     stripNodeModulesSourceMapReferences(),

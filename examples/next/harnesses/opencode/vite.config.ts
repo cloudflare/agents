@@ -13,7 +13,7 @@ export default defineConfig({
       name: "empty-httpapi-scalar",
       enforce: "pre",
       load: (id) =>
-        id.includes("/effect/dist/http-api/internal/httpApiScalar.js")
+        id.includes("/effect/dist/unstable/httpapi/internal/httpApiScalar.js")
           ? 'export const javascript = "";'
           : null
     },
