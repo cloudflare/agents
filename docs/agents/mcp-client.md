@@ -197,7 +197,7 @@ After 24 hours without a successful connection, the manager stops and records th
 
 #### Reconnecting on request
 
-Calling `addMcpServer()` for a server that is already registered reconnects it if it isn't connected, so calling it from `onStart`, `onConnect` or `onRequest` brings a server back once it can be reached:
+Calling `addMcpServer()` for a server that is already registered reconnects it if it is not connected, so calling it from `onStart`, `onConnect` or `onRequest` brings a server back once it can be reached:
 
 - `ready`, or a link still waiting for the user: returned as is.
 - `failed` from something that can pass (network, `5xx`, timeout) or a link that expired unused: connects now and returns the result, including a fresh `authUrl`. It tries at most once per first backoff step (30 seconds by default); a call sooner than that throws the current error.
@@ -297,7 +297,7 @@ type AddMcpServerResult =
 - **`ready`** - Server connected and tools discovered
 - **`authenticating`** - Server requires OAuth; redirect user to `authUrl`. This includes servers that accept the MCP handshake without a token but require one to list tools, prompts or resources.
 
-Calling `addMcpServer()` again for a server that is already registered returns its current state, and reconnects it when it isn't connected (see [Reconnecting on request](#reconnecting-on-request)). If the server is still connecting (for example while it is restored after the agent wakes), the call waits for that attempt and returns its result. Pass a stable `id` so the server keeps the same id everywhere.
+Calling `addMcpServer()` again for a server that is already registered returns its current state, and reconnects it when it is not connected (see [Reconnecting on request](#reconnecting-on-request)). If the server is still connecting (for example while it is restored after the agent wakes), the call waits for that attempt and returns its result. Pass a stable `id` so the server keeps the same id everywhere.
 
 ### Best practices
 
