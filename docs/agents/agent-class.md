@@ -288,8 +288,9 @@ Schedules are stored as jobs in the `cf_agents_jobs` SQL table, the Lifecycle-ow
 class MyAgent extends Agent {
   @callable()
   async addServer(url: string) {
-    // Calling this again for the same server reports its state; it never
-    // reconnects a failed server. Use reconnectMcpServer(id) for that.
+    // Calling this again for the same server reconnects it if it isn't
+    // connected. A server stopped for a reason only a person can fix
+    // (authorization refused, for example) needs reconnectMcpServer(id).
     return this.addMcpServer("GitHub", url, { id: "github" });
   }
 }

@@ -99,10 +99,10 @@ export class MyAgent extends Agent {
   }
 
   /**
-   * Add a server. Safe to call again for the same server: it reports the
-   * server's current state and never reconnects or replaces its link.
-   * The browser sees the state, the authorization link and any error
-   * through the `cf_agent_mcp_servers` broadcast.
+   * Add a server. Calling it again for the same server returns its state,
+   * or reconnects it if it isn't connected. The browser sees the state, the
+   * authorization link and any error through the `cf_agent_mcp_servers`
+   * broadcast.
    */
   @callable()
   async addServer(name: string, url: string) {
