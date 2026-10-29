@@ -25,6 +25,7 @@
 import { toolDefinition, convertSchemaToJsonSchema } from "@tanstack/ai";
 import type {
   Tool as TanStackTool,
+  SchemaInput,
   ServerTool,
   JSONSchema as TanStackJSONSchema
 } from "@tanstack/ai";
@@ -229,7 +230,9 @@ export function tanstackTools(
  * });
  * ```
  */
-export function createCodeTool(options: CreateCodeToolOptions): ServerTool {
+export function createCodeTool(
+  options: CreateCodeToolOptions
+): ServerTool<SchemaInput, SchemaInput> {
   const providers = normalizeProviders(options.tools);
 
   const typeBlocks: string[] = [];

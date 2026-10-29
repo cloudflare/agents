@@ -1,5 +1,5 @@
 import type { Tool, ToolSet } from "ai";
-import type { ServerTool } from "@tanstack/ai";
+import type { SchemaInput, ServerTool } from "@tanstack/ai";
 import { expectTypeOf } from "vitest";
 import {
   fetchWeb,
@@ -62,7 +62,9 @@ const tools: ToolSet = { web_fetch: aiSdkTool };
 void tools;
 
 // The TanStack AI adapter is a ServerTool.
-expectTypeOf(tanStackWebFetchTool({ source })).toExtend<ServerTool>();
+expectTypeOf(tanStackWebFetchTool({ source })).toExtend<
+  ServerTool<SchemaInput, SchemaInput>
+>();
 
 // fetchWeb returns the whole page; the tool's output is one window of it.
 expectTypeOf(

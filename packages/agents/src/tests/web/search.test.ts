@@ -828,9 +828,9 @@ describe("adapters", () => {
   });
 
   it("tanstack: failures throw so TanStack AI reports an error result", async () => {
-    const error = await tanstackWebSearchTool({ source: failingSource })
-      .execute?.({ query: "a" })
-      .catch((e: unknown) => e);
+    const error = await Promise.resolve(
+      tanstackWebSearchTool({ source: failingSource }).execute?.({ query: "a" })
+    ).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(WebSearchError);
     expect(error).toMatchObject({
       code: "web_search_payment_required",
