@@ -359,6 +359,9 @@ export class ServerController {
             if (
               attempt.state === MCPConnectionState.FAILED &&
               !attempt.refused &&
+              // A failure the attempt recorded (the step-up limit, say) is
+              // final; retrying would clear it.
+              !this.ctx.store.failure(id) &&
               this.ctx.connections[id]
             ) {
               throw new AttemptFailedError(attempt);
