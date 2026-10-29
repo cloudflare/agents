@@ -222,8 +222,9 @@ export class Context {
       (await this.#session.getBranches(tail.id)).length === 0;
 
     if (!delivered.system || state.refresh) {
-      // A new snapshot reads every block afresh, as a refresh does.
-      if (!state.refresh) await this.#blocks.load();
+      // A new snapshot reads every block afresh, even after a refresh: a
+      // block may have changed since the refresh was asked for.
+      await this.#blocks.load();
       const sections = await this.#blocks.internal_sections();
       if (recordable) {
         await this.#record(tail, { system: sections });
