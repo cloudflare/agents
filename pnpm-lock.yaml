@@ -4969,7 +4969,7 @@ importers:
   packages/hono-agents:
     devDependencies:
       agents:
-        specifier: ^0.31.0
+        specifier: ^0.32.0
         version: link:../agents
       hono:
         specifier: ^4.13.11

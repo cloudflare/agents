@@ -1,5 +1,25 @@
 # @cloudflare/agents
 
+## 0.32.0
+
+### Minor Changes
+
+- [#2752](https://github.com/cloudflare/agents/pull/2752) [`34cbd30`](https://github.com/cloudflare/agents/commit/34cbd305c6d55d2c38f4063c58ddbe97785fb8c8) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add `experimental_registerOpenTelemetry()` to `agents/observability`, which records spans from OpenTelemetry-instrumented libraries as Workers trace spans. Experimental and subject to change.
+
+- [#2771](https://github.com/cloudflare/agents/pull/2771) [`54ae3e8`](https://github.com/cloudflare/agents/commit/54ae3e86987be92ae20bc6a8b06c26ec1884d01c) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Breaking: `agents/skills` now loads Agent Skills from Computer Workspace files (`workspace()`), R2 (`r2()`), or code (`manifest()`), checks `SKILL.md` against the Agent Skills spec, and replaces `SkillRegistry` with `loadSkillCatalog()` and `createSkillTools()` (from `agents/skills/tools/ai-sdk`); `parseSkill()` follows the spec's guide for agents, loading skills that break a rule with warnings; `runner()` moved to `agents/skills/runner`; the `agents:skills` Vite import and `agents/skills/compile` are removed. See [Agent Skills](https://developers.cloudflare.com/agents/skills/).
+
+### Patch Changes
+
+- [#2763](https://github.com/cloudflare/agents/pull/2763) [`df85805`](https://github.com/cloudflare/agents/commit/df85805ed79b4287f35f59efdbf2e947854bc14a) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Agents SDK spans (agent lifecycle, `wrapAISDK`, Think) now set span status `error` on failure, where the Workers runtime supports `Span.setStatus()`; attributes are unchanged. See [Observability](https://github.com/cloudflare/agents/blob/main/docs/agents/observability.md#ai-sdk-tracing).
+
+- [#2737](https://github.com/cloudflare/agents/pull/2737) [`08747d9`](https://github.com/cloudflare/agents/commit/08747d9aa7a11f284dbd85e3b024ef1ce1ddaa41) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Mark the package side-effect free (apart from the CLI), so bundlers drop the modules a Worker doesn't use. `import { routeAgentRequest } from "agents"` no longer bundles the MCP client.
+
+- [#2744](https://github.com/cloudflare/agents/pull/2744) [`a2d371e`](https://github.com/cloudflare/agents/commit/a2d371ec333198855f4ac2aa4dadbe2696e73c75) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Update `@modelcontextprotocol/client` and `@modelcontextprotocol/server` to 2.4.0 and `@modelcontextprotocol/sdk` to 1.32.2, and add a `clientMetadataUrl` option to `DurableObjectOAuthClientProvider` for OAuth Client ID Metadata Documents. See [MCP client](https://developers.cloudflare.com/agents/model-context-protocol/apis/client-api/).
+
+- [#2740](https://github.com/cloudflare/agents/pull/2740) [`8cf6da1`](https://github.com/cloudflare/agents/commit/8cf6da190aa4212c83dd11089413f390a9f510ac) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `agents/models/pi-ai` parses streamed chat-completions tool-call arguments incrementally, instead of re-parsing the whole argument text on every delta.
+
+- [#2766](https://github.com/cloudflare/agents/pull/2766) [`b372289`](https://github.com/cloudflare/agents/commit/b372289fdee424366b6bd8a8ae9923afb3ac803f) Thanks [@github-actions](https://github.com/apps/github-actions)! - Allow `@tanstack/ai` 1.x in the optional peer dependency ranges, and type the TanStack AI tools so they compile against both 0.x and 1.x. See [TanStack AI](https://github.com/cloudflare/agents/blob/main/packages/codemode/README.md#tanstack-ai).
+
 ## 0.31.0
 
 This release adds internal hostnames to the browser. Give a Browser Run browser hostnames such as `preview.internal`, and its requests to them go to your agent instead of the internet, so the model can open a dev server, a workspace folder or another Worker in the same browser it uses for the web.
@@ -20,6 +40,7 @@ You only need to make changes if you serve MCP or use `browserTool`.
 If you serve MCP or use `agents/x402` or `agents/experimental/webmcp`:
 
 1. **Add the MCP packages to your `package.json`** at the versions this release expects, since your package manager no longer installs them. Until you do, builds fail with an unresolved import.
+
    - `agents/mcp` (`McpAgent`, `WorkerTransport`, `createLegacyMcpHandler`) and `agents/x402`: `@modelcontextprotocol/sdk@1.32.1` and `@modelcontextprotocol/server@2.3.1`
    - `agents/mcp/server` (`createMcpHandler`): `@modelcontextprotocol/server@2.3.1`
    - `agents/experimental/webmcp`: `@modelcontextprotocol/sdk@1.32.1`
