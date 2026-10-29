@@ -10025,8 +10025,7 @@ export class Agent<
           authUrl: settlement.authUrl
         };
       case MCPConnectionState.FAILED:
-        // The server stays in storage and keeps reconnecting in the
-        // background; the caller can also retry.
+        // The server stays in storage, failed until reconnectMcpServer().
         throw new Error(
           settlement.phase === "connect"
             ? `Failed to connect to MCP server at ${context.url}: ${settlement.error}`
@@ -10041,13 +10040,10 @@ export class Agent<
 
   /**
    * Try an MCP server again, for example from a "Reconnect" button: forgets
-   * why it stopped (gave up reconnecting, authorization refused or expired,
-   * step-up limit reached), drops pending reconnects and connects now.
-   *
-   * `addMcpServer()` also reconnects a server that is not connected, but
-   * leaves alone one stopped for a reason only a person can fix
-   * (authorization refused or denied, the step-up limit, or reconnecting
-   * gave up). This retries any failed server, with no rate limit.
+   * why it failed (unreachable, authorization refused, step-up limit
+   * reached) and its pending link, then connects now with the quick
+   * attempts. The only way to retry a failed server or get a new link;
+   * `addMcpServer()` for a registered server reports its state as is.
    *
    * @returns The same result as `addMcpServer()`: `ready`, or
    * `authenticating` with a new `authUrl`. Throws when the attempt fails.
