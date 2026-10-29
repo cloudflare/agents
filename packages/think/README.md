@@ -341,7 +341,7 @@ Script execution requires a Worker Loader binding:
 | --------------------------------------- | ------------------------------------------------------------- |
 | `@cloudflare/think`                     | `Think`, `Session` — main class + re-exports                  |
 | `agents/sessions`                       | `Sessions`, `Session`, `createCompactFunction`, attachments   |
-| `agents/context`                        | `ContextBlocks`, providers, `ContextConfig` — prompt assembly |
+| `agents/context`                        | `Context`, providers, `ContextConfig` — prompt context        |
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
 | `@cloudflare/think/tools/fetch`         | `createFetchTools()` — opt-in allowlisted HTTP reads          |
@@ -803,8 +803,9 @@ export class MyAgent extends Think<Env> {
 
 A block declared without a `provider` is auto-wired to durable per-agent SQLite,
 so `memory` above is writable through the `set_context` tool with no extra
-wiring. The frozen system prompt is always persisted, so there is nothing to opt
-into: a cold wake reuses the exact prompt string the model already cached.
+wiring. The transcript records the system prompt each turn was sent with, so
+there is nothing to opt into: a cold wake reuses the exact prompt the model
+already cached.
 
 The assembled blocks are available as `this.context` once the Lifecycle has
 started. See [Context](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md)
