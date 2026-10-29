@@ -5159,8 +5159,11 @@ export class ThinkSessionTestAgent extends Think {
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const frozenPrompt = await this.context.freezeSystemPrompt();
-    return frozenPrompt || this.getSystemPrompt();
+    return this._buildBaseSystemPrompt();
+  }
+
+  async getContextReminder(): Promise<string | null> {
+    return this.context.reminder();
   }
 
   async addDynamicContext(label: string, description?: string): Promise<void> {
@@ -5216,9 +5219,8 @@ export class ThinkSystemPromptSkillsWarningAgent extends Think {
 
   override getSkills() {
     return [
-      skills.fromManifest({
+      skills.manifest({
         id: "test-skills",
-        fingerprint: "v1",
         skills: [
           {
             name: "knot-tying",
@@ -5228,6 +5230,10 @@ export class ThinkSystemPromptSkillsWarningAgent extends Think {
         ]
       })
     ];
+  }
+
+  async getAssembledSystemPrompt(): Promise<string> {
+    return this._buildBaseSystemPrompt();
   }
 
   async runChatTurnForWarningTest(): Promise<TestChatResult> {
@@ -5247,9 +5253,8 @@ export class ThinkSystemPromptSkillsWarningAgent extends Think {
 // system prompt must not be mistaken for an override.
 function mapReadingSkills() {
   return [
-    skills.fromManifest({
+    skills.manifest({
       id: "default-prompt-test-skills",
-      fingerprint: "v1",
       skills: [
         {
           name: "map-reading",
@@ -5285,6 +5290,48 @@ export class ThinkSystemPromptFieldSkillsAgent extends ThinkSessionTestAgent {
   }
 
   override getSystemPrompt = () => "You are an experienced cartographer.";
+}
+
+// ── ThinkWorkspaceSkillsAgent ───────────────────────────────
+// Skills are plain files in the agent's Workspace: writing, editing, or
+// deleting a SKILL.md changes the catalog on the next turn.
+
+export class ThinkWorkspaceSkillsAgent extends ThinkSessionTestAgent {
+  private _turnToolNames: string[] = [];
+
+  override getSkills() {
+    return [skills.workspace(this.workspace)];
+  }
+
+  override beforeTurn(ctx: TurnContext): void {
+    this._turnToolNames = Object.keys(ctx.tools).sort();
+  }
+
+  async writeSkill(name: string, description: string): Promise<void> {
+    await this.workspace.fs.mkdir(`/workspace/.agents/skills/${name}`, {
+      recursive: true
+    });
+    await this.workspace.fs.writeFile(
+      `/workspace/.agents/skills/${name}/SKILL.md`,
+      new TextEncoder().encode(
+        `---\nname: ${name}\ndescription: ${description}\n---\nInstructions for ${name}.`
+      )
+    );
+  }
+
+  async deleteSkill(name: string): Promise<void> {
+    await this.workspace.fs.rm(`/workspace/.agents/skills/${name}`, {
+      recursive: true
+    });
+  }
+
+  async getTurnToolNames(): Promise<string[]> {
+    return this._turnToolNames;
+  }
+
+  async clearSkillHistory(): Promise<void> {
+    await this.clearMessages();
+  }
 }
 
 class ThinkClassifierTestAgent extends ThinkSessionTestAgent {
@@ -5353,8 +5400,11 @@ export class ThinkAsyncConfigSessionAgent extends Think {
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const frozenPrompt = await this.context.freezeSystemPrompt();
-    return frozenPrompt || this.getSystemPrompt();
+    return this._buildBaseSystemPrompt();
+  }
+
+  async getContextReminder(): Promise<string | null> {
+    return this.context.reminder();
   }
 }
 

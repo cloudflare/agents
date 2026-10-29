@@ -15,6 +15,7 @@ export {
   ThinkDefaultSystemPromptSkillsAgent,
   ThinkInheritedSystemPromptSkillsAgent,
   ThinkSystemPromptFieldSkillsAgent,
+  ThinkWorkspaceSkillsAgent,
   ThinkMissingClassifierWarningAgent,
   ThinkClassifierMethodAgent,
   ThinkInheritedClassifierAgent,

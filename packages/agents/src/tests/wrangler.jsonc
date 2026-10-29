@@ -410,6 +410,7 @@
     ]
   },
   "worker_loaders": [{ "binding": "LOADER" }],
+  "r2_buckets": [{ "binding": "SKILLS_BUCKET", "bucket_name": "skills-test" }],
   "workflows": [
     {
       "name": "test-processing-workflow",

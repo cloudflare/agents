@@ -118,13 +118,19 @@ Pi's extensions can do more: hooks on model requests and tool calls (`hook(ToolT
 
 ### Skills
 
-`skills(sources)` turns `agents/skills` sources (refer to [Agent Skills](../../think/index.md#agent-skills)) into a Pi extension named `agents.skills`. It has two tools, `activate_skill` and `read_skill_resource`, and a `skills` section that lists the skills. Install it in the factory, since it reads the sources:
+`skills(sources)` turns `agents/skills` sources (refer to [Agent Skills](../../think/index.md#agent-skills)) into a Pi extension named `agents.skills`. It has two tools, `activate_skill` and `read_skill_resource`, and a `skills` section that lists the skills. Sources can read skills from a Computer Workspace (`workspace()`), an R2 bucket (`r2()`), or code (`manifest()`). Install it in the factory, since it reads the sources:
 
 ```ts
 import { skills } from "agents/harness/pi";
+import * as agentSkills from "agents/skills";
 
 harness: async ({ storage, context, onWake }) => {
-  this.registry.install(await skills(sources));
+  this.registry.install(
+    await skills([
+      agentSkills.workspace(workspace), // /workspace/.agents/skills
+      agentSkills.r2(this.env.SKILLS_BUCKET, { prefix: "skills/" })
+    ])
+  );
   return Harness.open(
     storage,
     { models, registry: this.registry, onWake },
@@ -133,7 +139,7 @@ harness: async ({ storage, context, onWake }) => {
 };
 ```
 
-The existing `@cloudflare/think` skills work out-of-the-box.
+The sources are read once, when the factory builds the extension. The tools and their output match `@cloudflare/think`, so a skill behaves the same in both.
 
 ### Browser
 

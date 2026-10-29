@@ -126,7 +126,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-A block declared without a `provider` is auto-wired to durable per-agent SQLite, so `memory` above is writable through the `set_context` tool with no extra wiring. When context blocks are configured, Think builds the system prompt from those blocks instead of using `getSystemPrompt()`. The frozen system prompt is always persisted, so a cold wake reuses the exact prompt string the model already cached.
+A block declared without a `provider` is auto-wired to durable per-agent SQLite, so `memory` above is writable through the `set_context` tool with no extra wiring. When context blocks are configured, Think builds the system prompt from an overridden `getSystemPrompt()` followed by those blocks. Think's default `getSystemPrompt()` is only used when there are no blocks. The frozen system prompt is always persisted, so a cold wake reuses the exact prompt string the model already cached.
 
 The assembled blocks are available as `this.context` once the Lifecycle has started. See the [Context documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/context.md) for providers, tools, and frozen-prompt behavior.
 
@@ -142,18 +142,18 @@ beforeTurn(ctx: TurnContext): TurnConfig | void | Promise<TurnConfig | void>
 
 ### TurnContext
 
-| Field          | Type                            | Description                                                              |
-| -------------- | ------------------------------- | ------------------------------------------------------------------------ |
-| `system`       | `string`                        | Assembled system prompt (from context blocks or `getSystemPrompt()`)     |
-| `messages`     | `ModelMessage[]`                | Assembled model messages (truncated)                                     |
-| `tools`        | `ToolSet`                       | Merged tool set (workspace + getTools + context + MCP + client + caller) |
-| `model`        | `LanguageModel`                 | The resolved model (a string from `getModel()` is already resolved here) |
-| `continuation` | `boolean`                       | Whether this is a continuation turn (auto-continue after tool result)    |
-| `body`         | `Record<string, unknown>`       | Custom body fields from the client request                               |
-| `requestId`    | `string \| undefined`           | The request this turn runs for. See [Turn identity](#turn-identity)      |
-| `trigger`      | `TurnTrigger \| undefined`      | What admitted the turn: `"ws-chat"`, `"rpc"`, `"submission"`, and so on  |
-| `abortSignal`  | `AbortSignal \| undefined`      | Aborts when the turn is cancelled. Pass it to I/O the hook awaits        |
-| `messenger`    | `MessengerContext \| undefined` | The messenger thread this turn answers, fixed when the turn was admitted |
+| Field          | Type                            | Description                                                                 |
+| -------------- | ------------------------------- | --------------------------------------------------------------------------- |
+| `system`       | `string`                        | Assembled system prompt (`getSystemPrompt()` override, then context blocks) |
+| `messages`     | `ModelMessage[]`                | Assembled model messages (truncated)                                        |
+| `tools`        | `ToolSet`                       | Merged tool set (workspace + getTools + context + MCP + client + caller)    |
+| `model`        | `LanguageModel`                 | The resolved model (a string from `getModel()` is already resolved here)    |
+| `continuation` | `boolean`                       | Whether this is a continuation turn (auto-continue after tool result)       |
+| `body`         | `Record<string, unknown>`       | Custom body fields from the client request                                  |
+| `requestId`    | `string \| undefined`           | The request this turn runs for. See [Turn identity](#turn-identity)         |
+| `trigger`      | `TurnTrigger \| undefined`      | What admitted the turn: `"ws-chat"`, `"rpc"`, `"submission"`, and so on     |
+| `abortSignal`  | `AbortSignal \| undefined`      | Aborts when the turn is cancelled. Pass it to I/O the hook awaits           |
+| `messenger`    | `MessengerContext \| undefined` | The messenger thread this turn answers, fixed when the turn was admitted    |
 
 ### Turn identity
 

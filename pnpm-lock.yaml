@@ -282,67 +282,6 @@ importers:
         specifier: ^4.145.0
         version: 4.145.0(@cloudflare/workers-types@5.20261014.1)(@types/node@26.0.1)
 
-  examples/agent-skills:
-    dependencies:
-      '@cloudflare/computer':
-        specifier: ^0.8.0
-        version: 0.8.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.6.7))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.6(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.6.7)
-      '@cloudflare/kumo':
-        specifier: ^2.6.0
-        version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.6.7)
-      '@cloudflare/think':
-        specifier: '*'
-        version: link:../../packages/think
-      '@phosphor-icons/react':
-        specifier: ^2.1.10
-        version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      agents:
-        specifier: '*'
-        version: link:../../packages/agents
-      ai:
-        specifier: ^7.0.0
-        version: 7.0.18(zod@4.6.7)
-      react:
-        specifier: ^19.2.7
-        version: 19.2.7
-      react-dom:
-        specifier: ^19.2.7
-        version: 19.2.7(react@19.2.7)
-    devDependencies:
-      '@cloudflare/vite-plugin':
-        specifier: 1.62.3
-        version: 1.62.3(@types/node@26.0.1)(vite@8.1.6(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(wrangler@4.145.0(@cloudflare/workers-types@5.20261014.1)(@types/node@26.0.1))
-      '@cloudflare/workers-types':
-        specifier: ^5.20261014.1
-        version: 5.20261014.1
-      '@tailwindcss/vite':
-        specifier: ^4
-        version: 4.3.1(vite@8.1.6(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
-      '@types/node':
-        specifier: ^26.0.1
-        version: 26.0.1
-      '@types/react':
-        specifier: ^19.2.17
-        version: 19.2.17
-      '@types/react-dom':
-        specifier: ^19.2.3
-        version: 19.2.3(@types/react@19.2.17)
-      '@vitejs/plugin-react':
-        specifier: ^6.0.3
-        version: 6.0.3(@rolldown/plugin-babel@0.2.3(@babel/core@8.0.6)(@babel/runtime@7.29.7)(rolldown@1.2.15)(vite@8.1.6(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.1.6(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
-      tailwindcss:
-        specifier: ^4.3.2
-        version: 4.3.2
-      typescript:
-        specifier: ^6.0.3
-        version: 6.0.3
-      vite:
-        specifier: ^8.1.6
-        version: 8.1.6(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
-      wrangler:
-        specifier: ^4.145.0
-        version: 4.145.0(@cloudflare/workers-types@5.20261014.1)(@types/node@26.0.1)
-
   examples/agents-as-tools:
     dependencies:
       '@cloudflare/computer':
@@ -451,85 +390,6 @@ importers:
       workers-ai-provider:
         specifier: ^4.0.0
         version: 4.0.0(@ai-sdk/anthropic@4.0.10(zod@4.6.7))(@ai-sdk/google@4.0.10(zod@4.6.7))(@ai-sdk/openai@4.0.9(zod@4.6.7))(@ai-sdk/provider@4.0.2)(ai@7.0.18(zod@4.6.7))
-      zod:
-        specifier: ^4.6.7
-        version: 4.6.7
-    devDependencies:
-      '@cloudflare/vite-plugin':
-        specifier: 1.62.3
-        version: 1.62.3(@types/node@26.0.1)(vite@8.1.6(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(wrangler@4.145.0(@cloudflare/workers-types@5.20261014.1)(@types/node@26.0.1))
-      '@cloudflare/workers-types':
-        specifier: ^5.20261014.1
-        version: 5.20261014.1
-      '@tailwindcss/vite':
-        specifier: ^4
-        version: 4.3.1(vite@8.1.6(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
-      '@types/node':
-        specifier: ^26.0.1
-        version: 26.0.1
-      '@types/react':
-        specifier: ^19.2.17
-        version: 19.2.17
-      '@types/react-dom':
-        specifier: ^19.2.3
-        version: 19.2.3(@types/react@19.2.17)
-      '@vitejs/plugin-react':
-        specifier: ^6.0.3
-        version: 6.0.3(@rolldown/plugin-babel@0.2.3(@babel/core@8.0.6)(@babel/runtime@7.29.7)(rolldown@1.2.15)(vite@8.1.6(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.1.6(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
-      tailwindcss:
-        specifier: ^4.3.2
-        version: 4.3.2
-      typescript:
-        specifier: ^6.0.3
-        version: 6.0.3
-      vite:
-        specifier: ^8.1.6
-        version: 8.1.6(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
-      wrangler:
-        specifier: ^4.145.0
-        version: 4.145.0(@cloudflare/workers-types@5.20261014.1)(@types/node@26.0.1)
-
-  examples/assistant:
-    dependencies:
-      '@cloudflare/codemode':
-        specifier: '*'
-        version: link:../../packages/codemode
-      '@cloudflare/computer':
-        specifier: ^0.8.0
-        version: 0.8.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.18(zod@4.6.7))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.1.6(@types/node@26.0.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.6.7)
-      '@cloudflare/kumo':
-        specifier: ^2.6.0
-        version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.6.7)
-      '@cloudflare/think':
-        specifier: '*'
-        version: link:../../packages/think
-      '@modelcontextprotocol/sdk':
-        specifier: 1.32.2
-        version: 1.32.2(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.7)
-      '@phosphor-icons/react':
-        specifier: ^2.1.10
-        version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      '@streamdown/code':
-        specifier: ^1.1.1
-        version: 1.1.1(react@19.2.7)
-      agents:
-        specifier: '*'
-        version: link:../../packages/agents
-      ai:
-        specifier: ^7.0.0
-        version: 7.0.18(zod@4.6.7)
-      nanoid:
-        specifier: ^5.1.16
-        version: 5.1.16
-      react:
-        specifier: ^19.2.7
-        version: 19.2.7
-      react-dom:
-        specifier: ^19.2.7
-        version: 19.2.7(react@19.2.7)
-      streamdown:
-        specifier: ^2.5.0
-        version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(supports-color@10.2.2)
       zod:
         specifier: ^4.6.7
         version: 4.6.7
@@ -1110,6 +970,73 @@ importers:
       wrangler:
         specifier: ^4.145.0
         version: 4.145.0(@cloudflare/workers-types@5.20261014.1)(@types/node@26.0.1)
+
+  examples/computer-skills:
+    dependencies:
+      '@cloudflare/computer':
+        specifier: ^0.8.0
+        version: 0.8.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.6.7))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.3.5(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.6.7)
+      '@cloudflare/kumo':
+        specifier: ^2.6.0
+        version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.6.7)
+      '@cloudflare/think':
+        specifier: '*'
+        version: link:../../packages/think
+      '@phosphor-icons/react':
+        specifier: ^2.1.10
+        version: 2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@streamdown/code':
+        specifier: ^1.1.1
+        version: 1.1.1(react@19.2.8)
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+      ai:
+        specifier: ^7.0.0
+        version: 7.0.118(zod@4.6.7)
+      react:
+        specifier: ^19.2.7
+        version: 19.2.8
+      react-dom:
+        specifier: ^19.2.7
+        version: 19.2.8(react@19.2.8)
+      streamdown:
+        specifier: ^2.5.0
+        version: 2.5.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(supports-color@10.2.2)
+    devDependencies:
+      '@cloudflare/vite-plugin':
+        specifier: 1.62.3
+        version: 1.62.3(@types/node@26.4.0)(vite@8.3.5(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(wrangler@4.145.0(@cloudflare/workers-types@5.20261014.1)(@types/node@26.4.0))
+      '@cloudflare/workers-types':
+        specifier: ^5.20261014.1
+        version: 5.20261014.1
+      '@tailwindcss/vite':
+        specifier: ^4
+        version: 4.3.3(vite@8.3.5(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      '@types/node':
+        specifier: ^26.0.1
+        version: 26.4.0
+      '@types/react':
+        specifier: ^19.2.17
+        version: 19.2.17
+      '@types/react-dom':
+        specifier: ^19.2.3
+        version: 19.2.3(@types/react@19.2.17)
+      '@vitejs/plugin-react':
+        specifier: ^6.0.3
+        version: 6.0.3(@rolldown/plugin-babel@0.2.3(@babel/core@8.0.6)(@babel/runtime@7.29.7)(rolldown@1.2.15)(vite@8.3.5(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.3.5(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      tailwindcss:
+        specifier: ^4.3.2
+        version: 4.3.3
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vite:
+        specifier: ^8.1.6
+        version: 8.3.5(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
+      wrangler:
+        specifier: ^4.145.0
+        version: 4.145.0(@cloudflare/workers-types@5.20261014.1)(@types/node@26.4.0)
 
   examples/context-overflow-recovery:
     dependencies:
@@ -3121,6 +3048,73 @@ importers:
         specifier: ^4.145.0
         version: 4.145.0(@cloudflare/workers-types@5.20261014.1)(@types/node@26.0.1)
 
+  examples/r2-skills:
+    dependencies:
+      '@cloudflare/computer':
+        specifier: ^0.8.0
+        version: 0.8.0(@cloudflare/workers-types@5.20261014.1)(@platformatic/vfs@0.4.0)(ai@7.0.118(zod@4.6.7))(just-bash@3.0.2(supports-color@10.2.2))(vite@8.3.5(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(zod@4.6.7)
+      '@cloudflare/kumo':
+        specifier: ^2.6.0
+        version: 2.6.0(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.6.7)
+      '@cloudflare/think':
+        specifier: '*'
+        version: link:../../packages/think
+      '@phosphor-icons/react':
+        specifier: ^2.1.10
+        version: 2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@streamdown/code':
+        specifier: ^1.1.1
+        version: 1.1.1(react@19.2.8)
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+      ai:
+        specifier: ^7.0.0
+        version: 7.0.118(zod@4.6.7)
+      react:
+        specifier: ^19.2.7
+        version: 19.2.8
+      react-dom:
+        specifier: ^19.2.7
+        version: 19.2.8(react@19.2.8)
+      streamdown:
+        specifier: ^2.5.0
+        version: 2.5.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(supports-color@10.2.2)
+    devDependencies:
+      '@cloudflare/vite-plugin':
+        specifier: 1.62.3
+        version: 1.62.3(@types/node@26.4.0)(vite@8.3.5(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(wrangler@4.145.0(@cloudflare/workers-types@5.20261014.1)(@types/node@26.4.0))
+      '@cloudflare/workers-types':
+        specifier: ^5.20261014.1
+        version: 5.20261014.1
+      '@tailwindcss/vite':
+        specifier: ^4
+        version: 4.3.3(vite@8.3.5(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      '@types/node':
+        specifier: ^26.0.1
+        version: 26.4.0
+      '@types/react':
+        specifier: ^19.2.17
+        version: 19.2.17
+      '@types/react-dom':
+        specifier: ^19.2.3
+        version: 19.2.3(@types/react@19.2.17)
+      '@vitejs/plugin-react':
+        specifier: ^6.0.3
+        version: 6.0.3(@rolldown/plugin-babel@0.2.3(@babel/core@8.0.6)(@babel/runtime@7.29.7)(rolldown@1.2.15)(vite@8.3.5(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.3.5(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      tailwindcss:
+        specifier: ^4.3.2
+        version: 4.3.3
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vite:
+        specifier: ^8.1.6
+        version: 8.3.5(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
+      wrangler:
+        specifier: ^4.145.0
+        version: 4.145.0(@cloudflare/workers-types@5.20261014.1)(@types/node@26.4.0)
+
   examples/resumable-stream-chat:
     dependencies:
       '@cloudflare/ai-chat':
@@ -4791,9 +4785,6 @@ importers:
       cron-schedule:
         specifier: ^6.0.0
         version: 6.0.0
-      esbuild:
-        specifier: ^0.28.1
-        version: 0.28.1
       mimetext:
         specifier: ^3.0.28
         version: 3.0.28
@@ -4882,6 +4873,9 @@ importers:
       chat:
         specifier: ^4.31.0
         version: 4.31.0(ai@7.0.18(zod@4.6.7))(supports-color@10.2.2)(zod@4.6.7)
+      esbuild:
+        specifier: ^0.28.1
+        version: 0.28.1
       glob:
         specifier: ^13.0.6
         version: 13.0.6
@@ -20536,7 +20530,7 @@ snapshots:
       jiti: 2.7.0
       lightningcss: 1.32.0
       magic-string: 0.30.21
-      source-map-js: 1.2.1
+      source-map-js: 1.2.2
       tailwindcss: 4.3.3
 
   '@tailwindcss/oxide-android-arm64@4.3.1':
@@ -21125,7 +21119,7 @@ snapshots:
 
   '@types/ws@8.18.1':
     dependencies:
-      '@types/node': 26.0.1
+      '@types/node': 26.4.0
 
   '@typescript/native-preview-darwin-arm64@7.0.0-dev.20260629.1':
     optional: true

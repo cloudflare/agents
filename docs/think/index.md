@@ -397,7 +397,7 @@ path.
 | `getModel()`               | throws                           | Return a model id `string` (resolved via the bundled `workers-ai-provider` off `getAIBinding()` — a `@cf/...` id hits Workers AI, a `"provider/model"` slug routes through AI Gateway) or a `LanguageModel`                                                                                                                                                                                                                                                                                                                 |
 | `getGateway(model)`        | `undefined`                      | AI Gateway options (`id`, `metadata`, cache settings) for a string model — see [AI Gateway options](#ai-gateway-options)                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `getAIBinding()`           | `this.env.AI`                    | Workers AI binding used to resolve string models from `getModel()`                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `getSystemPrompt()`        | `"You are a helpful assistant."` | System prompt (fallback when no context blocks)                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `getSystemPrompt()`        | `"You are a helpful assistant."` | Instructions at the top of the system prompt, above context blocks. The default is used only with no context blocks                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `getTools()`               | `{}`                             | AI SDK `ToolSet` for the agentic loop                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `getScheduledTasks()`      | `{}`                             | Code-declared recurring prompts or handlers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `getScheduledTasksScope()` | `"root"`                         | Which instances arm the declared tasks — `"root"` (top-level agent only) or `"all"` (sub-agents too)                                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -414,7 +414,6 @@ path.
 | `hydrationByteBudget`      | 32 MiB                           | Byte budget for startup transcript hydration. Charges each row its stored bytes plus the attachment bytes it re-inflates                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `mediaEviction`            | `true`                           | Media eviction policy: aged media leaves the conversation and is preserved as a Workspace file. `false` keeps aged media in the conversation                                                                                                                                                                                                                                                                                                                                                                                |
 | `getSkills()`              | `[]`                             | Return Agent Skills sources for on-demand skill activation                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `skillWorkspace`           | `false`                          | Project skills into the Workspace as files; `{}` enables with defaults                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `getSkillScriptRunner()`   | `null`                           | Enable the optional `run_skill_script` tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `fetchTools`               | `false`                          | Opt-in allowlisted, read-only HTTP fetch tools (`fetch_url` + per-binding `fetch_<name>`). Set to a config object; see [Fetch tool](#fetch-tool)                                                                                                                                                                                                                                                                                                                                                                            |
 | `messageConcurrency`       | `"queue"`                        | How overlapping submits behave — see [Client Tools](./client-tools.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -472,83 +471,71 @@ See [Tools](./tools.md#mcp-tools) for MCP setup and alternative exposure paths.
 
 ## Agent Skills
 
-Think supports [Agent Skills](https://agentskills.io/) as on-demand
-instructions. A skill source provides a catalog of skill names and descriptions;
-Think adds that catalog to the system prompt and exposes tools the model can use
-when a user task matches a skill.
+Think supports [Agent Skills](https://agentskills.io/): on-demand
+instructions, references, and scripts. A skill is a directory with a
+`SKILL.md` file. Think adds each skill's name and description to the system
+prompt and gives the model tools to load a skill when a task matches it.
 
-Bundled skills are imported with the Agents Vite plugin from `agents/vite`.
-Register it alongside the Cloudflare plugin in `vite.config.ts`:
-
-```typescript
-import { cloudflare } from "@cloudflare/vite-plugin";
-import agents from "agents/vite";
-import { defineConfig } from "vite";
-
-export default defineConfig({
-  plugins: [agents(), cloudflare()]
-});
-```
-
-Then import the bundled skill manifest:
+The simplest place to keep skills is the agent's Workspace. Every
+`/workspace/.agents/skills/<name>/SKILL.md` is a skill, and the files beside it
+are its resources:
 
 ```typescript
 import { Think, skills } from "@cloudflare/think";
-import bundledSkills from "agents:skills"; // resolves to ./skills next to this file
 
 export class MyAgent extends Think<Env> {
   getSkills() {
-    return [
-      bundledSkills,
-      skills.r2(this.env.SKILLS_BUCKET, { prefix: "skills/" })
-    ];
-  }
-
-  getSkillScriptRunner() {
-    return skills.runner({
-      loader: this.env.LOADER,
-      workspaceInstance: this.workspace
-    });
+    return [skills.workspace(this.workspace)];
   }
 }
 ```
 
-`agents:skills` resolves to a `./skills` directory next to the importing file;
-use `agents:skills/<dir>` to point at a differently named sibling directory.
-The `agents:skills` import is typed by ambient declarations that ship with
-`agents`, so importing `Think` in the same file brings the type into scope (for
-a file that imports only the specifier, add
-`/// <reference types="agents/skills-module" />`). If you are not using the
-Agents Vite plugin, build a source with `skills.fromManifest(...)` instead.
-
-The skills engine lives in `agents/skills` and is framework-agnostic, so any
-agent (including a plain `@cloudflare/ai-chat` `onChatMessage`) can build a
-`SkillRegistry`; `@cloudflare/think` re-exports it as `skills` and wires
-`getSkills()` into the turn automatically.
-
-Think can also project each resolved `SKILL.md` into the active workspace so
-the agent can read and edit skills as files. This is off by default: skills
-load from their sources and nothing is written to the Workspace. Set
-`skillWorkspace = {}` to enable it. Skills land under `/workspace/.agents/skills`.
-Existing workspace edits are preserved and
-affect later activation. Resources copy into the workspace when first requested
-rather than at startup. A durable source fingerprint lets unchanged cold wakes
-attach to the existing projection without statting or rewriting every file.
-
-Set `skillWorkspace = { root: "/some/other/dir" }` to project skills somewhere
-else.
-
-Sources are applied in order; the first source to register a skill name wins,
-and later duplicates (or a source that fails to load) are skipped with a logged
-warning rather than failing the agent.
-
-The imported directory should contain one child directory per skill:
-
 ```text
-agents/my-agent/skills/release-notes/SKILL.md
-agents/my-agent/skills/release-notes/scripts/format-release-notes.ts
-agents/my-agent/skills/release-notes/references/style-guide.md
+/workspace/.agents/skills/release-notes/SKILL.md
+/workspace/.agents/skills/release-notes/scripts/format-release-notes.js
+/workspace/.agents/skills/release-notes/references/style-guide.md
 ```
+
+Think lists every source before each turn, so a skill written, edited, or
+deleted in the Workspace (by you, a user, or the agent itself) takes effect on
+the next turn. Pass `{ root }` to read from another directory. Skill scripts
+are Workspace files too: give the Workspace a backend and the model runs them
+with the `exec` tool.
+
+Other sources:
+
+| Source                                  | Reads skills from                                      |
+| --------------------------------------- | ------------------------------------------------------ |
+| `skills.workspace(workspace, { root })` | A `@cloudflare/computer` Workspace                     |
+| `skills.r2(bucket, { prefix })`         | An R2 bucket with the same layout under `prefix`       |
+| `skills.manifest({ id, skills })`       | Skills defined in code, for tests and small fixed sets |
+
+Sources are applied in order. The first source to provide a skill name wins,
+and later duplicates are skipped with a logged warning. `skills.r2()` reuses
+a bucket listing for 60 seconds by default; set `refreshIntervalMs` to change
+that.
+
+Every `SKILL.md` is checked against the
+[spec](https://agentskills.io/specification) and loaded the way the spec's
+[guide for agents](https://agentskills.io/client-implementation/adding-skills-support)
+recommends. A skill that breaks a rule, such as a `name` that is not 1-64
+lowercase letters, digits, and hyphens, does not match its directory, or a
+`description` over 1024 characters, still loads, and Think logs a warning for
+each broken rule. A skill with no `description`, a `name` that is not a safe
+single path segment, or frontmatter that is not YAML is skipped and logged.
+Frontmatter whose values contain an unquoted `: ` is read again with those
+values quoted. To check a skill before you write it, parse it with
+`skills.parseSkill(markdown, { directory })` and require `warnings` to be
+empty. Frontmatter keys the spec does not define are kept in
+`skill.extraFields`. A skill with `disable-model-invocation: true` is not
+shown to the model.
+
+The parser, sources, and catalog live in `agents/skills` and work without
+Think: `skills.parseSkill()` parses a `SKILL.md`, `skills.loadSkillCatalog()`
+merges sources, and `createSkillTools()` from `agents/skills/tools/ai-sdk`
+builds the AI SDK tools.
+`@cloudflare/think` re-exports the module as `skills` and wires `getSkills()`
+into every turn.
 
 When skills are available, Think exposes:
 
@@ -563,13 +550,23 @@ Skills are not always-on system prompt text. Use a context block from
 for task-specific procedures, references, scripts, templates, and assets that
 should be loaded only when relevant.
 
-Skills register a context block of their own, and `getSystemPrompt()` is only a
-fallback for agents with no context blocks. Once `getSkills()` returns a source,
-an overridden `getSystemPrompt()` is no longer part of the prompt, and Think
-logs a one-time warning suggesting you move that text into `configureContext()`.
-Agents that keep the default `getSystemPrompt()` do not see the warning.
+Skills register a context block of their own. An overridden `getSystemPrompt()`
+stays at the top of the system prompt, above every context block, so adding
+skills never removes it.
 
-Script execution is opt-in and requires a Worker Loader binding:
+The skills block is a `whenChanged: "remind"` block. When a skill is added,
+edited, or removed mid-conversation, the frozen system prompt stays the same,
+so the model provider's prompt cache stays warm. The new catalog goes to the
+model as a reminder after the cached prefix on the next turn, and Think folds
+it into the system prompt at the next rebuild: compaction, or clearing the
+history.
+
+### Skill script runner
+
+For skills that live outside a Workspace, such as in R2, `skills.runner()` runs
+bundled scripts through `run_skill_script`. It is experimental; prefer keeping
+skills in a Workspace and running scripts with `exec`. It needs a Worker Loader
+binding:
 
 ```jsonc
 {
@@ -577,17 +574,25 @@ Script execution is opt-in and requires a Worker Loader binding:
 }
 ```
 
-`skills.runner()` is experimental and runs JavaScript, TypeScript, Python, and
-Bash scripts under `scripts/`. TypeScript is compiled with
-`@cloudflare/worker-bundler`; Python runs as Python Dynamic Workers; Bash runs
-through `just-bash`.
-
-JavaScript and TypeScript scripts are function-style:
-
 ```typescript
-import type { SkillRunContext } from "@cloudflare/think";
+getSkillScriptRunner() {
+  return skills.runner({ loader: this.env.LOADER });
+}
+```
 
-export default async function run(input: unknown, ctx: SkillRunContext) {
+Outside Think, import it from `agents/skills/runner`. It is a separate entry
+point because it loads `just-bash` and `@cloudflare/codemode`.
+
+The runner runs JavaScript, Python, and Bash scripts under `scripts/`. Python
+runs as Python Dynamic Workers and Bash runs through `just-bash`. There is no
+in-Worker bundler: a JavaScript script must be one self-contained module, so
+compile TypeScript or multi-file scripts (for example with esbuild) before
+storing the skill.
+
+JavaScript scripts are function-style:
+
+```javascript
+export default async function run(input, ctx) {
   const guide = ctx.files["references/style-guide.md"]; // bundled text resources
   const docs = await ctx.workspace.readFile("README.md"); // gated by permission
   const summary = await ctx.tools.call("summarize", { input }); // explicit tools
@@ -596,13 +601,13 @@ export default async function run(input: unknown, ctx: SkillRunContext) {
 }
 ```
 
-`ctx` is `{ skill, files, workspace, tools, output }`. `ctx.files` holds bundled
-text resources by relative path, `ctx.workspace` is gated by the workspace
-permission, `ctx.tools` only exposes tools the runner was given, and
-`ctx.output.writeFile(name, content)` returns scratch artifacts to the model
-(it does not mutate the workspace). Python and Bash use the path-based contract
-instead: `/input.json`, `/context.json`, bundled resources under `/skill`, and
-`/output` for artifacts.
+`ctx` is `{ skill, files, workspace, tools, output }` (typed as
+`SkillRunContext`). `ctx.files` holds bundled text resources by relative path,
+`ctx.workspace` is gated by the workspace permission, `ctx.tools` only exposes
+tools the runner was given, and `ctx.output.writeFile(name, content)` returns
+scratch artifacts to the model (it does not mutate the workspace). Python and
+Bash use the path-based contract instead: `/input.json`, `/context.json`,
+bundled resources under `/skill`, and `/output` for artifacts.
 
 Passing `workspaceInstance` gives scripts read-only workspace access by default.
 Network access, tools, and workspace writes are opt-in. The default timeout is
@@ -1028,13 +1033,13 @@ Think's workspace is a `Workspace` from [`@cloudflare/computer`](https://github.
 - Install `@cloudflare/computer`; it is a peer dependency. Import `Workspace` from it rather than from `@cloudflare/think`.
 - `workspace` is typed `ThinkWorkspace`, which needs only `workspace.fs`. `WorkspaceLike` is gone.
 - The default Workspace lives on the agent's own storage and has no execution backends. Override `workspace` with `new Workspace({ storage: this.ctx.storage, ... })` to add backends, mounts, or git.
-- Think writes its own files under `/workspace`: evicted media under `/workspace/attachments/evicted/`, fetched responses under `/workspace/fetched/`, and skills under `/workspace/.agents/skills`.
+- Think writes its own files under `/workspace`: evicted media under `/workspace/attachments/evicted/` and fetched responses under `/workspace/fetched/`. `skills.workspace()` reads skills from `/workspace/.agents/skills`.
 - The execute tool's `state` option and `state.*` namespace are removed. Pass `createAITools({ workspace: this.workspace })` as `tools` to give sandboxed code the workspace.
 - The workspace tools are `@cloudflare/computer`'s `createAITools`: `read`, `ls`, `find`, `grep`, `write`, `edit`, and `delete`, plus `exec` when the Workspace has backends. `list` is now `ls`. `exec` offers every backend the Workspace has.
 - `workspaceBash`, `createWorkspaceTools`, and `@cloudflare/think/tools/workspace` are removed, with no replacement. There is no in-process `bash` tool: add a backend to the Workspace to get `exec`. To change a built-in tool, return a same-name tool from `getTools()`; to hide tools for a turn, return `activeTools` from `beforeTurn`.
 - Every Think agent has `__getWorkspaceStub()`, so `getWorkspace(stub)` and the Worker shell backend can reach a Workspace it owns.
 - Image and PDF reads stored by the old `read` tool replay as an error asking the model to read the file again.
-- Agent Skills (`agents/skills`) accept only a Computer Workspace, for both projection and `skills.runner({ workspaceInstance })`. Relative paths in skill scripts resolve against `/workspace`.
+- Agent Skills (`agents/skills`) accept only a Computer Workspace, for both `skills.workspace()` and `skills.runner({ workspaceInstance })`. Relative paths in skill scripts resolve against `/workspace`.
 
 Files a Shell Workspace stored are not moved. [Migrating to `@cloudflare/computer`](../shell/migrating-to-computer.md) documents both storage schemas and a copy script.
 
@@ -1056,9 +1061,9 @@ Bundled with `@cloudflare/think`:
 | ---------------------- | ---------------------------------------- |
 | `@cloudflare/codemode` | Code execution for `createExecuteTool()` |
 
-The Agent Skills engine and its script runner live in
-[`agents/skills`](https://github.com/cloudflare/agents/blob/main/packages/agents/AGENTS.md) (so skill scripts pull
-`@cloudflare/worker-bundler` and `just-bash` through `agents`, not Think).
+The Agent Skills parser, sources, and script runner live in
+[`agents/skills`](https://github.com/cloudflare/agents/blob/main/packages/agents/AGENTS.md) (so the script runner pulls
+`just-bash` through `agents`, not Think).
 
 ## Docs
 

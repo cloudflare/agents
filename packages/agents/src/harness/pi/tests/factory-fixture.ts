@@ -12,7 +12,7 @@ import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
 import { setWakeTimingForTests } from "../harness";
 import { TEST_TIMING } from "./timing";
-import { fromManifest } from "../../../skills/manifest";
+import { manifest } from "../../../skills/manifest";
 import {
   createRegistry,
   Harness,
@@ -110,20 +110,15 @@ const sum: ToolRegistration<typeof Sum> = {
   }
 };
 
-const notes = fromManifest({
+const notes = manifest({
   id: "test-skills",
-  fingerprint: "v1",
   skills: [
     {
       name: "haiku",
       description: "Write haiku.",
       body: "Five, seven, five syllables.",
       resources: [
-        {
-          path: "examples.md",
-          kind: "reference",
-          content: "An old silent pond"
-        }
+        { path: "references/examples.md", content: "An old silent pond" }
       ]
     }
   ]
