@@ -15057,8 +15057,21 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     const clearGen = this._turnQueue.generation;
     const continuation = options?.continuation ?? false;
     const parentId = options?.parentId;
+    const leaf = this.messages.at(-1);
+    const continuationAssistant =
+      continuation && options?.extendLeafAssistant && leaf?.role === "assistant"
+        ? leaf
+        : undefined;
+    const assistantId = continuationAssistant?.id ?? crypto.randomUUID();
+    // A continuation's stored chunks carry no message id (`_alignStreamStartId`
+    // skips them), so record the id and how many parts the message already had.
+    // Orphan recovery then updates that one row instead of appending a copy.
     const streamId = this._startResumableStream(requestId, {
       continuation,
+      ...(continuation && { messageId: assistantId }),
+      ...(continuationAssistant !== undefined && {
+        basePartCount: continuationAssistant.parts.length
+      }),
       ...(parentId !== undefined && { parentMessageId: parentId })
     });
 
@@ -15069,14 +15082,9 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       );
     }
 
-    const leaf = this.messages.at(-1);
-    const continuationAssistant =
-      continuation && options?.extendLeafAssistant && leaf?.role === "assistant"
-        ? leaf
-        : undefined;
     const leafMetadata = continuationAssistant?.metadata;
     const accumulator = new StreamAccumulator({
-      messageId: continuationAssistant?.id ?? crypto.randomUUID(),
+      messageId: assistantId,
       continuation: continuationAssistant !== undefined,
       existingParts: continuationAssistant?.parts.map(settleInterruptedPart),
       existingMetadata:
@@ -19769,6 +19777,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     options?: {
       messageId?: string;
       parentMessageId?: string;
+      basePartCount?: number;
       continuation?: boolean;
     }
   ): string {
@@ -19855,6 +19864,13 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     return stream.getStreamParentMessageId?.(streamId) ?? undefined;
   }
 
+  private _orphanMessageId(streamId: string): string | undefined {
+    const stream = this._resumableStream as ResumableStream & {
+      getStreamMessageId?: (streamId: string) => string | null;
+    };
+    return stream.getStreamMessageId?.(streamId) ?? undefined;
+  }
+
   private async _persistOrphanedStream(streamId: string): Promise<void> {
     this._resumableStream.flushBuffer();
     const chunks = this._resumableStream.getStreamChunks(streamId);
@@ -19873,6 +19889,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     let persistedId: string | undefined;
     const store = this._orphanStore();
     const parentId = this._orphanParentId(streamId);
+    const baseCount =
+      (
+        this._resumableStream as ResumableStream & {
+          getStreamBasePartCount?: (streamId: string) => number;
+        }
+      ).getStreamBasePartCount?.(streamId) ?? 0;
     const wrote = await persistReconstructedOrphan(chunks, {
       store:
         parentId === undefined
@@ -19881,13 +19903,24 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               ...store,
               appendMessage: (message) => store.appendMessage(message, parentId)
             },
-      fallbackId: crypto.randomUUID(),
+      fallbackId: this._orphanMessageId(streamId) ?? crypto.randomUUID(),
       prepare: (message) => {
         const prepared = this._strippedForPersist(message);
         persistedId = prepared?.id;
         return prepared;
       },
-      merge: (_existing, incoming) => incoming
+      // A continuation's chunks rebuild only what came after the message's
+      // earlier parts, so keep those and replace the rest.
+      merge: (existing, incoming) =>
+        baseCount > 0
+          ? {
+              ...incoming,
+              parts: [
+                ...existing.parts.slice(0, baseCount).map(settleInterruptedPart),
+                ...incoming.parts
+              ]
+            }
+          : incoming
     });
     if (!wrote) return;
     const requestId =

@@ -105,6 +105,13 @@ type ChatStreamMetadata = {
    */
   parentMessageId?: string;
   /**
+   * How many parts the message this stream continues already held when the
+   * stream started. The stream's chunks reconstruct only what came after, so
+   * orphan recovery keeps that many leading parts of the existing row and
+   * replaces the rest, which makes recovering the same stream twice idempotent.
+   */
+  basePartCount?: number;
+  /**
    * Whether this stream is a continuation (appends to the last assistant
    * message rather than starting a new one). Live broadcast frames carry
    * `continuation: true`, and replay frames must too (#1733): without it a
@@ -540,6 +547,7 @@ export class ResumableStream {
     options: {
       messageId?: string;
       parentMessageId?: string;
+      basePartCount?: number;
       continuation?: boolean;
       originMessageIds?: string[];
     } = {}
@@ -565,6 +573,7 @@ export class ResumableStream {
     if (options.parentMessageId != null) {
       metadata.parentMessageId = options.parentMessageId;
     }
+    if (options.basePartCount) metadata.basePartCount = options.basePartCount;
     if (this._activeIsContinuation) metadata.isContinuation = 1;
     if (seqBase > 0) metadata.seqBase = seqBase;
     if (options.originMessageIds?.length) {
@@ -598,6 +607,13 @@ export class ResumableStream {
     const row = this.ops.getStream(streamId);
     if (!row) return null;
     return parseChatMetadata(row)?.messageId ?? null;
+  }
+
+  /** Parts the continued message already held when the stream started. */
+  getStreamBasePartCount(streamId: string): number {
+    const row = this.ops.getStream(streamId);
+    if (!row) return 0;
+    return parseChatMetadata(row)?.basePartCount ?? 0;
   }
 
   /**

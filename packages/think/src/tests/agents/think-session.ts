@@ -8219,6 +8219,53 @@ export class ThinkProgrammaticTestAgent extends Think {
     await internals._persistOrphanedStream(streamId);
   }
 
+  /**
+   * Persist a recovery continuation's orphaned chunks (no `start.messageId`,
+   * as `_alignStreamStartId` leaves them) `times` times onto a leaf assistant
+   * message that already holds one part.
+   */
+  async persistContinuationOrphanForTest(
+    requestId: string,
+    leafId: string,
+    times: number
+  ): Promise<void> {
+    await this.session.appendMessage({
+      id: leafId,
+      role: "assistant",
+      parts: [{ type: "text", text: "earlier", state: "done" }]
+    } as UIMessage);
+    const internals = this as unknown as {
+      _resumableStream: {
+        start(
+          requestId: string,
+          options: {
+            messageId?: string;
+            basePartCount?: number;
+            continuation?: boolean;
+          }
+        ): string;
+        storeChunk(streamId: string, body: string): unknown;
+      };
+      _persistOrphanedStream(streamId: string): Promise<void>;
+    };
+    const streamId = internals._resumableStream.start(requestId, {
+      messageId: leafId,
+      basePartCount: 1,
+      continuation: true
+    });
+    for (const chunk of [
+      { type: "start" },
+      { type: "text-start", id: "t2" },
+      { type: "text-delta", id: "t2", delta: "continued" },
+      { type: "text-end", id: "t2" }
+    ]) {
+      internals._resumableStream.storeChunk(streamId, JSON.stringify(chunk));
+    }
+    for (let i = 0; i < times; i++) {
+      await internals._persistOrphanedStream(streamId);
+    }
+  }
+
   async continueRecoveredChatForTest(requestId: string): Promise<void> {
     await this._chatRecoveryContinueDetached({
       recoveredRequestId: requestId
