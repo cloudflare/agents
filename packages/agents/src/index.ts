@@ -6152,9 +6152,14 @@ export class Agent<
   }
 
   private _hasOutstandingDetachedRuns(): boolean {
+    // A given-up run whose child was torn down is settled (#2768), unless a
+    // finish was already claimed: then its callback may still need a retry.
+    // `IS 0` keeps the predicate null-safe (a finish attempt clears the flag).
     const rows = this.sql<{ n: number }>`
       SELECT COUNT(*) AS n FROM cf_agent_tool_runs
       WHERE detached = 1 AND finish_delivered_at IS NULL
+        AND NOT (give_up_delivered_at IS NOT NULL AND child_still_running IS 0
+                 AND finish_claimed_at IS NULL)
     `;
     return (rows[0]?.n ?? 0) > 0;
   }
@@ -6507,6 +6512,8 @@ export class Agent<
              give_up_delivered_at
       FROM cf_agent_tool_runs
       WHERE detached = 1 AND finish_delivered_at IS NULL
+        AND NOT (give_up_delivered_at IS NOT NULL AND child_still_running IS 0
+                 AND finish_claimed_at IS NULL)
       ORDER BY started_at ASC
     `;
 
@@ -6591,6 +6598,7 @@ export class Agent<
         row.give_up_delivered_at === null
       ) {
         let childTornDown = false;
+        let afterCancel: AgentToolRunInspection | null = null;
         try {
           const child = await this._cf_resolveSubAgent(row.agent_type, runId);
           const adapter = this._asAgentToolChildAdapter(child);
@@ -6600,10 +6608,27 @@ export class Agent<
               ? "detached budget exceeded"
               : "detached run went silent past its no-progress window"
           );
+          // Cancelling an already-finished child is a no-op, so re-inspect: a
+          // child that completed between the inspection above and the cancel
+          // must have its real result delivered, not be sealed as torn down.
+          afterCancel = await adapter.inspectAgentToolRun(runId);
           childTornDown = true;
         } catch {
           // Could not confirm teardown; the child may complete anyway and the
           // finish slot (still open) will deliver the real result.
+        }
+        if (
+          afterCancel &&
+          (afterCancel.status === "completed" || afterCancel.status === "error")
+        ) {
+          await this._deliverDetachedTerminal(
+            runId,
+            "finish",
+            this._terminalResultFromInspection(row.agent_type, afterCancel),
+            { sequence: Date.now(), serialize: true },
+            afterCancel.completedAt
+          );
+          continue;
         }
         await this._deliverDetachedTerminal(
           runId,
