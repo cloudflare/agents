@@ -354,6 +354,10 @@ A server waiting for authorization keeps its link, across wakes too, until the u
 
 A request can need authorization again after the server is `ready`: a tool call that needs a scope the grant lacks (`403 insufficient_scope`), or a `401` whose token refresh fails. `callTool()`, `readResource()` and `getPrompt()` then throw `MCPAuthorizationRequiredError`. The server moves to `authenticating` and its `auth_url` is saved, so clients see the new link through `getMcpServers()` like at connect time. Send the user to `error.authUrl`; the normal OAuth callback completes the flow and reconnects. Retry the request when the server is `ready` again. Tools from `getAITools()` call `callTool()`, so their `execute` throws the same error. If no usable link was produced (for example, a custom OAuth provider that does not put a fresh `state` in each authorization URL, or a callback for this server is already being processed), the call throws the SDK's plain `UnauthorizedError` as before. `MCPAuthorizationRequiredError` extends `UnauthorizedError`, so existing `instanceof UnauthorizedError` checks keep matching.
 
+During a scope step-up the session keeps its current grant, so requests it already covers keep working while the user decides. If the user declines, the server goes back to `ready` on that grant, and the next request that needs the scope asks again.
+
+A request to a server that is waiting for its first authorization throws `MCPAuthorizationRequiredError` with the link it is waiting on.
+
 Calls for a `serverId` with no connection (never registered, removed, or still being restored) throw `MCPConnectionNotFoundError`.
 
 Re-authorization is limited, as the MCP authorization spec asks. If the user completes three authorizations for the same scopes within an hour and the server still asks for them (for example because the authorization server never grants a scope), the next challenge does not produce a link. The server moves to `failed` with an error naming the scopes, the request throws the SDK's `UnauthorizedError`, and the server stays failed until you call `reconnectMcpServer(id)`.

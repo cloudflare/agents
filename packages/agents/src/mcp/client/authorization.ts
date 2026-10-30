@@ -59,6 +59,18 @@ export class AuthorizationController {
    * that link in memory afterwards; it must never be shown again.
    */
   private readonly spentStates = new Map<string, string>();
+  /**
+   * Step-ups started on a live session, by server: the connection and the
+   * state it was in. The session keeps working on its current grant while
+   * the user decides, and goes back to that state if they decline.
+   */
+  private readonly liveStepUps = new Map<
+    string,
+    {
+      readonly conn: MCPClientConnection;
+      readonly stateBefore: MCPConnectionState;
+    }
+  >();
   private callbackConfig: MCPClientOAuthCallbackConfig | undefined;
 
   constructor(
@@ -178,9 +190,10 @@ export class AuthorizationController {
     if (provider?.authUrl && this.isSpent(id, provider.authUrl)) {
       return "The server still answers 401 after a completed authorization";
     }
-    return `OAuth configuration incomplete: missing ${
-      !provider?.authUrl ? "authUrl" : "redirectUrl"
-    }`;
+    if (!provider?.redirectUrl) {
+      return "The server requires authorization, but no OAuth callback is configured to ask the user. Pass callbackHost to addMcpServer(), or a callbackUrl when registering the server.";
+    }
+    return "OAuth configuration incomplete: the OAuth provider produced no authorization URL";
   }
 
   /** The link a waiting server was given: the live one, else the stored one. */
@@ -195,6 +208,30 @@ export class AuthorizationController {
   forget(id: string): void {
     this.ctx.store.clearAuthUrl(id);
     this.ctx.store.setAuthorizationRounds(id, undefined);
+    this.liveStepUps.delete(id);
+  }
+
+  private isLiveStepUp(id: string, conn: MCPClientConnection): boolean {
+    return this.liveStepUps.get(id)?.conn === conn;
+  }
+
+  /**
+   * The user declined a step-up: the session still holds its earlier grant,
+   * so go back to where it was instead of failing the server. The next
+   * request that needs the scope asks again.
+   */
+  private declineStepUp(
+    serverId: string,
+    conn: MCPClientConnection,
+    error: string
+  ): MCPOAuthCallbackResult {
+    const stepUp = this.liveStepUps.get(serverId);
+    this.liveStepUps.delete(serverId);
+    this.ctx.store.clearAuthUrl(serverId);
+    conn.connectionState = stepUp?.stateBefore ?? MCPConnectionState.READY;
+    conn.connectionError = null;
+    this.ctx.stateChanged();
+    return { serverId, authSuccess: false, authError: error };
   }
 
   private isSpent(id: string, authUrl: string): boolean {
@@ -221,6 +258,19 @@ export class AuthorizationController {
   ): Promise<T> {
     const conn = this.ctx.connections[serverId];
     if (!conn) throw new MCPConnectionNotFoundError(serverId);
+    // Waiting for authorization with no session to fall back on: the
+    // request cannot run, and the answer is the link the server waits on.
+    if (
+      conn.connectionState === MCPConnectionState.AUTHENTICATING &&
+      !this.isLiveStepUp(serverId, conn)
+    ) {
+      const authUrl = this.pendingLink(serverId, conn);
+      if (authUrl) {
+        throw new MCPAuthorizationRequiredError(serverId, authUrl, {
+          clientId: conn.options.transport.authProvider?.clientId
+        });
+      }
+    }
     const authUrlBefore = conn.options.transport.authProvider?.authUrl;
     try {
       return await request(conn);
@@ -277,6 +327,9 @@ export class AuthorizationController {
     const auth = this.enterAuthenticating(serverId, conn);
     // An exhausted server is now failed; the caller gets the original error.
     if (auth._tag !== "authenticating") return undefined;
+    if (stateBefore !== MCPConnectionState.AUTHENTICATING) {
+      this.liveStepUps.set(serverId, { conn, stateBefore });
+    }
     return new MCPAuthorizationRequiredError(serverId, auth.authUrl, {
       clientId: auth.clientId,
       cause: error
@@ -405,11 +458,19 @@ export class AuthorizationController {
         );
       }
 
+      // The user declined a step-up: the session keeps its current grant.
+      const declined = params.get("error");
+      if (declined && this.isLiveStepUp(serverId, conn)) {
+        await consumeStaleState(serverId, provider, state);
+        return this.declineStepUp(serverId, conn, declined);
+      }
+
       // A genuine callback can recover a flow that previously failed.
       conn.connectionState = MCPConnectionState.CONNECTING;
       // Forget the link before redeeming it. If the isolate dies during the
       // exchange, a later wake reconnects instead of restoring a spent link.
       this.ctx.store.clearAuthUrl(serverId);
+      this.liveStepUps.delete(serverId);
       this.spentStates.set(serverId, state);
       await provider.consumeState(state);
       await exchangeAuthorizationCode(serverId, conn, provider, state, params);
@@ -444,6 +505,7 @@ export class AuthorizationController {
    * Recorded, so a later wake does not start another flow nobody asked for.
    */
   private fail(serverId: string, error: string): MCPOAuthCallbackResult {
+    this.liveStepUps.delete(serverId);
     if (this.ctx.store.get(serverId)) {
       this.status.stop(serverId, "authorization-failed", error);
     } else if (this.ctx.connections[serverId]) {

@@ -81,6 +81,63 @@ describe("A user clicking authorization links", () => {
   });
 });
 
+describe("A user who does not authorize", () => {
+  it("keeps the session on its current grant after declining a step-up, and is asked again on the next request that needs it", async () => {
+    const agent = await newAgent();
+    const id = await connectAuthorized(agent, server, { scope: READ_SCOPE });
+    const asked = await agent.callServerTool(id, "write");
+    if (asked.ok || !asked.authUrl) throw new Error("expected a link");
+
+    expect(await followCallback(server.deny(asked.authUrl))).toEqual({
+      authorized: false,
+      error: "access_denied"
+    });
+    await agent.settle();
+    expect(await agent.server(id)).toEqual({
+      state: "ready",
+      auth_url: null,
+      error: null
+    });
+    expect(await agent.callServerTool(id, "read")).toEqual({
+      ok: true,
+      text: "read it"
+    });
+
+    const again = await agent.callServerTool(id, "write");
+    expect(again).toMatchObject({ authorizationRequired: true });
+    if (again.ok || !again.authUrl) throw new Error("expected a link");
+    await followCallback(server.authorize(again.authUrl));
+    await agent.settle();
+    expect(await agent.callServerTool(id, "write")).toMatchObject({
+      ok: true
+    });
+  });
+
+  it("answers a request made before the first authorization with the link the server waits on", async () => {
+    const agent = await newAgent();
+    const added = await agent.connectServer(MCP_URL, {
+      callbackHost: CLIENT_ORIGIN
+    });
+    if (added.state !== "authenticating") throw new Error("expected a link");
+
+    expect(await agent.callServerTool(added.id, "read")).toMatchObject({
+      ok: false,
+      authorizationRequired: true,
+      authUrl: added.authUrl
+    });
+    expect((await agent.server(added.id))?.auth_url).toBe(added.authUrl);
+  });
+
+  it("explains how to let the user authorize when no callback is configured", async () => {
+    const agent = await newAgent();
+    const added = await agent.connectServer(MCP_URL, {});
+    expect(added.state).toBe("error");
+    if (added.state !== "error") throw new Error("unreachable");
+    expect(added.message).toContain("requires authorization");
+    expect(added.message).toContain("callbackHost");
+  });
+});
+
 describe("A user pressing Reconnect", () => {
   it("reconnects a ready server and keeps it ready", async () => {
     const agent = await newAgent();
