@@ -533,7 +533,7 @@ export class OpenCodeHarness extends LifecycleCapability {
           case "queued":
           case "running":
             await this.#call(() =>
-              opencode.sessions.wait(
+              opencode.experimental.session.wait(
                 { sessionID: session },
                 signal ? { signal } : undefined
               )
@@ -667,7 +667,7 @@ export class OpenCodeHarness extends LifecycleCapability {
     const timer = setTimeout(() => budget.abort(), this.#waitBudgetMs);
     try {
       // Cancelling the wait never cancels OpenCode's work.
-      await opencode.sessions.wait(
+      await opencode.experimental.session.wait(
         { sessionID: session },
         { signal: budget.signal }
       );
@@ -1239,7 +1239,7 @@ export class OpenCodeSession {
     const release = this.#harness.lease();
     try {
       const opencode = await this.#harness.opencode();
-      yield* opencode.sessions.log(
+      yield* opencode.experimental.session.log(
         {
           sessionID: this.id,
           ...(options.after === undefined ? {} : { after: options.after }),
