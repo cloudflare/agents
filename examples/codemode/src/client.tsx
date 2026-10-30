@@ -33,6 +33,7 @@ import {
   PlugsConnectedIcon,
   PlusIcon,
   CubeIcon,
+  ArrowClockwiseIcon,
   SpinnerGapIcon,
   SignInIcon,
   MoonIcon,
@@ -246,6 +247,7 @@ function SettingsPanel({
   mcpState,
   onAddMcp,
   onRemoveMcp,
+  onReconnectMcp,
   onRefreshMcpTools,
   mcpLoading
 }: {
@@ -254,6 +256,7 @@ function SettingsPanel({
   mcpState: MCPServersState;
   onAddMcp: (url: string, name?: string) => Promise<void>;
   onRemoveMcp: (serverId: string) => Promise<void>;
+  onReconnectMcp: (serverId: string) => Promise<void>;
   onRefreshMcpTools: () => void;
   mcpLoading: boolean;
 }) {
@@ -412,6 +415,16 @@ function SettingsPanel({
                                   Authorize
                                 </Button>
                               )}
+                            {server.state === "failed" && (
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                icon={<ArrowClockwiseIcon size={12} />}
+                                onClick={() => onReconnectMcp(serverId)}
+                              >
+                                Reconnect
+                              </Button>
+                            )}
                             {tools.length > 0 && (
                               <Badge
                                 variant="secondary"
@@ -595,6 +608,20 @@ function App() {
     async (url: string, name?: string) => {
       const result = (await agent.call("addMcp", [url, name])) as {
         id: string;
+        state: string;
+        authUrl?: string;
+      };
+      if (result.state === "authenticating" && result.authUrl) {
+        window.open(result.authUrl, "oauth", "width=600,height=800");
+      }
+      await refreshMcpTools();
+    },
+    [agent, refreshMcpTools]
+  );
+
+  const handleReconnectMcp = useCallback(
+    async (serverId: string) => {
+      const result = (await agent.call("reconnectMcp", [serverId])) as {
         state: string;
         authUrl?: string;
       };
@@ -802,6 +829,7 @@ function App() {
           mcpState={mcpState}
           onAddMcp={handleAddMcp}
           onRemoveMcp={handleRemoveMcp}
+          onReconnectMcp={handleReconnectMcp}
           onRefreshMcpTools={refreshMcpTools}
           mcpLoading={mcpLoading}
         />
