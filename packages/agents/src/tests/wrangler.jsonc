@@ -295,6 +295,26 @@
         "name": "TestNativeRpcAgent"
       },
       {
+        "class_name": "RetryableBaseAgent",
+        "name": "RetryableBaseAgent"
+      },
+      {
+        "class_name": "RetryableChildAgent",
+        "name": "RetryableChildAgent"
+      },
+      {
+        "class_name": "LateRetryableChildAgent",
+        "name": "LateRetryableChildAgent"
+      },
+      {
+        "class_name": "RetryablePlainObject",
+        "name": "RetryablePlainObject"
+      },
+      {
+        "class_name": "NonRetryablePlainObject",
+        "name": "NonRetryablePlainObject"
+      },
+      {
         "class_name": "RoutingOwnerAgent",
         "name": "RoutingOwnerAgent"
       },
@@ -530,6 +550,11 @@
         "TestSessionAgent",
         "TestWaitConnectionsAgent",
         "TestNativeRpcAgent",
+        "RetryableBaseAgent",
+        "RetryableChildAgent",
+        "LateRetryableChildAgent",
+        "RetryablePlainObject",
+        "NonRetryablePlainObject",
         "RoutingOwnerAgent",
         "RoutedChatAgent",
         "TestSubAgentParent",
