@@ -3,4 +3,4 @@
 "agents": patch
 ---
 
-Fix Think persisting a recovered interrupted continuation as a new assistant message each time it was recovered. A continuation stream now records the id of the message it continues and how many parts that message already held, so orphan recovery updates that one message instead of appending a copy with a duplicate tool call.
+Fix Think recovering an interrupted continuation as a duplicate assistant message; recovery now updates the continued message, keeping its earlier parts and metadata. See [Chat Recovery](https://github.com/cloudflare/agents/blob/main/docs/think/index.md#chat-recovery).

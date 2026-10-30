@@ -8227,12 +8227,18 @@ export class ThinkProgrammaticTestAgent extends Think {
   async persistContinuationOrphanForTest(
     requestId: string,
     leafId: string,
-    times: number
+    times: number,
+    options: {
+      startMessageId?: string;
+      leafMetadata?: Record<string, unknown>;
+      startMetadata?: Record<string, unknown>;
+    } = {}
   ): Promise<void> {
     await this.session.appendMessage({
       id: leafId,
       role: "assistant",
-      parts: [{ type: "text", text: "earlier", state: "done" }]
+      parts: [{ type: "text", text: "earlier", state: "done" }],
+      ...(options.leafMetadata && { metadata: options.leafMetadata })
     } as UIMessage);
     const internals = this as unknown as {
       _resumableStream: {
@@ -8254,7 +8260,11 @@ export class ThinkProgrammaticTestAgent extends Think {
       continuation: true
     });
     for (const chunk of [
-      { type: "start" },
+      {
+        type: "start",
+        ...(options.startMessageId && { messageId: options.startMessageId }),
+        ...(options.startMetadata && { messageMetadata: options.startMetadata })
+      },
       { type: "text-start", id: "t2" },
       { type: "text-delta", id: "t2", delta: "continued" },
       { type: "text-end", id: "t2" }

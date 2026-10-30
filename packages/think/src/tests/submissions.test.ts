@@ -157,7 +157,12 @@ type ThinkSubmissionTestStub = {
   persistContinuationOrphanForTest(
     requestId: string,
     leafId: string,
-    times: number
+    times: number,
+    options?: {
+      startMessageId?: string;
+      leafMetadata?: Record<string, unknown>;
+      startMetadata?: Record<string, unknown>;
+    }
   ): Promise<void>;
   continueRecoveredChatForTest(requestId: string): Promise<void>;
   continueRecoveredChatCatchingForTest(
@@ -223,7 +228,12 @@ type ThinkSubmissionTestStub = {
     }>
   >;
   getStoredMessages(): Promise<
-    Array<{ id: string; role: string; parts?: unknown[] }>
+    Array<{
+      id: string;
+      role: string;
+      parts?: unknown[];
+      metadata?: unknown;
+    }>
   >;
   getResponseLog(): Promise<Array<{ status: string; requestId: string }>>;
   getSubmissionLog(): Promise<ThinkSubmissionInspection[]>;
@@ -2105,8 +2115,43 @@ describe("Think durable submissions", () => {
     expect(assistants).toHaveLength(1);
     expect(assistants[0].id).toBe("leaf-1");
     expect(
-      assistants[0].parts.map((part) => (part as { text: string }).text)
+      (assistants[0].parts ?? []).map((part) => (part as { text: string }).text)
     ).toEqual(["earlier", "continued"]);
+  });
+
+  it("recovers an interrupted continuation into the leaf when its start chunk carries a provider id", async () => {
+    const agent = await freshAgent();
+
+    await agent.persistContinuationOrphanForTest("req-cont-id", "leaf-1", 2, {
+      startMessageId: "provider-2"
+    });
+
+    const assistants = (await agent.getStoredMessages()).filter(
+      (message) => message.role === "assistant"
+    );
+    expect(assistants.map((message) => message.id)).toEqual(["leaf-1"]);
+    expect(
+      (assistants[0].parts ?? []).map((part) => (part as { text: string }).text)
+    ).toEqual(["earlier", "continued"]);
+  });
+
+  it("keeps the continued message's metadata when recovering an interrupted continuation", async () => {
+    const agent = await freshAgent();
+
+    await agent.persistContinuationOrphanForTest("req-cont-meta", "leaf-1", 1, {
+      leafMetadata: { createdAt: 1, continuation: false },
+      startMetadata: { resumed: true }
+    });
+
+    const assistants = (await agent.getStoredMessages()).filter(
+      (message) => message.role === "assistant"
+    );
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0].metadata).toEqual({
+      createdAt: 1,
+      continuation: false,
+      resumed: true
+    });
   });
 
   it("completes recovered chat fiber submissions through scheduled continuation", async () => {

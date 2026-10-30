@@ -19895,6 +19895,12 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
           getStreamBasePartCount?: (streamId: string) => number;
         }
       ).getStreamBasePartCount?.(streamId) ?? 0;
+    const recordedId = this._orphanMessageId(streamId);
+    // A stream that extends a leaf persists under the leaf's id even when its
+    // `start` chunk carries a provider id: the live accumulator ignores that id
+    // for a continuation, so recovery must too.
+    const extendsLeafId =
+      baseCount > 0 && recordedId !== undefined ? recordedId : undefined;
     const wrote = await persistReconstructedOrphan(chunks, {
       store:
         parentId === undefined
@@ -19903,20 +19909,34 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
               ...store,
               appendMessage: (message) => store.appendMessage(message, parentId)
             },
-      fallbackId: this._orphanMessageId(streamId) ?? crypto.randomUUID(),
+      fallbackId: recordedId ?? crypto.randomUUID(),
       prepare: (message) => {
-        const prepared = this._strippedForPersist(message);
+        const prepared = this._strippedForPersist(
+          extendsLeafId === undefined
+            ? message
+            : { ...message, id: extendsLeafId }
+        );
         persistedId = prepared?.id;
         return prepared;
       },
       // A continuation's chunks rebuild only what came after the message's
-      // earlier parts, so keep those and replace the rest.
+      // earlier parts and the metadata keys it added, so keep the earlier
+      // parts and metadata and overlay the continuation's.
       merge: (existing, incoming) =>
         baseCount > 0
           ? {
               ...incoming,
+              ...((existing.metadata !== undefined ||
+                incoming.metadata !== undefined) && {
+                metadata: {
+                  ...(existing.metadata as Record<string, unknown> | undefined),
+                  ...(incoming.metadata as Record<string, unknown> | undefined)
+                }
+              }),
               parts: [
-                ...existing.parts.slice(0, baseCount).map(settleInterruptedPart),
+                ...existing.parts
+                  .slice(0, baseCount)
+                  .map(settleInterruptedPart),
                 ...incoming.parts
               ]
             }
