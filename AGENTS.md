@@ -135,6 +135,8 @@ Test locations:
 
 Each test directory has its own `vitest.config.ts` and (for Workers tests) a `wrangler.jsonc`.
 
+Integration tests fake HTTP servers with [msw](https://mswjs.io), not by mocking `globalThis.fetch` or injecting a fake `fetch`. See "Faking HTTP servers in integration tests" in `packages/agents/AGENTS.md`.
+
 For a repo-wide rollup of **what proves feature X works, at which layer, and which CI run guards it** — plus the tracked skip/quarantine debt — see [`design/test-coverage-matrix.md`](design/test-coverage-matrix.md).
 
 ## Contributing

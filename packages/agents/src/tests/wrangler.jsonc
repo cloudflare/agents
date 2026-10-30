@@ -150,6 +150,10 @@
         "name": "TestOAuthAgent"
       },
       {
+        "class_name": "McpIntegrationAgent",
+        "name": "McpIntegrationAgent"
+      },
+      {
         "class_name": "TestCustomOAuthAgent",
         "name": "TestCustomOAuthAgent"
       },
@@ -497,6 +501,7 @@
         "TestUserNotificationAgent",
         "TestRaceAgent",
         "TestOAuthAgent",
+        "McpIntegrationAgent",
         "TestCustomOAuthAgent",
         "TestMcpJurisdiction",
         "TestAlarmInitAgent",

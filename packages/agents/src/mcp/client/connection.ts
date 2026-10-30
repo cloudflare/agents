@@ -27,10 +27,12 @@ import {
   fetchMcpTools
 } from "./catalog";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
+import { AuthorizationTurns } from "./authorization-turns";
 import { createMcpSdkClient, normalizeMcpClientOptions } from "./runtime";
 export { elicitationCapabilitiesFromHandlers } from "./runtime";
 import {
   isTransportNotImplemented,
+  isAuthorizationRefused,
   isUnauthorized,
   toErrorMessage
 } from "./errors";
@@ -135,6 +137,15 @@ export class MCPClientConnection {
     | SSEClientTransport
     | RPCClientTransport;
   private _restoredListSubscription?: McpSubscription;
+  /**
+   * Whether the last connect or discovery failed because authorization was
+   * refused in a way retrying cannot change: a 403 from the server, or an
+   * OAuth error such as `invalid_target` from the authorization server. The
+   * manager stops reconnecting such a server instead of asking again.
+   */
+  accessRefused = false;
+  /** Keeps concurrent `401`s from starting interleaved OAuth flows. */
+  private readonly _authorizationTurns = new AuthorizationTurns();
   prompts: Prompt[] = [];
   resources: Resource[] = [];
   resourceTemplates: ResourceTemplate[] = [];
@@ -265,6 +276,9 @@ export class MCPClientConnection {
 
     // Set the connection state
     this.connectionState = res.state;
+    this.accessRefused =
+      res.state === MCPConnectionState.FAILED &&
+      isAuthorizationRefused(res.error);
 
     // Handle the result and emit appropriate events
     if (res.state === MCPConnectionState.CONNECTED && res.transport) {
@@ -620,6 +634,7 @@ export class MCPClientConnection {
       this.connectionState = isUnauthorized(e)
         ? MCPConnectionState.AUTHENTICATING
         : MCPConnectionState.CONNECTED;
+      this.accessRefused = isAuthorizationRefused(e);
 
       const error = e instanceof Error ? e.message : String(e);
       // A restored streamable HTTP session rejected with 404 must be
@@ -898,14 +913,22 @@ export class MCPClientConnection {
   getTransport(transportType: BaseTransportType) {
     switch (transportType) {
       case "streamable-http":
-        return new StreamableHTTPClientTransport(
-          this.url,
-          this.options.transport as StreamableHTTPClientTransportOptions
+        return this.withAuthorizationTurns(
+          new StreamableHTTPClientTransport(
+            this.url,
+            this.authorizationTurnOptions(
+              this.options.transport as StreamableHTTPClientTransportOptions
+            )
+          )
         );
       case "sse":
-        return new SSEClientTransport(
-          this.url,
-          this.options.transport as SSEClientTransportOptions
+        return this.withAuthorizationTurns(
+          new SSEClientTransport(
+            this.url,
+            this.authorizationTurnOptions(
+              this.options.transport as SSEClientTransportOptions
+            )
+          )
         );
       case "rpc":
         return new RPCClientTransport(
@@ -914,6 +937,30 @@ export class MCPClientConnection {
       default:
         throw new Error(`Unsupported transport type: ${transportType}`);
     }
+  }
+
+  /**
+   * Take an HTTP transport's OAuth flows one at a time: a `401` waits for the
+   * authorization an earlier one started, so concurrent requests share one
+   * client registration and one pending link.
+   */
+  /** Transport options whose `fetch` records the token each 401 carried. */
+  private authorizationTurnOptions<
+    T extends StreamableHTTPClientTransportOptions | SSEClientTransportOptions
+  >(options: T): T {
+    if (!this.options.transport.authProvider) return options;
+    return {
+      ...options,
+      fetch: this._authorizationTurns.wrapFetch(options.fetch)
+    };
+  }
+
+  private withAuthorizationTurns<T extends object>(transport: T): T {
+    const { authProvider } = this.options.transport;
+    if (authProvider) {
+      this._authorizationTurns.wrapTransport(transport, authProvider);
+    }
+    return transport;
   }
 
   private async tryConnect(
