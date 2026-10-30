@@ -60,6 +60,15 @@ export class ChatAgent extends AIChatAgent {
     return await this.addMcpServer(name, url);
   }
 
+  /**
+   * Try a failed server again: forgets why it stopped and connects now,
+   * returning a new authorization link if the server needs one.
+   */
+  @callable()
+  async reconnectServer(serverId: string) {
+    return await this.reconnectMcpServer(serverId);
+  }
+
   @callable()
   async removeServer(serverId: string) {
     await this.removeMcpServer(serverId);

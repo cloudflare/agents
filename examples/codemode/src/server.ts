@@ -58,6 +58,11 @@ export class Codemode extends AIChatAgent<Env> {
     }));
   }
 
+  @callable({ description: "Try a failed MCP server again" })
+  async reconnectMcp(serverId: string) {
+    return await this.reconnectMcpServer(serverId);
+  }
+
   @callable({ description: "Remove an MCP server" })
   async removeMcp(serverId: string) {
     await this.removeMcpServer(serverId);
