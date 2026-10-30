@@ -428,13 +428,18 @@ function App() {
   };
 
   const handleReconnect = async (serverId: string) => {
-    const result = (await agent.call("reconnectServer", [serverId])) as {
-      state: string;
-      authUrl?: string;
-    };
-    // The server may need the user to authorize again.
-    if (result.state === "authenticating" && result.authUrl) {
-      openPopup(result.authUrl);
+    try {
+      const result = (await agent.call("reconnectServer", [serverId])) as {
+        state: string;
+        authUrl?: string;
+      };
+      // The server may need the user to authorize again.
+      if (result.state === "authenticating" && result.authUrl) {
+        openPopup(result.authUrl);
+      }
+    } catch (e) {
+      // Still failed: the server's error shows from the MCP state broadcast.
+      console.error("Failed to reconnect MCP server:", e);
     }
   };
 

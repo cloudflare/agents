@@ -18,8 +18,8 @@ const codeSections: CodeSection[] = [
     title: "Connect to OAuth-protected MCP servers",
     description:
       "When an MCP server requires OAuth, addMcpServer returns the link to send the user to. The agent finishes the flow on its /callback endpoint and every connected client sees the server move to ready.",
-    code: `// Server: add the server from a callable. Calling it again returns the
-// link still waiting, or reconnects a server that isn't connected.
+    code: `// Server: add the server from a callable. Calling it again returns its
+// state as is: the link still waiting, or the failure until reconnect().
 @callable()
 async connect(url: string) {
   return this.addMcpServer("oauth-server", url, { id: "oauth-server" });

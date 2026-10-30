@@ -9,7 +9,7 @@ An Agent that acts as an MCP **client** — dynamically connects to remote MCP s
 - **`this.mcp.configureElicitationHandlers`** — handles both Stateless Elicitation (`input_required` through MRTR) and Legacy Elicitation (pushed `elicitation/create`); the Agent broadcasts requests to the browser and the human's answer resolves the pending operation via a `@callable` method
 - **OAuth popup flow** — `configureOAuthCallback` with a custom handler that closes the popup after auth
 - **Re-authorization during a session** — a tool call that needs the user to authorize again (a scope step-up, or a token that can no longer be refreshed) catches `MCPAuthorizationRequiredError` and opens the new link
-- **`reconnectMcpServer`** — a "Reconnect" button for a server that stopped. Adding the server again also reconnects it, except when it stopped for a reason only a person can fix (authorization refused or denied, the step-up limit)
+- **`reconnectMcpServer`** — a "Reconnect" button for a failed server, or for a new authorization link. Adding the server again only reports its current state; nothing retries a failed server on its own
 
 ## Running
 
