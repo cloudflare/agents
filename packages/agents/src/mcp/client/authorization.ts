@@ -71,6 +71,11 @@ export class AuthorizationController {
       readonly stateBefore: MCPConnectionState;
     }
   >();
+  /**
+   * Servers whose declined step-up should reconnect on the grant they still
+   * hold, because the session it ran on is gone (the object woke since).
+   */
+  private readonly resumeAfterDecline = new Set<string>();
   private callbackConfig: MCPClientOAuthCallbackConfig | undefined;
 
   constructor(
@@ -209,6 +214,11 @@ export class AuthorizationController {
     this.ctx.store.clearAuthUrl(id);
     this.ctx.store.setAuthorizationRounds(id, undefined);
     this.liveStepUps.delete(id);
+  }
+
+  /** Whether a declined callback left this server to reconnect on its grant. */
+  takeResumeAfterDecline(id: string): boolean {
+    return this.resumeAfterDecline.delete(id);
   }
 
   private isLiveStepUp(id: string, conn: MCPClientConnection): boolean {
@@ -459,10 +469,21 @@ export class AuthorizationController {
       }
 
       // The user declined a step-up: the session keeps its current grant.
+      // Without a live session (the object woke since) a grant the server
+      // still holds means the same, so reconnect on it.
       const declined = params.get("error");
       if (declined && this.isLiveStepUp(serverId, conn)) {
         await consumeStaleState(serverId, provider, state);
         return this.declineStepUp(serverId, conn, declined);
+      }
+      if (declined && (await hasTokens(provider))) {
+        await consumeStaleState(serverId, provider, state);
+        this.ctx.store.clearAuthUrl(serverId);
+        conn.connectionState = MCPConnectionState.CONNECTING;
+        conn.connectionError = null;
+        this.resumeAfterDecline.add(serverId);
+        this.ctx.stateChanged();
+        return { serverId, authSuccess: false, authError: declined };
       }
 
       // A genuine callback can recover a flow that previously failed.
@@ -476,8 +497,13 @@ export class AuthorizationController {
       await exchangeAuthorizationCode(serverId, conn, provider, state, params);
       if (this.ctx.connections[serverId] !== conn) {
         // Removed while the code was exchanged: the tokens just saved
-        // outlived removeServer's cleanup, so clear them again.
-        await this.clearStorage(serverId, provider);
+        // outlived removeServer's cleanup, so clear them again. A server
+        // added again under the same id keeps its own pending flow.
+        if (this.ctx.connections[serverId]) {
+          await provider.invalidateCredentials?.("tokens");
+        } else {
+          await this.clearStorage(serverId, provider);
+        }
         return removedDuringAuthorization(serverId);
       }
       this.status.saveSession(serverId, conn);
@@ -568,6 +594,15 @@ function removedDuringAuthorization(serverId: string): MCPOAuthCallbackResult {
     authSuccess: false,
     authError: `Server ${serverId} was removed during authorization`
   };
+}
+
+/** Whether the provider still holds a grant for this server. */
+async function hasTokens(provider: AgentMcpOAuthProvider): Promise<boolean> {
+  try {
+    return (await provider.tokens()) !== undefined;
+  } catch {
+    return false;
+  }
 }
 
 /** Whether a link's `state` can still be redeemed. */

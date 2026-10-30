@@ -100,20 +100,28 @@ describe("MCP connection work in an Agent", () => {
     await waitingAtServer(server);
 
     await agent.remove("files");
-    const second = await agent.connectServer(MCP_URL, {
+    // Adding it again waits for the old exchange to finish.
+    const adding = agent.connectServer(MCP_URL, {
       callbackHost: CLIENT_ORIGIN,
       id: "files"
     });
-    if (second.state !== "authenticating") throw new Error("expected a link");
 
     release();
     expect(await callback).toMatchObject({ authorized: false });
+    const second = await adding;
+    if (second.state !== "authenticating") throw new Error("expected a link");
     await agent.settle();
 
     expect(await agent.server("files")).toMatchObject({
       state: "authenticating",
       auth_url: second.authUrl
     });
+    // The old exchange left the new flow intact: its link completes.
+    expect(await followCallback(server.authorize(second.authUrl))).toEqual({
+      authorized: true
+    });
+    await agent.settle();
+    expect((await agent.server("files"))?.state).toBe("ready");
   });
 
   it("leaves a server re-added under the same id alone when the old code exchange fails late", async () => {
@@ -128,15 +136,16 @@ describe("MCP connection work in an Agent", () => {
     const callback = followCallback(server.authorize(first.authUrl));
     await waitingAtServer(server);
     await agent.remove("files");
-    const second = await agent.connectServer(MCP_URL, {
+    const adding = agent.connectServer(MCP_URL, {
       callbackHost: CLIENT_ORIGIN,
       id: "files"
     });
-    if (second.state !== "authenticating") throw new Error("expected a link");
 
     server.options.refuseCodes = true;
     release();
     expect(await callback).toMatchObject({ authorized: false });
+    const second = await adding;
+    if (second.state !== "authenticating") throw new Error("expected a link");
     await agent.settle();
 
     expect(await agent.server("files")).toMatchObject({

@@ -3,6 +3,7 @@ import {
   connectAuthorized,
   followCallback,
   newAgent,
+  restartAgent,
   useOAuthMcpServer
 } from "./harness";
 import { CLIENT_ORIGIN, MCP_URL, READ_SCOPE } from "./oauth-mcp-server";
@@ -110,6 +111,25 @@ describe("A user who does not authorize", () => {
     await agent.settle();
     expect(await agent.callServerTool(id, "write")).toMatchObject({
       ok: true
+    });
+  });
+
+  it("reconnects on its current grant when a step-up is declined after the agent woke", async () => {
+    const before = await newAgent();
+    const id = await connectAuthorized(before, server, { scope: READ_SCOPE });
+    const asked = await before.callServerTool(id, "write");
+    if (asked.ok || !asked.authUrl) throw new Error("expected a link");
+    const agent = await restartAgent(before);
+
+    await followCallback(server.deny(asked.authUrl));
+    await agent.settle();
+    expect(await agent.server(id)).toMatchObject({
+      state: "ready",
+      auth_url: null
+    });
+    expect(await agent.callServerTool(id, "read")).toEqual({
+      ok: true,
+      text: "read it"
     });
   });
 

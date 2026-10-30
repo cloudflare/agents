@@ -102,13 +102,14 @@ export class ServerLanes {
   }
 
   /**
-   * Drop a server's queue: work still waiting rejects with
-   * {@link ServerLaneCancelledError}, work already running keeps running,
-   * and later work no longer queues behind either.
+   * Cancel a server's queue: work still waiting rejects with
+   * {@link ServerLaneCancelledError}, and work already running keeps
+   * running. Later work for the same id (a server added again) still waits
+   * for that running work, so a late OAuth exchange cannot write over the
+   * new server's flow.
    */
   forget(serverId: string): void {
     this.#generations.set(serverId, this.#generation(serverId) + 1);
-    this.#tails.delete(serverId);
   }
 
   /** Drop every server's queue, as {@link ServerLanes.forget} does for one. */
