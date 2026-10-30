@@ -10,6 +10,7 @@ import {
   PoweredByCloudflare
 } from "@cloudflare/kumo";
 import {
+  ArrowClockwiseIcon,
   PlusIcon,
   PlugIcon,
   PlugsConnectedIcon,
@@ -27,6 +28,19 @@ import type { MCPServersState } from "agents";
 import { nanoid } from "nanoid";
 import type { PendingElicitation } from "./server";
 import "./styles.css";
+
+/** The `callTool` result when the server needs the user to authorize. */
+function needsAuthorization(
+  value: unknown
+): value is { authorizationRequired: true; authUrl: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "authorizationRequired" in value &&
+    "authUrl" in value &&
+    typeof value.authUrl === "string"
+  );
+}
 
 let sessionId = localStorage.getItem("sessionId");
 if (!sessionId) {
@@ -367,11 +381,24 @@ function App() {
     await agent.call("respondToElicitation", [id, result]);
   };
 
-  const runTool = (
+  // A tool that needs the user to authorize again returns the link; open
+  // it so the user can approve, then run the tool again.
+  const runTool = async (
     serverId: string,
     name: string,
     args: Record<string, unknown>
-  ) => agent.call("callTool", [serverId, name, args]);
+  ) => {
+    const result: unknown = await agent.call("callTool", [
+      serverId,
+      name,
+      args
+    ]);
+    if (needsAuthorization(result)) {
+      openPopup(result.authUrl);
+      return "Authorization needed. Approve it in the popup, then run the tool again.";
+    }
+    return result;
+  };
 
   function openPopup(authUrl: string) {
     window.open(
@@ -398,6 +425,17 @@ function App() {
 
   const handleDisconnect = async (serverId: string) => {
     await agent.call("disconnectServer", [serverId]);
+  };
+
+  const handleReconnect = async (serverId: string) => {
+    const result = (await agent.call("reconnectServer", [serverId])) as {
+      state: string;
+      authUrl?: string;
+    };
+    // The server may need the user to authorize again.
+    if (result.state === "authenticating" && result.authUrl) {
+      openPopup(result.authUrl);
+    }
   };
 
   const serverEntries = Object.entries(mcpState.servers);
@@ -557,6 +595,16 @@ function App() {
                               Authorize
                             </Button>
                           )}
+                        {server.state === "failed" && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            icon={<ArrowClockwiseIcon size={14} />}
+                            onClick={() => handleReconnect(id)}
+                          >
+                            Reconnect
+                          </Button>
+                        )}
                         <Button
                           variant="ghost"
                           size="sm"

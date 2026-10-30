@@ -8,7 +8,8 @@ An Agent that acts as an MCP **client** — dynamically connects to remote MCP s
 - **`onMcpUpdate`** — real-time state updates pushed to the React frontend via WebSocket
 - **`this.mcp.configureElicitationHandlers`** — handles both Stateless Elicitation (`input_required` through MRTR) and Legacy Elicitation (pushed `elicitation/create`); the Agent broadcasts requests to the browser and the human's answer resolves the pending operation via a `@callable` method
 - **OAuth popup flow** — `configureOAuthCallback` with a custom handler that closes the popup after auth
-- **`agentFetch`** — making HTTP requests to the Agent's custom endpoints from the client
+- **Re-authorization during a session** — a tool call that needs the user to authorize again (a scope step-up, or a token that can no longer be refreshed) catches `MCPAuthorizationRequiredError` and opens the new link
+- **`reconnectMcpServer`** — a "Reconnect" button for a server that stopped. Adding the server again also reconnects it, except when it stopped for a reason only a person can fix (authorization refused or denied, the step-up limit)
 
 ## Running
 
@@ -52,16 +53,36 @@ export class MyAgent extends Agent {
     });
   }
 
-  async onRequest(request) {
-    // Custom endpoints for the frontend
-    if (url.pathname.endsWith("add-mcp")) {
-      const { name, url } = await request.json();
-      await this.addMcpServer(name, url);
-      return new Response("Ok");
+  @callable()
+  async addServer(name: string, url: string) {
+    await this.addMcpServer(name, url);
+  }
+
+  @callable()
+  async reconnectServer(serverId: string) {
+    // Returns a new authUrl when the server needs the user again
+    return await this.reconnectMcpServer(serverId);
+  }
+
+  @callable()
+  async callTool(
+    serverId: string,
+    name: string,
+    args: Record<string, unknown>
+  ) {
+    try {
+      return await this.mcp.callTool({ serverId, name, arguments: args });
+    } catch (error) {
+      if (error instanceof MCPAuthorizationRequiredError) {
+        return { authorizationRequired: true, authUrl: error.authUrl };
+      }
+      throw error;
     }
   }
 }
 ```
+
+The browser renders each server from the `cf_agent_mcp_servers` state: an **Authorize** button while it is `authenticating` with an `auth_url`, and the error with a **Reconnect** button while it is `failed`.
 
 ### Client side
 
