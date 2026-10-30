@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../lifecycle";
 import { MCPClientManager } from "../../mcp/client";
 import { MCPConnectionState } from "../../mcp/client/connection";
+import { expireOAuthStates } from "../shared/mcp-time-travel";
 
 /**
  * A plain Lifecycle Object with the MCP client manager installed, used to
@@ -64,72 +65,91 @@ export class PlainMcpClientObject extends DurableObject<Cloudflare.Env> {
     return authProvider.state();
   }
 
-  async startFreshOAuthFlow(): Promise<unknown> {
+  /**
+   * Register an MCP server with the default transport and connect to it, as
+   * a standalone manager does. One quick attempt per connect.
+   */
+  async addServer(
+    id: string,
+    url: string,
+    callbackUrl: string
+  ): Promise<{ state: string; authUrl?: string; clientId?: string }> {
     await this.lifecycle.start();
-    const serverUrl = "https://mcp.example.com/mcp";
-    const resourceMetadataUrl =
-      "https://mcp.example.com/.well-known/oauth-protected-resource/mcp";
-    const authorizationServerUrl = "https://auth.example.com";
-
-    const oauthFetch: typeof fetch = async (input, init) => {
-      const request = new Request(input, init);
-      const url = new URL(request.url);
-
-      if (request.url === serverUrl) {
-        return new Response(null, {
-          status: 401,
-          headers: {
-            "www-authenticate": `Bearer resource_metadata="${resourceMetadataUrl}"`
-          }
-        });
-      }
-
-      if (request.url === resourceMetadataUrl) {
-        return Response.json({
-          resource: serverUrl,
-          authorization_servers: [authorizationServerUrl]
-        });
-      }
-
-      if (
-        url.origin === authorizationServerUrl &&
-        url.pathname.includes(".well-known")
-      ) {
-        return Response.json({
-          issuer: authorizationServerUrl,
-          authorization_endpoint: `${authorizationServerUrl}/authorize`,
-          token_endpoint: `${authorizationServerUrl}/token`,
-          registration_endpoint: `${authorizationServerUrl}/register`,
-          response_types_supported: ["code"],
-          grant_types_supported: ["authorization_code", "refresh_token"],
-          token_endpoint_auth_methods_supported: ["none"],
-          code_challenge_methods_supported: ["S256"]
-        });
-      }
-
-      if (
-        url.origin === authorizationServerUrl &&
-        url.pathname === "/register" &&
-        request.method === "POST"
-      ) {
-        return Response.json({
-          client_id: "test-client-id",
-          redirect_uris: ["https://example.com/callback"]
-        });
-      }
-
-      return new Response(`Unexpected OAuth test request: ${request.url}`, {
-        status: 500
-      });
-    };
-
-    await this.mcp.registerServer("fresh-oauth-server", {
-      name: "Fresh OAuth server",
-      url: serverUrl,
-      callbackUrl: "https://example.com/callback",
-      transport: { type: "streamable-http", fetch: oauthFetch }
+    await this.mcp.registerServer(id, {
+      name: id,
+      url,
+      callbackUrl,
+      transport: { type: "auto" },
+      retry: { maxAttempts: 1 }
     });
+    const result = await this.mcp.connectToServer(id);
+    return result.state === "authenticating"
+      ? {
+          state: result.state,
+          authUrl: result.authUrl,
+          clientId: result.clientId
+        }
+      : { state: result.state };
+  }
 
-    return this.mcp.connectToServer("fresh-oauth-server");
+  /**
+   * Connect a registered server again, as a standalone manager does on
+   * request: connect, then discover.
+   */
+  async reconnect(id: string): Promise<void> {
+    await this.lifecycle.start();
+    const result = await this.mcp.connectToServer(id);
+    if (result.state === "connected") await this.mcp.discoverIfConnected(id);
+  }
+
+  /**
+   * Register a server as if a session with it had been saved, so the next
+   * wake resumes that session instead of starting a new one.
+   */
+  async registerResumedServer(
+    id: string,
+    url: string,
+    callbackUrl: string,
+    sessionId: string
+  ): Promise<void> {
+    await this.lifecycle.start();
+    await this.mcp.registerServer(id, {
+      name: id,
+      url,
+      callbackUrl,
+      transport: {
+        type: "streamable-http",
+        sessionId,
+        protocolVersion: "2025-11-25"
+      }
+    });
+  }
+
+  /** Wait for connection work started by callbacks, restores and jobs. */
+  async settle(): Promise<void> {
+    await this.lifecycle.start();
+    await this.mcp.waitForConnections();
+  }
+
+  /**
+   * Reset the object the way the runtime does when it tears one down: memory
+   * is gone, storage stays, and the next call starts a fresh instance.
+   */
+  restart(): void {
+    this.ctx.abort("restarted by test");
+  }
+
+  expireOAuthStates(): Promise<void> {
+    return expireOAuthStates(this.ctx.storage);
+  }
+
+  /** One connection's state and error. */
+  connectionStatus(
+    id: string
+  ): { state: string; error: string | null } | undefined {
+    const connection = this.mcp.mcpConnections[id];
+    return connection
+      ? { state: connection.connectionState, error: connection.connectionError }
+      : undefined;
   }
 }
