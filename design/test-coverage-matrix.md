@@ -86,6 +86,18 @@ close through both the Stateless and Legacy compatibility client paths. Refer
 to [`packages/agents/conformance/README.md`](../packages/agents/conformance/README.md)
 for scenario counts and expected-failure rationale.
 
+The MCP client's OAuth and connection recovery run end to end in
+`packages/agents/src/tests/mcp/integration/`: an Agent with its default
+transport against an OAuth-protected MCP server served through msw, with
+callbacks routed through the worker, Lifecycle jobs driven by alarms, and
+object restarts between steps. It covers mid-session step-up, refused
+refreshes, the step-up round limit, removal and re-registration races,
+connection failures that stay failed until reconnected, and waiting links
+that stay until reconnected.
+`packages/agents/src/tests/mcp/client-capability.test.ts` covers the same
+failures and links for a standalone `MCPClientManager` on a plain
+Lifecycle object.
+
 ### Accepted coverage gaps
 
 - **Chat recovery orphan-persist (c) tool-approval dedup:** no real-SIGKILL L4
