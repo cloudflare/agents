@@ -95,6 +95,50 @@ export class MissingTaskDefinitionError extends Error {
 }
 
 /**
+ * Recorded against a run whose interruption retry budget is spent: as many
+ * consecutive attempts died mid-execution as the run's `retries.limit`
+ * allows in total, so the run fails instead of being replayed again.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export class TaskInterruptionsExhaustedError extends Error {
+  readonly runId: string;
+  /** Consecutive attempts of this run lost to an unclean interruption. */
+  readonly interruptions: number;
+
+  constructor(runId: string, interruptions: number) {
+    super(
+      `Task run "${runId}" was interrupted ${interruptions} time${interruptions === 1 ? "" : "s"} and its retry budget is spent.`
+    );
+    this.name = "TaskInterruptionsExhaustedError";
+    this.runId = runId;
+    this.interruptions = interruptions;
+  }
+}
+
+/**
+ * Recorded against a run whose wall-clock `deadline` passed before it
+ * settled. A live attempt observes it as the reason on `step.signal`; a
+ * parked run fails at its next wake.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export class TaskDeadlineExceededError extends Error {
+  readonly runId: string;
+  /** The deadline, epoch milliseconds. */
+  readonly deadline: number;
+
+  constructor(runId: string, deadline: number) {
+    super(
+      `Task run "${runId}" exceeded its deadline of ${new Date(deadline).toISOString()}.`
+    );
+    this.name = "TaskDeadlineExceededError";
+    this.runId = runId;
+    this.deadline = deadline;
+  }
+}
+
+/**
  * Thrown when a Task input, step result, metadata value, or final result is
  * not JSON-serializable or exceeds the serialized size limit.
  *
