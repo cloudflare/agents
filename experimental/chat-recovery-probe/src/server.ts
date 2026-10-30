@@ -308,7 +308,8 @@ export class ProbeAgent extends Think<Env, ProbeState> {
     });
     for (const value of list.values()) incidents.push(value);
 
-    const progress = (await this.ctx.storage.get<number>(PROGRESS_KEY)) ?? 0;
+    // The marker recovery reads; the old KV counter is no longer written.
+    const progress = this._resumableStream.progressMarker();
     const recovering =
       (await this.ctx.storage.get<unknown>("cf:chat:recovering")) ?? null;
     const completed = this.sql<{

@@ -191,9 +191,6 @@ export type ChatRecoveryExhaustedContext = Pick<
    *   recovery after repeated Durable Object memory-limit resets (#1825).
    * - `stable_timeout` — a recovery attempt kept timing out waiting for the
    *   isolate to reach stable state until the budget drained (extreme churn).
-   * - `max_recovery_window_exceeded` — DEPRECATED. The old absolute incident-age
-   *   ceiling. No longer emitted (a progressing turn is no longer bounded by
-   *   wall-clock); retained only for back-compat with persisted incidents.
    *
    * Treat this as an open string: new reasons may be added.
    */
