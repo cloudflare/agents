@@ -71,16 +71,13 @@ export class AuthorizationController {
       readonly stateBefore: MCPConnectionState;
     }
   >();
-  /**
-   * Servers whose declined step-up should reconnect on the grant they still
-   * hold, because the session it ran on is gone (the object woke since).
-   */
-  private readonly resumeAfterDecline = new Set<string>();
   private callbackConfig: MCPClientOAuthCallbackConfig | undefined;
 
   constructor(
     private readonly ctx: McpClientContext,
-    private readonly status: ServerStatus
+    private readonly status: ServerStatus,
+    /** Reconnect a server on the grant it holds, queued in its lane. */
+    private readonly resume: (id: string) => void
   ) {}
 
   // Providers
@@ -153,7 +150,11 @@ export class AuthorizationController {
    * permanent failure instead of a link once the server has asked for the
    * same authorization past the round limit.
    */
-  enterAuthenticating(id: string, conn: MCPClientConnection): AuthContinuation {
+  enterAuthenticating(
+    id: string,
+    conn: MCPClientConnection,
+    { stepUp = false }: { readonly stepUp?: boolean } = {}
+  ): AuthContinuation {
     if (this.ctx.connections[id] !== conn) return { _tag: "unavailable" };
     const provider = conn.options.transport.authProvider;
     const authUrl = provider?.authUrl;
@@ -176,7 +177,7 @@ export class AuthorizationController {
     }
 
     const clientId = provider.clientId;
-    this.ctx.store.setAuthContinuation(id, authUrl, clientId);
+    this.ctx.store.setAuthContinuation(id, authUrl, clientId, stepUp);
     this.ctx.store.setAuthorizationRounds(id, round.rounds);
     this.ctx.store.clearFailure(id);
     conn.connectionState = MCPConnectionState.AUTHENTICATING;
@@ -198,7 +199,7 @@ export class AuthorizationController {
     if (!provider?.redirectUrl) {
       return "The server requires authorization, but no OAuth callback is configured to ask the user. Pass callbackHost to addMcpServer(), or a callbackUrl when registering the server.";
     }
-    return "OAuth configuration incomplete: the OAuth provider produced no authorization URL";
+    return "The server rejected the credentials, and no new authorization link was produced";
   }
 
   /** The link a waiting server was given: the live one, else the stored one. */
@@ -214,11 +215,6 @@ export class AuthorizationController {
     this.ctx.store.clearAuthUrl(id);
     this.ctx.store.setAuthorizationRounds(id, undefined);
     this.liveStepUps.delete(id);
-  }
-
-  /** Whether a declined callback left this server to reconnect on its grant. */
-  takeResumeAfterDecline(id: string): boolean {
-    return this.resumeAfterDecline.delete(id);
   }
 
   private isLiveStepUp(id: string, conn: MCPClientConnection): boolean {
@@ -334,7 +330,9 @@ export class AuthorizationController {
       return undefined;
     }
 
-    const auth = this.enterAuthenticating(serverId, conn);
+    // A request only runs on a live session, so this asks for more than the
+    // grant it already holds.
+    const auth = this.enterAuthenticating(serverId, conn, { stepUp: true });
     // An exhausted server is now failed; the caller gets the original error.
     if (auth._tag !== "authenticating") return undefined;
     if (stateBefore !== MCPConnectionState.AUTHENTICATING) {
@@ -469,20 +467,20 @@ export class AuthorizationController {
       }
 
       // The user declined a step-up: the session keeps its current grant.
-      // Without a live session (the object woke since) a grant the server
-      // still holds means the same, so reconnect on it.
+      // If the session is gone (the object woke since), reconnect on it.
       const declined = params.get("error");
       if (declined && this.isLiveStepUp(serverId, conn)) {
         await consumeStaleState(serverId, provider, state);
         return this.declineStepUp(serverId, conn, declined);
       }
-      if (declined && (await hasTokens(provider))) {
+      if (declined && this.ctx.store.isPendingStepUp(serverId)) {
         await consumeStaleState(serverId, provider, state);
         this.ctx.store.clearAuthUrl(serverId);
         conn.connectionState = MCPConnectionState.CONNECTING;
         conn.connectionError = null;
-        this.resumeAfterDecline.add(serverId);
         this.ctx.stateChanged();
+        // Queued behind this callback, not run inside it.
+        this.ctx.lanes.outside(() => this.resume(serverId));
         return { serverId, authSuccess: false, authError: declined };
       }
 
@@ -594,15 +592,6 @@ function removedDuringAuthorization(serverId: string): MCPOAuthCallbackResult {
     authSuccess: false,
     authError: `Server ${serverId} was removed during authorization`
   };
-}
-
-/** Whether the provider still holds a grant for this server. */
-async function hasTokens(provider: AgentMcpOAuthProvider): Promise<boolean> {
-  try {
-    return (await provider.tokens()) !== undefined;
-  } catch {
-    return false;
-  }
 }
 
 /** Whether a link's `state` can still be redeemed. */

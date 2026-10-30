@@ -138,21 +138,43 @@ export class McpServerStore {
     return decodeMcpServerOptions(row.server_options);
   }
 
-  /** Record the authorization URL and OAuth client id a flow is waiting on. */
+  /**
+   * Record the authorization URL and OAuth client id a flow is waiting on,
+   * and whether it is a step-up on a grant the server already holds.
+   */
   setAuthContinuation(
     id: string,
     authUrl: string,
-    clientId: string | undefined
+    clientId: string | undefined,
+    stepUp: boolean
   ): void {
     const row = this.get(id);
     if (!row) return;
     this.save({ ...row, auth_url: authUrl, client_id: clientId ?? null });
+    this.#ensureStatusColumns();
+    this.#exec(
+      "UPDATE cf_agents_mcp_servers SET pending_step_up = ? WHERE id = ?",
+      stepUp ? 1 : null,
+      id
+    );
+  }
+
+  /** Whether the flow a server waits on is a step-up on its current grant. */
+  isPendingStepUp(id: string): boolean {
+    this.#ensureStatusColumns();
+    return (
+      this.#exec<{ pending_step_up: number | null }>(
+        "SELECT pending_step_up FROM cf_agents_mcp_servers WHERE id = ?",
+        id
+      )[0]?.pending_step_up === 1
+    );
   }
 
   /** Forget the authorization URL of one server. */
   clearAuthUrl(id: string): void {
+    this.#ensureStatusColumns();
     this.#exec(
-      "UPDATE cf_agents_mcp_servers SET auth_url = NULL WHERE id = ?",
+      "UPDATE cf_agents_mcp_servers SET auth_url = NULL, pending_step_up = NULL WHERE id = ?",
       id
     );
   }
@@ -243,7 +265,8 @@ export class McpServerStore {
   }
 
   /**
-   * Add the status columns (`failure`, `authorization_rounds`) on first use.
+   * Add the status columns (`failure`, `authorization_rounds`,
+   * `pending_step_up`) on first use.
    * They are owned here rather than in `ensureMcpServerTable`, so the
    * catalog's base DDL (and the Agent schema snapshot built from it) stays
    * unchanged and objects that never use them never alter the table.
@@ -255,10 +278,14 @@ export class McpServerStore {
         "SELECT name FROM pragma_table_info('cf_agents_mcp_servers')"
       ).map((column) => column.name)
     );
-    for (const column of ["failure", "authorization_rounds"]) {
+    for (const [column, type] of [
+      ["failure", "TEXT"],
+      ["authorization_rounds", "TEXT"],
+      ["pending_step_up", "INTEGER"]
+    ] as const) {
       if (!present.has(column)) {
         this.#exec(
-          `ALTER TABLE cf_agents_mcp_servers ADD COLUMN ${column} TEXT`
+          `ALTER TABLE cf_agents_mcp_servers ADD COLUMN ${column} ${type}`
         );
       }
     }
