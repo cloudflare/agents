@@ -442,6 +442,13 @@ function SettingsPanel({
                               <XIcon size={12} />
                             </button>
                           </div>
+                          {server.state === "failed" && server.error && (
+                            <div className="px-3 py-1.5 border-b border-kumo-line">
+                              <Text size="xs" variant="secondary">
+                                {server.error}
+                              </Text>
+                            </div>
+                          )}
                           {tools.length > 0 && (
                             <div className="divide-y divide-kumo-line max-h-32 overflow-y-auto">
                               {tools.map((tool) => (
@@ -621,14 +628,20 @@ function App() {
 
   const handleReconnectMcp = useCallback(
     async (serverId: string) => {
-      const result = (await agent.call("reconnectMcp", [serverId])) as {
-        state: string;
-        authUrl?: string;
-      };
-      if (result.state === "authenticating" && result.authUrl) {
-        window.open(result.authUrl, "oauth", "width=600,height=800");
+      try {
+        const result = (await agent.call("reconnectMcp", [serverId])) as {
+          state: string;
+          authUrl?: string;
+        };
+        if (result.state === "authenticating" && result.authUrl) {
+          window.open(result.authUrl, "oauth", "width=600,height=800");
+        }
+      } catch (err) {
+        // Still failed: the panel shows the server's error from onMcpUpdate.
+        console.error("Reconnect failed:", err);
+      } finally {
+        await refreshMcpTools();
       }
-      await refreshMcpTools();
     },
     [agent, refreshMcpTools]
   );
