@@ -133,6 +133,29 @@ describe("A user who does not authorize", () => {
     });
   });
 
+  it("records a declined sign-in as declined after a wake, even when old tokens are still stored", async () => {
+    const before = await newAgent();
+    const id = await connectAuthorized(before, server);
+    // The token expired and the refresh is refused, so the wake asks the
+    // user to sign in again: a fresh authorization, not a step-up.
+    server.revokeAccessTokens();
+    server.options.refuseRefresh = true;
+    const agent = await restartAgent(before);
+    await agent.settle();
+    const asked = await agent.server(id);
+    if (asked?.state !== "authenticating" || !asked.auth_url) {
+      throw new Error(`expected a link, got ${asked?.state}`);
+    }
+
+    await followCallback(server.deny(asked.auth_url));
+    await agent.settle();
+    expect(await agent.server(id)).toMatchObject({
+      state: "failed",
+      auth_url: null,
+      error: "access_denied"
+    });
+  });
+
   it("answers a request made before the first authorization with the link the server waits on", async () => {
     const agent = await newAgent();
     const added = await agent.connectServer(MCP_URL, {

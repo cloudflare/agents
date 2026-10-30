@@ -132,7 +132,15 @@ export class MCPClientManager extends LifecycleCapability {
     };
     this.status = new ServerStatus(ctx);
     this.elicitation = new ElicitationHandlers(ctx);
-    this.authorization = new AuthorizationController(ctx, this.status);
+    this.authorization = new AuthorizationController(ctx, this.status, (id) => {
+      void this.establishConnection(id).catch((error) => {
+        if (error instanceof ServerLaneCancelledError) return;
+        console.error(
+          "[MCPClientManager] Reconnecting after a declined step-up failed:",
+          error
+        );
+      });
+    });
     this.servers = new ServerController(
       ctx,
       this.status,
@@ -172,13 +180,8 @@ export class MCPClientManager extends LifecycleCapability {
     if (!this.isCallbackRequest(request)) return undefined;
 
     const result = await this.handleCallbackRequest(request);
-    const { serverId } = result;
-    if (
-      serverId &&
-      (result.authSuccess ||
-        this.authorization.takeResumeAfterDecline(serverId))
-    ) {
-      void this.establishConnection(serverId).catch((error) => {
+    if (result.authSuccess) {
+      void this.establishConnection(result.serverId).catch((error) => {
         if (error instanceof ServerLaneCancelledError) return;
         console.error(
           "[MCPClientManager] Connection establishment after OAuth failed:",
