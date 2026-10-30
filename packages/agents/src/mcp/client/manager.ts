@@ -172,8 +172,13 @@ export class MCPClientManager extends LifecycleCapability {
     if (!this.isCallbackRequest(request)) return undefined;
 
     const result = await this.handleCallbackRequest(request);
-    if (result.authSuccess) {
-      void this.establishConnection(result.serverId).catch((error) => {
+    const { serverId } = result;
+    if (
+      serverId &&
+      (result.authSuccess ||
+        this.authorization.takeResumeAfterDecline(serverId))
+    ) {
+      void this.establishConnection(serverId).catch((error) => {
         if (error instanceof ServerLaneCancelledError) return;
         console.error(
           "[MCPClientManager] Connection establishment after OAuth failed:",

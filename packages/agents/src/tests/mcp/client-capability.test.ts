@@ -144,4 +144,18 @@ describe("MCPClientManager capability", () => {
       state: "authenticating"
     });
   });
+
+  it("keeps the authorization link when a forgotten session restarts and only its catalog needs OAuth", async () => {
+    server.options.openHandshake = true;
+    const name = crypto.randomUUID();
+    const stub = env.PlainMcpClientObject.getByName(name);
+    await stub.registerResumedServer("files", MCP_URL, CALLBACK_URL, "gone");
+
+    const restarted = await restart(stub, name);
+    await restarted.settle();
+
+    expect(await restarted.connectionStatus("files")).toMatchObject({
+      state: "authenticating"
+    });
+  });
 });

@@ -288,6 +288,15 @@ export class ServerController {
     if (!result.success && result.reason === "stale-session") {
       return this.recoverStaleSession(conn, id, options);
     }
+    return this.afterDiscovery(id, conn, result);
+  }
+
+  /** Record what discovery found: ready, or waiting for the user. */
+  private afterDiscovery(
+    id: string,
+    conn: MCPClientConnection,
+    result: Awaited<ReturnType<MCPClientConnection["discover"]>>
+  ): MCPDiscoverResult {
     if (result.success) this.status.ready(id);
     // A 401 during discovery (initialize open, catalogs protected) waits for
     // the user exactly like a 401 at connect.
@@ -335,9 +344,7 @@ export class ServerController {
         state: conn.connectionState
       };
     }
-    const result = await conn.discover(options);
-    this.ctx.stateChanged();
-    return discoverResult(conn, result);
+    return this.afterDiscovery(id, conn, await conn.discover(options));
   }
 
   /**
@@ -529,8 +536,9 @@ export class ServerController {
 
   /**
    * Try a server again because someone asked: forget a recorded failure,
-   * its link and step-up budget, and connect now. The only path that
-   * retries a failed server.
+   * its link and step-up budget, and connect now. With the manager's own
+   * `connectToServer()`, the only paths that retry a failed server; nothing
+   * automatic does.
    */
   reconnect(id: string): Promise<MCPServerSettlement> {
     return removedIfCancelled(
