@@ -507,6 +507,7 @@ export class OpenCodeHarness extends LifecycleCapability {
   ): Promise<OpenCodeOperationResult> {
     const messageId = messageIdOf(operationId);
     return this.use(async (opencode) => {
+      let idle = false;
       for (;;) {
         signal?.throwIfAborted();
         const state = await this.#state(opencode, session, messageId);
@@ -532,18 +533,19 @@ export class OpenCodeHarness extends LifecycleCapability {
                 };
           case "queued":
           case "running":
+            // Idle while the operation is unsettled: the run is between an
+            // eviction and its resume. Let the wake job bring it back.
+            if (idle) {
+              await this.#wake(session);
+              await delay(this.#heartbeatMs / 30, signal);
+            }
             await this.#call(() =>
               opencode.sessions.wait(
                 { sessionID: session },
                 signal ? { signal } : undefined
               )
             );
-            // Idle while the operation is unsettled: the run is between an
-            // eviction and its resume. Let the wake job bring it back.
-            if ((await opencode.sessions.active())[session] === undefined) {
-              await this.#wake(session);
-              await delay(this.#heartbeatMs / 30, signal);
-            }
+            idle = (await opencode.sessions.active())[session] === undefined;
         }
       }
     });

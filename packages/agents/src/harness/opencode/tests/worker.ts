@@ -163,6 +163,10 @@ export class OpenCodeHarnessTestObject extends DurableObject<Cloudflare.Env> {
     await this.ctx.storage.put(RELEASE_KEY, true);
   }
 
+  setHeartbeat(heartbeatMs: number): void {
+    setWakeTimingForTests(this.harness, { heartbeatMs });
+  }
+
   async holdRuns(): Promise<number> {
     return (await this.ctx.storage.get<number>(HOLD_RUNS_KEY)) ?? 0;
   }
