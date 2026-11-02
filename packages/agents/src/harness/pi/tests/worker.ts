@@ -3,7 +3,6 @@ import {
   fauxProvider,
   fauxText,
   fauxToolCall,
-  Type,
   type AssistantMessage,
   type Message,
   type TranscriptContext
@@ -13,13 +12,13 @@ import {
   defineTask,
   ConversationBusy,
   Harness,
-  type AgentEvent,
   type EntryRecord,
   type Extension,
   type InputEntry,
   type ToolRegistration
 } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
+import { num, obj } from "@earendil-works/pi-schema";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "../../../lifecycle";
@@ -81,7 +80,7 @@ const Reminder = defineTask<
  *
  * - `nowake:` opens pi without `onWake`.
  * - `retry:` retries a failed generation once, after two seconds.
- * - `park:` parks a task after its first restart.
+ * - `park:` ends a task cut off after its first restart (`restartLimit: 1`).
  */
 function variantSettings(name: string) {
   const plain = name.replace(/^nowake:/, "");
@@ -464,10 +463,6 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.abort({ operationId });
   }
 
-  async retry(): Promise<boolean> {
-    return this.harness.retry();
-  }
-
   async createSession(): Promise<string> {
     return (await this.harness.sessions.create()).id;
   }
@@ -489,25 +484,40 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return (await this.ctx.storage.get<number>(GATE_RUNS_KEY)) ?? 0;
   }
 
-  /** Watch the root session's events until a run ends. */
+  /**
+   * Watch the root session's conversation view until a run ends: what
+   * `pi.live` showed along the way.
+   */
   async watch(): Promise<string[]> {
-    const stream = await this.harness.session().events();
-    const types: string[] = [stream.snapshot.type];
+    const watch = await this.harness.session().watch();
+    const seen: string[] = ["value"];
     await new Promise<void>((resolve) => {
-      stream.start(async (events: readonly AgentEvent[]) => {
-        types.push(...events.map((event) => event.type));
-        if (events.some((event) => event.type === "run_end")) resolve();
+      let running = false;
+      watch.start(async (call) => {
+        if (call.kind !== "value") return;
+        const live = call.value.docs["pi.live"] as
+          | { run?: unknown; tools?: readonly unknown[] }
+          | undefined;
+        if (live?.run !== undefined && !running) seen.push("run");
+        if ((live?.tools?.length ?? 0) > 0 && !seen.includes("tool")) {
+          seen.push("tool");
+        }
+        if (running && live?.run === undefined) {
+          seen.push("idle");
+          resolve();
+        }
+        running = live?.run !== undefined;
       });
     });
-    await stream.stop();
-    return types;
+    await watch.stop();
+    return seen;
   }
 
-  /** The transcript in a fresh snapshot, as a client joining now sees it. */
+  /** The transcript in a fresh view, as a client joining now sees it. */
   async snapshotTexts(): Promise<string[]> {
-    const stream = await this.harness.session().events();
-    await stream.stop();
-    return entryTexts(stream.snapshot.entries);
+    const watch = await this.harness.session().watch();
+    await watch.stop();
+    return entryTexts(watch.value.entries);
   }
 
   async alarmTime(): Promise<number | null> {
@@ -645,8 +655,8 @@ export class PiHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 }
 
-const NoParameters = Type.Object({});
-const MultiplyParameters = Type.Object({ value: Type.Number() });
+const NoParameters = obj({});
+const MultiplyParameters = obj({ value: num() });
 
 /** Multiplies by three: no gating, no storage. */
 function multiplyTool(): ToolRegistration<typeof MultiplyParameters> {

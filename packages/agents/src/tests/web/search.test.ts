@@ -792,7 +792,8 @@ describe("adapters", () => {
 
   it("tells the model the host's limit without rejecting more", async () => {
     const pi = piWebSearchTool({ source: okSource, limit: 3 });
-    const piLimit = pi.parameters.properties.limit as {
+    const properties = pi.parameters.properties as Record<string, unknown>;
+    const piLimit = properties.limit as {
       maximum?: number;
       description?: string;
     };
