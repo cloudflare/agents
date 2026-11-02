@@ -37,7 +37,6 @@ export {
 
 export {
   Browser,
-  DEFAULT_BROWSER_SCOPE,
   MAX_BROWSER_SCOPES,
   type BrowserConnection,
   type BrowserConnectOptions,
@@ -46,6 +45,8 @@ export {
   type BrowserProvider,
   type ResolvedBrowser
 } from "./browser";
+
+export { DEFAULT_BROWSER_SCOPE } from "./scope";
 
 export {
   InternalHostRouter,

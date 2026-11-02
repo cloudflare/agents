@@ -37,6 +37,7 @@ import {
   type BrowserProviderAdapter,
   type InternalHostOwner
 } from "./providers/provider-adapter";
+import { DEFAULT_BROWSER_SCOPE } from "./scope";
 import { BrowserSession, type BrowserSessionOptions } from "./session";
 import {
   DurableBrowserSessionStore,
@@ -55,10 +56,10 @@ export const SESSION_TOUCH_INTERVAL_MS = 60_000;
 export const DEFAULT_BROWSER_NAME = "default";
 
 /**
- * The scope used when a caller doesn't pick one: every caller that leaves
- * `scope` out shares this one active tab. See {@link BrowserConnectOptions}.
+ * The scope used when a caller doesn't pick one. Defined in `./scope`,
+ * re-exported here where it has always been.
  */
-export const DEFAULT_BROWSER_SCOPE = "shared";
+export { DEFAULT_BROWSER_SCOPE };
 
 /**
  * Scope records kept per browser. Writing a new one past the cap deletes the

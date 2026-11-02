@@ -11,14 +11,14 @@
  */
 import type { BrowserInternalHosts } from "./browser";
 import type { InternalHostInfo } from "./internal-hosts";
-import {
-  validate,
-  type BrowserAttachInput,
-  type BrowserDebugLogInput,
-  type BrowserSendInput,
-  type BrowserSession
+import type {
+  BrowserAttachInput,
+  BrowserDebugLogInput,
+  BrowserSendInput,
+  BrowserSession
 } from "./session";
 import type { SearchableCdpSpec } from "./spec";
+import { validate } from "./validate";
 
 /** One function on the `browser` object, as the host runs it. */
 export type BrowserFunction = (input: unknown) => Promise<unknown>;

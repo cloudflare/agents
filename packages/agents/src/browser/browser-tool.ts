@@ -3,13 +3,13 @@
  * in `tools/` (`agents/browser/ai-sdk`, `agents/browser/tanstack-ai`,
  * `agents/browser/pi`). Internal — not an entry point.
  */
-import { DEFAULT_BROWSER_SCOPE } from "./browser";
 import {
   BROWSER_RULES,
   browserFunctionDocs,
   browserFunctions
 } from "./browser-functions";
 import { runBrowserCode } from "./sandbox";
+import { DEFAULT_BROWSER_SCOPE } from "./scope";
 import {
   BrowserSession,
   type BrowserSessionReport,
